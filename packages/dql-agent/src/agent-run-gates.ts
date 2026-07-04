@@ -24,6 +24,8 @@ import type {
   AgentRunGates,
   AgentRouteExecutorResult,
 } from "./agent-run-engine.js";
+import { validateAnswerResultShape } from "./answer-shape.js";
+import { buildAnalysisQuestionPlan } from "./metadata/analysis-planner.js";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -80,6 +82,14 @@ function resultRowCount(payload: Record<string, unknown> | undefined): number | 
   return typeof rowCount === "number" ? rowCount : undefined;
 }
 
+function contextPackQuestionPlan(payload: Record<string, unknown> | undefined): ReturnType<typeof buildAnalysisQuestionPlan> | undefined {
+  const contextPack = asRecord(payload?.contextPack);
+  const questionPlan = asRecord(contextPack?.questionPlan);
+  const requestedShape = asRecord(questionPlan?.requestedShape);
+  if (!requestedShape || !Array.isArray(requestedShape.requiredOutputs)) return undefined;
+  return questionPlan as unknown as ReturnType<typeof buildAnalysisQuestionPlan>;
+}
+
 /** A grain/cardinality evaluation when a scalar question returned many rows. */
 function semanticCorrectnessEvaluation(
   question: string,
@@ -102,11 +112,71 @@ function semanticCorrectnessEvaluation(
   };
 }
 
+function answerShapeEvaluation(
+  question: string,
+  payload: Record<string, unknown> | undefined,
+): AgentRunEvaluation | undefined {
+  const result = asRecord(payload?.result) ?? asRecord(payload?.resultPreview);
+  if (!result) return undefined;
+  const plan = contextPackQuestionPlan(payload) ?? buildAnalysisQuestionPlan(question);
+  const validation = validateAnswerResultShape(plan, result);
+  const missingOutputs = validation.missingOutputs;
+  if (missingOutputs.length > 0) {
+    return {
+      id: "answer-shape",
+      label: "Answer shape",
+      passed: false,
+      severity: "warning",
+      message: `The answer is missing requested output column(s): ${missingOutputs.join(", ")}.`,
+      suggestedRepair: `Regenerate the answer at the requested grain and include: ${missingOutputs.join(", ")}.`,
+      repairAction: {
+        kind: "retry",
+        hint: `The previous result missed requested column(s): ${missingOutputs.join(", ")}. Regenerate SQL using governed metadata and include those columns.`,
+      },
+    };
+  }
+  if (validation.topN && validation.topNReturned !== undefined) {
+    return {
+      id: "answer-topn",
+      label: "Requested top-N",
+      passed: false,
+      severity: "warning",
+      message: `The user asked for top ${validation.topN}, but the answer returned ${validation.topNReturned} rows.`,
+      suggestedRepair: `Limit or trim the answer to top ${validation.topN} at the requested scope.`,
+      repairAction: {
+        kind: "retry",
+        hint: `The previous result returned ${validation.topNReturned} rows but the user asked for top ${validation.topN}. Return exactly the requested top-N unless the question asks for per-group results.`,
+      },
+    };
+  }
+  return undefined;
+}
+
+function routeAwareAnswerShapeEvaluation(
+  context: AgentRunGateContext,
+  payload: Record<string, unknown> | undefined,
+): AgentRunEvaluation | undefined {
+  const shape = answerShapeEvaluation(context.request.question, payload);
+  if (!shape || context.route !== "certified_answer") return shape;
+  const hint = shape.repairAction?.hint ?? shape.suggestedRepair ?? "Regenerate the answer at the requested shape.";
+  return {
+    ...shape,
+    suggestedRepair: "Use the certified block as governed context and regenerate a review-required answer at the requested shape.",
+    repairAction: {
+      kind: "escalate",
+      route: "generated_answer",
+      hint,
+    },
+  };
+}
+
 /**
- * Answer routes (certified + generated). The repairable failure is a preview
- * execution error (repair the SQL); a wholly empty answer escalates to research.
+ * Answer routes (certified + generated). Preview execution errors retry the
+ * route, empty answers escalate to research, and wrong result shapes are
+ * repaired before we accept the answer.
  */
-const answerGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRunEvaluation[] => {
+const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluation[] => {
+  const { result } = context;
   let evaluations = baseEvaluations(result);
   const payload = primaryArtifactPayload(result);
   const executionError = nonEmptyString(payload?.executionError)
@@ -138,6 +208,8 @@ const answerGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRunEval
       repairAction: { kind: "escalate", route: "research", hint: "Investigate to ground the answer." },
     });
   }
+  const shape = routeAwareAnswerShapeEvaluation(context, payload);
+  if (shape) evaluations = upsert(evaluations, shape);
   return evaluations;
 };
 
@@ -174,8 +246,8 @@ function deepAnswerCompletenessEvaluation(
  */
 const generatedAnswerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluation[] => {
   let evaluations = answerGate(context);
-  // Never second-guess a certified result (the generated_answer route can still resolve
-  // a certified block); only re-check a genuinely generated answer.
+  // Keep the deeper generated-only checks off certified results; answerGate has
+  // already run the shared result-shape validation for both answer routes.
   const certified = context.result.artifacts?.[0]?.trustState === "certified";
   if (!certified) {
     const semantic = semanticCorrectnessEvaluation(context.request.question, primaryArtifactPayload(context.result));

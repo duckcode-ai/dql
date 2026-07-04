@@ -146,12 +146,14 @@ export {
 export {
   synthesizeAnswer,
   inferFormat,
+  computeResultStats,
   type SynthesizeInput,
   type SynthesizeOptions,
   type SynthesizeResult,
   type SynthesizeCompletion,
   type SynthesisFormat,
   type SynthesizeResultPreview,
+  type SynthesizeColumnStat,
 } from "./synthesize.js";
 export {
   planApp,
@@ -219,6 +221,37 @@ export type {
   AgentMemoryScope,
   MemorySearchOptions,
 } from "./memory/sqlite-memory.js";
+export {
+  ConversationStore,
+  defaultConversationPath,
+} from "./conversation/session-store.js";
+export type {
+  ConversationThread,
+  ConversationTurn,
+  ConversationTurnInput,
+  ConversationTurnResult,
+  ConversationTurnSearchOptions,
+} from "./conversation/session-store.js";
+export {
+  emptyWorkingState,
+  parseWorkingState,
+  reduceWorkingState,
+} from "./conversation/working-state.js";
+export type {
+  ConversationTopicFrame,
+  ConversationWorkingState,
+  TopicRelation,
+} from "./conversation/working-state.js";
+export { updateRollingSummary } from "./conversation/rolling-summary.js";
+export {
+  advanceThreadState,
+  buildConversationSnapshot,
+  recallRelevantTurns,
+} from "./conversation/snapshot.js";
+export type {
+  ConversationSnapshot,
+  ConversationSnapshotTurn,
+} from "./conversation/snapshot.js";
 export {
   MetadataCatalog,
   buildLocalContextPack,
@@ -360,6 +393,9 @@ export type {
 export { reflectAndReviseBlock } from "./propose/index.js";
 export type {
   BuildLocalContextPackRequest,
+  CertifiedFitConfirmation,
+  CertifiedFitConfirmationRequest,
+  CertifiedFitConfirmationResult,
   EnsureMetadataCatalogOptions,
   EnsureMetadataCatalogResult,
   DqlContextPack,
@@ -607,18 +643,30 @@ function loadAgentSemanticLayer(projectRoot: string) {
     semanticConfig,
     projectRoot,
   ).layer;
-  if (configured) return configured;
+  // An empty configured layer (scaffold default `provider: 'dql'` with no
+  // definitions) must not shadow a real dbt MetricFlow layer — that would strip
+  // every metric/dimension/measure node from the KG and disable the governed
+  // metric answer tier. Substance wins over configuration.
+  if (configured && semanticLayerHasContent(configured)) return configured;
 
   if (config.dbt?.projectDir) {
-    return resolveSemanticLayerWithDiagnostics(
+    const dbtLayer = resolveSemanticLayerWithDiagnostics(
       {
         provider: "dbt",
         projectPath: config.dbt.projectDir,
       },
       projectRoot,
     ).layer;
+    if (dbtLayer && semanticLayerHasContent(dbtLayer)) return dbtLayer;
   }
-  return undefined;
+  return configured ?? undefined;
+}
+
+/** True when the layer defines ANY semantics — metrics, dimensions, or measures. */
+function semanticLayerHasContent(layer: NonNullable<ReturnType<typeof resolveSemanticLayerWithDiagnostics>["layer"]>): boolean {
+  return layer.listMetrics().length > 0
+    || layer.listDimensions().length > 0
+    || layer.listMeasures().length > 0;
 }
 
 function dedupeGraph(

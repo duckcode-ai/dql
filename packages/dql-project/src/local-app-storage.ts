@@ -49,7 +49,7 @@ export interface LocalAppConversationContext {
   sourceCertifiedBlock?: string;
   sourceQuestion?: string;
   sourceAnswerSummary?: string;
-  followupKind?: 'generic' | 'drilldown';
+  followupKind?: 'generic' | 'drilldown' | 'contextual';
   requestedFilters?: string[];
   requestedDimensions?: string[];
   outputColumns?: string[];

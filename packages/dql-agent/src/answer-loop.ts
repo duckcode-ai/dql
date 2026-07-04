@@ -29,12 +29,16 @@ import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
+import type { ConversationSnapshot } from './conversation/snapshot.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import type { GeneratedDraftBlock } from './metadata/drafts.js';
-import { matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
+import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan, type RequestedAnswerShape } from './metadata/analysis-planner.js';
+import { certifiedFitAllowsTier1, evaluateCertifiedBlockFit } from './metadata/block-fit.js';
+import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
 import { decideAgentAction, type IntentDecision } from './intent-controller.js';
 import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
 import { buildGroundingFromRuntimeRelations, resolveRelationsInSql, validateSqlAgainstGrounding, type SchemaGrounding } from './metadata/sql-grounding.js';
+import { validateAnswerResultShape } from './answer-shape.js';
 import {
   compactSqlSnippet,
   extractSimpleSelectShape,
@@ -181,12 +185,24 @@ export interface AgentJoinPath {
 }
 
 export interface AgentFollowUpContext {
-  kind: 'generic' | 'drilldown';
+  /**
+   * 'generic'/'drilldown' — regex-classified follow-ups with routing force.
+   * 'contextual' — always-on advisory carry for any question in an ongoing
+   * conversation; never excludes artifacts, forces filters, or shifts intent.
+   */
+  kind: 'generic' | 'drilldown' | 'contextual';
+  sourceTurnId?: string;
   sourceBlockName?: string;
   sourceQuestion?: string;
   sourceAnswer?: string;
   filters?: string[];
   dimensions?: string[];
+  priorResultColumns?: string[];
+  priorResultValues?: Record<string, string[]>;
+  priorLimit?: number;
+  priorMeasures?: string[];
+  resolvedReferences?: string[];
+  unresolvedReferences?: string[];
 }
 
 export interface AgentEvidence {
@@ -326,6 +342,11 @@ export interface AnswerLoopInput {
    * review-required draft.
    */
   followUp?: AgentFollowUpContext;
+  /**
+   * Persisted conversation-thread snapshot (working state + rolling summary +
+   * recent turns). Advisory prompt context only — never changes governed routing.
+   */
+  conversationSnapshot?: ConversationSnapshot;
   /** Optional advisory memory. Never outranks project metadata. */
   memoryContext?: AgentMemory[];
   /** Optional AbortSignal forwarded to the provider. */
@@ -505,6 +526,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   ).slice(0, 30);
   const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext ?? [], input.contextPack);
   const catalogRoute = input.contextPack?.routeDecision;
+  const questionPlan = input.contextPack?.questionPlan?.requestedShape
+    ? input.contextPack.questionPlan
+    : buildAnalysisQuestionPlan(question, input.followUp);
   const fallbackIntent = classifyAgentIntent({
     question,
     followUp: input.followUp,
@@ -521,6 +545,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? pickCertifiedDrilldownArtifact({
         executableArtifactHits,
         question,
+        questionPlan,
         followUp: input.followUp,
         excludedArtifactIds,
         kg,
@@ -533,22 +558,56 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           executableArtifactHits,
           businessHits,
           question,
+          questionPlan,
           blockHints: input.followUp?.kind === 'drilldown' ? [] : effectiveBlockHints,
           excludedArtifactIds,
           kg,
         })
     : null);
-  if (artifactHit) {
+  // A certified TERM / BUSINESS VIEW is documentation, not data: it can be the
+  // terminal answer only for a definition-style question with no data ask. A
+  // question that requests a data shape (dimensions/measures/outputs/top-N) or
+  // continues an ongoing data conversation must be ANSWERED WITH DATA — the
+  // matched business context falls through as grounding for the executable
+  // tiers (certified block → governed metric → generated SQL), never instead
+  // of them. "Certified" always means "a governed, executable definition
+  // produced this result", not "a certified document sounded related".
+  const businessContextTerminal = (() => {
+    if (!artifactHit || artifactHit.node.kind === 'block') return true;
+    // An ongoing data conversation (prior turn produced result columns/values)
+    // must be answered with data even when the phrasing looks definitional
+    // ("so Matthew is the top — what is his 360 profile view?").
+    if (input.followUp?.priorResultValues || input.followUp?.priorResultColumns?.length) return false;
+    // Cold questions fall through only on STRONG data-shape signals — bare
+    // measure/dimension words are normal in definition asks ("what is revenue
+    // health?") and must keep answering from the certified business context.
+    // "Strong" = outputs requested BEYOND the measure/dimension words themselves
+    // (e.g. product_name), explicit filters, or a top-N.
+    const requested = questionPlan.requestedShape;
+    const nonTrivialOutputs = requested.requiredOutputs.filter((output) =>
+      !requested.measures.includes(output) && !requested.dimensions.includes(output));
+    const strongShape = nonTrivialOutputs.length > 0
+      || requested.filters.length > 0
+      || Boolean(requested.topN);
+    return !strongShape;
+  })();
+  if (artifactHit && businessContextTerminal) {
     let result: AgentResultPayload | undefined;
     let executionError: string | undefined;
     if (artifactHit.node.kind === 'block' && input.executeCertifiedBlock) {
       try {
         result = await input.executeCertifiedBlock(artifactHit.node);
+        result = trimResultToRequestedTopN(result, questionPlan);
       } catch (err) {
         executionError = err instanceof Error ? err.message : String(err);
       }
     }
-    const text = composeCertifiedAnswer(artifactHit.node, question, result, executionError);
+    const resultShapeWarnings = result ? validateAnswerResultShape(questionPlan, result).warnings : [];
+    const certifiedShapePassed = resultShapeWarnings.length === 0;
+    const certifiedText = composeCertifiedAnswer(artifactHit.node, question, result, executionError);
+    const text = resultShapeWarnings.length > 0
+      ? `${certifiedText}\n\nReview required: ${resultShapeWarnings.join(' ')}`
+      : certifiedText;
     const sourceTier: AnswerSourceTier = artifactHit.node.sourceTier === 'business_context'
       ? 'business_context'
       : 'certified_artifact';
@@ -572,20 +631,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       suggestedViz: result?.chartConfig ? chartNameFromConfig(result.chartConfig) : undefined,
     });
     return {
-      kind: 'certified',
+      kind: certifiedShapePassed ? 'certified' : 'uncertified',
       sourceTier,
-      certification: 'certified',
-      reviewStatus: 'certified',
-      confidence: 0.95,
+      certification: certifiedShapePassed ? 'certified' : 'analyst_review_required',
+      reviewStatus: certifiedShapePassed ? 'certified' : 'analyst_review_required',
+      confidence: certifiedShapePassed ? 0.95 : 0.45,
       text,
       answer: text,
       block: artifactHit.node.kind === 'block' ? artifactHit.node : undefined,
       result,
       executionError,
       sql: result?.sql,
-      trustLabel: input.contextPack?.trustLabel ?? 'certified',
+      trustLabel: certifiedShapePassed ? input.contextPack?.trustLabel ?? 'certified' : 'mixed',
       sourceCertifiedBlock: artifactHit.node.kind === 'block' ? artifactHit.node.name : undefined,
       contextPackId: input.contextPack?.id,
+      validationWarnings: resultShapeWarnings,
       selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
       citations,
       memoryContext: input.memoryContext,
@@ -599,6 +659,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         considered,
         result,
         executionError,
+        resultShapeWarnings,
         executorWasAvailable: Boolean(input.executeCertifiedBlock),
         citations,
         memoryContext: input.memoryContext ?? [],
@@ -715,6 +776,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       schemaContext,
       intent,
       input.contextPack,
+      input.conversationSnapshot,
     ),
   });
   messages.push({ role: 'user', content: question });
@@ -725,14 +787,44 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     schemaContext,
     followUp: input.followUp,
     contextPack: input.contextPack,
+    questionPlan,
   }) ?? buildContextPackAwareProposal({
     question,
     intent,
     contextPack: input.contextPack,
   });
+  // ── Tier 2: semantic-layer metrics + dimensions (governed hierarchy) ──────
+  // Certified blocks already missed (Stage 1). Before ANY generation — local
+  // proposal or LLM — a confidently matched governed metric whose definition can
+  // express the question's full requested shape (scalar KPI, or a group-by whose
+  // dimensions all resolve to columns on the metric's own table) answers
+  // deterministically. Only when no metric fits does the question fall through
+  // to SQL generation, where the metric still grounds the prompt as context.
+  let governedMetricAnswer = false;
+  const metricFirst = semanticMetricMatch
+    ? buildGovernedMetricFirstSql({
+        metric: semanticMetricMatch.metric,
+        pool: semanticMetricNodes,
+        requestedShape: questionPlan.requestedShape,
+        schemaTables: schemaContext.map((table) => ({
+          relation: table.relation,
+          name: table.name,
+          columns: table.columns.map((column) => ({ name: column.name })),
+        })),
+      })
+    : undefined;
+
   let proposed = '';
   let parsed: ParsedProposal;
-  if (localProposal) {
+  if (metricFirst) {
+    semanticMetricMatch = { ...semanticMetricMatch!, metric: metricFirst.metric };
+    governedMetricAnswer = true;
+    parsed = {
+      sql: metricFirst.sql,
+      text: `Answered from the governed metric ${metricFirst.metric.name}${metricFirst.dimensions.length > 0 ? ` by ${metricFirst.dimensions.join(', ')}` : ''}. This result is uncertified until reviewed and promoted.`,
+      viz: metricFirst.dimensions.length === 0 ? 'single_value' : undefined,
+    };
+  } else if (localProposal) {
     parsed = localProposal;
   } else {
     try {
@@ -767,11 +859,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
 
     parsed = parseProposal(proposed);
   }
-  // True when `parsed.sql` was synthesized deterministically from a governed
-  // semantic-layer metric (not the LLM). Such SQL is trusted and grounded against
-  // the runtime schema, so it skips the hallucination-guard context validation
-  // that exists to catch model-invented relations/columns.
-  let governedMetricAnswer = false;
+  // `governedMetricAnswer` (declared above): true when `parsed.sql` was
+  // synthesized deterministically from a governed semantic-layer metric (not the
+  // LLM). Such SQL is trusted and grounded against the runtime schema, so it
+  // skips the hallucination-guard context validation that exists to catch
+  // model-invented relations/columns.
   if (!parsed.sql) {
     // Spec 17, part C — if a governed metric matched confidently but the model
     // declined SQL, answer from the metric definition (deterministic, offline)
@@ -854,6 +946,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       question,
       intent,
       filterValues: input.followUp?.filters,
+      trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
     });
     contextValidation = c.ok
       ? { ok: true, warnings: c.warnings }
@@ -889,6 +982,52 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           warnings: ['Generated SQL failed context validation; answered from the governed metric definition instead.'],
         };
       }
+    }
+  }
+  // One bounded self-repair before refusing: hand the model the EXACT guard
+  // error (e.g. `column "product_name" outside the inspected columns for
+  // order_items`) so it can correct itself — usually by joining the relation
+  // that actually carries the column. Deterministic paths that never called the
+  // provider get the same single chance; any provider failure keeps the honest
+  // refusal below. This mirrors the engine-level repair loop, applied to the
+  // context-validation gate that previously refused on first failure.
+  if (!contextValidation.ok && !governedMetricAnswer) {
+    try {
+      const failedSql = parsed.sql ?? '';
+      const repairPrompt = [
+        `Your SQL was rejected before execution: ${contextValidation.error}`,
+        'Correct it using ONLY the relations and columns from the inspected context above.',
+        'If a needed column lives on a different relation, JOIN that relation using the suggested join paths.',
+        'If the requested column does not exist anywhere in the inspected context, return the closest answerable SQL and say what is missing.',
+        'Return the corrected SQL in a single ```sql code block.',
+      ].join('\n');
+      const repairRaw = await provider.generate(
+        [...messages, { role: 'assistant', content: failedSql }, { role: 'user', content: repairPrompt }],
+        { signal: input.signal, reasoningEffort: input.reasoningEffort },
+      );
+      const reparsed = parseProposal(repairRaw);
+      if (reparsed.sql) {
+        if (grounding) {
+          reparsed.sql = resolveRelationsInSql(reparsed.sql, grounding, { prefer: 'qualified' }).sql;
+        }
+        const revalidated = validateSqlAgainstLocalContext(reparsed.sql, input.contextPack, {
+          question,
+          intent,
+          filterValues: input.followUp?.filters,
+          trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+        });        if (revalidated.ok) {
+          const repairedSql: string = reparsed.sql;
+          parsed.sql = repairedSql;
+          parsed.text = reparsed.text || parsed.text;
+          parsed.viz = reparsed.viz ?? parsed.viz;
+          contextValidation = {
+            ok: true,
+            warnings: [...revalidated.warnings, 'Repaired after context-validation failure (1 repair).'],
+          };
+        }
+      }
+    } catch {
+      // Repair is best-effort — the refusal below stays the honest fallback.
     }
   }
   if (!contextValidation.ok) {
@@ -1031,9 +1170,61 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ],
       repairAttempts,
     });
+    const resultShape = result ? validateAnswerResultShape(questionPlan, result) : undefined;
+    if (resultShape && generatedResultShapeIsHardMismatch(question, questionPlan, resultShape)) {
+      const shapeWarnings = resultShape.warnings;
+      const text = [
+        'I could not produce a safe combined product/customer answer from the generated SQL.',
+        shapeWarnings.join(' '),
+        'The result was rejected instead of returning a partial customer-only or product-only table.',
+      ].filter(Boolean).join(' ');
+      const validationWarnings = [
+        ...(input.contextPack?.warnings ?? []),
+        ...contextValidation.warnings,
+        ...shapeWarnings,
+        'Generated result shape did not satisfy the requested product/customer answer contract.',
+      ];
+      return {
+        kind: 'no_answer',
+        sourceTier: 'no_answer',
+        certification: 'analyst_review_required',
+        reviewStatus: 'none',
+        confidence: 0.2,
+        text,
+        answer: text,
+        proposedSql: parsed.sql,
+        sql: parsed.sql,
+        result,
+        executionError,
+        suggestedViz: parsed.viz ?? 'table',
+        trustLabel: input.contextPack?.trustLabel,
+        sourceCertifiedBlock: followUpSourceBlock?.name ?? input.followUp?.sourceBlockName,
+        contextPackId: input.contextPack?.id,
+        validationWarnings,
+        selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
+        citations: generatedCitations,
+        memoryContext: input.memoryContext,
+        analysisPlan,
+        evidence: buildNoAnswerEvidence({
+          question,
+          reason: text,
+          artifactHits,
+          businessHits,
+          semanticHits,
+          manifestHits,
+          considered,
+          memoryContext: input.memoryContext ?? [],
+          analysisPlan,
+        }),
+        contextPack: input.contextPack,
+        considered,
+        providerUsed: localProposal ? 'schema_planner' : provider.name,
+      };
+    }
     const validationWarnings = [
       ...(input.contextPack?.warnings ?? []),
       ...contextValidation.warnings,
+      ...(resultShape?.warnings ?? []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ];
     let draftBlock: GeneratedDraftBlock | undefined;
@@ -1095,6 +1286,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       contextNodes,
       schemaContext,
       followUp: input.followUp,
+      contextPack: input.contextPack,
       businessHits,
       semanticHits,
       manifestHits,
@@ -1112,6 +1304,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // Carry the governed metric match so the exit point can name a
     // `semantic_metric` route (spec 17, part C).
     _semanticMetricMatch: activeTier === 'semantic_layer' ? semanticMetricMatch ?? undefined : undefined,
+  };
+}
+
+function trimResultToRequestedTopN(result: AgentResultPayload, plan: AnalysisQuestionPlan): AgentResultPayload {
+  const topN = plan.requestedShape.topN;
+  if (!topN || topN.scope === 'per_group' || !Array.isArray(result.rows) || result.rows.length <= topN.n) return result;
+  return {
+    ...result,
+    rows: result.rows.slice(0, topN.n),
+    rowCount: Math.min(result.rowCount, topN.n),
   };
 }
 
@@ -1163,6 +1365,7 @@ function renderContextPrompt(
   schemaContext: AgentSchemaTable[] = [],
   intent: AgentIntent = 'ad_hoc_analysis',
   contextPack?: LocalContextPack,
+  conversationSnapshot?: ConversationSnapshot,
 ): string {
   const intentSection = `## Routing intent\n\nintent: ${intent}\n${intent === 'exact_certified_lookup'
     ? 'Use a certified artifact only if it exactly answers the question.'
@@ -1222,10 +1425,58 @@ function renderContextPrompt(
   const followUpSection = followUp
     ? `\n\n## Follow-up routing context\n\n${renderFollowUpContext(followUp)}`
     : '';
+  const conversationSection = conversationSnapshot
+    ? `\n\n## Conversation state (session)\n\n${renderConversationSnapshot(conversationSnapshot)}`
+    : '';
   const contextPackSection = contextPack
     ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack)}`
     : '';
-  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${extraSection}${followUpSection}`;
+  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${conversationSection}${extraSection}${followUpSection}`;
+}
+
+/**
+ * Bounded rendering of the persisted conversation snapshot: working state one-liner
+ * (≤300 chars), compacted rolling summary (≤600), and up to 4 recent turns (≤280 each).
+ */
+function renderConversationSnapshot(snapshot: ConversationSnapshot): string {
+  const parts: string[] = [];
+  const state = snapshot.workingState;
+  if (state) {
+    const stateLine = [
+      state.entities.length ? `entities=${state.entities.join(',')}` : '',
+      state.measures.length ? `measures=${state.measures.join(',')}` : '',
+      state.dimensions.length ? `dimensions=${state.dimensions.join(',')}` : '',
+      state.filters.length ? `filters=${state.filters.map((f) => f.value).join(',')}` : '',
+      state.limit ? `limit=${state.limit}` : '',
+      state.timeframe ? `timeframe=${state.timeframe}` : '',
+      snapshot.topicRelation ? `topic=${snapshot.topicRelation}` : '',
+    ].filter(Boolean).join('; ');
+    if (stateLine) parts.push(`Working state: ${stateLine.slice(0, 300)}`);
+  } else if (snapshot.topicRelation) {
+    parts.push(`Working state: topic=${snapshot.topicRelation}`);
+  }
+  if (snapshot.rollingSummary) {
+    parts.push(`Earlier in this conversation (compacted):\n${snapshot.rollingSummary.slice(0, 600)}`);
+  }
+  if (snapshot.recentTurns.length > 0) {
+    const turns = snapshot.recentTurns.slice(-4).map((turn, index) => {
+      const line = [
+        `Q: ${turn.question}`,
+        turn.answerSummary ? `A: ${turn.answerSummary}` : '',
+        turn.resultColumns?.length ? `cols: ${turn.resultColumns.slice(0, 6).join(', ')}` : '',
+        turn.sourceCertifiedBlock ? `block: ${turn.sourceCertifiedBlock}` : '',
+      ].filter(Boolean).join(' | ');
+      return `${index + 1}. ${line.slice(0, 280)}`;
+    });
+    parts.push(`Recent turns:\n${turns.join('\n')}`);
+  }
+  if (snapshot.recalledTurns?.length) {
+    parts.push(`Recalled earlier turns (semantic match):\n${snapshot.recalledTurns.slice(0, 3)
+      .map((turn) => `- Q: ${turn.question}${turn.answerSummary ? ` | A: ${turn.answerSummary}` : ''}`.slice(0, 280))
+      .join('\n')}`);
+  }
+  parts.push('Use this only where the question refers to it. On a new topic, answer fresh.');
+  return parts.join('\n\n');
 }
 
 function renderContextPackForPrompt(contextPack: LocalContextPack): string {
@@ -1243,6 +1494,9 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
   const certifiedApplicability = contextPack.routeDecision?.certifiedApplicability
     ? `\nCertified applicability: ${contextPack.routeDecision.certifiedApplicability.name} is ${contextPack.routeDecision.certifiedApplicability.kind} (${contextPack.routeDecision.certifiedApplicability.reasons.join('; ')})`
     : '';
+  const blockFit = contextPack.routeDecision?.blockFit
+    ? `\nCertified block fit: ${contextPack.routeDecision.blockFit.kind} / ${contextPack.routeDecision.blockFit.confidence} (${contextPack.routeDecision.blockFit.reasons.join('; ')})`
+    : '';
   const warnings = contextPack.warnings.length
     ? `Warnings:\n${contextPack.warnings.slice(0, 8).map((warning) => `- ${warning}`).join('\n')}\n`
     : '';
@@ -1259,10 +1513,11 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
     ? `\nCandidate conflicts:\n${contextPack.retrievalDiagnostics.candidateConflicts.slice(0, 4).map((conflict) => `- ${conflict.reason} ${conflict.prompt}`).join('\n')}`
     : '';
   const route = contextPack.routeDecision
-    ? `\nRoute decision: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}\nReason: ${contextPack.routeDecision.reason}${certifiedApplicability}\nMissing context: ${contextPack.routeDecision.missingContext.map((item) => item.message).join(' ') || 'none'}`
+    ? `\nRoute decision: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}\nReason: ${contextPack.routeDecision.reason}${certifiedApplicability}${blockFit}\nMissing context: ${contextPack.routeDecision.missingContext.map((item) => item.message).join(' ') || 'none'}`
     : '';
   const allowed = renderAllowedSqlRelationsForPrompt(contextPack);
   const joins = renderCandidateJoinsForPrompt(contextPack);
+  const lineage = renderColumnLineageForPrompt(contextPack);
   const relationDiagnostics = contextPack.retrievalDiagnostics?.selectedRelations?.length
     ? `\nSelected relation reasoning:\n${contextPack.retrievalDiagnostics.selectedRelations.slice(0, 8).map((relation) => `- ${relation.relation} (score ${relation.score.toFixed(1)}): ${relation.reason}`).join('\n')}`
     : '';
@@ -1276,6 +1531,7 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
     `Selected evidence:\n${objects || '- none'}`,
     allowed.trim(),
     joins.trim(),
+    lineage.trim(),
     relationDiagnostics.trim(),
     sourceSql.trim(),
     conflicts.trim(),
@@ -1299,6 +1555,35 @@ function renderCandidateJoinsForPrompt(contextPack: LocalContextPack): string {
       `- ${join.leftRelation}.${join.leftColumn} -> ${join.rightRelation}.${join.rightColumn}${join.reason ? ` (${join.reason})` : ''}`
     ),
   ].join('\n');
+}
+
+function renderColumnLineageForPrompt(contextPack: LocalContextPack): string {
+  const lineageEdges = contextPack.edges
+    .filter((edge) => edge.edgeType === 'derives_from')
+    .slice(0, 12);
+  if (lineageEdges.length === 0) return '';
+  const objectsByKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
+  return [
+    'Column lineage from governed metadata:',
+    'Use this when adapting certified blocks or dbt models into generated SQL so derived output columns map back to their physical source columns.',
+    ...lineageEdges.map((edge) => {
+      const from = objectsByKey.get(edge.fromKey);
+      const to = objectsByKey.get(edge.toKey);
+      const aggregateFn = typeof edge.payload?.aggregateFn === 'string' && edge.payload.aggregateFn.trim()
+        ? ` via ${edge.payload.aggregateFn.trim().toUpperCase()}`
+        : '';
+      const confidence = typeof edge.confidence === 'number' ? `, confidence ${edge.confidence.toFixed(2)}` : '';
+      return `- ${formatLineageObjectForPrompt(from, edge.fromKey)} derives from ${formatLineageObjectForPrompt(to, edge.toKey)}${aggregateFn}${confidence}`;
+    }),
+  ].join('\n');
+}
+
+function formatLineageObjectForPrompt(
+  object: LocalContextPack['objects'][number] | undefined,
+  fallbackKey: string,
+): string {
+  if (!object) return fallbackKey;
+  return object.fullName ?? object.name ?? object.objectKey;
 }
 
 function renderAllowedSqlRelationsForPrompt(contextPack: LocalContextPack): string {
@@ -1386,6 +1671,7 @@ function shouldUseCertifiedRoute(route: MetadataRouteDecision | undefined, inten
 }
 
 function certifiedHitFromContextPack(contextPack: LocalContextPack | undefined, kg: KGStore): KGSearchHit | null {
+  if (contextPack?.routeDecision.blockFit && !certifiedFitAllowsTier1(contextPack.routeDecision.blockFit)) return null;
   const key = contextPack?.routeDecision.exactObjectKey;
   if (!key) return null;
   const object = contextPack.objects.find((item) => item.objectKey === key);
@@ -1471,11 +1757,23 @@ function renderFollowUpContext(followUp: AgentFollowUpContext): string {
     followUp.sourceAnswer ? `source answer: ${followUp.sourceAnswer.slice(0, 700)}` : '',
     followUp.filters?.length ? `requested filters: ${followUp.filters.join(', ')}` : '',
     followUp.dimensions?.length ? `requested dimensions: ${followUp.dimensions.join(', ')}` : '',
+    followUp.priorResultColumns?.length ? `prior result columns: ${followUp.priorResultColumns.join(', ')}` : '',
+    followUp.priorResultValues ? `prior result values: ${formatPriorResultValues(followUp.priorResultValues)}` : '',
+    followUp.priorLimit ? `prior result limit: ${followUp.priorLimit}` : '',
   ].filter(Boolean);
   const rule = followUp.kind === 'drilldown'
     ? 'routing rule: find a distinct certified drilldown block first; if none exists, generate review-required SQL as a draft drilldown. Do not silently re-run the source block unless it explicitly supports the requested filter or dimension.'
-    : 'routing rule: reuse the prior certified block when the user asks a generic follow-up.';
+    : followUp.kind === 'contextual'
+      ? 'routing rule: this is prior-turn context (advisory). The user may be continuing from it — resolve references like "these"/"those"/"same" against it when the question refers to it. If this question starts a genuinely new topic, ignore the prior-turn context entirely and answer fresh.'
+      : 'routing rule: reuse the prior certified block when the user asks a generic follow-up.';
   return [...parts, rule].join('\n');
+}
+
+function formatPriorResultValues(values: Record<string, string[]>): string {
+  return Object.entries(values)
+    .slice(0, 8)
+    .map(([key, vals]) => `${key}=[${vals.slice(0, 12).join(', ')}]`)
+    .join('; ');
 }
 
 function generatedTrustExplanation(input: {
@@ -1536,9 +1834,21 @@ function buildSchemaAwareProposal(input: {
   schemaContext: AgentSchemaTable[];
   followUp?: AgentFollowUpContext;
   contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
 }): ParsedProposal | undefined {
   if (!isGeneratedAgentIntent(input.intent)) return undefined;
   const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext, input.contextPack);
+  const productCustomerProposal = buildProductCustomerRevenueProposal({ ...input, schemaContext });
+  if (productCustomerProposal) return productCustomerProposal;
+  const customerProductCategoryProposal = buildCustomerProductCategoryBuyerProposal({ ...input, schemaContext });
+  if (customerProductCategoryProposal) return customerProductCategoryProposal;
+  if (requiresProductCustomerRevenueCompositeAnswer(input.question)) {
+    return undefined;
+  }
+  const customerCategoryReverseProposal = buildProductCategoryByCustomerProposal({ ...input, schemaContext });
+  if (customerCategoryReverseProposal) return customerCategoryReverseProposal;
+  const customerCategoryProposal = buildCustomerCategoryDrilldownProposal({ ...input, schemaContext });
+  if (customerCategoryProposal) return customerCategoryProposal;
   const drilldownProposal = buildMatchedEntityDrilldownProposal({ ...input, schemaContext });
   if (drilldownProposal) return drilldownProposal;
   const profileProposal = buildEntityProfileProposal({ ...input, schemaContext });
@@ -1610,11 +1920,798 @@ function buildSchemaAwareProposal(input: {
     }
   }
 
+  const productCategoryRevenueProposal = buildProductCategoryRevenueFromSourceSqlProposal({ ...input, schemaContext });
+  if (productCategoryRevenueProposal) return productCategoryRevenueProposal;
+
   const genericJoinProposal = buildGenericJoinProposal({ ...input, schemaContext });
   if (genericJoinProposal) return genericJoinProposal;
   const genericProposal = buildGenericSingleTableProposal({ ...input, schemaContext });
   if (genericProposal) return genericProposal;
   return undefined;
+}
+
+function buildProductCustomerRevenueProposal(input: {
+  question: string;
+  schemaContext: AgentSchemaTable[];
+  contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
+  followUp?: AgentFollowUpContext;
+}): ParsedProposal | undefined {
+  if (
+    input.followUp?.kind === 'drilldown'
+    && /\bcat(?:egor|agor|ogor)(?:y|ies)\b/i.test(input.question)
+    && /\bcustomers?\b/i.test(input.question)
+  ) {
+    return undefined;
+  }
+  if (!hasProductCustomerRevenueIntent(input.question, input.questionPlan)) return undefined;
+
+  const candidates = input.schemaContext
+    .map((table) => {
+      const productColumn = findPhysicalSchemaColumn(table, ['product_name', 'product', 'product_title', 'sku', 'product_id']);
+      const category = categoryExpressionForTable(table, input.contextPack, 'f');
+      const metric = inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
+      const customerPath = findCustomerJoinPath(input.schemaContext, table);
+      if (!productColumn || !category || !metric || !customerPath) return undefined;
+      return {
+        table,
+        productColumn,
+        category,
+        metric,
+        customerPath,
+        score:
+          genericTableScore(table, input.question, metric, [productColumn, category.label]) +
+          (customerPath.sameTable ? 14 : 8),
+      };
+    })
+    .filter((candidate): candidate is {
+      table: AgentSchemaTable;
+      productColumn: string;
+      category: CategoryExpression;
+      metric: GenericMetricSelection;
+      customerPath: CustomerJoinPath;
+      score: number;
+    } => Boolean(candidate))
+    .sort((a, b) => b.score - a.score);
+  const selected = candidates[0];
+  if (!selected) return undefined;
+
+  const metricAlias = requestedMetricAlias(selected.metric.alias, input.question, input.questionPlan, input.followUp, selected.metric);
+  const limit = requestedGenericLimit(input.question, input.questionPlan);
+  const customerRef = customerReference(selected.customerPath);
+  const productRef = `f.${sqlIdentifier(selected.productColumn)}`;
+  const metricExpression = qualifiedMetricExpression(selected.metric, 'f');
+  const joinLines = customerJoinLines(selected.customerPath);
+
+  return {
+    text: [
+      `Prepared a review-required product/customer revenue view from ${selected.table.relation}.`,
+      'The result keeps product name, category, buyer, revenue, and units together at the product-customer grain.',
+      'This result is uncertified until reviewed and promoted.',
+    ].join(' '),
+    sql: [
+      'SELECT',
+      `  ${productRef} AS product_name,`,
+      `  ${selected.category.expression} AS category,`,
+      `  ${customerRef} AS customer_name,`,
+      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)},`,
+      '  COUNT(*) AS units',
+      `FROM ${sqlRelation(selected.table.relation)} AS f`,
+      ...joinLines,
+      `GROUP BY ${productRef}, ${selected.category.expression}, ${customerRef}`,
+      `ORDER BY ${sqlIdentifier(metricAlias)} DESC`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: 'table',
+  };
+}
+
+function buildCustomerProductCategoryBuyerProposal(input: {
+  question: string;
+  schemaContext: AgentSchemaTable[];
+  contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
+  followUp?: AgentFollowUpContext;
+}): ParsedProposal | undefined {
+  const categoryFilters = requestedProductCategoryFilterValues(input.question);
+  if (categoryFilters.length === 0 || !hasCustomerProductCategoryBuyerIntent(input.question, input.questionPlan)) return undefined;
+
+  const candidates = input.schemaContext
+    .map((table) => {
+      const category = categoryExpressionForTable(table, input.contextPack, 'f');
+      const metric = inferRevenueLikeMetric(table) ?? inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
+      const customerPath = findCustomerJoinPath(input.schemaContext, table);
+      if (!category || !metric || !customerPath) return undefined;
+      const productColumn = findPhysicalSchemaColumn(table, ['product_name', 'product', 'product_title', 'sku', 'product_id']);
+      const mappedFilters = mapProductCategoryFilterValues(categoryFilters, table, category, input.contextPack);
+      if (mappedFilters.length === 0) return undefined;
+      return {
+        table,
+        category,
+        metric,
+        customerPath,
+        productColumn,
+        filterValues: mappedFilters,
+        score:
+          genericTableScore(table, input.question, metric, [category.label, productColumn].filter((value): value is string => Boolean(value))) +
+          (customerPath.sameTable ? 14 : 8) +
+          (productColumn ? 6 : 0),
+      };
+    })
+    .filter((candidate): candidate is {
+      table: AgentSchemaTable;
+      category: CategoryExpression;
+      metric: GenericMetricSelection;
+      customerPath: CustomerJoinPath;
+      productColumn: string | undefined;
+      filterValues: string[];
+      score: number;
+    } => Boolean(candidate))
+    .sort((a, b) => b.score - a.score);
+  const selected = candidates[0];
+  if (!selected) return undefined;
+
+  const customerRef = customerReference(selected.customerPath);
+  const metricAlias = requestedMetricAlias(selected.metric.alias, input.question, input.questionPlan, input.followUp, selected.metric);
+  const metricExpression = qualifiedMetricExpression(selected.metric, 'f');
+  const joinLines = customerJoinLines(selected.customerPath);
+  const wherePredicate = selected.filterValues.length === 1
+    ? `${selected.category.expression} = ${sqlStringLiteral(selected.filterValues[0]!)}`
+    : `${selected.category.expression} IN (${selected.filterValues.map(sqlStringLiteral).join(', ')})`;
+  const limit = requestedGenericLimit(input.question, input.questionPlan);
+
+  return {
+    text: [
+      `Prepared a review-required customer ranking for ${selected.filterValues.join(', ')} products from ${selected.table.relation}.`,
+      'The result joins product order items to customers and ranks customers by product revenue at the customer/category grain.',
+      'This result is uncertified until reviewed and promoted.',
+    ].join(' '),
+    sql: [
+      'SELECT',
+      `  ${customerRef} AS customer_name,`,
+      `  ${selected.category.expression} AS category,`,
+      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)},`,
+      '  COUNT(*) AS units',
+      `FROM ${sqlRelation(selected.table.relation)} AS f`,
+      ...joinLines,
+      `WHERE ${wherePredicate}`,
+      `GROUP BY ${customerRef}, ${selected.category.expression}`,
+      `ORDER BY ${sqlIdentifier(metricAlias)} DESC, units DESC`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: 'bar',
+  };
+}
+
+function buildProductCategoryByCustomerProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
+}): ParsedProposal | undefined {
+  if (input.followUp?.kind !== 'drilldown') return undefined;
+  const lower = input.question.toLowerCase();
+  const dimensions = new Set((input.followUp.dimensions ?? []).map(normalizeFilterDimension));
+  const priorKeys = new Set(Object.keys(input.followUp.priorResultValues ?? {}).map(normalizeFilterDimension));
+  const wantsCategory = /\bcat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower) || dimensions.has('category');
+  const wantsProduct = /\bproducts?\b|\bproduct\b|\bproduct_name\b/.test(lower) || dimensions.has('product');
+  const referencesPriorRows = /\b(?:above|previous|prior|these|those|same)\s+(?:orders?|results?|rows?|customers?)\b/.test(lower);
+  if ((!wantsCategory && !wantsProduct) || (!/\bcustomers?\b/.test(lower) && !referencesPriorRows && !dimensions.has('customer') && !priorKeys.has('customer'))) {
+    return undefined;
+  }
+  if (!dimensions.has('customer') && !priorKeys.has('customer')) return undefined;
+  const filterValues = uniqueDrilldownStrings((input.followUp.filters ?? []).filter(isConcreteDimensionFilter));
+  if (filterValues.length === 0) return undefined;
+
+  const candidates = input.schemaContext
+    .map((table) => {
+      const category = categoryExpressionForTable(table, input.contextPack, 'f');
+      const productColumn = findPhysicalSchemaColumn(table, ['product_name', 'product', 'product_title', 'sku', 'product_id']);
+      const metricQuestion = referencesPriorRows
+        ? input.question.replace(/\borders?\b/gi, 'purchases') + ' revenue'
+        : input.question;
+      const metric = inferRevenueLikeMetric(table) ?? inferGenericMetric(table, metricQuestion, input.followUp, input.questionPlan);
+      const customerPath = findCustomerJoinPath(input.schemaContext, table);
+      if ((wantsCategory && !category) || (wantsProduct && !productColumn) || !metric || !customerPath) return undefined;
+      return {
+        table,
+        category: category ?? undefined,
+        productColumn: productColumn ?? undefined,
+        metric,
+        customerPath,
+        score: genericTableScore(table, input.question, metric, [category?.label, productColumn].filter((value): value is string => Boolean(value))) + (customerPath.sameTable ? 14 : 8),
+      };
+    })
+    .filter((candidate): candidate is {
+      table: AgentSchemaTable;
+      category: CategoryExpression | undefined;
+      productColumn: string | undefined;
+      metric: GenericMetricSelection;
+      customerPath: CustomerJoinPath;
+      score: number;
+    } => Boolean(candidate))
+    .sort((a, b) => b.score - a.score);
+  const selected = candidates[0];
+  if (!selected) return undefined;
+
+  const customerRef = customerReference(selected.customerPath);
+  const metricAlias = requestedMetricAlias(selected.metric.alias, input.question, input.questionPlan, input.followUp, selected.metric);
+  const metricExpression = qualifiedMetricExpression(selected.metric, 'f');
+  const mappedValues = mapCustomerFilterValues(filterValues, selected.customerPath);
+  if (mappedValues.length === 0) return undefined;
+  const wherePredicate = mappedValues.length === 1
+    ? `${customerRef} = ${sqlStringLiteral(mappedValues[0]!)}`
+    : `${customerRef} IN (${mappedValues.map(sqlStringLiteral).join(', ')})`;
+  const joinLines = customerJoinLines(selected.customerPath);
+  const limit = requestedGenericLimit(input.question, input.questionPlan);
+  const dimensionSelects = [
+    wantsProduct && selected.productColumn ? `  f.${sqlIdentifier(selected.productColumn)} AS product_name,` : undefined,
+    wantsCategory && selected.category ? `  ${selected.category.expression} AS category,` : undefined,
+  ].filter((line): line is string => Boolean(line));
+  const groupByExpressions = [
+    customerRef,
+    wantsProduct && selected.productColumn ? `f.${sqlIdentifier(selected.productColumn)}` : undefined,
+    wantsCategory && selected.category ? selected.category.expression : undefined,
+  ].filter((line): line is string => Boolean(line));
+
+  return {
+    text: `Prepared a review-required product category view for the prior customers from ${selected.table.relation}. This result is uncertified until reviewed and promoted.`,
+    sql: [
+      'SELECT',
+      `  ${customerRef} AS customer_name,`,
+      ...dimensionSelects,
+      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)},`,
+      '  COUNT(*) AS units',
+      `FROM ${sqlRelation(selected.table.relation)} AS f`,
+      ...joinLines,
+      `WHERE ${wherePredicate}`,
+      `GROUP BY ${groupByExpressions.join(', ')}`,
+      `ORDER BY customer_name ASC, ${sqlIdentifier(metricAlias)} DESC`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: 'table',
+  };
+}
+
+function hasProductCustomerRevenueIntent(question: string, questionPlan?: AnalysisQuestionPlan): boolean {
+  const requestedText = [
+    question,
+    ...(questionPlan?.requestedShape.requiredOutputs ?? []),
+    ...(questionPlan?.requestedShape.dimensions ?? []),
+    ...(questionPlan?.requestedShape.measures ?? []),
+    ...(questionPlan?.dimensionTerms ?? []),
+    ...(questionPlan?.metricTerms ?? []),
+  ].join(' ');
+  return mentionsProductConcept(requestedText)
+    && mentionsCustomerConcept(requestedText)
+    && /\brevenu|\bsales\b|\bamount\b|\bspend\b/i.test(requestedText);
+}
+
+function hasCustomerProductCategoryBuyerIntent(question: string, questionPlan?: AnalysisQuestionPlan): boolean {
+  const requestedText = [
+    question,
+    ...(questionPlan?.requestedShape.requiredOutputs ?? []),
+    ...(questionPlan?.requestedShape.dimensions ?? []),
+    ...(questionPlan?.requestedShape.filters ?? []),
+    ...(questionPlan?.dimensionTerms ?? []),
+  ].join(' ');
+  return mentionsCustomerConcept(requestedText)
+    && (mentionsProductConcept(requestedText) || requestedProductCategoryFilterValues(requestedText).length > 0)
+    && /\b(who|which|show|list|top|best|highest|rank|ranking|buyers?|buying|bought|purchased?|orders?|revenue|spend)\b/i.test(question);
+}
+
+function requiresProductCustomerRevenueCompositeAnswer(question: string): boolean {
+  return mentionsProductConcept(question)
+    && mentionsCustomerConcept(question)
+    && /\brevenu|\bsales\b|\bamount\b|\bspend\b/i.test(question);
+}
+
+function mentionsCustomerConcept(text: string): boolean {
+  return /\b(?:customers?|cusomers?|custmers?|costomers?|clients?|buyers?)\b/i.test(text);
+}
+
+function mentionsProductConcept(text: string): boolean {
+  return /\b(?:products?|product_name|items?|skus?|bought|buying|purchased?)\b/i.test(text);
+}
+
+function requestedProductCategoryFilterValues(text: string): string[] {
+  const lower = text.toLowerCase();
+  const values: string[] = [];
+  if (/\b(?:beverages?|drinks?)\b/i.test(lower)) values.push('beverage');
+  if (/\b(?:food|foods|jaffles?)\b/i.test(lower)) values.push('jaffle');
+  return uniqueDrilldownStrings(values);
+}
+
+function generatedResultShapeIsHardMismatch(
+  question: string,
+  questionPlan: AnalysisQuestionPlan,
+  resultShape: ReturnType<typeof validateAnswerResultShape>,
+): boolean {
+  if (!requiresProductCustomerRevenueCompositeAnswer(question) && !hasProductCustomerRevenueIntent(question, questionPlan)) return false;
+  if (resultShape.missingOutputs.length === 0) return false;
+  return resultShape.missingOutputs.some((output) =>
+    /\b(product|category|customer|revenue|sales|amount|spend)\b/i.test(output.replace(/_/g, ' '))
+  ) || resultShape.missingOutputs.length >= 2;
+}
+
+interface CategoryExpression {
+  expression: string;
+  label: string;
+}
+
+function categoryExpressionForTable(
+  table: AgentSchemaTable,
+  contextPack: LocalContextPack | undefined,
+  tableAlias?: string,
+): CategoryExpression | undefined {
+  const categoryColumn = findPhysicalSchemaColumn(table, ['category', 'category_name', 'product_category', 'product_type', 'type']);
+  if (categoryColumn) {
+    return {
+      expression: tableAlias ? `${tableAlias}.${sqlIdentifier(categoryColumn)}` : sqlIdentifier(categoryColumn),
+      label: categoryColumn,
+    };
+  }
+
+  const sourcePattern = productCategoryRevenuePatternFromSourceSql(contextPack);
+  if (sourcePattern && sourceRelationsCompatible(sourcePattern.relation, table.relation)) {
+    return {
+      expression: tableAlias
+        ? qualifyExpressionForTableAlias(sourcePattern.categoryExpression, table, tableAlias)
+        : sourcePattern.categoryExpression,
+      label: 'category',
+    };
+  }
+
+  const foodFlag = findPhysicalSchemaColumn(table, ['is_food_item', 'is_food', 'food_item']);
+  if (foodFlag) {
+    const flagRef = tableAlias ? `${tableAlias}.${sqlIdentifier(foodFlag)}` : sqlIdentifier(foodFlag);
+    return {
+      expression: `CASE WHEN ${flagRef} THEN 'Food' ELSE 'Drink' END`,
+      label: 'category',
+    };
+  }
+  return undefined;
+}
+
+function findPhysicalSchemaColumn(table: AgentSchemaTable, names: string[]): string | undefined {
+  const byLower = new Map(table.columns.map((column) => [column.name.toLowerCase(), column]));
+  for (const name of names) {
+    const exact = byLower.get(name.toLowerCase());
+    if (exact && !isCertifiedSourceShapeColumn(exact)) return exact.name;
+    const alias = table.columns.find((column) =>
+      !isCertifiedSourceShapeColumn(column) && columnHasGovernedAlias(column, name)
+    );
+    if (alias) return alias.name;
+  }
+  return undefined;
+}
+
+function qualifyExpressionForTableAlias(expression: string, table: AgentSchemaTable, alias: string): string {
+  let qualified = expression;
+  const physicalColumns = table.columns
+    .filter((column) => !isCertifiedSourceShapeColumn(column))
+    .map((column) => column.name)
+    .sort((a, b) => b.length - a.length);
+  for (const column of physicalColumns) {
+    const pattern = new RegExp(`(^|[^\\w.])(${sqlIdentifierPattern(column)})(?=[^\\w]|$)`, 'gi');
+    qualified = qualified.replace(pattern, (_match, prefix: string, identifier: string) =>
+      `${prefix}${alias}.${sqlIdentifier(cleanSqlIdentifier(identifier))}`,
+    );
+  }
+  return qualified;
+}
+
+function customerJoinLines(customerPath: CustomerJoinPath): string[] {
+  if (customerPath.sameTable) return [];
+  if (customerPath.bridgeTable) {
+    return [
+      `JOIN ${sqlRelation(customerPath.bridgeTable.relation)} AS b ON f.${sqlIdentifier(customerPath.factToBridge.leftColumn)} = b.${sqlIdentifier(customerPath.factToBridge.rightColumn)}`,
+      `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON b.${sqlIdentifier(customerPath.bridgeToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.bridgeToCustomer.rightColumn)}`,
+    ];
+  }
+  return [
+    `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON f.${sqlIdentifier(customerPath.factToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.factToCustomer.rightColumn)}`,
+  ];
+}
+
+function mapCustomerFilterValues(values: string[], customerPath: CustomerJoinPath): string[] {
+  return mapFollowUpFilterValues(values, customerPath.customerTable, customerPath.customerNameColumn);
+}
+
+function mapProductCategoryFilterValues(
+  values: string[],
+  table: AgentSchemaTable,
+  category: CategoryExpression,
+  contextPack: LocalContextPack | undefined,
+): string[] {
+  const mapped = mapFollowUpFilterValues(values, table, category.label, contextPack);
+  if (!/\bCASE\b/i.test(category.expression)) return mapped;
+  return uniqueDrilldownStrings(mapped.map((value) => {
+    const normalized = value.trim().toLowerCase();
+    if (/\b(beverage|drink|coffee|tea)\b/i.test(normalized)) return 'Drink';
+    if (/\b(food|jaffle|meal|sandwich)\b/i.test(normalized)) return 'Food';
+    return value;
+  }));
+}
+
+function trustedFollowUpFilterValues(followUp: AgentFollowUpContext | undefined): string[] | undefined {
+  const filters = new Set((followUp?.filters ?? []).map((value) => value.trim()).filter(Boolean));
+  if (!filters.size || !followUp?.priorResultValues) return undefined;
+  const priorValues = Object.values(followUp.priorResultValues).flat().map((value) => value.trim()).filter(Boolean);
+  const trusted = priorValues.filter((value) => filters.has(value));
+  return trusted.length > 0 ? uniqueDrilldownStrings(trusted) : undefined;
+}
+
+function buildProductCategoryRevenueFromSourceSqlProposal(input: {
+  question: string;
+  schemaContext: AgentSchemaTable[];
+  contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
+}): ParsedProposal | undefined {
+  const requestedText = [
+    input.question,
+    ...(input.questionPlan?.requestedShape.requiredOutputs ?? []),
+    ...(input.questionPlan?.requestedShape.dimensions ?? []),
+    ...(input.questionPlan?.requestedShape.measures ?? []),
+    ...(input.questionPlan?.dimensionTerms ?? []),
+    ...(input.questionPlan?.metricTerms ?? []),
+  ].join(' ').toLowerCase();
+  const wantsProduct = /\bproducts?\b|\bproduct_name\b/.test(requestedText);
+  const wantsCategory = /\bcategor(?:y|ies)\b|\bcategory_name\b/.test(requestedText);
+  const wantsRevenue = /\brevenu|\bsales\b|\bamount\b|\bspend\b/.test(requestedText);
+  if (!wantsProduct || !wantsCategory || !wantsRevenue) return undefined;
+
+  const pattern = productCategoryRevenuePatternFromSourceSql(input.contextPack);
+  if (!pattern) return undefined;
+
+  const limit = requestedGenericLimit(input.question, input.questionPlan);
+  const orderDirection = rankingDirectionFromText(input.question) === 'bottom' ? 'ASC' : 'DESC';
+  const sourceNames = pattern.sourceNames.length ? ` using ${pattern.sourceNames.join(' and ')}` : '';
+  return {
+    text: `Prepared a review-required product revenue ranking with category${sourceNames} as governed SQL context. This result is uncertified until reviewed and promoted.`,
+    sql: [
+      'SELECT',
+      `  ${pattern.productExpression} AS product_name,`,
+      `  ${pattern.categoryExpression} AS category,`,
+      `  ${pattern.metricExpression} AS revenue`,
+      `FROM ${pattern.relation}`,
+      'GROUP BY 1, 2',
+      `ORDER BY revenue ${orderDirection}`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: 'bar',
+  };
+}
+
+interface ProductCategoryRevenuePattern {
+  relation: string;
+  productExpression: string;
+  categoryExpression: string;
+  metricExpression: string;
+  sourceNames: string[];
+}
+
+interface SourceSqlShapeHints {
+  relation: string;
+  sourceName: string;
+  productExpression?: string;
+  categoryExpression?: string;
+  metricExpression?: string;
+}
+
+function productCategoryRevenuePatternFromSourceSql(
+  contextPack: LocalContextPack | undefined,
+): ProductCategoryRevenuePattern | undefined {
+  const sources = contextPack?.allowedSqlContext?.sourceBlockSql ?? [];
+  if (sources.length === 0) return undefined;
+
+  const hints = sources
+    .map((source): SourceSqlShapeHints | undefined => {
+      const shape = extractSimpleSelectShape(source.sql);
+      if (!shape || !safeSourceRelation(shape.relation)) return undefined;
+      const hint: SourceSqlShapeHints = {
+        relation: shape.relation,
+        sourceName: source.name,
+      };
+      for (const expression of shape.selectExpressions) {
+        const outputName = selectExpressionOutputName(expression);
+        const body = reusableSelectExpressionBody(expression);
+        if (!outputName || !body) continue;
+        if (!hint.productExpression && isProductOutputName(outputName)) {
+          hint.productExpression = body;
+        }
+        if (!hint.categoryExpression && isCategoryOutputName(outputName)) {
+          hint.categoryExpression = body;
+        }
+        if (!hint.metricExpression && isRevenueOutputExpression(outputName, body)) {
+          hint.metricExpression = body;
+        }
+      }
+      return hint;
+    })
+    .filter((hint): hint is SourceSqlShapeHints => Boolean(hint));
+
+  for (const productMetric of hints) {
+    if (!productMetric.productExpression || !productMetric.metricExpression) continue;
+    const category = hints.find((candidate) =>
+      candidate.categoryExpression && sourceRelationsCompatible(productMetric.relation, candidate.relation)
+    );
+    if (!category?.categoryExpression) continue;
+    return {
+      relation: productMetric.relation,
+      productExpression: productMetric.productExpression,
+      categoryExpression: category.categoryExpression,
+      metricExpression: productMetric.metricExpression,
+      sourceNames: uniqueDrilldownStrings([productMetric.sourceName, category.sourceName]),
+    };
+  }
+  return undefined;
+}
+
+function reusableSelectExpressionBody(expression: string): string | undefined {
+  const stripped = stripSqlAliasQualifiers(stripSelectAlias(expression).replace(/\s+/g, ' ').trim());
+  if (!isReusableGeneratedSelectExpression(stripped)) return undefined;
+  return stripped;
+}
+
+function stripSelectAlias(expression: string): string {
+  const explicit = expression.replace(/\s+AS\s+(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w]*)\s*$/i, '').trim();
+  if (explicit !== expression.trim()) return explicit;
+  const implicit = expression.match(/^([\s\S]*\S)\s+(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w]*)\s*$/);
+  if (implicit?.[1] && /[()\s+\-*\/]|\bCASE\b/i.test(implicit[1])) return implicit[1].trim();
+  return expression.trim();
+}
+
+function isReusableGeneratedSelectExpression(expression: string): boolean {
+  if (!expression || expression.length > 500) return false;
+  if (/[;]/.test(expression) || /--|\/\*/.test(expression)) return false;
+  return !/\b(SELECT|FROM|JOIN|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|PRAGMA|SET)\b/i.test(expression);
+}
+
+function safeSourceRelation(relation: string): boolean {
+  return Boolean(relation.trim())
+    && relation.length <= 160
+    && !/[;()]/.test(relation)
+    && !/\b(SELECT|JOIN|WHERE|GROUP\s+BY|ORDER\s+BY|LIMIT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|PRAGMA|SET)\b/i.test(relation);
+}
+
+function isProductOutputName(outputName: string): boolean {
+  const normalized = outputName.toLowerCase();
+  return normalized === 'product'
+    || normalized === 'product_name'
+    || normalized === 'product_title'
+    || normalized === 'sku';
+}
+
+function isCategoryOutputName(outputName: string): boolean {
+  const normalized = outputName.toLowerCase();
+  return normalized === 'category'
+    || normalized === 'category_name'
+    || normalized === 'product_category'
+    || normalized === 'product_type';
+}
+
+function isRevenueOutputExpression(outputName: string, expression: string): boolean {
+  const output = outputName.toLowerCase();
+  const body = expression.toLowerCase().replace(/_/g, ' ');
+  return /\b(revenue|sales|amount|spend|value)\b/.test(output.replace(/_/g, ' '))
+    && /\b(SUM|AVG|COUNT|MIN|MAX)\s*\(/i.test(expression)
+    && /\b(revenue|sales|amount|price|spend|value|total)\b/.test(body);
+}
+
+function sourceRelationsCompatible(left: string, right: string): boolean {
+  const leftKeys = new Set(relationLookupKeys(left));
+  return relationLookupKeys(right).some((key) => leftKeys.has(key));
+}
+
+function buildCustomerCategoryDrilldownProposal(input: {
+  question: string;
+  intent: AgentIntent;
+  schemaContext: AgentSchemaTable[];
+  followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
+}): ParsedProposal | undefined {
+  if (input.followUp?.kind !== 'drilldown') return undefined;
+  if (!/\bcustomers?\b/i.test(input.question)) return undefined;
+  const filterTarget = customerDrilldownFilterTarget(input.question, input.followUp);
+  if (!filterTarget) return undefined;
+  const filterValues = uniqueDrilldownStrings((input.followUp.filters ?? []).filter(isConcreteDimensionFilter));
+  if (filterValues.length === 0) return undefined;
+
+  const metricTableCandidates = input.schemaContext
+    .map((table) => {
+      const filterColumn = findSchemaColumn(table, filterTarget.columnCandidates);
+      const metric = inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
+      const orderKey = findSchemaColumn(table, ['order_id', 'order_key', 'order_uuid']);
+      const customerKey = findSchemaColumn(table, ['customer_id', 'customer_key', 'customer_uuid']);
+      const customerName = findSchemaColumn(table, ['customer_name', 'customer', 'full_name', 'name']);
+      if (!filterColumn || !metric || (!orderKey && !customerKey && !customerName)) return undefined;
+      return {
+        table,
+        filterColumn,
+        metric,
+        score: genericTableScore(table, input.question, metric, [filterColumn]) + (orderKey ? 10 : 0) + (customerKey ? 14 : 0) + (customerName ? 12 : 0),
+      };
+    })
+    .filter((candidate): candidate is {
+      table: AgentSchemaTable;
+      filterColumn: string;
+      metric: GenericMetricSelection;
+      score: number;
+    } => Boolean(candidate))
+    .sort((a, b) => b.score - a.score);
+  const metricCandidate = metricTableCandidates[0];
+  if (!metricCandidate) return undefined;
+
+  const customerPath = findCustomerJoinPath(input.schemaContext, metricCandidate.table);
+  if (!customerPath) return undefined;
+  const mappedValues = mapFollowUpFilterValues(
+    filterValues,
+    metricCandidate.table,
+    metricCandidate.filterColumn,
+    input.contextPack,
+    input.followUp.sourceBlockName,
+  );
+  if (mappedValues.length === 0) return undefined;
+
+  const metricAlias = requestedMetricAlias(metricCandidate.metric.alias, input.question, input.questionPlan, input.followUp, metricCandidate.metric);
+  const metricExpression = qualifiedMetricExpression(metricCandidate.metric, 'f');
+  const wherePredicate = mappedValues.length === 1
+    ? `f.${sqlIdentifier(metricCandidate.filterColumn)} = ${sqlStringLiteral(mappedValues[0]!)}`
+    : `f.${sqlIdentifier(metricCandidate.filterColumn)} IN (${mappedValues.map(sqlStringLiteral).join(', ')})`;
+  const joinLines = customerPath.sameTable
+    ? []
+    : customerPath.bridgeTable
+    ? [
+        `JOIN ${sqlRelation(customerPath.bridgeTable.relation)} AS b ON f.${sqlIdentifier(customerPath.factToBridge.leftColumn)} = b.${sqlIdentifier(customerPath.factToBridge.rightColumn)}`,
+        `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON b.${sqlIdentifier(customerPath.bridgeToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.bridgeToCustomer.rightColumn)}`,
+      ]
+    : [
+        `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON f.${sqlIdentifier(customerPath.factToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.factToCustomer.rightColumn)}`,
+      ];
+  const limit = requestedGenericLimit(input.question, input.questionPlan);
+
+  return {
+    text: `Prepared a review-required customer revenue ranking for the prior ${filterTarget.pluralLabel} from ${metricCandidate.table.relation}. This result is uncertified until reviewed and promoted.`,
+    sql: [
+      'SELECT',
+      `  ${customerReference(customerPath)} AS customer_name,`,
+      `  f.${sqlIdentifier(metricCandidate.filterColumn)} AS ${sqlIdentifier(filterTarget.outputAlias)},`,
+      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)}`,
+      `FROM ${sqlRelation(metricCandidate.table.relation)} AS f`,
+      ...joinLines,
+      `WHERE ${wherePredicate}`,
+      `GROUP BY ${customerReference(customerPath)}, f.${sqlIdentifier(metricCandidate.filterColumn)}`,
+      `ORDER BY ${sqlIdentifier(metricAlias)} DESC`,
+      `LIMIT ${limit}`,
+    ].join('\n'),
+    viz: 'table',
+  };
+}
+
+type CustomerJoinPath =
+  | {
+      customerTable: AgentSchemaTable;
+      customerNameColumn: string;
+      sameTable: true;
+      factToCustomer?: undefined;
+      bridgeTable?: undefined;
+      factToBridge?: undefined;
+      bridgeToCustomer?: undefined;
+    }
+  | {
+      customerTable: AgentSchemaTable;
+      customerNameColumn: string;
+      sameTable?: undefined;
+      factToCustomer: JoinColumnSelection;
+      bridgeTable?: undefined;
+      factToBridge?: undefined;
+      bridgeToCustomer?: undefined;
+    }
+  | {
+      customerTable: AgentSchemaTable;
+      customerNameColumn: string;
+      sameTable?: undefined;
+      bridgeTable: AgentSchemaTable;
+      factToBridge: JoinColumnSelection;
+      bridgeToCustomer: JoinColumnSelection;
+      factToCustomer?: undefined;
+    };
+
+function findCustomerJoinPath(schemaContext: AgentSchemaTable[], factTable: AgentSchemaTable): CustomerJoinPath | undefined {
+  const factCustomerName = findSchemaColumn(factTable, ['customer_name', 'customer', 'full_name', 'name']);
+  if (factCustomerName) {
+    return {
+      customerTable: factTable,
+      customerNameColumn: factCustomerName,
+      sameTable: true,
+    };
+  }
+
+  const customerTables = schemaContext
+    .map((table) => {
+      const customerNameColumn = findSchemaColumn(table, ['customer_name', 'customer', 'full_name', 'name']);
+      const customerKey = findSchemaColumn(table, ['customer_id', 'customer_key', 'customer_uuid', 'id']);
+      if (!customerNameColumn || !customerKey) return undefined;
+      return { table, customerNameColumn };
+    })
+    .filter((candidate): candidate is { table: AgentSchemaTable; customerNameColumn: string } => Boolean(candidate))
+    .sort((a, b) => selectedRelationWeight(b.table) - selectedRelationWeight(a.table));
+
+  for (const customer of customerTables) {
+    const direct = pickJoinColumns(factTable, customer.table);
+    if (direct) {
+      return {
+        customerTable: customer.table,
+        customerNameColumn: customer.customerNameColumn,
+        factToCustomer: direct,
+      };
+    }
+  }
+
+  for (const customer of customerTables) {
+    for (const bridgeTable of schemaContext) {
+      if (normalizeRelationKey(bridgeTable.relation) === normalizeRelationKey(factTable.relation)) continue;
+      if (normalizeRelationKey(bridgeTable.relation) === normalizeRelationKey(customer.table.relation)) continue;
+      const factToBridge = pickJoinColumns(factTable, bridgeTable);
+      if (!factToBridge) continue;
+      const bridgeToCustomer = pickJoinColumns(bridgeTable, customer.table);
+      if (!bridgeToCustomer) continue;
+      return {
+        customerTable: customer.table,
+        customerNameColumn: customer.customerNameColumn,
+        bridgeTable,
+        factToBridge,
+        bridgeToCustomer,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+interface CustomerDrilldownFilterTarget {
+  dimension: 'category' | 'product';
+  outputAlias: 'category' | 'product_name';
+  pluralLabel: string;
+  columnCandidates: string[];
+}
+
+function customerDrilldownFilterTarget(
+  question: string,
+  followUp: AgentFollowUpContext,
+): CustomerDrilldownFilterTarget | undefined {
+  const lower = question.toLowerCase();
+  const dimensions = new Set((followUp.dimensions ?? []).map(normalizeFilterDimension));
+  const priorKeys = new Set(Object.keys(followUp.priorResultValues ?? {}).map(normalizeFilterDimension));
+  const wantsProduct = /\bproducts?\b/.test(lower) || dimensions.has('product') || priorKeys.has('product');
+  const wantsCategory = /\bcat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower) || dimensions.has('category') || priorKeys.has('category');
+  if (wantsProduct) {
+    return {
+      dimension: 'product',
+      outputAlias: 'product_name',
+      pluralLabel: 'products',
+      columnCandidates: ['product_name', 'product', 'product_title', 'sku', 'product_id'],
+    };
+  }
+  if (wantsCategory) {
+    return {
+      dimension: 'category',
+      outputAlias: 'category',
+      pluralLabel: 'categories',
+      columnCandidates: ['category', 'category_name', 'product_category', 'product_type', 'type'],
+    };
+  }
+  return undefined;
+}
+
+function customerReference(path: CustomerJoinPath): string {
+  return path.sameTable
+    ? `f.${sqlIdentifier(path.customerNameColumn)}`
+    : `c.${sqlIdentifier(path.customerNameColumn)}`;
 }
 
 function customerRankingDirectionFromText(text: string): RankingDirection {
@@ -1631,6 +2728,7 @@ function buildGenericJoinProposal(input: {
   schemaContext: AgentSchemaTable[];
   followUp?: AgentFollowUpContext;
   contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
 }): ParsedProposal | undefined {
   const planMode = input.contextPack?.questionPlan?.mode;
   if (planMode === 'entity_profile' || planMode === 'diagnose_change' || planMode === 'anomaly' || planMode === 'trust_review') {
@@ -1677,6 +2775,7 @@ function buildGenericSingleTableProposal(input: {
   schemaContext: AgentSchemaTable[];
   followUp?: AgentFollowUpContext;
   contextPack?: LocalContextPack;
+  questionPlan?: AnalysisQuestionPlan;
 }): ParsedProposal | undefined {
   const planMode = input.contextPack?.questionPlan?.mode;
   if (planMode === 'entity_profile' || planMode === 'diagnose_change' || planMode === 'anomaly' || planMode === 'trust_review') {
@@ -1689,27 +2788,28 @@ function buildGenericSingleTableProposal(input: {
   if (!/\b(show|list|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking|compare|trend|by\s+[a-z]|how many|number of|revenue|sales|orders?|points?|score|count|total|average|avg|sum)\b/i.test(lower)) {
     return undefined;
   }
-  const table = pickGenericAnalysisTable(input.schemaContext, input.question);
+  const table = pickGenericAnalysisTable(input.schemaContext, input.question, input.followUp, input.questionPlan);
   if (!table) return undefined;
-  const metric = inferGenericMetric(table, input.question);
+  const metric = inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
   if (!metric) return undefined;
-  const dimensions = augmentGenericRankingDimensions(
-    table,
-    inferGenericDimensions(table, input.question, metric.column),
-    metric,
-    input.question,
-  ).slice(0, 2);
+  const dimensionSelections = selectGenericDimensionSelections(table, input.question, metric, input.questionPlan).slice(0, 3);
+  if (customerQuestionRequiresCustomerDimension(input.question) && !dimensionSelections.some((dimension) => isCustomerDimensionSelection(dimension))) {
+    return undefined;
+  }
   const direction = rankingDirectionFromText(input.question);
-  const limit = /\b(all|complete|full)\b/i.test(input.question) ? 50 : 10;
-  const metricAlias = metric.alias;
+  const limit = requestedGenericLimit(input.question, input.questionPlan);
+  const metricAlias = requestedMetricAlias(metric.alias, input.question, input.questionPlan, input.followUp, metric);
+  const whereClause = genericFollowUpWhereClause(table, dimensionSelections, input.followUp);
+  const whereLines = whereClause ? [`WHERE ${whereClause}`] : [];
 
-  if (dimensions.length === 0) {
+  if (dimensionSelections.length === 0) {
     return {
       text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} summary from ${table.relation}. This result is uncertified until reviewed and promoted.`,
       sql: [
         'SELECT',
         `  ${metric.expression} AS ${sqlIdentifier(metricAlias)}`,
         `FROM ${sqlRelation(table.relation)}`,
+        ...whereLines,
       ].join('\n'),
       viz: 'single_value',
     };
@@ -1717,30 +2817,32 @@ function buildGenericSingleTableProposal(input: {
 
   if (direction && metric.preAggregated) {
     return {
-      text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} ranking by ${dimensions.map(humanizeIdentifier).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
+      text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} ranking by ${dimensionSelections.map((dimension) => humanizeIdentifier(dimension.alias)).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
       sql: [
         'SELECT',
-        ...dimensions.map((dimension) => `  ${sqlIdentifier(dimension)} AS ${sqlIdentifier(dimension)},`),
-        `  ${sqlIdentifier(metric.column)} AS ${sqlIdentifier(metric.column)}`,
+        ...dimensionSelections.map((dimension) => `  ${sqlIdentifier(dimension.column)} AS ${sqlIdentifier(dimension.alias)},`),
+        `  ${sqlIdentifier(metric.column)} AS ${sqlIdentifier(metricAlias)}`,
         `FROM ${sqlRelation(table.relation)}`,
-        `ORDER BY ${sqlIdentifier(metric.column)} ${direction === 'bottom' ? 'ASC' : 'DESC'}`,
+        ...whereLines,
+        `ORDER BY ${sqlIdentifier(metricAlias)} ${direction === 'bottom' ? 'ASC' : 'DESC'}`,
         `LIMIT ${limit}`,
       ].join('\n'),
       viz: 'table',
     };
   }
 
-  const selectDimensions = dimensions.map((dimension) => `  ${sqlIdentifier(dimension)} AS ${sqlIdentifier(dimension)},`);
-  const groupBy = dimensions.map(sqlIdentifier).join(', ');
+  const selectDimensions = dimensionSelections.map((dimension) => `  ${sqlIdentifier(dimension.column)} AS ${sqlIdentifier(dimension.alias)},`);
+  const groupBy = dimensionSelections.map((dimension) => sqlIdentifier(dimension.column)).join(', ');
   const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
-  const chart = dimensions.some(isTimeLikeGenericColumn) ? 'line' : 'bar';
+  const chart = dimensionSelections.some((dimension) => isTimeLikeGenericColumn(dimension.column)) ? 'line' : 'bar';
   return {
-    text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} breakdown by ${dimensions.map(humanizeIdentifier).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
+    text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} breakdown by ${dimensionSelections.map((dimension) => humanizeIdentifier(dimension.alias)).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
     sql: [
       'SELECT',
       ...selectDimensions,
       `  ${metric.expression} AS ${sqlIdentifier(metricAlias)}`,
       `FROM ${sqlRelation(table.relation)}`,
+      ...whereLines,
       `GROUP BY ${groupBy}`,
       `ORDER BY ${sqlIdentifier(metricAlias)} ${orderDirection}`,
       `LIMIT ${limit}`,
@@ -1757,15 +2859,43 @@ interface GenericMetricSelection {
   preAggregated: boolean;
 }
 
+function inferRevenueLikeMetric(table: AgentSchemaTable): GenericMetricSelection | undefined {
+  const column = findPhysicalSchemaColumn(table, [
+    'revenue',
+    'sales',
+    'amount',
+    'product_revenue',
+    'product_sales',
+    'product_amount',
+    'product_price',
+    'price',
+    'subtotal',
+    'order_total',
+    'total_amount',
+    'lifetime_spend',
+  ]);
+  if (!column) return undefined;
+  const preAggregated = isPreAggregatedMetricColumn(column);
+  return {
+    column,
+    expression: preAggregated ? sqlIdentifier(column) : `SUM(${sqlIdentifier(column)})`,
+    alias: /revenue/i.test(column) ? column : 'revenue',
+    score: 96,
+    preAggregated,
+  };
+}
+
 function pickGenericAnalysisTable(
   schemaContext: AgentSchemaTable[],
   question: string,
+  followUp?: AgentFollowUpContext,
+  questionPlan?: AnalysisQuestionPlan,
 ): AgentSchemaTable | undefined {
   return schemaContext
     .filter((table) => table.columns.length > 0)
     .map((table, index) => ({
       table,
-      metric: inferGenericMetric(table, question),
+      metric: inferGenericMetric(table, question, followUp, questionPlan),
       dimensions: inferGenericDimensions(table, question),
       index,
     }))
@@ -2057,9 +3187,15 @@ function qualifiedMetricExpression(metric: GenericMetricSelection, tableAlias: s
   return `${aggregate}(${column})`;
 }
 
-function inferGenericMetric(table: AgentSchemaTable, question: string): GenericMetricSelection | undefined {
+function inferGenericMetric(
+  table: AgentSchemaTable,
+  question: string,
+  followUp?: AgentFollowUpContext,
+  questionPlan?: AnalysisQuestionPlan,
+): GenericMetricSelection | undefined {
   const lower = question.toLowerCase();
   const wantsCount = /\b(count|how many|number of|volume)\b/i.test(lower);
+  const metricHints = genericMetricHints(question, followUp, questionPlan);
   const candidates = table.columns
     .map((column) => {
       const name = column.name.toLowerCase();
@@ -2071,6 +3207,10 @@ function inferGenericMetric(table: AgentSchemaTable, question: string): GenericM
       if (/\b(revenue|sales|amount|total|spend|cost|margin|profit|value|points?|score|orders?|count|quantity|duration|minutes?|rate|average|avg)\b/i.test(name.replace(/_/g, ' '))) {
         score += 18;
       }
+      for (const hint of metricHints) {
+        if (metricHintMatchesColumn(hint, column.name)) score += 42;
+      }
+      if (isCertifiedSourceShapeColumn(column)) score -= 24;
       if (/\b(id|key|code|zip|postal|phone|season|year|month|week|day|date|time)\b/i.test(name.replace(/_/g, ' '))) {
         score -= 14;
       }
@@ -2124,6 +3264,46 @@ function inferGenericMetric(table: AgentSchemaTable, question: string): GenericM
     score: selected.score,
     preAggregated,
   };
+}
+
+function genericMetricHints(
+  question: string,
+  followUp?: AgentFollowUpContext,
+  questionPlan?: AnalysisQuestionPlan,
+): string[] {
+  return uniqueDrilldownStrings([
+    ...(questionPlan?.requestedShape?.measures ?? []),
+    ...(questionPlan?.metricTerms ?? []),
+    ...(followUp?.priorMeasures ?? []),
+    ...(followUp?.priorResultColumns ?? []).filter(requestedOutputLooksMeasure),
+    ...extractMetricWordsFromText(question),
+  ]).slice(0, 10);
+}
+
+function extractMetricWordsFromText(text: string): string[] {
+  const lower = text.toLowerCase();
+  const out: string[] = [];
+  for (const metric of ['revenue', 'sales', 'amount', 'spend', 'cost', 'margin', 'profit', 'value', 'orders', 'count', 'quantity', 'score', 'points']) {
+    if (new RegExp(`\\b${metric}\\b`, 'i').test(lower)) out.push(metric);
+  }
+  return out;
+}
+
+function metricHintMatchesColumn(hint: string, columnName: string): boolean {
+  const normalizedHint = normalizeToken(hint);
+  const normalizedColumn = normalizeToken(columnName);
+  const columnText = columnName.toLowerCase().replace(/_/g, ' ');
+  if (!normalizedHint || !normalizedColumn) return false;
+  if (namesEqualLoose(normalizedHint, normalizedColumn)) return true;
+  if (meaningfulTokens(columnName).has(normalizedHint)) return true;
+  if (normalizedHint === 'revenue') return /\b(revenue|sales|amount|total|price|spend|value)\b/i.test(columnText);
+  if (normalizedHint === 'sales') return /\b(sales|revenue|amount|total|price|value)\b/i.test(columnText);
+  if (normalizedHint === 'orders' || normalizedHint === 'order') {
+    return /\b(order_count|orders_count|count_lifetime_orders|orders|order total|total orders)\b/i.test(columnText)
+      && !/\b(id|key|uuid|code)\b/i.test(columnText);
+  }
+  if (normalizedHint === 'count') return /\b(count|total|number|num)\b/i.test(columnText) && !/\b(id|key|uuid|code)\b/i.test(columnText);
+  return columnText.includes(normalizedHint.replace(/_/g, ' '));
 }
 
 function inferCountSubject(question: string): string | undefined {
@@ -2183,6 +3363,260 @@ function augmentGenericRankingDimensions(
     .map((column) => column.name)
     .find((name) => isTimeLikeGenericColumn(name) && !dimensions.some((dimension) => namesEqualLoose(dimension, name)));
   return timeColumn ? [...dimensions, timeColumn] : dimensions;
+}
+
+interface GenericDimensionSelection {
+  column: string;
+  alias: string;
+}
+
+function selectGenericDimensionSelections(
+  table: AgentSchemaTable,
+  question: string,
+  metric: GenericMetricSelection,
+  questionPlan?: AnalysisQuestionPlan,
+): GenericDimensionSelection[] {
+  const baseDimensions = augmentGenericRankingDimensions(
+    table,
+    inferGenericDimensions(table, question, metric.column),
+    metric,
+    question,
+  ).map((column) => ({ column, alias: column }));
+  const requestedDimensions = requestedDimensionSelections(table, questionPlan?.requestedShape, metric.column);
+  return mergeDimensionSelections([...baseDimensions, ...requestedDimensions]);
+}
+
+function requestedDimensionSelections(
+  table: AgentSchemaTable,
+  requested: RequestedAnswerShape | undefined,
+  metricColumn: string,
+): GenericDimensionSelection[] {
+  if (!requested) return [];
+  const requestedOutputs = uniqueDrilldownStrings([
+    ...requested.requiredOutputs,
+    ...requested.dimensions,
+  ]);
+  const selections: GenericDimensionSelection[] = [];
+  for (const output of requestedOutputs) {
+    const alias = genericDimensionAlias(output);
+    if (!alias || requestedOutputLooksMeasure(output)) continue;
+    const column = findSchemaColumn(table, dimensionColumnCandidatesForOutput(output));
+    if (!column || namesEqualLoose(column, metricColumn)) continue;
+    if (isNumericLikeColumn({ name: column, type: findColumnType(table, column) })) continue;
+    selections.push({ column, alias });
+  }
+  return selections;
+}
+
+function mergeDimensionSelections(selections: GenericDimensionSelection[]): GenericDimensionSelection[] {
+  const merged: GenericDimensionSelection[] = [];
+  for (const selection of selections) {
+    const existing = merged.find((item) => namesEqualLoose(item.column, selection.column));
+    if (existing) {
+      if (selection.alias !== selection.column && existing.alias === existing.column) existing.alias = selection.alias;
+      continue;
+    }
+    merged.push(selection);
+  }
+  return merged;
+}
+
+function isCustomerDimensionSelection(selection: GenericDimensionSelection): boolean {
+  return /\bcustomer\b/i.test([selection.column, selection.alias].join(' ').replace(/_/g, ' '));
+}
+
+function customerQuestionRequiresCustomerDimension(question: string): boolean {
+  return /\bcustomers?\b/i.test(question)
+    && /\b(who|which|list|show|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking)\b/i.test(question)
+    && !/\b(how many|number of|count of|count|total)\b/i.test(question);
+}
+
+function dimensionColumnCandidatesForOutput(output: string): string[] {
+  const normalized = output.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if (normalized === 'category' || normalized === 'category_name') {
+    return ['category', 'category_name', 'product_category', 'product_type', 'type'];
+  }
+  if (normalized === 'product' || normalized === 'product_name') {
+    return ['product_name', 'product', 'product_title', 'sku', 'product_id'];
+  }
+  if (normalized === 'customer' || normalized === 'customer_name') {
+    return ['customer_name', 'customer', 'full_name', 'name', 'customer_id'];
+  }
+  if (normalized === 'region' || normalized === 'market') {
+    return [normalized, 'region', 'market', 'geo'];
+  }
+  if (normalized === 'segment') {
+    return ['segment', 'customer_segment', 'type'];
+  }
+  return uniqueDrilldownStrings([
+    normalized,
+    normalized.replace(/_name$/, ''),
+    `${normalized}_name`,
+  ]);
+}
+
+function genericDimensionAlias(output: string): string | undefined {
+  const normalized = output.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  if (!normalized) return undefined;
+  if (normalized === 'product') return 'product_name';
+  if (normalized === 'customer') return 'customer_name';
+  if (normalized === 'category_name') return 'category';
+  return normalized;
+}
+
+function requestedOutputLooksMeasure(output: string): boolean {
+  return /\b(revenue|sales|amount|total|count|average|avg|sum|min|max|spend|cost|margin|profit|value|points?|score|quantity|rate|volume)\b/i.test(
+    output.replace(/_/g, ' '),
+  );
+}
+
+function requestedMetricAlias(
+  defaultAlias: string,
+  question: string,
+  questionPlan?: AnalysisQuestionPlan,
+  followUp?: AgentFollowUpContext,
+  metric?: GenericMetricSelection,
+): string {
+  const inheritedMeasures = uniqueDrilldownStrings([
+    ...(followUp?.priorMeasures ?? []),
+    ...(followUp?.priorResultColumns ?? []).filter(requestedOutputLooksMeasure),
+  ]);
+  if (
+    inheritedMeasures.some((measure) => namesEqualLoose(measure, 'revenue'))
+    && (!metric || metricHintMatchesColumn('revenue', metric.column))
+  ) return 'revenue';
+  if (
+    inheritedMeasures.some((measure) => namesEqualLoose(measure, 'sales'))
+    && (!metric || metricHintMatchesColumn('sales', metric.column))
+  ) return 'sales';
+  if (!mentionsExplicitOutputColumns(question)) return defaultAlias;
+  const requestedMeasures = uniqueDrilldownStrings([
+    ...(questionPlan?.requestedShape?.measures ?? []),
+    ...extractMetricWordsFromText(question),
+  ]);
+  if (
+    requestedMeasures.some((measure) => namesEqualLoose(measure, 'revenue'))
+    && (!metric || metricHintMatchesColumn('revenue', metric.column))
+  ) return 'revenue';
+  if (
+    requestedMeasures.some((measure) => namesEqualLoose(measure, 'sales'))
+    && (!metric || metricHintMatchesColumn('sales', metric.column))
+  ) return 'sales';
+  return defaultAlias;
+}
+
+function mentionsExplicitOutputColumns(question: string): boolean {
+  return /\b(?:with|including|include|return|show|list|give|provide|columns?|fields?|results?)\b[^.?!]{0,120}\b(?:name|id|email|category|segment|region|revenue|sales|amount|total|count|score|points?)\b/i.test(question);
+}
+
+function requestedGenericLimit(question: string, questionPlan?: AnalysisQuestionPlan): number {
+  const topN = questionPlan?.requestedShape?.topN;
+  if (topN && topN.scope === 'overall') return topN.n;
+  return /\b(all|complete|full)\b/i.test(question) ? 50 : 10;
+}
+
+function genericFollowUpWhereClause(
+  table: AgentSchemaTable,
+  dimensionSelections: GenericDimensionSelection[],
+  followUp?: AgentFollowUpContext,
+): string | undefined {
+  if (followUp?.kind !== 'drilldown') return undefined;
+  const values = uniqueDrilldownStrings((followUp.filters ?? []).filter(isConcreteDimensionFilter));
+  if (values.length === 0) return undefined;
+  const dimensions = new Set((followUp.dimensions ?? []).map(normalizeFilterDimension));
+  const selected = dimensionSelections.find((dimension) =>
+    dimensions.size === 0
+    || dimensions.has(normalizeFilterDimension(dimension.alias))
+    || dimensions.has(normalizeFilterDimension(dimension.column))
+    || (dimensions.has('category') && /\b(category|type)\b/i.test(dimension.alias.replace(/_/g, ' ')))
+    || (dimensions.has('category') && /\b(category|type)\b/i.test(dimension.column.replace(/_/g, ' ')))
+  );
+  if (!selected) return undefined;
+  const column = table.columns.find((candidate) => namesEqualLoose(candidate.name, selected.column));
+  const matchedValues = mapFollowUpFilterValues(values, table, selected.column);
+  if (matchedValues.length === 0) return undefined;
+  const predicate = matchedValues.length === 1
+    ? `${sqlIdentifier(selected.column)} = ${sqlStringLiteral(matchedValues[0]!)}`
+    : `${sqlIdentifier(selected.column)} IN (${matchedValues.map(sqlStringLiteral).join(', ')})`;
+  return predicate;
+}
+
+function mapFollowUpFilterValues(
+  values: string[],
+  table: AgentSchemaTable,
+  columnName: string,
+  contextPack?: LocalContextPack,
+  sourceBlockName?: string,
+): string[] {
+  const column = table.columns.find((candidate) => namesEqualLoose(candidate.name, columnName));
+  const sampleValues = uniqueDrilldownStrings(column?.sampleValues ?? []);
+  const sourceMappings = sourceBlockValueMappings(contextPack, sourceBlockName, columnName);
+  if (sampleValues.length === 0 && sourceMappings.size === 0) return values;
+  const sampleLookup = new Map(sampleValues.map((value) => [value.toLowerCase(), value]));
+  const mapped = values
+    .map((value) =>
+      sourceMappings.get(value.toLowerCase())
+      ?? sampleLookup.get(value.toLowerCase())
+      ?? businessCategoryValueMapping(value, sampleValues)
+    )
+    .filter((value): value is string => Boolean(value));
+  return uniqueDrilldownStrings(mapped);
+}
+
+function sourceBlockValueMappings(
+  contextPack: LocalContextPack | undefined,
+  sourceBlockName: string | undefined,
+  columnName: string,
+): Map<string, string> {
+  const mappings = new Map<string, string>();
+  const normalizedColumn = normalizeToken(columnName);
+  if (!contextPack || !sourceBlockName || !normalizedColumn) return mappings;
+  const source = contextPack.allowedSqlContext.sourceBlockSql.find((candidate) =>
+    namesEqualLoose(candidate.name, sourceBlockName)
+    || namesEqualLoose(candidate.objectKey.split(':').at(-1) ?? '', sourceBlockName)
+  );
+  if (!source) return mappings;
+  const whenThen = /\bwhen\s+((?:"[^"]+"|`[^`]+`|[a-z_][\w]*)(?:\s*\.\s*(?:"[^"]+"|`[^`]+`|[a-z_][\w]*))?)\s*=\s*'([^']+)'\s+then\s+'([^']+)'/gi;
+  for (const match of source.sql.matchAll(whenThen)) {
+    const rawColumn = cleanSqlColumnName(match[1] ?? '');
+    const physicalValue = match[2]?.trim();
+    const displayValue = match[3]?.trim();
+    if (!physicalValue || !displayValue) continue;
+    if (!namesEqualLoose(rawColumn, columnName) && normalizeToken(rawColumn) !== normalizedColumn) continue;
+    mappings.set(displayValue.toLowerCase(), physicalValue);
+  }
+  return mappings;
+}
+
+function cleanSqlColumnName(value: string): string {
+  return value
+    .split('.')
+    .at(-1)
+    ?.replace(/["`]/g, '')
+    .trim() ?? value.trim();
+}
+
+function businessCategoryValueMapping(value: string, sampleValues: string[]): string | undefined {
+  const normalized = value.trim().toLowerCase();
+  const samples = sampleValues.map((sample) => ({ raw: sample, normalized: sample.trim().toLowerCase() }));
+  if (normalized === 'food') {
+    return samples.find((sample) => /\b(food|jaffle|meal|sandwich)\b/i.test(sample.normalized))?.raw;
+  }
+  if (normalized === 'drink' || normalized === 'drinks' || normalized === 'beverage' || normalized === 'beverages') {
+    return samples.find((sample) => /\b(drink|beverage|coffee|tea)\b/i.test(sample.normalized))?.raw;
+  }
+  return undefined;
+}
+
+function isConcreteDimensionFilter(value: string): boolean {
+  if (!value.trim()) return false;
+  return !/\b(today|yesterday|tomorrow|last|this|next|previous|prior|current|week|month|quarter|year|day|date|ytd|mtd|qtd|wtd)\b/i.test(value);
+}
+
+function normalizeFilterDimension(value: string): string {
+  const normalized = normalizeToken(value.replace(/_name$/i, '').replace(/^product_type$/i, 'category'));
+  if (normalized === 'type') return 'category';
+  return normalized;
 }
 
 function inferGenericDimensions(
@@ -2971,12 +4405,37 @@ function findSchemaTable(schemaContext: AgentSchemaTable[], names: string[]): Ag
 }
 
 function findSchemaColumn(table: AgentSchemaTable, names: string[]): string | undefined {
-  const byLower = new Map(table.columns.map((column) => [column.name.toLowerCase(), column.name]));
+  const byLower = new Map(table.columns.map((column) => [column.name.toLowerCase(), column]));
+  let sourceShapeFallback: string | undefined;
+  let lineageAliasFallback: string | undefined;
   for (const name of names) {
     const exact = byLower.get(name.toLowerCase());
-    if (exact) return exact;
+    if (exact) {
+      if (isCertifiedSourceShapeColumn(exact)) {
+        sourceShapeFallback ??= exact.name;
+      } else {
+        return exact.name;
+      }
+    }
+    lineageAliasFallback ??= table.columns.find((column) =>
+      !isCertifiedSourceShapeColumn(column) && columnHasGovernedAlias(column, name)
+    )?.name;
+    if (lineageAliasFallback) {
+      return lineageAliasFallback;
+    }
   }
-  return undefined;
+  return lineageAliasFallback ?? sourceShapeFallback;
+}
+
+function isCertifiedSourceShapeColumn(column: Pick<AgentSchemaColumn, 'description'>): boolean {
+  return /projected by certified source sql shape/i.test(column.description ?? '');
+}
+
+function columnHasGovernedAlias(column: Pick<AgentSchemaColumn, 'description'>, name: string): boolean {
+  const match = /governed aliases from lineage:\s*([^.]*)/i.exec(column.description ?? '');
+  if (!match?.[1]) return false;
+  const normalizedName = normalizeToken(name);
+  return match[1].split(',').some((alias) => normalizeToken(alias) === normalizedName);
 }
 
 function sqlRelation(relation: string): string {
@@ -3007,6 +4466,7 @@ function pickCertifiedArtifact(input: {
   executableArtifactHits: KGSearchHit[];
   businessHits: KGSearchHit[];
   question: string;
+  questionPlan: AnalysisQuestionPlan;
   blockHints: string[];
   excludedArtifactIds?: Set<string>;
   kg: KGStore;
@@ -3015,12 +4475,12 @@ function pickCertifiedArtifact(input: {
   // user at a specific block. We still validate it's certified.
   for (const hint of input.blockHints) {
     const node = input.kg.getNode(`block:${hint}`);
-    if (node && node.status === 'certified' && hasCompatibleCertifiedBlockMatch(input.question, node)) {
+    if (node && node.status === 'certified' && hasCertifiedNodeFit(input.question, input.questionPlan, node)) {
       return { node, score: 1, snippet: undefined };
     }
   }
 
-  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds, input.question);
+  const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds, input.question, input.questionPlan);
   if (isBusinessDefinitionQuestion(input.question)) {
     if (executableHit && hasExactExecutableArtifactSignal(input.question, executableHit.node)) {
       return executableHit;
@@ -3054,12 +4514,14 @@ function pickFirstCertifiedHit(
   kg: KGStore,
   excludedNodeIds?: Set<string>,
   question?: string,
+  questionPlan?: AnalysisQuestionPlan,
 ): KGSearchHit | null {
   for (const hit of hits) {
     if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
     if (excludedNodeIds?.has(hit.node.nodeId)) continue;
     if (!isCertifiedHit(hit, kg)) continue;
-    if (question && hit.node.kind === 'block' && !hasCompatibleCertifiedBlockMatch(question, hit.node)) continue;
+    if (question && questionPlan && hit.node.kind === 'block' && !hasCertifiedNodeFit(question, questionPlan, hit.node)) continue;
+    if (question && !questionPlan && hit.node.kind === 'block' && !hasCompatibleCertifiedBlockMatch(question, hit.node)) continue;
     return hit;
   }
   return null;
@@ -3068,6 +4530,7 @@ function pickFirstCertifiedHit(
 function pickCertifiedDrilldownArtifact(input: {
   executableArtifactHits: KGSearchHit[];
   question: string;
+  questionPlan: AnalysisQuestionPlan;
   followUp: AgentFollowUpContext;
   excludedArtifactIds?: Set<string>;
   kg: KGStore;
@@ -3082,7 +4545,7 @@ function pickCertifiedDrilldownArtifact(input: {
     if (input.excludedArtifactIds?.has(hit.node.nodeId)) continue;
     if (hit.node.kind !== 'block') continue;
     if (!isCertifiedHit(hit, input.kg)) continue;
-    if (!hasCompatibleCertifiedBlockMatch(input.question, hit.node)) continue;
+    if (!hasCertifiedNodeFit(input.question, input.questionPlan, hit.node, { allowInferredContract: true })) continue;
     if (!hasRequestedDrilldownOverlap(hit.node, requestedTerms)) continue;
     return hit;
   }
@@ -3185,6 +4648,47 @@ type RankingDirection = 'top' | 'bottom';
 function hasCompatibleCertifiedBlockMatch(question: string, node: KGNode): boolean {
   return hasMeaningfulCertifiedBlockSignal(question, node)
     && hasCompatibleRankingDirection(question, node);
+}
+
+function hasCertifiedNodeFit(
+  question: string,
+  plan: AnalysisQuestionPlan,
+  node: KGNode,
+  options: { allowInferredContract?: boolean } = {},
+): boolean {
+  if (!hasCompatibleRankingDirection(question, node)) return false;
+  const definitionLookup = isBusinessDefinitionQuestion(question) && objectNameInQuestion(question, node);
+  const exactExampleMatch = (node.examples ?? []).some((example) =>
+    normalizeQuestion(example.question) === normalizeQuestion(question)
+  );
+  const exactObjectRequest = objectNameInQuestion(question, node)
+    && /\b(run|use|open|show|execute|certified|saved|block)\b/i.test(question);
+  if (!definitionLookup && !exactExampleMatch && !exactObjectRequest && !hasMeaningfulCertifiedBlockSignal(question, node)) return false;
+  const fit = evaluateCertifiedBlockFit({
+    question,
+    plan,
+    block: node,
+    exactExampleMatch: exactExampleMatch || exactObjectRequest,
+    definitionLookup,
+  });
+  if (certifiedFitAllowsTier1(fit)) return true;
+  return Boolean(options.allowInferredContract
+    && fit.kind === 'exact'
+    && fit.confidence === 'medium'
+    && fit.missingDimensions.length === 0
+    && fit.missingOutputs.length === 0
+    && fit.unsupportedFilters.length === 0
+    && !fit.grainMismatch);
+}
+
+function objectNameInQuestion(question: string, node: Pick<KGNode, 'name'>): boolean {
+  const questionText = normalizeQuestion(question);
+  const name = normalizeQuestion(node.name);
+  return Boolean(name && questionText.includes(name));
+}
+
+function normalizeQuestion(value: string): string {
+  return value.toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function hasCompatibleRankingDirection(question: string, node: KGNode): boolean {
@@ -3396,12 +4900,18 @@ function isFilteredEntityQuestion(question: string): boolean {
   if (/\b(for|where|only|specific|single|individual|named|called)\b.+\b(account|accounts|customer|customers|product|products|sku|user|users)\b/i.test(lower)) {
     return true;
   }
-  if (/\b(account|customer|product|sku|user)\s+(?:id|name|email)\b/i.test(lower)) return true;
+  if (/\b(account|customer|product|sku|user)\s+(?:id|name|email)\b/i.test(lower)) {
+    return !mentionsEntityIdentifierAsRequestedOutput(lower);
+  }
   if (/[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}/.test(question) && /\b(revenue|sales|order|orders|spend|value|churn|usage|activity|performance|performed|metric|kpi)\b/i.test(lower)) {
     return true;
   }
   if (/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/.test(question)) return true;
   return false;
+}
+
+function mentionsEntityIdentifierAsRequestedOutput(lowerQuestion: string): boolean {
+  return /\b(?:with|including|include|return|show|list|give|provide|columns?|fields?|results?)\b[^.?!]{0,100}\b(?:account|customer|product|sku|user)\s+(?:id|name|email)\b/i.test(lowerQuestion);
 }
 
 function looksLikeDataQuestion(question: string): boolean {
@@ -3750,6 +5260,7 @@ function buildCertifiedEvidence(input: {
   considered: KGSearchHit[];
   result?: AgentResultPayload;
   executionError?: string;
+  resultShapeWarnings?: string[];
   executorWasAvailable: boolean;
   citations: AgentCitation[];
   memoryContext: AgentMemory[];
@@ -3832,9 +5343,11 @@ function buildCertifiedEvidence(input: {
     sourceTables,
     semanticObjects,
     validation: {
-      status: input.executionError ? 'failed' : 'passed',
+      status: input.executionError ? 'failed' : input.resultShapeWarnings?.length ? 'warning' : 'passed',
       message: input.executionError
         ? 'The certified artifact matched, but execution returned an error.'
+        : input.resultShapeWarnings?.length
+          ? `Certified artifact executed, but the result shape needs review: ${input.resultShapeWarnings.join(' ')}`
         : 'Certified artifact routing passed; no generated SQL was promoted.',
     },
     execution: executionEvidence(input.artifact, input.result, input.executionError, input.executorWasAvailable),
@@ -3850,6 +5363,7 @@ function buildGeneratedEvidence(input: {
   contextNodes: KGNode[];
   schemaContext: AgentSchemaTable[];
   followUp?: AgentFollowUpContext;
+  contextPack?: LocalContextPack;
   businessHits: KGSearchHit[];
   semanticHits: KGSearchHit[];
   manifestHits: KGSearchHit[];
@@ -3882,6 +5396,8 @@ function buildGeneratedEvidence(input: {
   ).slice(0, 6);
   const selectedAssets = uniqueAssets(selectedNodes.map(assetFromNode)).slice(0, 4);
   const selectedSemantic = input.activeTier === 'semantic_layer' && semanticObjects.length > 0;
+  const certifiedFitStep = certifiedFitEvidenceStep(input.contextPack);
+  const certifiedCandidateFitSteps = certifiedCandidateFitEvidenceSteps(input.contextPack);
   return {
     route: [
       {
@@ -3894,6 +5410,8 @@ function buildGeneratedEvidence(input: {
           : 'No certified artifact was strong enough for this question',
         detail: input.followUp?.sourceBlockName,
       },
+      ...(certifiedFitStep ? [certifiedFitStep] : []),
+      ...certifiedCandidateFitSteps,
       {
         tool: 'propose_drilldown',
         status: input.followUp?.kind === 'drilldown' ? 'checked' : 'skipped',
@@ -4000,6 +5518,56 @@ function buildGeneratedEvidence(input: {
     citations: input.citations,
     analysisPlan: input.analysisPlan,
   };
+}
+
+function certifiedFitEvidenceStep(contextPack: LocalContextPack | undefined): AgentEvidenceRouteStep | undefined {
+  const fit = contextPack?.routeDecision?.blockFit;
+  if (!fit) return undefined;
+  const applicability = contextPack?.routeDecision?.certifiedApplicability;
+  const allowed = certifiedFitAllowsTier1(fit);
+  return {
+    tool: 'check_certified_fit',
+    status: allowed ? 'selected' : 'checked',
+    label: allowed
+      ? `Certified block fit passed${applicability?.name ? ` for ${applicability.name}` : ''}`
+      : `Certified block kept as context${applicability?.name ? `: ${applicability.name}` : ''}`,
+    detail: fit.reasons.length > 0
+      ? fit.reasons.join('; ')
+      : allowed
+        ? 'Certified block covers the requested answer contract.'
+        : 'Certified block did not prove an exact answer contract match.',
+  };
+}
+
+function certifiedCandidateFitEvidenceSteps(contextPack: LocalContextPack | undefined): AgentEvidenceRouteStep[] {
+  const candidates = contextPack?.retrievalDiagnostics.certifiedCandidateFits ?? [];
+  return candidates
+    .slice(0, 4)
+    .map((candidate) => ({
+      tool: 'check_certified_candidate_fit',
+      status: candidate.action === 'certified_answer'
+        ? 'selected'
+        : 'checked',
+      label: certifiedCandidateFitLabel(candidate.name, candidate.action),
+      detail: [
+        `applicability=${candidate.applicabilityKind}`,
+        `fit=${candidate.fit.kind}/${candidate.fit.confidence}`,
+        candidate.fit.reasons.join('; '),
+      ].filter(Boolean).join(' | '),
+    }));
+}
+
+function certifiedCandidateFitLabel(name: string, action: NonNullable<LocalContextPack['retrievalDiagnostics']['certifiedCandidateFits']>[number]['action']): string {
+  switch (action) {
+    case 'certified_answer':
+      return `Certified candidate selected: ${name}`;
+    case 'context_only':
+      return `Certified candidate used as context only: ${name}`;
+    case 'eligible_not_selected':
+      return `Certified candidate fit passed but was not selected: ${name}`;
+    case 'rejected_for_fit':
+      return `Certified candidate rejected for answer fit: ${name}`;
+  }
 }
 
 function buildNoAnswerEvidence(input: {

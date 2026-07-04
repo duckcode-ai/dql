@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  classifyConversationalTurn,
   decideAgentAction,
   looksLikeComposeApp,
   type IntentDecision,
@@ -124,7 +125,10 @@ export interface AgentRunRequest {
   signals?: IntentSignals;
   selectedObject?: AgentRunSelectedObject;
   workspaceContext?: Record<string, unknown>;
+  conversationContext?: Record<string, unknown>;
   history?: Array<{ role: "user" | "assistant"; text: string }>;
+  /** Server-side conversation thread this run belongs to (persistence + resume). */
+  threadId?: string;
   runId?: string;
 }
 
@@ -1148,6 +1152,22 @@ export function defaultSuccessCriteria(route: AgentRunRoute): string[] {
 }
 
 function buildIntentDecision(request: AgentRunRequest): IntentDecision {
+  const hasConversationContext = Boolean(request.conversationContext && Object.keys(request.conversationContext).length > 0);
+  const conversationalKind = classifyConversationalTurn(
+    request.question,
+    Boolean((request.history?.length ?? 0) > 0 || hasConversationContext),
+  );
+  if (request.requestedMode === "ask" && conversationalKind && hasConversationContext) {
+    return {
+      action: "converse",
+      confidence: 0.9,
+      reason: "This asks about the prior conversation, so I will answer from conversation context instead of querying governed data.",
+      conversationalKind,
+      category: "conversational",
+      source: "heuristic",
+      followsUp: true,
+    };
+  }
   const forcedAction = requestedModeToAction(request.requestedMode);
   if (forcedAction) {
     return {

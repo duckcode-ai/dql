@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { resolveEffectiveQuestion } from './dql-agent-provider.js';
+import { __test__, resolveEffectiveQuestion } from './dql-agent-provider.js';
 import type { AgentRunRequest } from '../types.js';
+import type { AgentMessage, AgentProvider } from '@duckcodeailabs/dql-agent';
 
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
   return { provider: 'ollama', messages, projectRoot: '/tmp/x' } as AgentRunRequest;
@@ -37,5 +38,419 @@ describe('resolveEffectiveQuestion — clarify follow-up folding', () => {
       { role: 'user', content: 'revenue by product' },
     ]));
     expect(out).toBe('revenue by product');
+  });
+});
+
+describe('conversation context follow-up routing', () => {
+  it('resolves "these categories" to prior result values and dimensions', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'who are the top 5 customers for these categories?' }],
+      conversationContext: {
+        sourceCertifiedBlock: 'food_vs_drink_revenue',
+        sourceQuestion: 'Revenue by food vs drink',
+        sourceAnswerSummary: 'Food and Drink revenue split.',
+        resultColumns: ['category', 'revenue'],
+        resultDimensionValues: { category: ['Food', 'Drink'] },
+        priorMeasures: ['revenue'],
+      },
+    } as AgentRunRequest, 'who are the top 5 customers for these categories?');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      sourceBlockName: 'food_vs_drink_revenue',
+      filters: ['Food', 'Drink'],
+      dimensions: ['category'],
+      priorResultColumns: ['category', 'revenue'],
+      priorResultValues: { category: ['Food', 'Drink'] },
+      priorMeasures: ['revenue'],
+    });
+  });
+
+  it('resolves bare "those" when prior values have one clear dimension', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'who are the top 5 customers for those?' }],
+      conversationContext: {
+        sourceCertifiedBlock: 'food_vs_drink_revenue',
+        sourceQuestion: 'Revenue by food vs drink',
+        sourceAnswerSummary: 'Food and Drink revenue split.',
+        resultColumns: ['category', 'revenue'],
+        resultDimensionValues: { category: ['Food', 'Drink'] },
+        priorMeasures: ['revenue'],
+      },
+    } as AgentRunRequest, 'who are the top 5 customers for those?');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['Food', 'Drink'],
+      dimensions: ['category'],
+      priorResultValues: { category: ['Food', 'Drink'] },
+    });
+  });
+
+  it('resolves singular "this product" to the top prior product value', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'who are the customers for this product?' }],
+      conversationContext: {
+        sourceQuestion: 'Top products by revenue',
+        sourceAnswerSummary: 'Revenue is concentrated in top drink products.',
+        resultColumns: ['product_name', 'category', 'revenue', 'units'],
+        resultDimensionValues: {
+          product_name: ['for richer or pourover', 'vanilla ice'],
+          category: ['Drink'],
+        },
+        priorMeasures: ['revenue'],
+      },
+    } as AgentRunRequest, 'who are the customers for this product?');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['for richer or pourover'],
+      dimensions: ['product'],
+      priorResultColumns: ['product_name', 'category', 'revenue', 'units'],
+      priorResultValues: {
+        product_name: ['for richer or pourover', 'vanilla ice'],
+        category: ['Drink'],
+      },
+      priorMeasures: ['revenue'],
+    });
+  });
+
+  it('resolves misspelled category follow-up over prior customers', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'what are the product catagories for these customers' }],
+      conversationContext: {
+        sourceQuestion: 'Top products by revenue with customers',
+        sourceAnswerSummary: 'Product/customer revenue view.',
+        resultColumns: ['product_name', 'category', 'customer_name', 'revenue', 'units'],
+        resultDimensionValues: {
+          product_name: ['for richer or pourover', 'vanilla ice'],
+          category: ['Drink'],
+          customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+        },
+        priorMeasures: ['revenue'],
+      },
+    } as AgentRunRequest, 'what are the product catagories for these customers');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+      priorResultColumns: ['product_name', 'category', 'customer_name', 'revenue', 'units'],
+      priorResultValues: {
+        product_name: ['for richer or pourover', 'vanilla ice'],
+        category: ['Drink'],
+        customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+      },
+      priorMeasures: ['revenue'],
+    });
+    expect(followUp?.dimensions).toEqual(expect.arrayContaining(['customer']));
+  });
+
+  it('resolves follow-ups from structured conversation turns without legacy flat fields', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'what are the product categories for these customers' }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_customers',
+        turns: [
+          {
+            id: 'turn_products',
+            question: 'Top products by revenue',
+            answerSummary: 'Top product is for richer or pourover.',
+            result: {
+              columns: ['product_name', 'category', 'revenue'],
+              dimensionValues: {
+                product_name: ['for richer or pourover'],
+                category: ['Drink'],
+              },
+              measureColumns: ['revenue'],
+            },
+          },
+          {
+            id: 'turn_customers',
+            question: 'who are the customers for this product?',
+            answerSummary: 'Customers for for richer or pourover.',
+            result: {
+              columns: ['customer_name', 'product_name', 'revenue'],
+              dimensionValues: {
+                customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+                product_name: ['for richer or pourover'],
+              },
+              measureColumns: ['revenue'],
+            },
+          },
+        ],
+      },
+    } as AgentRunRequest, 'what are the product categories for these customers');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      sourceTurnId: 'turn_customers',
+      sourceQuestion: 'who are the customers for this product?',
+      filters: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+      dimensions: expect.arrayContaining(['customer']),
+      priorResultColumns: ['customer_name', 'product_name', 'revenue'],
+      priorResultValues: {
+        customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+        product_name: ['for richer or pourover'],
+      },
+      priorMeasures: ['revenue'],
+    });
+  });
+
+  it('resolves above-order references to prior customer rows', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'what the are the products and sub catogories for the above orders' }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_customers',
+        turns: [
+          {
+            id: 'turn_customers',
+            question: 'top customers by lifetime spend',
+            answerSummary: 'Top customers are Matthew Meyer and Aaron Gardner.',
+            result: {
+              columns: ['customer_name', 'orders', 'lifetime_spend'],
+              dimensionValues: {
+                customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+              },
+              measureColumns: ['lifetime_spend', 'orders'],
+            },
+          },
+        ],
+      },
+    } as AgentRunRequest, 'what the are the products and sub catogories for the above orders');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      sourceTurnId: 'turn_customers',
+      filters: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+      dimensions: expect.arrayContaining(['customer']),
+      priorResultColumns: ['customer_name', 'orders', 'lifetime_spend'],
+      priorResultValues: {
+        customer_name: ['Mr. Matthew Meyer', 'Aaron Gardner'],
+      },
+      priorMeasures: ['lifetime_spend', 'orders'],
+    });
+  });
+
+  it('treats combine-previous-results requests as generic follow-ups', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: "let's combine these results with two previous outputs and give final" }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_products',
+        turns: [
+          {
+            id: 'turn_products',
+            question: 'top products by revenue',
+            answerSummary: 'Top products by revenue.',
+            result: {
+              columns: ['product_name', 'category', 'revenue'],
+              dimensionValues: {
+                product_name: ['for richer or pourover'],
+                category: ['Drink'],
+              },
+              measureColumns: ['revenue'],
+            },
+          },
+        ],
+      },
+    } as AgentRunRequest, "let's combine these results with two previous outputs and give final");
+
+    expect(followUp).toMatchObject({
+      kind: 'generic',
+      sourceTurnId: 'turn_products',
+      priorResultColumns: ['product_name', 'category', 'revenue'],
+      priorResultValues: {
+        product_name: ['for richer or pourover'],
+        category: ['Drink'],
+      },
+      priorMeasures: ['revenue'],
+    });
+  });
+
+  it('does not invent filters when deictic words have no prior result values', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'who are the top 5 customers for these categories?' }],
+      conversationContext: {
+        sourceCertifiedBlock: 'food_vs_drink_revenue',
+        resultColumns: ['category', 'revenue'],
+      },
+    } as AgentRunRequest, 'who are the top 5 customers for these categories?');
+
+    expect(followUp?.kind).toBe('drilldown');
+    expect(followUp?.filters).toBeUndefined();
+    expect(followUp?.dimensions).toBeUndefined();
+    expect(followUp?.priorMeasures).toEqual(['revenue']);
+  });
+});
+
+describe('always-on contextual carry (no regex match)', () => {
+  const priorContext = {
+    sourceCertifiedBlock: 'food_vs_drink_revenue',
+    sourceQuestion: 'Revenue by food vs drink',
+    sourceAnswerSummary: 'Food and Drink revenue split.',
+    resultColumns: ['category', 'revenue'],
+    resultDimensionValues: { category: ['Food', 'Drink'] },
+    priorMeasures: ['revenue'],
+  };
+
+  it('carries prior-turn context as advisory "contextual" for a topic-shift question', () => {
+    const question = 'how many new signups did we get last quarter?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: priorContext,
+    } as AgentRunRequest, question);
+
+    expect(followUp?.kind).toBe('contextual');
+    expect(followUp?.sourceBlockName).toBe('food_vs_drink_revenue');
+    expect(followUp?.priorResultColumns).toEqual(['category', 'revenue']);
+    expect(followUp?.priorResultValues).toEqual({ category: ['Food', 'Drink'] });
+    // Advisory carry must never FORCE prior filters/dimensions onto a new topic.
+    expect(followUp?.filters).toBeUndefined();
+    expect(followUp?.dimensions).toBeUndefined();
+  });
+
+  it('carries context for a definition-style question that fails both regexes', () => {
+    const question = 'what is our monthly recurring revenue?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: priorContext,
+    } as AgentRunRequest, question);
+
+    expect(followUp?.kind).toBe('contextual');
+    expect(followUp?.filters).toBeUndefined();
+  });
+
+  it('still returns undefined when there is no useful prior context (turn one stays cold)', () => {
+    const question = 'how many new signups did we get last quarter?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: { activeSurface: 'notebook' },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toBeUndefined();
+  });
+
+  it('messages-only fallback carries the prior certified block as contextual', () => {
+    const question = 'how many new signups did we get last quarter?';
+    const followUp = __test__.inferFollowUpContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [
+        { role: 'user', content: 'revenue by category' },
+        { role: 'assistant', content: 'Answered from certified block food_vs_drink_revenue. Food 240877, Drink 396567.' },
+        { role: 'user', content: question },
+      ],
+    } as AgentRunRequest, question);
+
+    expect(followUp?.kind).toBe('contextual');
+    expect(followUp?.sourceBlockName).toBe('food_vs_drink_revenue');
+    expect(followUp?.filters).toBeUndefined();
+    expect(followUp?.dimensions).toBeUndefined();
+  });
+
+  it('keeps classifying real drilldown follow-ups as drilldown (regexes still classify)', () => {
+    const question = 'who are the top 5 customers for these categories?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: priorContext,
+    } as AgentRunRequest, question);
+
+    expect(followUp?.kind).toBe('drilldown');
+  });
+});
+
+describe('certified fit confirmation bridge', () => {
+  it('asks the provider for strict fit JSON with requested shape and block context', async () => {
+    const calls: AgentMessage[][] = [];
+    const provider: AgentProvider = {
+      name: 'openai',
+      async available() {
+        return true;
+      },
+      async generate(messages) {
+        calls.push(messages);
+        return '{"allow":true,"confidence":"high","reason":"block covers product usage"}';
+      },
+    };
+    const confirm = __test__.createCertifiedFitConfirmation(provider);
+
+    const result = await confirm({
+      question: 'Show usage by product',
+      questionPlan: {
+        requestedShape: {
+          dimensions: ['product'],
+          measures: ['usage'],
+          requiredOutputs: ['product', 'usage'],
+          filters: [],
+          followUpReferences: [],
+          ambiguities: [],
+        },
+      } as any,
+      block: {
+        objectKey: 'dql:block:Legacy Product Usage',
+        objectType: 'dql_block',
+        name: 'Legacy Product Usage',
+        status: 'certified',
+        description: 'Legacy certified usage metric by product.',
+        payload: {
+          grain: 'product',
+          dimensions: ['product'],
+          llmContext: 'Use for usage by product.',
+        },
+      },
+      fit: {
+        kind: 'exact',
+        confidence: 'medium',
+        reasons: ['block contract was safely inferred from available metadata'],
+        missingOutputs: [],
+        missingDimensions: [],
+        unsupportedFilters: [],
+        topNAction: 'none',
+        inferredContract: true,
+      },
+    });
+
+    expect(result).toEqual({
+      allow: true,
+      confidence: 'high',
+      reason: 'block covers product usage',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]?.content).toContain('strict governed analytics routing judge');
+    expect(calls[0]?.[1]?.content).toContain('"requestedShape"');
+    expect(calls[0]?.[1]?.content).toContain('"Legacy Product Usage"');
+  });
+
+  it('rejects malformed fit confirmation output', () => {
+    expect(__test__.parseCertifiedFitConfirmation('not json')).toMatchObject({
+      allow: false,
+      confidence: 'low',
+    });
   });
 });

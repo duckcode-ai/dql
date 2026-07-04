@@ -19,11 +19,14 @@ import {
   resolveDataLexManifestPath,
   resolveDbtManifestPath,
   resolveSemanticLayerWithDiagnostics,
+  extractColumnLineage,
   type DataLexManifest,
   type DQLManifest,
   type ManifestConflictDetail,
   type ManifestDiagnostic,
   type SemanticLayer,
+  type ColumnLineageEntry,
+  type ColumnSource,
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
@@ -43,6 +46,11 @@ import {
   requestedGrainFromPlan,
   type GrainGateResult,
 } from './grain-gate.js';
+import {
+  certifiedFitAllowsTier1,
+  evaluateCertifiedBlockFit,
+  type CertifiedBlockFit,
+} from './block-fit.js';
 import { retrieveScopedHints } from '../hints/retrieval.js';
 import type { QuestionScope } from '../hints/types.js';
 
@@ -161,15 +169,48 @@ export interface BuildLocalContextPackRequest {
   selectedContext?: unknown;
   runtimeSchemaSnapshot?: RuntimeSchemaSnapshot;
   strictness?: 'safe' | 'balanced' | 'exploratory';
+  confirmCertifiedFit?: CertifiedFitConfirmation;
+  /** Prior turn's context pack — reuse fuel for same-topic follow-ups. */
+  priorContextPackId?: string;
+  /**
+   * 'reuse_on_refinement' — filter/limit-only follow-ups re-stamp the prior pack
+   * (skips retrieval + route planning + the fit-confirm LLM call);
+   * 'seed' (default) — prior pack objects only COMPETE in ranking;
+   * 'off' — ignore the prior pack entirely.
+   */
+  reusePolicy?: 'off' | 'seed' | 'reuse_on_refinement';
+  /** How the conversation layer classified this question vs the ongoing topic. */
+  conversationTopicRelation?: 'continuation' | 'refinement' | 'shift' | 'return';
 }
 
+export interface CertifiedFitConfirmationRequest {
+  question: string;
+  questionPlan: AnalysisQuestionPlan;
+  block: MetadataObject;
+  fit: CertifiedBlockFit;
+}
+
+export interface CertifiedFitConfirmationResult {
+  allow: boolean;
+  reason?: string;
+  confidence?: 'high' | 'medium' | 'low';
+}
+
+export type CertifiedFitConfirmation = (
+  request: CertifiedFitConfirmationRequest,
+) => Promise<CertifiedFitConfirmationResult>;
+
 export interface MetadataFollowUpContext {
-  kind: 'generic' | 'drilldown';
+  kind: 'generic' | 'drilldown' | 'contextual';
   sourceBlockName?: string;
   sourceQuestion?: string;
   sourceAnswer?: string;
   filters?: string[];
   dimensions?: string[];
+  priorResultColumns?: string[];
+  priorResultValues?: Record<string, string[]>;
+  priorLimit?: number;
+  priorMeasures?: string[];
 }
 
 export type MetadataAgentIntent =
@@ -275,6 +316,8 @@ export interface MetadataRouteDecision {
   routeReason?: string;
   /** Structured grain-gate verdict for the best-matching certified candidate, when evaluated. */
   grainGate?: GrainGateRouteInfo;
+  /** Structured full answer-shape fit verdict for the best-matching certified candidate, when evaluated. */
+  blockFit?: CertifiedBlockFit;
   trustLabel: MetadataTrustLabel;
   reviewStatus: 'certified' | 'draft_ready' | 'needs_review' | 'none' | 'conflict';
   exactObjectKey?: string;
@@ -368,7 +411,7 @@ export interface LocalContextPack {
   /** Conflicting approved hints surfaced for review (advisory). */
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
-    strategy: 'sqlite_fts';
+    strategy: 'sqlite_fts' | 'reused_pack_refinement';
     selectedObjects: number;
     selectedEvidence: Array<{
       objectKey: string;
@@ -410,6 +453,14 @@ export interface LocalContextPack {
       reason: string;
       score: number;
       rejectedRank: number;
+    }>;
+    certifiedCandidateFits: Array<{
+      objectKey: string;
+      name: string;
+      applicabilityKind: CertifiedBlockApplicability['kind'];
+      applicabilityScore: number;
+      action: 'certified_answer' | 'context_only' | 'eligible_not_selected' | 'rejected_for_fit';
+      fit: CertifiedBlockFit;
     }>;
     candidateConflicts: MetadataCandidateConflict[];
   };
@@ -471,8 +522,20 @@ interface SchemaShapeCandidate {
   reasons: string[];
 }
 
+interface RawDbtCatalogEntry {
+  uniqueId: string;
+  name: string;
+  node: Record<string, unknown>;
+  objectKey: string;
+  objectType: 'dbt_model' | 'dbt_source';
+  relation: string;
+  database?: string;
+  schema?: string;
+}
+
 const OBJECT_PRIORITY: Record<string, number> = {
   dql_block: 1,
+  dql_block_output: 1.5,
   semantic_metric: 2,
   dql_term: 3,
   business_view: 4,
@@ -484,6 +547,7 @@ const OBJECT_PRIORITY: Record<string, number> = {
   dbt_source: 10,
   dbt_column: 11,
   warehouse_table: 12,
+  warehouse_column: 12.5,
   notebook: 13,
   dashboard: 14,
   app: 15,
@@ -561,6 +625,53 @@ export async function buildLocalContextPack(
     const mode = request.mode ?? 'question';
     const followUp = normalizeFollowUpContext(request.followUp);
     const questionPlan = buildAnalysisQuestionPlan(request.question, followUp ?? undefined);
+
+    // ── Conversation-aware context reuse ──────────────────────────────────
+    // The prior turn's pack is fuel: a filter/limit-only REFINEMENT re-stamps it
+    // (skipping FTS fan-out, both ranking passes, route planning, and the
+    // fit-confirm LLM); CONTINUATION/RETURN seed its objects into ranking as
+    // candidates only; a SHIFT ignores it. A metadata fingerprint mismatch
+    // always disqualifies reuse.
+    const reusePolicy = request.reusePolicy ?? 'seed';
+    const priorPack = reusePolicy !== 'off'
+      && request.priorContextPackId
+      && request.conversationTopicRelation
+      && request.conversationTopicRelation !== 'shift'
+      ? catalog.getContextPack(request.priorContextPackId)
+      : null;
+    const priorPackFresh = Boolean(priorPack && priorPack.freshness.fingerprint === catalog.state('fingerprint'));
+    if (
+      priorPack
+      && priorPackFresh
+      && request.conversationTopicRelation === 'refinement'
+      && isFilterOnlyRefinement(priorPack.questionPlan, questionPlan)
+    ) {
+      // Route commitment: the prior route decision was already fit-validated for
+      // this grain/measures/dimensions; only filters/limit/timeframe changed.
+      const reusedPayload: Omit<LocalContextPack, 'id'> = {
+        ...priorPack,
+        question: request.question,
+        questionPlan,
+        followUp: followUp ?? undefined,
+        retrievalDiagnostics: {
+          ...priorPack.retrievalDiagnostics,
+          strategy: 'reused_pack_refinement',
+        },
+        freshness: {
+          catalogPath: defaultMetadataPath(projectRoot),
+          builtAt: catalog.state('built_at'),
+          fingerprint: catalog.state('fingerprint'),
+        },
+      };
+      delete (reusedPayload as Partial<LocalContextPack>).id;
+      const reusedId = catalog.insertContextPack(reusedPayload);
+      return { ...reusedPayload, id: reusedId };
+    }
+    const priorSeedObjects = priorPack && priorPackFresh
+      && (request.conversationTopicRelation === 'continuation' || request.conversationTopicRelation === 'return')
+      ? priorPack.objects.slice(0, 24)
+      : [];
+
     const runtimeSnapshot = request.runtimeSchemaSnapshot ?? catalog.latestRuntimeSchemaSnapshot();
     const runtimeObjects = runtimeSnapshot ? runtimeSchemaObjects(runtimeSnapshot) : [];
     const selectedObjects = selectedContextObjects(request.selectedContext);
@@ -582,13 +693,18 @@ export async function buildLocalContextPack(
     const exact = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
     const ranked = rankMetadataObjects({
       rows: mergeObjects(exact
-        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects]
-        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects]),
+        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects, ...priorSeedObjects]
+        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects, ...priorSeedObjects]),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 80,
     });
-    const selected = mergeObjects([...followUpSourceObjects, ...followUpObjects, ...ranked.selected]);
+    // Advisory 'contextual' carry: the prior turn's block competes on rank (it is
+    // already in the candidate rows above) but is never FORCED into selection or
+    // allowed to become the derived focus of a possibly-new-topic question.
+    const selected = followUp?.kind === 'contextual'
+      ? ranked.selected
+      : mergeObjects([...followUpSourceObjects, ...followUpObjects, ...ranked.selected]);
     const focusObjectKey = request.focusObjectKey ?? selected[0]?.objectKey ?? null;
     const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
@@ -635,7 +751,7 @@ export async function buildLocalContextPack(
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
     const compileConflicts = catalog.compileConflicts();
-    const routeDecision = planContextPackRoute({
+    const routeDecision = await planContextPackRoute({
       request,
       objects,
       allowedSqlContext,
@@ -645,6 +761,12 @@ export async function buildLocalContextPack(
       questionPlan,
       compileConflicts,
       rankedObjects: reranked.ranked,
+    });
+    const certifiedCandidateFits = buildCertifiedCandidateFitDiagnostics({
+      request,
+      objects,
+      questionPlan,
+      routeDecision,
     });
 
     // Approved scoped correction hints — folded in AFTER certified routing so
@@ -699,6 +821,7 @@ export async function buildLocalContextPack(
           columns: candidate.relation.columns.slice(0, 16).map((column) => column.name),
         })),
         topRejected: reranked.rejected,
+        certifiedCandidateFits,
         candidateConflicts: conflicts,
       },
       freshness: {
@@ -784,6 +907,7 @@ export function buildMetadataSnapshot(
   addDbtDagObjects(manifest, objects, edges, diagnostics);
   addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
   addBlockDependencyEdges(manifest, edges);
+  addBlockOutputLineageObjects(manifest, objects, edges);
   addDataLexManifestObjects(projectRoot, manifest, objects, edges, diagnostics);
 
   const nodeKeyMap = new Map<string, string>();
@@ -1459,18 +1583,33 @@ function loadAgentSemanticLayer(projectRoot: string): SemanticLayer | undefined 
         ? { provider: 'dql' as const, path: config.semanticLayer.path }
         : undefined;
     const configured = resolveSemanticLayerWithDiagnostics(semanticConfig, projectRoot).layer;
-    if (configured) return configured;
+    // An EMPTY configured layer (e.g. `provider: 'dql'` pointing at a folder
+    // with no definitions — the scaffold default) must not shadow a real dbt
+    // MetricFlow semantic layer: that starves the catalog of every
+    // semantic_metric object and the governed-metric answer tier can never
+    // fire. Mirror the runtime's resolveProjectSemanticConfig preference:
+    // substance wins over configuration.
+    if (configured && semanticLayerHasContent(configured)) return configured;
 
     if (config.dbt?.projectDir) {
-      return resolveSemanticLayerWithDiagnostics({
+      const dbtLayer = resolveSemanticLayerWithDiagnostics({
         provider: 'dbt',
         projectPath: config.dbt.projectDir,
-      }, projectRoot).layer ?? undefined;
+      }, projectRoot).layer;
+      if (dbtLayer && semanticLayerHasContent(dbtLayer)) return dbtLayer;
     }
+    return configured ?? undefined;
   } catch {
     return undefined;
   }
   return undefined;
+}
+
+/** True when the layer defines ANY semantics — metrics, dimensions, or measures. */
+function semanticLayerHasContent(layer: SemanticLayer): boolean {
+  return layer.listMetrics().length > 0
+    || layer.listDimensions().length > 0
+    || layer.listMeasures().length > 0;
 }
 
 function manifestDiagnosticToMetadataDiagnostic(diagnostic: ManifestDiagnostic): MetadataDiagnostic {
@@ -1499,6 +1638,8 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     grain: node.grain,
     entities: node.entities ?? [],
     declaredOutputs: node.declaredOutputs ?? [],
+    outputs: node.outputs ?? [],
+    outputContract: node.outputContract ?? [],
     dimensions: node.dimensions ?? [],
     allowedFilters: node.allowedFilters ?? [],
     parameterPolicy: node.parameterPolicy ?? [],
@@ -1687,16 +1828,26 @@ function addRawDbtManifestCatalogObjects(
     return;
   }
 
+  const entries: RawDbtCatalogEntry[] = [];
   for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
     if (node.resource_type !== 'model') continue;
     const name = rawDbtName(node);
     if (!name) continue;
-    addRawDbtCatalogObject({
+    const database = stringValue(node.database);
+    const schema = stringValue(node.schema);
+    const entry: RawDbtCatalogEntry = {
       uniqueId,
       name,
       node,
       objectKey: `dbt:model:${name}`,
       objectType: 'dbt_model',
+      relation: [database, schema, name].filter(Boolean).join('.'),
+      database,
+      schema,
+    };
+    entries.push(entry);
+    addRawDbtCatalogObject({
+      ...entry,
       objects,
       edges,
     });
@@ -1705,31 +1856,41 @@ function addRawDbtManifestCatalogObjects(
   for (const [uniqueId, source] of Object.entries(raw.sources ?? {})) {
     const name = rawDbtName(source);
     if (!name) continue;
-    addRawDbtCatalogObject({
+    const database = stringValue(source.database);
+    const schema = stringValue(source.schema);
+    const entry: RawDbtCatalogEntry = {
       uniqueId,
       name,
       node: source,
       objectKey: `dbt:source:${name}`,
       objectType: 'dbt_source',
+      relation: [database, schema, name].filter(Boolean).join('.'),
+      database,
+      schema,
+    };
+    entries.push(entry);
+    addRawDbtCatalogObject({
+      ...entry,
       objects,
       edges,
     });
   }
+
+  const relationLookup = buildRawDbtRelationLookup(entries);
+  for (const entry of entries) {
+    if (entry.objectType !== 'dbt_model') continue;
+    addRawDbtCompiledColumnLineage(entry, relationLookup, objects, edges);
+  }
 }
 
-function addRawDbtCatalogObject(input: {
-  uniqueId: string;
-  name: string;
-  node: Record<string, unknown>;
-  objectKey: string;
-  objectType: 'dbt_model' | 'dbt_source';
+function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
   objects: Map<string, MetadataObject>;
   edges: Map<string, MetadataEdge>;
 }): void {
   const existing = input.objects.get(input.objectKey);
-  const database = stringValue(input.node.database);
-  const schema = stringValue(input.node.schema);
-  const relation = [database, schema, input.name].filter(Boolean).join('.');
+  const database = input.database ?? stringValue(input.node.database);
+  const schema = input.schema ?? stringValue(input.node.schema);
+  const relation = input.relation || [database, schema, input.name].filter(Boolean).join('.');
   const columns = rawDbtColumns(input.node.columns);
   input.objects.set(input.objectKey, mergeObject(existing, {
     objectKey: input.objectKey,
@@ -1795,6 +1956,137 @@ function addRawDbtCatalogObject(input: {
   }
 }
 
+function addRawDbtCompiledColumnLineage(
+  entry: RawDbtCatalogEntry,
+  relationLookup: Map<string, Set<RawDbtCatalogEntry>>,
+  objects: Map<string, MetadataObject>,
+  edges: Map<string, MetadataEdge>,
+): void {
+  const sql = rawDbtCompiledSql(entry.node);
+  if (!sql) return;
+  const lineage = extractColumnLineage(sql);
+  if (!lineage.parsed || lineage.columns.length === 0) return;
+
+  for (const column of lineage.columns) {
+    if (!column.name || column.name === '*' || column.name.endsWith('.*')) continue;
+    const outputKey = ensureDbtLineageOutputColumnObject(entry, column, objects);
+    for (const source of column.sources) {
+      if (!source.column || source.column === '*') continue;
+      const targetKey = ensureDbtLineageSourceColumnObject(source, relationLookup, objects);
+      putEdge(edges, {
+        edgeType: 'derives_from',
+        fromKey: outputKey,
+        toKey: targetKey,
+        confidence: column.unresolved ? 0.55 : 0.88,
+        payload: compactObject({
+          source: 'dbt compiled SQL column lineage',
+          model: entry.name,
+          output: column.name,
+          table: source.table,
+          column: source.column,
+          isAggregate: column.isAggregate,
+          aggregateFn: column.aggregateFn,
+        }),
+      });
+    }
+  }
+}
+
+function ensureDbtLineageOutputColumnObject(
+  entry: RawDbtCatalogEntry,
+  column: ColumnLineageEntry,
+  objects: Map<string, MetadataObject>,
+): string {
+  const columnKey = `dbt:column:${entry.name}.${column.name}`;
+  const existing = objects.get(columnKey);
+  objects.set(columnKey, mergeObject(existing, {
+    objectKey: columnKey,
+    objectType: 'dbt_column',
+    name: column.name,
+    fullName: `${entry.name}.${column.name}`,
+    status: existing?.status ?? 'dbt_compiled_lineage',
+    sourcePath: existing?.sourcePath ?? stringValue(entry.node.original_file_path) ?? stringValue(entry.node.path),
+    sourceSystem: existing?.sourceSystem ?? 'dbt compiled SQL lineage',
+    payload: compactObject({
+      ...(existing?.payload ?? {}),
+      model: entry.name,
+      uniqueId: entry.uniqueId,
+      relation: entry.relation,
+      compiledSqlLineage: true,
+      isAggregate: column.isAggregate,
+      aggregateFn: column.aggregateFn,
+      lineageSources: column.sources,
+    }),
+  }));
+  return columnKey;
+}
+
+function ensureDbtLineageSourceColumnObject(
+  source: ColumnSource,
+  relationLookup: Map<string, Set<RawDbtCatalogEntry>>,
+  objects: Map<string, MetadataObject>,
+): string {
+  const dbtSource = resolveRawDbtRelationForTable(source.table, relationLookup);
+  if (dbtSource) {
+    const columnKey = `dbt:column:${dbtSource.name}.${source.column}`;
+    const existing = objects.get(columnKey);
+    if (existing) return columnKey;
+    objects.set(columnKey, {
+      objectKey: columnKey,
+      objectType: 'dbt_column',
+      name: source.column,
+      fullName: `${dbtSource.name}.${source.column}`,
+      status: 'dbt_compiled_lineage',
+      sourceSystem: 'dbt compiled SQL lineage',
+      payload: compactObject({
+        model: dbtSource.name,
+        uniqueId: dbtSource.uniqueId,
+        relation: dbtSource.relation,
+        inferredFromCompiledSql: true,
+      }),
+    });
+    return columnKey;
+  }
+  return ensureWarehouseLineageSourceColumnObject(source, objects, 'dbt compiled SQL lineage');
+}
+
+function buildRawDbtRelationLookup(entries: RawDbtCatalogEntry[]): Map<string, Set<RawDbtCatalogEntry>> {
+  const lookup = new Map<string, Set<RawDbtCatalogEntry>>();
+  const add = (key: string | undefined, entry: RawDbtCatalogEntry) => {
+    if (!key) return;
+    const normalized = normalizeRelationKey(key);
+    if (!normalized) return;
+    const existing = lookup.get(normalized);
+    if (existing) existing.add(entry);
+    else lookup.set(normalized, new Set([entry]));
+  };
+  for (const entry of entries) {
+    add(entry.uniqueId, entry);
+    add(entry.name, entry);
+    add(entry.relation, entry);
+    for (const key of dbtModelLookupKeys(entry.name, entry.schema, entry.database)) {
+      add(key, entry);
+    }
+  }
+  return lookup;
+}
+
+function resolveRawDbtRelationForTable(
+  tableRef: string,
+  relationLookup: Map<string, Set<RawDbtCatalogEntry>>,
+): RawDbtCatalogEntry | undefined {
+  for (const key of tableReferenceLookupKeys(tableRef)) {
+    const matches = relationLookup.get(key);
+    if (matches?.size === 1) return [...matches][0];
+  }
+  return undefined;
+}
+
+function rawDbtCompiledSql(node: Record<string, unknown>): string | undefined {
+  return stringValue(node.compiled_code)
+    ?? stringValue(node.compiled_sql);
+}
+
 function rawDbtName(node: Record<string, unknown>): string | undefined {
   return stringValue(node.alias) ?? stringValue(node.identifier) ?? stringValue(node.name);
 }
@@ -1831,6 +2123,9 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
     const objectKey = `dql:block:${block.name}`;
     const existing = objects.get(objectKey);
     if (!existing) continue;
+    const contractOutputNames = block.declaredOutputs
+      ?? block.outputContract?.map((output) => output.name).filter(Boolean)
+      ?? block.outputs?.map((output) => output.name).filter(Boolean);
     objects.set(objectKey, mergeObject(existing, {
       ...existing,
       payload: compactObject({
@@ -1841,6 +2136,9 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
         refDependencies: block.refDependencies,
         metricRefs: block.metricRefs,
         dimensionRefs: block.dimensionRefs,
+        declaredOutputs: block.declaredOutputs,
+        outputs: block.outputs,
+        outputContract: block.outputContract,
         dimensions: block.dimensions,
         chartType: block.chartType,
         blockType: block.blockType,
@@ -1855,7 +2153,7 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
           grain: block.grain,
           entities: block.entities,
           terms: block.termRefs,
-          outputs: block.declaredOutputs,
+          outputs: contractOutputNames,
           dimensions: block.dimensions,
           filters: block.allowedFilters,
           sources: [...(block.tableDependencies ?? []), ...(block.rawTableRefs ?? [])],
@@ -2079,6 +2377,127 @@ function addBlockDependencyEdges(manifest: DQLManifest, edges: Map<string, Metad
   }
 }
 
+function addBlockOutputLineageObjects(
+  manifest: DQLManifest,
+  objects: Map<string, MetadataObject>,
+  edges: Map<string, MetadataEdge>,
+): void {
+  const dbtLookup = buildDbtModelLookup(manifest);
+  for (const block of Object.values(manifest.blocks ?? {})) {
+    if (!isCertifiedManifestBlock(block)) continue;
+    if (!Array.isArray(block.outputs) || block.outputs.length === 0) continue;
+    const blockKey = `dql:block:${block.name}`;
+    for (const output of block.outputs) {
+      const outputName = typeof output.name === 'string' ? output.name.trim() : '';
+      if (!outputName) continue;
+      const outputKey = blockOutputObjectKey(block.name, outputName);
+      objects.set(outputKey, mergeObject(objects.get(outputKey), {
+        objectKey: outputKey,
+        objectType: 'dql_block_output',
+        name: outputName,
+        fullName: `${block.name}.${outputName}`,
+        domain: block.domain,
+        owner: block.owner,
+        status: block.status,
+        description: `${outputName} output column from DQL block ${block.name}.`,
+        sourcePath: block.filePath,
+        sourceSystem: 'DQL block column lineage',
+        payload: compactObject({
+          block: block.name,
+          output: outputName,
+          isAggregate: output.isAggregate,
+          aggregateFn: output.aggregateFn,
+          unresolved: output.unresolved,
+          sources: output.sources ?? [],
+        }),
+      }));
+      putEdge(edges, {
+        edgeType: 'contains',
+        fromKey: blockKey,
+        toKey: outputKey,
+        confidence: 1,
+        payload: { source: 'dql block output lineage', output: outputName },
+      });
+      for (const source of output.sources ?? []) {
+        const targetKey = ensureLineageSourceColumnObject(source, dbtLookup, objects);
+        putEdge(edges, {
+          edgeType: 'derives_from',
+          fromKey: outputKey,
+          toKey: targetKey,
+          confidence: output.unresolved ? 0.55 : 0.92,
+          payload: {
+            source: 'dql block output column lineage',
+            block: block.name,
+            output: outputName,
+            table: source.table,
+            column: source.column,
+            aggregateFn: output.aggregateFn,
+          },
+        });
+      }
+    }
+  }
+}
+
+function isCertifiedManifestBlock(block: DQLManifest['blocks'][string]): boolean {
+  return block.status === 'certified'
+    || block.status === 'approved';
+}
+
+function ensureLineageSourceColumnObject(
+  source: { table: string; column: string },
+  dbtLookup: Map<string, Set<string>>,
+  objects: Map<string, MetadataObject>,
+): string {
+  const dbtModelKey = resolveDbtModelKeyForTable(source.table, dbtLookup);
+  if (dbtModelKey) {
+    const modelName = dbtModelKey.split(':').at(-1) ?? source.table;
+    const columnKey = `dbt:column:${modelName}.${source.column}`;
+    if (objects.has(columnKey)) return columnKey;
+  }
+
+  return ensureWarehouseLineageSourceColumnObject(source, objects, 'DQL block column lineage');
+}
+
+function ensureWarehouseLineageSourceColumnObject(
+  source: { table: string; column: string },
+  objects: Map<string, MetadataObject>,
+  sourceSystem: string,
+): string {
+  const tableKey = `warehouse:table:${source.table}`;
+  if (!objects.has(tableKey)) {
+    objects.set(tableKey, {
+      objectKey: tableKey,
+      objectType: 'warehouse_table',
+      name: source.table.split('.').at(-1) ?? source.table,
+      fullName: source.table,
+      status: 'referenced',
+      sourceSystem,
+      payload: compactObject({ relation: source.table }),
+    });
+  }
+
+  const columnKey = `warehouse:column:${source.table}.${source.column}`;
+  objects.set(columnKey, mergeObject(objects.get(columnKey), {
+    objectKey: columnKey,
+    objectType: 'warehouse_column',
+    name: source.column,
+    fullName: `${source.table}.${source.column}`,
+    status: 'referenced',
+    sourceSystem,
+    payload: compactObject({
+      relation: source.table,
+      table: source.table,
+      column: source.column,
+    }),
+  }));
+  return columnKey;
+}
+
+function blockOutputObjectKey(blockName: string, outputName: string): string {
+  return `dql:block_output:${blockName}.${outputName}`;
+}
+
 function putEdge(edges: Map<string, MetadataEdge>, edge: MetadataEdge): void {
   edges.set(`${edge.edgeType}\u0000${edge.fromKey}\u0000${edge.toKey}`, edge);
 }
@@ -2217,7 +2636,7 @@ function lowerOrUndef(value: string | undefined): string | undefined {
   return value ? value.trim().toLowerCase() : undefined;
 }
 
-function planContextPackRoute(input: {
+async function planContextPackRoute(input: {
   request: BuildLocalContextPackRequest;
   objects: MetadataObject[];
   allowedSqlContext: MetadataAllowedSqlContext;
@@ -2227,7 +2646,7 @@ function planContextPackRoute(input: {
   questionPlan: AnalysisQuestionPlan;
   compileConflicts?: ManifestConflictDetail[];
   rankedObjects?: RankedMetadataObject[];
-}): MetadataRouteDecision {
+}): Promise<MetadataRouteDecision> {
   const intent = input.request.intent ?? input.questionPlan.routeIntent ?? classifyMetadataIntent(input.request.question, input.request.followUp);
 
   // Conflict route (additive, evaluated first): if the question's top governed
@@ -2270,6 +2689,32 @@ function planContextPackRoute(input: {
     .filter((item) => item.kind === 'context_only')
     .sort((a, b) => b.score - a.score)[0];
   const exactExampleMatch = exact ? hasExactExampleQuestion(input.request.question, exact) : false;
+  const directCertifiedBypass = Boolean(exact && (
+    exactExampleMatch
+    || intent === 'definition_lookup'
+    || intent === 'exact_certified_lookup'
+    || objectNameInQuestion(input.request.question, exact)
+  ));
+  const blockFitObject = exact
+    ?? (contextApplicability ? input.objects.find((object) => object.objectKey === contextApplicability.objectKey) : undefined);
+  const rawBlockFit = blockFitObject
+    ? evaluateCertifiedBlockFit({
+        question: input.request.question,
+        plan: input.questionPlan,
+        block: blockFitObject,
+        exactExampleMatch: exact ? exactExampleMatch : false,
+        definitionLookup: Boolean(exact && intent === 'definition_lookup'),
+      })
+    : undefined;
+  const blockFit = rawBlockFit && blockFitObject
+    ? await confirmMediumCertifiedFit({
+        request: input.request,
+        questionPlan: input.questionPlan,
+        block: blockFitObject,
+        fit: rawBlockFit,
+        directCertifiedBypass,
+      })
+    : rawBlockFit;
   const missingContext = buildMissingContext(input.request, intent, input.objects, input.allowedSqlContext);
   const selectedEvidence = input.evidenceRoles.slice(0, 16);
 
@@ -2302,8 +2747,10 @@ function planContextPackRoute(input: {
     input.allowedSqlContext.sourceBlockSql.length > 0 ||
     input.objects.some((object) => object.objectType.startsWith('semantic_'));
   const grainGateDemotes = Boolean(grainGate && !grainGate.allow && canGenerateFromContext);
+  const blockFitDemotes = Boolean(blockFit && !certifiedFitAllowsTier1(blockFit) && !directCertifiedBypass && canGenerateFromContext);
+  const certifiedFitPassed = !blockFit || certifiedFitAllowsTier1(blockFit) || directCertifiedBypass;
 
-  if (!grainGateDemotes && exact && (
+  if (!grainGateDemotes && !blockFitDemotes && certifiedFitPassed && exact && (
     certifiedApplicability?.kind === 'exact_answer'
     || certifiedApplicability?.kind === 'safe_parameterized'
     || intent === 'exact_certified_lookup'
@@ -2317,6 +2764,7 @@ function planContextPackRoute(input: {
       reason: `Certified ${exact.objectType.replace(/_/g, ' ')} "${exact.name}" exactly matches the requested artifact, definition, or direct KPI grain.`,
       routeReason: grainGateInfo?.reason,
       grainGate: grainGateInfo,
+      blockFit,
       trustLabel: 'certified',
       reviewStatus: 'certified',
       exactObjectKey: exact.objectKey,
@@ -2337,6 +2785,26 @@ function planContextPackRoute(input: {
       reason: `Certified block "${exact.name}" is close but answers a different grain than the question, so it is context only and SQL is generated for the requested grain.`,
       routeReason: grainGate.reason,
       grainGate: grainGateInfo,
+      blockFit,
+      trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
+      reviewStatus: 'draft_ready',
+      certifiedApplicability: certifiedApplicability
+        ? { ...certifiedApplicability, kind: 'context_only' }
+        : contextApplicability,
+      selectedEvidence,
+      missingContext,
+      followUps: buildMetadataFollowUps(isGeneratedMetadataIntent(intent) ? intent : 'ad_hoc_ranking', input.allowedSqlContext),
+    };
+  }
+
+  if (blockFitDemotes && exact && blockFit) {
+    return {
+      route: 'generated_sql',
+      intent: isGeneratedMetadataIntent(intent) ? intent : 'ad_hoc_ranking',
+      reason: `Certified block "${exact.name}" is relevant but does not satisfy the requested answer shape, so it is context only and SQL is generated for the requested result.`,
+      routeReason: blockFit.reasons.join('; '),
+      grainGate: grainGateInfo,
+      blockFit,
       trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
       reviewStatus: 'draft_ready',
       certifiedApplicability: certifiedApplicability
@@ -2383,16 +2851,18 @@ function planContextPackRoute(input: {
       route: 'generated_sql',
       intent,
       reason: 'The question asks for a different grain, ranking, breakdown, comparison, entity drilldown, or diagnostic analysis, so certified artifacts are context only.',
+      routeReason: blockFit && !certifiedFitAllowsTier1(blockFit) ? blockFit.reasons.join('; ') : undefined,
       trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
       reviewStatus: 'draft_ready',
       certifiedApplicability: contextApplicability,
+      blockFit,
       selectedEvidence,
       missingContext,
       followUps: buildMetadataFollowUps(intent, input.allowedSqlContext),
     };
   }
 
-  if (exact) {
+  if (exact && certifiedFitPassed) {
     return {
       route: 'certified',
       intent: 'exact_certified_lookup',
@@ -2401,10 +2871,19 @@ function planContextPackRoute(input: {
       reviewStatus: 'certified',
       exactObjectKey: exact.objectKey,
       certifiedApplicability,
+      blockFit,
       selectedEvidence,
       missingContext: [],
       followUps: buildMetadataFollowUps('exact_certified_lookup', input.allowedSqlContext),
     };
+  }
+
+  if (exact && blockFit && !certifiedFitAllowsTier1(blockFit)) {
+    return clarifyDecision(intent, input.trustLabel === 'certified' ? 'mixed' : input.trustLabel, selectedEvidence, [{
+      kind: 'metadata',
+      severity: 'blocking',
+      message: `The closest certified block "${exact.name}" does not exactly answer this question (${blockFit.reasons.join('; ')}), and there is not enough SQL context to safely generate the requested answer.`,
+    }]);
   }
 
   return clarifyDecision(intent, input.trustLabel, selectedEvidence, missingContext.length > 0 ? missingContext : [{
@@ -2412,6 +2891,83 @@ function planContextPackRoute(input: {
     severity: 'blocking',
     message: 'The local metadata matched some context, but not enough to choose a safe metric, table, or grain.',
   }]);
+}
+
+const CERTIFIED_FIT_CONFIRM_TIMEOUT_MS = 2500;
+
+async function confirmMediumCertifiedFit(input: {
+  request: BuildLocalContextPackRequest;
+  questionPlan: AnalysisQuestionPlan;
+  block: MetadataObject;
+  fit: CertifiedBlockFit;
+  directCertifiedBypass: boolean;
+}): Promise<CertifiedBlockFit> {
+  const confirmer = input.request.confirmCertifiedFit;
+  if (!confirmer || input.directCertifiedBypass) return input.fit;
+  if (input.fit.confidence !== 'medium') return input.fit;
+  if (input.fit.kind !== 'exact' && input.fit.kind !== 'trim_safe') return input.fit;
+
+  try {
+    const result = await withTimeout(
+      confirmer({
+        question: input.request.question,
+        questionPlan: input.questionPlan,
+        block: input.block,
+        fit: input.fit,
+      }),
+      CERTIFIED_FIT_CONFIRM_TIMEOUT_MS,
+      'certified fit confirmation timed out',
+    );
+    const reason = cleanConfirmationReason(result.reason);
+    if (result.allow && result.confidence !== 'low') {
+      return {
+        ...input.fit,
+        confidence: 'high',
+        reasons: [
+          ...input.fit.reasons,
+          `fit confirmation accepted this certified block${reason ? `: ${reason}` : ''}`,
+        ],
+      };
+    }
+    return {
+      ...input.fit,
+      kind: 'context_only',
+      confidence: 'high',
+      reasons: [
+        ...input.fit.reasons,
+        `fit confirmation rejected this certified block as a direct answer${reason ? `: ${reason}` : ''}`,
+      ],
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ...input.fit,
+      reasons: [
+        ...input.fit.reasons,
+        `fit confirmation unavailable; kept review-required (${message})`,
+      ],
+    };
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function cleanConfirmationReason(value: string | undefined): string {
+  return typeof value === 'string'
+    ? value.replace(/\s+/g, ' ').trim().slice(0, 240)
+    : '';
 }
 
 function certifiedApplicabilities(
@@ -2424,6 +2980,70 @@ function certifiedApplicabilities(
     .filter((item) => item.kind !== 'not_applicable')
     .sort((a, b) => b.score - a.score);
   return new Map(items.map((item) => [item.objectKey, item]));
+}
+
+function buildCertifiedCandidateFitDiagnostics(input: {
+  request: BuildLocalContextPackRequest;
+  objects: MetadataObject[];
+  questionPlan: AnalysisQuestionPlan;
+  routeDecision: MetadataRouteDecision;
+}): LocalContextPack['retrievalDiagnostics']['certifiedCandidateFits'] {
+  return input.objects
+    .filter((object) => object.objectType === 'dql_block' && isCertifiedMetadataObject(object))
+    .map((object) => {
+      const applicability = certifiedApplicabilityForObject(object, input.questionPlan);
+      const fit = evaluateCertifiedBlockFit({
+        question: input.request.question,
+        plan: input.questionPlan,
+        block: object,
+        exactExampleMatch: hasExactExampleQuestion(input.request.question, object),
+        definitionLookup: input.routeDecision.intent === 'definition_lookup',
+      });
+      return {
+        objectKey: object.objectKey,
+        name: object.name,
+        applicabilityKind: applicability.kind,
+        applicabilityScore: applicability.score,
+        action: certifiedCandidateFitAction(object.objectKey, applicability, fit, input.routeDecision),
+        fit,
+      };
+    })
+    .filter((item) =>
+      item.applicabilityKind !== 'not_applicable' ||
+      item.fit.kind !== 'not_applicable' ||
+      item.action === 'certified_answer'
+    )
+    .sort((a, b) =>
+      certifiedCandidateActionRank(a.action) - certifiedCandidateActionRank(b.action) ||
+      b.applicabilityScore - a.applicabilityScore ||
+      a.name.localeCompare(b.name)
+    )
+    .slice(0, 12);
+}
+
+function certifiedCandidateFitAction(
+  objectKey: string,
+  applicability: CertifiedBlockApplicability,
+  fit: CertifiedBlockFit,
+  routeDecision: MetadataRouteDecision,
+): LocalContextPack['retrievalDiagnostics']['certifiedCandidateFits'][number]['action'] {
+  if (routeDecision.route === 'certified' && routeDecision.exactObjectKey === objectKey) return 'certified_answer';
+  if (routeDecision.certifiedApplicability?.objectKey === objectKey && routeDecision.route !== 'certified') return 'context_only';
+  if (!certifiedFitAllowsTier1(fit) || applicability.kind === 'context_only') return 'rejected_for_fit';
+  return 'eligible_not_selected';
+}
+
+function certifiedCandidateActionRank(action: LocalContextPack['retrievalDiagnostics']['certifiedCandidateFits'][number]['action']): number {
+  switch (action) {
+    case 'certified_answer':
+      return 0;
+    case 'context_only':
+      return 1;
+    case 'rejected_for_fit':
+      return 2;
+    case 'eligible_not_selected':
+      return 3;
+  }
 }
 
 function clarifyDecision(
@@ -2725,10 +3345,11 @@ function buildEvidenceRoles(objects: MetadataObject[], queryRuns: QueryRunSummar
 
 function evidenceRoleForObject(object: MetadataObject): MetadataEvidenceRole {
   if (object.objectType === 'dql_block' && isCertifiedMetadataObject(object)) return 'certified_context';
+  if (object.objectType === 'dql_block_output') return 'certified_context';
   if (object.objectType === 'semantic_metric') return 'semantic_metric';
   if (object.objectType === 'dql_term' || object.objectType === 'business_view') return 'business_context';
   if (object.objectType === 'dbt_model' || object.objectType === 'dbt_source' || object.objectType === 'dbt_column') return 'dbt_model';
-  if (object.objectType === 'warehouse_table') return 'warehouse_schema';
+  if (object.objectType === 'warehouse_table' || object.objectType === 'warehouse_column') return 'warehouse_schema';
   if (object.objectType === 'runtime_table' || object.objectType === 'runtime_column') return 'runtime_schema';
   if (object.objectType === 'selected_context') return 'selected_context';
   if (object.objectType === 'skill') return 'skill_guidance';
@@ -3026,7 +3647,7 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
       ...existing,
       objectKey: existing.objectKey ?? relation.objectKey,
       source: mergeRelationSources(existing.source, relation.source),
-      columns: dedupeRuntimeColumns([...existing.columns, ...relation.columns]).slice(0, 120),
+      columns: mergeRelationColumns(existing, relation).slice(0, 120),
     });
   };
 
@@ -3079,6 +3700,8 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
     if (fromRelation && toRelation) addRelation({ ...fromRelation, columns: toRelation.columns, source: 'dbt mapped warehouse table' });
   }
 
+  applyLineageColumnAliases(byRelation, objectsByKey, edges);
+
   return {
     relations: coalesceRelationAliases(Array.from(byRelation.values()))
       .sort((a, b) => a.relation.localeCompare(b.relation)),
@@ -3099,6 +3722,78 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         grain: typeof object.payload?.grain === 'string' ? object.payload.grain : undefined,
       })),
   };
+}
+
+function applyLineageColumnAliases(
+  byRelation: Map<string, MetadataAllowedSqlRelation>,
+  objectsByKey: Map<string, MetadataObject>,
+  edges: MetadataEdge[],
+): void {
+  const aliasesByRelationAndColumn = new Map<string, Set<string>>();
+  for (const edge of edges) {
+    if (edge.edgeType !== 'derives_from') continue;
+    const from = objectsByKey.get(edge.fromKey);
+    const to = objectsByKey.get(edge.toKey);
+    if (!from || !to) continue;
+    const targetRelation = metadataRelationFromObject(to);
+    if (!targetRelation) continue;
+    const alias = semanticAliasFromLineageOutput(from);
+    if (!alias || namesEqualForCatalog(alias, to.name)) continue;
+    const relationKey = normalizeRelationKey(targetRelation.relation);
+    const columnKey = normalizeColumnKeyForCatalog(to.name);
+    if (!relationKey || !columnKey) continue;
+    const mapKey = `${relationKey}\u0000${columnKey}`;
+    const existing = aliasesByRelationAndColumn.get(mapKey) ?? new Set<string>();
+    existing.add(alias);
+    aliasesByRelationAndColumn.set(mapKey, existing);
+  }
+  if (aliasesByRelationAndColumn.size === 0) return;
+
+  for (const [relationKey, relation] of byRelation) {
+    const columns = relation.columns.map((column) => {
+      const aliases = aliasesByRelationAndColumn.get(`${relationKey}\u0000${normalizeColumnKeyForCatalog(column.name)}`);
+      if (!aliases?.size) return column;
+      const aliasText = Array.from(aliases).sort().slice(0, 8).join(', ');
+      const suffix = `Governed aliases from lineage: ${aliasText}.`;
+      const description = column.description
+        ? column.description.includes(suffix)
+          ? column.description
+          : `${column.description} ${suffix}`
+        : suffix;
+      return { ...column, description };
+    });
+    byRelation.set(relationKey, { ...relation, columns });
+  }
+}
+
+function semanticAliasFromLineageOutput(object: MetadataObject): string | undefined {
+  const candidates = [
+    typeof object.payload?.output === 'string' ? object.payload.output : undefined,
+    object.name,
+    object.fullName?.split('.').at(-1),
+  ];
+  for (const candidate of candidates) {
+    const alias = normalizeLineageAlias(candidate);
+    if (alias) return alias;
+  }
+  return undefined;
+}
+
+function normalizeLineageAlias(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/["`]/g, '').replace(/\s+/g, ' ').trim();
+  if (!normalized || normalized === '*' || normalized === '?') return undefined;
+  if (normalized.length > 64) return undefined;
+  return normalized;
+}
+
+function normalizeColumnKeyForCatalog(value: string): string {
+  return value.replace(/["`]/g, '').trim().toLowerCase();
+}
+
+function namesEqualForCatalog(left: string, right: string): boolean {
+  return normalizeColumnKeyForCatalog(left).replace(/[_\s]+/g, '') ===
+    normalizeColumnKeyForCatalog(right).replace(/[_\s]+/g, '');
 }
 
 // Pull the first natural-language example question off a block payload so the
@@ -3129,19 +3824,20 @@ function buildSelectedJoinPaths(
       const right = relations[rightIndex]!;
       const join = pickCatalogJoinColumns(left, right);
       if (!join) continue;
+      const oriented = orientCatalogJoinPath(left, right, join);
       const key = [
-        normalizeRelationKey(left.relation),
-        join.leftColumn.toLowerCase(),
-        normalizeRelationKey(right.relation),
-        join.rightColumn.toLowerCase(),
+        normalizeRelationKey(oriented.leftRelation.relation),
+        oriented.leftColumn.toLowerCase(),
+        normalizeRelationKey(oriented.rightRelation.relation),
+        oriented.rightColumn.toLowerCase(),
       ].join('|');
       if (seen.has(key)) continue;
       seen.add(key);
       joins.push({
-        leftRelation: left.relation,
-        leftColumn: join.leftColumn,
-        rightRelation: right.relation,
-        rightColumn: join.rightColumn,
+        leftRelation: oriented.leftRelation.relation,
+        leftColumn: oriented.leftColumn,
+        rightRelation: oriented.rightRelation.relation,
+        rightColumn: oriented.rightColumn,
         reason: catalogJoinReason(join.leftColumn, join.rightColumn, join.confidence),
         confidence: join.confidence,
       });
@@ -3150,6 +3846,42 @@ function buildSelectedJoinPaths(
   return joins
     .sort((a, b) => b.confidence - a.confidence || a.leftRelation.localeCompare(b.leftRelation))
     .slice(0, 12);
+}
+
+function orientCatalogJoinPath(
+  left: MetadataAllowedSqlRelation,
+  right: MetadataAllowedSqlRelation,
+  join: { leftColumn: string; rightColumn: string; confidence: number },
+): {
+  leftRelation: MetadataAllowedSqlRelation;
+  leftColumn: string;
+  rightRelation: MetadataAllowedSqlRelation;
+  rightColumn: string;
+} {
+  if (catalogRelationFactScore(right) > catalogRelationFactScore(left)) {
+    return {
+      leftRelation: right,
+      leftColumn: join.rightColumn,
+      rightRelation: left,
+      rightColumn: join.leftColumn,
+    };
+  }
+  return {
+    leftRelation: left,
+    leftColumn: join.leftColumn,
+    rightRelation: right,
+    rightColumn: join.rightColumn,
+  };
+}
+
+function catalogRelationFactScore(relation: MetadataAllowedSqlRelation): number {
+  const text = normalizeRelationKey([relation.name, relation.relation].join(' ')).replace(/[._-]+/g, ' ');
+  let score = 0;
+  if (/\b(fct|fact)\b/i.test(text)) score += 20;
+  if (/\b(order items?|orders?|events?|transactions?|performance|activity|usage|revenue|sales|payments?|line items?|stats?)\b/i.test(text)) score += 8;
+  if (/\b(dim|dimension)\b/i.test(text)) score -= 18;
+  if (/\b(customers?|products?|players?|accounts?|users?|segments?|regions?)\b/i.test(text)) score -= 4;
+  return score;
 }
 
 function pickCatalogJoinColumns(
@@ -3258,7 +3990,7 @@ function coalesceRelationAliases(relations: MetadataAllowedSqlRelation[]): Metad
       ...target,
       objectKey: target.objectKey ?? relation.objectKey,
       source: mergeRelationSources(target.source, relation.source),
-      columns: dedupeRuntimeColumns([...target.columns, ...relation.columns]).slice(0, 120),
+      columns: mergeRelationColumns(target, relation).slice(0, 120),
     });
     skipped.add(relationKey);
   }
@@ -3266,6 +3998,25 @@ function coalesceRelationAliases(relations: MetadataAllowedSqlRelation[]): Metad
   return Array.from(mergedByRelation.entries())
     .filter(([key]) => !skipped.has(key))
     .map(([, relation]) => relation);
+}
+
+function mergeRelationColumns(
+  existing: Pick<MetadataAllowedSqlRelation, 'source' | 'columns'>,
+  incoming: Pick<MetadataAllowedSqlRelation, 'source' | 'columns'>,
+): RuntimeSchemaColumn[] {
+  const existingIsSourceShape = relationSourceIncludes(existing.source, 'certified source SQL shape');
+  const incomingIsSourceShape = relationSourceIncludes(incoming.source, 'certified source SQL shape');
+  if (existingIsSourceShape && !incomingIsSourceShape) {
+    return dedupeRuntimeColumns([...incoming.columns, ...existing.columns]);
+  }
+  if (!existingIsSourceShape && incomingIsSourceShape) {
+    return dedupeRuntimeColumns([...existing.columns, ...incoming.columns]);
+  }
+  return dedupeRuntimeColumns([...existing.columns, ...incoming.columns]);
+}
+
+function relationSourceIncludes(source: string | undefined, value: string): boolean {
+  return Boolean(source && source.split(/\s+\+\s+/).some((part) => part.trim() === value));
 }
 
 function relationTailKey(relation: string): string {
@@ -3296,14 +4047,18 @@ function warehouseTableHasTrustedReference(
 }
 
 function metadataRelationFromObject(object: MetadataObject): MetadataAllowedSqlRelation | null {
-  if (object.objectType === 'dbt_column' || object.objectType === 'runtime_column') {
+  if (object.objectType === 'dbt_column' || object.objectType === 'runtime_column' || object.objectType === 'warehouse_column') {
     const relation = metadataPayloadString(object, 'relation');
     if (!relation) return null;
     return {
       relation,
       name: relation.split('.').at(-1) ?? relation,
       objectKey: object.objectKey,
-      source: object.objectType === 'runtime_column' ? 'runtime schema snapshot' : 'dbt manifest',
+      source: object.objectType === 'runtime_column'
+        ? 'runtime schema snapshot'
+        : object.objectType === 'warehouse_column'
+          ? 'DQL block column lineage'
+          : 'dbt manifest',
       columns: [{
         name: object.name,
         type: metadataPayloadString(object, 'type') ?? metadataPayloadString(object, 'data_type'),
@@ -3390,7 +4145,13 @@ function selectedContextObjects(value: unknown): MetadataObject[] {
 function normalizeFollowUpContext(value: unknown): MetadataFollowUpContext | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
-  const kind = record.kind === 'drilldown' ? 'drilldown' : record.kind === 'generic' ? 'generic' : null;
+  const kind = record.kind === 'drilldown'
+    ? 'drilldown'
+    : record.kind === 'generic'
+      ? 'generic'
+      : record.kind === 'contextual'
+        ? 'contextual'
+        : null;
   if (!kind) return null;
   return {
     kind,
@@ -3399,7 +4160,36 @@ function normalizeFollowUpContext(value: unknown): MetadataFollowUpContext | nul
     sourceAnswer: stringValue(record.sourceAnswer),
     filters: metadataStringArray(record.filters),
     dimensions: metadataStringArray(record.dimensions),
+    priorResultColumns: metadataStringArray(record.priorResultColumns),
+    priorResultValues: metadataStringRecordArray(record.priorResultValues),
+    priorLimit: typeof record.priorLimit === 'number' ? record.priorLimit : undefined,
+    priorMeasures: metadataStringArray(record.priorMeasures),
   };
+}
+
+/**
+ * Deterministic route-commitment gate: true only when the new plan differs from
+ * the prior one in FILTERS / TOP-N / TIMEFRAME alone. Any change to measures,
+ * dimensions, grain, required outputs, or mode disqualifies reuse — those change
+ * which artifacts/relations can answer, so the full pipeline must re-run.
+ */
+export function isFilterOnlyRefinement(prior: AnalysisQuestionPlan, next: AnalysisQuestionPlan): boolean {
+  if (prior.mode !== next.mode) return false;
+  const priorShape = prior.requestedShape;
+  const nextShape = next.requestedShape;
+  return setEqual(priorShape.measures, nextShape.measures)
+    && setEqual(priorShape.dimensions, nextShape.dimensions)
+    && setEqual(priorShape.requiredOutputs, nextShape.requiredOutputs)
+    && (priorShape.grain ?? '') === (nextShape.grain ?? '')
+    && setEqual(prior.entities.map((entity) => entity.text.toLowerCase()), next.entities.map((entity) => entity.text.toLowerCase()));
+}
+
+function setEqual(a: string[], b: string[]): boolean {
+  const setA = new Set(a.map((value) => value.toLowerCase()));
+  const setB = new Set(b.map((value) => value.toLowerCase()));
+  if (setA.size !== setB.size) return false;
+  for (const value of setA) if (!setB.has(value)) return false;
+  return true;
 }
 
 function followUpSourceObjectKeys(followUp: MetadataFollowUpContext | null): string[] {
@@ -3416,11 +4206,17 @@ function followUpContextObjects(followUp: MetadataFollowUpContext | null): Metad
     followUp.sourceAnswer ?? '',
     ...(followUp.filters ?? []),
     ...(followUp.dimensions ?? []),
+    ...(followUp.priorResultColumns ?? []),
+    ...Object.entries(followUp.priorResultValues ?? {}).flatMap(([key, values]) => [key, ...values]),
   ].join(' ');
   return [{
     objectKey: `selected:followup:${sha256(stableStringify(followUp)).slice(0, 16)}`,
     objectType: 'selected_context',
-    name: followUp.kind === 'drilldown' ? 'Follow-up drilldown request' : 'Follow-up request',
+    name: followUp.kind === 'drilldown'
+      ? 'Follow-up drilldown request'
+      : followUp.kind === 'contextual'
+        ? 'Conversation context (advisory)'
+        : 'Follow-up request',
     description: text.trim() || undefined,
     status: 'transient_context',
     sourceSystem: 'agent follow-up context',
@@ -3431,18 +4227,36 @@ function followUpContextObjects(followUp: MetadataFollowUpContext | null): Metad
       sourceAnswer: followUp.sourceAnswer,
       filters: followUp.filters,
       dimensions: followUp.dimensions,
+      priorResultColumns: followUp.priorResultColumns,
+      priorResultValues: followUp.priorResultValues,
+      priorLimit: followUp.priorLimit,
+      priorMeasures: followUp.priorMeasures,
     }),
   }];
 }
 
 function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpContext | null): string {
   if (!followUp) return question;
+  // Contextual carry is advisory: enrich retrieval softly (prior question, columns,
+  // measures) but never with concrete dimension VALUES or the block name — those pull
+  // ranking hard toward the old topic when the user may be switching subjects. The
+  // question-plan's own raw queries still run alongside this one either way.
+  if (followUp.kind === 'contextual') {
+    return [
+      question,
+      followUp.sourceQuestion ?? '',
+      ...(followUp.priorResultColumns ?? []),
+      ...(followUp.priorMeasures ?? []),
+    ].filter(Boolean).join(' ');
+  }
   return [
     question,
     followUp.sourceBlockName ?? '',
     followUp.sourceQuestion ?? '',
     ...(followUp.filters ?? []),
     ...(followUp.dimensions ?? []),
+    ...(followUp.priorResultColumns ?? []),
+    ...Object.entries(followUp.priorResultValues ?? {}).flatMap(([key, values]) => [key, ...values]),
   ].filter(Boolean).join(' ');
 }
 
@@ -3535,6 +4349,16 @@ function dedupeRuntimeColumns(columns: RuntimeSchemaColumn[]): RuntimeSchemaColu
 function metadataStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
+}
+
+function metadataStringRecordArray(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const values = metadataStringArray(raw).slice(0, 24);
+    if (key.trim() && values.length > 0) out[key.trim()] = values;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function metadataPayloadString(object: MetadataObject, key: string): string | undefined {
@@ -3812,9 +4636,10 @@ function selectionReason(row: MetadataObject, score: number, plannerReasons: str
 
 function reasonForObject(row: MetadataObject): string {
   if (row.objectType === 'dql_block' && row.status === 'certified') return 'Certified reusable answer candidate';
+  if (row.objectType === 'dql_block_output') return 'Certified block output column lineage';
   if (row.objectType === 'semantic_metric') return 'Semantic metric matched the question';
   if (row.objectType === 'dql_term' || row.objectType === 'business_view') return 'DQL business context';
-  if (row.objectType.startsWith('dbt_') || row.objectType === 'warehouse_table') return 'dbt or warehouse metadata supplies physical context';
+  if (row.objectType.startsWith('dbt_') || row.objectType === 'warehouse_table' || row.objectType === 'warehouse_column') return 'dbt or warehouse metadata supplies physical context';
   if (row.objectType === 'app' || row.objectType === 'dashboard') return 'Published consumption context';
   return 'Relevant project metadata';
 }

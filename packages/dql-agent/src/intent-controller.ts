@@ -133,6 +133,8 @@ const GRATITUDE_RE =
 /** Meta / capability questions about the assistant itself. */
 const META_CAPABILITY_RE =
   /\b(what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+do\s+(you|i)\s+(work|use)|who\s+are\s+you|what\s+are\s+you|what\s+is\s+dql|help\s+me\s+get\s+started|how\s+can\s+you\s+help|what\s+should\s+i\s+ask|how\s+does\s+this\s+work|are\s+you\s+(an?\s+)?(ai|bot|llm))\b/i;
+const CONTEXT_RECAP_RE =
+  /\b(what\s+(?:are|were)\s+we\s+talking\s+about|what\s+we\s+(?:are|were)\s+talking\s+about|what\s+is\s+this\s+about|where\s+were\s+we|remind\s+me|recap(?:\s+this)?|summari[sz]e\s+(?:this|our\s+conversation))\b/i;
 
 /**
  * Classify a turn as conversational (greeting / gratitude / meta-capability /
@@ -151,6 +153,7 @@ export function classifyConversationalTurn(
   const words = trimmed.split(/\s+/).length;
 
   if (META_CAPABILITY_RE.test(trimmed)) return 'meta_capability';
+  if (hasHistory && CONTEXT_RECAP_RE.test(trimmed)) return 'smalltalk';
   // Short openers/closers only — a long sentence starting with "hi" is likely a real ask.
   if (words <= 6 && GREETING_RE.test(trimmed)) return 'greeting';
   if (words <= 6 && GRATITUDE_RE.test(trimmed)) return 'gratitude';

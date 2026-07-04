@@ -136,6 +136,8 @@ export interface ChatCellConfig {
    * `history` field is retained for backward-compatible reads of older cells.
    */
   thread?: unknown[];
+  /** Server-side conversation thread id, so reloads resume the same thread. */
+  threadId?: string;
 }
 
 export type ParamType = 'text' | 'select' | 'date' | 'number';

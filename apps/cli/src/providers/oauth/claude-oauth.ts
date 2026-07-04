@@ -31,9 +31,9 @@ export const CLAUDE_OAUTH_CONFIG = {
   callbackPort: 54545,
 } as const;
 
-/** Claude subscription models exposed after login (static list; default first). */
-export const CLAUDE_OAUTH_MODELS = ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5'] as const;
-export const CLAUDE_OAUTH_DEFAULT_MODEL = 'claude-sonnet-4-5';
+/** Claude subscription models exposed after login (latest generation; default first). */
+export const CLAUDE_OAUTH_MODELS = ['claude-sonnet-5', 'claude-opus-4-8', 'claude-haiku-4-5'] as const;
+export const CLAUDE_OAUTH_DEFAULT_MODEL = 'claude-sonnet-5';
 
 export function generateCodeVerifier(): string {
   return crypto.randomBytes(32).toString('base64url');

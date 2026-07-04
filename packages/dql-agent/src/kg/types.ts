@@ -36,6 +36,20 @@ export type KGSourceTier =
 
 export type KGCertification = 'certified' | 'ai_generated' | 'analyst_review_required' | 'uncertified';
 
+export interface KGOutputLineage {
+  name: string;
+  isAggregate?: boolean;
+  aggregateFn?: string;
+  sources: Array<{ table: string; column: string }>;
+  unresolved?: boolean;
+}
+
+export interface KGOutputContractColumn {
+  name: string;
+  type?: string;
+  role?: string;
+}
+
 export interface KGNode {
   /** Stable identifier — `${kind}:${name}` (lower-cased). */
   nodeId: string;
@@ -87,6 +101,10 @@ export interface KGNode {
   entities?: string[];
   /** Declared output field names for review and retrieval. */
   declaredOutputs?: string[];
+  /** SQL-derived output lineage for this artifact, when the compiler can resolve it. */
+  outputs?: KGOutputLineage[];
+  /** Typed, reusable output contract for downstream block-fit and drift checks. */
+  outputContract?: KGOutputContractColumn[];
   /** Business dimensions available for grouping or filters. */
   dimensions?: string[];
   /** Filters the artifact is designed to support safely. */

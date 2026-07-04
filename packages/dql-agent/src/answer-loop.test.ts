@@ -6,6 +6,8 @@ import { KGStore } from "./kg/sqlite-fts.js";
 import { answer, parseProposal } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
+import type { CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
+import type { CertifiedBlockFit } from "./metadata/block-fit.js";
 import type { AgentProvider, AgentMessage } from "./providers/types.js";
 
 class StubProvider implements AgentProvider {
@@ -219,6 +221,75 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.outcome?.name).toContain("Revenue leadership");
   });
 
+  it("Tier 2: a governed semantic metric EXECUTES deterministically with zero LLM calls", async () => {
+    // Governed hierarchy: certified blocks → semantic metrics → generated SQL.
+    // With no certified block in play, a confident metric match must run the
+    // metric's own definition and return rows — the provider is never invoked.
+    kg.rebuild(
+      [
+        {
+          nodeId: "metric:order_item.revenue",
+          kind: "metric",
+          name: "order_item.revenue",
+          domain: "growth",
+          status: "certified",
+          description: "Recognized revenue measure over order items.",
+          llmContext: "sql: SUM(product_price)\ntable: dev.order_items",
+          sourceTier: "semantic_layer",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should never be called");
+    const executed: string[] = [];
+    const result = await answer({
+      question: "what is our total revenue?",
+      provider,
+      kg,
+      executeGeneratedSql: async (sql) => {
+        executed.push(sql);
+        return {
+          columns: ["order_item_revenue"],
+          rows: [{ order_item_revenue: 785425.37 }],
+          rowCount: 1,
+          executionTime: 4,
+          sql,
+        };
+      },
+    });
+    // The metric definition ran — real rows, real SQL, no model involvement.
+    expect(provider.messages).toHaveLength(0);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toContain("SUM(product_price)");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.sourceTier).toBe("semantic_layer");
+    expect(result.text).toContain("governed metric order_item.revenue");
+  });
+
+  it("does NOT terminate a data conversation with a business-view document (360-profile regression)", async () => {
+    // Prior turn returned customer rows; the follow-up asks for a specific
+    // customer's profile. A certified business VIEW may only ground the answer —
+    // never BE the answer ("certified" must mean an executable definition ran).
+    const provider = new StubProvider(
+      "```sql\nSELECT customer_name, lifetime_spend FROM dim_customers WHERE customer_name = 'Mr. Matthew Meyer'\n```",
+    );
+    const result = await answer({
+      question: "so Matthew is the top so what is his revenue health profile view?",
+      provider,
+      kg,
+      followUp: {
+        kind: "contextual",
+        sourceQuestion: "who are the customers? give me the customers info",
+        priorResultColumns: ["customer_name", "customer_type", "lifetime_spend"],
+        priorResultValues: { customer_name: ["Mr. Matthew Meyer", "Aaron Gardner"] },
+      },
+    });
+    // The certified business view must not short-circuit into a no-data
+    // "certified" answer; the loop proceeds to an executable tier instead.
+    expect(result.kind === "certified" && !result.result).toBe(false);
+    expect(result.sourceTier === "business_context" && !result.result).toBe(false);
+  });
+
   it("uses certified business context for definition questions", async () => {
     const provider = new StubProvider("should not be called");
     const result = await answer({
@@ -296,6 +367,99 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.rowCount).toBe(1);
     expect(result.sourceTier).toBe("certified_artifact");
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("downgrades a certified execution when the result misses requested columns", async () => {
+    const question = "Show total revenue with customer name";
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:total_revenue",
+          kind: "block",
+          name: "total_revenue",
+          domain: "revenue",
+          status: "certified",
+          description: "Single-value gross revenue KPI across all orders.",
+          tags: ["revenue", "kpi", "customer"],
+          examples: [{ question }],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+          declaredOutputs: ["revenue"],
+        },
+      ],
+      [],
+    );
+
+    const result = await answer({
+      question,
+      provider: new StubProvider("should not be called"),
+      kg,
+      contextPack: {
+        id: "ctx_total_revenue",
+        question,
+        focusObjectKey: "dql:block:total_revenue",
+        mode: "question",
+        trustLabel: "certified",
+        objects: [{
+          objectKey: "dql:block:total_revenue",
+          objectType: "dql_block",
+          name: "total_revenue",
+          status: "certified",
+          sourceSystem: "DQL block",
+          snippet: "Single-value gross revenue KPI across all orders.",
+        }],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "certified",
+          intent: "exact_certified_lookup",
+          reason: "exact certified test route",
+          trustLabel: "certified",
+          reviewStatus: "certified",
+          exactObjectKey: "dql:block:total_revenue",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: { relations: [], sourceBlockSql: [] },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          certifiedCandidateFits: [],
+          candidateConflicts: [],
+        },
+        freshness: {
+          catalogPath: ".dql/cache/metadata.sqlite",
+          builtAt: null,
+          fingerprint: null,
+        },
+      } as any,
+      executeCertifiedBlock: async () => ({
+        columns: ["revenue"],
+        rows: [{ revenue: 222.5 }],
+        rowCount: 1,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.certification).toBe("analyst_review_required");
+    expect(result.reviewStatus).toBe("analyst_review_required");
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("customer_name"),
+      ]),
+    );
+    expect(result.text).toContain("Review required");
+    expect(result.evidence?.validation?.status).toBe("warning");
   });
 
   it("executes a certified block when the host supplies an executor", async () => {
@@ -473,6 +637,39 @@ describe("answer (block-first loop)", () => {
           tool: "execute_generated_sql",
           status: "selected",
         }),
+      ]),
+    );
+  });
+
+  it("warns when generated preview results miss requested columns or top-N shape", async () => {
+    const question = "Who are the top 2 customers with customer name and revenue?";
+    const provider = new StubProvider(
+      "Top customers by revenue.\n\n" +
+        "```sql\nSELECT customer_id, revenue FROM customers ORDER BY revenue DESC\n```\n\n" +
+        "Viz: table",
+    );
+
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_id", "revenue"],
+        rows: [
+          { customer_id: 1, revenue: 100 },
+          { customer_id: 2, revenue: 90 },
+          { customer_id: 3, revenue: 80 },
+        ],
+        rowCount: 3,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("customer_name"),
+        expect.stringContaining("top 2"),
       ]),
     );
   });
@@ -675,6 +872,855 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).not.toContain("total_customers");
   });
 
+  it("honors an already-demoted category revenue route for a product-grain revenue request", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:food_vs_drink_revenue",
+          kind: "block",
+          name: "food_vs_drink_revenue",
+          domain: "orders",
+          status: "certified",
+          description: "Revenue split between food and drink categories from order items.",
+          llmContext: "Use only for Food vs Drink category-level revenue, not product-level revenue.",
+          tags: ["revenue", "category", "food", "drink"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+          grain: "category",
+          entities: ["Category"],
+          declaredOutputs: ["category", "revenue"],
+          dimensions: ["category"],
+        },
+        {
+          nodeId: "dbt_model:order_items",
+          kind: "dbt_model",
+          name: "order_items",
+          domain: "orders",
+          description: "Order item rows with product name, product type/category, and product price.",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider("should not be called");
+    const schemaContext = [
+      {
+        relation: "analytics.order_items",
+        schema: "analytics",
+        name: "order_items",
+        columns: [
+          { name: "product_name", type: "VARCHAR" },
+          { name: "product_type", type: "VARCHAR" },
+          { name: "product_price", type: "DECIMAL" },
+          { name: "order_item_id", type: "BIGINT" },
+        ],
+      },
+    ];
+    const question =
+      "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.order_items",
+          name: "order_items",
+          source: "dbt manifest",
+          columns: [
+            ...schemaContext[0]!.columns,
+            { name: "category", description: "Projected by certified source SQL shape." },
+            { name: "revenue", description: "Projected by certified source SQL shape." },
+          ],
+          rank: 1,
+          score: 84,
+          reason: "selected product revenue relation",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["product", "category"],
+        routeIntent: "ad_hoc_ranking",
+        certifiedApplicability: {
+          objectKey: "block:food_vs_drink_revenue",
+          name: "food_vs_drink_revenue",
+          kind: "context_only",
+          score: 0.42,
+          reasons: ["category revenue block is only context for product-grain request"],
+        },
+        blockFit: {
+          kind: "context_only",
+          confidence: "high",
+          reasons: ["missing requested dimensions: product", "missing requested outputs: product_name"],
+          missingOutputs: ["product_name"],
+          missingDimensions: ["product"],
+          unsupportedFilters: [],
+          topNAction: "none",
+          inferredContract: false,
+        },
+        certifiedCandidateFits: [{
+          objectKey: "block:food_vs_drink_revenue",
+          name: "food_vs_drink_revenue",
+          applicabilityKind: "context_only",
+          applicabilityScore: 0.42,
+          action: "context_only",
+          fit: {
+            kind: "context_only",
+            confidence: "high",
+            reasons: ["missing requested dimensions: product", "missing requested outputs: product_name"],
+            missingOutputs: ["product_name"],
+            missingDimensions: ["product"],
+            unsupportedFilters: [],
+            topNAction: "none",
+            inferredContract: false,
+          },
+        }],
+      }),
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_name", "category", "revenue"],
+        rows: [{ product_name: "Classic Jaffle", category: "Food", revenue: 120 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.sourceCertifiedBlock).not.toBe("food_vs_drink_revenue");
+    expect(result.proposedSql).toContain("product_name");
+    expect(result.proposedSql).toContain("product_type AS category");
+    expect(result.proposedSql).toContain("SUM(product_price) AS revenue");
+    expect(result.proposedSql).not.toContain("food_vs_drink_revenue");
+    expect(result.result?.columns).toEqual(["product_name", "category", "revenue"]);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "check_certified_fit",
+          status: "checked",
+          label: expect.stringContaining("food_vs_drink_revenue"),
+          detail: expect.stringContaining("product"),
+        }),
+        expect.objectContaining({
+          tool: "check_certified_candidate_fit",
+          status: "checked",
+          label: expect.stringContaining("food_vs_drink_revenue"),
+          detail: expect.stringContaining("missing requested outputs: product_name"),
+        }),
+      ]),
+    );
+  });
+
+  it("adapts certified source SQL expressions when only projected source-shape columns are selected", async () => {
+    const provider = new StubProvider("should not be called");
+    const question =
+      "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext: [],
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "dev.order_items",
+          name: "order_items",
+          source: "certified source SQL shape",
+          columns: [
+            { name: "product_name", description: "Projected by certified source SQL shape." },
+            { name: "category", description: "Projected by certified source SQL shape." },
+            { name: "revenue", description: "Projected by certified source SQL shape." },
+            { name: "units", description: "Projected by certified source SQL shape." },
+          ],
+          rank: 1,
+          score: 84,
+          reason: "selected projected source shape for product revenue",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["product", "category"],
+        routeIntent: "ad_hoc_ranking",
+        sourceBlockSql: [
+          {
+            objectKey: "dql:block:top_products",
+            name: "top_products",
+            status: "certified",
+            sql: [
+              "SELECT",
+              "  product_name,",
+              "  SUM(product_price) AS revenue,",
+              "  COUNT(*) AS units",
+              "FROM dev.order_items",
+              "GROUP BY 1",
+              "ORDER BY revenue DESC",
+              "LIMIT 10",
+            ].join("\n"),
+          },
+          {
+            objectKey: "dql:block:food_vs_drink_revenue",
+            name: "food_vs_drink_revenue",
+            status: "certified",
+            sql: [
+              "SELECT",
+              "  CASE WHEN is_food_item THEN 'Food' ELSE 'Drink' END AS category,",
+              "  SUM(product_price) AS revenue",
+              "FROM dev.order_items",
+              "GROUP BY 1",
+              "ORDER BY revenue DESC",
+            ].join("\n"),
+          },
+        ],
+      }),
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_name", "category", "revenue"],
+        rows: [{ product_name: "Classic Jaffle", category: "Food", revenue: 120 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.proposedSql).toContain("product_name AS product_name");
+    expect(result.proposedSql).toContain("CASE WHEN is_food_item THEN 'Food' ELSE 'Drink' END AS category");
+    expect(result.proposedSql).toContain("SUM(product_price) AS revenue");
+    expect(result.proposedSql).toContain("FROM dev.order_items");
+    expect(result.proposedSql).toContain("GROUP BY 1, 2");
+    expect(result.proposedSql).toContain("ORDER BY revenue DESC");
+    expect(result.proposedSql).not.toContain("FROM food_vs_drink_revenue");
+    expect(result.validationWarnings ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("missing requested output column"),
+      ]),
+    );
+    expect(result.result?.columns).toEqual(["product_name", "category", "revenue"]);
+  });
+
+  it("generates a customer drilldown for a singular prior product reference", async () => {
+    const provider = new StubProvider("should not be called");
+    const question = "who are the customers for this product?";
+    const schemaContext = [
+      {
+        relation: "dev.order_items",
+        schema: "dev",
+        name: "order_items",
+        columns: [
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "product_name", type: "VARCHAR", sampleValues: ["for richer or pourover", "vanilla ice"] },
+          { name: "product_price", type: "DECIMAL" },
+          { name: "order_item_id", type: "BIGINT" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: "dev.order_items",
+        name: "order_items",
+        source: "dbt manifest",
+        columns: schemaContext[0]!.columns,
+        rank: 1,
+        score: 92,
+        reason: "selected order item relation for product customer drilldown",
+      }], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["customer", "product"],
+        routeIntent: "entity_drilldown",
+      }),
+      followUp: {
+        kind: "drilldown",
+        filters: ["for richer or pourover"],
+        dimensions: ["product"],
+        priorResultColumns: ["product_name", "category", "revenue", "units"],
+        priorResultValues: {
+          product_name: ["for richer or pourover", "vanilla ice"],
+          category: ["Drink"],
+        },
+        priorMeasures: ["revenue"],
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "product_name", "revenue"],
+        rows: [{ customer_name: "Mr. Matthew Meyer", product_name: "for richer or pourover", revenue: 70 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("f.customer_name AS customer_name");
+    expect(result.proposedSql).toContain("f.product_name AS product_name");
+    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+    expect(result.proposedSql).toContain("WHERE f.product_name = 'for richer or pourover'");
+    expect(result.proposedSql).toContain("GROUP BY f.customer_name, f.product_name");
+    expect(result.proposedSql).not.toContain("top_products");
+    expect(result.validationWarnings ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("missing requested output column"),
+      ]),
+    );
+    expect(result.result?.columns).toEqual(["customer_name", "product_name", "revenue"]);
+  });
+
+  it("generates a product-customer revenue view for combined product and buyer requests", async () => {
+    const provider = new StubProvider("should not be called");
+    const question = "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue and also give the complete view of customers who bought these product";
+    const schemaContext = [
+      {
+        relation: "dev.order_items",
+        schema: "dev",
+        name: "order_items",
+        columns: [
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "product_name", type: "VARCHAR" },
+          { name: "is_food_item", type: "BOOLEAN" },
+          { name: "product_price", type: "DECIMAL" },
+          { name: "order_item_id", type: "BIGINT" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: "dev.order_items",
+        name: "order_items",
+        source: "dbt manifest",
+        columns: schemaContext[0]!.columns,
+        rank: 1,
+        score: 93,
+        reason: "selected order item relation for product/customer revenue view",
+      }], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["product", "category", "customer"],
+        routeIntent: "ad_hoc_ranking",
+      }),
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_name", "category", "customer_name", "revenue", "units"],
+        rows: [{
+          product_name: "for richer or pourover",
+          category: "Drink",
+          customer_name: "Mr. Matthew Meyer",
+          revenue: 70,
+          units: 10,
+        }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("f.product_name AS product_name");
+    expect(result.proposedSql).toContain("CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END AS category");
+    expect(result.proposedSql).toContain("f.customer_name AS customer_name");
+    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+    expect(result.proposedSql).toContain("COUNT(*) AS units");
+    expect(result.proposedSql).toContain("GROUP BY f.product_name, CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END, f.customer_name");
+    expect(result.proposedSql).not.toContain("top_customers");
+    expect(result.proposedSql).not.toContain("lifetime_spend");
+    expect(result.validationWarnings ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("missing requested output column"),
+      ]),
+    );
+    expect(result.result?.columns).toEqual(["product_name", "category", "customer_name", "revenue", "units"]);
+  });
+
+  it("rejects customer-only generated rows for combined product and buyer requests", async () => {
+    const question = "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue and also give the complete view of customers who bought these product";
+    const provider = new StubProvider([
+      "Customer-only result.\n\n",
+      "```sql\n",
+      "SELECT customer_name, count_lifetime_orders AS orders, lifetime_spend\n",
+      "FROM dev.customers\n",
+      "ORDER BY lifetime_spend DESC\n",
+      "LIMIT 10\n",
+      "```\n\n",
+      "Viz: table",
+    ].join(""));
+    const schemaContext = [
+      {
+        relation: "dev.customers",
+        schema: "dev",
+        name: "customers",
+        columns: [
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "count_lifetime_orders", type: "BIGINT" },
+          { name: "lifetime_spend", type: "DECIMAL" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: "dev.customers",
+        name: "customers",
+        source: "dbt manifest",
+        columns: schemaContext[0]!.columns,
+        rank: 1,
+        score: 90,
+        reason: "selected customer relation",
+      }], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["product", "category", "customer"],
+        routeIntent: "ad_hoc_ranking",
+      }),
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "orders", "lifetime_spend"],
+        rows: [{ customer_name: "Mr. Matthew Meyer", orders: 33, lifetime_spend: 3089.8 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(1);
+    expect(result.kind).toBe("no_answer");
+    expect(result.text).toContain("rejected instead of returning a partial customer-only or product-only table");
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("missing requested output column"),
+        "Generated result shape did not satisfy the requested product/customer answer contract.",
+      ]),
+    );
+    expect(result.result?.columns).toEqual(["customer_name", "orders", "lifetime_spend"]);
+  });
+
+  it("generates product categories for a prior customer set even when category is derived", async () => {
+    const provider = new StubProvider("should not be called");
+    const question = "what are the product catagories for these customers";
+    const schemaContext = [
+      {
+        relation: "dev.order_items",
+        schema: "dev",
+        name: "order_items",
+        columns: [
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "product_name", type: "VARCHAR" },
+          { name: "is_food_item", type: "BOOLEAN" },
+          { name: "product_price", type: "DECIMAL" },
+          { name: "order_item_id", type: "BIGINT" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: "dev.order_items",
+        name: "order_items",
+        source: "dbt manifest",
+        columns: schemaContext[0]!.columns,
+        rank: 1,
+        score: 91,
+        reason: "selected order item relation for customer category view",
+      }], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["customer", "category"],
+        routeIntent: "entity_drilldown",
+      }),
+      followUp: {
+        kind: "drilldown",
+        filters: ["Mr. Matthew Meyer", "Aaron Gardner"],
+        dimensions: ["customer"],
+        priorResultColumns: ["product_name", "category", "customer_name", "revenue", "units"],
+        priorResultValues: {
+          customer_name: ["Mr. Matthew Meyer", "Aaron Gardner"],
+          product_name: ["for richer or pourover", "vanilla ice"],
+          category: ["Drink"],
+        },
+        priorMeasures: ["revenue"],
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "product_name", "category", "revenue", "units"],
+        rows: [{ customer_name: "Mr. Matthew Meyer", product_name: "for richer or pourover", category: "Drink", revenue: 70, units: 10 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("f.customer_name AS customer_name");
+    expect(result.proposedSql).toContain("f.product_name AS product_name");
+    expect(result.proposedSql).toContain("CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END AS category");
+    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+    expect(result.proposedSql).toContain("WHERE f.customer_name IN ('Mr. Matthew Meyer', 'Aaron Gardner')");
+    expect(result.proposedSql).toContain("GROUP BY f.customer_name, f.product_name, CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END");
+    expect(result.proposedSql).not.toContain(" category ");
+    expect(result.validationWarnings ?? []).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("outside the inspected columns"),
+      ]),
+    );
+    expect(result.result?.columns).toEqual(["customer_name", "product_name", "category", "revenue", "units"]);
+  });
+
+  it("generates product and category rows for above-order follow-ups using prior customers", async () => {
+    const provider = new StubProvider("should not be called");
+    const question = "what the are the products and sub catogories for the above orders";
+    const schemaContext = [
+      {
+        relation: "order_items",
+        schema: "main",
+        name: "order_items",
+        columns: [
+          { name: "order_item_id", type: "BIGINT" },
+          { name: "order_id", type: "BIGINT" },
+          { name: "product_name", type: "VARCHAR" },
+          { name: "product_type", type: "VARCHAR" },
+          { name: "product_price", type: "DECIMAL" },
+        ],
+      },
+      {
+        relation: "fct_orders",
+        schema: "main",
+        name: "fct_orders",
+        columns: [
+          { name: "order_id", type: "BIGINT" },
+          { name: "customer_id", type: "BIGINT" },
+        ],
+      },
+      {
+        relation: "dim_customers",
+        schema: "main",
+        name: "dim_customers",
+        columns: [
+          { name: "customer_id", type: "BIGINT" },
+          { name: "customer_name", type: "VARCHAR" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, schemaContext.map((table, index) => ({
+        relation: table.relation,
+        name: table.name,
+        source: "dbt manifest",
+        columns: table.columns,
+        rank: index + 1,
+        score: 90 - index,
+        reason: "selected prior customer order relation",
+      })), {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["customer", "product", "category"],
+        routeIntent: "entity_drilldown",
+      }),
+      followUp: {
+        kind: "drilldown",
+        filters: ["Mr. Matthew Meyer", "Aaron Gardner"],
+        dimensions: ["customer"],
+        priorResultColumns: ["customer_name", "orders", "lifetime_spend"],
+        priorResultValues: {
+          customer_name: ["Mr. Matthew Meyer", "Aaron Gardner"],
+        },
+        priorMeasures: ["lifetime_spend"],
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "product_name", "category", "revenue", "units"],
+        rows: [{
+          customer_name: "Mr. Matthew Meyer",
+          product_name: "for richer or pourover",
+          category: "Drink",
+          revenue: 70,
+          units: 10,
+        }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("f.product_name AS product_name");
+    expect(result.proposedSql).toContain("f.product_type AS category");
+    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+    expect(result.proposedSql).toContain("JOIN fct_orders AS b ON f.order_id = b.order_id");
+    expect(result.proposedSql).toContain("JOIN dim_customers AS c ON b.customer_id = c.customer_id");
+    expect(result.proposedSql).toContain("WHERE c.customer_name IN ('Mr. Matthew Meyer', 'Aaron Gardner')");
+    expect(result.proposedSql).toContain("GROUP BY c.customer_name, f.product_name, f.product_type");
+    expect(result.result?.columns).toEqual(["customer_name", "product_name", "category", "revenue", "units"]);
+  });
+
+  it("does not certify global top customers for a category-scoped follow-up", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:food_vs_drink_revenue",
+          kind: "block",
+          name: "food_vs_drink_revenue",
+          domain: "orders",
+          status: "certified",
+          description: "Revenue split between food and drink categories from order items.",
+          tags: ["revenue", "category", "food", "drink"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+          grain: "category",
+          declaredOutputs: ["category", "revenue"],
+          dimensions: ["category"],
+        },
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top 10 customers by lifetime spend, with order counts.",
+          llmContext: "Use for overall best customers by lifetime spend only.",
+          tags: ["customers", "ranking", "orders"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+          grain: "customer",
+          declaredOutputs: ["customer_name", "lifetime_spend", "order_count"],
+          dimensions: ["customer"],
+          sql: "SELECT customer_name, lifetime_spend, order_count FROM customers ORDER BY lifetime_spend DESC LIMIT 10",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "Top customers for the prior categories.\n\n" +
+        "```sql\n" +
+        "SELECT customer_name, product_type AS category, SUM(product_price) AS revenue\n" +
+        "FROM analytics.order_items\n" +
+        "WHERE product_type IN ('Food', 'Drink')\n" +
+        "GROUP BY customer_name, product_type\n" +
+        "ORDER BY revenue DESC\n" +
+        "LIMIT 5\n" +
+        "```\n\n" +
+        "Viz: table",
+    );
+    const question = "who are the top 5 customers for these categories?";
+    const schemaContext = [
+      {
+        relation: "analytics.order_items",
+        schema: "analytics",
+        name: "order_items",
+        columns: [
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "product_type", type: "VARCHAR" },
+          { name: "product_price", type: "DECIMAL" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.order_items",
+          name: "order_items",
+          source: "dbt manifest",
+          columns: schemaContext[0]!.columns,
+          rank: 1,
+          score: 81,
+          reason: "selected product/customer revenue relation",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["customer", "category"],
+        routeIntent: "entity_drilldown",
+        certifiedApplicability: {
+          objectKey: "block:top_customers",
+          name: "top_customers",
+          kind: "context_only",
+          score: 0.38,
+          reasons: ["overall top customers block lacks category scope"],
+        },
+        blockFit: {
+          kind: "context_only",
+          confidence: "high",
+          reasons: ["missing requested dimensions: category", "unsupported requested filters: category"],
+          missingOutputs: [],
+          missingDimensions: ["category"],
+          unsupportedFilters: ["category"],
+          topNAction: "none",
+          inferredContract: false,
+        },
+      }),
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "food_vs_drink_revenue",
+        filters: ["Food", "Drink"],
+        dimensions: ["category"],
+        priorResultColumns: ["category", "revenue"],
+        priorResultValues: { category: ["Food", "Drink"] },
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "category", "revenue"],
+        rows: [{ customer_name: "Mr. Matthew Meyer", category: "Food", revenue: 3089.8 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.block).toBeUndefined();
+    expect(result.reviewStatus).toBe("draft_ready");
+	    expect(result.sourceCertifiedBlock).toBe("food_vs_drink_revenue");
+	    expect(result.proposedSql).toContain("product_type IN ('Food', 'Drink')");
+	    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+	    expect(result.proposedSql).toContain("LIMIT 5");
+	    expect(result.proposedSql).not.toContain("order_item_id_sum");
+	    expect(result.proposedSql).not.toContain("top_customers");
+    expect(result.result?.columns).toEqual(["customer_name", "category", "revenue"]);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "check_certified_fit",
+          status: "checked",
+          label: expect.stringContaining("top_customers"),
+          detail: expect.stringContaining("category"),
+        }),
+      ]),
+    );
+  });
+
+  it("joins through orders for category-scoped customer follow-ups when customers are not on order items", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "block:food_vs_drink_revenue",
+          kind: "block",
+          name: "food_vs_drink_revenue",
+          domain: "orders",
+          status: "certified",
+          description: "Revenue split between food and drink categories from order items.",
+          tags: ["revenue", "category", "food", "drink"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+          grain: "category",
+          declaredOutputs: ["category", "revenue"],
+          dimensions: ["category"],
+        },
+        {
+          nodeId: "block:top_customers",
+          kind: "block",
+          name: "top_customers",
+          domain: "customers",
+          status: "certified",
+          description: "Top 10 customers by lifetime spend, with order counts.",
+          llmContext: "Use for overall best customers by lifetime spend only.",
+          tags: ["customers", "ranking", "orders"],
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL block",
+          grain: "customer",
+          declaredOutputs: ["customer_name", "lifetime_spend", "order_count"],
+          dimensions: ["customer"],
+          sql: "SELECT customer_name, lifetime_spend, order_count FROM customers ORDER BY lifetime_spend DESC LIMIT 10",
+        },
+      ],
+      [],
+    );
+    const question = "who are the top 5 customers for these categories?";
+    const schemaContext = [
+      {
+        relation: "order_items",
+        schema: "main",
+        name: "order_items",
+        columns: [
+          { name: "order_item_id", type: "BIGINT" },
+          { name: "order_id", type: "BIGINT" },
+          { name: "product_id", type: "VARCHAR" },
+          { name: "product_type", type: "VARCHAR" },
+          { name: "product_price", type: "DECIMAL" },
+        ],
+      },
+      {
+        relation: "fct_orders",
+        schema: "main",
+        name: "fct_orders",
+        columns: [
+          { name: "order_id", type: "BIGINT" },
+          { name: "customer_id", type: "BIGINT" },
+        ],
+      },
+      {
+        relation: "dim_customers",
+        schema: "main",
+        name: "dim_customers",
+        columns: [
+          { name: "customer_id", type: "BIGINT" },
+          { name: "customer_name", type: "VARCHAR" },
+        ],
+      },
+    ];
+    const result = await answer({
+      question,
+      provider: new StubProvider("should not be called"),
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations(question, schemaContext.map((table, index) => ({
+        relation: table.relation,
+        name: table.name,
+        source: "dbt manifest",
+        columns: table.columns,
+        rank: index + 1,
+        score: 90 - index,
+        reason: "selected follow-up join relation",
+      })), {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["customer", "category"],
+        routeIntent: "entity_drilldown",
+        sourceBlockSql: [{
+          objectKey: "dql:block:food_vs_drink_revenue",
+          name: "food_vs_drink_revenue",
+          status: "certified",
+          sql: "SELECT CASE WHEN product_type = 'jaffle' THEN 'Food' WHEN product_type = 'beverage' THEN 'Drink' ELSE product_type END AS category, SUM(product_price) AS revenue FROM order_items GROUP BY 1",
+        }],
+      }),
+      followUp: {
+        kind: "drilldown",
+        sourceBlockName: "food_vs_drink_revenue",
+        filters: ["Food", "Drink"],
+        dimensions: ["category"],
+        priorResultColumns: ["category", "revenue"],
+        priorResultValues: { category: ["Food", "Drink"] },
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "category", "revenue"],
+        rows: [{ customer_name: "Alice Johnson", category: "jaffle", revenue: 24 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.sourceCertifiedBlock).toBe("food_vs_drink_revenue");
+    expect(result.proposedSql).toContain("c.customer_name AS customer_name");
+    expect(result.proposedSql).toContain("f.product_type AS category");
+    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+    expect(result.proposedSql).toContain("FROM order_items AS f");
+    expect(result.proposedSql).toContain("JOIN fct_orders AS b ON f.order_id = b.order_id");
+    expect(result.proposedSql).toContain("JOIN dim_customers AS c ON b.customer_id = c.customer_id");
+    expect(result.proposedSql).toContain("f.product_type IN ('jaffle', 'beverage')");
+    expect(result.proposedSql).toContain("LIMIT 5");
+    expect(result.proposedSql).not.toContain("top_customers");
+    expect(result.proposedSql).not.toContain("product_id AS product_id");
+  });
+
   it("allows an explicit saved top customers block request to stay certified", async () => {
     kg.rebuild(
       [
@@ -828,6 +1874,7 @@ describe("answer (block-first loop)", () => {
           selectedObjects: 2,
           selectedEvidence: [],
           topRejected: [],
+          certifiedCandidateFits: [],
           candidateConflicts: [],
         },
       } as any,
@@ -1261,6 +2308,45 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("uses governed lineage aliases when physical metric columns do not match the business term", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "Which products have the highest revenue?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.order_items",
+          schema: "analytics",
+          name: "order_items",
+          source: "dbt manifest",
+          columns: [
+            { name: "product_name", type: "VARCHAR" },
+            {
+              name: "product_price",
+              type: "DECIMAL",
+              description: "Item sale price. Governed aliases from lineage: revenue.",
+            },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_name", "revenue_sum"],
+        rows: [{ product_name: "Jaffle", revenue_sum: 200000 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("FROM analytics.order_items");
+    expect(result.proposedSql).toContain("product_name");
+    expect(result.proposedSql).toContain("SUM(product_price)");
+    expect(result.proposedSql).not.toContain("SUM(revenue)");
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("generates generic dbt-only trend SQL from inspected relation columns", async () => {
     kg.rebuild([], []);
     const provider = new StubProvider("should not be called");
@@ -1645,6 +2731,7 @@ describe("answer (block-first loop)", () => {
           selectedObjects: 1,
           selectedEvidence: [],
           topRejected: [],
+          certifiedCandidateFits: [],
           candidateConflicts: [],
         },
         freshness: {
@@ -1826,6 +2913,7 @@ describe("answer (block-first loop)", () => {
           selectedObjects: 1,
           selectedEvidence: [],
           topRejected: [],
+          certifiedCandidateFits: [],
           candidateConflicts: [],
         },
         freshness: {
@@ -1899,8 +2987,30 @@ describe("answer (block-first loop)", () => {
               sql: "SELECT player_name, team_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
             },
           },
+          {
+            objectKey: "dql:block_output:Top 10 Goal Scorers.total_points",
+            objectType: "dql_block_output",
+            name: "total_points",
+            fullName: "Top 10 Goal Scorers.total_points",
+            status: "certified",
+          },
+          {
+            objectKey: "warehouse:column:NBA_GAMES.RAW.fct_player_performance.points",
+            objectType: "warehouse_column",
+            name: "points",
+            fullName: "NBA_GAMES.RAW.fct_player_performance.points",
+            sourceSystem: "DQL block column lineage",
+          },
         ],
-        edges: [],
+        edges: [
+          {
+            edgeType: "derives_from",
+            fromKey: "dql:block_output:Top 10 Goal Scorers.total_points",
+            toKey: "warehouse:column:NBA_GAMES.RAW.fct_player_performance.points",
+            confidence: 0.92,
+            payload: { aggregateFn: "sum" },
+          },
+        ],
         queryRuns: [],
         citations: [],
         evidenceSummaries: [],
@@ -1948,6 +3058,7 @@ describe("answer (block-first loop)", () => {
           selectedObjects: 1,
           selectedEvidence: [],
           topRejected: [],
+          certifiedCandidateFits: [],
           candidateConflicts: [],
         },
         freshness: {
@@ -1964,6 +3075,8 @@ describe("answer (block-first loop)", () => {
     expect(prompt).toContain("Worked examples from certified blocks");
     expect(prompt).toContain("relation: NBA_GAMES.RAW.fct_player_performance");
     expect(prompt).toContain("projected columns: player_name, team_name, season, total_points");
+    expect(prompt).toContain("Column lineage from governed metadata:");
+    expect(prompt).toContain("Top 10 Goal Scorers.total_points derives from NBA_GAMES.RAW.fct_player_performance.points via SUM");
     expect(result.validationWarnings ?? []).not.toEqual(
       expect.arrayContaining([expect.stringContaining("Column validation was advisory")]),
     );
@@ -2226,6 +3339,7 @@ describe("answer (block-first loop)", () => {
           selectedObjects: 0,
           selectedEvidence: [],
           topRejected: [],
+          certifiedCandidateFits: [],
           candidateConflicts: [],
         },
         freshness: {
@@ -2315,6 +3429,7 @@ describe("answer (block-first loop)", () => {
           selectedObjects: 0,
           selectedEvidence: [],
           topRejected: [],
+          certifiedCandidateFits: [],
           candidateConflicts: [],
         },
         freshness: {
@@ -2447,6 +3562,72 @@ describe("answer (block-first loop)", () => {
     expect(result.executionError).toBeUndefined();
   });
 
+  it("self-repairs context-validation failures: bad column on turn 1, corrected JOIN on turn 2 executes", async () => {
+    // Turn 1 hallucinates `product_name` onto the fact table; the guard rejects
+    // it and the bounded repair pass hands the model the exact error. Turn 2's
+    // corrected SQL (join-free, using inspected columns) validates and EXECUTES.
+    const provider = new StubProvider([
+      "```sql\nSELECT product_name, SUM(amount) AS revenue FROM analytics.fct_orders GROUP BY product_name\n```",
+      "```sql\nSELECT c.segment, o.week, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_customers c ON o.customer_id = c.customer_id GROUP BY c.segment, o.week\n```",
+    ]);
+    let executed = false;
+    const question = "Why did revenue change by segment?";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.fct_orders",
+          name: "fct_orders",
+          source: "dbt manifest",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "amount", type: "DECIMAL" },
+            { name: "week", type: "DATE" },
+          ],
+          rank: 1,
+          score: 80,
+          reason: "selected revenue fact table",
+        },
+        {
+          relation: "analytics.dim_customers",
+          name: "dim_customers",
+          source: "dbt manifest",
+          columns: [
+            { name: "customer_id", type: "VARCHAR" },
+            { name: "segment", type: "VARCHAR" },
+          ],
+          rank: 2,
+          score: 65,
+          reason: "selected customer dimension",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["segment"],
+        mode: "diagnose_change",
+        routeIntent: "diagnose_change",
+      }),
+      executeGeneratedSql: async (sql) => {
+        executed = true;
+        return {
+          columns: ["segment", "revenue"],
+          rows: [{ segment: "enterprise", revenue: 100 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(provider.calls).toHaveLength(2);
+    expect(executed).toBe(true);
+    expect(result.kind).toBe("uncertified");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Repaired after context-validation failure")]),
+    );
+  });
+
   it("rejects provider SQL that selects unknown columns from a joined CTE before execution", async () => {
     const provider = new StubProvider(
       "Draft diagnostic SQL.\n\n" +
@@ -2500,7 +3681,9 @@ describe("answer (block-first loop)", () => {
     expect(result.kind).toBe("no_answer");
     expect(result.text).toContain('column "fake_column"');
     expect(executed).toBe(false);
-    expect(provider.calls).toHaveLength(1);
+    // Initial generation + exactly ONE bounded self-repair attempt (which still
+    // fails against this stub) — invalid SQL is never executed either way.
+    expect(provider.calls).toHaveLength(2);
   });
 
   it("asks for clarification when no metadata can ground an analytical question", async () => {
@@ -2529,7 +3712,28 @@ function contextPackForRankedRelations(
     score: number;
     reason: string;
   }>,
-  options: { metricTerms?: string[]; dimensionTerms?: string[]; mode?: string; routeIntent?: string } = {},
+  options: {
+    metricTerms?: string[];
+    dimensionTerms?: string[];
+    mode?: string;
+    routeIntent?: string;
+    certifiedApplicability?: CertifiedBlockApplicability;
+    blockFit?: CertifiedBlockFit;
+    certifiedCandidateFits?: Array<{
+      objectKey: string;
+      name: string;
+      applicabilityKind: "exact_answer" | "safe_parameterized" | "context_only" | "not_applicable";
+      applicabilityScore: number;
+      action: "certified_answer" | "context_only" | "eligible_not_selected" | "rejected_for_fit";
+      fit: CertifiedBlockFit;
+    }>;
+    sourceBlockSql?: Array<{
+      objectKey: string;
+      name: string;
+      status?: string;
+      sql: string;
+    }>;
+  } = {},
 ) {
   const metricTerms = options.metricTerms ?? ["revenue"];
   const dimensionTerms = options.dimensionTerms ?? ["product"];
@@ -2572,14 +3776,16 @@ function contextPackForRankedRelations(
       reason: "Use selected dbt metadata context.",
       trustLabel: "mixed",
       reviewStatus: "draft_ready",
-      selectedEvidence: [],
-      missingContext: [],
-      followUps: [],
-    },
+	      selectedEvidence: [],
+	      missingContext: [],
+	      followUps: [],
+	      certifiedApplicability: options.certifiedApplicability,
+	      blockFit: options.blockFit,
+	    },
     evidenceRoles: [],
     allowedSqlContext: {
       relations: relations.map(({ rank: _rank, score: _score, reason: _reason, ...relation }) => relation),
-      sourceBlockSql: [],
+      sourceBlockSql: options.sourceBlockSql ?? [],
     },
     missingContext: [],
     conflicts: [],
@@ -2597,6 +3803,7 @@ function contextPackForRankedRelations(
         rank: relation.rank,
       })),
       topRejected: [],
+      certifiedCandidateFits: options.certifiedCandidateFits ?? [],
       candidateConflicts: [],
     },
     freshness: {

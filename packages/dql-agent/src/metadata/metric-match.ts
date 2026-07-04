@@ -262,14 +262,141 @@ export function resolveGovernedMetricSql(
   metric: KGNode,
   pool: KGNode[],
 ): { sql: string; metric: KGNode } | undefined {
-  const direct = metricToGovernedSql(metric);
-  if (direct) return { sql: direct, metric };
+  const resolved = resolveGovernedMetricDefinition(metric, pool);
+  return resolved ? { sql: metricToGovernedSql(resolved.metric)!, metric: resolved.metric } : undefined;
+}
+
+/** Resolve a metric (or its leaf-named sibling measure) to an executable definition. */
+export function resolveGovernedMetricDefinition(
+  metric: KGNode,
+  pool: KGNode[],
+): { def: { expr: string; table: string }; metric: KGNode } | undefined {
+  const direct = parseMetricDefinition(metric);
+  if (direct) return { def: direct, metric };
   const leaf = metric.name.split('.').pop()?.toLowerCase();
   if (!leaf) return undefined;
   const leafSibling = pool
     .filter((node) => node.nodeId !== metric.nodeId && node.name.split('.').pop()?.toLowerCase() === leaf)
     .sort((a, b) => a.name.length - b.name.length)
-    .find((node) => metricToGovernedSql(node));
-  if (leafSibling) return { sql: metricToGovernedSql(leafSibling)!, metric: leafSibling };
+    .find((node) => parseMetricDefinition(node));
+  if (!leafSibling) return undefined;
+  return { def: parseMetricDefinition(leafSibling)!, metric: leafSibling };
+}
+
+export interface GovernedMetricFirstResult {
+  sql: string;
+  metric: KGNode;
+  dimensions: string[];
+}
+
+/**
+ * Tier 2 of the governed answer hierarchy (certified blocks → semantic-layer
+ * metrics + dimensions → generated SQL): deterministically synthesize executable
+ * SQL for a confidently matched metric WHEN its governed definition can express
+ * the question's full requested shape — a scalar KPI, or a group-by whose
+ * requested dimensions ALL resolve to real columns on the metric's own table
+ * (verified against the runtime schema). Precise-or-nothing: any unresolvable
+ * dimension, explicit filter, extra measure, or per-group top-N returns
+ * undefined so the question falls through to generation, where the metric still
+ * grounds the prompt as context.
+ */
+export function buildGovernedMetricFirstSql(input: {
+  metric: KGNode;
+  pool: KGNode[];
+  requestedShape: {
+    dimensions: string[];
+    measures: string[];
+    filters: string[];
+    topN?: { n: number; scope: 'overall' | 'per_group' };
+    rankingDirection?: 'top' | 'bottom';
+  };
+  schemaTables: Array<{ relation: string; name?: string; columns: Array<{ name: string }> }>;
+}): GovernedMetricFirstResult | undefined {
+  const { requestedShape } = input;
+  // Conservative gates: ONE measure family (the planner expands a single ask
+  // into variants — 'revenue'/'total'/'total_revenue' — so count families, not
+  // terms), no explicit filter values (value binding stays with generation),
+  // and no per-group ranking.
+  const families = new Set(
+    requestedShape.measures
+      .map((measure) => measureFamilyOf(measure))
+      .filter((family): family is string => Boolean(family)),
+  );
+  if (families.size > 1) return undefined;
+  if (requestedShape.filters.length > 0) return undefined;
+  if (requestedShape.topN?.scope === 'per_group') return undefined;
+  const resolved = resolveGovernedMetricDefinition(input.metric, input.pool);
+  if (!resolved) return undefined;
+  const alias = resolved.metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
+
+  if (requestedShape.dimensions.length === 0) {
+    return {
+      sql: `SELECT ${resolved.def.expr} AS ${alias}\nFROM ${resolved.def.table}`,
+      metric: resolved.metric,
+      dimensions: [],
+    };
+  }
+
+  const table = findSchemaTable(resolved.def.table, input.schemaTables);
+  if (!table) return undefined;
+  const columns: string[] = [];
+  for (const dimension of requestedShape.dimensions) {
+    const column = resolveDimensionColumn(dimension, table.columns);
+    if (!column) return undefined;
+    if (!columns.includes(column)) columns.push(column);
+  }
+  const direction = requestedShape.rankingDirection === 'bottom' ? 'ASC' : 'DESC';
+  const limit = requestedShape.topN?.n;
+  return {
+    sql: [
+      `SELECT ${columns.join(', ')}, ${resolved.def.expr} AS ${alias}`,
+      `FROM ${resolved.def.table}`,
+      `GROUP BY ${columns.join(', ')}`,
+      `ORDER BY ${alias} ${direction}`,
+      ...(limit ? [`LIMIT ${limit}`] : []),
+    ].join('\n'),
+    metric: resolved.metric,
+    dimensions: columns,
+  };
+}
+
+/** Resolve a measure term to its synonym family (undefined for generic words like 'total'). */
+function measureFamilyOf(term: string): string | undefined {
+  const tokens = term.toLowerCase().match(TOKEN_RE) ?? [];
+  for (const [family, words] of Object.entries(MEASURE_FAMILIES)) {
+    if (tokens.some((token) => words.includes(token))) return family;
+  }
   return undefined;
+}
+
+function findSchemaTable(
+  table: string,
+  schemaTables: Array<{ relation: string; name?: string; columns: Array<{ name: string }> }>,
+): { relation: string; columns: Array<{ name: string }> } | undefined {
+  const target = table.toLowerCase();
+  const targetLeaf = target.split('.').pop() ?? target;
+  return schemaTables.find((candidate) => {
+    const relation = candidate.relation.toLowerCase();
+    const name = candidate.name?.toLowerCase();
+    return relation === target
+      || relation.split('.').pop() === targetLeaf
+      || name === target
+      || name === targetLeaf;
+  });
+}
+
+/** Map a requested dimension term to a real column on the metric's table (exact-ish only). */
+function resolveDimensionColumn(dimension: string, columns: Array<{ name: string }>): string | undefined {
+  const term = dimension.toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+  const singular = term.replace(/s$/, '');
+  const candidates = [term, singular, `${term}_name`, `${singular}_name`];
+  for (const candidate of candidates) {
+    const hit = columns.find((column) => column.name.toLowerCase() === candidate);
+    if (hit) return hit.name;
+  }
+  const suffixHit = columns.find((column) => {
+    const name = column.name.toLowerCase();
+    return name.endsWith(`_${singular}`) || name.endsWith(`_${term}`);
+  });
+  return suffixHit?.name;
 }

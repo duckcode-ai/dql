@@ -142,6 +142,203 @@ describe('local metadata catalog', () => {
     );
   });
 
+  it('indexes block output column lineage as traversable metadata edges', async () => {
+    await ensureMetadataCatalogFresh(projectRoot);
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.getObject('dql:block_output:Top 10 Goal Scorers.total_points')).toMatchObject({
+        objectType: 'dql_block_output',
+        name: 'total_points',
+        payload: expect.objectContaining({
+          block: 'Top 10 Goal Scorers',
+          output: 'total_points',
+          isAggregate: true,
+          aggregateFn: 'SUM',
+          sources: expect.arrayContaining([
+            expect.objectContaining({ table: 'fct_player_performance', column: 'points' }),
+          ]),
+        }),
+      });
+      expect(catalog.edgesForKeys(['dql:block:Top 10 Goal Scorers'], 3)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            edgeType: 'contains',
+            fromKey: 'dql:block:Top 10 Goal Scorers',
+            toKey: 'dql:block_output:Top 10 Goal Scorers.total_points',
+          }),
+          expect.objectContaining({
+            edgeType: 'derives_from',
+            fromKey: 'dql:block_output:Top 10 Goal Scorers.total_points',
+            toKey: 'dbt:column:fct_player_performance.points',
+          }),
+        ]),
+      );
+    } finally {
+      catalog.close();
+    }
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Can I trust the total points lineage?',
+      limit: 30,
+    });
+
+    expect(pack.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          edgeType: 'derives_from',
+          fromKey: 'dql:block_output:Top 10 Goal Scorers.total_points',
+          toKey: 'dbt:column:fct_player_performance.points',
+        }),
+      ]),
+    );
+    expect(pack.objects.map((object) => object.objectKey)).toContain('dql:block_output:Top 10 Goal Scorers.total_points');
+    const scoringRelation = pack.allowedSqlContext.relations.find((relation) =>
+      relation.relation.endsWith('fct_player_performance'),
+    );
+    expect(scoringRelation?.columns.find((column) => column.name === 'points')?.description).toContain(
+      'Governed aliases from lineage: total_points.',
+    );
+  });
+
+  it('indexes dbt compiled SQL column lineage as traversable metadata edges', async () => {
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+      nodes: Record<string, Record<string, unknown>>;
+    };
+    manifest.nodes['model.nba_analysis.stg_player_games'] = {
+      resource_type: 'model',
+      name: 'stg_player_games',
+      alias: 'stg_player_games',
+      database: 'NBA_DB',
+      schema: 'STAGING',
+      description: 'Staging player game rows.',
+      depends_on: { nodes: [] },
+      tags: ['nba', 'player'],
+      original_file_path: 'models/staging/stg_player_games.sql',
+      config: { materialized: 'view' },
+      columns: {
+        player_name: { name: 'player_name', data_type: 'text', description: 'Player full name.' },
+        season: { name: 'season', data_type: 'number', description: 'NBA season year.' },
+        points: { name: 'points', data_type: 'number', description: 'Points scored in a game.' },
+      },
+    };
+    manifest.nodes['model.nba_analysis.fct_player_performance'] = {
+      ...manifest.nodes['model.nba_analysis.fct_player_performance'],
+      depends_on: { nodes: ['model.nba_analysis.stg_player_games'] },
+      compiled_code: `
+        SELECT player_name, season, SUM(points) AS total_points
+        FROM stg_player_games
+        GROUP BY 1, 2
+      `,
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+
+    await ensureMetadataCatalogFresh(projectRoot);
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.getObject('dbt:column:fct_player_performance.total_points')).toMatchObject({
+        objectType: 'dbt_column',
+        payload: expect.objectContaining({
+          compiledSqlLineage: true,
+          aggregateFn: 'SUM',
+          lineageSources: expect.arrayContaining([
+            expect.objectContaining({ table: 'stg_player_games', column: 'points' }),
+          ]),
+        }),
+      });
+      expect(catalog.edgesForKeys(['dbt:model:fct_player_performance'], 3)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            edgeType: 'derives_from',
+            fromKey: 'dbt:column:fct_player_performance.total_points',
+            toKey: 'dbt:column:stg_player_games.points',
+          }),
+        ]),
+      );
+    } finally {
+      catalog.close();
+    }
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Can I trust dbt total_points lineage from stg player games?',
+      limit: 40,
+    });
+
+    expect(pack.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          edgeType: 'derives_from',
+          fromKey: 'dbt:column:fct_player_performance.total_points',
+          toKey: 'dbt:column:stg_player_games.points',
+        }),
+      ]),
+    );
+  });
+
+  it('uses governed lineage aliases to map business metrics onto physical columns', async () => {
+    writeFileSync(
+      join(projectRoot, 'blocks', 'product_revenue_context.dql'),
+      `block "Product Revenue Context" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  description = "Certified product revenue context."
+  tags = ["product", "revenue"]
+  grain = "product"
+  entities = ["Product"]
+  outputs = ["product_name", "revenue"]
+  query = """
+    SELECT product_name, SUM(product_price) AS revenue
+    FROM order_items
+    GROUP BY 1
+  """
+}`,
+      'utf-8',
+    );
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+      nodes: Record<string, Record<string, unknown>>;
+    };
+    manifest.nodes['model.nba_analysis.order_items'] = {
+      resource_type: 'model',
+      name: 'order_items',
+      alias: 'order_items',
+      database: 'NBA_DB',
+      schema: 'ANALYTICS',
+      description: 'Order item rows with product details and item price.',
+      depends_on: { nodes: [] },
+      tags: ['orders', 'product'],
+      original_file_path: 'models/marts/order_items.sql',
+      config: { materialized: 'table' },
+      columns: {
+        product_name: { name: 'product_name', data_type: 'text', description: 'Product display name.' },
+        product_price: { name: 'product_price', data_type: 'number', description: 'Item sale price.' },
+        product_type: { name: 'product_type', data_type: 'text', description: 'Food or drink category.' },
+      },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show revenue by product',
+      limit: 40,
+    });
+
+    const orderItems = pack.allowedSqlContext.relations.find((relation) =>
+      relation.relation.endsWith('order_items'),
+    );
+    expect(orderItems?.columns.find((column) => column.name === 'product_price')?.description).toContain(
+      'Governed aliases from lineage: revenue.',
+    );
+    expect(pack.retrievalDiagnostics.selectedRelations?.find((relation) =>
+      relation.relation.endsWith('order_items'),
+    )?.reason).toContain('semantic column map matched');
+    expect(pack.retrievalDiagnostics.selectedRelations?.find((relation) =>
+      relation.relation.endsWith('order_items'),
+    )?.reason).toContain('revenue->product_price');
+  });
+
   it('routes exact certified block-name questions to certified execution', async () => {
     const plan = await planAgentAnswer(projectRoot, {
       question: 'Run Top 10 Goal Scorers',
@@ -364,6 +561,217 @@ describe('local metadata catalog', () => {
 
     expect(plan.routeDecision.route).toBe('certified');
     expect(plan.routeDecision.exactObjectKey).toBe('dql:block:Player Scoring Leaders');
+  });
+
+  it('block-fit gate: demotes a category certified block for product-grain revenue questions', async () => {
+    addJaffleOrderItemsModel(projectRoot);
+    writeFileSync(
+      join(projectRoot, 'blocks', 'food_vs_drink_revenue.dql'),
+      `block "food_vs_drink_revenue" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Revenue split between food and drink categories from order items."
+  tags = ["revenue", "category", "food", "drink"]
+  llmContext = "Use only for Food vs Drink category-level revenue, not product-level revenue."
+  grain = "category"
+  entities = ["Category"]
+  outputs = ["category", "revenue"]
+  dimensions = ["category"]
+  query = """
+    SELECT product_type AS category, SUM(product_price) AS revenue
+    FROM order_items
+    GROUP BY 1
+    ORDER BY revenue DESC
+  """
+}`,
+      'utf-8',
+    );
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue',
+      limit: 40,
+    });
+
+    expect(pack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      intent: 'ad_hoc_ranking',
+      reviewStatus: 'draft_ready',
+      certifiedApplicability: expect.objectContaining({
+        name: 'food_vs_drink_revenue',
+        kind: 'context_only',
+      }),
+      blockFit: expect.objectContaining({
+        kind: 'context_only',
+        confidence: 'high',
+        missingDimensions: expect.arrayContaining(['product']),
+        missingOutputs: expect.arrayContaining(['product_name']),
+      }),
+    });
+    expect(pack.routeDecision.routeReason).toMatch(/product/i);
+    expect(pack.routeDecision.exactObjectKey).toBeUndefined();
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toContain('SHOP.ANALYTICS.order_items');
+    const orderItems = pack.allowedSqlContext.relations.find((relation) => relation.relation === 'SHOP.ANALYTICS.order_items');
+    const orderItemColumns = orderItems?.columns.map((column) => column.name) ?? [];
+    expect(orderItemColumns.indexOf('product_type')).toBeGreaterThanOrEqual(0);
+    expect(orderItemColumns.indexOf('product_price')).toBeGreaterThanOrEqual(0);
+    expect(orderItemColumns.indexOf('product_type')).toBeLessThan(orderItemColumns.indexOf('category'));
+    expect(orderItemColumns.indexOf('product_price')).toBeLessThan(orderItemColumns.indexOf('revenue'));
+    expect(pack.retrievalDiagnostics.certifiedCandidateFits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'food_vs_drink_revenue',
+          applicabilityKind: 'exact_answer',
+          action: 'context_only',
+          fit: expect.objectContaining({
+            kind: 'context_only',
+            missingOutputs: expect.arrayContaining(['product_name']),
+            missingDimensions: expect.arrayContaining(['product']),
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('preserves compiler-inferred output contracts for certified block fit', async () => {
+    addJaffleOrderItemsModel(projectRoot);
+    writeFileSync(
+      join(projectRoot, 'blocks', 'product_revenue_inferred_contract.dql'),
+      `block "Product Revenue Inferred Contract" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Revenue by product and category from order items."
+  tags = ["revenue", "product", "category"]
+  grain = "product"
+  entities = ["Product"]
+  dimensions = ["product", "category"]
+  query = """
+    SELECT product_name, product_type AS category, SUM(product_price) AS revenue
+    FROM order_items
+    GROUP BY 1, 2
+    ORDER BY revenue DESC
+  """
+}`,
+      'utf-8',
+    );
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      const object = catalog.getObject('dql:block:Product Revenue Inferred Contract');
+      expect((object?.payload?.outputs as Array<{ name: string }> | undefined)?.map((output) => output.name)).toEqual(
+        expect.arrayContaining(['product_name', 'category', 'revenue']),
+      );
+      expect((object?.payload?.outputContract as Array<{ name: string }> | undefined)?.map((output) => output.name)).toEqual(
+        expect.arrayContaining(['product_name', 'category', 'revenue']),
+      );
+    } finally {
+      catalog.close();
+    }
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show revenue by product with product name, category, and revenue',
+      limit: 40,
+    });
+
+    expect(pack.routeDecision).toMatchObject({
+      route: 'certified',
+      exactObjectKey: 'dql:block:Product Revenue Inferred Contract',
+      blockFit: expect.objectContaining({
+        kind: 'exact',
+        confidence: 'high',
+        missingOutputs: [],
+        missingDimensions: [],
+      }),
+    });
+  });
+
+  it('promotes medium certified block fit only when confirmation accepts it', async () => {
+    writeLegacyProductUsageBlock(projectRoot);
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+    let calls = 0;
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show usage by product',
+      focusObjectKey: 'dql:block:Legacy Product Usage',
+      runtimeSchemaSnapshot: productUsageRuntimeSchema(),
+      confirmCertifiedFit: async ({ fit, block }) => {
+        calls += 1;
+        expect(block.name).toBe('Legacy Product Usage');
+        expect(fit).toMatchObject({ kind: 'exact', confidence: 'medium' });
+        return { allow: true, confidence: 'high', reason: 'legacy block declares product grain and usage metric' };
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(pack.routeDecision).toMatchObject({
+      route: 'certified',
+      exactObjectKey: 'dql:block:Legacy Product Usage',
+      blockFit: expect.objectContaining({
+        kind: 'exact',
+        confidence: 'high',
+        reasons: expect.arrayContaining([
+          expect.stringContaining('fit confirmation accepted'),
+        ]),
+      }),
+    });
+  });
+
+  it('demotes medium certified block fit when confirmation rejects it', async () => {
+    writeLegacyProductUsageBlock(projectRoot);
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show usage by product',
+      focusObjectKey: 'dql:block:Legacy Product Usage',
+      runtimeSchemaSnapshot: productUsageRuntimeSchema(),
+      confirmCertifiedFit: async () => ({ allow: false, confidence: 'high', reason: 'missing required output proof' }),
+    });
+
+    expect(pack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      reviewStatus: 'draft_ready',
+      certifiedApplicability: expect.objectContaining({ kind: 'context_only' }),
+      blockFit: expect.objectContaining({
+        kind: 'context_only',
+        confidence: 'high',
+        reasons: expect.arrayContaining([
+          expect.stringContaining('fit confirmation rejected'),
+        ]),
+      }),
+    });
+    expect(pack.routeDecision.exactObjectKey).toBeUndefined();
+  });
+
+  it('keeps medium certified block fit review-required when confirmation fails', async () => {
+    writeLegacyProductUsageBlock(projectRoot);
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show usage by product',
+      focusObjectKey: 'dql:block:Legacy Product Usage',
+      runtimeSchemaSnapshot: productUsageRuntimeSchema(),
+      confirmCertifiedFit: async () => {
+        throw new Error('provider unavailable');
+      },
+    });
+
+    expect(pack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      reviewStatus: 'draft_ready',
+      blockFit: expect.objectContaining({
+        kind: 'exact',
+        confidence: 'medium',
+        reasons: expect.arrayContaining([
+          expect.stringContaining('fit confirmation unavailable'),
+        ]),
+      }),
+    });
+    expect(pack.routeDecision.exactObjectKey).toBeUndefined();
   });
 
   it('grain gate: does not demote certified routes for grain-free questions (no regression)', async () => {
@@ -912,6 +1320,48 @@ function addGenericAthleteBoxScoreModel(root: string, modelName = 'athlete_box_s
   writeFileSync(path, JSON.stringify(manifest), 'utf-8');
 }
 
+function addJaffleOrderItemsModel(root: string): void {
+  const path = join(root, 'target', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  manifest.nodes['model.nba_analysis.order_items'] = {
+    resource_type: 'model',
+    name: 'order_items',
+    alias: 'order_items',
+    database: 'SHOP',
+    schema: 'ANALYTICS',
+    description: 'Order item rows with product name, product category/type, and product price.',
+    depends_on: { nodes: [] },
+    tags: ['orders', 'products', 'revenue'],
+    original_file_path: 'models/marts/order_items.sql',
+    config: { materialized: 'table' },
+    columns: {
+      order_item_id: {
+        name: 'order_item_id',
+        data_type: 'number',
+        description: 'Order item identifier.',
+      },
+      product_name: {
+        name: 'product_name',
+        data_type: 'text',
+        description: 'Product display name.',
+      },
+      product_type: {
+        name: 'product_type',
+        data_type: 'text',
+        description: 'Product category such as food or drink.',
+      },
+      product_price: {
+        name: 'product_price',
+        data_type: 'number',
+        description: 'Product revenue amount.',
+      },
+    },
+  };
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+}
+
 function addGrainedTeamScoringModel(root: string): void {
   const path = join(root, 'target', 'manifest.json');
   const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
@@ -1112,4 +1562,38 @@ function seedDqlProject(root: string): void {
     }),
     'utf-8',
   );
+}
+
+function writeLegacyProductUsageBlock(root: string): void {
+  writeFileSync(
+    join(root, 'blocks', 'legacy_product_usage.dql'),
+    `block "Legacy Product Usage" {
+  domain = "product"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Legacy certified usage metric by product."
+  tags = ["usage", "product", "metric"]
+  grain = "product"
+  entities = ["Product"]
+  dimensions = ["product"]
+}`,
+    'utf-8',
+  );
+}
+
+function productUsageRuntimeSchema() {
+  return {
+    source: 'test runtime schema',
+    tables: [{
+      relation: 'APP.ANALYTICS.product_usage',
+      schema: 'ANALYTICS',
+      name: 'product_usage',
+      source: 'runtime',
+      columns: [
+        { name: 'product_name', type: 'text' },
+        { name: 'usage', type: 'number' },
+      ],
+    }],
+  };
 }

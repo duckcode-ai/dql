@@ -22,6 +22,7 @@ import {
   normalizeProjectConnection,
   openBlockStudioDocument,
   parseBlockSourceMetadata,
+  parseAgentRunRequestBody,
   prepareLocalExecution,
   dashboardRuntimeVariables,
   resolveDefaultLLMProvider,
@@ -85,6 +86,110 @@ describe('serializeJSON', () => {
 });
 
 describe('agent run runtime API', () => {
+  it('preserves conversation context when parsing governed agent run requests', () => {
+    const parsed = parseAgentRunRequestBody({
+      question: 'who are the top 5 customers for these categories?',
+      requestedMode: 'ask',
+      conversationContext: {
+        sourceCertifiedBlock: 'food_vs_drink_revenue',
+        resultColumns: ['category', 'revenue'],
+        resultDimensionValues: { category: ['Food', 'Drink'] },
+        priorMeasures: ['revenue'],
+      },
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.request?.conversationContext).toEqual({
+      sourceCertifiedBlock: 'food_vs_drink_revenue',
+      resultColumns: ['category', 'revenue'],
+      resultDimensionValues: { category: ['Food', 'Drink'] },
+      priorMeasures: ['revenue'],
+    });
+  });
+
+  it('threads conversation context through the HTTP agent-run endpoint into the route executor', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-context-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    let observedContext: Record<string, unknown> | undefined;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => {
+          server = created;
+        },
+        agentRunExecutors: {
+          generated_answer: ({ request }) => {
+            observedContext = request.conversationContext;
+            return {
+              summary: 'Answered with generated SQL (review required).',
+              answer: 'Top customers for the prior categories.',
+              status: 'needs_review',
+              trustState: 'review_required',
+              stopReason: 'human_review_required',
+              artifacts: [{
+                id: 'answer:test',
+                kind: 'answer',
+                title: 'Review-required answer',
+                trustState: 'review_required',
+                payload: {
+                  kind: 'uncertified',
+                  certification: 'ai_generated',
+                  reviewStatus: 'draft_ready',
+                  text: 'Top customers for the prior categories.',
+                  result: {
+                    columns: ['customer_name', 'category', 'revenue'],
+                    rows: [{ customer_name: 'Mr. Matthew Meyer', category: 'Food', revenue: 3089.8 }],
+                    rowCount: 1,
+                  },
+                },
+              }],
+              evaluations: [],
+              nextActions: [],
+            };
+          },
+        },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'who are the top 5 customers for these categories?',
+          requestedMode: 'ask',
+          conversationContext: {
+            sourceCertifiedBlock: 'food_vs_drink_revenue',
+            resultColumns: ['category', 'revenue'],
+            resultDimensionValues: { category: ['Food', 'Drink'] },
+            priorMeasures: ['revenue'],
+          },
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const payload = await response.json() as { run: any };
+      expect(payload.run.route).toBe('generated_answer');
+      expect(payload.run.status).toBe('needs_review');
+      expect(observedContext).toEqual({
+        sourceCertifiedBlock: 'food_vs_drink_revenue',
+        resultColumns: ['category', 'revenue'],
+        resultDimensionValues: { category: ['Food', 'Drink'] },
+        priorMeasures: ['revenue'],
+      });
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    }
+  });
+
   it('creates, stores, and reads a governed agent run', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-api-'));
     tempDirs.push(projectRoot);
@@ -1101,6 +1206,33 @@ describe('buildAgentSchemaContext', () => {
       'customer_id',
       'customer_name',
     ]);
+  });
+
+  it('keeps the order-item fact path for composite product and customer questions', () => {
+    const rows = [
+      { table_schema: 'dev', table_name: 'customers', column_name: 'customer_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'customers', column_name: 'customer_name', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'customers', column_name: 'lifetime_spend', data_type: 'DECIMAL' },
+      { table_schema: 'dev', table_name: 'order_items', column_name: 'order_item_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'order_items', column_name: 'order_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'order_items', column_name: 'product_name', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'order_items', column_name: 'product_type', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'order_items', column_name: 'product_price', data_type: 'DECIMAL' },
+      { table_schema: 'dev', table_name: 'fct_orders', column_name: 'order_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'fct_orders', column_name: 'customer_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'fct_orders', column_name: 'order_total', data_type: 'DECIMAL' },
+      { table_schema: 'dev', table_name: 'calendar', column_name: 'date_day', data_type: 'DATE' },
+    ];
+
+    const context = buildAgentSchemaContext(
+      'Give me top revenue products with product name, category, revenue, and customers who bought these products',
+      rows,
+    );
+
+    expect(context.map((table) => table.relation)).toEqual(
+      expect.arrayContaining(['dev.order_items', 'dev.fct_orders', 'dev.customers']),
+    );
+    expect(context[0]?.relation).toBe('dev.order_items');
   });
 });
 

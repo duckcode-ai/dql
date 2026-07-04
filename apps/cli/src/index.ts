@@ -89,6 +89,7 @@ const HELP = `
                                     Manage App artifacts (metadata, policies, dashboards, schedules)
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
       dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
+      dql agent threads               List persisted conversation threads (resume with --thread)
       dql agent reindex [path]        Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
       dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
       dql agent eval agent-evals.yml  Measure certified/follow-up/refusal accuracy
@@ -127,6 +128,7 @@ const HELP = `
                                       For "migrate layout": apply domain-first file moves
       --dry-run                       For "migrate layout": preview file moves
       --execute                       For "agent eval": run bounded SQL previews
+      --thread <id>                   For "agent ask": continue a persisted conversation thread
       --ai                            For "doctor": include AI, MCP, and metadata checks
   `;
 

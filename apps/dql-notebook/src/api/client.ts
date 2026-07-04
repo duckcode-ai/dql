@@ -559,8 +559,15 @@ export interface CreateAgentRunInput {
   signals?: Record<string, unknown>;
   selectedObject?: AgentRunSelectedObject;
   workspaceContext?: Record<string, unknown>;
+  conversationContext?: AgentConversationContext;
   context?: Record<string, unknown>;
   history?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  /**
+   * Server-side conversation thread. When present the server injects prior turns
+   * into the conversation context and persists this run as a new turn — the
+   * client-built conversationContext stays the no-threadId fallback.
+   */
+  threadId?: string;
   runId?: string;
 }
 
@@ -590,6 +597,46 @@ export type AgentRunStreamMessage =
   | { kind: 'event'; event: AgentRunEvent }
   | { kind: 'answer-delta'; delta: string }
   | { kind: 'complete'; run: AgentRun };
+
+// ── Conversation threads (server-side session persistence) ──────────────
+
+export interface AgentConversationThread {
+  id: string;
+  surface: string;
+  title?: string;
+  notebookPath?: string;
+  rollingSummary?: string;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentConversationTurnResult {
+  columns?: string[];
+  rowsSample?: unknown[][];
+  dimensionValues?: Record<string, string[]>;
+  measureColumns?: string[];
+  rowCount?: number;
+}
+
+/** One persisted question/answer pair in a conversation thread (seq-ordered). */
+export interface AgentConversationTurn {
+  id: string;
+  threadId: string;
+  seq: number;
+  question: string;
+  answerSummary?: string;
+  answerText?: string;
+  route?: string;
+  trustLabel?: string;
+  certification?: string;
+  sourceCertifiedBlock?: string;
+  contextPackId?: string;
+  sql?: string;
+  result?: AgentConversationTurnResult;
+  contract?: Record<string, unknown>;
+  createdAt: string;
+}
 
 export interface NotebookResearchDiagnostics {
   counts: {
@@ -1867,6 +1914,34 @@ export const api = {
   async getAgentRun(id: string): Promise<AgentRun> {
     const raw = await request<{ run: AgentRun }>(`/api/agent-runs/${encodeURIComponent(id)}`);
     return raw.run;
+  },
+
+  async listAgentThreads(input?: { limit?: number; archived?: boolean }): Promise<{ threads: AgentConversationThread[] }> {
+    const params = new URLSearchParams();
+    if (typeof input?.limit === 'number' && Number.isFinite(input.limit)) {
+      params.set('limit', String(input.limit));
+    }
+    if (input?.archived) params.set('archived', '1');
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    return request<{ threads: AgentConversationThread[] }>(`/api/agent/threads${suffix}`);
+  },
+
+  async createAgentThread(input: { surface?: string; title?: string; notebookPath?: string } = {}): Promise<AgentConversationThread> {
+    const raw = await request<{ thread: AgentConversationThread }>('/api/agent/threads', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return raw.thread;
+  },
+
+  async getAgentThread(id: string): Promise<{ thread: AgentConversationThread; turns: AgentConversationTurn[] }> {
+    return request<{ thread: AgentConversationThread; turns: AgentConversationTurn[] }>(
+      `/api/agent/threads/${encodeURIComponent(id)}`,
+    );
+  },
+
+  async archiveAgentThread(id: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/agent/threads/${encodeURIComponent(id)}/archive`, { method: 'POST' });
   },
 
   /**

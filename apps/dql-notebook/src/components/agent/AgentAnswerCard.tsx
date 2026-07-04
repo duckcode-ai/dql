@@ -3,7 +3,7 @@ import type { AgentTurn } from '../../llm/types';
 import type { AiRoute, CellChartConfig, QueryResult } from '../../store/types';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import { ChartOutput, resolveChartType } from '../output/ChartOutput';
+import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
 import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage';
@@ -174,13 +174,44 @@ function normalizeChartConfig(config: unknown, answer: AgentAnswerEnvelope): Cel
     : typeof answer.suggestedViz === 'string'
       ? answer.suggestedViz
       : undefined;
+  const normalizedChart = chart
+    ? chart.toLowerCase().replace(/_/g, '-') === 'single-value' ? 'kpi' : chart
+    : undefined;
   return {
-    ...(chart ? { chart } : {}),
+    ...(normalizedChart ? { chart: normalizedChart } : {}),
     ...(typeof raw.x === 'string' ? { x: raw.x } : {}),
     ...(typeof raw.y === 'string' ? { y: raw.y } : {}),
     ...(typeof raw.color === 'string' ? { color: raw.color } : {}),
     ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
   };
+}
+
+function completeChartConfig(config: CellChartConfig | undefined, result: QueryResult | null): CellChartConfig | undefined {
+  if (!result || result.columns.length === 0) return config;
+  const columns = result.columns;
+  const sample = result.rows.slice(0, 20);
+  const numericColumns = columns.filter((column) =>
+    sample.length === 0 || sample.some((row) => isChartNumericValue(row[column]))
+  );
+  const categoryColumn = columns.find((column) => !numericColumns.includes(column)) ?? columns[0];
+  const x = config?.x && columns.includes(config.x) ? config.x : categoryColumn;
+  const y = config?.y && columns.includes(config.y)
+    ? config.y
+    : numericColumns.find((column) => column !== x) ?? columns.find((column) => column !== x) ?? columns[1] ?? columns[0];
+  const color = config?.color && columns.includes(config.color) ? config.color : undefined;
+  return {
+    ...(config ?? {}),
+    chart: config?.chart ?? resolveChartType(result, config),
+    x,
+    y,
+    ...(color ? { color } : {}),
+  };
+}
+
+function isChartNumericValue(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string' && value.trim()) return Number.isFinite(Number(value));
+  return false;
 }
 
 function cleanQuestion(value: unknown): string | undefined {
@@ -269,7 +300,9 @@ export function AgentAnswerCard({
   const t = themes[themeMode];
   const { dispatch } = useNotebook();
   const result = normalizeAgentResult(answer);
-  const chartConfig = normalizeChartConfig(answer.result?.chartConfig, answer);
+  const baseChartConfig = normalizeChartConfig(answer.result?.chartConfig, answer);
+  const [chartConfigOverride, setChartConfigOverride] = useState<CellChartConfig | undefined>();
+  const chartConfig = completeChartConfig({ ...(baseChartConfig ?? {}), ...(chartConfigOverride ?? {}) }, result);
   const hasChart = Boolean(result && resolveChartType(result, chartConfig) !== 'table');
   const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
   const sql = showSql ? answer.sql ?? answer.result?.sql ?? answer.proposedSql ?? analysisPlan?.sql : undefined;
@@ -447,7 +480,13 @@ export function AgentAnswerCard({
     }
     if (targetTab === 'visual' && result && hasChart) {
       return (
-        <div style={{ padding: compact ? '8px 10px' : '10px 12px', minHeight: compact ? 180 : 220 }}>
+        <div style={{ padding: compact ? '8px 10px' : '10px 12px', minHeight: compact ? 180 : 220, display: 'grid', gap: 10 }}>
+          <ChartCustomizationPanel
+            result={result}
+            chartConfig={chartConfig}
+            t={t}
+            onChange={(next) => setChartConfigOverride((current) => ({ ...(current ?? {}), ...next }))}
+          />
           <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
         </div>
       );
@@ -1772,6 +1811,113 @@ function SegmentButton({ active, label, onClick, t }: { active: boolean; label: 
       {label}
     </button>
   );
+}
+
+function ChartCustomizationPanel({
+  result,
+  chartConfig,
+  t,
+  onChange,
+}: {
+  result: QueryResult;
+  chartConfig?: CellChartConfig;
+  t: Theme;
+  onChange: (next: Partial<CellChartConfig>) => void;
+}) {
+  const columns = result.columns;
+  if (columns.length === 0) return null;
+  const chartTypeOptions = CHART_TYPE_OPTIONS.filter((option) => option.value !== 'table');
+  const x = chartConfig?.x && columns.includes(chartConfig.x) ? chartConfig.x : columns[0] ?? '';
+  const y = chartConfig?.y && columns.includes(chartConfig.y) ? chartConfig.y : columns.find((column) => column !== x) ?? columns[0] ?? '';
+  const color = chartConfig?.color && columns.includes(chartConfig.color) ? chartConfig.color : '';
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+        gap: 8,
+        alignItems: 'end',
+        border: `1px solid ${t.cellBorder}`,
+        borderRadius: 7,
+        background: `${t.tableHeaderBg}55`,
+        padding: 10,
+      }}
+    >
+      <ChartControlLabel label="Chart type" t={t}>
+        <select
+          value={chartConfig?.chart ?? 'bar'}
+          onChange={(event) => onChange({ chart: event.target.value })}
+          style={chartControlSelectStyle(t)}
+        >
+          {chartTypeOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </ChartControlLabel>
+      <ChartControlLabel label="X axis" t={t}>
+        <select
+          value={x}
+          onChange={(event) => onChange({ x: event.target.value })}
+          style={chartControlSelectStyle(t)}
+        >
+          {columns.map((column) => <option key={column} value={column}>{column}</option>)}
+        </select>
+      </ChartControlLabel>
+      <ChartControlLabel label="Y axis" t={t}>
+        <select
+          value={y}
+          onChange={(event) => onChange({ y: event.target.value })}
+          style={chartControlSelectStyle(t)}
+        >
+          {columns.map((column) => <option key={column} value={column}>{column}</option>)}
+        </select>
+      </ChartControlLabel>
+      <ChartControlLabel label="Color" t={t}>
+        <select
+          value={color}
+          onChange={(event) => onChange({ color: event.target.value || undefined })}
+          style={chartControlSelectStyle(t)}
+        >
+          <option value="">None</option>
+          {columns.map((column) => <option key={column} value={column}>{column}</option>)}
+        </select>
+      </ChartControlLabel>
+    </div>
+  );
+}
+
+function ChartControlLabel({
+  label,
+  t,
+  children,
+}: {
+  label: string;
+  t: Theme;
+  children: React.ReactNode;
+}) {
+  return (
+    <label style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+      <span style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
+        {label}
+      </span>
+      {children}
+    </label>
+  );
+}
+
+function chartControlSelectStyle(t: Theme): React.CSSProperties {
+  return {
+    width: '100%',
+    minWidth: 0,
+    height: 30,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 6,
+    background: t.editorBg,
+    color: t.textPrimary,
+    fontFamily: t.font,
+    fontSize: 12,
+    padding: '0 8px',
+  };
 }
 
 function AddToAppControl({

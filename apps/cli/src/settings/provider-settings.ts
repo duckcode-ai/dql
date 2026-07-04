@@ -272,7 +272,7 @@ function providerCanBeActive(id: ProviderSettingsId, stored: StoredProviderSetti
   return hasKey;
 }
 
-function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
+export function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
   return value === 'anthropic'
     || value === 'openai'
     || value === 'gemini'

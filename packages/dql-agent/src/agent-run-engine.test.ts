@@ -87,6 +87,67 @@ describe("AgentRunEngine", () => {
     expect(store.get("run-certified")?.route).toBe("certified_answer");
   });
 
+  it("escalates a shape-failed certified answer to generated_answer", async () => {
+    const events: AgentRunEvent[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-certified-shape-repair",
+      now: fixedClock(),
+      gates: defaultAgentRunGates,
+      executors: {
+        certified_answer: () => ({
+          answer: "Food and drink revenue.",
+          artifacts: [{
+            id: "certified",
+            kind: "answer",
+            title: "Certified answer",
+            trustState: "certified",
+            payload: {
+              answer: "Food and drink revenue.",
+              result: {
+                columns: ["category", "revenue"],
+                rows: [{ category: "Food", revenue: 10 }],
+                rowCount: 1,
+              },
+            },
+          }],
+        }),
+        generated_answer: () => ({
+          answer: "Product revenue.",
+          artifacts: [{
+            id: "generated",
+            kind: "answer",
+            title: "Generated answer",
+            trustState: "review_required",
+            payload: {
+              answer: "Product revenue.",
+              result: {
+                columns: ["product_name", "category", "revenue"],
+                rows: [{ product_name: "Classic Jaffle", category: "Food", revenue: 10 }],
+                rowCount: 1,
+              },
+            },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "show revenue by product with product name, category, and revenue",
+      intent: "exact_certified_lookup",
+      signals: { certifiedScore: 0.9, hasRetrieval: true },
+    }, (event) => events.push(event));
+
+    expect(run.route).toBe("generated_answer");
+    expect(run.repairAttempts).toBe(1);
+    expect(run.steps.map((step) => step.route)).toEqual(["certified_answer", "generated_answer"]);
+    expect(run.steps[0]?.evaluations.some((evaluation) => evaluation.id === "answer-shape" && !evaluation.passed)).toBe(true);
+    expect(events.some((event) =>
+      event.type === "escalated"
+      && Boolean(event.payload)
+      && (event.payload as { route?: string }).route === "generated_answer"
+    )).toBe(true);
+  });
+
   it("opens research as review-required durable work for investigate requests", async () => {
     const engine = new AgentRunEngine({ idGenerator: () => "run-research", now: fixedClock() });
     const run = await engine.run({
@@ -515,6 +576,35 @@ describe("AgentRunEngine — conversation route", () => {
     const run = await engine.run({ question: "hello", audience: "stakeholder" });
     expect(run.route).toBe("conversation");
     expect(run.status).toBe("completed");
+  });
+
+  it("routes Ask-mode conversation recap questions to conversation when context exists", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-context-recap",
+      now: fixedClock(),
+      executors: {
+        conversation: ({ request }) => ({
+          answer: `We were talking about ${request.conversationContext?.sourceQuestion}.`,
+          answerKind: "conversational",
+          status: "completed",
+          trustState: "not_applicable",
+          evaluations: [],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "what we are talking about here?",
+      requestedMode: "ask",
+      conversationContext: {
+        sourceQuestion: "Top products by revenue",
+        resultColumns: ["product_name", "category", "revenue"],
+      },
+    });
+
+    expect(run.route).toBe("conversation");
+    expect(run.answerKind).toBe("conversational");
+    expect(run.answer).toContain("Top products by revenue");
   });
 
   it("prefers an injected router decision over the deterministic path", async () => {

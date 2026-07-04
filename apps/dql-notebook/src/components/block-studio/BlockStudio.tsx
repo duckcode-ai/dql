@@ -27,7 +27,7 @@ import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
-import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import { openAiBuild } from '../../utils/ai-build-bus';
 import {
   appendSemanticRefToQuery,
@@ -57,6 +57,9 @@ const TREE_OVERSCAN = 10;
 export function BlockStudio() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  // Server-persisted conversation thread for the Ask AI overlay — a page
+  // refresh resumes the same conversation.
+  const agentThread = usePersistedAgentThreadId('block-studio');
   // Real tables→columns for IDE-style SQL completion inside the block's query body.
   const editorSchema = useMemo(
     () =>
@@ -1199,6 +1202,8 @@ export function BlockStudio() {
               scopeHint={activeBlockName ? `Current block: ${activeBlockName}` : 'Block Studio project context'}
               workspaceContext={{ blockStudioDraft: state.blockStudioDraft, activeBlockPath: state.activeBlockPath }}
               initialMode="auto"
+              threadId={agentThread.threadId}
+              onThreadIdChange={agentThread.onThreadIdChange}
               onInsertSql={(sql, title) => handleAiSqlInsert(sql, { question: title ?? activeBlockName ?? 'analysis', title })}
               emptyHint="Ask whether a block already exists, what domain it belongs in, which parameters should stay dynamic, or what evidence is missing before certification."
               examplePrompts={[

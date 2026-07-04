@@ -41,8 +41,32 @@ export interface AnalysisQuestionPlan {
   needsResearchWorkspace: boolean;
   searchQueries: string[];
   searchTerms: string[];
+  requestedShape: RequestedAnswerShape;
   confidence: number;
   reasons: string[];
+}
+
+export interface RequestedAnswerShape {
+  grain?: string;
+  dimensions: string[];
+  measures: string[];
+  requiredOutputs: string[];
+  filters: string[];
+  topN?: {
+    n: number;
+    scope: 'overall' | 'per_group';
+  };
+  rankingDirection?: 'top' | 'bottom';
+  followUpReferences: Array<{
+    phrase: string;
+    kind: 'prior_dimension_values' | 'prior_entities' | 'prior_timeframe' | 'ambiguous';
+    resolvedValues?: string[];
+  }>;
+  ambiguities: Array<{
+    term: string;
+    defaultInterpretation?: string;
+    requiresClarification: boolean;
+  }>;
 }
 
 export type CertifiedApplicabilityKind =
@@ -107,7 +131,10 @@ export function buildAnalysisQuestionPlan(
   const normalizedQuestion = normalizeSearchText(cleanQuestion);
   const lower = cleanQuestion.toLowerCase();
   const entities = extractEntities(cleanQuestion);
-  const metricTerms = extractMetricTerms(cleanQuestion);
+  const metricTerms = uniqueStrings([
+    ...extractMetricTerms(cleanQuestion),
+    ...extractFollowUpMetricTerms(followUp, lower),
+  ]);
   const dimensionTerms = extractDimensionTerms(cleanQuestion);
   const filterTerms = extractFilterTerms(cleanQuestion, entities);
   const timeTerms = extractTimeTerms(cleanQuestion);
@@ -117,6 +144,15 @@ export function buildAnalysisQuestionPlan(
   const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities);
   const needsGeneratedSql = generatedSqlIsLikely(mode, shouldConsiderCertifiedExact);
   const needsResearchWorkspace = researchWorkspaceIsLikely(mode, lower);
+  const requestedShape = buildRequestedAnswerShape(cleanQuestion, {
+    lower,
+    mode,
+    metricTerms,
+    dimensionTerms,
+    filterTerms,
+    timeTerms,
+    followUp,
+  });
   const searchTerms = uniqueStrings([
     ...tokenize(cleanQuestion),
     ...entities.flatMap((entity) => tokenize(entity.text)),
@@ -154,6 +190,7 @@ export function buildAnalysisQuestionPlan(
     needsResearchWorkspace,
     searchQueries,
     searchTerms,
+    requestedShape,
     confidence: planConfidence(mode, entities, metricTerms, dimensionTerms),
     reasons,
   };
@@ -317,6 +354,12 @@ export function scoreAllowedSqlRelationWithAnalysisPlan(
         : 0;
   const usabilityBonus = generatedSqlUsabilityScore(relation, plan);
   const columnShapeBonus = relationColumnShapeScore(relation, plan);
+  const semanticColumnBonus = semanticColumnMapScore(relation, plan);
+  const incompleteSourceShapePenalty = relation.source.includes('certified source SQL') &&
+    sourceShapeMustCoverRequestedOutputs(plan) &&
+    semanticColumnBonus.missingRequired.length > 0
+    ? Math.min(42, semanticColumnBonus.missingRequired.length * 34)
+    : 0;
   const score = Number((
     search.score * 3 +
     metrics.score * 8 +
@@ -326,6 +369,8 @@ export function scoreAllowedSqlRelationWithAnalysisPlan(
     sourceBonus +
     usabilityBonus +
     columnShapeBonus +
+    semanticColumnBonus.score +
+    -incompleteSourceShapePenalty +
     Math.min(relation.columns.length, 24) * 0.2
   ).toFixed(3));
   const reasons = [
@@ -338,6 +383,8 @@ export function scoreAllowedSqlRelationWithAnalysisPlan(
     usabilityBonus > 0 ? 'relation has usable columns for generated SQL' : '',
     usabilityBonus < 0 ? 'relation has no inspected/projected columns for generated SQL' : '',
     columnShapeBonus > 0 ? 'columns match requested analytical shape' : '',
+    semanticColumnBonus.matched.length ? `semantic column map matched: ${semanticColumnBonus.matched.slice(0, 6).join(', ')}` : '',
+    incompleteSourceShapePenalty > 0 ? `certified source SQL shape is missing requested output(s): ${semanticColumnBonus.missingRequired.join(', ')}` : '',
     relation.columns.length > 0 ? `${relation.columns.length} inspected/projected columns` : '',
   ].filter(Boolean);
   return {
@@ -380,6 +427,166 @@ function relationColumnShapeScore(
     score += 8;
   }
   return score;
+}
+
+function semanticColumnMapScore(
+  relation: MetadataAllowedSqlContext['relations'][number],
+  plan: AnalysisQuestionPlan,
+): { score: number; matched: string[]; missingRequired: string[] } {
+  if (relation.columns.length === 0) return { score: 0, matched: [], missingRequired: [] };
+  const requiredConcepts = uniqueStrings(plan.requestedShape.requiredOutputs.map(canonicalColumnConcept).filter(Boolean));
+  const requestedOutputs = uniqueStrings([
+    ...requiredConcepts,
+    ...plan.requestedShape.dimensions,
+    ...plan.requestedShape.measures,
+    ...plan.dimensionTerms,
+    ...plan.metricTerms,
+  ].map(canonicalColumnConcept).filter(Boolean));
+  const matched: string[] = [];
+  const missingRequired: string[] = [];
+  let score = 0;
+  for (const concept of requestedOutputs) {
+    const best = bestColumnConceptScore(concept, relation.columns);
+    if (best.score <= 0) {
+      if (requiredConcepts.includes(concept)) {
+        missingRequired.push(concept);
+        score -= 12;
+      }
+      continue;
+    }
+    matched.push(`${concept}->${best.column}`);
+    score += best.score * (requiredConcepts.includes(concept) ? 1.35 : 1);
+  }
+  const capped = Math.max(-36, Math.min(score, plan.needsGeneratedSql ? 44 : 28));
+  return { score: capped, matched: uniqueStrings(matched), missingRequired: uniqueStrings(missingRequired) };
+}
+
+function sourceShapeMustCoverRequestedOutputs(plan: AnalysisQuestionPlan): boolean {
+  return plan.mode === 'ranking' ||
+    plan.mode === 'driver_breakdown' ||
+    plan.mode === 'comparison' ||
+    plan.mode === 'trend' ||
+    plan.mode === 'general_analysis';
+}
+
+function canonicalColumnConcept(value: string): string {
+  return normalizeTerm(value)
+    .replace(/\bname\b$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function bestColumnConceptScore(
+  concept: string,
+  columns: MetadataAllowedSqlContext['relations'][number]['columns'],
+): { score: number; column: string } {
+  let best = { score: 0, column: '' };
+  for (const column of columns) {
+    const score = columnConceptScore(concept, column);
+    if (score > best.score) best = { score, column: column.name };
+  }
+  return best;
+}
+
+function columnConceptScore(
+  concept: string,
+  column: MetadataAllowedSqlContext['relations'][number]['columns'][number],
+): number {
+  const normalizedConcept = normalizeTerm(concept.replace(/_name$/, ''));
+  if (!normalizedConcept) return 0;
+  const columnName = normalizeSearchText(column.name);
+  const columnTokens = tokenize(column.name);
+  const columnText = normalizeSearchText([
+    column.name,
+    column.description ?? '',
+  ].join(' '));
+  const aliases = semanticColumnAliases(normalizedConcept);
+  let score = 0;
+  if (columnName === normalizedConcept || columnName === `${normalizedConcept} name`) score += 12;
+  if (columnTokens.includes(normalizedConcept)) score += 9;
+  for (const alias of aliases) {
+    const aliasText = normalizeSearchText(alias);
+    const aliasTokens = tokenize(alias).filter((token) => !GENERIC_COLUMN_ALIAS_TOKENS.has(token));
+    if (!aliasText) continue;
+    if (columnName === aliasText) score += 11;
+    else if (columnText.includes(aliasText)) score += 7;
+    else if (aliasTokens.some((token) => columnTokens.includes(token))) score += 5;
+  }
+  if (lineageAliasesIncludeConcept(column.description, normalizedConcept, aliases)) score += 12;
+  if (isCertifiedSourceShapeDescription(column.description)) score -= 16;
+  if (isMetricConcept(normalizedConcept) && isIdentifierLikeColumn(column.name)) score -= 8;
+  if (isDimensionConcept(normalizedConcept) && isMetricLikeColumn(column.name)) score -= 6;
+  return Math.max(0, score);
+}
+
+const GENERIC_COLUMN_ALIAS_TOKENS = new Set(['name', 'title', 'type', 'value', 'total']);
+
+function lineageAliasesIncludeConcept(
+  description: string | undefined,
+  concept: string,
+  aliases: string[],
+): boolean {
+  const match = /governed aliases from lineage:\s*([^.]*)/i.exec(description ?? '');
+  if (!match?.[1]) return false;
+  const aliasText = normalizeSearchText(match[1]);
+  const candidates = [concept, ...aliases].map(normalizeSearchText).filter(Boolean);
+  return candidates.some((candidate) =>
+    aliasText === candidate ||
+    aliasText.split(/\s*,\s*/).some((alias) => normalizeSearchText(alias) === candidate)
+  );
+}
+
+function isCertifiedSourceShapeDescription(description: string | undefined): boolean {
+  return /projected by certified source sql shape/i.test(description ?? '');
+}
+
+function semanticColumnAliases(concept: string): string[] {
+  switch (concept) {
+    case 'revenue':
+    case 'sale':
+    case 'sales':
+      return ['revenue', 'sales', 'amount', 'gross amount', 'net amount', 'price', 'product price', 'order amount', 'total'];
+    case 'usage':
+      return ['usage', 'use', 'consumption', 'activity', 'events', 'sessions', 'volume'];
+    case 'order':
+    case 'orders':
+      return ['order count', 'orders', 'order total', 'count lifetime orders'];
+    case 'product':
+      return ['product', 'product name', 'product title', 'sku', 'item', 'item name'];
+    case 'category':
+      return ['category', 'category name', 'product category', 'product type', 'type', 'class'];
+    case 'customer':
+      return ['customer', 'customer name', 'buyer', 'client', 'account name', 'full name'];
+    case 'segment':
+      return ['segment', 'customer segment', 'market segment'];
+    case 'region':
+    case 'market':
+      return ['region', 'market', 'geo', 'location', 'country', 'state'];
+    case 'player':
+      return ['player', 'player name', 'athlete', 'athlete name'];
+    case 'month':
+    case 'week':
+    case 'year':
+      return [concept, `${concept} date`, `${concept} start`, 'date', 'period'];
+    default:
+      return [concept.replace(/_/g, ' ')];
+  }
+}
+
+function isMetricConcept(concept: string): boolean {
+  return METRIC_WORDS.includes(concept) || ['sale', 'sales', 'order', 'orders'].includes(concept);
+}
+
+function isDimensionConcept(concept: string): boolean {
+  return DIMENSION_WORDS.includes(concept);
+}
+
+function isIdentifierLikeColumn(column: string): boolean {
+  return /\b(id|key|uuid|code|hash)\b/i.test(column.replace(/_/g, ' '));
+}
+
+function isMetricLikeColumn(column: string): boolean {
+  return /\b(revenue|sales|amount|price|spend|cost|total|count|score|points?|quantity|value|rate|volume)\b/i.test(column.replace(/_/g, ' '));
 }
 
 function inferQuestionMode(input: {
@@ -482,6 +689,12 @@ function extractMetricTerms(question: string): string[] {
     terms.add('score');
     terms.add('scoring');
   }
+  if (/\b(how many|number of)\b/i.test(lower)) {
+    terms.add('count');
+  }
+  if (/\bhow much\b/i.test(lower)) {
+    terms.add('amount');
+  }
   for (const word of METRIC_WORDS) {
     if (new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
@@ -495,8 +708,13 @@ function extractMetricTerms(question: string): string[] {
 function extractDimensionTerms(question: string): string[] {
   const lower = question.toLowerCase();
   const terms = new Set<string>();
+  if (/\b(?:cusomers?|custmers?|costomers?|clients?|buyers?)\b/i.test(lower)) terms.add('customer');
+  if (/\b(?:beverages?|drinks?)\b/i.test(lower)) {
+    terms.add('category');
+    terms.add('product');
+  }
   for (const word of DIMENSION_WORDS) {
-    if (new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
+    if (new RegExp(`\\b(?:${escapeRegExp(word)}|${escapeRegExp(pluralizeDimensionWord(word))})\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
   for (const match of lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/g)) {
     const value = match[1].replace(/\b(where|for|with|and|or|from|over|in)\b.*$/i, '').trim();
@@ -505,9 +723,19 @@ function extractDimensionTerms(question: string): string[] {
   return uniqueStrings([...terms]).slice(0, 16);
 }
 
+function pluralizeDimensionWord(word: string): string {
+  if (word.endsWith('y')) return `${word.slice(0, -1)}ies`;
+  return `${word}s`;
+}
+
 function extractFilterTerms(question: string, entities: AnalysisEntityMention[]): string[] {
+  const lower = question.toLowerCase();
+  const businessFilters: string[] = [];
+  if (/\b(?:beverages?|drinks?)\b/i.test(lower)) businessFilters.push('beverage');
+  if (/\b(?:food|foods|jaffles?)\b/i.test(lower)) businessFilters.push('jaffle');
   return uniqueStrings([
     ...entities.flatMap((entity) => tokenize(entity.text)),
+    ...businessFilters,
     ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
 }
@@ -521,6 +749,260 @@ function extractTimeTerms(question: string): string[] {
     if (new RegExp(`\\b${word}\\b`, 'i').test(question)) terms.push(word);
   }
   return uniqueStrings(terms).slice(0, 12);
+}
+
+function extractFollowUpMetricTerms(followUp: unknown, lowerQuestion?: string): string[] {
+  if (!followUp || typeof followUp !== 'object' || Array.isArray(followUp)) return [];
+  const record = followUp as Record<string, unknown>;
+  // Advisory 'contextual' carry must not inject prior measures into a genuinely-new
+  // question's plan (it would bias retrieval and the block-fit gate toward the old
+  // topic). Carry prior measures only when the question textually refers back.
+  if (record.kind === 'contextual' && lowerQuestion !== undefined
+    && !/\b(these|those|that|them|this|same|prior|previous|above)\b/.test(lowerQuestion)) {
+    return [];
+  }
+  return uniqueStrings([
+    ...cleanStringArray(record.priorMeasures),
+    ...cleanStringArray(record.priorResultColumns).filter((column) =>
+      METRIC_WORDS.some((word) => new RegExp(`\\b${word}\\b`, 'i').test(column.replace(/_/g, ' ')))
+    ),
+  ]).slice(0, 8);
+}
+
+function cleanStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => typeof item === 'string' ? item.trim() : '')
+    .filter(Boolean);
+}
+
+function buildRequestedAnswerShape(
+  question: string,
+  input: {
+    lower: string;
+    mode: AnalysisQuestionMode;
+    metricTerms: string[];
+    dimensionTerms: string[];
+    filterTerms: string[];
+    timeTerms: string[];
+    followUp?: unknown;
+  },
+): RequestedAnswerShape {
+  const topN = parseTopN(question);
+  const followUpReferences = extractFollowUpReferences(question, input.followUp);
+  const rawDimensions = uniqueStrings([
+    ...input.dimensionTerms.map(canonicalShapeTerm),
+    ...followUpDimensionsForRequestedShape(input.followUp, followUpReferences),
+  ].filter(Boolean));
+  const dimensions = scalarValueQuestionUsesEntitiesAsMeasures(input.mode, input.lower)
+    ? []
+    : rawDimensions;
+  const measures = uniqueStrings(input.metricTerms.map(canonicalShapeTerm).filter(Boolean));
+  const requiredOutputs = extractRequiredOutputs(question, dimensions, measures);
+  const filters = uniqueStrings([
+    ...input.filterTerms,
+    ...followUpFiltersForRequestedShape(input.followUp, followUpReferences),
+  ]);
+  const ambiguities = /\bimpact(?:ed|s|ing)?\b/i.test(question)
+    ? [{
+        term: 'impacted',
+        defaultInterpretation: 'highest contribution to the requested metric',
+        requiresClarification: false,
+      }]
+    : [];
+  return {
+    grain: inferRequestedShapeGrain(dimensions, input.timeTerms),
+    dimensions,
+    measures,
+    requiredOutputs,
+    filters,
+    ...(topN ? { topN } : {}),
+    rankingDirection: rankingDirection(question),
+    followUpReferences,
+    ambiguities,
+  };
+}
+
+function scalarValueQuestionUsesEntitiesAsMeasures(mode: AnalysisQuestionMode, lower: string): boolean {
+  if (mode !== 'exact_lookup' && mode !== 'general_analysis') return false;
+  return /\b(how many|how much|what is|what was|total|count|number of)\b/.test(lower)
+    && !/\b(by|per|each|every|top|bottom|rank|ranking|list|which|who|break\s*down|breakdown|split|segment|trend|over time)\b/.test(lower);
+}
+
+function parseTopN(question: string): RequestedAnswerShape['topN'] | undefined {
+  const lower = question.toLowerCase();
+  const numeric = lower.match(/\b(?:top|bottom|first|last)\s+(\d{1,3})\b/);
+  const n = numeric ? Number(numeric[1]) : wordNumberFromTopN(lower);
+  if (!n || n <= 0) return undefined;
+  const scope: 'overall' | 'per_group' = /\b(?:per|for each|within each)\s+\w+/i.test(lower)
+    || /\bby\s+(?:category|segment|region|channel|product|customer|account|user|month|week|year)\b/i.test(lower)
+    ? 'per_group'
+    : 'overall';
+  return { n, scope };
+}
+
+function wordNumberFromTopN(lower: string): number | undefined {
+  const words: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+  };
+  const match = lower.match(/\b(?:top|bottom|first|last)\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b/);
+  return match ? words[match[1]!] : undefined;
+}
+
+function extractRequiredOutputs(question: string, dimensions: string[], measures: string[]): string[] {
+  const lower = question.toLowerCase();
+  const outputs = new Set<string>();
+  for (const dim of dimensions) outputs.add(dim);
+  for (const measure of measures) outputs.add(measure);
+  if (/\bproduct\s+name\b/i.test(lower)) outputs.add('product_name');
+  if (/\bcustomer\s+name\b/i.test(lower)) outputs.add('customer_name');
+  if (/\bcategory\s+name\b/i.test(lower)) outputs.add('category_name');
+  if (/\b(?:name|names)\b/i.test(lower)) {
+    if (dimensions.includes('product')) outputs.add('product_name');
+    if (dimensions.includes('customer')) outputs.add('customer_name');
+    if (dimensions.includes('category')) outputs.add('category_name');
+  }
+  return uniqueStrings([...outputs]).slice(0, 24);
+}
+
+function extractFollowUpReferences(question: string, followUp?: unknown): RequestedAnswerShape['followUpReferences'] {
+  const refs: RequestedAnswerShape['followUpReferences'] = [];
+  const lower = question.toLowerCase();
+  const record = followUpRecord(followUp);
+  const hasFollowUp = Boolean(record);
+  for (const match of lower.matchAll(/\b(these|those|that|same|prior|previous)\s+([a-z][a-z0-9_ -]{1,30})\b/g)) {
+    const phrase = match[0];
+    const noun = canonicalShapeTerm(match[2]);
+    let kind: RequestedAnswerShape['followUpReferences'][number]['kind'] = 'ambiguous';
+    if (/period|date|day|week|month|quarter|year|time/.test(noun)) kind = 'prior_timeframe';
+    else if (hasFollowUp && /\b(category|product|customer|account|user|region|segment|channel)\b/.test(noun)) kind = 'prior_dimension_values';
+    else if (hasFollowUp) kind = 'prior_entities';
+    refs.push({
+      phrase,
+      kind,
+      ...resolvedFollowUpValues(record, noun, kind),
+    });
+  }
+  if (refs.length === 0 && record) {
+    const bare = lower.match(/\b(these|those|that|them|same)\b/);
+    const dimension = bare ? singleFollowUpDimension(record) : undefined;
+    if (bare && dimension) {
+      refs.push({
+        phrase: bare[0],
+        kind: 'prior_dimension_values',
+        ...resolvedFollowUpValues(record, dimension, 'prior_dimension_values'),
+      });
+    }
+  }
+  return refs.slice(0, 8);
+}
+
+function followUpDimensionsForRequestedShape(
+  followUp: unknown,
+  refs: RequestedAnswerShape['followUpReferences'],
+): string[] {
+  const record = followUpRecord(followUp);
+  if (!record || refs.every((ref) => ref.kind !== 'prior_dimension_values')) return [];
+  const explicit = cleanStringArray(record.dimensions).map(contextDimensionTerm).filter(Boolean);
+  if (explicit.length > 0) return uniqueStrings(explicit);
+  const single = singleFollowUpDimension(record);
+  return single ? [single] : [];
+}
+
+function followUpFiltersForRequestedShape(
+  followUp: unknown,
+  refs: RequestedAnswerShape['followUpReferences'],
+): string[] {
+  const record = followUpRecord(followUp);
+  if (!record || refs.every((ref) => ref.kind !== 'prior_dimension_values')) return [];
+  return uniqueStrings([
+    ...cleanStringArray(record.filters),
+    ...refs.flatMap((ref) => ref.resolvedValues ?? []),
+  ]);
+}
+
+function resolvedFollowUpValues(
+  record: Record<string, unknown> | undefined,
+  dimension: string | undefined,
+  kind: RequestedAnswerShape['followUpReferences'][number]['kind'],
+): { resolvedValues?: string[] } {
+  if (!record || kind !== 'prior_dimension_values') return {};
+  const values = followUpValuesForDimension(record, dimension);
+  return values.length > 0 ? { resolvedValues: values } : {};
+}
+
+function followUpValuesForDimension(record: Record<string, unknown>, dimension: string | undefined): string[] {
+  const valuesByDimension = cleanStringRecord(record.priorResultValues);
+  const canonicalDimension = dimension ? contextDimensionTerm(dimension) : singleFollowUpDimension(record);
+  const values = canonicalDimension
+    ? valuesByDimension[canonicalDimension] ?? valuesByDimension[`${canonicalDimension}_name`] ?? []
+    : [];
+  return uniqueStrings([
+    ...values,
+    ...cleanStringArray(record.filters),
+  ]).slice(0, 24);
+}
+
+function singleFollowUpDimension(record: Record<string, unknown>): string | undefined {
+  const explicit = uniqueStrings(cleanStringArray(record.dimensions).map(contextDimensionTerm).filter(Boolean));
+  if (explicit.length === 1) return explicit[0];
+  if (explicit.length > 1) return undefined;
+  const valuesByDimension = cleanStringRecord(record.priorResultValues);
+  const inferred = uniqueStrings(
+    Object.keys(valuesByDimension)
+      .map(contextDimensionTerm)
+      .filter((term) => term && !METRIC_WORDS.includes(term)),
+  );
+  return inferred.length === 1 ? inferred[0] : undefined;
+}
+
+function contextDimensionTerm(value: string): string {
+  const term = canonicalShapeTerm(value);
+  if (term.includes('category')) return 'category';
+  if (term.includes('product')) return 'product';
+  if (term.includes('customer')) return 'customer';
+  if (term.includes('account')) return 'account';
+  if (term.includes('user')) return 'user';
+  if (term.includes('region')) return 'region';
+  if (term.includes('segment')) return 'segment';
+  if (term.includes('channel')) return 'channel';
+  return term;
+}
+
+function cleanStringRecord(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const cleanKey = contextDimensionTerm(key);
+    const values = cleanStringArray(raw).slice(0, 24);
+    if (cleanKey && values.length > 0) out[cleanKey] = values;
+  }
+  return out;
+}
+
+function followUpRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function inferRequestedShapeGrain(dimensions: string[], timeTerms: string[]): string | undefined {
+  if (dimensions.length > 0) return dimensions[0];
+  const time = timeTerms.find((term) => /\b(hour|day|week|month|quarter|year|season|period|date)\b/i.test(term));
+  return time ? canonicalShapeTerm(time) : undefined;
+}
+
+function canonicalShapeTerm(value: string): string {
+  return normalizeTerm(value).replace(/\s+/g, '_');
 }
 
 function buildSearchQueries(input: {
@@ -729,6 +1211,8 @@ function normalizeSearchText(value: string): string {
 
 function normalizeTerm(value: string): string {
   const clean = normalizeSearchText(value);
+  if (/^(cusomer|custmer|costomer|client|buyer)s?$/.test(clean)) return 'customer';
+  if (/^(beverage|drink)s?$/.test(clean)) return 'beverage';
   if (clean.endsWith('ies') && clean.length > 4) return `${clean.slice(0, -3)}y`;
   if (clean.endsWith('s') && clean.length > 4) return clean.slice(0, -1);
   return clean;

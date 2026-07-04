@@ -95,6 +95,9 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
       if (!usesLlm(input.request)) {
         return deterministic.replan(input);
       }
+      if (hasAuthoritativeRepairAction(input)) {
+        return deterministic.replan(input);
+      }
       try {
         const raw = await options.complete({
           system: buildReplanSystemPrompt(),
@@ -109,6 +112,14 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
       return deterministic.replan(input);
     },
   };
+}
+
+function hasAuthoritativeRepairAction(input: AgentRunReplanInput): boolean {
+  return input.currentStep.evaluations.some((evaluation) =>
+    !evaluation.passed
+    && Boolean(evaluation.suggestedRepair)
+    && Boolean(evaluation.repairAction)
+  );
 }
 
 function buildPlanSystemPrompt(maxSteps: number, audience: AgentRunAudience): string {

@@ -7,12 +7,25 @@ export interface ChatTurn {
 
 export interface AgentConversationContext {
   activeSurface?: 'notebook' | 'block' | 'app' | 'research' | 'chat' | string;
+  conversationStateVersion?: number;
+  activeTurnId?: string;
+  activeTopic?: string;
+  conversationSummary?: string;
+  turns?: AgentConversationTurn[];
+  sourceAnswerId?: string;
   sourceCertifiedBlock?: string;
   sourceQuestion?: string;
   sourceAnswerSummary?: string;
-  followupKind?: 'generic' | 'drilldown';
+  followupKind?: 'generic' | 'drilldown' | 'contextual';
   requestedFilters?: string[];
   requestedDimensions?: string[];
+  answerContract?: unknown;
+  resultColumns?: string[];
+  resultRowsSample?: Record<string, unknown>[];
+  resultDimensionValues?: Record<string, string[]>;
+  appliedFilters?: Record<string, unknown>;
+  priorLimit?: number;
+  priorMeasures?: string[];
   outputColumns?: string[];
   trustLabel?: string;
   reviewStatus?: string;
@@ -22,6 +35,33 @@ export interface AgentConversationContext {
   draftBlockPath?: string;
   selectedEvidence?: unknown[];
   updatedAt?: string;
+}
+
+export interface AgentConversationTurn {
+  id: string;
+  question: string;
+  answerSummary?: string;
+  completedAt?: string;
+  artifactKind?: string;
+  sourceCertifiedBlock?: string;
+  route?: string;
+  trustLabel?: string;
+  reviewStatus?: string;
+  certification?: string;
+  contextPackId?: string;
+  requestedFilters?: string[];
+  requestedDimensions?: string[];
+  requestedMeasures?: string[];
+  answerContract?: unknown;
+  topN?: number;
+  result?: {
+    columns?: string[];
+    rowsSample?: Record<string, unknown>[];
+    dimensionValues?: Record<string, string[]>;
+    measureColumns?: string[];
+    rowCount?: number;
+  };
+  sourceSql?: string;
 }
 
 export interface BlockProposal {

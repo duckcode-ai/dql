@@ -77,6 +77,8 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
         workspaceContext={upstreamSql ? { upstreamSql } : undefined}
         initialItems={(config.thread as ThreadItem[] | undefined) ?? undefined}
         onItemsChange={(items) => onUpdate({ chatConfig: { ...config, thread: items } })}
+        threadId={config.threadId}
+        onThreadIdChange={(id) => onUpdate({ chatConfig: { ...config, threadId: id } })}
         onInsertSql={insertGeneratedSqlCell}
       />
     </div>

@@ -21,6 +21,8 @@ interface Conversation {
   createdAt: string;
   updatedAt: string;
   items: ThreadItem[];
+  /** Server-side conversation thread id — the runs' turns persist server-side too. */
+  threadId?: string;
 }
 
 const STORAGE_KEY = 'dql-ask-conversations';
@@ -61,21 +63,35 @@ function loadConversations(): Conversation[] {
   }
 }
 
+// Strip fields that only matter during a LIVE run before writing to disk. Event
+// streams (and their payloads) dominate the serialized size and blow the
+// localStorage quota after a handful of chats — which used to silently drop the
+// answer cards from history. Answers themselves are recoverable from the
+// server-persisted thread (threadId), so the local copy is a fast-path cache.
+function slimForPersist(conversations: Conversation[]): Conversation[] {
+  return conversations.map((conversation) => ({
+    ...conversation,
+    items: conversation.items.map((item) =>
+      item.kind === 'run' ? { ...item, run: { ...item.run, events: [] } } : item,
+    ),
+  }));
+}
+
 // Returns the set actually persisted, so callers keep in-memory state in sync with
 // disk (a quota fallback writes fewer than it was given — don't keep 40 in memory).
 function persistConversations(conversations: Conversation[]): Conversation[] {
   const capped = conversations.slice(0, MAX_CONVERSATIONS);
   if (typeof window === 'undefined') return capped;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(capped));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(slimForPersist(capped)));
     return capped;
   } catch {
     // Quota exceeded (large result payloads) — keep only the most recent few.
     const trimmed = capped.slice(0, 8);
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(slimForPersist(trimmed)));
     } catch {
-      /* give up — history is best-effort */
+      /* give up — history is best-effort; answers remain on the server thread */
     }
     return trimmed;
   }
@@ -116,6 +132,10 @@ export function AnalyticsHome() {
     () => conversations.find((c) => c.id === activeId)?.items ?? [],
     [conversations, activeId],
   );
+  const activeThreadId = useMemo(
+    () => conversations.find((c) => c.id === activeId)?.threadId,
+    [conversations, activeId],
+  );
 
   const handleItemsChange = useCallback(
     (items: ThreadItem[]) => {
@@ -131,9 +151,29 @@ export function AnalyticsHome() {
           createdAt: existing?.createdAt ?? now,
           updatedAt: now,
           items,
+          threadId: existing?.threadId,
         };
         const next = [convo, ...prev.filter((c) => c.id !== activeId)].slice(0, MAX_CONVERSATIONS);
         return persistConversations(next);
+      });
+    },
+    [activeId],
+  );
+
+  // Remember the server thread backing this conversation, so resuming it (or a
+  // page refresh) continues the same server-persisted thread.
+  const handleThreadIdChange = useCallback(
+    (threadId: string) => {
+      setConversations((prev) => {
+        const existing = prev.find((c) => c.id === activeId);
+        const now = new Date().toISOString();
+        if (!existing) {
+          return persistConversations([
+            { id: activeId, title: 'New chat', createdAt: now, updatedAt: now, items: [], threadId },
+            ...prev,
+          ]);
+        }
+        return persistConversations(prev.map((c) => (c.id === activeId ? { ...c, threadId } : c)));
       });
     },
     [activeId],
@@ -204,6 +244,8 @@ export function AnalyticsHome() {
               initialMode="auto"
               initialItems={activeItems}
               onItemsChange={handleItemsChange}
+              threadId={activeThreadId}
+              onThreadIdChange={handleThreadIdChange}
               onRunningChange={setIsRunning}
               onOpenResearch={openResearch}
               onOpenApp={openApp}

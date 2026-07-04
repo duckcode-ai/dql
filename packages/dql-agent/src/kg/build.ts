@@ -54,6 +54,9 @@ export function buildKGFromManifest(manifest: DQLManifest): {
   // Blocks
   for (const block of Object.values(manifest.blocks)) {
     const nodeId = `block:${block.name}`;
+    const contractOutputNames = block.declaredOutputs
+      ?? block.outputContract?.map((output) => output.name).filter(Boolean)
+      ?? block.outputs?.map((output) => output.name).filter(Boolean);
     nodes.push({
       nodeId,
       kind: 'block',
@@ -73,6 +76,8 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       grain: block.grain,
       entities: block.entities,
       declaredOutputs: block.declaredOutputs,
+      outputs: block.outputs,
+      outputContract: block.outputContract,
       dimensions: block.dimensions,
       allowedFilters: block.allowedFilters,
       parameterPolicy: block.parameterPolicy,
@@ -87,7 +92,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
         grain: block.grain,
         entities: block.entities,
         terms: block.termRefs,
-        outputs: block.declaredOutputs,
+        outputs: contractOutputNames,
         dimensions: block.dimensions,
         filters: block.allowedFilters,
         sources: [...(block.tableDependencies ?? []), ...(block.rawTableRefs ?? [])],

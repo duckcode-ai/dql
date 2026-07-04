@@ -132,6 +132,38 @@ describe("createLlmAgentRunPlanner", () => {
     expect(decision).toMatchObject({ decision: "escalate", route: "research" });
   });
 
+  it("honors explicit gate repair actions before asking the LLM to replan", async () => {
+    const complete = vi.fn().mockResolvedValue(JSON.stringify({
+      decision: "clarify",
+      question: "Which product source should I use?",
+    }));
+    const planner = createLlmAgentRunPlanner({ complete });
+
+    const decision = await planner.replan(replanInput({
+      currentStep: {
+        ...stepWithFailure(),
+        evaluations: [{
+          id: "answer-shape",
+          label: "Answer shape",
+          passed: false,
+          severity: "warning",
+          message: "The answer is missing requested output column(s): product_name, category.",
+          suggestedRepair: "Regenerate the answer at the requested grain and include: product_name, category.",
+          repairAction: {
+            kind: "retry",
+            hint: "Regenerate SQL using governed metadata and include product_name and category.",
+          },
+        }],
+      },
+    }));
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({
+      decision: "repair",
+      repairHint: "Regenerate SQL using governed metadata and include product_name and category.",
+    });
+  });
+
   it("falls back to the deterministic replan on bad replan output", async () => {
     const complete = vi.fn().mockResolvedValue("garbage");
     const planner = createLlmAgentRunPlanner({ complete });

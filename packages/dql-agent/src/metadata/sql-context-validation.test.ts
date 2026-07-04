@@ -222,6 +222,7 @@ function pack(): LocalContextPack {
       selectedObjects: 0,
       selectedEvidence: [],
       topRejected: [],
+      certifiedCandidateFits: [],
       candidateConflicts: [],
     },
     freshness: {

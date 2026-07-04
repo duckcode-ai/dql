@@ -1,0 +1,399 @@
+import type { KGNode } from '../kg/types.js';
+import type { AnalysisQuestionPlan, RequestedAnswerShape } from './analysis-planner.js';
+import type { MetadataObject } from './catalog.js';
+import { extractSimpleSelectShape, selectExpressionOutputName } from './sql-shape.js';
+
+export interface CertifiedBlockFit {
+  kind: 'exact' | 'trim_safe' | 'context_only' | 'not_applicable';
+  confidence: 'high' | 'medium' | 'low';
+  reasons: string[];
+  missingOutputs: string[];
+  missingDimensions: string[];
+  unsupportedFilters: string[];
+  grainMismatch?: string;
+  topNAction?: 'none' | 'trim' | 'generate';
+  inferredContract: boolean;
+}
+
+export function requestedShapeFromPlan(plan: AnalysisQuestionPlan): RequestedAnswerShape {
+  return plan.requestedShape;
+}
+
+export function certifiedFitAllowsTier1(fit: CertifiedBlockFit): boolean {
+  return (fit.kind === 'exact' || fit.kind === 'trim_safe') && fit.confidence === 'high';
+}
+
+export function evaluateCertifiedBlockFit(input: {
+  question: string;
+  plan: AnalysisQuestionPlan;
+  block: MetadataObject | KGNode;
+  exactExampleMatch?: boolean;
+  definitionLookup?: boolean;
+}): CertifiedBlockFit {
+  const requested = requestedShapeFromPlan(input.plan);
+  const block = blockShape(input.block);
+
+  if (input.definitionLookup || input.exactExampleMatch) {
+    return {
+      kind: 'exact',
+      confidence: 'high',
+      reasons: [input.definitionLookup ? 'definition lookup bypasses shape fit' : 'question matches a certified example'],
+      missingOutputs: [],
+      missingDimensions: [],
+      unsupportedFilters: [],
+      topNAction: 'none',
+      inferredContract: block.inferredContract,
+    };
+  }
+
+  const requestedDimensions = requested.dimensions.map(canonicalToken).filter(Boolean);
+  const requestedMeasures = requested.measures.map(canonicalToken).filter(Boolean);
+  const requiredOutputs = requested.requiredOutputs.map(canonicalColumn).filter(Boolean);
+  const blockDimensions = new Set(block.dimensions);
+  const blockMeasures = new Set(block.measures);
+  const blockOutputs = new Set(block.outputs);
+
+  const missingDimensions = uniqueStrings(requestedDimensions.filter((dimension) =>
+    !blockDimensions.has(dimension) && !outputHasEntity(blockOutputs, dimension)
+  ));
+  const missingOutputs = uniqueStrings(requiredOutputs.filter((output) =>
+    !outputRequirementCovered(output, block)
+  ));
+  const measureMatch = requestedMeasures.length === 0
+    || requestedMeasures.some((measure) => blockMeasures.has(measure) || block.textTokens.has(measure) || outputHasEntity(blockOutputs, measure));
+
+  const unsupportedFilters = unsupportedRequestedFilters(requested, block);
+  const grainMismatch = requested.grain && block.grain && canonicalToken(requested.grain) !== block.grain
+    && !blockDimensions.has(canonicalToken(requested.grain))
+    ? `certified block grain=${block.grain} does not cover requested grain=${canonicalToken(requested.grain)}`
+    : undefined;
+  const topNAction = topNFitAction(requested, block);
+
+  if (grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || !measureMatch || topNAction === 'generate') {
+    const reasons = [
+      grainMismatch,
+      missingDimensions.length ? `missing requested dimensions: ${missingDimensions.join(', ')}` : '',
+      missingOutputs.length ? `missing requested outputs: ${missingOutputs.join(', ')}` : '',
+      unsupportedFilters.length ? `unsupported requested filters: ${unsupportedFilters.join(', ')}` : '',
+      !measureMatch ? `missing requested measures: ${requestedMeasures.join(', ')}` : '',
+      topNAction === 'generate' ? 'certified block limit is narrower than requested top-N' : '',
+    ].filter((reason): reason is string => Boolean(reason));
+    return {
+      kind: block.relevance > 0 ? 'context_only' : 'not_applicable',
+      confidence: 'high',
+      reasons,
+      missingOutputs,
+      missingDimensions,
+      unsupportedFilters,
+      grainMismatch,
+      topNAction,
+      inferredContract: block.inferredContract,
+    };
+  }
+
+  const hasRequestedShape = requestedDimensions.length > 0 || requestedMeasures.length > 0 || requiredOutputs.length > 0 || Boolean(requested.grain);
+  if (!hasRequestedShape) {
+    return {
+      kind: 'exact',
+      confidence: 'low',
+      reasons: ['question has no strong requested answer shape; block fit is not proven'],
+      missingOutputs: [],
+      missingDimensions: [],
+      unsupportedFilters: [],
+      topNAction: 'none',
+      inferredContract: block.inferredContract,
+    };
+  }
+
+  const inferredMeasureOnly = block.inferredContract
+    && block.outputs.length === 0
+    && requestedDimensions.length === 0
+    && requiredOutputs.length > 0
+    && requiredOutputs.every((output) => outputRequirementCovered(output, block));
+  return {
+    kind: topNAction === 'trim' ? 'trim_safe' : 'exact',
+    confidence: block.inferredContract && block.outputs.length === 0 && !inferredMeasureOnly ? 'medium' : 'high',
+    reasons: [
+      'certified block covers requested metric, grain, dimensions, filters, and outputs',
+      topNAction === 'trim' ? 'certified result can be trimmed to requested top-N' : '',
+      block.inferredContract ? 'block contract was safely inferred from available metadata' : '',
+    ].filter(Boolean),
+    missingOutputs: [],
+    missingDimensions: [],
+    unsupportedFilters: [],
+    topNAction,
+    inferredContract: block.inferredContract,
+  };
+}
+
+interface BlockShape {
+  grain?: string;
+  dimensions: string[];
+  measures: string[];
+  outputs: string[];
+  filters: string[];
+  limit?: number;
+  textTokens: Set<string>;
+  relevance: number;
+  inferredContract: boolean;
+}
+
+function blockShape(block: MetadataObject | KGNode): BlockShape {
+  const record = block as unknown as Record<string, unknown>;
+  const payload = isMetadataObject(block) ? block.payload ?? {} : record;
+  const sql = stringValue(payload.sql) ?? stringValue(record.sql);
+  const descriptiveText = [
+    stringValue(record.name),
+    stringValue(record.description),
+    stringValue(payload.description),
+    stringValue(payload.llmContext),
+    Array.isArray(record.tags) ? (record.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
+  ].filter(Boolean).join(' ');
+  const sqlOutputs = sql ? extractSqlOutputs(sql) : [];
+  const outputs = uniqueStrings([
+    ...stringArray(payload.declaredOutputs),
+    ...stringArray(record.declaredOutputs),
+    ...stringArray(payload.outputs),
+    ...stringArray(payload.outputContract),
+    ...outputContractColumns(payload.outputContract),
+    ...sqlOutputs,
+  ].map(canonicalColumn).filter(Boolean));
+  const explicitDimensions = uniqueStrings([
+    ...stringArray(payload.dimensions),
+    ...stringArray(record.dimensions),
+    ...stringArray(payload.entities),
+    ...stringArray(record.entities),
+    ...outputs.filter(isDimensionLike),
+    ...tokensFromValue(stringValue(payload.grain) ?? stringValue(record.grain) ?? '').filter(isDimensionLike),
+  ].map(canonicalToken).filter(Boolean));
+  const dimensions = uniqueStrings([
+    ...explicitDimensions,
+    ...inferredTextDimensions(descriptiveText),
+  ]);
+  const measures = uniqueStrings([
+    ...outputs.filter(isMeasureLike),
+    ...tokensFromValue(descriptiveText).filter(isMeasureLike),
+  ].map(canonicalToken).filter(Boolean));
+  const textTokens = new Set(tokensFromValue([
+    descriptiveText,
+    JSON.stringify(payload),
+  ].filter(Boolean).join(' ')).map(canonicalToken));
+  const filters = uniqueStrings([
+    ...stringArray(payload.allowedFilters),
+    ...stringArray(record.allowedFilters),
+    ...filterBindingNames(payload.filterBindings),
+    ...filterBindingNames(record.filterBindings),
+  ].map(canonicalToken).filter(Boolean));
+  const grain = canonicalToken(stringValue(payload.grain) ?? stringValue(record.grain) ?? explicitDimensions[0] ?? '');
+  const relevance = outputs.length + dimensions.length + measures.length;
+  return {
+    ...(grain ? { grain } : {}),
+    dimensions,
+    measures,
+    outputs,
+    filters,
+    limit: sql ? parseSqlLimit(sql) : undefined,
+    textTokens,
+    relevance,
+    inferredContract: stringArray(payload.declaredOutputs).length === 0 && stringArray(record.declaredOutputs).length === 0,
+  };
+}
+
+function inferredTextDimensions(text: string): string[] {
+  const normalized = text.replace(/[_-]+/g, ' ').toLowerCase();
+  const inferred: string[] = [];
+  for (const match of normalized.matchAll(/\b(?:by|per)\s+([a-z][a-z0-9 ]{1,48})/g)) {
+    const phrase = (match[1] ?? '')
+      .replace(/\b(?:for|from|with|and|or|including|include|where|when|over|during|not)\b.*$/i, '')
+      .trim();
+    const dimensions = tokensFromValue(phrase).map(canonicalToken).filter(isDimensionLike);
+    const dimension = dimensions.at(-1);
+    if (dimension) inferred.push(dimension);
+  }
+  return uniqueStrings(inferred);
+}
+
+function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: BlockShape): string[] {
+  const requestedFilters = uniqueStrings([
+    ...requested.filters,
+    ...requested.followUpReferences.flatMap((ref) => ref.resolvedValues ?? []),
+  ].map(canonicalToken).filter(Boolean));
+  if (requestedFilters.length === 0 || block.filters.length === 0) return [];
+  const blockFilters = new Set(block.filters);
+  return requestedFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter));
+}
+
+function topNFitAction(requested: RequestedAnswerShape, block: BlockShape): CertifiedBlockFit['topNAction'] {
+  if (!requested.topN) return 'none';
+  if (!block.limit) return 'none';
+  if (block.limit === requested.topN.n) return 'none';
+  if (block.limit > requested.topN.n) return 'trim';
+  return 'generate';
+}
+
+function outputCoversRequired(outputs: string[], required: string): boolean {
+  const outputSet = new Set(outputs);
+  if (outputSet.has(required)) return true;
+  const requiredTokens = required.split('_').filter(Boolean);
+  if (requiredTokens.length === 0) return true;
+  if (required.endsWith('_name')) {
+    const entity = requiredTokens[0] ?? '';
+    return outputs.some((output) => {
+      const tokens = output.split('_');
+      return tokens.includes(entity) && (tokens.includes('name') || tokens.includes('title') || output === entity);
+    });
+  }
+  return outputs.some((output) => requiredTokens.every((token) => output.split('_').includes(token)));
+}
+
+function outputRequirementCovered(required: string, block: BlockShape): boolean {
+  if (outputCoversRequired(block.outputs, required)) return true;
+  const token = canonicalToken(required);
+  if (block.dimensions.includes(token)) return true;
+  if (isMeasureLike(required) || block.measures.includes(token)) {
+    return block.measures.includes(token) || block.textTokens.has(token) || outputHasEntity(new Set(block.outputs), token);
+  }
+  return false;
+}
+
+function outputHasEntity(outputs: Set<string>, entity: string): boolean {
+  for (const output of outputs) {
+    if (output === entity || output.split('_').includes(entity)) return true;
+  }
+  return false;
+}
+
+function extractSqlOutputs(sql: string): string[] {
+  const shape = extractSimpleSelectShape(sql);
+  if (!shape) return [];
+  return shape.selectExpressions
+    .map(selectExpressionOutputName)
+    .filter((value): value is string => Boolean(value));
+}
+
+function outputContractColumns(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return [
+      ...stringArray(value),
+      ...arrayObjectNames(value),
+    ];
+  }
+  if (!value || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  return [
+    ...stringArray(record.columns),
+    ...stringArray(record.outputs),
+    ...arrayObjectNames(record.columns),
+    ...arrayObjectNames(record.outputs),
+  ];
+}
+
+function filterBindingNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    return [stringValue(record.filter), stringValue(record.name), stringValue(record.binding)].filter((v): v is string => Boolean(v));
+  });
+}
+
+function arrayObjectNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === 'string') return [item];
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    return [stringValue(record.name), stringValue(record.field), stringValue(record.column)].filter((v): v is string => Boolean(v));
+  });
+}
+
+function parseSqlLimit(sql: string): number | undefined {
+  const match = sql.match(/\blimit\s+(\d{1,6})\b/i);
+  return match ? Number(match[1]) : undefined;
+}
+
+function isMetadataObject(value: MetadataObject | KGNode): value is MetadataObject {
+  return 'objectKey' in value && 'objectType' in value;
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === 'string') return [item];
+    if (item && typeof item === 'object') {
+      const record = item as Record<string, unknown>;
+      return [stringValue(record.name), stringValue(record.field), stringValue(record.column)].filter((v): v is string => Boolean(v));
+    }
+    return [];
+  });
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function isDimensionLike(value: string): boolean {
+  return /\b(account|category|channel|cohort|country|customer|date|department|geo|hour|item|location|market|member|month|order|period|person|player|product|quarter|region|segment|sku|store|team|territory|type|user|vendor|week|year)\b/.test(value);
+}
+
+function isMeasureLike(value: string): boolean {
+  return /\b(amount|arr|average|avg|balance|booking|churn|conversion|cost|count|duration|expense|growth|kpi|margin|metric|mrr|number|order|point|profit|quantity|rate|revenue|sale|score|spend|stat|total|usage|value|volume)\b/.test(value);
+}
+
+function tokensFromValue(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[_\-./]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && token !== 'id')
+    .map((token) => (token.endsWith('id') && token.length > 3 ? token.slice(0, -2) : token))
+    .map(singularize);
+}
+
+function canonicalColumn(value: string): string {
+  return tokensFromValue(value).join('_');
+}
+
+function canonicalToken(value: string): string {
+  const tokens = tokensFromValue(value);
+  if (tokens.length === 0) return '';
+  if (tokens.includes('product')) return 'product';
+  if (tokens.includes('category')) return 'category';
+  if (tokens.includes('customer') || tokens.includes('client')) return 'customer';
+  if (tokens.includes('account')) return 'account';
+  if (tokens.includes('user') || tokens.includes('member')) return 'user';
+  if (tokens.includes('region') || tokens.includes('geo') || tokens.includes('market') || tokens.includes('territory')) return 'region';
+  if (tokens.includes('segment') || tokens.includes('cohort')) return 'segment';
+  if (tokens.includes('channel')) return 'channel';
+  if (tokens.includes('order')) return 'order';
+  if (tokens.includes('revenue') || tokens.includes('sale') || tokens.includes('spend') || tokens.includes('amount')) return 'revenue';
+  if (tokens.includes('score') || tokens.includes('scoring') || tokens.includes('scorer') || tokens.includes('point')) return 'score';
+  if (tokens.includes('count') || tokens.includes('number') || tokens.includes('quantity') || tokens.includes('volume')) return 'count';
+  if (tokens.includes('week')) return 'week';
+  if (tokens.includes('month')) return 'month';
+  if (tokens.includes('quarter')) return 'quarter';
+  if (tokens.includes('year') || tokens.includes('season')) return 'year';
+  if (tokens.includes('day') || tokens.includes('date')) return 'day';
+  return tokens[0] ?? '';
+}
+
+function singularize(token: string): string {
+  if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
+  if (token.endsWith('ses') && token.length > 4) return token.slice(0, -2);
+  if (token.endsWith('s') && token.length > 3) return token.slice(0, -1);
+  return token;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const clean = value.trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}

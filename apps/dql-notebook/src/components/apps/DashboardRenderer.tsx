@@ -6,7 +6,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
-import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import { renderMarkdown } from '../cells/MarkdownCellEditor';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
 import { classifyColumns } from '../../utils/semantic-fields';
@@ -100,6 +100,9 @@ export function DashboardRenderer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  // Server-persisted conversation thread, keyed per app dashboard so a page
+  // refresh resumes the same Dashboard AI conversation.
+  const agentThread = usePersistedAgentThreadId(`app:${appId}:${dashboard.id}`);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogSearch, setCatalogSearch] = useState('');
@@ -684,12 +687,15 @@ export function DashboardRenderer({
             </div>
             <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
               <UnifiedAgentRunPanel
+                key={`${appId}:${dashboard.id}`}
                 themeMode={state.themeMode}
                 title="Dashboard AI"
                 scopeHint="Scoped to this App dashboard first"
                 audience="stakeholder"
                 workspaceContext={{ appId, dashboardId: dashboard.id, dashboardContext: chatContext }}
                 initialMode="auto"
+                threadId={agentThread.threadId}
+                onThreadIdChange={agentThread.onThreadIdChange}
               />
             </div>
           </div>

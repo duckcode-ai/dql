@@ -68,6 +68,10 @@ import type { AgentConversationContext, AgentRunner as LLMAgentRunner, ProviderI
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
 import {
   ClaudeProvider,
+  ConversationStore,
+  advanceThreadState,
+  buildConversationSnapshot,
+  recallRelevantTurns,
   GeminiProvider,
   MemoryStore,
   OllamaProvider,
@@ -75,6 +79,7 @@ import {
   buildBlockBusinessFingerprint,
   buildBlockSqlFingerprints,
   buildLocalContextPack,
+  defaultConversationPath,
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
   ensureMetadataCatalogFresh,
@@ -87,6 +92,7 @@ import {
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
   createHybridRouter,
+  computeResultStats,
   synthesizeAnswer,
   streamOrGenerate,
   type SynthesizeResultPreview,
@@ -108,6 +114,7 @@ import {
   type Skill,
   type WriteSkillInput,
   type AgentAnswer,
+  type ConversationTurnInput,
   type AgentResultPayload,
   type AgentProvider,
   type AgentSchemaTable,
@@ -152,6 +159,7 @@ import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps
 import {
   getActiveProvider,
   getEffectiveProviderConfig,
+  isProviderSettingsId,
   listProviderSettings,
   saveProviderSettings,
   type ProviderSettingsId,
@@ -160,12 +168,14 @@ import {
 import { ClaudeCodeCliProvider, CodexCliProvider } from './providers/subscription-cli.js';
 import {
   ClaudeOAuthManager,
+  ClaudeOAuthProvider,
   claudeOAuthConnected,
   CLAUDE_OAUTH_MODELS,
   CLAUDE_OAUTH_DEFAULT_MODEL,
 } from './providers/oauth/claude-oauth.js';
 import {
   CodexOAuthManager,
+  CodexOAuthProvider,
   codexOAuthConnected,
   CODEX_OAUTH_MODELS,
   CODEX_OAUTH_DEFAULT_MODEL,
@@ -318,6 +328,11 @@ export interface LocalServerOptions {
    * let the process exit instead of hanging on an open listener.
    */
   captureServer?: (server: import('node:http').Server) => void;
+  /**
+   * Test/embedding seam for deterministic agent-run execution without a live LLM.
+   * Production callers leave this unset and use the default governed executors.
+   */
+  agentRunExecutors?: AgentRunExecutors;
 }
 
 const AGENT_RUN_REQUESTED_MODES = new Set<AgentRunRequestedMode>(['auto', 'ask', 'research', 'sql', 'block', 'app']);
@@ -370,7 +385,7 @@ function parseAgentRunHistory(value: unknown): AgentRunRequest['history'] {
   return history.length > 0 ? history.slice(-20) : undefined;
 }
 
-function parseAgentRunRequestBody(body: unknown): { request?: AgentRunRequest; error?: string } {
+export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunRequest; error?: string } {
   const record = agentRunRecord(body);
   if (!record) return { error: 'Invalid JSON body.' };
   const question = agentRunString(record.question) ?? agentRunString(record.prompt) ?? agentRunString(record.message);
@@ -391,10 +406,163 @@ function parseAgentRunRequestBody(body: unknown): { request?: AgentRunRequest; e
       signals: signals as AgentRunRequest['signals'],
       selectedObject,
       workspaceContext,
+      conversationContext: agentRunRecord(record.conversationContext),
       history: parseAgentRunHistory(record.history),
+      threadId: agentRunString(record.threadId),
       runId: agentRunString(record.runId),
     },
   };
+}
+
+// ── Server-side conversation threads ────────────────────────────────────────
+// When a run carries a threadId, the persisted thread is the authoritative
+// source of prior turns (survives refresh); the client-built context remains
+// the fallback for embedders that never send a threadId.
+
+async function conversationContextFromThread(
+  store: ConversationStore,
+  threadId: string,
+  clientContext: Record<string, unknown> | undefined,
+  question?: string,
+): Promise<Record<string, unknown>> {
+  const turns = store.recentTurns(threadId, 8).map((turn) => {
+    const contract = turn.contract ?? {};
+    const topN = contract.topN;
+    const topNValue = typeof topN === 'number'
+      ? topN
+      : topN && typeof topN === 'object' && typeof (topN as { n?: unknown }).n === 'number'
+        ? (topN as { n: number }).n
+        : undefined;
+    return compactConversationRecord({
+      id: turn.id,
+      question: turn.question,
+      answerSummary: turn.answerSummary,
+      sourceCertifiedBlock: turn.sourceCertifiedBlock,
+      route: turn.route,
+      trustLabel: turn.trustLabel,
+      certification: turn.certification,
+      contextPackId: turn.contextPackId,
+      requestedFilters: conversationStringArray(contract.filters),
+      requestedDimensions: conversationStringArray(contract.dimensions),
+      requestedMeasures: conversationStringArray(contract.measures),
+      topN: topNValue,
+      result: turn.result
+        ? compactConversationRecord({
+            columns: turn.result.columns,
+            rowsSample: turn.result.rowsSample,
+            dimensionValues: turn.result.dimensionValues,
+            measureColumns: turn.result.measureColumns,
+          })
+        : undefined,
+    });
+  }).filter((turn): turn is Record<string, unknown> => Boolean(turn));
+  const thread = store.getThread(threadId);
+  // Bounded structured snapshot (working state + rolling summary + topic relation)
+  // for the answer loop's conversation-state prompt section.
+  const serverSnapshot = buildConversationSnapshot(store, threadId, { question });
+  if (serverSnapshot && question) {
+    // Semantic recall over OLDER turns (the recent window is already verbatim).
+    serverSnapshot.recalledTurns = await recallRelevantTurns(store, threadId, question, {
+      limit: 3,
+      excludeTurnIds: serverSnapshot.recentTurns.map((turn) => turn.id),
+    });
+  }
+  return {
+    ...(clientContext ?? {}),
+    conversationStateVersion: 1,
+    threadId,
+    ...(serverSnapshot ? { serverSnapshot } : {}),
+    ...(thread?.rollingSummary ? { conversationSummary: thread.rollingSummary } : {}),
+    ...(turns.length > 0 ? { turns, activeTurnId: (turns[turns.length - 1] as { id?: string }).id } : {}),
+  };
+}
+
+/** Best-effort: persist a completed run as a conversation turn (never throws). */
+function recordConversationTurn(store: ConversationStore | null, threadId: string | undefined, run: AgentRun): void {
+  if (!store || !threadId) return;
+  try {
+    if (!store.getThread(threadId)) return;
+    const turn = store.appendTurn(threadId, conversationTurnInputFromRun(run));
+    // Fold the turn into the thread's working state + rolling summary (incremental).
+    advanceThreadState(store, threadId, turn);
+  } catch {
+    // Conversation persistence is additive; a failed write must not fail the run.
+  }
+}
+
+function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
+  const artifact = run.artifacts.find((candidate) => candidate.kind === 'answer')
+    ?? run.artifacts.find((candidate) => candidate.kind === 'research_run')
+    ?? run.artifacts[0];
+  const payload = agentRunRecord(artifact?.payload);
+  const result = agentRunRecord(payload?.result);
+  const columns = conversationResultColumns(result?.columns);
+  const rows = Array.isArray(result?.rows)
+    ? result.rows.filter((row): row is Record<string, unknown> =>
+        Boolean(row && typeof row === 'object' && !Array.isArray(row))).slice(0, 8)
+    : [];
+  const rowsSample = rows.map((row) => columns.map((column) => row[column]));
+  const contextPack = agentRunRecord(payload?.contextPack);
+  const questionPlan = agentRunRecord(contextPack?.questionPlan);
+  const requestedShape = agentRunRecord(questionPlan?.requestedShape);
+  const rowCountRaw = result?.rowCount;
+  return {
+    question: run.question,
+    answerSummary: run.answer ?? run.summary,
+    route: run.route,
+    trustLabel: agentRunString(payload?.trustLabel) ?? run.trustState,
+    certification: agentRunString(payload?.certification),
+    sourceCertifiedBlock: agentRunString(payload?.sourceCertifiedBlock)
+      ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
+    contextPackId: agentRunString(payload?.contextPackId),
+    sql: agentRunString(payload?.proposedSql) ?? agentRunString(payload?.sql),
+    result: columns.length > 0 || rows.length > 0
+      ? {
+          columns,
+          rowsSample,
+          dimensionValues: conversationDimensionValues(columns, rows),
+          rowCount: typeof rowCountRaw === 'number' ? rowCountRaw : rows.length || undefined,
+        }
+      : undefined,
+    contract: requestedShape,
+  };
+}
+
+function conversationResultColumns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((column) => typeof column === 'string'
+      ? column
+      : agentRunString((column as { name?: unknown })?.name) ?? '')
+    .filter(Boolean)
+    .slice(0, 24);
+}
+
+/** Distinct string values per low-cardinality column — the deictic-resolution fuel. */
+function conversationDimensionValues(
+  columns: string[],
+  rows: Array<Record<string, unknown>>,
+): Record<string, string[]> | undefined {
+  if (columns.length === 0 || rows.length === 0) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const column of columns.slice(0, 8)) {
+    const values = Array.from(new Set(
+      rows.map((row) => row[column]).filter((value): value is string => typeof value === 'string' && value.trim().length > 0),
+    )).slice(0, 24);
+    if (values.length > 0 && values.length <= 24) out[column] = values;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function conversationStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+  return values.length > 0 ? values : undefined;
+}
+
+function compactConversationRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(record).filter(([, value]) => value !== undefined && value !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
@@ -699,6 +867,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ...(request.history ?? []).map((message) => ({ role: message.role, content: message.text })),
           { role: 'user', content: isRepair ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}` : request.question },
         ],
+        conversationContext: request.conversationContext,
         upstream: {
           cellId: `agent-run:${request.selectedObject?.kind ?? 'workspace'}:${request.selectedObject?.id ?? request.runId ?? 'auto'}`,
           sql: JSON.stringify(contextEnvelope, null, 2),
@@ -858,15 +1027,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }));
 
     let text: string | undefined;
-    try {
-      const provider = await createBlockStudioAssistProvider(projectRoot);
-      if (provider) {
-        const system = buildConversationSystemPrompt(kind, isGeneralKnowledge, catalogContext, request.audience ?? 'analyst');
-        const messages = [
-          { role: 'system' as const, content: system },
-          ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
-          { role: 'user' as const, content: request.question },
-        ];
+	    try {
+	      const provider = await createBlockStudioAssistProvider(projectRoot);
+	      if (provider) {
+	        const system = buildConversationSystemPrompt(kind, isGeneralKnowledge, catalogContext, request.audience ?? 'analyst');
+	        const conversationMemory = renderConversationMemoryForPrompt(request.conversationContext);
+	        const messages = [
+	          { role: 'system' as const, content: system },
+	          ...(conversationMemory ? [{ role: 'system' as const, content: conversationMemory }] : []),
+	          ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
+	          { role: 'user' as const, content: request.question },
+	        ];
         text = (await provider.generate(messages, { maxTokens: 320, temperature: 0.6 })).trim();
         // Perceived-latency: surface the reply as one delta for surfaces wired to stream.
         if (text) emitAnswerDelta?.(text);
@@ -874,11 +1045,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     } catch {
       // Provider unavailable / errored — fall through to the deterministic reply.
       text = undefined;
-    }
-    if (!text) {
-      text = buildConversationalFallback(kind, isGeneralKnowledge, request.question, suggestions);
-      emitAnswerDelta?.(text);
-    }
+	    }
+	    if (!text) {
+	      text = buildConversationContextRecap(request.conversationContext)
+	        ?? buildConversationalFallback(kind, isGeneralKnowledge, request.question, suggestions);
+	      emitAnswerDelta?.(text);
+	    }
 
     return {
       summary: 'Replied conversationally.',
@@ -1284,9 +1456,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   });
 
   const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
+  // Server-side conversation threads: persisted multi-turn state (survives refresh).
+  // Lazy so a failed native-sqlite load never blocks the runtime; conversation
+  // persistence degrades to the per-request context instead.
+  let conversationStoreInstance: ConversationStore | null | undefined;
+  const getConversationStore = (): ConversationStore | null => {
+    if (conversationStoreInstance !== undefined) return conversationStoreInstance;
+    try {
+      conversationStoreInstance = new ConversationStore(defaultConversationPath(projectRoot));
+    } catch {
+      conversationStoreInstance = null;
+    }
+    return conversationStoreInstance;
+  };
   const agentRunEngine = new AgentRunEngine({
     store: agentRunStore,
-    executors: agentRunExecutors,
+    executors: {
+      ...agentRunExecutors,
+      ...(opts.agentRunExecutors ?? {}),
+    },
     gates: defaultAgentRunGates,
     planner: agentRunPlanner,
     router: agentRunRouter,
@@ -1485,16 +1673,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
-    const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
-    if (catalogContext.length > 0) {
-      if (!connection) return catalogContext;
-      const enriched = await enrichAgentSchemaContextWithValueMatches(question, catalogContext, executor, connection);
-      recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, 'catalog enriched runtime schema');
-      return enriched;
-    }
-
-    if (!connection) return [];
-    try {
+    const scanRuntimeSchema = async (): Promise<AgentSchemaTable[]> => {
+      if (!connection) return [];
       const result = await executor.executeQuery(
         `SELECT table_schema, table_name, column_name, data_type
          FROM information_schema.columns
@@ -1505,7 +1685,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         runtimeVariables({}),
         connection,
       );
-      const schemaContext = buildAgentSchemaContext(question, result.rows);
+      return buildAgentSchemaContext(question, result.rows);
+    };
+    const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
+    if (catalogContext.length > 0) {
+      if (!connection) return catalogContext;
+      const runtimeContext = shouldAugmentAgentRuntimeSchema(question)
+        ? await scanRuntimeSchema().catch(() => [])
+        : [];
+      const merged = mergeAgentSchemaContexts(catalogContext, runtimeContext);
+      const enriched = await enrichAgentSchemaContextWithValueMatches(question, merged, executor, connection);
+      recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, runtimeContext.length > 0
+        ? 'catalog plus runtime schema for composite Ask AI question'
+        : 'catalog enriched runtime schema');
+      return enriched;
+    }
+
+    if (!connection) return [];
+    try {
+      const schemaContext = await scanRuntimeSchema();
       const enriched = await enrichAgentSchemaContextWithValueMatches(question, schemaContext, executor, connection);
       recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, 'information_schema runtime scan');
       return enriched;
@@ -2618,6 +2816,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!parsed.request.signals && !parsed.request.requestedMode) {
           parsed.request.signals = computeAgentRunSignals(projectRoot, parsed.request.question);
         }
+        // Thread-scoped runs: the persisted thread supplies prior turns (server
+        // state wins; the client-built context stays the no-threadId fallback).
+        const conversationStore = parsed.request.threadId ? getConversationStore() : null;
+        if (conversationStore && parsed.request.threadId && conversationStore.getThread(parsed.request.threadId)) {
+          parsed.request.conversationContext = await conversationContextFromThread(
+            conversationStore,
+            parsed.request.threadId,
+            parsed.request.conversationContext,
+            parsed.request.question,
+          );
+        }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         if (wantsStream) {
           res.writeHead(200, {
@@ -2631,11 +2840,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }, (delta) => {
             writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-answer-delta', { runId: parsed.request!.runId, delta });
           });
+          recordConversationTurn(conversationStore, parsed.request.threadId, run);
           writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', run);
           res.end();
           return;
         }
         const run = await agentRunEngine.run(parsed.request);
+        recordConversationTurn(conversationStore, parsed.request.threadId, run);
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ run }));
       } catch (error) {
@@ -3280,6 +3491,116 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Conversation threads (server-side session persistence) ────────────
+    if (path === '/api/agent/threads' || path.startsWith('/api/agent/threads/')) {
+      const store = getConversationStore();
+      if (!store) {
+        res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Conversation store is unavailable.' }));
+        return;
+      }
+      try {
+        if (req.method === 'GET' && path === '/api/agent/threads') {
+          const limit = Number(url.searchParams.get('limit') ?? '50');
+          const includeArchived = url.searchParams.get('archived') === '1';
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ threads: store.listThreads({ limit: Number.isFinite(limit) ? limit : 50, includeArchived }) }));
+          return;
+        }
+        if (req.method === 'POST' && path === '/api/agent/threads') {
+          const body = await readJSON(req).catch(() => null);
+          const record = agentRunRecord(body) ?? {};
+          const thread = store.createThread({
+            surface: agentRunString(record.surface),
+            title: agentRunString(record.title),
+            notebookPath: agentRunString(record.notebookPath),
+          });
+          res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ thread }));
+          return;
+        }
+        // Cross-thread turn search ("search conversations") — must precede :id.
+        if (req.method === 'GET' && path === '/api/agent/threads/search') {
+          const query = url.searchParams.get('q') ?? '';
+          const limit = Number(url.searchParams.get('limit') ?? '10');
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            turns: query.trim()
+              ? store.searchTurns({ query, limit: Number.isFinite(limit) ? limit : 10 })
+              : [],
+          }));
+          return;
+        }
+        const threadMatch = path.match(/^\/api\/agent\/threads\/([^/]+)(?:\/(archive|promote))?$/);
+        if (threadMatch) {
+          const threadId = decodeURIComponent(threadMatch[1]);
+          const action = threadMatch[2];
+          const thread = store.getThread(threadId);
+          if (!thread) {
+            res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: 'Unknown thread id.' }));
+            return;
+          }
+          if (req.method === 'POST' && action === 'archive') {
+            store.archiveThread(threadId);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ ok: true }));
+            return;
+          }
+          // Explicit promotion — the ONLY path from conversation into durable
+          // memory ("remember this"). Deliberate user act, tagged for audit.
+          if (req.method === 'POST' && action === 'promote') {
+            const body = await readJSON(req).catch(() => null);
+            const record = agentRunRecord(body) ?? {};
+            const turnId = agentRunString(record.turnId);
+            const turn = turnId
+              ? store.recentTurns(threadId, 200).find((candidate) => candidate.id === turnId)
+              : undefined;
+            if (!turn) {
+              res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ error: 'turnId is required and must belong to this thread.' }));
+              return;
+            }
+            const scopeRaw = agentRunString(record.scope);
+            const scope = scopeRaw === 'notebook' || scopeRaw === 'project' || scopeRaw === 'user' ? scopeRaw : 'project';
+            const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+            try {
+              const saved = memory.upsert({
+                scope,
+                title: agentRunString(record.title) ?? turn.question.slice(0, 120),
+                content: `Q: ${turn.question}\nA: ${turn.answerSummary ?? turn.answerText ?? '(no answer summary)'}`,
+                tags: ['conversation', threadId],
+                source: 'conversation',
+                confidence: 0.6,
+                importance: 0.5,
+                enabled: true,
+              });
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ ok: true, memory: saved }));
+            } finally {
+              memory.close();
+            }
+            return;
+          }
+          if (req.method === 'GET' && !action) {
+            const limit = Number(url.searchParams.get('limit') ?? '50');
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({
+              thread,
+              turns: store.recentTurns(threadId, Number.isFinite(limit) ? limit : 50),
+            }));
+            return;
+          }
+        }
+        res.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Method not allowed' }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -11593,10 +11914,15 @@ async function createBlockStudioAssistProvider(
       provider = new OpenAIProvider({ apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model, allowNoApiKey: true });
       break;
     case 'claude-code':
-      provider = new ClaudeCodeCliProvider({ model: config.model });
+      // OAuth-first: use the browser-login token when connected; fall back to the CLI passthrough.
+      provider = claudeOAuthConnected(projectRoot)
+        ? new ClaudeOAuthProvider({ projectRoot, model: config.model })
+        : new ClaudeCodeCliProvider({ model: config.model });
       break;
     case 'codex':
-      provider = new CodexCliProvider({ model: config.model });
+      provider = codexOAuthConnected(projectRoot)
+        ? new CodexOAuthProvider({ projectRoot, model: config.model })
+        : new CodexCliProvider({ model: config.model });
       break;
     default:
       return null;
@@ -11610,8 +11936,7 @@ function agentResultToSynthesisPreview(result: AgentAnswer['result']): Synthesiz
   const columns = Array.isArray(result.columns)
     ? result.columns.map((col) => typeof col === 'string' ? col : (col as { name?: string })?.name ?? String(col))
     : [];
-  const rawRows = Array.isArray(result.rows) ? result.rows.slice(0, 20) : [];
-  const rows = rawRows.map((row) => {
+  const normalizeRow = (row: unknown): Record<string, unknown> => {
     if (row && typeof row === 'object' && !Array.isArray(row)) return row as Record<string, unknown>;
     // Array-shaped rows → zip with column names.
     if (Array.isArray(row)) {
@@ -11620,11 +11945,18 @@ function agentResultToSynthesisPreview(result: AgentAnswer['result']): Synthesiz
       return obj;
     }
     return { value: row } as Record<string, unknown>;
-  });
+  };
+  // Normalize ALL rows so verified statistics cover the full result — the
+  // narrator sees only a 20-row sample, and sample-derived aggregate claims
+  // ("spend ranges from X to Y") were the last hallucination surface.
+  const allRows = Array.isArray(result.rows) ? result.rows.map(normalizeRow) : [];
+  const rows = allRows.slice(0, 20);
+  const resolvedColumns = columns.length > 0 ? columns : Object.keys(rows[0] ?? {});
   return {
-    columns: columns.length > 0 ? columns : Object.keys(rows[0] ?? {}),
+    columns: resolvedColumns,
     rows,
-    rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length,
+    rowCount: typeof result.rowCount === 'number' ? result.rowCount : allRows.length,
+    stats: computeResultStats(resolvedColumns, allRows),
   };
 }
 
@@ -11741,6 +12073,124 @@ function buildConversationSystemPrompt(
     lines.push('', 'When suggesting example questions, prefer these real objects in their workspace:', catalogContext);
   }
   return lines.join('\n');
+}
+
+function renderConversationMemoryForPrompt(context: Record<string, unknown> | undefined): string | undefined {
+  const recap = buildConversationContextRecap(context);
+  if (!recap) return undefined;
+  return [
+    'Current conversation context:',
+    recap,
+    'If the user asks what this conversation is about, summarize this context directly. Do not query data or invent values.',
+  ].join('\n');
+}
+
+function buildConversationContextRecap(context: Record<string, unknown> | undefined): string | undefined {
+  if (!context) return undefined;
+  const turnRecap = buildConversationTurnsRecap(context);
+  if (turnRecap) return turnRecap;
+  const sourceQuestion = agentRunString(context.sourceQuestion);
+  const sourceAnswerSummary = agentRunString(context.sourceAnswerSummary);
+  const columns = agentRunStringArray(context.resultColumns ?? context.outputColumns).slice(0, 8);
+  const values = agentRunRecord(context.resultDimensionValues);
+  const rows = Array.isArray(context.resultRowsSample)
+    ? context.resultRowsSample.map(agentRunRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 1)
+    : [];
+  const firstRow = rows[0];
+
+  const leadParts: string[] = [];
+  const product = firstPriorValue(values, ['product_name', 'product', 'sku']);
+  const category = firstPriorValue(values, ['category', 'category_name', 'product_type']);
+  const customer = firstPriorValue(values, ['customer_name', 'customer']);
+  if (product) leadParts.push(`top product "${product}"`);
+  if (category) leadParts.push(`category "${category}"`);
+  if (customer) leadParts.push(`customer "${customer}"`);
+
+  const rowFacts = firstRow
+    ? columns
+        .slice(0, 5)
+        .map((column) => {
+          const value = firstRow[column];
+          return value === undefined || value === null || typeof value === 'object' ? '' : `${column}=${String(value)}`;
+        })
+        .filter(Boolean)
+    : [];
+
+  const contextBits = [
+    sourceQuestion ? `the question "${sourceQuestion}"` : '',
+    sourceAnswerSummary ? `the latest answer summary: ${sourceAnswerSummary}` : '',
+    columns.length ? `result columns: ${columns.join(', ')}` : '',
+    leadParts.length ? `notable prior values: ${leadParts.join(', ')}` : '',
+    rowFacts.length ? `first result row: ${rowFacts.join(', ')}` : '',
+  ].filter(Boolean);
+  if (contextBits.length === 0) return undefined;
+  return `We were talking about ${contextBits.join('. ')}.`;
+}
+
+function buildConversationTurnsRecap(context: Record<string, unknown>): string | undefined {
+  const turns = Array.isArray(context.turns)
+    ? context.turns.map(agentRunRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn)).slice(-3)
+    : [];
+  if (turns.length === 0) return undefined;
+  const activeTurnId = agentRunString(context.activeTurnId);
+  const active = activeTurnId
+    ? turns.find((turn) => agentRunString(turn.id) === activeTurnId)
+    : undefined;
+  const selected = active ?? turns[turns.length - 1];
+  if (!selected) return undefined;
+  const result = agentRunRecord(selected.result);
+  const values = agentRunRecord(result?.dimensionValues);
+  const columns = agentRunStringArray(result?.columns).slice(0, 8);
+  const rows = Array.isArray(result?.rowsSample)
+    ? result.rowsSample.map(agentRunRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 1)
+    : [];
+  const firstRow = rows[0];
+  const product = firstPriorValue(values, ['product_name', 'product', 'sku']);
+  const category = firstPriorValue(values, ['category', 'category_name', 'product_type']);
+  const customer = firstPriorValue(values, ['customer_name', 'customer']);
+  const leadParts = [
+    product ? `top product "${product}"` : '',
+    category ? `category "${category}"` : '',
+    customer ? `customer "${customer}"` : '',
+  ].filter(Boolean);
+  const rowFacts = firstRow
+    ? columns
+        .slice(0, 5)
+        .map((column) => {
+          const value = firstRow[column];
+          return value === undefined || value === null || typeof value === 'object' ? '' : `${column}=${String(value)}`;
+        })
+        .filter(Boolean)
+    : [];
+  const previous = turns
+    .filter((turn) => turn !== selected)
+    .map((turn) => agentRunString(turn.question))
+    .filter((value): value is string => Boolean(value))
+    .slice(-2);
+  const bits = [
+    agentRunString(selected.question) ? `the latest question "${agentRunString(selected.question)}"` : '',
+    agentRunString(selected.answerSummary) ? `latest answer summary: ${agentRunString(selected.answerSummary)}` : '',
+    columns.length ? `result columns: ${columns.join(', ')}` : '',
+    leadParts.length ? `notable prior values: ${leadParts.join(', ')}` : '',
+    rowFacts.length ? `first result row: ${rowFacts.join(', ')}` : '',
+    previous.length ? `earlier in this thread: ${previous.join(' / ')}` : '',
+  ].filter(Boolean);
+  return bits.length > 0 ? `We were talking about ${bits.join('. ')}.` : undefined;
+}
+
+function agentRunStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map(agentRunString).filter((item): item is string => Boolean(item))));
+}
+
+function firstPriorValue(values: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+  if (!values) return undefined;
+  for (const key of keys) {
+    const list = Array.isArray(values[key]) ? values[key] : [];
+    const first = list.map(agentRunString).find(Boolean);
+    if (first) return first;
+  }
+  return undefined;
 }
 
 /** Deterministic, warm reply when no AI provider is configured — never governance-speak. */
@@ -13722,14 +14172,6 @@ function collectSettingsEnvStatus(): SettingsEnvGroup[] {
   ];
 }
 
-function isProviderSettingsId(value: unknown): value is ProviderSettingsId {
-  return value === 'anthropic'
-    || value === 'openai'
-    || value === 'gemini'
-    || value === 'ollama'
-    || value === 'custom-openai';
-}
-
 function isDeterministicDqlGenerationProvider(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   return value === 'none' || value === 'deterministic' || value === 'local-deterministic';
@@ -13754,13 +14196,19 @@ async function testProviderConfig(
   const label = providerSettingsLabel(id);
   const details = providerConfigDetails(id, config);
   const isSubscriptionCli = id === 'claude-code' || id === 'codex';
-  // Subscription CLI providers are always testable — detection (installed + logged in)
-  // needs no saved config; the others require enabling/saving first.
+  // Subscription providers are always testable — the connection (browser OAuth, or
+  // an installed+logged-in CLI) needs no saved config; the others require enabling first.
   if (!config.enabled && !isSubscriptionCli) {
     return { ok: false, message: `${label} is disabled. Enable it (or Save) before testing.` };
   }
   if (id === 'openai') return testOpenAIProviderConfig(config, label, details);
   if (id === 'anthropic') return testAnthropicProviderConfig(config, label, details);
+
+  // OAuth-first for subscriptions: when the user signed in via the browser, test the
+  // OAuth-backed provider (no CLI required); otherwise fall back to the CLI passthrough.
+  // Mirrors the runtime selection in dql-agent-provider / createBlockStudioAssistProvider.
+  const claudeOAuth = id === 'claude-code' && claudeOAuthConnected(projectRoot);
+  const codexOAuth = id === 'codex' && codexOAuthConnected(projectRoot);
 
   let provider: AgentProvider;
   switch (id) {
@@ -13771,10 +14219,14 @@ async function testProviderConfig(
       provider = new OllamaProvider({ baseUrl: config.baseUrl, model: config.model });
       break;
     case 'claude-code':
-      provider = new ClaudeCodeCliProvider({ model: config.model });
+      provider = claudeOAuth
+        ? new ClaudeOAuthProvider({ projectRoot, model: config.model })
+        : new ClaudeCodeCliProvider({ model: config.model });
       break;
     case 'codex':
-      provider = new CodexCliProvider({ model: config.model });
+      provider = codexOAuth
+        ? new CodexOAuthProvider({ projectRoot, model: config.model })
+        : new CodexCliProvider({ model: config.model });
       break;
     case 'custom-openai':
     default:
@@ -13784,10 +14236,11 @@ async function testProviderConfig(
   const available = await provider.available().catch(() => false);
   if (!available) {
     const cli = id === 'claude-code' ? 'claude' : 'codex';
+    const signIn = id === 'claude-code' ? 'Sign in with Claude' : 'Sign in with ChatGPT';
     return {
       ok: false,
       message: isSubscriptionCli
-        ? `${label} is not ready. Install the \`${cli}\` CLI and run \`${cli} ${id === 'claude-code' ? '/login' : 'login'}\` with your subscription, then test again.`
+        ? `${label} is not ready. Click "${signIn}" to sign in with your subscription, or install the \`${cli}\` CLI and run \`${cli} ${id === 'claude-code' ? '/login' : 'login'}\`, then test again.`
         : `${label} is not configured or reachable${details}. Check API key, base URL, and local service state.`,
     };
   }
@@ -13879,10 +14332,16 @@ function providerSettingsLabel(id: ProviderSettingsId): string {
 }
 
 function providerConfigDetails(id: ProviderSettingsId, config: ReturnType<typeof getEffectiveProviderConfig>): string {
+  // Subscription providers (Claude Code / Codex) authenticate via OAuth/CLI, not an
+  // API key — omit the key clause so we don't report a misleading "API key missing".
+  const isSubscription = id === 'claude-code' || id === 'codex';
+  const authNote = isSubscription
+    ? ''
+    : id === 'ollama' ? 'local endpoint' : config.apiKey ? 'API key present' : 'API key missing';
   const parts = [
     config.model ? `model ${config.model}` : '',
     config.baseUrl ? `base URL ${config.baseUrl}` : '',
-    id === 'ollama' ? 'local endpoint' : config.apiKey ? 'API key present' : 'API key missing',
+    authNote,
   ].filter(Boolean);
   return parts.length ? ` (${parts.join(', ')})` : '';
 }
@@ -14840,6 +15299,38 @@ export function buildAgentSchemaContext(question: string, rows: unknown[]): Agen
     .map((entry) => entry.table);
 }
 
+function mergeAgentSchemaContexts(...contexts: AgentSchemaTable[][]): AgentSchemaTable[] {
+  const byRelation = new Map<string, AgentSchemaTable>();
+  for (const table of contexts.flat()) {
+    const key = table.relation.toLowerCase();
+    const existing = byRelation.get(key);
+    if (!existing) {
+      byRelation.set(key, {
+        ...table,
+        columns: dedupeAgentSchemaColumns(table.columns).slice(0, 80),
+      });
+      continue;
+    }
+    byRelation.set(key, {
+      ...existing,
+      description: existing.description ?? table.description,
+      source: existing.source === table.source ? existing.source : 'catalog and runtime schema',
+      columns: dedupeAgentSchemaColumns([...existing.columns, ...table.columns]).slice(0, 80),
+    });
+  }
+  return Array.from(byRelation.values()).slice(0, 16);
+}
+
+function shouldAugmentAgentRuntimeSchema(question: string): boolean {
+  const lower = question.toLowerCase();
+  const wantsProduct = /\bproducts?\b|\bproduct[_ ]name\b|\bsku\b/.test(lower);
+  const wantsCustomer = /\bcustomers?\b|\bbuyers?\b|\bbought\b|\bpurchased?\b/.test(lower);
+  const wantsMetric = /\brevenu|\bsales\b|\bamount\b|\bspend\b|\border/.test(lower);
+  const wantsCategory = /\bcat(?:egor|agor)(?:y|ies)\b|\bsub[- ]?cat(?:egor|agor)(?:y|ies)\b/.test(lower);
+  const referencesPriorRows = /\b(?:above|previous|prior|these|those|same)\s+(?:orders?|results?|rows?|customers?|products?)\b/.test(lower);
+  return (wantsProduct && wantsCustomer && wantsMetric) || (referencesPriorRows && (wantsProduct || wantsCategory));
+}
+
 async function enrichAgentSchemaContextWithValueMatches(
   question: string,
   schemaContext: AgentSchemaTable[],
@@ -14897,7 +15388,27 @@ function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): nu
       if (columnTokens.has(token)) score += 3;
     }
   }
+  score += scoreCompositeAgentSchemaTable(table, tokens);
   if (/(customer|order|revenue|product|location|date|month)/i.test(table.name)) score += 1;
+  return score;
+}
+
+function scoreCompositeAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): number {
+  const hasCompositeAsk = tokens.has('product')
+    && (tokens.has('customer') || tokens.has('buyer') || tokens.has('bought') || tokens.has('purchased'))
+    && (tokens.has('revenue') || tokens.has('sales') || tokens.has('amount') || tokens.has('spend') || tokens.has('order'));
+  const hasPriorRowsAsk = ['above', 'previous', 'prior'].some((token) => tokens.has(token))
+    && (tokens.has('product') || tokens.has('category'));
+  if (!hasCompositeAsk && !hasPriorRowsAsk) return 0;
+  const relationText = `${table.schema ?? ''} ${table.name} ${table.relation}`.toLowerCase().replace(/[_-]+/g, ' ');
+  const columns = table.columns.map((column) => column.name.toLowerCase());
+  let score = 0;
+  if (/\b(order items?|line items?|fct orders?|fact orders?)\b/.test(relationText)) score += 18;
+  if (columns.some((name) => /\bproduct|sku/.test(name))) score += 8;
+  if (columns.some((name) => /\bcustomer/.test(name))) score += 8;
+  if (columns.some((name) => /\border/.test(name))) score += 6;
+  if (columns.some((name) => /\brevenue|sales|amount|price|spend|subtotal|total/.test(name))) score += 8;
+  if (columns.some((name) => /\bcategory|type/.test(name))) score += 5;
   return score;
 }
 

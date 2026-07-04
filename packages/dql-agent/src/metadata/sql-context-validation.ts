@@ -30,6 +30,7 @@ export interface SqlContextValidationOptions {
   question?: string;
   intent?: MetadataAgentIntent | string;
   filterValues?: string[];
+  trustedFilterValues?: string[];
 }
 
 export function validateSqlAgainstLocalContext(
@@ -185,11 +186,39 @@ function buildAllowedRelationLookup(contextPack: LocalContextPack): Map<string, 
         name: relation.split('.').at(-1) ?? relation,
         objectKey: source.objectKey,
         source: 'certified source block SQL',
-        columns: sourceSqlShapeColumns(source.sql),
+        columns: mergeAllowedColumns(
+          sourceSqlShapeColumns(source.sql),
+          sourceSqlReferencedColumns(analysis, relation),
+        ),
       });
     }
   }
   return allowed;
+}
+
+function sourceSqlReferencedColumns(
+  analysis: ReturnType<typeof analyzeSqlReferences>,
+  relation: string,
+): MetadataAllowedSqlRelation['columns'] {
+  const relationCount = analysis.tables.length;
+  const columns: MetadataAllowedSqlRelation['columns'] = [];
+  const seen = new Set<string>();
+  for (const column of analysis.columns) {
+    const name = cleanIdentifier(column.column);
+    if (!name || name === '*') continue;
+    if (relationCount > 1 && column.relation && !relationLookupKeys(column.relation).some((key) => relationLookupKeys(relation).includes(key))) {
+      continue;
+    }
+    if (relationCount > 1 && !column.relation) continue;
+    const key = normalizeColumnName(name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    columns.push({
+      name,
+      description: 'Referenced by certified source SQL.',
+    });
+  }
+  return columns;
 }
 
 function mergeAllowedRelation(
@@ -339,6 +368,7 @@ function findAmbiguousEntityFilter(
     .filter((value) => value.length > 0 && !isTemporalEntityFilter(value)));
 
   if (explicitValues.length === 0) return undefined;
+  const trustedValues = new Set((options.trustedFilterValues ?? []).map(normalizeSampleValue).filter(Boolean));
   const sampleMatches = sampleValueColumnMatches(contextPack);
   if (sampleMatches.size === 0) return undefined;
   const predicates = extractEntityValuePredicates(sql, aliasToRelation);
@@ -346,11 +376,12 @@ function findAmbiguousEntityFilter(
   for (const value of explicitValues) {
     const valueKey = normalizeSampleValue(value);
     const matchedColumns = sampleMatches.get(valueKey) ?? [];
+    const valuePredicates = predicates.filter((predicate) => normalizeSampleValue(predicate.value) === valueKey);
     if (matchedColumns.length === 0) {
+      if (trustedValues.has(valueKey) && valuePredicates.length > 0) continue;
       return `Entity drilldown SQL needs an inspected value match for "${value}" before it can apply that filter.`;
     }
 
-    const valuePredicates = predicates.filter((predicate) => normalizeSampleValue(predicate.value) === valueKey);
     if (valuePredicates.length === 0) {
       return `Entity drilldown SQL does not apply the requested inspected entity filter "${value}".`;
     }

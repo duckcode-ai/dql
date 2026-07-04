@@ -31,9 +31,12 @@ export const CODEX_OAUTH_CONFIG = {
 
 const CODEX_API_BASE_URL = 'https://chatgpt.com/backend-api/codex';
 
-/** ChatGPT subscription models exposed after login (static list; default first). */
-export const CODEX_OAUTH_MODELS = ['gpt-5.2-codex', 'gpt-5.1-codex', 'gpt-5-codex', 'gpt-5-codex-mini'] as const;
-export const CODEX_OAUTH_DEFAULT_MODEL = 'gpt-5.2-codex';
+// ChatGPT-account Codex supports a *narrower* set than API-key Codex — the versioned
+// `-codex` models (e.g. gpt-5.2-codex) are API-only and 400 with "not supported when
+// using Codex with a ChatGPT account". These are the models a ChatGPT Plus/Pro login
+// can actually call. See https://developers.openai.com/codex/models (default first).
+export const CODEX_OAUTH_MODELS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'] as const;
+export const CODEX_OAUTH_DEFAULT_MODEL = 'gpt-5.5';
 
 export function generateCodeVerifier(): string {
   return crypto.randomBytes(32).toString('base64url');

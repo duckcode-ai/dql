@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Blocks,
@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import {
   api,
+  type AgentConversationTurn,
   type AgentRun,
   type AgentRunArtifact,
   type AgentRunAudience,
@@ -31,6 +32,7 @@ import {
   type AgentRunSelectedObject,
   type AgentRunStep,
   type AgentRunStepStatus,
+  type AgentRunTrustState,
   type AppBuildProposal,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
@@ -39,6 +41,8 @@ import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuil
 import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import type { QueryResult, AppSummary } from '../../store/types';
+import { buildConversationContext } from './agentConversationContext';
+import { emitNotebookResearchChanged } from '../../utils/notebook-research';
 
 export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
@@ -64,6 +68,15 @@ interface UnifiedAgentRunPanelProps {
   initialItems?: ThreadItem[];
   /** Fires whenever the thread changes, so a host can persist the conversation. */
   onItemsChange?: (items: ThreadItem[]) => void;
+  /**
+   * Resume a server-persisted conversation thread (read at mount). Prior turns
+   * hydrate the panel unless `initialItems` already seeded it. Without one, the
+   * panel creates a thread on the first question and reports it via
+   * `onThreadIdChange`.
+   */
+  threadId?: string;
+  /** Fires when the panel creates a server thread, so a host can persist the id. */
+  onThreadIdChange?: (id: string) => void;
   /** 'stakeholder' (consumption-only) hides authoring modes + adds the certify handoff. */
   audience?: AgentRunAudience;
   autoRun?: { text: string; mode?: AgentRunRequestedMode; nonce: number };
@@ -101,6 +114,8 @@ export function UnifiedAgentRunPanel({
   initialInput = '',
   initialItems,
   onItemsChange,
+  threadId: threadIdProp,
+  onThreadIdChange,
   audience = 'analyst',
   autoRun,
   onInsertSql,
@@ -110,14 +125,13 @@ export function UnifiedAgentRunPanel({
   onRunningChange,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
-  // One clean composer everywhere: an auto-routed box + a "Dig deeper" toggle — no
-  // mode chips. Capability still varies server-side by `audience` (analyst keeps the
+  // One clean composer everywhere: an auto-routed box — no mode chips. Capability
+  // still varies server-side by `audience` (analyst keeps the
   // authoring routes so SQL/blocks generate; stakeholder is consumption-only), but
   // the chrome is uniform. A next-action can pre-route the *next* question (e.g.
   // "Draft this as a block") via this one-shot ref: consumed once at submit and cleared
   // the moment the user edits the prefilled prompt. The default is always auto.
   const pendingModeRef = useRef<AgentRunRequestedMode | undefined>(undefined);
-  const [deepResearch, setDeepResearch] = useState(false);
   const [certifying, setCertifying] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
   const [input, setInput] = useState(initialInput);
   const [items, setItems] = useState<ThreadItem[]>(initialItems ?? []);
@@ -154,6 +168,42 @@ export function UnifiedAgentRunPanel({
     onItemsChangeRef.current?.(items);
   }, [items]);
 
+  // Server-side conversation thread: created lazily on the first question (unless
+  // the host passed one), then sent with every run so the server injects prior
+  // turns and persists new ones. Kept in a ref so submit closures always see the
+  // latest id; thread failures degrade to the client-built conversation context.
+  const threadIdRef = useRef<string | undefined>(threadIdProp);
+  const onThreadIdChangeRef = useRef(onThreadIdChange);
+  onThreadIdChangeRef.current = onThreadIdChange;
+
+  // Resume: when mounted with a threadId, hydrate the conversation from the
+  // server-persisted turns. The server thread is the source of truth for
+  // ANSWERS: host-seeded `initialItems` can be a stale partial snapshot (the
+  // localStorage copy is quota-capped and drops run payloads), so we replace
+  // local items whenever the server holds more completed turns than the local
+  // copy has answer cards. A richer in-memory session (equal counts) is kept.
+  const hydratedThreadRef = useRef(false);
+  useEffect(() => {
+    if (!threadIdProp || hydratedThreadRef.current) return;
+    hydratedThreadRef.current = true;
+    threadIdRef.current ??= threadIdProp;
+    let cancelled = false;
+    api.getAgentThread(threadIdProp)
+      .then(({ turns }) => {
+        if (cancelled || turns.length === 0) return;
+        setItems((current) => {
+          const localAnswerCount = current.filter((item) => item.kind === 'run').length;
+          return turns.length > localAnswerCount ? threadItemsFromTurns(turns) : current;
+        });
+      })
+      .catch(() => {
+        // Unknown/pruned thread (or store unavailable): forget the id so the next
+        // question starts a fresh thread instead of writing into the void.
+        if (!cancelled && threadIdRef.current === threadIdProp) threadIdRef.current = undefined;
+      });
+    return () => { cancelled = true; };
+  }, [threadIdProp]);
+
   const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
@@ -169,6 +219,22 @@ export function UnifiedAgentRunPanel({
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      // Thread-scoped persistence: make sure a server thread exists so this run is
+      // recorded as a turn. Best-effort — never block the question on it; without
+      // a thread the run simply falls back to the client-built context below.
+      if (!threadIdRef.current) {
+        try {
+          const thread = await api.createAgentThread({
+            surface: 'notebook',
+            title: text,
+            ...(notebookPath ? { notebookPath } : {}),
+          });
+          threadIdRef.current = thread.id;
+          onThreadIdChangeRef.current?.(thread.id);
+        } catch {
+          // Conversation store unavailable — proceed without a threadId.
+        }
+      }
       const runInput = {
         question: text,
         requestedMode: activeMode,
@@ -178,7 +244,9 @@ export function UnifiedAgentRunPanel({
           ...(workspaceContext ?? {}),
           ...(notebookPath ? { notebookPath } : {}),
         },
+        conversationContext: buildConversationContext(items),
         history,
+        ...(threadIdRef.current ? { threadId: threadIdRef.current } : {}),
       };
       const run = await api.createAgentRunStream(runInput, (message) => {
         if (message.kind === 'event') {
@@ -202,12 +270,8 @@ export function UnifiedAgentRunPanel({
     }
   };
 
-  // Submit the box; only clear the one-shot deep-research toggle when a run will
-  // actually start (mirror the send button's guard so a no-op Enter can't lose it).
   const handleSubmit = () => {
-    const willRun = Boolean(input.trim()) && !running;
-    void submit(undefined, deepResearch ? 'research' : undefined);
-    if (willRun && deepResearch) setDeepResearch(false);
+    void submit();
   };
 
   const onRunningChangeRef = useRef(onRunningChange);
@@ -238,6 +302,14 @@ export function UnifiedAgentRunPanel({
         notebookPath: typeof workspaceContext?.notebookPath === 'string' ? workspaceContext.notebookPath : notebookPath,
         context: { agentRunId: run.id, route: run.route, selectedObject: run.selectedObject },
       });
+      if (result.ok) {
+        emitNotebookResearchChanged({
+          notebookPath: result.notebookPath,
+          runId: result.researchRunId,
+          reason: 'agent-run-request-certification',
+        });
+        if (result.researchRunId) onOpenResearch?.(result.researchRunId, result.notebookPath);
+      }
       setCertifying((current) => ({ ...current, [run.id]: result.ok ? 'sent' : 'error' }));
     } catch {
       setCertifying((current) => ({ ...current, [run.id]: 'error' }));
@@ -328,21 +400,8 @@ export function UnifiedAgentRunPanel({
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
 
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <button
-            type="button"
-            className="dql-hover"
-            aria-pressed={deepResearch}
-            onClick={() => setDeepResearch((v) => !v)}
-            style={digDeeperStyle(t, deepResearch)}
-            title="Run a slower, multi-step investigation instead of a quick answer."
-          >
-            <FileSearch size={13} />
-            <span>Dig deeper</span>
-          </button>
-          <span style={{ fontSize: 11, color: t.textMuted }}>
-            {deepResearch ? 'Your next question runs a deep investigation.' : 'Auto-routes to the best answer for your question.'}
-          </span>
+        <div style={{ fontSize: 11, color: t.textMuted }}>
+          Auto-routes to the best answer for your question. Use Research deeper on an answer when you want a slower investigation.
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
@@ -375,13 +434,134 @@ export function UnifiedAgentRunPanel({
   );
 }
 
-const DEFAULT_EMPTY_HINT = 'Ask a question or dig deeper with research — every answer is grounded in your certified metrics and dbt lineage.';
+const DEFAULT_EMPTY_HINT = 'Ask a question — every answer is grounded in your certified metrics and dbt lineage. Use Research deeper on any answer for a slower investigation.';
 const EXAMPLE_PROMPTS: ExamplePrompt[] = [
   { label: 'What is total revenue?', prompt: 'What is total revenue?' },
   { label: 'Why is revenue down by region?', prompt: 'Why is revenue down by region?' },
   { label: 'Top customers by revenue this quarter', prompt: 'Top customers by revenue this quarter' },
   { label: 'How have orders trended over the last 6 months?', prompt: 'How have orders trended over the last 6 months?' },
 ];
+
+// ── Server-thread resume ─────────────────────────────────────────────────────
+
+/**
+ * Host helper: persist the panel's server thread id in localStorage (keyed per
+ * surface) so a page refresh resumes the same conversation. Wire the returned
+ * `threadId`/`onThreadIdChange` straight into `UnifiedAgentRunPanel` props;
+ * `resetThreadId` starts a fresh conversation on the next question.
+ */
+export function usePersistedAgentThreadId(scope: string): {
+  threadId: string | undefined;
+  onThreadIdChange: (id: string) => void;
+  resetThreadId: () => void;
+} {
+  const storageKey = `dql.agent.threadId.${scope}`;
+  const [threadId, setThreadId] = useState<string | undefined>(() => readStoredThreadId(storageKey));
+  useEffect(() => {
+    setThreadId(readStoredThreadId(storageKey));
+  }, [storageKey]);
+  const onThreadIdChange = useCallback((id: string) => {
+    setThreadId(id);
+    try { window.localStorage.setItem(storageKey, id); } catch { /* best-effort */ }
+  }, [storageKey]);
+  const resetThreadId = useCallback(() => {
+    setThreadId(undefined);
+    try { window.localStorage.removeItem(storageKey); } catch { /* best-effort */ }
+  }, [storageKey]);
+  return { threadId, onThreadIdChange, resetThreadId };
+}
+
+function readStoredThreadId(storageKey: string): string | undefined {
+  try {
+    return window.localStorage.getItem(storageKey) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const AGENT_RUN_ROUTES = new Set<AgentRunRoute>([
+  'conversation', 'certified_answer', 'generated_answer', 'research',
+  'sql_cell', 'dql_block_draft', 'app_build', 'clarify', 'blocked',
+]);
+const AGENT_RUN_TRUST_STATES = new Set<AgentRunTrustState>([
+  'certified', 'grounded', 'review_required', 'blocked', 'not_applicable',
+]);
+
+/**
+ * Rebuild the panel's thread items from server-persisted conversation turns.
+ * A stored turn is a compact snapshot (question + answer summary + capped result),
+ * not a full AgentRun — so each run is reconstructed minimally: enough for the
+ * RunCard (route, trust, answer, result preview) and for
+ * `buildConversationContext` to keep working as the no-threadId fallback.
+ */
+export function threadItemsFromTurns(turns: AgentConversationTurn[]): ThreadItem[] {
+  return turns.flatMap((turn): ThreadItem[] => [
+    { kind: 'user', id: `${turn.id}-q`, text: turn.question },
+    { kind: 'run', id: turn.id, run: runFromConversationTurn(turn) },
+  ]);
+}
+
+function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
+  const route: AgentRunRoute = AGENT_RUN_ROUTES.has(turn.route as AgentRunRoute)
+    ? (turn.route as AgentRunRoute)
+    : 'generated_answer';
+  const trustState: AgentRunTrustState = AGENT_RUN_TRUST_STATES.has(turn.trustLabel as AgentRunTrustState)
+    ? (turn.trustLabel as AgentRunTrustState)
+    : turn.certification === 'certified'
+      ? 'certified'
+      : 'not_applicable';
+  const columns = (turn.result?.columns ?? []).filter((column): column is string => typeof column === 'string');
+  // Stored samples are positional arrays; rebuild keyed rows for the result view.
+  const rows = (turn.result?.rowsSample ?? [])
+    .filter((row): row is unknown[] => Array.isArray(row))
+    .map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index]])));
+  const result = columns.length > 0
+    ? { columns, rows, rowCount: turn.result?.rowCount ?? rows.length }
+    : undefined;
+  const artifact: AgentRunArtifact | undefined = result || turn.sql || turn.sourceCertifiedBlock
+    ? {
+        id: `${turn.id}-artifact`,
+        kind: 'answer',
+        title: turn.sourceCertifiedBlock ?? turn.question,
+        trustState,
+        ref: turn.sourceCertifiedBlock,
+        payload: {
+          ...(turn.sourceCertifiedBlock ? { sourceCertifiedBlock: turn.sourceCertifiedBlock } : {}),
+          ...(turn.certification ? { certification: turn.certification } : {}),
+          ...(turn.contextPackId ? { contextPackId: turn.contextPackId } : {}),
+          ...(turn.sql ? { sql: turn.sql } : {}),
+          ...(result ? { result } : {}),
+          ...(turn.contract && Object.keys(turn.contract).length > 0
+            ? { contextPack: { questionPlan: { requestedShape: turn.contract } } }
+            : {}),
+        },
+      }
+    : undefined;
+  return {
+    id: turn.id,
+    question: turn.question,
+    requestedMode: 'auto',
+    route,
+    status: 'completed',
+    trustState,
+    stopReason: route === 'conversation'
+      ? 'conversational_reply'
+      : trustState === 'certified'
+        ? 'certified_answer_found'
+        : 'artifact_created',
+    startedAt: turn.createdAt,
+    completedAt: turn.createdAt,
+    summary: turn.answerSummary ?? turn.question,
+    answer: turn.answerText ?? turn.answerSummary,
+    answerKind: route === 'conversation' ? 'conversational' : undefined,
+    steps: [],
+    artifacts: artifact ? [artifact] : [],
+    evaluations: [],
+    events: [],
+    nextActions: [],
+    repairAttempts: 0,
+  };
+}
 
 function routeActionLabel(route?: AgentRunRoute): string {
   switch (route) {
@@ -719,7 +899,7 @@ function RunCard({
       <AppliedLearnings run={run} t={t} />
 
       {run.artifacts.length > 0 ? (
-        <div style={{ display: 'grid', gap: 8 }}>
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0 }}>
           {run.artifacts.map((artifact) => (
             <ArtifactView
               key={artifact.id}
@@ -760,7 +940,7 @@ function RunCard({
           {run.nextActions.filter((a) => a.id !== 'pin-to-app' && a.id !== 'research-deeper' && a.id !== 'confirm-app-build').map((action) => {
             const isCertify = action.id === 'request-certification';
             const label = isCertify && certifyState === 'sent'
-              ? 'Sent to analyst'
+              ? 'Queued for review'
               : isCertify && certifyState === 'pending'
                 ? 'Sending…'
                 : isCertify && certifyState === 'error'
@@ -1258,7 +1438,7 @@ function VerificationChecks({ evaluations, t }: { evaluations: AgentRun['evaluat
   const flagged = evaluations.filter((evaluation) => !evaluation.passed);
   const passed = evaluations.filter((evaluation) => evaluation.passed);
   return (
-    <div style={{ display: 'grid', gap: 6 }}>
+    <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0 }}>
       {flagged.map((evaluation) => (
         <EvaluationRow key={evaluation.id} evaluation={evaluation} t={t} />
       ))}
@@ -1285,11 +1465,13 @@ function VerificationChecks({ evaluations, t }: { evaluations: AgentRun['evaluat
 function EvaluationRow({ evaluation, t }: { evaluation: AgentRun['evaluations'][number]; t: Theme }) {
   const color = evaluation.passed ? t.success : evaluation.severity === 'blocking' ? t.error : t.warning;
   return (
-    <div style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
+    <div style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary, minWidth: 0 }}>
       <span style={{ color, lineHeight: '16px', flex: '0 0 auto', fontWeight: 800 }}>
         {evaluation.passed ? 'OK' : evaluation.severity === 'blocking' ? 'Stop' : 'Review'}
       </span>
-      <span style={{ lineHeight: 1.4 }}>
+      {/* minWidth 0 + anywhere: long unbroken tokens (qualified relation names,
+          SQL error fragments) must wrap instead of widening the chat column. */}
+      <span style={{ lineHeight: 1.4, minWidth: 0, flex: 1, overflowWrap: 'anywhere' }}>
         {evaluation.message}
         {!evaluation.passed && evaluation.suggestedRepair ? (
           <span style={{ display: 'block', color: t.textMuted, marginTop: 1 }}>↳ {evaluation.suggestedRepair}</span>
@@ -1501,7 +1683,7 @@ function AppliedLearnings({ run, t }: { run: AgentRun; t: Theme }) {
     }
   };
   return (
-    <div style={{ display: 'grid', gap: 6 }}>
+    <div style={{ display: 'grid', gap: 6, gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0 }}>
       <button type="button" onClick={() => setOpen((v) => !v)} style={appliedChipStyle(t)}>
         <Lightbulb size={11} />
         <span>Applied {items.length} learning{items.length > 1 ? 's' : ''}</span>
@@ -1720,23 +1902,6 @@ function sendButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
   };
 }
 
-function digDeeperStyle(t: Theme, active: boolean): React.CSSProperties {
-  return {
-    border: `1px solid ${active ? t.accent : t.btnBorder}`,
-    background: active ? `${t.accent}14` : 'transparent',
-    color: active ? t.accent : t.textMuted,
-    borderRadius: 999,
-    padding: '5px 11px',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    fontSize: 11.5,
-    fontWeight: 650,
-    fontFamily: t.font,
-    cursor: 'pointer',
-  };
-}
-
 function heroAddButtonStyle(t: Theme): React.CSSProperties {
   return {
     border: 'none',
@@ -1856,6 +2021,13 @@ function runCardStyle(t: Theme): React.CSSProperties {
     padding: 10,
     display: 'grid',
     gap: 10,
+    // A grid's implicit column track floors at the widest child's min-content
+    // (e.g. a long SQL line in "View query"), inflating every row past the chat
+    // column and leaving a horizontal-scroll white gutter after results/refresh.
+    // minmax(0, 1fr) lets children shrink; wide content scrolls in its own box.
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    minWidth: 0,
+    maxWidth: '100%',
   };
 }
 
@@ -1867,6 +2039,9 @@ function artifactStyle(t: Theme): React.CSSProperties {
     padding: 9,
     display: 'grid',
     gap: 8,
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    minWidth: 0,
+    maxWidth: '100%',
   };
 }
 

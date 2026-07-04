@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import type Database from 'better-sqlite3';
+import { sanitizeFtsQuery } from './fts-query.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -317,34 +318,3 @@ function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-const STOP_WORDS = new Set([
-  'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', 'as', 'at',
-  'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
-  'can', 'could', 'current', 'did', 'do', 'does', 'doing', 'down', 'during',
-  'each', 'explain', 'few', 'find', 'for', 'from', 'further',
-  'get', 'give',
-  'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself', 'him', 'himself', 'his', 'how',
-  'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself',
-  'just',
-  'me', 'more', 'most', 'my', 'myself',
-  'no', 'nor', 'not', 'now',
-  'of', 'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
-  'please',
-  'query',
-  'same', 'she', 'should', 'show', 'so', 'some', 'sql', 'such',
-  'than', 'that', 'the', 'their', 'theirs', 'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to', 'too',
-  'under', 'until', 'up', 'using',
-  'very',
-  'was', 'we', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'will', 'with', 'would',
-  'you', 'your', 'yours', 'yourself', 'yourselves',
-]);
-
-function sanitizeFtsQuery(raw: string): string {
-  return raw
-    .split(/\s+/)
-    .map((t) => t.replace(/[^\p{L}\p{N}_]/gu, ''))
-    .filter((t) => t.length > 1 && !STOP_WORDS.has(t.toLowerCase()))
-    .slice(0, 48)
-    .map((t) => `"${t}"`)
-    .join(' OR ');
-}

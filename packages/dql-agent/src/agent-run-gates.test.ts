@@ -77,6 +77,87 @@ describe("defaultAgentRunGates", () => {
     expect(gate(context).find((evaluation) => evaluation.id === "semantic-cardinality")).toBeUndefined();
   });
 
+  it("answer-shape gate flags missing requested output columns", () => {
+    const gate = defaultAgentRunGates.generated_answer!;
+    const context: AgentRunGateContext = {
+      route: "generated_answer",
+      request: { question: "show revenue by product with product name, category, and revenue" },
+      result: {
+        answer: "Food and drink revenue.",
+        artifacts: [{
+          id: "a",
+          kind: "answer",
+          title: "Answer",
+          trustState: "certified",
+          payload: {
+            answer: "Food and drink revenue.",
+            result: { columns: ["category", "revenue"], rows: [{ category: "Food", revenue: 10 }], rowCount: 1 },
+          },
+        }],
+      },
+      attempt: 0,
+    };
+    const shape = gate(context).find((evaluation) => evaluation.id === "answer-shape");
+    expect(shape?.passed).toBe(false);
+    expect(shape?.message).toContain("product_name");
+    expect(shape?.repairAction?.kind).toBe("retry");
+  });
+
+  it("certified answer-shape failures escalate to generated answers", () => {
+    const gate = defaultAgentRunGates.certified_answer!;
+    const context: AgentRunGateContext = {
+      route: "certified_answer",
+      request: { question: "show revenue by product with product name, category, and revenue" },
+      result: {
+        answer: "Food and drink revenue.",
+        artifacts: [{
+          id: "a",
+          kind: "answer",
+          title: "Answer",
+          trustState: "certified",
+          payload: {
+            answer: "Food and drink revenue.",
+            result: { columns: ["category", "revenue"], rows: [{ category: "Food", revenue: 10 }], rowCount: 1 },
+          },
+        }],
+      },
+      attempt: 0,
+    };
+    const shape = gate(context).find((evaluation) => evaluation.id === "answer-shape");
+    expect(shape?.passed).toBe(false);
+    expect(shape?.message).toContain("product_name");
+    expect(shape?.repairAction).toMatchObject({ kind: "escalate", route: "generated_answer" });
+  });
+
+  it("answer-shape gate flags untrimmed top-N answers", () => {
+    const gate = defaultAgentRunGates.generated_answer!;
+    const context: AgentRunGateContext = {
+      route: "generated_answer",
+      request: { question: "who are the top 2 customers by revenue?" },
+      result: {
+        answer: "Top customers.",
+        artifacts: [{
+          id: "a",
+          kind: "answer",
+          title: "Answer",
+          trustState: "review_required",
+          payload: {
+            answer: "Top customers.",
+            result: {
+              columns: ["customer_name", "revenue"],
+              rows: [{ customer_name: "A", revenue: 3 }, { customer_name: "B", revenue: 2 }, { customer_name: "C", revenue: 1 }],
+              rowCount: 3,
+            },
+          },
+        }],
+      },
+      attempt: 0,
+    };
+    const topn = gate(context).find((evaluation) => evaluation.id === "answer-topn");
+    expect(topn?.passed).toBe(false);
+    expect(topn?.repairAction?.kind).toBe("retry");
+  });
+
   it("semantic gate does NOT flag scalar-phrased TIME-SERIES questions (monthly total, month over month)", () => {
     const gate = defaultAgentRunGates.generated_answer!;
     const many = { columns: ["m", "v"], rows: [{ m: 1, v: 1 }, { m: 2, v: 2 }, { m: 3, v: 3 }], rowCount: 12 };

@@ -9,7 +9,7 @@ import { CellList } from './CellList';
 import { DashboardView } from './DashboardView';
 import { DocumentMetadataRow } from './DocumentMetadataRow';
 import { useOpenBlockInStudio } from '../agent/AiBuildResult';
-import { UnifiedAgentRunPanel } from '../agent/UnifiedAgentRunPanel';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import {
   emitNotebookResearchChanged,
 } from '../../utils/notebook-research';
@@ -458,6 +458,9 @@ function NotebookAiDrawer({
 }) {
   const { state } = useNotebook();
   const openBlockInStudio = useOpenBlockInStudio();
+  // Server-persisted conversation thread, keyed per notebook so a page refresh
+  // resumes the same conversation.
+  const agentThread = usePersistedAgentThreadId(`notebook:${notebookPath ?? 'notebook'}`);
   const sourceTitle = sourceCell
     ? `${sourceCell.type.toUpperCase()} cell${sourceCell.name ? ` · ${sourceCell.name}` : ''}`
     : 'Whole notebook';
@@ -569,6 +572,8 @@ function NotebookAiDrawer({
           initialMode="auto"
           initialInput={autoAsk ? '' : initialInput}
           autoRun={autoAsk ? { text: autoAsk.text, mode: 'ask', nonce: autoAsk.nonce } : undefined}
+          threadId={agentThread.threadId}
+          onThreadIdChange={agentThread.onThreadIdChange}
           onInsertSql={onInsertSql}
           onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
           onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}

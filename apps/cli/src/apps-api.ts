@@ -1055,7 +1055,9 @@ function normalizeConversationContext(value: unknown): LocalAppConversationConte
     sourceCertifiedBlock: cleanString(record.sourceCertifiedBlock) || undefined,
     sourceQuestion: cleanString(record.sourceQuestion) || undefined,
     sourceAnswerSummary: cleanString(record.sourceAnswerSummary) || undefined,
-    followupKind: record.followupKind === 'generic' || record.followupKind === 'drilldown' ? record.followupKind : undefined,
+    followupKind: record.followupKind === 'generic' || record.followupKind === 'drilldown' || record.followupKind === 'contextual'
+      ? record.followupKind
+      : undefined,
     requestedFilters: stringArray(record.requestedFilters),
     requestedDimensions: stringArray(record.requestedDimensions),
     outputColumns: stringArray(record.outputColumns),

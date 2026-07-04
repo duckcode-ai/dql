@@ -32,6 +32,8 @@ describe('seedDefaultSkills (spec 16)', () => {
     const conventions = skills.find((s) => s.id === 'sql-conventions');
     expect(conventions?.body).toMatch(/\{\{ ref/);
     expect(conventions?.body).toMatch(/qualified relation/i);
+    expect(conventions?.body).toMatch(/answer contract/i);
+    expect(conventions?.body).toMatch(/these categories/i);
     // Block authoring guides the agent to build meaningful, metric-first blocks.
     const authoring = skills.find((s) => s.id === 'block-authoring');
     expect(authoring?.body).toMatch(/semantic metric/i);

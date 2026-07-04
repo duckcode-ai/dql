@@ -12,9 +12,12 @@ import {
   loadSkills,
   reindexProject,
   type AgentAnswer,
+  type CertifiedFitConfirmation,
+  type CertifiedFitConfirmationRequest,
   type AgentFollowUpContext,
   type AgentProvider,
   type AgentResultPayload,
+  type ConversationSnapshot,
 } from '@duckcodeailabs/dql-agent';
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
@@ -103,6 +106,107 @@ const SPECS: Record<SimpleProviderId, ProviderSpec> = {
   },
 };
 
+function createCertifiedFitConfirmation(provider: AgentProvider, signal?: AbortSignal): CertifiedFitConfirmation {
+  return async ({ question, questionPlan, block, fit }) => {
+    const response = await provider.generate([
+      {
+        role: 'system',
+        content: [
+          'You are a strict governed analytics routing judge.',
+          'Decide whether the certified block can directly answer the user question.',
+          'Allow only when the block covers the requested metric, grain, dimensions, filters, required columns, ranking, and top-N.',
+          'If the block is merely useful context, close but wrong grain, missing requested columns, or ambiguous, reject it.',
+          'Return JSON only: {"allow":boolean,"confidence":"high|medium|low","reason":"short reason"}.',
+        ].join(' '),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          question,
+          requestedShape: questionPlan.requestedShape,
+          candidateBlock: summarizeBlockForFitConfirmation(block),
+          deterministicFit: {
+            kind: fit.kind,
+            confidence: fit.confidence,
+            reasons: fit.reasons,
+            missingOutputs: fit.missingOutputs,
+            missingDimensions: fit.missingDimensions,
+            unsupportedFilters: fit.unsupportedFilters,
+            grainMismatch: fit.grainMismatch,
+            topNAction: fit.topNAction,
+            inferredContract: fit.inferredContract,
+          },
+        }, null, 2),
+      },
+    ], { maxTokens: 220, temperature: 0, signal });
+    return parseCertifiedFitConfirmation(response);
+  };
+}
+
+function summarizeBlockForFitConfirmation(block: CertifiedFitConfirmationRequest['block']): Record<string, unknown> {
+  const payload = block.payload ?? {};
+  return {
+    objectKey: block.objectKey,
+    objectType: block.objectType,
+    name: block.name,
+    status: block.status,
+    description: block.description ?? stringValue(payload.description),
+    grain: stringValue(payload.grain),
+    dimensions: stringArray(payload.dimensions),
+    entities: stringArray(payload.entities),
+    declaredOutputs: stringArray(payload.declaredOutputs),
+    outputContract: payload.outputContract,
+    allowedFilters: stringArray(payload.allowedFilters),
+    sql: truncateForFitPrompt(stringValue(payload.sql), 1200),
+    llmContext: truncateForFitPrompt(stringValue(payload.llmContext), 800),
+  };
+}
+
+function parseCertifiedFitConfirmation(text: string): { allow: boolean; confidence?: 'high' | 'medium' | 'low'; reason?: string } {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return { allow: false, confidence: 'low', reason: 'fit confirmation did not return JSON' };
+  }
+  try {
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    const confidence = parsed.confidence === 'high' || parsed.confidence === 'medium' || parsed.confidence === 'low'
+      ? parsed.confidence
+      : undefined;
+    return {
+      allow: parsed.allow === true,
+      ...(confidence ? { confidence } : {}),
+      reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+    };
+  } catch {
+    return { allow: false, confidence: 'low', reason: 'fit confirmation returned malformed JSON' };
+  }
+}
+
+function extractJsonObject(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
+  const fenced = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+  if (fenced?.[1]) return fenced[1];
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  return start >= 0 && end > start ? trimmed.slice(start, end + 1) : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function truncateForFitPrompt(value: string | undefined, max: number): string | undefined {
+  if (!value) return undefined;
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
 function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): void {
   const match = text.match(/DQL_BLOCK_PROPOSAL\s*[:=]?\s*(\{[\s\S]*\})\s*$/);
   if (!match) return;
@@ -169,13 +273,22 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             ? await req.getSchemaContext(question).catch(() => [])
             : [];
           const skills = loadSkills(req.projectRoot).skills;
-          const followUp = followUpFromConversationContext(req, question) ?? inferFollowUpContext(req, question);
+          const conversationSnapshot = conversationSnapshotFromContext(req.conversationContext);
+          const followUp = applyTopicShiftGuard(
+            followUpFromConversationContext(req, question) ?? inferFollowUpContext(req, question),
+            conversationSnapshot,
+          );
           const selectedContext = selectedContextForMetadata(req, question);
           const contextPack = await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
             followUp,
             selectedContext,
+            confirmCertifiedFit: createCertifiedFitConfirmation(provider, signal),
+            // Conversation-aware reuse: same-topic follow-ups seed (or, for
+            // filter-only refinements, re-stamp) the prior turn's context pack.
+            priorContextPackId: priorContextPackIdFromSnapshot(conversationSnapshot),
+            conversationTopicRelation: conversationSnapshot?.topicRelation,
             runtimeSchemaSnapshot: schemaContext.length > 0
               ? {
                   source: 'agent provider schema context',
@@ -206,6 +319,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             skills,
             blockHints,
             followUp,
+            conversationSnapshot,
             memoryContext,
             schemaContext,
             contextPack,
@@ -297,7 +411,10 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
     parts.push(`${label}:\n${upstream}`);
   }
   const context = req.conversationContext;
-  if (context) {
+  // Thread-scoped runs render the structured conversation snapshot in its own
+  // prompt section (answer-loop) — skip this text recap to avoid double-carrying.
+  const hasServerSnapshot = Boolean((context as Record<string, unknown> | undefined)?.serverSnapshot);
+  if (context && !hasServerSnapshot) {
     // Bound the carried-forward "conversation memory" defensively: only the most
     // recent turn's signals, with hard caps on the summary length and list sizes
     // so prompts don't grow across a long multi-turn chat.
@@ -315,6 +432,8 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
       context.requestedFilters?.length ? `remembered filters: ${clampList(context.requestedFilters)}` : '',
       context.requestedDimensions?.length ? `remembered dimensions: ${clampList(context.requestedDimensions)}` : '',
       context.outputColumns?.length ? `prior output columns: ${clampList(context.outputColumns)}` : '',
+      context.resultDimensionValues ? `prior result values: ${formatResultDimensionValues(context.resultDimensionValues)}` : '',
+      context.turns?.length ? `recent analytical turns:\n${formatConversationTurnsForPrompt(context.turns)}` : '',
     ].filter(Boolean);
     if (contextLines.length > 0) {
       parts.push(`Conversation memory:\n${contextLines.join('\n')}`);
@@ -323,8 +442,13 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
   if (followUp?.sourceBlockName) {
     const suffix = followUp.kind === 'drilldown'
       ? 'Use it as source context, but prefer a distinct certified drilldown block or a review-required draft.'
-      : 'Reuse it for this generic follow-up.';
-    parts.push(`Follow-up context: the user is referring to certified block "${followUp.sourceBlockName}". ${suffix}`);
+      : followUp.kind === 'contextual'
+        ? 'This is advisory prior-turn context — use it only if the question refers to it; on a new topic, ignore it.'
+        : 'Reuse it for this generic follow-up.';
+    const lead = followUp.kind === 'contextual'
+      ? `Prior turn used certified block "${followUp.sourceBlockName}".`
+      : `Follow-up context: the user is referring to certified block "${followUp.sourceBlockName}".`;
+    parts.push(`${lead} ${suffix}`);
   }
   if (followUp?.filters?.length) {
     parts.push(`Requested follow-up filters: ${followUp.filters.join(', ')}`);
@@ -399,8 +523,9 @@ function extractSelectedBlockHints(req: AgentRunRequest): string[] {
 }
 
 function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
-  const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : null;
-  if (!kind) return undefined;
+  // Messages-only fallback (no structured conversationContext). Regexes classify the
+  // kind; a non-matching question still carries the prior turn as advisory 'contextual'.
+  const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : 'contextual';
   for (let i = req.messages.length - 1; i >= 0; i--) {
     const msg = req.messages[i];
     if (msg.role !== 'assistant') continue;
@@ -417,36 +542,220 @@ function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFoll
   return undefined;
 }
 
+function priorContextPackIdFromSnapshot(snapshot: ConversationSnapshot | undefined): string | undefined {
+  const fromState = (snapshot?.workingState as { lastContextPackId?: unknown } | undefined)?.lastContextPackId;
+  if (typeof fromState === 'string' && fromState.trim()) return fromState;
+  const fromTurns = snapshot?.recentTurns?.length
+    ? snapshot.recentTurns[snapshot.recentTurns.length - 1]?.contextPackId
+    : undefined;
+  return typeof fromTurns === 'string' && fromTurns.trim() ? fromTurns : undefined;
+}
+
+/** Parse the server-attached conversation snapshot (thread-scoped runs only). */
+function conversationSnapshotFromContext(
+  context: AgentRunRequest['conversationContext'],
+): ConversationSnapshot | undefined {
+  const raw = (context as Record<string, unknown> | undefined)?.serverSnapshot;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const snapshot = raw as ConversationSnapshot;
+  return typeof snapshot.threadId === 'string' && Array.isArray(snapshot.recentTurns)
+    ? snapshot
+    : undefined;
+}
+
+/**
+ * Deterministic stale-context protection: when the persisted working state says
+ * the new question is a topic SHIFT, prior-turn filters must not be forced into
+ * the follow-up (a "by X" phrasing can regex-classify as drilldown even on a
+ * genuinely new topic). Question-derived filters are kept; carried ones drop.
+ */
+function applyTopicShiftGuard(
+  followUp: AgentFollowUpContext | undefined,
+  snapshot: ConversationSnapshot | undefined,
+): AgentFollowUpContext | undefined {
+  if (!followUp || snapshot?.topicRelation !== 'shift') return followUp;
+  if (followUp.kind !== 'drilldown') return followUp;
+  return {
+    ...followUp,
+    filters: undefined,
+    dimensions: undefined,
+    priorResultValues: undefined,
+    priorMeasures: undefined,
+    priorLimit: undefined,
+  };
+}
+
 function followUpFromConversationContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
   const context = req.conversationContext;
   if (!context) return undefined;
-  const sourceBlockName = cleanOptionalString(context.sourceCertifiedBlock);
-  if (!sourceBlockName) return undefined;
+  const turns = conversationTurnsFromContext(context);
+  const activeTurn = activeConversationTurn(context, turns);
+  const activeResult = activeTurn?.result && typeof activeTurn.result === 'object' && !Array.isArray(activeTurn.result)
+    ? activeTurn.result as Record<string, unknown>
+    : undefined;
+  const sourceBlockName = cleanOptionalString(activeTurn?.sourceCertifiedBlock) ?? cleanOptionalString(context.sourceCertifiedBlock);
+  const priorResultValues = cleanStringRecordArray(activeResult?.dimensionValues) ?? cleanStringRecordArray(context.resultDimensionValues);
+  const priorResultColumns = mergeStrings(
+    arrayValue(activeResult?.columns),
+    context.resultColumns,
+    context.outputColumns,
+  );
+  const resolvedReferences = resolveConversationReferences(question, turns, priorResultValues);
+  const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || priorResultValues);
+  if (!hasUsefulContext) return undefined;
   const inferredKind = isGenericFollowUp(question)
     ? 'generic'
     : isDrilldownFollowUp(question)
       ? 'drilldown'
       : null;
-  const kind = inferredKind ?? (context.followupKind === 'generic' || context.followupKind === 'drilldown' ? context.followupKind : null);
-  if (!kind) return undefined;
+  // Always-on carry: the regexes only CLASSIFY the follow-up kind — they no longer
+  // gate whether conversation context exists at all. A question that matches neither
+  // pattern still carries the prior turn as advisory 'contextual' state; the model
+  // (not a regex) decides whether it's relevant to the new question.
+  const kind = inferredKind
+    ?? (context.followupKind === 'generic' || context.followupKind === 'drilldown' ? context.followupKind : null)
+    ?? 'contextual';
   return {
     kind,
+    sourceTurnId: cleanOptionalString(activeTurn?.id) ?? cleanOptionalString(context.sourceAnswerId),
     sourceBlockName,
-    sourceQuestion: cleanOptionalString(context.sourceQuestion),
-    sourceAnswer: cleanOptionalString(context.sourceAnswerSummary),
+    sourceQuestion: cleanOptionalString(activeTurn?.question) ?? cleanOptionalString(context.sourceQuestion),
+    sourceAnswer: cleanOptionalString(activeTurn?.answerSummary) ?? cleanOptionalString(context.sourceAnswerSummary),
     filters: kind === 'drilldown'
-      ? mergeStrings(context.requestedFilters, extractDrilldownFilters(question))
+      ? mergeStrings(
+          activeTurnStringArray(activeTurn, 'requestedFilters'),
+          context.requestedFilters,
+          extractDrilldownFilters(question),
+          resolvedReferences.filters,
+        )
       : undefined,
     dimensions: kind === 'drilldown'
-      ? mergeStrings(context.requestedDimensions, extractDrilldownDimensions(question))
+      ? mergeStrings(
+          activeTurnStringArray(activeTurn, 'requestedDimensions'),
+          context.requestedDimensions,
+          extractDrilldownDimensions(question),
+          resolvedReferences.dimensions,
+        )
       : undefined,
+    priorResultColumns,
+    priorResultValues,
+    priorLimit: activeTurnNumber(activeTurn, 'topN') ?? (typeof context.priorLimit === 'number' ? context.priorLimit : undefined),
+    priorMeasures: mergeStrings(
+      activeTurnStringArray(activeTurn, 'requestedMeasures'),
+      arrayValue(activeResult?.measureColumns),
+      context.priorMeasures,
+      inferredMeasuresFromAnswerContract(context.answerContract),
+      inferredMeasureColumns(priorResultColumns),
+    ),
+    resolvedReferences: resolvedReferences.labels,
+    unresolvedReferences: resolvedReferences.unresolved,
   };
+}
+
+function conversationTurnsFromContext(context: AgentRunRequest['conversationContext']): Array<Record<string, unknown>> {
+  const explicit = Array.isArray(context?.turns)
+    ? context.turns.map(cleanRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn))
+    : [];
+  if (explicit.length > 0) return explicit.slice(-8);
+  const legacy = cleanRecord({
+    id: context?.sourceAnswerId,
+    question: context?.sourceQuestion,
+    answerSummary: context?.sourceAnswerSummary,
+    sourceCertifiedBlock: context?.sourceCertifiedBlock,
+    requestedFilters: context?.requestedFilters,
+    requestedDimensions: context?.requestedDimensions,
+    requestedMeasures: context?.priorMeasures,
+    topN: context?.priorLimit,
+    result: {
+      columns: context?.resultColumns ?? context?.outputColumns,
+      rowsSample: context?.resultRowsSample,
+      dimensionValues: context?.resultDimensionValues,
+      measureColumns: context?.priorMeasures,
+    },
+    route: context?.route,
+    trustLabel: context?.trustLabel,
+    reviewStatus: context?.reviewStatus,
+    certification: context?.certification,
+    contextPackId: context?.contextPackId,
+  });
+  return legacy ? [legacy] : [];
+}
+
+function activeConversationTurn(
+  context: AgentRunRequest['conversationContext'],
+  turns: Array<Record<string, unknown>>,
+): Record<string, unknown> | undefined {
+  if (turns.length === 0) return undefined;
+  const activeId = cleanOptionalString(context?.activeTurnId);
+  if (activeId) {
+    const match = turns.find((turn) => cleanOptionalString(turn.id) === activeId);
+    if (match) return match;
+  }
+  return [...turns].reverse().find((turn) => {
+    const result = cleanRecord(turn.result);
+    const columns = arrayValue(result?.columns);
+    const rows = arrayValue(result?.rowsSample);
+    return Boolean(columns?.length || rows?.length);
+  }) ?? turns[turns.length - 1];
+}
+
+function resolveConversationReferences(
+  question: string,
+  turns: Array<Record<string, unknown>>,
+  activeValues: Record<string, string[]> | undefined,
+): { filters?: string[]; dimensions?: string[]; labels?: string[]; unresolved?: string[] } {
+  const dimensions = resolveDeicticDimensions(question, activeValues) ?? [];
+  let filters = resolveDeicticFilters(question, activeValues) ?? [];
+  const labels: string[] = [];
+  if (dimensions.length > 0 && filters.length === 0) {
+    for (const turn of [...turns].reverse()) {
+      const values = cleanStringRecordArray(cleanRecord(turn.result)?.dimensionValues);
+      if (!values) continue;
+      filters = dimensions.flatMap((dimension) => valuesForPriorDimension(values, dimension));
+      if (filters.length > 0) break;
+    }
+  }
+  for (const dimension of dimensions) {
+    const values = (activeValues ? valuesForPriorDimension(activeValues, dimension) : []).slice(0, 5);
+    labels.push(values.length ? `${dimension}: ${values.join(', ')}` : `${dimension}: unresolved`);
+  }
+  const unresolved = referencesNeedValues(question) && filters.length === 0
+    ? ['Could not resolve the referenced prior result values from conversation state.']
+    : undefined;
+  return {
+    filters: filters.length > 0 ? Array.from(new Set(filters)).slice(0, 24) : undefined,
+    dimensions: dimensions.length > 0 ? dimensions : undefined,
+    labels: labels.length > 0 ? labels : undefined,
+    unresolved,
+  };
+}
+
+function cleanRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function activeTurnStringArray(turn: Record<string, unknown> | undefined, key: string): unknown[] | undefined {
+  return arrayValue(turn?.[key]);
+}
+
+function activeTurnNumber(turn: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = turn?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function referencesNeedValues(question: string): boolean {
+  return /\b(?:this|that|these|those|same|above|previous|prior)\b/i.test(question);
 }
 
 function extractCertifiedBlockName(content: string): string | undefined {
   const fromAnswer = content.match(/Answered by certified block \*\*([^*]+)\*\*/i)?.[1];
+  const fromRoute = content.match(/Answered from certified block\s+([A-Za-z0-9_.-]+)/i)?.[1];
   const fromCitation = content.match(/^- block:\s*([A-Za-z0-9_.-]+)/im)?.[1];
-  return (fromAnswer ?? fromCitation)?.trim();
+  // The name pattern admits dots, so a sentence period lands in the match
+  // ("... block food_vs_drink_revenue.") — strip trailing punctuation.
+  return (fromAnswer ?? fromRoute ?? fromCitation)?.trim().replace(/[.,;:]+$/, '') || undefined;
 }
 
 function cleanOptionalString(value: unknown): string | undefined {
@@ -462,6 +771,154 @@ function mergeStrings(...groups: Array<unknown[] | undefined>): string[] | undef
   return unique.length > 0 ? unique : undefined;
 }
 
+function inferredMeasuresFromAnswerContract(value: unknown): string[] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const requestedShape = record.requestedShape && typeof record.requestedShape === 'object' && !Array.isArray(record.requestedShape)
+    ? record.requestedShape as Record<string, unknown>
+    : undefined;
+  return mergeStrings(arrayValue(record.measures), arrayValue(requestedShape?.measures));
+}
+
+function inferredMeasureColumns(columns: string[] | undefined): string[] | undefined {
+  if (!columns?.length) return undefined;
+  const measures = columns.filter((column) =>
+    /\b(revenue|sales|amount|total|count|average|avg|sum|spend|cost|margin|profit|value|points?|score|quantity|rate|volume)\b/i.test(
+      column.replace(/_/g, ' '),
+    )
+  );
+  return measures.length > 0 ? measures : undefined;
+}
+
+function arrayValue(value: unknown): unknown[] | undefined {
+  return Array.isArray(value) ? value : undefined;
+}
+
+function cleanStringRecordArray(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const values = Array.isArray(raw)
+      ? raw.map(cleanOptionalString).filter((item): item is string => Boolean(item)).slice(0, 24)
+      : [];
+    if (key.trim() && values.length > 0) out[key.trim()] = values;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function resolveDeicticFilters(question: string, priorValues: Record<string, string[]> | undefined): string[] | undefined {
+  if (!priorValues) return undefined;
+  const hasExplicitPluralReference = /\b(?:these|those|same)\s+(?:customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/i.test(question);
+  if (!hasExplicitPluralReference) {
+    const singular = resolveSingularDeicticDimension(question, priorValues);
+    if (singular) {
+      const values = valuesForPriorDimension(priorValues, singular).slice(0, 1);
+      return values.length > 0 ? values : undefined;
+    }
+  }
+  const dims = resolveDeicticDimensions(question, priorValues) ?? [];
+  const values = dims.flatMap((dim) => valuesForPriorDimension(priorValues, dim));
+  return values.length > 0 ? Array.from(new Set(values)).slice(0, 24) : undefined;
+}
+
+function resolveDeicticDimensions(question: string, priorValues: Record<string, string[]> | undefined): string[] | undefined {
+  if (!priorValues) return undefined;
+  const lower = question.toLowerCase();
+  const dims: string[] = [];
+  const candidates: Array<[RegExp, string]> = [
+    [/\b(?:these|those|the)\s+cat(?:egor|agor|ogor)(?:y|ies)\b/, 'category'],
+    [/\b(?:this|that|these|those|the)\s+products?\b/, 'product'],
+    [/\b(?:this|that|these|those|the)\s+customers?\b/, 'customer'],
+    [/\b(?:above|previous|prior)\s+(?:orders?|results?|rows?)\b/, 'customer'],
+    [/\b(?:this|that|these|those|the)\s+segments?\b/, 'segment'],
+    [/\b(?:this|that|these|those|the)\s+regions?\b/, 'region'],
+  ];
+  for (const [pattern, dim] of candidates) {
+    if (!pattern.test(lower)) continue;
+    if (dim === 'product' && /\bthe\s+product\s+cat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower)) continue;
+    if (valuesForPriorDimension(priorValues, dim).length) dims.push(dim);
+  }
+  if (dims.length === 0 && /\b(?:these|those|that|them|same|above|previous|prior)\b/.test(lower)) {
+    const single = singlePriorValueDimension(priorValues);
+    if (single) dims.push(single);
+  }
+  return dims.length > 0 ? Array.from(new Set(dims)) : undefined;
+}
+
+function resolveSingularDeicticDimension(question: string, priorValues: Record<string, string[]>): string | undefined {
+  const lower = question.toLowerCase();
+  const candidates: Array<[RegExp, string]> = [
+    [/\b(?:this|that|the)\s+product\b/, 'product'],
+    [/\b(?:this|that|the)\s+customer\b/, 'customer'],
+    [/\b(?:this|that|the)\s+category\b/, 'category'],
+    [/\b(?:this|that|the)\s+segment\b/, 'segment'],
+    [/\b(?:this|that|the)\s+region\b/, 'region'],
+  ];
+  for (const [pattern, dim] of candidates) {
+    if (pattern.test(lower) && valuesForPriorDimension(priorValues, dim).length) return dim;
+  }
+  return undefined;
+}
+
+function valuesForPriorDimension(values: Record<string, string[]>, dim: string): string[] {
+  const aliases = [dim, `${dim}_name`];
+  if (dim === 'product') aliases.push('sku');
+  if (dim === 'category') aliases.push('product_type', 'category_name');
+  return Array.from(new Set(aliases.flatMap((alias) => values[alias] ?? []))).filter(Boolean);
+}
+
+function formatResultDimensionValues(value: Record<string, string[]>): string {
+  return Object.entries(value)
+    .slice(0, 8)
+    .map(([key, values]) => `${key}=[${values.slice(0, 8).join(', ')}]`)
+    .join('; ');
+}
+
+function formatConversationTurnsForPrompt(turns: unknown[]): string {
+  return turns
+    .map(cleanRecord)
+    .filter((turn): turn is Record<string, unknown> => Boolean(turn))
+    .slice(-4)
+    .map((turn, index) => {
+      const result = cleanRecord(turn.result);
+      const columns = arrayValue(result?.columns)?.map(cleanOptionalString).filter(Boolean).slice(0, 6) ?? [];
+      const values = cleanStringRecordArray(result?.dimensionValues);
+      const valueText = values ? formatResultDimensionValues(values) : '';
+      return [
+        `${index + 1}. ${cleanOptionalString(turn.question) ?? 'prior turn'}`,
+        cleanOptionalString(turn.answerSummary) ? `summary=${cleanOptionalString(turn.answerSummary)}` : '',
+        columns.length ? `columns=${columns.join(', ')}` : '',
+        valueText ? `values=${valueText}` : '',
+      ].filter(Boolean).join(' | ');
+    })
+    .join('\n');
+}
+
+function singlePriorValueDimension(priorValues: Record<string, string[]>): string | undefined {
+  const dims = Array.from(new Set(Object.keys(priorValues).map(normalizePriorValueDimension).filter(Boolean)));
+  return dims.length === 1 ? dims[0] : undefined;
+}
+
+function normalizePriorValueDimension(value: string): string {
+  const lower = value.toLowerCase();
+  if (lower.includes('category')) return 'category';
+  if (lower.includes('product')) return 'product';
+  if (lower.includes('customer')) return 'customer';
+  if (lower.includes('account')) return 'account';
+  if (lower.includes('user')) return 'user';
+  if (lower.includes('region')) return 'region';
+  if (lower.includes('segment')) return 'segment';
+  if (lower.includes('channel')) return 'channel';
+  return lower.replace(/[_\s-]+name$/, '').replace(/[^a-z0-9_ -]+/g, '').trim();
+}
+
+export const __test__ = {
+  createCertifiedFitConfirmation,
+  followUpFromConversationContext,
+  inferFollowUpContext,
+  parseCertifiedFitConfirmation,
+};
+
 const GENERIC_FOLLOW_UP_WORDS = new Set([
   'a', 'about', 'again', 'all', 'also', 'and', 'as', 'be', 'block', 'can', 'could', 'data', 'do',
   'execute', 'for', 'from', 'get', 'give', 'import', 'it', 'its', 'let', 'lets', 'me', 'metrics',
@@ -471,6 +928,9 @@ const GENERIC_FOLLOW_UP_WORDS = new Set([
 
 function isGenericFollowUp(question: string): boolean {
   const lower = question.toLowerCase();
+  if (/\b(?:combine|merge|join|final|summari[sz]e)\b/.test(lower) && /\b(?:previous|prior|above|these|those|results?|outputs?|turns?)\b/.test(lower)) {
+    return true;
+  }
   if (!/\b(block|data|execute|import|it|result|results|run|solution|that|this)\b/.test(lower)) return false;
   const tokens = lower.match(/[a-z0-9_]+/g) ?? [];
   const meaningful = tokens.filter((token) => token.length > 1 && !GENERIC_FOLLOW_UP_WORDS.has(token));
@@ -479,8 +939,9 @@ function isGenericFollowUp(question: string): boolean {
 
 function isDrilldownFollowUp(question: string): boolean {
   const lower = question.toLowerCase();
-  return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|region|customer|channel|product)\b/.test(lower)
-    && !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
+  const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower);
+  return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|region|customer|channel|product|category|categories|catagor(?:y|ies)|catogor(?:y|ies))\b/.test(lower)
+    && (deicticDrilldown || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower));
 }
 
 function extractDrilldownFilters(question: string): string[] {
@@ -510,7 +971,7 @@ function extractDrilldownDimensions(question: string): string[] {
     const value = match[1].replace(/\b(last|this|where|for|only|and|with)\b.*$/i, '').trim();
     if (value) dims.push(value);
   }
-  for (const dim of ['segment', 'region', 'customer', 'channel', 'product', 'week', 'month']) {
+  for (const dim of ['segment', 'region', 'customer', 'channel', 'product', 'category', 'week', 'month']) {
     if (new RegExp(`\\b${dim}\\b`, 'i').test(question)) dims.push(dim);
   }
   return Array.from(new Set(dims));

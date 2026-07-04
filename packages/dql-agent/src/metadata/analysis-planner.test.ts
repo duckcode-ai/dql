@@ -8,6 +8,46 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('extracts requested shape for product revenue rankings', () => {
+    const plan = buildAnalysisQuestionPlan('Give me the most revenue products with product name, category and revenue');
+
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['product', 'category']));
+    expect(plan.requestedShape.measures).toContain('revenue');
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['product_name', 'category', 'revenue']));
+    expect(plan.requestedShape.rankingDirection).toBe('top');
+  });
+
+  it('extracts top-N and follow-up references', () => {
+    const plan = buildAnalysisQuestionPlan('who are the top 5 customers for these categories?', { kind: 'drilldown' });
+
+    expect(plan.requestedShape.topN).toEqual({ n: 5, scope: 'overall' });
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['customer', 'category']));
+    expect(plan.requestedShape.followUpReferences[0]).toMatchObject({
+      phrase: 'these categories',
+      kind: 'prior_dimension_values',
+    });
+  });
+
+  it('carries deictic-only follow-up values into the requested answer shape', () => {
+    const plan = buildAnalysisQuestionPlan('who are the top 5 customers for those?', {
+      kind: 'drilldown',
+      dimensions: ['category'],
+      filters: ['Food', 'Drink'],
+      priorResultValues: { category: ['Food', 'Drink'] },
+      priorMeasures: ['revenue'],
+    });
+
+    expect(plan.requestedShape.topN).toEqual({ n: 5, scope: 'overall' });
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['customer', 'category']));
+    expect(plan.requestedShape.measures).toContain('revenue');
+    expect(plan.requestedShape.filters).toEqual(expect.arrayContaining(['Food', 'Drink']));
+    expect(plan.requestedShape.followUpReferences[0]).toMatchObject({
+      phrase: 'those',
+      kind: 'prior_dimension_values',
+      resolvedValues: ['Food', 'Drink'],
+    });
+  });
+
   it('classifies entity profile research without hard-coding the entity domain', () => {
     const plan = buildAnalysisQuestionPlan('Can you research on Kevin Durant profile and provide me the complete stats');
 
@@ -131,6 +171,70 @@ describe('analysis planner', () => {
 
     expect(sorted.relations[0]?.relation).toBe('NBA_GAMES.RAW.fct_player_performance');
     expect(score.reasons.join(' ')).toContain('relation has usable columns');
+  });
+
+  it('uses semantic column aliases to prefer physical product revenue columns over certified source-shape aliases', () => {
+    const plan = buildAnalysisQuestionPlan('Give me the most revenue products with product name, category and revenue');
+    const context: MetadataAllowedSqlContext = {
+      relations: [
+        {
+          relation: 'certified.food_vs_drink_revenue',
+          name: 'food_vs_drink_revenue',
+          source: 'certified source SQL shape',
+          columns: [{ name: 'category' }, { name: 'revenue' }],
+        },
+        {
+          relation: 'SHOP.ANALYTICS.order_items',
+          name: 'order_items',
+          source: 'runtime schema',
+          columns: [
+            { name: 'order_id' },
+            { name: 'product_name' },
+            { name: 'product_type' },
+            { name: 'product_price' },
+          ],
+        },
+      ],
+      sourceBlockSql: [],
+    };
+
+    const sorted = sortAllowedSqlContextForAnalysisPlan(context, plan);
+    const score = scoreAllowedSqlRelationWithAnalysisPlan(sorted.relations[0]!, plan);
+
+    expect(sorted.relations[0]?.relation).toBe('SHOP.ANALYTICS.order_items');
+    expect(score.reasons.join(' ')).toContain('semantic column map matched');
+    expect(score.reasons.join(' ')).toContain('category->product_type');
+    expect(score.reasons.join(' ')).toContain('revenue->product_price');
+  });
+
+  it('uses column descriptions for business metric matching', () => {
+    const plan = buildAnalysisQuestionPlan('Show revenue by market');
+    const context: MetadataAllowedSqlContext = {
+      relations: [
+        {
+          relation: 'analytics.customer_markets',
+          name: 'customer_markets',
+          source: 'dbt manifest',
+          columns: [{ name: 'market' }, { name: 'customer_count' }],
+        },
+        {
+          relation: 'analytics.market_finance',
+          name: 'market_finance',
+          source: 'dbt manifest',
+          columns: [
+            { name: 'market' },
+            { name: 'net_amount', description: 'Recognized revenue after refunds.' },
+          ],
+        },
+      ],
+      sourceBlockSql: [],
+    };
+
+    const sorted = sortAllowedSqlContextForAnalysisPlan(context, plan);
+    const score = scoreAllowedSqlRelationWithAnalysisPlan(sorted.relations[0]!, plan);
+
+    expect(sorted.relations[0]?.relation).toBe('analytics.market_finance');
+    expect(score.reasons.join(' ')).toContain('revenue->net_amount');
   });
 });
 

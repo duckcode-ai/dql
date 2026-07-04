@@ -21,6 +21,70 @@ export interface SynthesizeResultPreview {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   rowCount: number;
+  /**
+   * Deterministic statistics computed over the FULL result (not the sampled
+   * rows above). The narrator must source every aggregate claim (ranges,
+   * totals, "all rows are X") from these — a sample described as the
+   * population is the last hallucination surface in the pipeline.
+   */
+  stats?: SynthesizeColumnStat[];
+}
+
+export interface SynthesizeColumnStat {
+  column: string;
+  kind: 'numeric' | 'categorical';
+  min?: number;
+  max?: number;
+  sum?: number;
+  distinctCount?: number;
+  /** Top distinct values with occurrence counts (low-cardinality columns only). */
+  values?: Array<{ value: string; count: number }>;
+}
+
+/**
+ * Compute verified per-column statistics over the FULL result set so narration
+ * never has to derive aggregates from a truncated sample. Deterministic and
+ * cheap (single pass, capped).
+ */
+export function computeResultStats(
+  columns: string[],
+  rows: Array<Record<string, unknown>>,
+): SynthesizeColumnStat[] {
+  const scanned = rows.slice(0, 10_000);
+  const stats: SynthesizeColumnStat[] = [];
+  for (const column of columns.slice(0, 16)) {
+    let min: number | undefined;
+    let max: number | undefined;
+    let sum = 0;
+    let numericCount = 0;
+    const distinct = new Map<string, number>();
+    for (const row of scanned) {
+      const value = row[column];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        numericCount += 1;
+        sum += value;
+        min = min === undefined ? value : Math.min(min, value);
+        max = max === undefined ? value : Math.max(max, value);
+      } else if (typeof value === 'string' && value.trim()) {
+        if (distinct.size <= 48) distinct.set(value, (distinct.get(value) ?? 0) + 1);
+      }
+    }
+    if (numericCount > 0 && numericCount >= scanned.length / 2) {
+      stats.push({ column, kind: 'numeric', min, max, sum: Number(sum.toFixed(4)) });
+    } else if (distinct.size > 0) {
+      stats.push({
+        column,
+        kind: 'categorical',
+        distinctCount: distinct.size,
+        values: distinct.size <= 12
+          ? [...distinct.entries()]
+              .sort((a, b) => b[1] - a[1])
+              .map(([value, count]) => ({ value, count }))
+          : undefined,
+      });
+    }
+  }
+  return stats;
 }
 
 export interface SynthesizeInput {
@@ -78,7 +142,9 @@ export function inferFormat(input: SynthesizeInput): SynthesisFormat {
 function buildSystemPrompt(format: SynthesisFormat, audience: "analyst" | "stakeholder"): string {
   const lines = [
     "You compose the final answer a user reads in DQL, a governed analytics tool.",
-    "Use ONLY numbers that appear in the provided rows — never invent or estimate values.",
+    "Use ONLY numbers that appear in the provided rows or VERIFIED STATISTICS — never invent, estimate, or round beyond them.",
+    "The rows shown may be a SAMPLE of a larger result. Any aggregate claim — ranges (min/max), totals, counts, or 'all/most rows are X' — MUST come from the VERIFIED STATISTICS section when present. NEVER derive aggregates from the sample rows.",
+    "Do not do arithmetic in prose (no 'over 100', 'roughly', 'around'); quote exact values from the rows or statistics, or omit the claim.",
     "Do NOT add trust disclaimers (e.g. 'uncertified', 'review required') — the UI shows a trust badge separately.",
     "Do NOT say 'As an AI' or narrate your process. Be direct and concrete.",
   ];
@@ -125,10 +191,32 @@ function formatCell(value: unknown): string {
   return String(value).replace(/\|/g, "\\|");
 }
 
+function statsToText(stats: SynthesizeColumnStat[] | undefined, rowCount: number): string | undefined {
+  if (!stats || stats.length === 0) return undefined;
+  const lines = stats.slice(0, 16).map((stat) => {
+    if (stat.kind === 'numeric') {
+      return `- ${stat.column}: min ${stat.min}, max ${stat.max}, sum ${stat.sum}`;
+    }
+    const values = stat.values
+      ? ` (${stat.values.slice(0, 12).map((entry) => `${entry.value}: ${entry.count}`).join(', ')})`
+      : '';
+    return `- ${stat.column}: ${stat.distinctCount} distinct value${stat.distinctCount === 1 ? '' : 's'}${values}`;
+  });
+  return `VERIFIED STATISTICS (computed over ALL ${rowCount} rows — the ONLY source for aggregate claims):\n${lines.join('\n')}`;
+}
+
 function buildUserPrompt(input: SynthesizeInput): string {
   const lines: string[] = [];
   lines.push(`Question: ${input.question}`);
-  if (input.resultPreview) lines.push(`Result (${input.resultPreview.rowCount} rows):\n${previewToText(input.resultPreview)}`);
+  if (input.resultPreview) {
+    const shown = Math.min(input.resultPreview.rows.length, 20);
+    const sampleLabel = input.resultPreview.rowCount > shown
+      ? `Result (${input.resultPreview.rowCount} rows total; SAMPLE of first ${shown} shown):`
+      : `Result (${input.resultPreview.rowCount} rows):`;
+    lines.push(`${sampleLabel}\n${previewToText(input.resultPreview)}`);
+    const statsText = statsToText(input.resultPreview.stats, input.resultPreview.rowCount);
+    if (statsText) lines.push(statsText);
+  }
   if (input.findings?.length) lines.push(`Findings:\n${input.findings.map((f) => `- ${f}`).join("\n")}`);
   if (input.gaps?.length) lines.push(`Known gaps/caveats:\n${input.gaps.map((g) => `- ${g}`).join("\n")}`);
   if (input.sql && input.audience !== "stakeholder") lines.push(`SQL used:\n${input.sql}`);

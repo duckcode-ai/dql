@@ -6,6 +6,13 @@
  *     [--user alice@acme.com]   (filters Skills + records feedback as this user)
  *     [--domain growth]         (scopes KG search)
  *     [--format json]           (emits structured JSON instead of prose)
+ *     [--thread <id>]           (continue a persisted conversation thread: the
+ *                                question runs through the runtime's agent-run
+ *                                engine, which injects prior turns and records
+ *                                this one server-side)
+ *
+ *   dql agent threads
+ *     Lists persisted conversation threads (id, updated, title) from the runtime.
  *
  *   dql agent reindex [path]
  *     Rebuilds .dql/cache/agent-kg.sqlite and metadata.sqlite from the
@@ -93,6 +100,8 @@ export async function runAgent(
   switch (sub) {
     case 'ask':
       return runAsk(rest, flags);
+    case 'threads':
+      return runThreads(flags);
     case 'reindex':
       return runReindex(rest, flags);
     case 'feedback':
@@ -101,8 +110,9 @@ export async function runAgent(
       return runEval(rest, flags);
     default:
       throw new Error(
-        'Usage: dql agent <ask|reindex|feedback|eval> [args]\n' +
-            '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>]\n' +
+        'Usage: dql agent <ask|threads|reindex|feedback|eval> [args]\n' +
+            '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>] [--thread <id>]\n' +
+      '  dql agent threads [--runtime-url <url>]\n' +
       '  dql agent reindex [path]\n' +
       '  dql agent feedback up|down --block <id> --question "..."\n' +
       '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama] [--execute] [--save]',
@@ -113,6 +123,12 @@ export async function runAgent(
 async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const question = rest.join(' ').trim();
   if (!question) throw new Error('Usage: dql agent ask "<question>"');
+
+  // Thread-scoped ask: hand the question to the runtime's agent-run engine with
+  // the thread id, so the SERVER injects prior turns and persists this run as a
+  // new turn (the same conversation store the notebook UI uses).
+  const threadId = (flags as { thread?: string }).thread;
+  if (threadId) return runThreadAsk(question, threadId, flags);
 
   const projectRoot = findProjectRoot(process.cwd());
   const kgPath = defaultKgPath(projectRoot);
@@ -283,6 +299,86 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
     kg.close();
     memory.close();
     if (closeRuntime) await closeRuntime();
+  }
+}
+
+/** Minimal slice of the runtime's AgentRun payload that the CLI prints. */
+interface AgentThreadRun {
+  id?: string;
+  route?: string;
+  trustState?: string;
+  answer?: string;
+  summary?: string;
+}
+
+/**
+ * `dql agent ask --thread <id>` — POST the question to the runtime's
+ * `/api/agent-runs` with the threadId in the body. The server injects the
+ * thread's prior turns into the conversation context and records the completed
+ * run as the next turn, so follow-ups resolve "those"/"that product" correctly
+ * across CLI invocations (and across the notebook UI, which shares the store).
+ */
+async function runThreadAsk(question: string, threadId: string, flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(process.cwd());
+  const format = (flags as { format?: string }).format;
+  const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
+  try {
+    const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, threadId }),
+    });
+    if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
+    const payload = (await response.json()) as { run?: AgentThreadRun };
+    if (!payload.run) throw new Error('Runtime did not return an agent run.');
+    if (format === 'json') {
+      console.log(JSON.stringify(payload.run, null, 2));
+      return;
+    }
+    const run = payload.run;
+    const badge = run.trustState === 'certified'
+      ? '✓ Certified'
+      : run.trustState === 'grounded'
+        ? '✓ Verified (grounded)'
+        : run.trustState === 'review_required'
+          ? '! AI-generated · review required'
+          : run.trustState === 'blocked'
+            ? '✕ Blocked'
+            : '· Reply';
+    console.log(`${badge}\n\n${(run.answer ?? run.summary ?? '').trim()}`);
+    console.log(`\nThread: ${threadId}`);
+  } finally {
+    await close();
+  }
+}
+
+/** `dql agent threads` — list server-persisted conversation threads. */
+async function runThreads(flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(process.cwd());
+  const format = (flags as { format?: string }).format;
+  const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
+  try {
+    const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/agent/threads?limit=50`);
+    if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
+    const payload = (await response.json()) as {
+      threads?: Array<{ id: string; surface?: string; title?: string; updatedAt?: string }>;
+    };
+    const threads = Array.isArray(payload.threads) ? payload.threads : [];
+    if (format === 'json') {
+      console.log(JSON.stringify({ threads }, null, 2));
+      return;
+    }
+    if (threads.length === 0) {
+      console.log('No conversation threads yet. Ask from the notebook UI, or continue one here with `dql agent ask "<question>" --thread <id>`.');
+      return;
+    }
+    for (const thread of threads) {
+      const updated = thread.updatedAt ? new Date(thread.updatedAt).toISOString().replace('T', ' ').slice(0, 16) : 'unknown';
+      console.log(`  ${thread.id}  ${updated}  [${thread.surface ?? 'notebook'}]  ${thread.title ?? '(untitled)'}`);
+    }
+    console.log(`\n${threads.length} thread(s). Continue one: dql agent ask "<question>" --thread <id>`);
+  } finally {
+    await close();
   }
 }
 

@@ -2,7 +2,7 @@ import React from 'react';
 import { X } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import { UnifiedAgentRunPanel } from './UnifiedAgentRunPanel';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from './UnifiedAgentRunPanel';
 import type { AgentRunSelectedObject } from '../../api/client';
 
 /**
@@ -15,6 +15,9 @@ export function GlobalAiRail() {
   const t = themes[state.themeMode];
   const { audience, context } = state.globalAi;
   const selectedObject = context.selectedObject as AgentRunSelectedObject | undefined;
+  // One rolling server-persisted conversation for the global rail — a page
+  // refresh resumes the same thread.
+  const agentThread = usePersistedAgentThreadId('global-rail');
 
   return (
     <aside
@@ -59,6 +62,8 @@ export function GlobalAiRail() {
           autoRun={state.globalAi.autoRun
             ? { text: state.globalAi.autoRun.text, mode: state.globalAi.autoRun.mode as never, nonce: state.globalAi.autoRun.nonce }
             : undefined}
+          threadId={agentThread.threadId}
+          onThreadIdChange={agentThread.onThreadIdChange}
           initialMode="auto"
         />
       </div>

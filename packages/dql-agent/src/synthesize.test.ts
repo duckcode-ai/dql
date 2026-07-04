@@ -75,3 +75,57 @@ describe("synthesizeAnswer", () => {
     expect(result.text).toContain("West");
   });
 });
+
+describe("verified statistics — sample-as-population hallucination guard", () => {
+  it("computeResultStats covers the FULL result, not the 20-row sample", async () => {
+    const { computeResultStats } = await import("./synthesize.js");
+    // 200 customers sorted desc — the classic failure: narrator saw rows 1-20
+    // ($3,089…$2,201) and claimed the whole result "ranges $2,200 to $3,090".
+    const rows = Array.from({ length: 200 }, (_, i) => ({
+      customer_name: `Customer ${i}`,
+      customer_type: i < 194 ? "returning" : "new",
+      lifetime_spend: 3089.8 - i * 6.79,
+    }));
+    const stats = computeResultStats(["customer_name", "customer_type", "lifetime_spend"], rows);
+    const spend = stats.find((s) => s.column === "lifetime_spend");
+    expect(spend?.kind).toBe("numeric");
+    expect(spend?.max).toBe(3089.8);
+    expect(spend?.min).toBeLessThan(1800); // true min of ALL rows, not the sample's 2201
+    const type = stats.find((s) => s.column === "customer_type");
+    expect(type?.values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "returning", count: 194 }),
+        expect.objectContaining({ value: "new", count: 6 }),
+      ]),
+    );
+  });
+
+  it("renders verified statistics and the sample label into the narration prompt", async () => {
+    const prompts: Array<{ system: string; user: string }> = [];
+    const complete = vi.fn(async (input: { system: string; user: string }) => {
+      prompts.push(input);
+      return "Spend ranges from 66.88 to 3089.8 across 200 customers.";
+    });
+    await synthesizeAnswer(
+      {
+        question: "who are the customers?",
+        resultPreview: {
+          columns: ["customer_name", "lifetime_spend"],
+          rows: Array.from({ length: 20 }, (_, i) => ({ customer_name: `C${i}`, lifetime_spend: 3089.8 - i })),
+          rowCount: 200,
+          stats: [
+            { column: "lifetime_spend", kind: "numeric", min: 66.88, max: 3089.8, sum: 671425.37 },
+          ],
+        },
+      },
+      { complete },
+    );
+    const user = prompts[0].user;
+    const system = prompts[0].system;
+    // The sample is labeled honestly and the stats are the declared source of truth.
+    expect(user).toContain("200 rows total; SAMPLE of first 20 shown");
+    expect(user).toContain("VERIFIED STATISTICS (computed over ALL 200 rows");
+    expect(user).toContain("min 66.88, max 3089.8");
+    expect(system).toContain("NEVER derive aggregates from the sample rows");
+  });
+});

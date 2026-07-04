@@ -372,8 +372,7 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
   const palette = getPalette(chartConfig?.colorPalette);
   const lineColor = palette[0] ?? t.accent;
 
-  const xCol = result.columns[0];
-  const yCol = result.columns[1];
+  const { labelCol: xCol, valueCol: yCol } = pickColumns(result, chartConfig);
   const data = result.rows.map((row) => ({ label: String(row[xCol] ?? ''), value: Number(row[yCol] ?? 0) }));
   if (data.length < 2) return null;
 
