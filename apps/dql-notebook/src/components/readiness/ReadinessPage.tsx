@@ -204,6 +204,24 @@ export function ReadinessPage(): JSX.Element {
               <Stat label="Metrics found" value={summary!.metricsFound} />
             </div>
 
+            {/* R2.2 — review-queue telemetry: how close the drafts are to certified. */}
+            {summary!.reviewTelemetry && summary!.reviewTelemetry.existingDrafts > 0 ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+                <Stat
+                  label="Drafts ready for review"
+                  value={`${Math.round((summary!.reviewTelemetry.readyForReviewRate ?? 0) * 100)}%`}
+                  tone="success"
+                />
+                <Stat
+                  label="Median draft age"
+                  value={summary!.reviewTelemetry.medianReviewAgeHours != null
+                    ? `${summary!.reviewTelemetry.medianReviewAgeHours.toFixed(1)}h`
+                    : '—'}
+                />
+                <Stat label="Est. review time" value={`~${summary!.reviewTelemetry.estimatedReviewMinutes} min`} />
+              </div>
+            ) : null}
+
             {/* Approve gate header */}
             <div style={planBarStyle}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -562,7 +580,7 @@ function Chip({ children }: { children: React.ReactNode }): JSX.Element {
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: number; tone?: 'success' }) {
+function Stat({ label, value, tone }: { label: string; value: number | string; tone?: 'success' }) {
   return (
     <div style={{ ...statStyle, borderTop: `2px solid ${tone === 'success' ? 'var(--status-success, #1f883d)' : 'var(--border-color, rgba(0,0,0,0.10))'}` }}>
       <div style={{ fontSize: 11, opacity: 0.62 }}>{label}</div>
