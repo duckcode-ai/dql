@@ -514,6 +514,21 @@ export interface BlockBinding {
   originalContent?: string;
 }
 
+/**
+ * Governed DQL provenance attached to an AI-generated (or Explore-scaffolded) query
+ * cell. The cell executes via its compiled SQL body, while this preserves the
+ * governed DQL so the cell can display it and be saved as a reusable block.
+ */
+export interface CellDqlArtifact {
+  source: string;          // the governed DQL source (block DSL or @metric/@dim form)
+  sql?: string;            // compiled SQL preview the cell executes
+  name?: string;           // display name / suggested block name
+  sourcePath?: string;     // set when already backed by a saved block file
+  kind?: string;           // artifact kind (e.g. semantic_block, sql_block)
+  metrics?: string[];
+  dimensions?: string[];
+}
+
 export interface Cell {
   id: string;
   type: CellType;
@@ -533,6 +548,7 @@ export interface Cell {
   chatConfig?: ChatCellConfig;        // Chat cell (v1.2 Track C)
   upstream?: string;                   // Dataframe handle this cell consumes
   blockBinding?: BlockBinding;         // Present when cell references a .dql block file
+  dqlArtifact?: CellDqlArtifact;       // Governed DQL provenance for AI/Explore-generated cells
   fromSnapshot?: boolean;              // Result was hydrated from .run.json, not executed this session
 }
 
