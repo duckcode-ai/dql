@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import {
+  Bookmark, Box, Boxes, ChevronDown, ChevronRight, Clock, Filter, Folder,
+  Gauge, GitBranch, Layers, Sigma, Tag,
+} from 'lucide-react';
 import type { SemanticTreeNode } from '../../store/types';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
@@ -31,15 +34,23 @@ function matchesTree(node: SemanticTreeNode, q: string): boolean {
   return (node.children ?? []).some((child) => matchesTree(child, q));
 }
 
-const KIND_BADGE: Record<string, { label: string; tone: (t: Theme) => string }> = {
-  metric: { label: 'MET', tone: (t) => t.accent },
-  measure: { label: 'MEA', tone: (t) => t.accent },
-  dimension: { label: 'DIM', tone: (t) => t.success },
-  time_dimension: { label: 'TIME', tone: (t) => t.warning },
-  entity: { label: 'ENT', tone: (t) => t.textMuted },
-  segment: { label: 'SEG', tone: (t) => t.textMuted },
-  hierarchy: { label: 'HIER', tone: (t) => t.textMuted },
-  pre_aggregation: { label: 'AGG', tone: (t) => t.textMuted },
+// Per-type icon + tone, so each semantic object reads at a glance — the same
+// icon-led style as the Database tab's table/column rows.
+const KIND_ICON: Record<string, { Icon: React.ComponentType<any>; tone: (t: Theme) => string }> = {
+  metric: { Icon: Gauge, tone: (t) => t.accent },
+  measure: { Icon: Sigma, tone: (t) => t.accent },
+  dimension: { Icon: Tag, tone: (t) => t.success },
+  time_dimension: { Icon: Clock, tone: (t) => t.warning },
+  entity: { Icon: Box, tone: (t) => t.textSecondary },
+  segment: { Icon: Filter, tone: (t) => t.textMuted },
+  hierarchy: { Icon: GitBranch, tone: (t) => t.textMuted },
+  pre_aggregation: { Icon: Layers, tone: (t) => t.textMuted },
+  cube: { Icon: Boxes, tone: (t) => t.textSecondary },
+  semantic_model: { Icon: Boxes, tone: (t) => t.textSecondary },
+  saved_query: { Icon: Bookmark, tone: (t) => t.textMuted },
+  provider: { Icon: Folder, tone: (t) => t.textMuted },
+  domain: { Icon: Folder, tone: (t) => t.textMuted },
+  group: { Icon: Folder, tone: (t) => t.textMuted },
 };
 
 export function SemanticTreeView({
@@ -66,7 +77,8 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
   const hasChildren = (node.children?.length ?? 0) > 0;
   const [open, setOpen] = useState(depth < 1 || Boolean(q));
   const insertable = INSERTABLE.has(node.kind);
-  const badge = KIND_BADGE[node.kind];
+  const icon = KIND_ICON[node.kind];
+  const Icon = icon?.Icon;
   const pad = 10 + depth * 13;
 
   if (!hasChildren) {
@@ -76,13 +88,13 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
         onClick={() => insertable && onInsert(nodeRef(node))}
         title={insertable ? `Insert ${nodeRef(node)}` : node.label}
         style={{
-          display: 'flex', alignItems: 'center', gap: 6, width: '100%', boxSizing: 'border-box',
+          display: 'flex', alignItems: 'center', gap: 7, width: '100%', minWidth: 0, boxSizing: 'border-box',
           padding: `5px 10px 5px ${pad + 15}px`, border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
           background: 'transparent', cursor: insertable ? 'pointer' : 'default', textAlign: 'left', fontFamily: t.font, color: t.textPrimary,
         }}
       >
-        {badge && <span style={{ fontSize: 8.5, fontWeight: 800, color: badge.tone(t), width: 28, flexShrink: 0 }}>{badge.label}</span>}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{node.label}</span>
+        {Icon && <Icon size={13} color={icon.tone(t)} style={{ flexShrink: 0 }} />}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{node.label}</span>
       </button>
     );
   }
@@ -93,14 +105,15 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
         type="button"
         onClick={() => setOpen((v) => !v)}
         style={{
-          display: 'flex', alignItems: 'center', gap: 5, width: '100%', boxSizing: 'border-box',
+          display: 'flex', alignItems: 'center', gap: 6, width: '100%', minWidth: 0, boxSizing: 'border-box',
           padding: `6px 10px 6px ${pad}px`, border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
           background: 'transparent', cursor: 'pointer', textAlign: 'left', fontFamily: t.font, color: t.textPrimary,
         }}
       >
-        {open ? <ChevronDown size={13} color={t.textMuted} /> : <ChevronRight size={13} color={t.textMuted} />}
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{node.label}</span>
-        <span style={{ marginLeft: 'auto', fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{node.count ?? children.length}</span>
+        {open ? <ChevronDown size={13} color={t.textMuted} style={{ flexShrink: 0 }} /> : <ChevronRight size={13} color={t.textMuted} style={{ flexShrink: 0 }} />}
+        {Icon && <Icon size={13} color={icon.tone(t)} style={{ flexShrink: 0 }} />}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{node.label}</span>
+        <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{node.count ?? children.length}</span>
       </button>
       {open && children.map((child) => <TreeNodeRow key={child.id} node={child} t={t} q={q} onInsert={onInsert} depth={depth + 1} />)}
     </div>
