@@ -3,10 +3,11 @@ import { Blocks, ChevronDown, ChevronRight, Database, FileText, Layers, Plus, Se
 import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
-import type { NotebookFile, SchemaTable, SemanticDimension, SemanticMetric } from '../../store/types';
+import type { NotebookFile, SchemaTable, SemanticTreeNode } from '../../store/types';
 import type { Theme } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
 import type { BlockEntry } from '../blocks/block-types';
+import { SemanticTreeView } from './CatalogTree';
 
 export type BuildTab = 'notebooks' | 'semantic' | 'database' | 'blocks';
 
@@ -104,14 +105,6 @@ const rowStyle = (t: Theme, active = false): React.CSSProperties => ({
   fontFamily: t.font, color: t.textPrimary,
 });
 
-function SectionHeader({ label, count, t }: { label: string; count: number; t: Theme }) {
-  return (
-    <div style={{ padding: '8px 10px 4px', fontSize: 9.5, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: t.textMuted }}>
-      {label} · {count}
-    </div>
-  );
-}
-
 function EmptyNote({ text, t }: { text: string; t: Theme }) {
   return <div style={{ padding: '16px 12px', fontSize: 11.5, color: t.textMuted, textAlign: 'center' }}>{text}</div>;
 }
@@ -159,40 +152,24 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
 
 function SemanticList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {
   const { state } = useNotebook();
-  const sl = state.semanticLayer;
-  const q = search.trim().toLowerCase();
-  const match = (name: string, label?: string) => !q || name.toLowerCase().includes(q) || (label ?? '').toLowerCase().includes(q);
-  const metrics = (sl?.metrics ?? []).filter((m) => match(m.name, m.label));
-  const dimensions = [...(sl?.dimensions ?? []), ...(sl?.timeDimensions ?? [])].filter((d) => match(d.name, d.label));
+  const [tree, setTree] = useState<SemanticTreeNode | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  if (!sl?.available && metrics.length === 0 && dimensions.length === 0) {
-    return <EmptyNote text="No semantic layer imported yet." t={t} />;
-  }
-  const row = (kind: 'metric' | 'dim', item: SemanticMetric | SemanticDimension) => (
-    <button
-      key={`${kind}:${item.name}`}
-      type="button"
-      onClick={() => onInsert(kind === 'metric' ? `@metric(${item.name})` : `@dim(${item.name})`)}
-      style={rowStyle(t)}
-      title={item.description || item.name}
-    >
-      <span style={{ fontSize: 9, fontWeight: 800, color: kind === 'metric' ? t.accent : t.success, width: 26, flexShrink: 0 }}>
-        {kind === 'metric' ? 'MET' : 'DIM'}
-      </span>
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontFamily: t.fontMono }}>
-        {item.name}
-      </span>
-    </button>
-  );
-  return (
-    <div>
-      {metrics.length > 0 && <SectionHeader label="Metrics" count={metrics.length} t={t} />}
-      {metrics.map((m) => row('metric', m))}
-      {dimensions.length > 0 && <SectionHeader label="Dimensions" count={dimensions.length} t={t} />}
-      {dimensions.map((d) => row('dim', d))}
-      {metrics.length === 0 && dimensions.length === 0 && <EmptyNote text="No matches." t={t} />}
-    </div>
-  );
+  // The sidebar owns the semantic-layer fetch (the old SemanticPanel did this on
+  // mount). Without it, nothing shows in the notebook. Cheap + cached server-side.
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.getSemanticTree()
+      .then((next) => { if (active) setTree(next); })
+      .catch(() => { if (active) setTree(null); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  if (loading && !tree) return <EmptyNote text="Loading semantic layer…" t={t} />;
+  if (!tree || (tree.children?.length ?? 0) === 0) return <EmptyNote text="No semantic layer imported yet." t={t} />;
+  return <SemanticTreeView tree={tree} themeMode={state.themeMode} search={search} onInsert={onInsert} />;
 }
 
 function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {
@@ -281,15 +258,50 @@ function BlocksList({ t, search }: { t: Theme; search: string }) {
 
   if (loading) return <EmptyNote text="Loading blocks…" t={t} />;
   if (filtered.length === 0) return <EmptyNote text={blocks.length === 0 ? 'No blocks yet.' : 'No matches.'} t={t} />;
+  return <div>{filtered.map((block) => <BlockRow key={block.path} block={block} t={t} onOpen={() => open(block)} />)}</div>;
+}
+
+function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: () => void }) {
+  const [open, setOpen] = useState(false);
   return (
     <div>
-      {filtered.map((block) => (
-        <button key={block.path} type="button" onClick={() => open(block)} style={rowStyle(t)} title={block.description || block.name}>
+      {/* Same object-display pattern as Database/Semantic: name row → expand. */}
+      <div style={{ ...rowStyle(t), justifyContent: 'flex-start' }}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          title={open ? 'Collapse' : 'Expand'}
+          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.textMuted, display: 'flex', padding: 0 }}
+        >
+          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          style={{ flex: 1, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6, padding: 0, fontFamily: t.font }}
+        >
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: STATUS_COLOR[block.status] ?? t.textMuted, flexShrink: 0 }} />
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{block.name}</span>
           <span style={{ marginLeft: 'auto', fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{block.domain}</span>
         </button>
-      ))}
+      </div>
+      {open && (
+        <div style={{ padding: '6px 12px 10px 30px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}30`, display: 'grid', gap: 6 }}>
+          {block.description && <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>{block.description}</div>}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 10.5, color: t.textMuted }}>
+            <span style={{ textTransform: 'capitalize', color: STATUS_COLOR[block.status] ?? t.textMuted, fontWeight: 700 }}>{block.status}</span>
+            {block.owner && <span>· {block.owner}</span>}
+            {block.lastModified && <span>· {new Date(block.lastModified).toLocaleDateString()}</span>}
+          </div>
+          <button
+            type="button"
+            onClick={onOpen}
+            style={{ justifySelf: 'start', border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.accent, cursor: 'pointer', borderRadius: 6, fontSize: 10.5, fontWeight: 700, fontFamily: t.font, padding: '3px 9px' }}
+          >
+            Open in builder
+          </button>
+        </div>
+      )}
     </div>
   );
 }
