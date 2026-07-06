@@ -127,6 +127,8 @@ export interface AgentAnswerEnvelope {
   certification?: string;
   reviewStatus?: string;
   trustLabel?: string;
+  /** Canonical trust stamp from the answer loop (single source of truth). */
+  trustLabelInfo?: { id?: string; display?: string };
   confidence?: number;
   text?: string;
   answer?: string;
@@ -2184,7 +2186,17 @@ function formatBusinessTier(value: string): string {
   return formatLabel(value);
 }
 
-function resolveAnswerTrustState(answer: AgentAnswerEnvelope): TrustState {
+export function resolveAnswerTrustState(answer: AgentAnswerEnvelope): TrustState {
+  // Prefer the canonical trust stamp from the answer loop (single source of
+  // truth). Fall back to the legacy fields for older payloads.
+  switch (answer.trustLabelInfo?.id) {
+    case 'certified': return 'certified';
+    case 'reviewed': return 'review';
+    case 'ai_generated': return 'ai_generated';
+    case 'conflict': return 'review';
+    case 'insufficient_context': return answer.kind === 'no_answer' ? 'no_answer' : 'uncertified';
+    default: break;
+  }
   if (answer.kind === 'no_answer') return 'no_answer';
   if (answer.certification === 'certified' || answer.reviewStatus === 'certified') return 'certified';
   if (answer.reviewStatus === 'draft_ready' || answer.reviewStatus === 'analyst_review_required') return 'review';

@@ -4,6 +4,7 @@ import type * as AgentAnswerCardModule from './AgentAnswerCard';
 let resolveDqlArtifactMeta: typeof AgentAnswerCardModule.resolveDqlArtifactMeta;
 let resolveAgentOutcome: typeof AgentAnswerCardModule.resolveAgentOutcome;
 let formatCascadeOutcome: typeof AgentAnswerCardModule.formatCascadeOutcome;
+let resolveAnswerTrustState: typeof AgentAnswerCardModule.resolveAnswerTrustState;
 
 describe('AgentAnswerCard DQL artifact metadata', () => {
   beforeAll(async () => {
@@ -12,6 +13,17 @@ describe('AgentAnswerCard DQL artifact metadata', () => {
     resolveDqlArtifactMeta = module.resolveDqlArtifactMeta;
     resolveAgentOutcome = module.resolveAgentOutcome;
     formatCascadeOutcome = module.formatCascadeOutcome;
+    resolveAnswerTrustState = module.resolveAnswerTrustState;
+  });
+
+  it('renders the badge from the canonical trustLabelInfo (R2.1)', () => {
+    // A certified-metric answer stamps canonical 'reviewed' -> UI 'review'.
+    expect(resolveAnswerTrustState({ kind: 'uncertified', certification: 'ai_generated', reviewStatus: 'draft_ready', trustLabelInfo: { id: 'reviewed' } })).toBe('review');
+    expect(resolveAnswerTrustState({ kind: 'uncertified', trustLabelInfo: { id: 'certified' } })).toBe('certified');
+    expect(resolveAnswerTrustState({ kind: 'uncertified', trustLabelInfo: { id: 'ai_generated' } })).toBe('ai_generated');
+    expect(resolveAnswerTrustState({ kind: 'no_answer', trustLabelInfo: { id: 'insufficient_context' } })).toBe('no_answer');
+    // Legacy fallback still works when trustLabelInfo is absent.
+    expect(resolveAnswerTrustState({ kind: 'certified', certification: 'certified' })).toBe('certified');
   });
 
   it('normalizes semantic artifact metadata for the DQL tab', () => {
