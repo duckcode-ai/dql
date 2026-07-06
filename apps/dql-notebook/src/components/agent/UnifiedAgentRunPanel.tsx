@@ -3,11 +3,14 @@ import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifact
 import {
   ArrowRight,
   Blocks,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Code2,
+  Copy,
   FileSearch,
+  Save,
   GitBranch,
   LayoutDashboard,
   Lightbulb,
@@ -915,6 +918,7 @@ function RunCard({
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
               onOpenApp={onOpenApp}
+              onNextAction={onNextAction}
             />
           ))}
         </div>
@@ -1283,6 +1287,7 @@ function ArtifactView({
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
+  onNextAction,
 }: {
   artifact: AgentRunArtifact;
   t: Theme;
@@ -1291,6 +1296,7 @@ function ArtifactView({
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onNextAction?: (action: AgentRun['nextActions'][number]) => void;
 }) {
   const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload as Record<string, unknown> : {};
   // Two-phase app build: the proposal card owns the confirm flow (toggles + Create).
@@ -1380,6 +1386,20 @@ function ArtifactView({
         <details>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
             <Blocks size={12} /><span>View DQL artifact</span>
+            <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              {dqlArtifact.source ? <CopyButton text={dqlArtifact.source} t={t} title="Copy DQL" /> : null}
+              {!dqlPath && onNextAction ? (
+                <button
+                  type="button"
+                  className="dql-hover"
+                  title="Save this DQL as a reusable block"
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); onNextAction({ id: 'save-dql-block', label: 'Save as DQL block', route: 'dql_block_draft' }); }}
+                  style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.accent, display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10.5, fontWeight: 700, padding: '2px 4px' }}
+                >
+                  <Save size={12} /> Save as block
+                </button>
+              ) : null}
+            </span>
           </summary>
           {dqlArtifact.sourcePath ? (
             <div style={{ marginTop: 6, fontSize: 10.5, color: t.textMuted }}>
@@ -1393,6 +1413,9 @@ function ArtifactView({
         <details>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
             <Code2 size={12} /><span>{artifactSqlDisclosureLabel(Boolean(dqlArtifact))}</span>
+            <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <CopyButton text={sql} t={t} title="Copy SQL" />
+            </span>
           </summary>
           <pre style={{ ...codeStyle(t), marginTop: 6 }}>{sql}</pre>
         </details>
@@ -1685,7 +1708,38 @@ export function artifactSqlDisclosureLabel(hasDqlArtifact: boolean): string {
   return hasDqlArtifact ? 'View compiled SQL preview' : 'View SQL preview';
 }
 
-/** Notebook-cell-style result view: chart + table toggle, reusing the same renderers. */
+/** Small copy-to-clipboard control. Safe inside a <summary> (stops the toggle). */
+function CopyButton({ text, t, title = 'Copy' }: { text: string; t: Theme; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard may be unavailable (insecure context) — fail quietly.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title={title}
+      className="dql-hover"
+      style={{
+        border: 'none', background: 'transparent', cursor: 'pointer',
+        color: copied ? t.success : t.textMuted, display: 'inline-flex', alignItems: 'center',
+        gap: 3, fontSize: 10.5, fontWeight: 650, padding: '2px 4px',
+      }}
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+      {copied ? 'Copied' : null}
+    </button>
+  );
+}
+
 function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult; themeMode: ThemeMode; t: Theme; chartConfig?: CellChartConfig }) {
   const isEmpty = result.rows.length === 0;
   // Honor the agent's chosen visualization; only default to table when it resolves
@@ -1700,16 +1754,19 @@ function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult
   return (
     <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, overflow: 'hidden' }}>
       <div style={{ display: 'flex', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        {!isEmpty && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>}
-        {!isEmpty && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>}
+        {/* Only offer the Chart tab when there is a real visualization to show —
+            otherwise it just re-renders the same table. */}
+        {chartable && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>}
+        {chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>}
+        {!chartable && !isEmpty && <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>Table</span>}
         <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
-      <div style={{ padding: 8, minHeight: view === 'chart' && !isEmpty ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
+      <div style={{ padding: 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
         {isEmpty
           ? <div style={{ padding: '18px 8px', textAlign: 'center', color: t.textMuted, fontSize: 12 }}>
               The query ran successfully and matched 0 rows{result.columns.length > 0 ? ` (columns: ${result.columns.join(', ')})` : ''}.
             </div>
-          : view === 'chart'
+          : chartable && view === 'chart'
             ? <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
             : <TableOutput result={result} themeMode={themeMode} />}
       </div>
