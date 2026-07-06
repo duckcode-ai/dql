@@ -58,6 +58,21 @@ describe('decideAgentAction', () => {
     expect(decideAgentAction({ question: 'widgets', intent: 'ad_hoc_ranking', signals: { hasRetrieval: false } }).action).toBe('clarify');
   });
 
+  it('answers (never re-clarifies) when the user replies to a prior clarifying question', () => {
+    // Short non-deictic replies to a clarify used to be re-classified fresh and
+    // clarified again — an infinite loop. A reply to a "?" turn must proceed.
+    const d = decideAgentAction({
+      question: 'top 5',
+      intent: 'clarify',
+      signals: { missingContext: ['Which product set?'] },
+      history: [
+        { role: 'user', text: 'top customers who bought the top products with revenue' },
+        { role: 'assistant', text: 'How many top-selling products should I consider (e.g. top 3, top 10)?' },
+      ],
+    });
+    expect(d.action).toBe('answer');
+  });
+
   it('always returns a human-facing reason', () => {
     for (const intent of ['exact_certified_lookup', 'clarify', 'driver_breakdown'] as const) {
       expect(decideAgentAction({ question: 'q', intent }).reason.length).toBeGreaterThan(10);
