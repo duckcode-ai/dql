@@ -2393,6 +2393,9 @@ function addDataLexManifestObjects(
 
   const latestContractKeyById = new Map<string, string>();
   const contractKeyByVersionedRef = new Map<string, string>();
+  // entity (by name and domain.entity) -> physical binding ref, so relationships
+  // can be resolved to concrete relations for grain-safe join hints.
+  const entityBindingRef = new Map<string, string>();
   for (const domain of raw.domains) {
     if (!domain?.name) continue;
     const domainKey = `datalex:domain:${domain.name}`;
@@ -2445,6 +2448,11 @@ function addDataLexManifestObjects(
     for (const entity of domain.entities ?? []) {
       if (!entity?.name) continue;
       const entityKey = `datalex:entity:${domain.name}.${entity.name}`;
+      if (entity.binding?.ref) {
+        const boundKey = objectKeyForDataLexBinding(entity.binding);
+        entityBindingRef.set(entity.name.toLowerCase(), boundKey);
+        entityBindingRef.set(`${domain.name}.${entity.name}`.toLowerCase(), boundKey);
+      }
       objects.set(entityKey, mergeObject(objects.get(entityKey), {
         objectKey: entityKey,
         objectType: 'datalex_entity',
@@ -2514,6 +2522,33 @@ function addDataLexManifestObjects(
         });
       }
     }
+  }
+
+  // Typed cross-entity relationships → grain-safe join edges between the entities'
+  // physical relations. buildSelectedJoinPaths turns these into `datalex`-sourced
+  // join paths that outrank name-heuristic guesses.
+  const resolveEntityRef = (endpoint: { domain?: string; entity: string }): string | undefined =>
+    entityBindingRef.get(`${endpoint.domain ?? ''}.${endpoint.entity}`.toLowerCase())
+    ?? entityBindingRef.get(endpoint.entity.toLowerCase());
+  for (const relationship of raw.relationships ?? []) {
+    if (!relationship?.from?.entity || !relationship?.to?.entity) continue;
+    const fromRef = resolveEntityRef(relationship.from);
+    const toRef = resolveEntityRef(relationship.to);
+    if (!fromRef || !toRef || fromRef.toLowerCase() === toRef.toLowerCase()) continue;
+    putEdge(edges, {
+      edgeType: 'datalex_join',
+      fromKey: fromRef,
+      toKey: toRef,
+      confidence: relationship.identifying ? 0.97 : 0.9,
+      payload: compactObject({
+        source: 'datalex relationship',
+        name: relationship.name,
+        fromColumn: relationship.from.column,
+        toColumn: relationship.to.column,
+        cardinality: relationship.cardinality,
+        verb: relationship.verb,
+      }),
+    });
   }
 
   for (const block of Object.values(manifest.blocks ?? {})) {
@@ -4132,6 +4167,30 @@ function buildSelectedJoinPaths(
     });
   }
 
+  // DataLex modeled relationships: grain-safe joins on the declared canonical
+  // columns (verified to exist on both relations), ranked above name heuristics.
+  const datalexLookup = buildSelectedRelationLookup(allowedSqlContext.relations);
+  for (const edge of edges) {
+    if (edge.edgeType !== 'datalex_join') continue;
+    const left = lookupRelationForCatalogEdge(edge.fromKey, datalexLookup);
+    const right = lookupRelationForCatalogEdge(edge.toKey, datalexLookup);
+    if (!left || !right || normalizeRelationKey(left.relation) === normalizeRelationKey(right.relation)) continue;
+    const payload = (edge.payload ?? {}) as { fromColumn?: string; toColumn?: string; cardinality?: string; name?: string };
+    const guessed = pickCatalogJoinColumns(left, right);
+    const leftColumn = relationHasColumn(left, payload.fromColumn) ? payload.fromColumn! : guessed?.leftColumn;
+    const rightColumn = relationHasColumn(right, payload.toColumn) ? payload.toColumn! : guessed?.rightColumn;
+    if (!leftColumn || !rightColumn) continue;
+    pushJoin({
+      leftRelation: left.relation,
+      leftColumn,
+      rightRelation: right.relation,
+      rightColumn,
+      reason: `DataLex relationship${payload.name ? ` ${payload.name}` : ''}${payload.cardinality ? ` (${payload.cardinality})` : ''}`,
+      confidence: edge.confidence ?? 0.9,
+      source: 'datalex',
+    });
+  }
+
   for (let leftIndex = 0; leftIndex < relations.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < relations.length; rightIndex += 1) {
       const left = relations[leftIndex]!;
@@ -4210,6 +4269,21 @@ function catalogJoinDedupeKey(
     `${normalizeRelationKey(leftRelation)}.${normalizeColumnKeyForCatalog(leftColumn)}`,
     `${normalizeRelationKey(rightRelation)}.${normalizeColumnKeyForCatalog(rightColumn)}`,
   ].sort().join('|');
+}
+
+/** Map a DataLex physical binding to the metadata object key of its relation. */
+function objectKeyForDataLexBinding(binding: { kind: string; ref: string }): string {
+  switch (binding.kind) {
+    case 'dbt_model': return `dbt:model:${binding.ref}`;
+    case 'dbt_source': return `dbt:source:${binding.ref}`;
+    default: return `warehouse:table:${binding.ref}`;
+  }
+}
+
+function relationHasColumn(relation: MetadataAllowedSqlRelation, column: string | undefined): boolean {
+  if (!column) return false;
+  const target = normalizeColumnKeyForCatalog(column);
+  return relation.columns.some((entry) => normalizeColumnKeyForCatalog(entry.name) === target);
 }
 
 function joinSourceRank(source: NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']>[number]['source']): number {

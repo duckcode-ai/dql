@@ -540,6 +540,65 @@ describe('local metadata catalog', () => {
     }
   });
 
+  it('turns DataLex relationships into grain-safe datalex join paths (R2.8)', async () => {
+    // Two dbt models sharing player_id, and a DataLex manifest that models the
+    // relationship between the entities bound to them.
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { nodes: Record<string, Record<string, unknown>> };
+    manifest.nodes['model.nba_analysis.dim_players'] = {
+      resource_type: 'model', name: 'dim_players', alias: 'dim_players', database: 'NBA_DB', schema: 'ANALYTICS',
+      description: 'Player dimension.', depends_on: { nodes: [] }, original_file_path: 'models/dim_players.sql',
+      columns: {
+        player_id: { name: 'player_id', data_type: 'text', description: 'Player id.' },
+        player_name: { name: 'player_name', data_type: 'text', description: 'Player name.' },
+      },
+    };
+    manifest.nodes['model.nba_analysis.fct_games'] = {
+      resource_type: 'model', name: 'fct_games', alias: 'fct_games', database: 'NBA_DB', schema: 'ANALYTICS',
+      description: 'Game facts by player.', depends_on: { nodes: [] }, original_file_path: 'models/fct_games.sql',
+      columns: {
+        player_id: { name: 'player_id', data_type: 'text', description: 'Player id.' },
+        points: { name: 'points', data_type: 'number', description: 'Points scored.' },
+      },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+    writeFileSync(
+      join(projectRoot, 'datalex-manifest.json'),
+      JSON.stringify({
+        manifestSpecVersion: '1.0.0', datalexVersion: 'test', generatedAt: '2026-06-20T00:00:00.000Z',
+        project: { name: 'nba_contracts' },
+        domains: [{
+          name: 'nba', entities: [
+            { name: 'Player', binding: { kind: 'dbt_model', ref: 'dim_players' }, fields: [{ name: 'player_id', primary_key: true }] },
+            { name: 'Game', binding: { kind: 'dbt_model', ref: 'fct_games' }, fields: [{ name: 'player_id' }] },
+          ],
+        }],
+        relationships: [{
+          name: 'player_plays_game', type: 'reference', identifying: true, cardinality: 'one_to_many',
+          from: { entity: 'Player', column: 'player_id' },
+          to: { entity: 'Game', column: 'player_id' },
+        }],
+      }),
+      'utf-8',
+    );
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'points by player joining players and games',
+      limit: 40,
+    });
+
+    expect(pack.retrievalDiagnostics.selectedJoinPaths).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'datalex',
+          leftColumn: 'player_id',
+          rightColumn: 'player_id',
+          reason: expect.stringContaining('DataLex relationship player_plays_game'),
+        }),
+      ]),
+    );
+  });
+
   it('routes exact certified example questions to certified execution', async () => {
     const plan = await planAgentAnswer(projectRoot, {
       question: 'Who were the top scorers?',
