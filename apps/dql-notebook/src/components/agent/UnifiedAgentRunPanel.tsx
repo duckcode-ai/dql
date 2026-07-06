@@ -42,7 +42,7 @@ import {
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
-import { ChartOutput, resolveChartType } from '../output/ChartOutput';
+import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import type { QueryResult, AppSummary, CellChartConfig } from '../../store/types';
 import { buildConversationContext } from './agentConversationContext';
@@ -1740,11 +1740,53 @@ function CopyButton({ text, t, title = 'Copy' }: { text: string; t: Theme; title
   );
 }
 
+const CHART_X_DATE_RE = /date|time|day|month|year|week|quarter|period|_at$|^at$/i;
+
+function isChartNumericCell(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') return value.trim() !== '' && Number.isFinite(Number(value));
+  return false;
+}
+
+/** Columns whose sampled non-blank values are all numeric — candidate measures. */
+function numericResultColumns(result: QueryResult): string[] {
+  const sample = result.rows.slice(0, 20);
+  if (sample.length === 0) return [];
+  return result.columns.filter((column) =>
+    sample.some((row) => isChartNumericCell(row[column]))
+    && sample.every((row) => {
+      const value = row[column];
+      return value === null || value === undefined || value === '' || isChartNumericCell(value);
+    }),
+  );
+}
+
+/**
+ * Best-effort chart config for an arbitrary agent result: honors any config the
+ * agent supplied, else picks a category column for X and a numeric column for Y and
+ * defaults to a line (time X) or bar chart. Returns chartable=false only when there
+ * is genuinely nothing to plot (no numeric column, <2 columns, or 0 rows) — far more
+ * permissive than the strict name-based auto-detector, so the Chart tab actually
+ * shows for real-world outputs like `product_name, total_value, order_count`.
+ */
+export function deriveResultChartConfig(result: QueryResult, base?: CellChartConfig): { config: CellChartConfig; chartable: boolean } {
+  const numeric = numericResultColumns(result);
+  const chartable = result.rows.length > 0 && result.columns.length >= 2 && numeric.length >= 1;
+  if (!chartable) return { config: base ?? {}, chartable: false };
+  const category = result.columns.find((column) => !numeric.includes(column)) ?? result.columns[0];
+  const x = base?.x && result.columns.includes(base.x) ? base.x : category;
+  const y = base?.y && result.columns.includes(base.y) ? base.y : (numeric.find((column) => column !== x) ?? numeric[0]);
+  const baseChart = base?.chart && base.chart.toLowerCase().replace(/_/g, '-') !== 'table' ? base.chart : undefined;
+  const chart = baseChart ?? (CHART_X_DATE_RE.test(x) ? 'line' : 'bar');
+  return { config: { ...(base ?? {}), chart, x, y }, chartable: true };
+}
+
 function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult; themeMode: ThemeMode; t: Theme; chartConfig?: CellChartConfig }) {
   const isEmpty = result.rows.length === 0;
-  // Honor the agent's chosen visualization; only default to table when it resolves
-  // to a table (or there's nothing to chart).
-  const chartable = !isEmpty && resolveChartType(result, chartConfig) !== 'table';
+  // User overrides from the chart-settings gear (type / X / Y / palette …).
+  const [override, setOverride] = useState<CellChartConfig | undefined>();
+  const base = useMemo<CellChartConfig>(() => ({ ...(chartConfig ?? {}), ...(override ?? {}) }), [chartConfig, override]);
+  const { config: effectiveChart, chartable } = deriveResultChartConfig(result, base);
   const [view, setView] = useState<'chart' | 'table'>(chartable ? 'chart' : 'table');
   const tabStyle = (active: boolean): React.CSSProperties => ({
     border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: t.font,
@@ -1754,8 +1796,8 @@ function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult
   return (
     <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, overflow: 'hidden' }}>
       <div style={{ display: 'flex', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        {/* Only offer the Chart tab when there is a real visualization to show —
-            otherwise it just re-renders the same table. */}
+        {/* Chart tab shows whenever the data can be plotted; the gear inside the
+            chart lets the user change type / axes. */}
         {chartable && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>}
         {chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>}
         {!chartable && !isEmpty && <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>Table</span>}
@@ -1767,7 +1809,12 @@ function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult
               The query ran successfully and matched 0 rows{result.columns.length > 0 ? ` (columns: ${result.columns.join(', ')})` : ''}.
             </div>
           : chartable && view === 'chart'
-            ? <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
+            ? <ChartOutput
+                result={result}
+                themeMode={themeMode}
+                chartConfig={effectiveChart}
+                onConfigChange={(updates) => setOverride((prev) => ({ ...(prev ?? {}), ...updates }))}
+              />
             : <TableOutput result={result} themeMode={themeMode} />}
       </div>
     </div>
