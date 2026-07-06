@@ -7,7 +7,6 @@ import { parseSemanticDragRef, SEMANTIC_REF_MIME } from '../../editor/semantic-c
 import { api } from '../../api/client';
 import { BlockPicker, type BlockEntry } from '../blocks/BlockPicker';
 import { extractSqlFromText } from '../../utils/block-studio';
-import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
 import {
   BlockIcon,
   SQLCellIcon,
@@ -58,7 +57,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const [hovered, setHovered] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [blockPickerOpen, setBlockPickerOpen] = useState(false);
-  const [aiSqlOpen, setAiSqlOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -100,25 +98,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
     cell.name = block.name;
     cell.blockBinding = { path: block.path, state: 'bound', originalContent: sqlBody };
     dispatch({ type: 'ADD_CELL', cell, afterId });
-    closeAll();
-  };
-
-  const insertAiSqlCell = (sql: string, meta: AiSqlDraftMeta) => {
-    const trimmed = sql.trim();
-    if (!trimmed) return;
-    const cell = makeCell('sql', trimmed);
-    cell.name = uniqueAiSqlCellName(meta.title || meta.question, state.cells);
-    if ('previewResult' in meta && meta.previewResult) {
-      cell.result = meta.previewResult;
-      cell.status = 'success';
-      cell.executionCount = 1;
-    } else if ('previewError' in meta && meta.previewError) {
-      cell.error = meta.previewError;
-      cell.status = 'error';
-      cell.executionCount = 1;
-    }
-    dispatch({ type: 'ADD_CELL', cell, afterId });
-    setAiSqlOpen(false);
     closeAll();
   };
 
@@ -233,7 +212,9 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
                     return;
                   }
                   if (entry.type === 'ai_sql') {
-                    setAiSqlOpen(true);
+                    // Open the governed Notebook AI drawer at this position — the
+                    // same DQL-first cascade as Ask AI, not the legacy SQL dialog.
+                    window.dispatchEvent(new CustomEvent('dql:open-notebook-ai', { detail: { afterId } }));
                     closeAll();
                     return;
                   }
@@ -260,49 +241,8 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
 
         </div>
       )}
-      {aiSqlOpen && (
-        <AiSqlDraftDialog
-          mode="notebook"
-          themeMode={state.themeMode}
-          contextLabel={state.activeFile?.name ?? state.notebookTitle ?? 'Notebook'}
-          upstreamSql={findUpstreamSqlForInsert(state.cells, afterId)}
-          onClose={() => setAiSqlOpen(false)}
-          onInsertSql={insertAiSqlCell}
-        />
-      )}
     </div>
   );
-}
-
-function findUpstreamSqlForInsert(cells: Cell[], afterId?: string): string | undefined {
-  const startIndex = afterId
-    ? cells.findIndex((cell) => cell.id === afterId)
-    : cells.length - 1;
-  const fromIndex = startIndex >= 0 ? startIndex : cells.length - 1;
-  for (let i = fromIndex; i >= 0; i--) {
-    const cell = cells[i];
-    if ((cell.type === 'sql' || cell.type === 'dql') && cell.content?.trim()) {
-      return cell.content;
-    }
-  }
-  return undefined;
-}
-
-function uniqueAiSqlCellName(title: string | undefined, cells: Cell[]): string {
-  const fallback = 'ai_sql_draft';
-  const base = (title || fallback)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 48) || fallback;
-  const taken = new Set(cells.map((cell) => cell.name).filter(Boolean));
-  let candidate = base;
-  let index = 2;
-  while (taken.has(candidate)) {
-    candidate = `${base}_${index}`;
-    index += 1;
-  }
-  return candidate;
 }
 
 function PaletteTile({

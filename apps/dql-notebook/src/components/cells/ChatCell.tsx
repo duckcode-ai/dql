@@ -1,7 +1,7 @@
 import { themes } from '../../themes/notebook-theme';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { Cell, ChatCellConfig, ThemeMode } from '../../store/types';
-import { UnifiedAgentRunPanel, type ThreadItem } from '../agent/UnifiedAgentRunPanel';
+import { UnifiedAgentRunPanel, type ThreadItem, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 
 interface ChatCellProps {
   cell: Cell;
@@ -64,6 +64,34 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
     dispatch({ type: 'ADD_CELL', cell: sqlCell, afterId: cell.id });
   };
 
+  // DQL-first insertion (default): a self-contained query cell seeded with the
+  // governed answer's compiled SQL + result + chart config, carrying the DQL as
+  // provenance for display + save-as-block.
+  const insertGeneratedDqlCell = (payload: InsertDqlPayload) => {
+    const sql = (payload.sql ?? payload.dqlArtifact?.source ?? '').trim();
+    if (!sql) return;
+    const sqlCell = makeCell('sql', sql);
+    sqlCell.name = uniqueSqlCellName(payload.title ?? payload.dqlArtifact?.name, cells);
+    if (payload.result) {
+      sqlCell.result = payload.result;
+      sqlCell.status = 'success';
+      sqlCell.executionCount = 1;
+    }
+    if (payload.chartConfig) sqlCell.chartConfig = payload.chartConfig;
+    if (payload.dqlArtifact) {
+      sqlCell.dqlArtifact = {
+        source: payload.dqlArtifact.source,
+        sql: payload.sql,
+        name: payload.dqlArtifact.name,
+        sourcePath: payload.dqlArtifact.sourcePath,
+        kind: payload.dqlArtifact.kind,
+        metrics: payload.dqlArtifact.metrics,
+        dimensions: payload.dqlArtifact.dimensions,
+      };
+    }
+    dispatch({ type: 'ADD_CELL', cell: sqlCell, afterId: cell.id });
+  };
+
   const upstreamSql = findUpstreamSql(cells, index, config.upstream);
 
   return (
@@ -80,6 +108,7 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
         threadId={config.threadId}
         onThreadIdChange={(id) => onUpdate({ chatConfig: { ...config, threadId: id } })}
         onInsertSql={insertGeneratedSqlCell}
+        onInsertDql={insertGeneratedDqlCell}
       />
     </div>
   );

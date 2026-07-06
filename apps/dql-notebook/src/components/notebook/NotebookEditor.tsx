@@ -10,7 +10,7 @@ import { DashboardView } from './DashboardView';
 import { DocumentMetadataRow } from './DocumentMetadataRow';
 import { NotebookCatalogRail } from './NotebookCatalogRail';
 import { useOpenBlockInStudio } from '../agent/AiBuildResult';
-import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 import {
   emitNotebookResearchChanged,
 } from '../../utils/notebook-research';
@@ -93,6 +93,23 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     };
   }, [activeNotebookPath, aiHistoryOpen, aiHistoryRefreshKey, state.queryLog.length]);
 
+  // The AddCellBar "AI" tile opens the governed Notebook AI drawer at its insertion
+  // position (routed through the same DQL-first cascade as Ask AI), replacing the
+  // old regex SQL-draft dialog. Decoupled via a window event (no prop threading
+  // through CellList), mirroring the existing dql:semantic-used pattern.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ afterId?: string }>).detail;
+      setAiSourceCellId(detail?.afterId ?? null);
+      setAiInitialInput('');
+      setAiAutoAsk(undefined);
+      setAiHistoryOpen(false);
+      setAiOpen(true);
+    };
+    window.addEventListener('dql:open-notebook-ai', handler);
+    return () => window.removeEventListener('dql:open-notebook-ai', handler);
+  }, []);
+
   const openAiForCell = useCallback((cellId: string, prompt?: string, options?: { autoAsk?: boolean }) => {
     const text = prompt?.trim() ?? '';
     setAiSourceCellId(cellId);
@@ -107,6 +124,36 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     if (!trimmed) return;
     const cell = makeCell('sql', trimmed);
     cell.name = safeCellName(title ?? 'AI SQL draft');
+    dispatch({ type: 'ADD_CELL', cell, afterId: aiSourceCellId ?? undefined });
+    setAiSourceCellId(cell.id);
+    setAiOpen(true);
+  }, [aiSourceCellId, dispatch]);
+
+  // DQL-first insertion (default): create a self-contained query cell seeded with
+  // the governed answer's compiled SQL body + executed result + chart config, and
+  // carry the DQL artifact as provenance (surfaced + save-as-block on the cell).
+  const insertGeneratedDqlCell = useCallback((payload: InsertDqlPayload) => {
+    const sql = (payload.sql ?? payload.dqlArtifact?.source ?? '').trim();
+    if (!sql) return;
+    const cell = makeCell('sql', sql);
+    cell.name = safeCellName(payload.title ?? payload.dqlArtifact?.name ?? 'AI analysis');
+    if (payload.result) {
+      cell.result = payload.result;
+      cell.status = 'success';
+      cell.executionCount = 1;
+    }
+    if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+    if (payload.dqlArtifact) {
+      cell.dqlArtifact = {
+        source: payload.dqlArtifact.source,
+        sql: payload.sql,
+        name: payload.dqlArtifact.name,
+        sourcePath: payload.dqlArtifact.sourcePath,
+        kind: payload.dqlArtifact.kind,
+        metrics: payload.dqlArtifact.metrics,
+        dimensions: payload.dqlArtifact.dimensions,
+      };
+    }
     dispatch({ type: 'ADD_CELL', cell, afterId: aiSourceCellId ?? undefined });
     setAiSourceCellId(cell.id);
     setAiOpen(true);
@@ -225,6 +272,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
             onClose={() => setAiOpen(false)}
             onToggleHistory={() => setAiHistoryOpen((open) => !open)}
             onInsertSql={insertAiSqlCell}
+            onInsertDql={insertGeneratedDqlCell}
             onAskFromHistory={askFromHistory}
             onOpenResearch={openResearchFromAgentRun}
           />
@@ -388,6 +436,7 @@ function NotebookAiDrawer({
   onClose,
   onToggleHistory,
   onInsertSql,
+  onInsertDql,
   onAskFromHistory,
   onOpenResearch,
 }: {
@@ -402,6 +451,7 @@ function NotebookAiDrawer({
   onClose: () => void;
   onToggleHistory: () => void;
   onInsertSql: (sql: string, title?: string) => void;
+  onInsertDql: (payload: InsertDqlPayload) => void;
   onAskFromHistory: (run: NotebookResearchRun) => void;
   onOpenResearch: (id: string, notebookPath?: string) => void | Promise<void>;
 }) {
@@ -524,6 +574,7 @@ function NotebookAiDrawer({
           threadId={agentThread.threadId}
           onThreadIdChange={agentThread.onThreadIdChange}
           onInsertSql={onInsertSql}
+          onInsertDql={onInsertDql}
           onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
           onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}
         />
