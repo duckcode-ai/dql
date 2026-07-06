@@ -34,19 +34,30 @@ import {
   loadSkills,
   pickProvider,
   answer,
-    buildLocalContextPack,
-    deriveGeneratedDraftSlug,
-    recordQueryRun,
-    type ProviderName,
-    upsertGeneratedDraft,
-    validateSqlAgainstLocalContext,
-    type AgentAnswer,
-    type AgentFollowUpContext,
-    type AgentResultPayload,
-  } from '@duckcodeailabs/dql-agent';
+  buildAnalysisQuestionPlan,
+  buildLocalContextPack,
+  coerceReasoningEffort,
+  contextRetrievalBudgetForQuestion,
+  deriveGeneratedDraftSlug,
+  loadAgentSemanticLayer,
+  recordQueryRun,
+  recordRuntimeSchemaSnapshot,
+  type ProviderName,
+  upsertGeneratedDqlArtifactDraft,
+  upsertGeneratedDraft,
+  validateSqlAgainstLocalContext,
+  type AgentAnswer,
+  type AgentFollowUpContext,
+  type AgentResultPayload,
+  type AgentSchemaTable,
+  type AnalysisDepth,
+  type ReasoningEffort,
+} from '@duckcodeailabs/dql-agent';
 import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
+import { buildAnswerLoopTools, createGroundingContextExpander } from '../llm/answer-loop-tools.js';
+import { judgeAnswer, type JudgeCompletion } from './eval-judge.js';
 import { startProjectRuntime } from './notebook.js';
 
 /**
@@ -78,6 +89,89 @@ async function resolveAgentRuntime(
   }
   const handle = await startProjectRuntime(projectRoot, { preferredPort: 0 });
   return { runtimeBase: handle.url, close: handle.close };
+}
+
+async function fetchRuntimeSchemaContext(runtimeBase: string): Promise<AgentSchemaTable[]> {
+  try {
+    const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/schema`);
+    if (!response.ok) return [];
+    const raw = await response.json();
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map(normalizeRuntimeSchemaTable)
+      .filter((table): table is AgentSchemaTable => Boolean(table))
+      .slice(0, 500);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeRuntimeSchemaTable(raw: unknown): AgentSchemaTable | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const table = raw as Record<string, unknown>;
+  const relation = cleanRuntimeSchemaString(table.path) ?? cleanRuntimeSchemaString(table.name);
+  if (!relation) return undefined;
+  const columns = Array.isArray(table.columns)
+    ? table.columns
+        .map(normalizeRuntimeSchemaColumn)
+        .filter((column): column is AgentSchemaTable['columns'][number] => Boolean(column))
+        .slice(0, 120)
+    : [];
+  return {
+    relation,
+    name: cleanRuntimeSchemaString(table.name) ?? relation.split('.').pop() ?? relation,
+    source: cleanRuntimeSchemaString(table.source) ?? 'runtime schema',
+    columns,
+  };
+}
+
+function normalizeRuntimeSchemaColumn(raw: unknown): AgentSchemaTable['columns'][number] | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const column = raw as Record<string, unknown>;
+  const name = cleanRuntimeSchemaString(column.name);
+  if (!name) return undefined;
+  return {
+    name,
+    type: cleanRuntimeSchemaString(column.type),
+    description: cleanRuntimeSchemaString(column.description),
+  };
+}
+
+function recordCliRuntimeSchemaSnapshot(projectRoot: string, schemaContext: AgentSchemaTable[], source: string): void {
+  if (schemaContext.length === 0) return;
+  try {
+    recordRuntimeSchemaSnapshot(projectRoot, {
+      source,
+      tables: schemaContext.map((table) => ({
+        relation: table.relation,
+        schema: table.schema,
+        name: table.name,
+        description: table.description,
+        source: table.source,
+        columns: table.columns.map((column) => ({
+          name: column.name,
+          type: column.type,
+          description: column.description,
+          sampleValues: column.sampleValues?.slice(0, 8),
+        })),
+      })),
+    });
+  } catch {
+    // Runtime schema snapshots are advisory local metadata and must not block answers.
+  }
+}
+
+function cleanRuntimeSchemaString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function cliReasoningEffort(flags: CLIFlags): ReasoningEffort | undefined {
+  return coerceReasoningEffort(flags.reasoningEffort);
+}
+
+function cliAnalysisDepth(flags: CLIFlags): AnalysisDepth | undefined {
+  const value = flags.analysisDepth?.trim().toLowerCase();
+  return value === 'quick' || value === 'deep' ? value : undefined;
 }
 
 /** A DQL runtime answers `/api/connections` with a connector/connection payload. */
@@ -138,6 +232,8 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const userId = (flags as { user?: string }).user;
   const domain = (flags as { domain?: string }).domain;
   const format = (flags as { format?: string }).format;
+  const reasoningEffort = cliReasoningEffort(flags);
+  const requestedDepth = cliAnalysisDepth(flags);
 
   const provider = await pickProvider(providerName);
   const kg = new KGStore(kgPath);
@@ -151,10 +247,31 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       scopes: ['project', 'user', 'artifact'],
       limit: 6,
     });
-    const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 80 }).catch(() => undefined);
+    const semanticLayer = loadAgentSemanticLayer(projectRoot);
+    const questionPlan = buildAnalysisQuestionPlan(question);
+    const contextBudget = contextRetrievalBudgetForQuestion({
+      questionPlan,
+      requestedDepth,
+      reasoningEffort,
+    });
     const manifest = buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined });
     const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
     closeRuntime = close;
+    const schemaContext = await fetchRuntimeSchemaContext(runtimeBase);
+    recordCliRuntimeSchemaSnapshot(projectRoot, schemaContext, 'direct CLI runtime schema');
+    const contextPack = await buildLocalContextPack(projectRoot, {
+      question,
+      surface: 'cli',
+      strictness: contextBudget.strictness,
+      limit: contextBudget.limit,
+      runtimeSchemaSnapshot: schemaContext.length > 0
+        ? {
+            source: 'direct CLI runtime schema',
+            tables: schemaContext,
+          }
+        : undefined,
+    }).catch(() => undefined);
+    const answerLoopTools = buildAnswerLoopTools(projectRoot, { serverUrl: runtimeBase });
     const result = await answer({
       question,
       provider,
@@ -163,7 +280,13 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       userId,
       domain,
       memoryContext,
+      semanticLayer,
+      schemaContext,
       contextPack,
+      reasoningEffort,
+      analysisDepth: contextBudget.analysisDepth,
+      expandGroundingContext: createGroundingContextExpander(projectRoot),
+      answerLoopTools,
       executeCertifiedBlock: async (node) => {
         const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
         if (!block) throw new Error(`Matched block ${node.name} is not present in the manifest.`);
@@ -250,20 +373,39 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
           });
           return result;
         },
-        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack, sourceBlock, validationWarnings }) => {
+        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack, sourceBlock, sourceDqlArtifact, dqlArtifact, proposedEntity, requestedFilters, requestedDimensions, validationWarnings, outputs }) => {
           const slug = deriveGeneratedDraftSlug(draftQuestion);
           const proposedDomain = sourceBlock?.domain ?? contextPack?.objects.find((object) => object.domain)?.domain ?? domain ?? 'misc';
+          if (dqlArtifact?.kind === 'semantic_block') {
+            return upsertGeneratedDqlArtifactDraft(projectRoot, {
+              slug,
+              question: draftQuestion,
+              proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+              proposedDomain,
+              dqlArtifact,
+              sourceQuestion: followUp?.sourceQuestion,
+              sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
+              followupKind: followUp?.kind,
+              outputs,
+              contextPackId: contextPack?.id,
+              routeIntent: String(intent),
+              validationWarnings,
+            });
+          }
           return upsertGeneratedDraft(projectRoot, {
             slug,
             question: draftQuestion,
             proposedSql: sql,
             proposedContractId: `${proposedDomain}.Unknown.${slug}`,
             proposedDomain,
+            proposedEntity,
+            sourceDqlArtifact,
             sourceQuestion: followUp?.sourceQuestion,
             sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
             followupKind: followUp?.kind,
-            requestedFilters: followUp?.filters,
-            requestedDimensions: followUp?.dimensions,
+            requestedFilters,
+            requestedDimensions,
+            outputs,
             contextPackId: contextPack?.id,
             routeIntent: String(intent),
             validationWarnings,
@@ -289,16 +431,27 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       console.log(`\nRows: ${result.result.rowCount}`);
       console.log(JSON.stringify(result.result.rows.slice(0, 5), null, 2));
     }
-      if (result.proposedSql) {
-        console.log(`\n--- Proposed SQL (review before saving as a block) ---\n${result.proposedSql}`);
-        if (result.suggestedViz) console.log(`Viz: ${result.suggestedViz}`);
-        if (result.draftBlock?.path) console.log(`Draft: ${result.draftBlock.path}`);
-        if (result.promoteCommand) console.log(`Promote: ${result.promoteCommand}`);
-      }
+    printDqlArtifactPreview(result);
   } finally {
     kg.close();
     memory.close();
     if (closeRuntime) await closeRuntime();
+  }
+}
+
+function printDqlArtifactPreview(result: AgentAnswer): void {
+  const dqlSource = result.dqlArtifact?.source?.trim();
+  if (dqlSource) {
+    console.log(`\n--- DQL artifact (${result.dqlArtifact?.kind ?? 'draft'}) ---\n${dqlSource}`);
+  }
+  if (result.proposedSql) {
+    const label = dqlSource
+      ? 'Compiled SQL preview'
+      : 'Proposed SQL (review before saving as a block)';
+    console.log(`\n--- ${label} ---\n${result.proposedSql}`);
+    if (result.suggestedViz) console.log(`Viz: ${result.suggestedViz}`);
+    if (result.draftBlock?.path) console.log(`Draft: ${result.draftBlock.path}`);
+    if (result.promoteCommand) console.log(`Promote: ${result.promoteCommand}`);
   }
 }
 
@@ -323,10 +476,17 @@ async function runThreadAsk(question: string, threadId: string, flags: CLIFlags)
   const format = (flags as { format?: string }).format;
   const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
   try {
+    const reasoningEffort = cliReasoningEffort(flags);
+    const analysisDepth = cliAnalysisDepth(flags);
     const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/agent-runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, threadId }),
+      body: JSON.stringify({
+        question,
+        threadId,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        ...(analysisDepth ? { analysisDepth } : {}),
+      }),
     });
     if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
     const payload = (await response.json()) as { run?: AgentThreadRun };
@@ -408,7 +568,9 @@ async function runReindex(rest: string[], flags: CLIFlags): Promise<void> {
     console.log(JSON.stringify({ ok: true, ...stats }, null, 2));
     return;
   }
-  console.log(`  ✓ KG and metadata catalog rebuilt — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`);
+  const kgStatus = stats.kgRebuilt ? 'KG rebuilt' : 'KG fresh';
+  const catalogStatus = stats.metadataRefreshed ? 'metadata refreshed' : 'metadata fresh';
+  console.log(`  ✓ ${kgStatus}; ${catalogStatus} — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`);
 }
 
 async function runFeedback(rest: string[], flags: CLIFlags): Promise<void> {
@@ -467,6 +629,7 @@ interface AgentEvalCase {
     allowedRelationsOnly?: boolean;
     allowedColumnsOnly?: boolean;
     draftSaved?: boolean;
+    minToolCalls?: number;
     rows?: unknown[];
   };
 }
@@ -477,6 +640,7 @@ interface AgentEvalResult {
   failures: string[];
   durationMs: number;
   executionMs?: number;
+  executionMatched?: boolean;
   kind: AgentAnswer['kind'];
   route?: string;
   intent?: string;
@@ -486,6 +650,28 @@ interface AgentEvalResult {
   draftSaved: boolean;
   expected?: AgentEvalCase['expected'];
   validationCode?: string;
+  trace: AgentEvalTraceStage[];
+  toolCalls: number;
+  judgeScore?: number;
+  judgePass?: boolean;
+}
+
+type AgentEvalTraceStageName =
+  | 'context'
+  | 'rewrite'
+  | 'lane'
+  | 'tools'
+  | 'answer'
+  | 'validation'
+  | 'execution'
+  | 'draft'
+  | 'scoring';
+
+interface AgentEvalTraceStage {
+  stage: AgentEvalTraceStageName;
+  status: 'passed' | 'failed' | 'not_run' | 'info';
+  message: string;
+  payload?: unknown;
 }
 
 async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
@@ -502,14 +688,28 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
 
   const providerName = (flags as { provider?: string }).provider as ProviderName | undefined;
   const provider = await pickProvider(providerName);
+  const reasoningEffort = cliReasoningEffort(flags);
+  const requestedDepth = cliAnalysisDepth(flags);
   const kg = new KGStore(kgPath);
   const memory = new MemoryStore(defaultMemoryPath(projectRoot));
   const { skills } = loadSkills(projectRoot);
   const execute = Boolean((flags as { execute?: boolean }).execute);
+  // R3.2: optional LLM-as-judge. Uses the same provider's completion; skipped
+  // gracefully when no provider is available so offline eval stays deterministic.
+  const judge = Boolean((flags as { judge?: boolean }).judge);
+  const judgeComplete: JudgeCompletion = async ({ system, user }) =>
+    provider.generate([{ role: 'system', content: system }, { role: 'user', content: user }], {});
   const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
     ?? (flags as { runtime?: string }).runtime
     ?? process.env.DQL_RUNTIME_URL
     ?? 'http://127.0.0.1:3474';
+  const semanticLayer = loadAgentSemanticLayer(projectRoot);
+  const expandGroundingContext = createGroundingContextExpander(projectRoot);
+  const answerLoopTools = buildAnswerLoopTools(projectRoot, { serverUrl: runtimeBase });
+  const schemaContext = execute
+    ? await fetchRuntimeSchemaContext(runtimeBase)
+    : [];
+  recordCliRuntimeSchemaSnapshot(projectRoot, schemaContext, 'CLI eval runtime schema');
   const manifest = execute
     ? buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined })
     : null;
@@ -523,12 +723,25 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         scopes: ['project', 'user', 'artifact'],
         limit: 6,
       });
+      const questionPlan = buildAnalysisQuestionPlan(testCase.question, testCase.followUp);
+      const contextBudget = contextRetrievalBudgetForQuestion({
+        questionPlan,
+        requestedDepth,
+        reasoningEffort,
+      });
       const contextPack = await buildLocalContextPack(projectRoot, {
         question: testCase.question,
         surface: 'cli-eval',
         followUp: testCase.followUp,
         selectedContext: testCase.selectedContext,
-        limit: 80,
+        strictness: contextBudget.strictness,
+        limit: contextBudget.limit,
+        runtimeSchemaSnapshot: schemaContext.length > 0
+          ? {
+              source: 'CLI eval runtime schema',
+              tables: schemaContext,
+            }
+          : undefined,
       }).catch(() => undefined);
       const result = await answer({
         question: testCase.question,
@@ -538,16 +751,45 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         skills,
         memoryContext,
         followUp: testCase.followUp,
+        semanticLayer,
+        schemaContext,
         contextPack,
+        reasoningEffort,
+        analysisDepth: contextBudget.analysisDepth,
+        expandGroundingContext,
+        answerLoopTools,
         executeCertifiedBlock: execute && manifest
           ? createCertifiedBlockExecutor(projectRoot, manifest, runtimeBase)
           : undefined,
         executeGeneratedSql: execute
           ? createGeneratedSqlExecutor(runtimeBase)
           : undefined,
-        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack: draftContextPack, sourceBlock, validationWarnings }) => {
+        captureGeneratedDraft: ({ question: draftQuestion, sql, intent, followUp, contextPack: draftContextPack, sourceBlock, sourceDqlArtifact, dqlArtifact, proposedEntity, requestedFilters, requestedDimensions, validationWarnings, outputs }) => {
           const slug = deriveGeneratedDraftSlug(draftQuestion);
           const proposedDomain = sourceBlock?.domain ?? draftContextPack?.objects.find((object) => object.domain)?.domain ?? testCase.domain ?? 'misc';
+          if (dqlArtifact?.kind === 'semantic_block') {
+            if (!(flags as { save?: boolean }).save) {
+              return {
+                path: previewGeneratedDraftPath(projectRoot, proposedDomain, slug),
+                askedTimes: 0,
+                proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+              };
+            }
+            return upsertGeneratedDqlArtifactDraft(projectRoot, {
+              slug,
+              question: draftQuestion,
+              proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+              proposedDomain,
+              dqlArtifact,
+              sourceQuestion: followUp?.sourceQuestion,
+              sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
+              followupKind: followUp?.kind,
+              outputs,
+              contextPackId: draftContextPack?.id,
+              routeIntent: String(intent),
+              validationWarnings,
+            });
+          }
           if (!(flags as { save?: boolean }).save) {
             return {
               path: previewGeneratedDraftPath(projectRoot, proposedDomain, slug),
@@ -561,11 +803,14 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
             proposedSql: sql,
             proposedContractId: `${proposedDomain}.Unknown.${slug}`,
             proposedDomain,
+            proposedEntity,
+            sourceDqlArtifact,
             sourceQuestion: followUp?.sourceQuestion,
             sourceBlock: followUp?.sourceBlockName ?? sourceBlock?.name,
             followupKind: followUp?.kind,
-            requestedFilters: followUp?.filters,
-            requestedDimensions: followUp?.dimensions,
+            requestedFilters,
+            requestedDimensions,
+            outputs,
             contextPackId: draftContextPack?.id,
             routeIntent: String(intent),
             validationWarnings,
@@ -573,21 +818,42 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         },
       });
       const evaluation = evaluateCase(testCase, result);
+      const durationMs = Date.now() - startedAt;
+      const draftSaved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
+      const judgeVerdict = judge
+        ? await judgeAnswer({
+            question: testCase.question,
+            sql: result.proposedSql ?? result.sql,
+            answerText: result.text,
+            trustLabel: result.trustLabelInfo?.display ?? result.certification,
+            resultSample: result.result?.rows,
+          }, judgeComplete)
+        : undefined;
       results.push({
         name: testCase.name ?? testCase.question,
         passed: evaluation.failures.length === 0,
         failures: evaluation.failures,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         executionMs: result.result?.executionTime,
+        executionMatched: evaluation.executionMatched,
+        ...(judgeVerdict ? { judgeScore: judgeVerdict.score, judgePass: judgeVerdict.pass } : {}),
         kind: result.kind,
         route: result.contextPack?.routeDecision.route,
         intent: result.contextPack?.routeDecision.intent,
         reviewStatus: result.reviewStatus,
         contextObjects: result.contextPack?.objects.length ?? 0,
         followUp: Boolean(testCase.followUp),
-        draftSaved: Boolean(result.draftBlock?.path ?? result.draftBlockId),
+        draftSaved,
+        toolCalls: result.evidence?.toolCalls?.length ?? 0,
         expected: testCase.expected,
         validationCode: evaluation.validationCode,
+        trace: buildEvalTrace({
+          testCase,
+          result,
+          evaluation,
+          durationMs,
+          draftSaved,
+        }),
       });
     }
   } finally {
@@ -597,8 +863,14 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
 
   const passed = results.filter((r) => r.passed).length;
   const metrics = computeEvalMetrics(results);
+  const thresholds = {
+    minToolRequirement: (flags as { minToolRequirement?: number }).minToolRequirement ?? null,
+  };
+  const thresholdsPassed = agentEvalThresholdsPass(metrics, thresholds);
+  const ok = passed === results.length && thresholdsPassed;
   if ((flags as { format?: string }).format === 'json') {
-    console.log(JSON.stringify({ ok: passed === results.length, passed, total: results.length, metrics, results }, null, 2));
+    console.log(JSON.stringify({ ok, passed, total: results.length, thresholds, metrics, results }, null, 2));
+    if (!ok) process.exitCode = 1;
     return;
   }
   for (const result of results) {
@@ -609,9 +881,16 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Certified hit rate: ${formatRate(metrics.certified_hit_rate)}`);
   console.log(`Generated follow-up pass rate: ${formatRate(metrics.generated_followup_pass_rate)}`);
   console.log(`Safe refusal rate: ${formatRate(metrics.safe_refusal_rate)}`);
+  console.log(`Execution match rate: ${formatRate(metrics.execution_match_rate)}`);
+  console.log(`Tool requirement pass rate: ${formatRate(metrics.tool_requirement_pass_rate)}`);
+  console.log(`Tool-observed case count: ${metrics.tool_observed_case_count}`);
+  console.log(`Average tool calls: ${metrics.avg_tool_calls}`);
   console.log(`Wrong certified count: ${metrics.wrong_certified_count}`);
   console.log(`Draft saved count: ${metrics.draft_saved_count}`);
-  if (passed !== results.length) process.exitCode = 1;
+  if (thresholds.minToolRequirement !== null) {
+    console.log(`Tool requirement threshold: ${thresholds.minToolRequirement} (actual ${formatRate(metrics.tool_requirement_pass_rate)})`);
+  }
+  if (!ok) process.exitCode = 1;
 }
 
 function previewGeneratedDraftPath(projectRoot: string, domain: string, slug: string): string {
@@ -626,11 +905,16 @@ function previewGeneratedDraftPath(projectRoot: string, domain: string, slug: st
   return `blocks/_drafts/${slug}.dql`;
 }
 
-function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): { failures: string[]; validationCode?: string } {
+function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): {
+  failures: string[];
+  validationCode?: string;
+  executionMatched?: boolean;
+} {
   const expected = testCase.expected;
   if (!expected) return { failures: [] };
   const failures: string[] = [];
   let validationCode: string | undefined;
+  let executionMatched: boolean | undefined;
   if (expected.kind && result.kind !== expected.kind) failures.push(`kind expected ${expected.kind}, got ${result.kind}`);
   if (expected.sourceTier && result.sourceTier !== expected.sourceTier) failures.push(`sourceTier expected ${expected.sourceTier}, got ${result.sourceTier}`);
   if (expected.certification && result.certification !== expected.certification) failures.push(`certification expected ${expected.certification}, got ${result.certification}`);
@@ -652,6 +936,12 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
     const saved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
     if (saved !== expected.draftSaved) failures.push(`draftSaved expected ${expected.draftSaved}, got ${saved}`);
   }
+  if (typeof expected.minToolCalls === 'number') {
+    const actualToolCalls = result.evidence?.toolCalls?.length ?? 0;
+    if (actualToolCalls < expected.minToolCalls) {
+      failures.push(`toolCalls expected at least ${expected.minToolCalls}, got ${actualToolCalls}`);
+    }
+  }
   if ((expected.allowedRelationsOnly || expected.allowedColumnsOnly) && result.proposedSql) {
     const validation = validateSqlAgainstLocalContext(result.proposedSql, result.contextPack, {
       question: testCase.question,
@@ -665,9 +955,10 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   }
   if (expected.rows) {
     const actualRows = result.result?.rows ?? [];
-    if (!rowsEqual(actualRows, expected.rows)) failures.push('executed rows did not match expected rows');
+    executionMatched = rowsEqual(actualRows, expected.rows);
+    if (!executionMatched) failures.push('executed rows did not match expected rows');
   }
-  return { failures, validationCode };
+  return { failures, validationCode, executionMatched };
 }
 
 function computeEvalMetrics(results: AgentEvalResult[]) {
@@ -686,10 +977,21 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
   const executionTimes = results
     .map((result) => result.executionMs)
     .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const executionMatchCases = results.filter((result) => result.executionMatched !== undefined);
+  const toolRequiredCases = results.filter((result) => typeof result.expected?.minToolCalls === 'number');
+  const toolCallCounts = results.map((result) => result.toolCalls);
+  const judged = results.filter((result) => typeof result.judgeScore === 'number');
   return {
     certified_hit_rate: ratio(certifiedCases.filter((result) => result.passed && result.kind === 'certified').length, certifiedCases.length),
+    judge_mean_score: judged.length ? average(judged.map((result) => result.judgeScore ?? 0)) : null,
+    judge_pass_rate: judged.length ? ratio(judged.filter((result) => result.judgePass).length, judged.length) : null,
     generated_followup_pass_rate: ratio(generatedFollowUpCases.filter((result) => result.passed).length, generatedFollowUpCases.length),
     safe_refusal_rate: ratio(refusalCases.filter((result) => result.passed && result.kind === 'no_answer').length, refusalCases.length),
+    execution_match_rate: ratio(executionMatchCases.filter((result) => result.executionMatched).length, executionMatchCases.length),
+    tool_requirement_pass_rate: ratio(
+      toolRequiredCases.filter((result) => result.toolCalls >= (result.expected?.minToolCalls ?? 0)).length,
+      toolRequiredCases.length,
+    ),
     wrong_certified_count: results.filter((result) =>
       result.kind === 'certified' &&
       (result.expected?.kind ? result.expected.kind !== 'certified' : result.followUp),
@@ -698,9 +1000,245 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
       result.validationCode === 'unknown_relation' || result.validationCode === 'unknown_column',
     ).length,
     draft_saved_count: results.filter((result) => result.draftSaved).length,
+    tool_observed_case_count: results.filter((result) => result.toolCalls > 0).length,
+    avg_tool_calls: average(toolCallCounts),
     avg_context_objects: average(results.map((result) => result.contextObjects)),
     avg_execution_ms: executionTimes.length ? average(executionTimes) : null,
   };
+}
+
+function agentEvalThresholdsPass(
+  metrics: ReturnType<typeof computeEvalMetrics>,
+  thresholds: { minToolRequirement: number | null },
+): boolean {
+  return thresholds.minToolRequirement === null
+    || metrics.tool_requirement_pass_rate === null
+    || metrics.tool_requirement_pass_rate >= thresholds.minToolRequirement;
+}
+
+function buildEvalTrace(input: {
+  testCase: AgentEvalCase;
+  result: Awaited<ReturnType<typeof answer>>;
+  evaluation: ReturnType<typeof evaluateCase>;
+  durationMs: number;
+  draftSaved: boolean;
+}): AgentEvalTraceStage[] {
+  const { testCase, result, evaluation, durationMs, draftSaved } = input;
+  const routeDecision = result.contextPack?.routeDecision;
+  const selectedRelations = result.contextPack?.retrievalDiagnostics.selectedRelations ?? [];
+  const allowedRelations = result.contextPack?.allowedSqlContext?.relations ?? [];
+  const followUp = testCase.followUp;
+  const toolCalls = result.evidence?.toolCalls ?? [];
+  const routeEvidence = result.evidence?.route ?? [];
+  const executionStatus = result.executionError
+    ? 'failed'
+    : result.result
+      ? 'passed'
+      : 'not_run';
+  const validationExpected = Boolean(testCase.expected?.allowedRelationsOnly || testCase.expected?.allowedColumnsOnly);
+  const validationStatus = evaluation.validationCode
+    ? 'failed'
+    : validationExpected
+      ? 'passed'
+      : 'not_run';
+  const rowsExpected = testCase.expected?.rows !== undefined;
+  const expectedMinToolCalls = testCase.expected?.minToolCalls;
+  const toolStatus = typeof expectedMinToolCalls === 'number'
+    ? toolCalls.length >= expectedMinToolCalls ? 'passed' : 'failed'
+    : toolCalls.length > 0 ? 'passed' : routeEvidence.length > 0 ? 'info' : 'not_run';
+  const toolMessage = typeof expectedMinToolCalls === 'number'
+    ? toolCalls.length >= expectedMinToolCalls
+      ? `Observed ${toolCalls.length} provider tool call(s), meeting the minimum of ${expectedMinToolCalls}.`
+      : `Observed ${toolCalls.length} provider tool call(s), below the minimum of ${expectedMinToolCalls}.`
+    : toolCalls.length > 0
+      ? `Observed ${toolCalls.length} provider tool call(s).`
+      : routeEvidence.length > 0
+        ? `Captured ${routeEvidence.length} deterministic route evidence step(s).`
+        : 'No provider tool calls were observed for this answer.';
+
+  return [
+    {
+      stage: 'context',
+      status: result.contextPack ? 'passed' : 'not_run',
+      message: result.contextPack
+        ? `Context pack ${result.contextPack.id} selected ${result.contextPack.objects.length} object(s).`
+        : 'No context pack was attached to the answer.',
+      payload: result.contextPack
+        ? {
+            contextPackId: result.contextPack.id,
+            selectedObjectCount: result.contextPack.objects.length,
+            allowedRelationCount: allowedRelations.length,
+            selectedRelations: selectedRelations.slice(0, 12).map((relation) => relation.relation),
+            missingContext: result.contextPack.missingContext,
+          }
+        : undefined,
+    },
+    {
+      stage: 'rewrite',
+      status: followUp ? 'passed' : 'not_run',
+      message: followUp
+        ? `Follow-up context attached (${followUp.kind}).`
+        : 'No follow-up rewrite/context was supplied for this case.',
+      payload: summarizeFollowUpForTrace(followUp),
+    },
+    {
+      stage: 'lane',
+      status: routeDecision ? 'passed' : 'not_run',
+      message: routeDecision
+        ? `Lane ${routeDecision.route} / ${routeDecision.intent}.`
+        : 'No lane decision was attached to the answer.',
+      payload: routeDecision
+        ? {
+            route: routeDecision.route,
+            intent: routeDecision.intent,
+            reason: routeDecision.reason,
+            trustLabel: routeDecision.trustLabel,
+            reviewStatus: routeDecision.reviewStatus,
+            exactObjectKey: routeDecision.exactObjectKey,
+          }
+        : undefined,
+    },
+    {
+      stage: 'tools',
+      status: toolStatus,
+      message: toolMessage,
+      payload: {
+        observedToolCalls: toolCalls.length,
+        expectedMinToolCalls,
+        providerToolCalls: toolCalls.slice(0, 12).map((call) => ({
+          order: call.order,
+          name: call.name,
+          status: call.status,
+          inputSummary: call.inputSummary,
+          outputSummary: call.outputSummary,
+        })),
+        routeEvidence: routeEvidence.slice(0, 12).map((step) => ({
+          tool: step.tool,
+          status: step.status,
+          label: step.label,
+          detail: step.detail,
+        })),
+      },
+    },
+    {
+      stage: 'answer',
+      status: result.kind === 'no_answer' ? 'failed' : 'passed',
+      message: `Answer kind ${result.kind}${result.sourceTier ? ` from ${result.sourceTier}` : ''}.`,
+      payload: {
+        kind: result.kind,
+        sourceTier: result.sourceTier,
+        certification: result.certification,
+        reviewStatus: result.reviewStatus,
+        route: result.route?.tier,
+        refusalCode: result.refusalCode,
+        sourceCertifiedBlock: result.sourceCertifiedBlock,
+        dqlArtifactKind: result.dqlArtifact?.kind,
+        providerUsed: result.providerUsed,
+      },
+    },
+    {
+      stage: 'validation',
+      status: validationStatus,
+      message: evaluation.validationCode
+        ? `SQL context validation failed with ${evaluation.validationCode}.`
+        : validationExpected
+          ? 'SQL context validation passed.'
+          : 'SQL context validation was not required by this case.',
+      payload: {
+        validationCode: evaluation.validationCode,
+        failures: evaluation.failures,
+        expectedAllowedRelationsOnly: testCase.expected?.allowedRelationsOnly,
+        expectedAllowedColumnsOnly: testCase.expected?.allowedColumnsOnly,
+      },
+    },
+    {
+      stage: 'execution',
+      status: executionStatus,
+      message: result.executionError
+        ? result.executionError
+        : result.result
+          ? `Executed and returned ${result.result.rowCount} row(s).`
+          : 'No SQL/block execution result was captured.',
+      payload: {
+        rowCount: result.result?.rowCount,
+        executionTime: result.result?.executionTime,
+        executionMatched: rowsExpected ? evaluation.executionMatched : undefined,
+        expectedRows: rowsExpected ? testCase.expected?.rows?.length : undefined,
+        columns: summarizeResultColumns(result.result?.columns),
+      },
+    },
+    {
+      stage: 'draft',
+      status: draftSaved ? 'passed' : 'not_run',
+      message: draftSaved
+        ? `Draft captured at ${result.draftBlock?.path ?? result.draftBlockId}.`
+        : 'No generated draft was captured.',
+      payload: {
+        draftBlockId: result.draftBlockId,
+        draftPath: result.draftBlock?.path,
+        promoteCommand: result.promoteCommand,
+      },
+    },
+    {
+      stage: 'scoring',
+      status: evaluation.failures.length === 0 ? 'passed' : 'failed',
+      message: evaluation.failures.length === 0
+        ? `Case passed in ${durationMs}ms.`
+        : `Case failed ${evaluation.failures.length} check(s) in ${durationMs}ms.`,
+      payload: {
+        durationMs,
+        expected: testCase.expected,
+      },
+    },
+  ];
+}
+
+function summarizeFollowUpForTrace(followUp: AgentFollowUpContext | undefined): unknown {
+  if (!followUp) return undefined;
+  const priorResultRef = followUp.priorResultRef
+    ? {
+        id: followUp.priorResultRef.id,
+        question: followUp.priorResultRef.question,
+        columns: followUp.priorResultRef.columns,
+        rowCount: followUp.priorResultRef.rowCount,
+        sourceSql: truncateTraceText(followUp.priorResultRef.sourceSql, 4000),
+      }
+    : undefined;
+  const priorDqlArtifact = followUp.priorDqlArtifact
+    ? {
+        kind: followUp.priorDqlArtifact.kind,
+        name: followUp.priorDqlArtifact.name,
+        sourcePath: followUp.priorDqlArtifact.sourcePath,
+        source: truncateTraceText(followUp.priorDqlArtifact.source, 4000),
+        metrics: followUp.priorDqlArtifact.metrics,
+        dimensions: followUp.priorDqlArtifact.dimensions,
+        filters: followUp.priorDqlArtifact.filters,
+        timeDimension: followUp.priorDqlArtifact.timeDimension,
+        orderBy: followUp.priorDqlArtifact.orderBy,
+        limit: followUp.priorDqlArtifact.limit,
+      }
+    : undefined;
+  return {
+    kind: followUp.kind,
+    sourceTurnId: followUp.sourceTurnId,
+    sourceBlockName: followUp.sourceBlockName,
+    sourceQuestion: followUp.sourceQuestion,
+    filters: followUp.filters,
+    dimensions: followUp.dimensions,
+    priorResultColumns: followUp.priorResultColumns,
+    priorResultValues: followUp.priorResultValues,
+    priorResultRef,
+    priorDqlArtifact,
+    priorLimit: followUp.priorLimit,
+    priorMeasures: followUp.priorMeasures,
+    resolvedReferences: followUp.resolvedReferences,
+    unresolvedReferences: followUp.unresolvedReferences,
+  };
+}
+
+function truncateTraceText(value: string | undefined, maxLength: number): string | undefined {
+  if (!value || value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
 }
 
 function ratio(numerator: number, denominator: number): number | null {
@@ -711,6 +1249,17 @@ function ratio(numerator: number, denominator: number): number | null {
 function average(values: number[]): number {
   if (values.length === 0) return 0;
   return Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2));
+}
+
+function summarizeResultColumns(columns: unknown[] | undefined): string[] {
+  return (columns ?? []).map((column) => {
+    if (typeof column === 'string') return column;
+    if (column && typeof column === 'object' && 'name' in column) {
+      const name = (column as { name?: unknown }).name;
+      return typeof name === 'string' ? name : JSON.stringify(column);
+    }
+    return String(column);
+  });
 }
 
 function formatRate(value: number | null): string {
@@ -810,6 +1359,10 @@ async function executeRuntimeCell(
 }
 
 export const __test__ = {
+  agentEvalThresholdsPass,
+  buildEvalTrace,
+  cliAnalysisDepth,
+  cliReasoningEffort,
   computeEvalMetrics,
   evaluateCase,
 };

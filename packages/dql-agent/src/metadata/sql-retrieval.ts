@@ -7,8 +7,8 @@
  * `buildSchemaGrounding`.
  *
  * Deterministic + offline by default: the default embedding provider is the
- * hashed-token vector, and `alpha` defaults to 0 (pure lexical) so tests are
- * stable without a model.
+ * hashed-token vector. A small non-zero blend lets a pluggable provider refine
+ * paraphrase matches while lexical recall remains the gate.
  */
 
 import { defaultEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
@@ -21,6 +21,8 @@ export interface SelectRelevantModelsOptions {
   alpha?: number;
   provider?: EmbeddingProvider;
 }
+
+export const DEFAULT_SQL_RETRIEVAL_EMBEDDING_ALPHA = 0.18;
 
 const TOKEN_RE = /[\p{L}\p{N}_]+/gu;
 
@@ -85,12 +87,13 @@ export async function selectRelevantModels(
     ftsScore: lexicalScore(queryTokens, model, artifacts),
   }));
 
+  const hasLexicalSignal = items.some((item) => item.ftsScore > 0);
   const ranked = await hybridRank(request, items, {
-    alpha: options.alpha ?? 0,
+    alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_SQL_RETRIEVAL_EMBEDDING_ALPHA : 0,
     provider: options.provider ?? defaultEmbeddingProvider(),
   });
 
-  const withSignal = ranked.filter((r) => r.score > 0);
+  const withSignal = ranked.filter((r) => r.ftsScore > 0 || (hasLexicalSignal && r.score > 0));
   const chosen = (withSignal.length > 0 ? withSignal : ranked).slice(0, topK);
   return chosen.map((r) => r.item.name);
 }

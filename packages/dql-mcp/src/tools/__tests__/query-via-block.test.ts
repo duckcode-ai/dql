@@ -64,9 +64,33 @@ describe('queryViaBlock — certified-only enforcement (the wedge)', () => {
       block: 'My Block',
       blockPath: 'blocks/my-block.dql',
       rowCount: 2,
+      returnedRowCount: 2,
+      maxRowsReturned: 200,
+      rowsTruncated: false,
       durationMs: 12,
       columns: [{ name: 'foo', type: 'integer' }],
     });
+  });
+
+  it('bounds returned rows to 200 by default', async () => {
+    const ctx = makeCtx({ 'My Block': makeManifestBlock() });
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          columns: [],
+          rows: Array.from({ length: 250 }, (_, index) => ({ index })),
+          executionTime: 5,
+        },
+      }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, { name: 'My Block' });
+    expect((result as { rowCount: number }).rowCount).toBe(250);
+    expect((result as { returnedRowCount: number }).returnedRowCount).toBe(200);
+    expect((result as { maxRowsReturned: number }).maxRowsReturned).toBe(200);
+    expect((result as { rowsTruncated: boolean }).rowsTruncated).toBe(true);
+    expect((result as { rows: unknown[] }).rows).toHaveLength(200);
   });
 
   it('honors the limit param', async () => {
@@ -83,6 +107,10 @@ describe('queryViaBlock — certified-only enforcement (the wedge)', () => {
     } as unknown as Response)) as unknown as typeof fetch;
 
     const result = await queryViaBlock(ctx, { name: 'My Block', limit: 2 });
+    expect((result as { rowCount: number }).rowCount).toBe(4);
+    expect((result as { returnedRowCount: number }).returnedRowCount).toBe(2);
+    expect((result as { maxRowsReturned: number }).maxRowsReturned).toBe(2);
+    expect((result as { rowsTruncated: boolean }).rowsTruncated).toBe(true);
     expect((result as { rows: unknown[] }).rows).toHaveLength(2);
   });
 

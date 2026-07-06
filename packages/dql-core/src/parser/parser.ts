@@ -48,15 +48,29 @@ const DRAFT_STRING_METADATA_FIELDS = new Set([
   'proposed_entity',
   'source_question',
   'source_block',
+  'source_dql_kind',
+  'source_dql_name',
+  'source_dql_path',
+  'source_dql_hash',
+  'source_dql_time_dimension',
+  'source_dql_granularity',
   'followup_kind',
   'context_pack_id',
   'route_intent',
+  'time_dimension',
+  'granularity',
+  'draft_path',
 ]);
 
 const DRAFT_ARRAY_METADATA_FIELDS = new Set([
   'upstream_refs',
   'requested_filters',
   'requested_dimensions',
+  'order_by',
+  'source_dql_metrics',
+  'source_dql_dimensions',
+  'source_dql_filters',
+  'source_dql_order_by',
   'validation_warnings',
 ]);
 
@@ -1216,12 +1230,28 @@ export class Parser {
     let proposedEntity: string | undefined;
     let sourceQuestion: string | undefined;
     let sourceBlock: string | undefined;
+    let sourceDqlKind: string | undefined;
+    let sourceDqlName: string | undefined;
+    let sourceDqlPath: string | undefined;
+    let sourceDqlHash: string | undefined;
+    let sourceDqlTimeDimension: string | undefined;
+    let sourceDqlGranularity: string | undefined;
     let followupKind: string | undefined;
     let contextPackId: string | undefined;
     let routeIntent: string | undefined;
+    let timeDimension: string | undefined;
+    let granularity: string | undefined;
+    let draftPath: string | undefined;
     let upstreamRefs: string[] | undefined;
     let requestedFilters: string[] | undefined;
     let requestedDimensions: string[] | undefined;
+    let orderBy: string[] | undefined;
+    let limit: number | undefined;
+    let sourceDqlMetrics: string[] | undefined;
+    let sourceDqlDimensions: string[] | undefined;
+    let sourceDqlFilters: string[] | undefined;
+    let sourceDqlOrderBy: string[] | undefined;
+    let sourceDqlLimit: number | undefined;
     let validationWarnings: string[] | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
@@ -1380,12 +1410,18 @@ export class Parser {
         datalexContract = val.value;
       } else if (
         this.check(TokenType.Identifier)
-        && this.current().value === 'asked_times'
+        && (this.current().value === 'asked_times' || this.current().value === 'limit' || this.current().value === 'source_dql_limit')
       ) {
-        this.advance();
+        const keyToken = this.advance();
         this.expect(TokenType.Equals);
         const val = this.expect(TokenType.NumberLiteral);
-        askedTimes = Number(val.value);
+        if (keyToken.value === 'asked_times') {
+          askedTimes = Number(val.value);
+        } else if (keyToken.value === 'limit') {
+          limit = Number(val.value);
+        } else {
+          sourceDqlLimit = Number(val.value);
+        }
       } else if (
         this.check(TokenType.Identifier)
         && isDraftStringMetadataField(this.current().value)
@@ -1415,6 +1451,24 @@ export class Parser {
           case 'source_block':
             sourceBlock = val.value;
             break;
+          case 'source_dql_kind':
+            sourceDqlKind = val.value;
+            break;
+          case 'source_dql_name':
+            sourceDqlName = val.value;
+            break;
+          case 'source_dql_path':
+            sourceDqlPath = val.value;
+            break;
+          case 'source_dql_hash':
+            sourceDqlHash = val.value;
+            break;
+          case 'source_dql_time_dimension':
+            sourceDqlTimeDimension = val.value;
+            break;
+          case 'source_dql_granularity':
+            sourceDqlGranularity = val.value;
+            break;
           case 'followup_kind':
             followupKind = val.value;
             break;
@@ -1423,6 +1477,15 @@ export class Parser {
             break;
           case 'route_intent':
             routeIntent = val.value;
+            break;
+          case 'time_dimension':
+            timeDimension = val.value;
+            break;
+          case 'granularity':
+            granularity = val.value;
+            break;
+          case 'draft_path':
+            draftPath = val.value;
             break;
         }
       } else if (
@@ -1441,6 +1504,21 @@ export class Parser {
             break;
           case 'requested_dimensions':
             requestedDimensions = values;
+            break;
+          case 'order_by':
+            orderBy = values;
+            break;
+          case 'source_dql_metrics':
+            sourceDqlMetrics = values;
+            break;
+          case 'source_dql_dimensions':
+            sourceDqlDimensions = values;
+            break;
+          case 'source_dql_filters':
+            sourceDqlFilters = values;
+            break;
+          case 'source_dql_order_by':
+            sourceDqlOrderBy = values;
             break;
           case 'validation_warnings':
             validationWarnings = values;
@@ -1602,12 +1680,28 @@ export class Parser {
       proposedEntity,
       sourceQuestion,
       sourceBlock,
+      sourceDqlKind,
+      sourceDqlName,
+      sourceDqlPath,
+      sourceDqlHash,
+      sourceDqlTimeDimension,
+      sourceDqlGranularity,
       followupKind,
       contextPackId,
       routeIntent,
+      timeDimension,
+      granularity,
+      draftPath,
       upstreamRefs,
       requestedFilters,
       requestedDimensions,
+      orderBy,
+      limit,
+      sourceDqlMetrics,
+      sourceDqlDimensions,
+      sourceDqlFilters,
+      sourceDqlOrderBy,
+      sourceDqlLimit,
       validationWarnings,
       span: this.makeSpan(start, this.previousSpan()),
     };

@@ -4,7 +4,7 @@
  */
 
 import { join } from 'node:path';
-import { loadSemanticLayerFromDir } from '../yaml-loader.js';
+import { loadSemanticLayerFromDir } from '../yaml-loader.node.js';
 import type { SemanticLayerProvider, SemanticLayerProviderConfig } from './provider.js';
 import type { SemanticLayer } from '../semantic-layer.js';
 

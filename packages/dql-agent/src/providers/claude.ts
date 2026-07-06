@@ -1,9 +1,12 @@
 import type {
   AgentProvider,
   AgentMessage,
+  AgentToolDefinition,
+  ProviderToolLoopOptions,
   ProviderRunOptions,
 } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
+import { compactToolOutput } from './tool-output.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -126,6 +129,113 @@ export class ClaudeProvider implements AgentProvider {
       .join('');
   }
 
+  async generateWithTools(
+    messages: AgentMessage[],
+    tools: AgentToolDefinition[],
+    options: ProviderToolLoopOptions = {},
+  ): Promise<string> {
+    if (!this.apiKey) {
+      throw new Error('claude: ANTHROPIC_API_KEY is not set');
+    }
+    if (tools.length === 0) return this.generate(messages, options);
+
+    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const turns: Array<Record<string, unknown>> = messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => ({ role: m.role, content: m.content }));
+    const model = options.model ?? this.defaultModel;
+    const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+    const toolDefs = tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
+    const maxToolCalls = Math.max(0, Math.min(30, options.maxToolCalls ?? 8));
+    let toolCallsUsed = 0;
+    let lastText = '';
+
+    for (;;) {
+      const res = await postMessages(
+        `${this.baseUrl}/v1/messages`,
+        {
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        {
+          model,
+          max_tokens: options.maxTokens ?? 1024,
+          temperature: options.temperature ?? 0.2,
+          system: system || undefined,
+          messages: turns,
+          tools: toolDefs,
+        },
+        anthropicReasoning(model, options),
+        options.signal,
+      );
+      if (!res.ok) {
+        const body = await res.text().catch(() => res.statusText);
+        throw new Error(`claude: ${res.status} ${body}`);
+      }
+      const json = (await res.json()) as {
+        content?: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
+      };
+      const blocks = json.content ?? [];
+      const text = blocks
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text ?? '')
+        .join('');
+      if (text) lastText = text;
+      const toolUses = blocks.filter((block): block is { type: string; id: string; name: string; input?: unknown } =>
+        block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string'
+      );
+      if (toolUses.length === 0) return text || lastText;
+      if (toolCallsUsed + toolUses.length > maxToolCalls) {
+        options.onToolCall?.({
+          name: 'tool_budget_exhausted',
+          input: {
+            requestedToolCalls: toolUses.map((call) => call.name),
+            maxToolCalls,
+            toolCallsUsed,
+          },
+          output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
+          isError: true,
+        });
+        return lastText || JSON.stringify({
+          summary: `Tool-call budget exhausted after ${toolCallsUsed} call(s).`,
+        });
+      }
+
+      turns.push({ role: 'assistant', content: blocks });
+      const toolResults: Array<Record<string, unknown>> = [];
+      for (const call of toolUses) {
+        toolCallsUsed += 1;
+        const tool = toolMap.get(call.name);
+        let output: unknown;
+        let isError = false;
+        if (!tool) {
+          output = { error: `Unknown tool: ${call.name}` };
+          isError = true;
+        } else {
+          try {
+            output = await tool.run(call.input ?? {});
+          } catch (err) {
+            output = { error: err instanceof Error ? err.message : String(err) };
+            isError = true;
+          }
+        }
+        options.onToolCall?.({ name: call.name, input: call.input ?? {}, output, isError });
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: call.id,
+          content: compactToolOutput(output),
+          is_error: isError,
+        });
+      }
+      turns.push({ role: 'user', content: toolResults });
+    }
+  }
+
   async generateStream(
     messages: AgentMessage[],
     options: ProviderRunOptions,
@@ -202,3 +312,4 @@ export async function consumeSse(
     if (done) break;
   }
 }
+

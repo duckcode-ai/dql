@@ -239,10 +239,11 @@ describe('parseMetricDefinition', () => {
     const metric = parseMetricDefinition({
       name: 'total_revenue', label: 'Total Revenue', description: 'Sum',
       domain: 'revenue', sql: 'SUM(amount)', type: 'sum', table: 'fct_revenue',
-      tags: ['revenue'], owner: 'kranthi',
+      status: 'certified', tags: ['revenue'], owner: 'kranthi',
     });
     expect(metric.name).toBe('total_revenue');
     expect(metric.type).toBe('sum');
+    expect(metric.status).toBe('certified');
     expect(metric.tags).toEqual(['revenue']);
   });
 });
@@ -251,10 +252,11 @@ describe('parseDimensionDefinition', () => {
   it('parses a raw object into DimensionDefinition', () => {
     const dim = parseDimensionDefinition({
       name: 'segment', label: 'Segment', description: 'Tier',
-      sql: 's.tier', type: 'string', table: 'dim_segment',
+      status: 'review', sql: 's.tier', type: 'string', table: 'dim_segment',
     });
     expect(dim.name).toBe('segment');
     expect(dim.type).toBe('string');
+    expect(dim.status).toBe('review');
   });
 });
 

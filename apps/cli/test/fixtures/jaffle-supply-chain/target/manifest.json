@@ -1,0 +1,200 @@
+{
+  "metadata": {
+    "project_name": "jaffle_shop"
+  },
+  "nodes": {
+    "model.jaffle_shop.order_items": {
+      "resource_type": "model",
+      "name": "order_items",
+      "alias": "order_items",
+      "database": "jaffle_shop",
+      "schema": "dev",
+      "description": "Order item rows with product name, product category, order id, and item revenue.",
+      "depends_on": {
+        "nodes": []
+      },
+      "tags": ["orders", "products", "revenue"],
+      "original_file_path": "models/order_items.sql",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "order_item_id": {
+          "name": "order_item_id",
+          "data_type": "number",
+          "description": "Order item identifier."
+        },
+        "order_id": {
+          "name": "order_id",
+          "data_type": "number",
+          "description": "Order identifier."
+        },
+        "product_id": {
+          "name": "product_id",
+          "data_type": "text",
+          "description": "Product SKU."
+        },
+        "product_name": {
+          "name": "product_name",
+          "data_type": "text",
+          "description": "Product display name."
+        },
+        "product_type": {
+          "name": "product_type",
+          "data_type": "text",
+          "description": "Product category such as jaffle or beverage."
+        },
+        "product_price": {
+          "name": "product_price",
+          "data_type": "number",
+          "description": "Product revenue amount."
+        },
+        "ordered_at": {
+          "name": "ordered_at",
+          "data_type": "timestamp",
+          "description": "Order timestamp."
+        }
+      }
+    },
+    "model.jaffle_shop.supplies": {
+      "resource_type": "model",
+      "name": "supplies",
+      "alias": "supplies",
+      "database": "jaffle_shop",
+      "schema": "dev",
+      "description": "Supply rows linked to products for supply-chain analysis.",
+      "depends_on": {
+        "nodes": []
+      },
+      "tags": ["products", "supplies", "supply-chain"],
+      "original_file_path": "models/supplies.sql",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "supply_id": {
+          "name": "supply_id",
+          "data_type": "text",
+          "description": "Supply identifier."
+        },
+        "product_id": {
+          "name": "product_id",
+          "data_type": "text",
+          "description": "Product SKU."
+        },
+        "supply_name": {
+          "name": "supply_name",
+          "data_type": "text",
+          "description": "Supply display name."
+        },
+        "supply_cost": {
+          "name": "supply_cost",
+          "data_type": "number",
+          "description": "Unit supply cost."
+        },
+        "is_perishable_supply": {
+          "name": "is_perishable_supply",
+          "data_type": "boolean",
+          "description": "Whether the supply is perishable."
+        }
+      }
+    },
+    "model.jaffle_shop.fct_orders": {
+      "resource_type": "model",
+      "name": "fct_orders",
+      "alias": "fct_orders",
+      "database": "jaffle_shop",
+      "schema": "dev",
+      "description": "Order fact rows with customer ids and subtotal revenue.",
+      "depends_on": {
+        "nodes": []
+      },
+      "tags": ["orders", "customers", "revenue"],
+      "original_file_path": "models/fct_orders.sql",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "number",
+          "description": "Order identifier."
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "number",
+          "description": "Customer identifier."
+        },
+        "order_total": {
+          "name": "order_total",
+          "data_type": "number",
+          "description": "Order total."
+        },
+        "count_food_items": {
+          "name": "count_food_items",
+          "data_type": "number",
+          "description": "Food item count."
+        },
+        "count_drink_items": {
+          "name": "count_drink_items",
+          "data_type": "number",
+          "description": "Drink item count."
+        },
+        "subtotal_food_items": {
+          "name": "subtotal_food_items",
+          "data_type": "number",
+          "description": "Food revenue."
+        },
+        "subtotal_drink_items": {
+          "name": "subtotal_drink_items",
+          "data_type": "number",
+          "description": "Drink revenue."
+        },
+        "subtotal": {
+          "name": "subtotal",
+          "data_type": "number",
+          "description": "Subtotal revenue."
+        }
+      }
+    },
+    "model.jaffle_shop.dim_customers": {
+      "resource_type": "model",
+      "name": "dim_customers",
+      "alias": "dim_customers",
+      "database": "jaffle_shop",
+      "schema": "dev",
+      "description": "Customer dimension with names and lifetime spend.",
+      "depends_on": {
+        "nodes": []
+      },
+      "tags": ["customers"],
+      "original_file_path": "models/dim_customers.sql",
+      "config": {
+        "materialized": "table"
+      },
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "number",
+          "description": "Customer identifier."
+        },
+        "customer_name": {
+          "name": "customer_name",
+          "data_type": "text",
+          "description": "Customer display name."
+        },
+        "count_lifetime_orders": {
+          "name": "count_lifetime_orders",
+          "data_type": "number",
+          "description": "Lifetime order count."
+        },
+        "lifetime_spend": {
+          "name": "lifetime_spend",
+          "data_type": "number",
+          "description": "Lifetime customer spend."
+        }
+      }
+    }
+  },
+  "sources": {}
+}

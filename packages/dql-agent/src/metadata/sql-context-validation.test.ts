@@ -31,6 +31,20 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('accepts implicit output aliases selected from CTEs', () => {
+    const result = validateSqlAgainstLocalContext(`
+      WITH enterprise AS (
+        SELECT c.segment, SUM(o.amount) revenue
+        FROM analytics.fct_orders o
+        JOIN analytics.dim_customers c ON o.customer_id = c.customer_id
+        GROUP BY c.segment
+      )
+      SELECT segment, revenue FROM enterprise
+    `, pack());
+
+    expect(result.ok).toBe(true);
+  });
+
   it('rejects unknown unqualified columns selected from joined CTEs', () => {
     const result = validateSqlAgainstLocalContext(`
       WITH enterprise AS (
@@ -56,6 +70,7 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result).toMatchObject({
       ok: false,
       code: 'unknown_relation',
+      offending: { relation: 'analytics.secret_orders' },
     });
   });
 
@@ -68,7 +83,32 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result).toMatchObject({
       ok: false,
       code: 'unknown_column',
+      offending: { relation: 'analytics.fct_orders', column: 'fake_column' },
     });
+  });
+
+  it('validates against the union of metadata context and runtime schema context', () => {
+    const context = pack();
+    context.allowedSqlContext.relations = [context.allowedSqlContext.relations[0]!];
+
+    const result = validateSqlAgainstLocalContext(`
+      SELECT o.order_id, s.supply_name, s.supply_cost
+      FROM analytics.fct_orders o
+      JOIN analytics.supplies s ON o.order_id = s.order_id
+    `, context, {
+      runtimeSchema: [{
+        relation: 'analytics.supplies',
+        name: 'supplies',
+        source: 'runtime schema context',
+        columns: [
+          { name: 'order_id' },
+          { name: 'supply_name' },
+          { name: 'supply_cost' },
+        ],
+      }],
+    });
+
+    expect(result.ok).toBe(true);
   });
 
   it('uses certified source SQL shape columns when relation metadata is sparse', () => {
@@ -93,14 +133,28 @@ describe('validateSqlAgainstLocalContext', () => {
       context,
     ).ok).toBe(true);
 
-    const rejected = validateSqlAgainstLocalContext(
+    const advisory = validateSqlAgainstLocalContext(
       'SELECT player_name, fake_metric FROM analytics.player_stats',
       context,
     );
-    expect(rejected).toMatchObject({
-      ok: false,
-      code: 'unknown_column',
-    });
+    expect(advisory.ok).toBe(true);
+    expect(advisory.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('partial')]),
+    );
+  });
+
+  it('treats explicitly partial relation columns as advisory', () => {
+    const context = pack();
+    context.allowedSqlContext.relations[0]!.columnCompleteness = 'partial';
+    const result = validateSqlAgainstLocalContext(
+      'SELECT o.fake_column FROM analytics.fct_orders o',
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('partial')]),
+    );
   });
 
   it('accepts output aliases used in ORDER BY when source columns are inspected', () => {
@@ -109,6 +163,18 @@ describe('validateSqlAgainstLocalContext', () => {
        FROM analytics.fct_orders o
        GROUP BY o.region
        ORDER BY revenue_total DESC`,
+      pack(),
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts implicit output aliases used in ORDER BY', () => {
+    const result = validateSqlAgainstLocalContext(
+      `SELECT o.region, COUNT(*) order_count
+       FROM analytics.fct_orders o
+       GROUP BY o.region
+       ORDER BY order_count DESC`,
       pack(),
     );
 
@@ -162,6 +228,59 @@ describe('validateSqlAgainstLocalContext', () => {
     if (!result.ok) {
       expect(result.error).toContain('analytics.dim_customers.segment');
     }
+  });
+
+  it('does not hard-fail a generic clarify route when allowed SQL context exists', () => {
+    const context = pack();
+    context.routeDecision = {
+      route: 'clarify',
+      intent: 'clarify',
+      reason: 'DQL needs one more business or metadata detail before it can safely generate SQL.',
+      trustLabel: 'mixed',
+      reviewStatus: 'none',
+      selectedEvidence: [],
+      missingContext: [{
+        kind: 'metadata',
+        severity: 'blocking',
+        message: 'No certified block, semantic metric, dbt model, or runtime schema matched strongly enough to answer safely.',
+      }],
+      followUps: [],
+    };
+
+    const result = validateSqlAgainstLocalContext(
+      'SELECT region, SUM(amount) AS revenue FROM analytics.fct_orders GROUP BY region',
+      context,
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('keeps explicit blocking clarify gaps terminal', () => {
+    const context = pack();
+    context.routeDecision = {
+      route: 'clarify',
+      intent: 'diagnose_change',
+      reason: 'Missing baseline context.',
+      trustLabel: 'mixed',
+      reviewStatus: 'none',
+      selectedEvidence: [],
+      missingContext: [{
+        kind: 'baseline',
+        severity: 'blocking',
+        message: 'A baseline time period is required before explaining what changed.',
+      }],
+      followUps: [],
+    };
+
+    const result = validateSqlAgainstLocalContext(
+      'SELECT region, SUM(amount) AS revenue FROM analytics.fct_orders GROUP BY region',
+      context,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'insufficient_context',
+    });
   });
 });
 

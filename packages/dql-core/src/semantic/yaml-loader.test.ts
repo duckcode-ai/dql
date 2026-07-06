@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadSemanticLayerFromDir } from './yaml-loader.js';
+import { loadSemanticLayerFromDir } from './yaml-loader.node.js';
+import { serializeMetricDefinitionToYaml } from './yaml-loader.js';
 
 const tempDirs: string[] = [];
 
@@ -14,6 +15,51 @@ afterEach(() => {
 });
 
 describe('loadSemanticLayerFromDir', () => {
+  it('serializes composted metric YAML that round-trips through the loader', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-semantic-serializer-'));
+    tempDirs.push(root);
+    const semanticDir = join(root, 'semantic-layer');
+    mkdirSync(join(semanticDir, 'metrics', '_drafts', 'finance'), { recursive: true });
+
+    const yaml = serializeMetricDefinitionToYaml({
+      name: 'completed_revenue',
+      label: 'Completed Revenue',
+      description: 'Draft metric composted from certified block usage.',
+      domain: 'finance',
+      status: 'draft',
+      sql: 'SUM(amount)',
+      type: 'sum',
+      table: 'fact_orders',
+      filter: "status = 'completed'",
+      tags: ['composted', 'human-review'],
+      owner: 'analytics@example.com',
+      source: {
+        provider: 'dql',
+        objectType: 'composted_metric',
+        objectId: 'composted:completed_revenue',
+        extra: {
+          support: 2,
+          donorBlocks: ['revenue_by_product', 'revenue_by_region'],
+        },
+      },
+    });
+    writeFileSync(join(semanticDir, 'metrics', '_drafts', 'finance', 'completed_revenue.yaml'), yaml);
+
+    const metric = loadSemanticLayerFromDir(semanticDir).getMetric('completed_revenue');
+
+    expect(metric).toMatchObject({
+      name: 'completed_revenue',
+      domain: 'finance',
+      status: 'draft',
+      sql: 'SUM(amount)',
+      type: 'sum',
+      table: 'fact_orders',
+      filter: "status = 'completed'",
+      owner: 'analytics@example.com',
+    });
+    expect(metric?.source?.extra?.support).toBe(2);
+  });
+
   it('loads nested semantic folders recursively, including segments and pre-aggregations', () => {
     const root = mkdtempSync(join(tmpdir(), 'dql-semantic-loader-'));
     tempDirs.push(root);
@@ -30,6 +76,7 @@ describe('loadSemanticLayerFromDir', () => {
       'label: Gross Revenue',
       'description: Imported flat metric',
       'domain: finance',
+      'status: certified',
       'sql: |',
       '  SUM(amount)',
       'type: sum',
@@ -44,6 +91,7 @@ describe('loadSemanticLayerFromDir', () => {
       'label: Sales Channel',
       'description: Channel dimension',
       'domain: finance',
+      'status: review',
       'sql: |',
       '  channel',
       'type: string',
@@ -115,7 +163,9 @@ describe('loadSemanticLayerFromDir', () => {
     const layer = loadSemanticLayerFromDir(semanticDir);
 
     expect(layer.getMetric('gross_revenue')?.domain).toBe('finance');
+    expect(layer.getMetric('gross_revenue')?.status).toBe('certified');
     expect(layer.getDimension('sales_channel')?.domain).toBe('finance');
+    expect(layer.getDimension('sales_channel')?.status).toBe('review');
     expect(layer.getCube('orders')?.measures.map((metric) => metric.name)).toContain('order_total');
     expect(layer.listSegments('finance').map((segment) => segment.name)).toEqual(['high_value_orders']);
     expect(layer.listPreAggregations('finance').map((preAggregation) => preAggregation.name)).toEqual(['orders_daily_rollup']);
@@ -168,6 +218,18 @@ describe('loadSemanticLayerFromDir', () => {
 
     expect(layer.listMetrics().map((metric) => metric.name).sort()).toEqual(['deposit_balance', 'fraud_exposure']);
     expect(layer.listDimensions().map((dimension) => dimension.name)).toEqual(['region']);
+    expect(layer.getMetric('fraud_exposure')?.source).toMatchObject({
+      provider: 'dql',
+      objectType: 'metric',
+      objectId: 'fraud_exposure',
+      extra: { path: 'metrics/banking.yaml' },
+    });
+    expect(layer.getDimension('region')?.source).toMatchObject({
+      provider: 'dql',
+      objectType: 'dimension',
+      objectId: 'region',
+      extra: { path: 'dimensions/banking.yaml' },
+    });
     expect(layer.getMetric('')).toBeUndefined();
     expect(layer.getDimension('')).toBeUndefined();
   });

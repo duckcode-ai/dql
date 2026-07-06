@@ -1,8 +1,22 @@
+import type { DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
+
 export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
 export interface ChatTurn {
   role: 'user' | 'assistant';
   content: string;
+}
+
+export type AgentConversationDqlArtifact = DqlArtifactReference;
+
+export interface AgentAnswerCascade {
+  terminalLane?: 'certified' | 'semantic' | 'generated' | 'refusal' | string;
+  routeTier?: 'certified_block' | 'semantic_metric' | 'generated_sql' | 'business_context' | 'no_answer' | string;
+  label?: string;
+  ref?: string;
+  artifactKind?: string;
+  refusalCode?: string;
+  outcome?: Record<string, unknown>;
 }
 
 export interface AgentConversationContext {
@@ -33,7 +47,10 @@ export interface AgentConversationContext {
   route?: string;
   contextPackId?: string;
   draftBlockPath?: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
+  cascade?: AgentAnswerCascade;
   selectedEvidence?: unknown[];
+  sourceSql?: string;
   updatedAt?: string;
 }
 
@@ -49,6 +66,8 @@ export interface AgentConversationTurn {
   reviewStatus?: string;
   certification?: string;
   contextPackId?: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
+  cascade?: AgentAnswerCascade;
   requestedFilters?: string[];
   requestedDimensions?: string[];
   requestedMeasures?: string[];
@@ -71,6 +90,12 @@ export interface BlockProposal {
   owner: string;
   description: string;
   sql: string;
+  blockType?: 'custom' | 'semantic';
+  dqlSource?: string;
+  metrics?: string[];
+  dimensions?: string[];
+  filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+  timeDimension?: { name: string; granularity: string };
   tags?: string[];
   chartType?: string;
 }

@@ -704,9 +704,9 @@ function buildNotebookAiContext(input: {
   lines.push([
     '- Use the same path for research, SQL generation, SQL repair, DQL reuse checks, and DQL draft planning.',
     '- Always check certified DQL blocks, draft blocks, dbt/semantic metadata, and runtime schema before proposing new SQL.',
-    '- Return one clear outcome: Reuse certified block, Use existing draft, Generate SQL cell, Fix SQL, Create DQL draft, Needs review, or Cannot answer yet.',
-    '- For generated SQL, prefer reusable parameterizable logic over hard-coded literals when the business question implies a reusable block.',
-    '- Keep DQL certification manual; do not claim generated SQL or drafts are certified.',
+    '- Return one clear outcome: Reuse certified block, Use existing draft, Review SQL preview, Fix SQL, Create DQL draft, Needs review, or Cannot answer yet.',
+    '- For review-required DQL artifacts, prefer reusable parameterizable SQL preview logic over hard-coded literals when the business question implies a reusable block.',
+    '- Keep DQL certification manual; do not claim SQL previews or drafts are certified.',
     '- Explain business purpose, grain, filters/parameters, technical lineage, duplicate/reuse evidence, preview status, and next action.',
   ].join('\n'));
   lines.push(`Notebook: ${input.notebookTitle || input.notebookPath || 'Untitled notebook'}`);

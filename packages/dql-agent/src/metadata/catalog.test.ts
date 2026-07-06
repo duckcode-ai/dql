@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +6,7 @@ import {
   buildLocalContextPack,
   defaultMetadataPath,
   ensureMetadataCatalogFresh,
+  MetadataCatalog,
   openMetadataCatalog,
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
@@ -14,6 +15,8 @@ import {
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
 import { recordCorrectionTrace, reviewHint } from '../hints/git-store.js';
+import { defaultKgPath, reindexProject } from '../index.js';
+import { KGStore } from '../kg/sqlite-fts.js';
 
 describe('local metadata catalog', () => {
   let projectRoot: string;
@@ -97,6 +100,11 @@ describe('local metadata catalog', () => {
           'dbt:column:fct_player_performance.total_points',
         ]),
       );
+      expect(catalog.searchObjects({ query: 'scor', limit: 10 }).map((row) => row.objectKey)).toEqual(
+        expect.arrayContaining([
+          'dql:block:Top 10 Goal Scorers',
+        ]),
+      );
     } finally {
       catalog.close();
     }
@@ -136,10 +144,91 @@ describe('local metadata catalog', () => {
       route: 'generated_sql',
       intent: 'ad_hoc_ranking',
       reviewStatus: 'draft_ready',
+      trustLabelInfo: {
+        id: 'ai_generated',
+      },
     });
     expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toEqual(
       expect.arrayContaining(['NBA_DB.ANALYTICS.fct_player_performance']),
     );
+  });
+
+  it('hands the whole small catalog to deep research and keeps ranked selection otherwise', async () => {
+    // Deep mode (strictness: exploratory) over a tiny catalog: skip top-k pruning
+    // and include every relation, even for a question that would not lexically
+    // select it.
+    const deep = await buildLocalContextPack(projectRoot, {
+      question: 'give me an overview of everything available',
+      strictness: 'exploratory',
+    });
+    expect(deep.retrievalDiagnostics.strategy).toBe('full_catalog');
+    expect(deep.allowedSqlContext.relations.map((relation) => relation.relation)).toEqual(
+      expect.arrayContaining(['NBA_DB.ANALYTICS.fct_player_performance']),
+    );
+
+    // Quick mode keeps ranked (sqlite_fts) selection — no full-catalog dump.
+    const quick = await buildLocalContextPack(projectRoot, {
+      question: 'give me an overview of everything available',
+    });
+    expect(quick.retrievalDiagnostics.strategy).not.toBe('full_catalog');
+  });
+
+  it('lets reindexProject skip unchanged metadata catalog rebuilds by fingerprint', async () => {
+    const firstStats = await reindexProject(projectRoot, { loadSkills: false });
+    const first = openMetadataCatalog(projectRoot);
+    const firstBuiltAt = first.state('built_at');
+    first.close();
+
+    expect(firstBuiltAt).toBeTruthy();
+    expect(firstStats.metadataRefreshed).toBe(true);
+    expect(firstStats.metadataFingerprint).toBeTruthy();
+
+    const secondStats = await reindexProject(projectRoot, { loadSkills: false });
+    const second = openMetadataCatalog(projectRoot);
+    try {
+      expect(second.state('built_at')).toBe(firstBuiltAt);
+    } finally {
+      second.close();
+    }
+    expect(secondStats.metadataRefreshed).toBe(false);
+    expect(secondStats.metadataFingerprint).toBe(firstStats.metadataFingerprint);
+  });
+
+  it('lets reindexProject skip unchanged KG rebuilds by graph fingerprint', async () => {
+    const firstStats = await reindexProject(projectRoot, { loadSkills: false });
+    const first = new KGStore(defaultKgPath(projectRoot));
+    const firstBuiltAt = first.meta('built_at');
+    const firstFingerprint = first.meta('fingerprint');
+    first.close();
+
+    expect(firstBuiltAt).toBeTruthy();
+    expect(firstFingerprint).toBeTruthy();
+    expect(firstStats.kgRebuilt).toBe(true);
+    expect(firstStats.kgFingerprint).toBe(firstFingerprint);
+
+    await sleep(10);
+    const secondStats = await reindexProject(projectRoot, { loadSkills: false });
+    const second = new KGStore(defaultKgPath(projectRoot));
+    const secondBuiltAt = second.meta('built_at');
+    const secondFingerprint = second.meta('fingerprint');
+    second.close();
+
+    expect(secondBuiltAt).toBe(firstBuiltAt);
+    expect(secondFingerprint).toBe(firstFingerprint);
+    expect(secondStats.kgRebuilt).toBe(false);
+    expect(secondStats.kgFingerprint).toBe(firstStats.kgFingerprint);
+
+    await sleep(10);
+    const forcedStats = await reindexProject(projectRoot, { loadSkills: false, forceKgIndex: true });
+    const forced = new KGStore(defaultKgPath(projectRoot));
+    try {
+      expect(forced.meta('fingerprint')).toBe(firstFingerprint);
+      expect(forced.meta('built_at')).not.toBe(firstBuiltAt);
+    } finally {
+      forced.close();
+    }
+    expect(forcedStats.kgRebuilt).toBe(true);
+    expect(forcedStats.kgFingerprint).toBe(firstStats.kgFingerprint);
   });
 
   it('indexes block output column lineage as traversable metadata edges', async () => {
@@ -451,6 +540,65 @@ describe('local metadata catalog', () => {
     }
   });
 
+  it('turns DataLex relationships into grain-safe datalex join paths (R2.8)', async () => {
+    // Two dbt models sharing player_id, and a DataLex manifest that models the
+    // relationship between the entities bound to them.
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { nodes: Record<string, Record<string, unknown>> };
+    manifest.nodes['model.nba_analysis.dim_players'] = {
+      resource_type: 'model', name: 'dim_players', alias: 'dim_players', database: 'NBA_DB', schema: 'ANALYTICS',
+      description: 'Player dimension.', depends_on: { nodes: [] }, original_file_path: 'models/dim_players.sql',
+      columns: {
+        player_id: { name: 'player_id', data_type: 'text', description: 'Player id.' },
+        player_name: { name: 'player_name', data_type: 'text', description: 'Player name.' },
+      },
+    };
+    manifest.nodes['model.nba_analysis.fct_games'] = {
+      resource_type: 'model', name: 'fct_games', alias: 'fct_games', database: 'NBA_DB', schema: 'ANALYTICS',
+      description: 'Game facts by player.', depends_on: { nodes: [] }, original_file_path: 'models/fct_games.sql',
+      columns: {
+        player_id: { name: 'player_id', data_type: 'text', description: 'Player id.' },
+        points: { name: 'points', data_type: 'number', description: 'Points scored.' },
+      },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+    writeFileSync(
+      join(projectRoot, 'datalex-manifest.json'),
+      JSON.stringify({
+        manifestSpecVersion: '1.0.0', datalexVersion: 'test', generatedAt: '2026-06-20T00:00:00.000Z',
+        project: { name: 'nba_contracts' },
+        domains: [{
+          name: 'nba', entities: [
+            { name: 'Player', binding: { kind: 'dbt_model', ref: 'dim_players' }, fields: [{ name: 'player_id', primary_key: true }] },
+            { name: 'Game', binding: { kind: 'dbt_model', ref: 'fct_games' }, fields: [{ name: 'player_id' }] },
+          ],
+        }],
+        relationships: [{
+          name: 'player_plays_game', type: 'reference', identifying: true, cardinality: 'one_to_many',
+          from: { entity: 'Player', column: 'player_id' },
+          to: { entity: 'Game', column: 'player_id' },
+        }],
+      }),
+      'utf-8',
+    );
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'points by player joining players and games',
+      limit: 40,
+    });
+
+    expect(pack.retrievalDiagnostics.selectedJoinPaths).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: 'datalex',
+          leftColumn: 'player_id',
+          rightColumn: 'player_id',
+          reason: expect.stringContaining('DataLex relationship player_plays_game'),
+        }),
+      ]),
+    );
+  });
+
   it('routes exact certified example questions to certified execution', async () => {
     const plan = await planAgentAnswer(projectRoot, {
       question: 'Who were the top scorers?',
@@ -599,6 +747,9 @@ describe('local metadata catalog', () => {
       route: 'generated_sql',
       intent: 'ad_hoc_ranking',
       reviewStatus: 'draft_ready',
+      trustLabelInfo: {
+        id: 'ai_generated',
+      },
       certifiedApplicability: expect.objectContaining({
         name: 'food_vs_drink_revenue',
         kind: 'context_only',
@@ -633,6 +784,42 @@ describe('local metadata catalog', () => {
         }),
       ]),
     );
+	  });
+
+  it('ingests dbt catalog.json columns as complete physical metadata', async () => {
+    addJaffleOrderItemsModel(projectRoot);
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+      nodes: Record<string, { columns?: Record<string, unknown> }>;
+    };
+    delete manifest.nodes['model.nba_analysis.order_items']?.columns?.product_price;
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+    writeFileSync(join(projectRoot, 'target', 'catalog.json'), JSON.stringify({
+      nodes: {
+        'model.nba_analysis.order_items': {
+          columns: {
+            order_item_id: { name: 'order_item_id', type: 'NUMBER', comment: 'Order item identifier.' },
+            product_name: { name: 'product_name', type: 'TEXT', comment: 'Product display name.' },
+            product_type: { name: 'product_type', type: 'TEXT', comment: 'Product category.' },
+            product_price: { name: 'product_price', type: 'NUMBER', comment: 'Warehouse-resolved product revenue amount.' },
+          },
+        },
+      },
+    }), 'utf-8');
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show product revenue by product name',
+      limit: 40,
+    });
+
+    const orderItems = pack.allowedSqlContext.relations.find((relation) => relation.relation === 'SHOP.ANALYTICS.order_items');
+    expect(orderItems).toMatchObject({
+      columnCompleteness: 'complete',
+      columns: expect.arrayContaining([
+        expect.objectContaining({ name: 'product_price', type: 'NUMBER' }),
+      ]),
+    });
   });
 
   it('preserves compiler-inferred output contracts for certified block fit', async () => {
@@ -681,6 +868,9 @@ describe('local metadata catalog', () => {
     expect(pack.routeDecision).toMatchObject({
       route: 'certified',
       exactObjectKey: 'dql:block:Product Revenue Inferred Contract',
+      trustLabelInfo: {
+        id: 'certified',
+      },
       blockFit: expect.objectContaining({
         kind: 'exact',
         confidence: 'high',
@@ -830,6 +1020,85 @@ describe('local metadata catalog', () => {
       intent: 'entity_drilldown',
       reviewStatus: 'draft_ready',
     });
+  });
+
+  it('preserves prior DQL artifact context for generic previous-result follow-ups', async () => {
+    const sourceSql = 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies ORDER BY supply_cost DESC LIMIT 10';
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'can you include product details with previous results and give final',
+      followUp: {
+        kind: 'generic',
+        sourceQuestion: 'give me product and supply info',
+        priorResultColumns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+        priorResultRef: {
+          id: 'turn_supply',
+          question: 'give me product and supply info',
+          columns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+          rowCount: 65,
+          sourceSql,
+        },
+        priorDqlArtifact: {
+          kind: 'sql_block',
+          name: 'product_supply_breakdown',
+          source: `block "product_supply_breakdown" {
+  type = "custom"
+  query = """${sourceSql}"""
+}`,
+          orderBy: [{ name: 'supply_cost', direction: 'desc' }],
+          limit: 10,
+        },
+      },
+      limit: 20,
+    });
+
+    expect(pack.followUp).toMatchObject({
+      kind: 'generic',
+      priorDqlArtifact: {
+        kind: 'sql_block',
+        name: 'product_supply_breakdown',
+        orderBy: [{ name: 'supply_cost', direction: 'desc' }],
+        limit: 10,
+      },
+    });
+    const followUpObject = pack.objects.find((object) => object.objectKey.startsWith('selected:followup:'));
+    expect(followUpObject).toBeDefined();
+    expect(followUpObject?.description).toContain('product_supply_breakdown');
+    expect(followUpObject?.description).toContain('supply_cost desc');
+    expect(followUpObject?.description).toContain('limit 10');
+    expect(followUpObject?.payload).toMatchObject({
+      priorResultRef: {
+        id: 'turn_supply',
+        rowCount: 65,
+        sourceSql,
+      },
+      priorDqlArtifact: {
+        name: 'product_supply_breakdown',
+        orderBy: [{ name: 'supply_cost', direction: 'desc' }],
+        limit: 10,
+      },
+    });
+  });
+
+  it('seeds prior context-pack objects for refinements without short-circuiting retrieval', async () => {
+    const priorPack = await buildLocalContextPack(projectRoot, {
+      question: 'Who scored the least points?',
+      limit: 20,
+    });
+
+    const refinedPack = await buildLocalContextPack(projectRoot, {
+      question: 'same result but only 2024',
+      priorContextPackId: priorPack.id,
+      conversationTopicRelation: 'refinement',
+      limit: 20,
+    });
+
+    expect(refinedPack.retrievalDiagnostics.strategy).toBe('sqlite_fts');
+    expect(refinedPack.objects.map((row) => row.objectKey)).toEqual(
+      expect.arrayContaining([
+        'dql:block:Top 10 Goal Scorers',
+        'dbt:model:fct_player_performance',
+      ]),
+    );
   });
 
   it('uses certified blocks as context for entity profile questions and generates SQL from metadata', async () => {
@@ -994,7 +1263,8 @@ describe('local metadata catalog', () => {
           leftColumn: 'player_id',
           rightRelation: 'NBA_DB.ANALYTICS.dim_players',
           rightColumn: 'player_id',
-          reason: 'shared key player_id',
+          reason: expect.stringContaining('dbt lineage'),
+          source: 'dbt_lineage',
         }),
       ]),
     );
@@ -1020,6 +1290,53 @@ describe('local metadata catalog', () => {
       relation: expect.stringContaining('fct_player_performance'),
       columns: expect.arrayContaining(['player_name', 'season', 'points', 'total_points']),
     });
+  });
+
+  it('balances relation and column budgets so column floods do not evict table context', async () => {
+    addColumnFloodModels(projectRoot, 16, 12);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Show supply metric by supply stage',
+      objectTypes: ['dbt_model', 'dbt_column'],
+      limit: 12,
+    });
+
+    const selectedSupplyModels = pack.objects.filter((object) =>
+      object.objectType === 'dbt_model' && object.name.startsWith('supply_wide_'),
+    );
+    expect(selectedSupplyModels.length).toBeGreaterThanOrEqual(6);
+    expect(pack.retrievalDiagnostics.topRejected).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          objectType: 'dbt_column',
+          reason: expect.stringContaining('Outside balanced context window'),
+        }),
+      ]),
+    );
+  });
+
+  it('caches schema-shape scans for repeated generated questions on the same catalog fingerprint', async () => {
+    addNoisyDbtModels(projectRoot, 80);
+    addGenericAthleteBoxScoreModel(projectRoot, 'cache_probe_box_scores');
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const scanSpy = vi.spyOn(MetadataCatalog.prototype, 'scanObjects');
+    try {
+      await buildLocalContextPack(projectRoot, {
+        question: 'Can you research Kevin Durant profile and provide complete stats for cache probe',
+        limit: 40,
+      });
+      const scansAfterFirstPack = scanSpy.mock.calls.length;
+      expect(scansAfterFirstPack).toBeGreaterThan(0);
+
+      await buildLocalContextPack(projectRoot, {
+        question: 'Can you research Kevin Durant profile and provide complete stats for cache probe',
+        limit: 40,
+      });
+      expect(scanSpy.mock.calls.length).toBe(scansAfterFirstPack);
+    } finally {
+      scanSpy.mockRestore();
+    }
   });
 
   it('does not use generated draft blocks as allowed SQL context', async () => {
@@ -1083,6 +1400,22 @@ describe('local metadata catalog', () => {
         ],
       }],
     });
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      const matches = catalog.searchRuntimeValues(['Stephen Curry']);
+      expect(matches).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            relation: 'NBA_DB.RAW.player_box_scores',
+            columnName: 'player_name',
+            value: 'Stephen Curry',
+          }),
+        ]),
+      );
+      expect(catalog.state('runtime_value_index_count')).toBe('1');
+    } finally {
+      catalog.close();
+    }
 
     const pack = await buildLocalContextPack(projectRoot, {
       question: 'Show Stephen Curry points by game date',
@@ -1096,8 +1429,14 @@ describe('local metadata catalog', () => {
           role: 'runtime_schema',
           name: 'player_box_scores',
         }),
+        expect.objectContaining({
+          role: 'value_match',
+          name: 'player_name = Stephen Curry',
+        }),
       ]),
     );
+    const relation = pack.allowedSqlContext.relations.find((item) => item.relation === 'NBA_DB.RAW.player_box_scores');
+    expect(relation?.columns.find((column) => column.name === 'player_name')?.sampleValues).toContain('Stephen Curry');
   });
 
   it('folds an approved, scoped correction hint into a matching Tier-2 context pack (cited)', async () => {
@@ -1203,6 +1542,10 @@ describe('block fingerprints', () => {
 
 function mkdtempProject(): string {
   return mkdtempSync(join(tmpdir(), 'dql-metadata-catalog-'));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function addNoisyDbtModels(root: string, count: number): void {
@@ -1428,6 +1771,43 @@ function addPlayerDimensionModel(root: string): void {
       },
     },
   };
+  writeFileSync(path, JSON.stringify(manifest), 'utf-8');
+}
+
+function addColumnFloodModels(root: string, modelCount: number, columnCount: number): void {
+  const path = join(root, 'target', 'manifest.json');
+  const manifest = JSON.parse(readFileSync(path, 'utf-8')) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  for (let modelIndex = 0; modelIndex < modelCount; modelIndex += 1) {
+    const columns: Record<string, Record<string, string>> = {};
+    for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+      const name = `supply_metric_${modelIndex}_${columnIndex}`;
+      columns[name] = {
+        name,
+        data_type: 'number',
+        description: `Supply metric ${columnIndex} for stage analysis.`,
+      };
+    }
+    columns.supply_stage = {
+      name: 'supply_stage',
+      data_type: 'text',
+      description: 'Supply stage dimension.',
+    };
+    manifest.nodes[`model.nba_analysis.supply_wide_${modelIndex}`] = {
+      resource_type: 'model',
+      name: `supply_wide_${modelIndex}`,
+      alias: `supply_wide_${modelIndex}`,
+      database: 'NBA_DB',
+      schema: 'ANALYTICS',
+      description: `Supply metric wide table ${modelIndex}.`,
+      depends_on: { nodes: [] },
+      tags: ['supply', 'metric'],
+      original_file_path: `models/supply/supply_wide_${modelIndex}.sql`,
+      config: { materialized: 'table' },
+      columns,
+    };
+  }
   writeFileSync(path, JSON.stringify(manifest), 'utf-8');
 }
 

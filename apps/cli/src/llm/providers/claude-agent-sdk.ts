@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { DQLContext, findProjectRoot } from '@duckcodeailabs/dql-mcp';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from '../types.js';
 import { buildAgentTools, type AgentTool } from '../tools.js';
+import { blockProposalDqlMetadata } from '../proposal-metadata.js';
 
 const MODEL = 'claude-opus-4-7';
 const MAX_TOOL_ITERATIONS = 16;
@@ -70,10 +71,15 @@ function systemPrompt(ctx: DQLContext, upstreamSql?: string): string {
   return [
     'You are the DQL authoring agent. Your job is to help the analyst turn a business question into a certified, governed DQL block.',
     '',
-    'Always ground answers in existing blocks, semantic metrics, and dimensions — do not invent SQL from scratch without checking what already exists. Use the provided tools:',
+    'Always ground answers in existing blocks, semantic metrics, and dimensions - do not invent SQL from scratch without checking what already exists. Use the provided tools:',
+    '- ask_dql: route analytics questions through the governed cascade before writing SQL.',
     '- search_blocks: find existing blocks before writing new ones.',
     '- get_block: inspect a block\'s SQL, dependencies, and lineage.',
-    '- list_metrics / list_dimensions: enumerate the semantic layer.',
+    '- query_via_block: execute a certified exact-fit block.',
+    '- query_semantic_model: compile governed semantic metrics, dimensions, and time grains into DQL-first generated analysis; surface the DQL artifact and draft path when present.',
+    '- inspect_metadata_context / query_via_metadata: generate review-required DQL drafts when no certified block or semantic query fits; carry returned dqlArtifact.source as the default artifact.',
+    '- Follow-ups: when the user refers to prior/previous results, pass followUp.priorResultRef and followUp.priorDqlArtifact into query_via_metadata instead of answering from vague follow-up prose.',
+    '- expand_context: add a known catalog/runtime relation to an existing context pack after a grounded query reports an allowed-context gap, then retry once with the new contextPackId and regroundAttemptsUsed: 1.',
     '- lineage_impact: understand upstream/downstream blast radius.',
     '- certify: check governance rules against a proposed block.',
     '- suggest_block: END of turn — write a reviewable draft to the local draft queue once the user is ready.',
@@ -172,6 +178,7 @@ function emitProposal(input: unknown, output: unknown, emit: (turn: AgentTurn) =
     owner: String(p.owner ?? ''),
     description: String(p.description ?? ''),
     sql: String(p.sql),
+    ...blockProposalDqlMetadata(p),
     tags: Array.isArray(p.tags) ? p.tags.map(String) : undefined,
     chartType: typeof p.chartType === 'string' ? p.chartType : undefined,
   };
@@ -205,4 +212,8 @@ export const claudeAgentSdkRunner: AgentRunner = {
       emit({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
     }
   },
+};
+
+export const __test__ = {
+  systemPrompt,
 };

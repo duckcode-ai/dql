@@ -1,4 +1,13 @@
-import type { AgentResultPayload, AgentSchemaTable, KGNode, ReasoningEffort } from '@duckcodeailabs/dql-agent';
+import type {
+  AgentDqlArtifactReference,
+  CascadeAnswerResult,
+  AgentResultPayload,
+  AgentSchemaTable,
+  AnalysisDepth,
+  ConversationSnapshot,
+  KGNode,
+  ReasoningEffort,
+} from '@duckcodeailabs/dql-agent';
 
 export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'codex' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
@@ -13,6 +22,8 @@ export interface AgentConversationContext {
   activeTurnId?: string;
   activeTopic?: string;
   conversationSummary?: string;
+  /** Server-built bounded snapshot: recent turns, semantic recall, working state, and topic relation. */
+  serverSnapshot?: ConversationSnapshot;
   turns?: AgentConversationTurn[];
   sourceAnswerId?: string;
   sourceCertifiedBlock?: string;
@@ -35,7 +46,10 @@ export interface AgentConversationContext {
   route?: string;
   contextPackId?: string;
   draftBlockPath?: string;
+  dqlArtifact?: AgentDqlArtifactReference;
+  cascade?: CascadeAnswerResult;
   selectedEvidence?: unknown[];
+  sourceSql?: string;
   updatedAt?: string;
 }
 
@@ -51,6 +65,8 @@ export interface AgentConversationTurn {
   reviewStatus?: string;
   certification?: string;
   contextPackId?: string;
+  dqlArtifact?: AgentDqlArtifactReference;
+  cascade?: CascadeAnswerResult;
   requestedFilters?: string[];
   requestedDimensions?: string[];
   requestedMeasures?: string[];
@@ -73,6 +89,12 @@ export interface BlockProposal {
   owner: string;
   description: string;
   sql: string;
+  blockType?: 'custom' | 'semantic';
+  dqlSource?: string;
+  metrics?: string[];
+  dimensions?: string[];
+  filters?: Array<{ dimension: string; operator: string; values: string[] }>;
+  timeDimension?: { name: string; granularity: string };
   tags?: string[];
   chartType?: string;
 }
@@ -102,10 +124,16 @@ export interface AgentRunRequest {
    * SDK runners translate it into their native param and no-op when unsupported.
    */
   reasoningEffort?: ReasoningEffort;
+  /** Context/prompt depth for governed Ask AI. Research routes pass deep. */
+  analysisDepth?: AnalysisDepth;
   projectRoot: string;
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string) => Promise<AgentSchemaTable[]>;
+  /** Active warehouse dialect so Lane-2 semantic compiles emit dialect-correct SQL. */
+  semanticDriver?: string;
+  /** Logical->physical table mapping for the semantic compiler, when resolved. */
+  semanticTableMapping?: Record<string, string>;
 }
 
 export interface AgentRunner {

@@ -5,6 +5,8 @@
  */
 
 import type { ConversationStore, ConversationTurn } from './session-store.js';
+import type { AgentDqlArtifactReference } from '../answer-loop.js';
+import type { CascadeAnswerResult } from '../cascade/cascade.js';
 import {
   parseWorkingState,
   reduceWorkingState,
@@ -25,7 +27,11 @@ export interface ConversationSnapshotTurn {
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   resultColumns?: string[];
+  resultRowCount?: number;
   resultDimensionValues?: Record<string, string[]>;
+  sourceSql?: string;
+  dqlArtifact?: AgentDqlArtifactReference;
+  cascade?: CascadeAnswerResult;
 }
 
 export interface ConversationSnapshot {
@@ -167,7 +173,11 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
     sourceCertifiedBlock: turn.sourceCertifiedBlock,
     contextPackId: turn.contextPackId,
     resultColumns: turn.result?.columns,
+    resultRowCount: turn.result?.rowCount,
     resultDimensionValues: turn.result?.dimensionValues,
+    sourceSql: turn.sql,
+    dqlArtifact: turn.dqlArtifact,
+    cascade: turn.cascade,
   };
 }
 

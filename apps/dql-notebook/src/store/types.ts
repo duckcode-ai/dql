@@ -280,6 +280,13 @@ export interface ProposeReadinessSummary {
   readyForReview: number;
   blockingTotal: number;
   warningTotal: number;
+  /** Review-latency / conversion telemetry for the draft queue (R2.2). */
+  reviewTelemetry?: {
+    existingDrafts: number;
+    medianReviewAgeHours: number | null;
+    readyForReviewRate: number | null;
+    estimatedReviewMinutes: number;
+  };
 }
 
 // ── Deterministic PLAN (classify → plan → approve) ─────────────────────────

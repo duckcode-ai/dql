@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CachingEmbeddingProvider,
   HashedTokenEmbeddingProvider,
+  OpenAIEmbeddingProvider,
   cosineSimilarity,
   defaultEmbeddingProvider,
   hybridRank,
+  resolveEmbeddingProvider,
+  type EmbeddingFetch,
+  type EmbeddingProvider,
 } from './provider.js';
 
 describe('deterministic embedding provider', () => {
@@ -57,5 +62,60 @@ describe('hybrid rank', () => {
     const r1 = await hybridRank('revenue net', items, { alpha: 0.5 });
     const r2 = await hybridRank('revenue net', items, { alpha: 0.5 });
     expect(r1.map((x) => [x.item, x.score])).toEqual(r2.map((x) => [x.item, x.score]));
+  });
+});
+
+describe('OpenAI embedding provider (R3.3)', () => {
+  const fakeVectors: Record<string, number[]> = {
+    'who are our best customers': [1, 0, 0],
+    'top customers by revenue': [0.9, 0.1, 0],
+    'player rebounds per game': [0, 0, 1],
+  };
+  const fetchImpl: EmbeddingFetch = async (_url, init) => {
+    const body = JSON.parse(init.body) as { input: string[] };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: body.input.map((text, index) => ({ index, embedding: fakeVectors[text] ?? [0, 0, 0] })) }),
+    };
+  };
+
+  it('embeds via the /embeddings endpoint and preserves order', async () => {
+    const provider = new OpenAIEmbeddingProvider({ apiKey: 'sk-test', fetchImpl });
+    const [a, b] = await provider.embed(['who are our best customers', 'player rebounds per game']);
+    expect(a).toEqual([1, 0, 0]);
+    expect(b).toEqual([0, 0, 1]);
+  });
+
+  it('caches by content hash — the inner provider is called once per unique text', async () => {
+    let calls = 0;
+    const counting: EmbeddingProvider = {
+      id: 'counting', dimensions: 3,
+      embed: async (texts) => { calls += 1; return texts.map(() => [1, 2, 3]); },
+    };
+    const cached = new CachingEmbeddingProvider(counting);
+    await cached.embed(['x', 'y']);
+    await cached.embed(['x', 'y']); // second time fully cached
+    expect(calls).toBe(1);
+  });
+
+  it('resolver returns a real embedder when keyed, hashed fallback otherwise', () => {
+    expect(resolveEmbeddingProvider({ openaiApiKey: 'sk-test', fetchImpl }).id).toContain('openai');
+    expect(resolveEmbeddingProvider({}).id).toBe('hashed-token-v1');
+  });
+
+  it('real embeddings let a PARAPHRASE outrank a lexically-closer distractor', async () => {
+    // "who are our best customers" should match "top customers by revenue"
+    // semantically even though the hashed-token overlap is weak.
+    const provider = new OpenAIEmbeddingProvider({ apiKey: 'sk-test', fetchImpl });
+    const ranked = await hybridRank(
+      'who are our best customers',
+      [
+        { item: 'best_customers_block', text: 'top customers by revenue', ftsScore: 0.2 },
+        { item: 'nba_block', text: 'player rebounds per game', ftsScore: 0.5 },
+      ],
+      { alpha: 0.8, provider },
+    );
+    expect(ranked[0].item).toBe('best_customers_block');
   });
 });

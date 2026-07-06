@@ -8,6 +8,8 @@
  * structured filters for domain/kind.
  */
 
+import type { TrustLabelId } from '@duckcodeailabs/dql-core';
+
 export type KGNodeKind =
   | 'block'
   | 'term'
@@ -34,7 +36,7 @@ export type KGSourceTier =
   | 'memory'
   | 'project';
 
-export type KGCertification = 'certified' | 'ai_generated' | 'analyst_review_required' | 'uncertified';
+export type KGCertification = TrustLabelId;
 
 export interface KGOutputLineage {
   name: string;
@@ -64,6 +66,8 @@ export interface KGNode {
   llmContext?: string;
   /** Question/SQL pairs the agent can few-shot on. */
   examples?: Array<{ question: string; sql?: string }>;
+  /** Raw SQL for DQL blocks / saved queries when available. */
+  sql?: string;
   /** Path on disk so the UI can deep-link. */
   sourcePath?: string;
   /** Pinned git SHA at index time. */

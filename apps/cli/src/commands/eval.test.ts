@@ -1,16 +1,23 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+
+// Resolve fixtures relative to this test file, not process.cwd(), so the suite
+// passes whether vitest runs from the repo root or the apps/cli package dir.
+const FIXTURES_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../test/fixtures');
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import type { PlanAgentAnswerResult } from '@duckcodeailabs/dql-agent';
 import {
   collectEvalCases,
+  computeDistributions,
   computeScores,
   loadYamlEvalCases,
   mapRoute,
   meetsThresholds,
   runEval,
+  runEvalHarness,
   scoreCase,
   type EvalCase,
 } from './eval.js';
@@ -145,6 +152,15 @@ describe('scoreCase', () => {
     expect(result.actualBlock).toBe('revenue_total');
     expect(result.actualGrain).toBe('week');
     expect(result.routeMatch && result.blockMatch && result.grainMatch).toBe(true);
+    expect(result.trace.map((stage) => stage.stage)).toEqual(['context', 'route', 'scoring']);
+    expect(result.trace.find((stage) => stage.stage === 'route')).toMatchObject({
+      status: 'passed',
+      payload: {
+        route: 'certified',
+        mappedRoute: 'certified',
+        exactObjectKey: 'dql:block:revenue_total',
+      },
+    });
   });
 
   it('scores a generated (Tier-2) case', () => {
@@ -268,6 +284,9 @@ describe('computeScores', () => {
     ];
     const scores = computeScores(results);
     expect(scores.total).toBe(4);
+    // Case 3 is an expected safe refusal, so answer rate is measured over the
+    // three answerable cases only; all three returned a non-refusal route.
+    expect(scores.answerRate).toBe(1);
     // route expectations on cases 1, 2, 4 — all routes matched
     expect(scores.routeAccuracy).toBe(1);
     // block expectations on cases 1, 4 — both selected block a
@@ -281,8 +300,90 @@ describe('computeScores', () => {
 
   it('returns null scores when a dimension has no expectations', () => {
     const scores = computeScores([]);
+    expect(scores.answerRate).toBeNull();
     expect(scores.routeAccuracy).toBeNull();
     expect(scores.refusalRecall).toBeNull();
+  });
+});
+
+describe('computeDistributions', () => {
+  it('tracks actual cascade tiers, authored expectations, categories, and sources', () => {
+    const manifest = makeManifest({
+      a: { status: 'certified', grain: 'week' },
+    });
+    const results = [
+      scoreCase(
+        {
+          name: 'certified',
+          question: 'q1',
+          source: 'block_example',
+          category: 'certified',
+          expectRoute: 'certified',
+          expectBlock: 'a',
+        },
+        makePlan({ route: 'certified', exactObjectKey: 'dql:block:a' }),
+        manifest,
+      ),
+      scoreCase(
+        {
+          name: 'generated',
+          question: 'q2',
+          source: 'yaml',
+          category: 'generated',
+          expectRoute: 'generated',
+        },
+        makePlan({ route: 'generated_sql' }),
+        manifest,
+      ),
+      scoreCase(
+        {
+          name: 'refusal',
+          question: 'q3',
+          source: 'yaml',
+          category: 'insufficient_context',
+          expectRefuse: true,
+        },
+        makePlan({ route: 'clarify', blocking: true }),
+        manifest,
+      ),
+      scoreCase(
+        {
+          name: 'research',
+          question: 'q4',
+          source: 'yaml',
+          category: 'conflict',
+          expectRoute: 'research',
+        },
+        makePlan({ route: 'research' }),
+        manifest,
+      ),
+    ];
+
+    expect(computeDistributions(results)).toEqual({
+      actualRoutes: {
+        certified: 1,
+        generated: 1,
+        missing_context: 1,
+        research: 1,
+      },
+      expectedRoutes: {
+        certified: 1,
+        generated: 1,
+        missing_context: 1,
+        research: 1,
+      },
+      categories: {
+        certified: 1,
+        generated: 1,
+        insufficient_context: 1,
+        conflict: 1,
+        wrong_grain: 0,
+      },
+      sources: {
+        block_example: 1,
+        yaml: 3,
+      },
+    });
   });
 });
 
@@ -295,6 +396,7 @@ describe('meetsThresholds', () => {
     grainMatchPrecision: 0.7,
     refusalPrecision: 1,
     refusalRecall: 0.85,
+    answerRate: 0.9,
   };
 
   it('passes when above both thresholds', () => {
@@ -309,8 +411,13 @@ describe('meetsThresholds', () => {
     expect(meetsThresholds(base, null, 0.9)).toBe(false);
   });
 
+  it('fails when answer rate is below the answer-rate threshold', () => {
+    expect(meetsThresholds(base, null, null, 0.95)).toBe(false);
+  });
+
   it('ignores a threshold when the dimension has no measurable data (null score)', () => {
     expect(meetsThresholds({ ...base, refusalRecall: null }, null, 0.9)).toBe(true);
+    expect(meetsThresholds({ ...base, answerRate: null }, null, null, 1)).toBe(true);
   });
 });
 
@@ -389,6 +496,43 @@ function seedProject(): string {
 }
 
 describe('runEval (end-to-end against the real router)', () => {
+  it('passes the checked-in lineage-app golden eval fixture at strict thresholds', async () => {
+    const report = await runEvalHarness(join(FIXTURES_ROOT, 'lineage-app'), {
+      includeBlockExamples: true,
+      minRouteAccuracy: 1,
+      minRefusal: 1,
+      minAnswerRate: 1,
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.scores.total).toBe(7);
+    expect(report.scores.answerRate).toBe(1);
+    expect(report.scores.routeAccuracy).toBe(1);
+    expect(report.scores.refusalRecall).toBe(1);
+  });
+
+  it('passes the checked-in jaffle supply-chain golden eval fixture at strict thresholds', async () => {
+    const report = await runEvalHarness(join(FIXTURES_ROOT, 'jaffle-supply-chain'), {
+      includeBlockExamples: true,
+      minRouteAccuracy: 1,
+      minRefusal: 1,
+      minAnswerRate: 1,
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.scores.total).toBe(14);
+    expect(report.scores.answerRate).toBe(1);
+    expect(report.scores.routeAccuracy).toBe(1);
+    expect(report.scores.blockSelectionAccuracy).toBe(1);
+    expect(report.scores.grainMatchPrecision).toBe(1);
+    expect(report.scores.refusalRecall).toBe(1);
+    expect(report.results.find((result) => result.name === 'supply chain product order details require generated SQL')).toMatchObject({
+      passed: true,
+      actualRoute: 'generated',
+      expectRoute: 'generated',
+    });
+  });
+
   it('emits a JSON report scoring a certified-exact example and a refusal', async () => {
     const projectRoot = seedProject();
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -397,11 +541,15 @@ describe('runEval (end-to-end against the real router)', () => {
 
     const payload = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
     expect(payload.scores.total).toBe(2);
+    expect(payload.scores.answerRate).toBe(1);
+    expect(payload.distributions.actualRoutes.certified).toBe(1);
+    expect(Object.values(payload.distributions.actualRoutes).reduce((sum: number, count) => sum + Number(count), 0)).toBe(2);
 
     const certified = payload.results.find((r: { source: string }) => r.source === 'block_example');
     expect(certified.actualRoute).toBe('certified');
     expect(certified.actualBlock).toBe('Top 10 Goal Scorers');
     expect(certified.passed).toBe(true);
+    expect(certified.trace.map((stage: { stage: string }) => stage.stage)).toEqual(['context', 'route', 'scoring']);
 
     const refusal = payload.results.find((r: { source: string }) => r.source === 'yaml');
     expect(refusal.expectRefuse).toBe(true);

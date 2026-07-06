@@ -1,11 +1,13 @@
 /**
- * YAML-based semantic layer loader.
- * Reads metric, dimension, hierarchy, cube, and block-companion YAML files
- * from a project's semantic-layer/ directory and returns a populated SemanticLayer.
+ * YAML-based semantic layer loader (browser-safe).
+ *
+ * This module contains only pure string/object parsing and serialization —
+ * no filesystem access — so it is safe to include in browser bundles. The
+ * node-only directory loaders (`loadSemanticLayerFromDir`) that read from disk
+ * live in the sibling `yaml-loader.node.ts` to keep `node:fs`/`node:path` out
+ * of the browser-reachable import graph.
  */
 
-import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
 import * as yaml from 'js-yaml';
 import {
   SemanticLayer,
@@ -15,50 +17,9 @@ import {
   parseCubeDefinition,
   parseSegmentDefinition,
   parsePreAggregationDefinition,
+  type MetricDefinition,
+  type DimensionDefinition,
 } from './semantic-layer.js';
-
-/**
- * Load a SemanticLayer from a directory on disk.
- * Expected structure:
- *   semanticLayerDir/
- *     metrics/       → *.yaml metric definitions
- *     dimensions/    → *.yaml dimension definitions
- *     hierarchies/   → *.yaml hierarchy definitions
- *     cubes/         → *.yaml cube definitions
- *     segments/      → *.yaml segment definitions
- *     pre_aggregations/ → *.yaml pre-aggregation definitions
- *     blocks/        → *.yaml block companion definitions (metadata only, not loaded into layer)
- */
-export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLayer {
-  const layer = new SemanticLayer();
-
-  const subdirs: Array<{ folder: string; keys: string[]; loader: (raw: Record<string, unknown>) => void }> = [
-    { folder: 'metrics', keys: ['metrics'], loader: (raw) => addIfNamed(parseMetricDefinition(raw), (item) => layer.addMetric(item)) },
-    { folder: 'dimensions', keys: ['dimensions'], loader: (raw) => addIfNamed(parseDimensionDefinition(raw), (item) => layer.addDimension(item)) },
-    { folder: 'hierarchies', keys: ['hierarchies'], loader: (raw) => addIfNamed(parseHierarchyDefinition(raw), (item) => layer.addHierarchy(item)) },
-    { folder: 'cubes', keys: ['cubes'], loader: (raw) => addIfNamed(parseCubeDefinition(raw), (item) => layer.addCube(item)) },
-    { folder: 'segments', keys: ['segments'], loader: (raw) => addIfNamed(parseSegmentDefinition(raw), (item) => layer.addSegment(item)) },
-    { folder: 'pre_aggregations', keys: ['pre_aggregations', 'preAggregations'], loader: (raw) => addIfNamed(parsePreAggregationDefinition(raw), (item) => layer.addPreAggregation(item)) },
-  ];
-
-  for (const { folder, keys, loader } of subdirs) {
-    const dir = join(semanticLayerDir, folder);
-    if (!existsSync(dir)) continue;
-    for (const filePath of collectYamlFiles(dir)) {
-      try {
-        const content = readFileSync(filePath, 'utf-8');
-        const raw = yaml.load(content) as Record<string, unknown>;
-        if (raw && typeof raw === 'object') {
-          for (const item of expandDefinitions(raw, keys)) loader(item);
-        }
-      } catch {
-        // Skip malformed YAML files
-      }
-    }
-  }
-
-  return layer;
-}
 
 /**
  * Load a SemanticLayer from pre-read file contents (no filesystem access needed).
@@ -108,7 +69,63 @@ export function loadSemanticLayerFromConfig(
   return layer;
 }
 
-function expandDefinitions(raw: Record<string, unknown>, collectionKeys: string[]): Record<string, unknown>[] {
+/**
+ * Serialize a MetricDefinition back into stable semantic-layer YAML.
+ * Used by governance flows that propose human-reviewed semantic changesets.
+ */
+export function serializeMetricDefinitionToYaml(metric: MetricDefinition): string {
+  return dumpSemanticYaml(stripUndefined({
+    name: metric.name,
+    label: metric.label,
+    description: metric.description,
+    domain: metric.domain,
+    status: metric.status,
+    sql: metric.sql,
+    type: metric.type,
+    table: metric.table,
+    filters: metric.filters,
+    filter: metric.filter,
+    tags: metric.tags,
+    owner: metric.owner,
+    cube: metric.cube,
+    aggregation: metric.aggregation,
+    metricType: metric.metricType,
+    typeParams: metric.typeParams,
+    aggTimeDimension: metric.aggTimeDimension,
+    source: serializeSourceMetadata(metric.source),
+  }));
+}
+
+/**
+ * Serialize a DimensionDefinition back into stable semantic-layer YAML.
+ * This mirrors the metric serializer so future composting can propose reusable
+ * dimensions without hand-building YAML strings.
+ */
+export function serializeDimensionDefinitionToYaml(dimension: DimensionDefinition): string {
+  return dumpSemanticYaml(stripUndefined({
+    name: dimension.name,
+    label: dimension.label,
+    description: dimension.description,
+    domain: dimension.domain,
+    status: dimension.status,
+    sql: dimension.sql,
+    type: dimension.type,
+    table: dimension.table,
+    tags: dimension.tags,
+    owner: dimension.owner,
+    cube: dimension.cube,
+    expr: dimension.expr,
+    isTimeDimension: dimension.isTimeDimension,
+    typeParams: dimension.typeParams,
+    source: serializeSourceMetadata(dimension.source),
+  }));
+}
+
+/**
+ * Expand a raw YAML document into individual definition records. Shared by the
+ * browser-safe config loader and the node-only directory loader.
+ */
+export function expandDefinitions(raw: Record<string, unknown>, collectionKeys: string[]): Record<string, unknown>[] {
   for (const key of collectionKeys) {
     const collection = raw[key];
     if (Array.isArray(collection)) {
@@ -119,24 +136,31 @@ function expandDefinitions(raw: Record<string, unknown>, collectionKeys: string[
   return [];
 }
 
-function addIfNamed<T extends { name: string }>(item: T, add: (item: T) => void): void {
-  if (item.name.trim().length > 0) add(item);
+function dumpSemanticYaml(value: Record<string, unknown>): string {
+  return yaml.dump(value, {
+    lineWidth: 120,
+    noRefs: true,
+    sortKeys: false,
+  });
 }
 
-function collectYamlFiles(dir: string): string[] {
-  const results: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const filePath = join(dir, entry);
-    try {
-      const stat = statSync(filePath);
-      if (stat.isDirectory()) {
-        results.push(...collectYamlFiles(filePath));
-      } else if (stat.isFile() && (extname(entry) === '.yaml' || extname(entry) === '.yml')) {
-        results.push(filePath);
-      }
-    } catch {
-      // Skip unreadable entries.
-    }
-  }
-  return results;
+function stripUndefined<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
+}
+
+function serializeSourceMetadata(source: MetricDefinition['source'] | DimensionDefinition['source']): Record<string, unknown> | undefined {
+  if (!source) return undefined;
+  return stripUndefined({
+    provider: source.provider,
+    objectType: source.objectType,
+    objectId: source.objectId,
+    objectName: source.objectName,
+    importedAt: source.importedAt,
+    extra: source.extra,
+  });
+}
+
+/** Add a definition to the layer only when it has a non-empty name. Shared helper. */
+export function addIfNamed<T extends { name: string }>(item: T, add: (item: T) => void): void {
+  if (item.name.trim().length > 0) add(item);
 }

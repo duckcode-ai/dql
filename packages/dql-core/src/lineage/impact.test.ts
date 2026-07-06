@@ -169,6 +169,46 @@ describe('computeImpact — re-cert list', () => {
     expect(mid?.invalidatedBy).toEqual(['base']);
   });
 
+  it('can require recertification for certified semantic definitions downstream of a changed lineage node', () => {
+    const g = new LineageGraph();
+    g.addNode({ id: 'dbt_model:orders', type: 'dbt_model', name: 'orders' });
+    g.addNode({
+      id: 'metric:total_revenue',
+      type: 'metric',
+      name: 'total_revenue',
+      domain: 'finance',
+      owner: 'finance@example.com',
+      status: 'certified',
+      metadata: { filePath: 'semantic-layer/metrics/revenue.yaml' },
+    });
+    g.addEdge({ source: 'dbt_model:orders', target: 'metric:total_revenue', type: 'aggregates' });
+
+    const report = computeImpact(g, [
+      {
+        name: 'orders',
+        nodeId: 'dbt_model:orders',
+        verdict: 'semantic',
+        changedFields: ['columns.amount'],
+        structural: false,
+      },
+    ]);
+
+    expect(report.requiresRecert).toEqual([
+      {
+        id: 'metric:total_revenue',
+        type: 'metric',
+        name: 'total_revenue',
+        domain: 'finance',
+        owner: 'finance@example.com',
+        status: 'certified',
+        filePath: 'semantic-layer/metrics/revenue.yaml',
+        recommendedStatus: 'pending_recertification',
+        invalidatedBy: ['orders'],
+      },
+    ]);
+    expect(report.hasCertifiedInvalidation).toBe(true);
+  });
+
   it('a non-semantic change produces no downstream impact and no re-cert', () => {
     const g = buildGraph();
     const report = computeImpact(g, [

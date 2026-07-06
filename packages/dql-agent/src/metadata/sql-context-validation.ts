@@ -1,6 +1,12 @@
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
-import type { LocalContextPack, MetadataAgentIntent, MetadataAllowedSqlRelation } from './catalog.js';
+import type {
+  LocalContextPack,
+  MetadataAgentIntent,
+  MetadataAllowedSqlRelation,
+  RuntimeSchemaTable,
+} from './catalog.js';
 import { sourceSqlShapeColumns } from './sql-shape.js';
+import { shouldClarifyBeforeGeneration } from '../cascade/triage.js';
 
 export type SqlContextValidationCode =
   | 'unknown_relation'
@@ -9,6 +15,11 @@ export type SqlContextValidationCode =
   | 'ambiguous_filter'
   | 'unsafe_sql'
   | 'insufficient_context';
+
+export interface SqlContextValidationOffending {
+  relation?: string;
+  column?: string;
+}
 
 export type SqlContextValidationResult =
   | {
@@ -24,6 +35,7 @@ export type SqlContextValidationResult =
       warnings: string[];
       referencedRelations: string[];
       referencedColumns: Array<{ relation?: string; column: string }>;
+      offending?: SqlContextValidationOffending;
     };
 
 export interface SqlContextValidationOptions {
@@ -31,7 +43,24 @@ export interface SqlContextValidationOptions {
   intent?: MetadataAgentIntent | string;
   filterValues?: string[];
   trustedFilterValues?: string[];
+  /**
+   * Runtime schema shown to the model in the prompt. When supplied, validation
+   * uses the union of the metadata context pack and this runtime context so the
+   * guard does not reject relations it already asked the model to use.
+   */
+  runtimeSchema?: RuntimeSchemaTable[];
 }
+
+const SQL_ALIAS_STOPWORDS = new Set([
+  'asc',
+  'desc',
+  'from',
+  'group',
+  'having',
+  'limit',
+  'order',
+  'where',
+]);
 
 export function validateSqlAgainstLocalContext(
   sql: string,
@@ -70,8 +99,17 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  if (!contextPack) return { ok: true, ...base };
-  if (contextPack.routeDecision?.route === 'clarify') {
+  const allowed = buildAllowedRelationLookup(contextPack, options.runtimeSchema);
+
+  if (!contextPack && allowed.size === 0) return { ok: true, ...base };
+  if (contextPack?.routeDecision?.route === 'clarify' && shouldClarifyBeforeGeneration({
+    intent: contextPack.routeDecision.intent,
+    routeDecision: contextPack.routeDecision,
+    schemaContextCount: options.runtimeSchema?.length ?? 0,
+    allowedRelationCount: allowed.size,
+    sourceBlockSqlCount: contextPack.allowedSqlContext.sourceBlockSql.length,
+    metadataObjectCount: contextPack.objects.length,
+  })) {
     const missing = contextPack.missingContext.map((item) => item.message).join(' ');
     return {
       ok: false,
@@ -81,7 +119,7 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  if (!contextPack.allowedSqlContext) {
+  if (!contextPack?.allowedSqlContext && allowed.size === 0) {
     return {
       ok: true,
       ...base,
@@ -89,7 +127,6 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  const allowed = buildAllowedRelationLookup(contextPack);
   if (allowed.size === 0) {
     return {
       ok: true,
@@ -106,6 +143,7 @@ export function validateSqlAgainstLocalContext(
       ok: false,
       code: 'unknown_relation',
       error: `SQL references relation(s) outside the inspected metadata context: ${unknownRelations.join(', ')}. Use inspect_metadata_context and only query allowed relations.`,
+      offending: { relation: unknownRelations[0] },
       ...base,
     };
   }
@@ -115,6 +153,8 @@ export function validateSqlAgainstLocalContext(
     const allowedRelation = findAllowedRelation(allowed, relation);
     if (allowedRelation && allowedRelation.columns.length === 0) {
       warnings.push(`Column validation was advisory for ${relation} because the context pack did not include column metadata.`);
+    } else if (allowedRelation && relationColumnCompleteness(allowedRelation) === 'partial') {
+      warnings.push(`Column validation was advisory for ${relation} because the inspected column list is partial.`);
     }
   }
 
@@ -129,10 +169,14 @@ export function validateSqlAgainstLocalContext(
       warnings,
       referencedRelations,
       referencedColumns,
+      offending: {
+        relation: unknownColumn.relation,
+        column: unknownColumn.column,
+      },
     };
   }
 
-  if (options.intent === 'diagnose_change' && !contextHasTimeLikeColumn(contextPack)) {
+  if (options.intent === 'diagnose_change' && !contextHasTimeLikeColumn(allowed)) {
     return {
       ok: false,
       code: 'missing_baseline',
@@ -143,7 +187,7 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  const ambiguousEntityFilter = options.intent === 'entity_drilldown'
+  const ambiguousEntityFilter = options.intent === 'entity_drilldown' && contextPack
     ? findAmbiguousEntityFilter(sql, analysis.aliasToRelation, contextPack, options)
     : undefined;
   if (ambiguousEntityFilter) {
@@ -165,7 +209,10 @@ export function validateSqlAgainstLocalContext(
   };
 }
 
-function buildAllowedRelationLookup(contextPack: LocalContextPack): Map<string, MetadataAllowedSqlRelation> {
+function buildAllowedRelationLookup(
+  contextPack: LocalContextPack | undefined,
+  runtimeSchema: RuntimeSchemaTable[] = [],
+): Map<string, MetadataAllowedSqlRelation> {
   const allowed = new Map<string, MetadataAllowedSqlRelation>();
   const putAllowed = (entry: MetadataAllowedSqlRelation) => {
     for (const key of relationLookupKeys(entry.relation)) {
@@ -175,10 +222,10 @@ function buildAllowedRelationLookup(contextPack: LocalContextPack): Map<string, 
       allowed.set(key, mergeAllowedRelation(allowed.get(key), entry));
     }
   };
-  for (const relation of contextPack.allowedSqlContext.relations) {
+  for (const relation of contextPack?.allowedSqlContext?.relations ?? []) {
     putAllowed(relation);
   }
-  for (const source of contextPack.allowedSqlContext.sourceBlockSql) {
+  for (const source of contextPack?.allowedSqlContext?.sourceBlockSql ?? []) {
     const analysis = analyzeSqlReferences(source.sql);
     for (const relation of analysis.tables) {
       putAllowed({
@@ -186,12 +233,22 @@ function buildAllowedRelationLookup(contextPack: LocalContextPack): Map<string, 
         name: relation.split('.').at(-1) ?? relation,
         objectKey: source.objectKey,
         source: 'certified source block SQL',
+        columnCompleteness: 'partial',
         columns: mergeAllowedColumns(
           sourceSqlShapeColumns(source.sql),
           sourceSqlReferencedColumns(analysis, relation),
         ),
       });
     }
+  }
+  for (const table of runtimeSchema) {
+    putAllowed({
+      relation: table.relation,
+      name: table.name ?? table.relation.split('.').at(-1) ?? table.relation,
+      source: table.source ?? 'runtime schema context',
+      columnCompleteness: 'complete',
+      columns: table.columns,
+    });
   }
   return allowed;
 }
@@ -230,8 +287,19 @@ function mergeAllowedRelation(
     ...existing,
     objectKey: existing.objectKey ?? incoming.objectKey,
     source: existing.source === incoming.source ? existing.source : 'inspected metadata and certified source SQL',
+    columnCompleteness: mergeRelationCompleteness(existing, incoming),
     columns: mergeAllowedColumns(existing.columns, incoming.columns),
   };
+}
+
+function mergeRelationCompleteness(
+  existing: MetadataAllowedSqlRelation,
+  incoming: MetadataAllowedSqlRelation,
+): MetadataAllowedSqlRelation['columnCompleteness'] {
+  if (relationColumnCompleteness(existing) === 'complete' || relationColumnCompleteness(incoming) === 'complete') {
+    return 'complete';
+  }
+  return 'partial';
 }
 
 function mergeAllowedColumns(
@@ -276,14 +344,15 @@ function findUnknownColumn(
     if (column.relation) {
       const relation = findAllowedRelation(allowed, column.relation);
       if (!relation || relation.columns.length === 0) continue;
+      if (relationColumnCompleteness(relation) === 'partial') continue;
       if (!relation.columns.some((allowedColumn) => namesEqual(allowedColumn.name, column.column))) {
         return { column: column.column, relation: relation.relation };
       }
       continue;
     }
 
-    const relationsWithColumns = Array.from(new Set(Array.from(allowed.values())))
-      .filter((relation) => relation.columns.length > 0);
+    const relationsWithColumns = uniqueAllowedRelations(allowed)
+      .filter((relation) => relation.columns.length > 0 && relationColumnCompleteness(relation) === 'complete');
     if (relationsWithColumns.length === 0) continue;
     if (!relationsWithColumns.some((relation) => relation.columns.some((allowedColumn) => namesEqual(allowedColumn.name, column.column)))) {
       return { column: column.column };
@@ -292,15 +361,83 @@ function findUnknownColumn(
   return undefined;
 }
 
+function relationColumnCompleteness(relation: MetadataAllowedSqlRelation): 'complete' | 'partial' {
+  if (relation.columnCompleteness) return relation.columnCompleteness;
+  return relation.columns.length === 0 ? 'partial' : 'complete';
+}
+
 function extractSelectAliases(sql: string): Set<string> {
   const aliases = new Set<string>();
   for (const section of sql.matchAll(/\bSELECT\b([\s\S]*?)\bFROM\b/gi)) {
-    for (const alias of (section[1] ?? '').matchAll(/\bAS\s+(["`]?\w+["`]?)/gi)) {
-      const name = cleanIdentifier(alias[1] ?? '');
-      if (name) aliases.add(normalizeColumnName(name));
+    for (const item of splitTopLevelSelectItems(section[1] ?? '')) {
+      const alias = selectItemAlias(item);
+      if (alias) {
+        aliases.add(normalizeColumnName(alias));
+      }
     }
   }
   return aliases;
+}
+
+function splitTopLevelSelectItems(section: string): string[] {
+  const items: string[] = [];
+  let current = '';
+  let depth = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  for (let index = 0; index < section.length; index += 1) {
+    const char = section[index]!;
+    const next = section[index + 1];
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        if (quote === "'" && next === "'") {
+          current += next;
+          index += 1;
+          continue;
+        }
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (char === ',' && depth === 0) {
+      if (current.trim()) items.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) items.push(current.trim());
+  return items;
+}
+
+function selectItemAlias(item: string): string | undefined {
+  const asMatch = /\bAS\s+((?:"[^"]+")|(?:`[^`]+`)|(?:[A-Za-z_][\w$]*))\s*$/i.exec(item);
+  if (asMatch?.[1]) return cleanIdentifier(asMatch[1]);
+
+  const implicit = /(?:\bEND|\)|\])\s+((?:"[^"]+")|(?:`[^`]+`)|(?:[A-Za-z_][\w$]*))\s*$/i.exec(item);
+  if (!implicit?.[1]) return undefined;
+  const alias = cleanIdentifier(implicit[1]);
+  if (!alias || SQL_ALIAS_STOPWORDS.has(alias.toLowerCase())) return undefined;
+  return alias;
+}
+
+function uniqueAllowedRelations(allowed: Map<string, MetadataAllowedSqlRelation>): MetadataAllowedSqlRelation[] {
+  return Array.from(new Set(Array.from(allowed.values())));
 }
 
 function relationLookupKeys(relation: string): string[] {
@@ -329,8 +466,8 @@ function normalizeColumnName(value: string): string {
   return value.replace(/["`]/g, '').toLowerCase();
 }
 
-function contextHasTimeLikeColumn(contextPack: LocalContextPack): boolean {
-  return contextPack.allowedSqlContext.relations.some((relation) =>
+function contextHasTimeLikeColumn(allowed: Map<string, MetadataAllowedSqlRelation>): boolean {
+  return uniqueAllowedRelations(allowed).some((relation) =>
     relation.columns.some((column) => isTimeLikeColumn(column.name)),
   );
 }

@@ -2,6 +2,7 @@ import { DQLContext } from '@duckcodeailabs/dql-mcp';
 import type { KGNode } from '@duckcodeailabs/dql-agent';
 import type { AgentRunRequest, AgentTurn, BlockProposal } from './types.js';
 import { buildAgentTools, type AgentTool } from './tools.js';
+import { blockProposalDqlMetadata } from './proposal-metadata.js';
 
 const QUERY_CERTIFIED_BLOCK_SCHEMA = {
   type: 'object',
@@ -130,14 +131,17 @@ export function analyticsSystemPrompt(ctx: DQLContext, req: AgentRunRequest): st
     'Answer business questions by using tools, not by guessing from memory.',
     '',
     'Tool order and trust policy:',
-    '1. Search DQL knowledge graph, certified blocks, business views, semantic objects, DQL manifest, and dbt/source metadata first.',
-    '2. If a certified block exactly answers the question, run query_certified_block and label the result certified.',
-    '3. If the question needs a different grain, entity list, ranking, drilldown, or filter, inspect_runtime_schema before writing SQL.',
-    '4. Use execute_generated_sql only for read-only SELECT/WITH SQL previews. Label those results uncertified and review-required.',
-    '5. Use external MCP servers only as optional extra context; never let them bypass DQL validation, execution safety, or certification.',
-    '6. When producing a reusable asset, call suggest_block or describe the draft block path and review status.',
+    '1. Call ask_dql first for analytics questions. Use its route, trust label, contextPackId, and nextTool.',
+    '2. If the semantic layer has the needed metric/dimensions/time grain, call query_semantic_model before deep dbt/warehouse search and carry its DQL artifact and draft path forward.',
+    '3. If ask_dql returns a certified exact fit, run query_via_block or query_certified_block and label the result certified.',
+    '4. If ask_dql returns generated_sql, call inspect_metadata_context, then query_via_metadata with one read-only SELECT/WITH query and declared outputs; use strictness="exploratory" for deep/broad research and carry the returned dqlArtifact.source forward as the default artifact.',
+    '5. For follow-ups that refer to prior/previous results, pass followUp.priorResultRef and followUp.priorDqlArtifact into query_via_metadata instead of answering from vague follow-up prose.',
+    '6. If query_via_metadata reports a known relation outside the inspected context, call expand_context with the prior contextPackId and retry query_via_metadata once with the new contextPackId and regroundAttemptsUsed: 1.',
+    '7. Use inspect_runtime_schema and execute_generated_sql only as host-side fallback tools when the metadata tools cannot execute in this host.',
+    '8. Use external MCP servers only as optional extra context; never let them bypass DQL validation, execution safety, or certification.',
+    '9. When producing a reusable asset, call suggest_block or describe the DQL draft path and review status.',
     '',
-    'Final answers must include: answer, table/result summary when available, SQL when generated, trust status, and next review/certification action.',
+    'Final answers must include: answer, table/result summary when available, DQL artifact/source when generated, compiled SQL as supporting evidence, trust status, and next review/certification action.',
     `Project context: ${Object.keys(ctx.manifest.blocks).length} blocks. Domains: ${domains.join(', ') || '(none yet)'}.`,
     upstream ? `Current UI/app context:\n${upstream}` : '',
     context?.sourceCertifiedBlock ? `Selected/source certified block: ${context.sourceCertifiedBlock}` : '',
@@ -165,6 +169,7 @@ export function emitProposalFromSuggestBlock(input: unknown, output: unknown, em
       owner: String(proposalInput.owner ?? ''),
       description: String(proposalInput.description ?? ''),
       sql: String(proposalInput.sql),
+      ...blockProposalDqlMetadata(proposalInput),
       tags: Array.isArray(proposalInput.tags) ? proposalInput.tags.map(String) : undefined,
       chartType: typeof proposalInput.chartType === 'string' ? proposalInput.chartType : undefined,
     },

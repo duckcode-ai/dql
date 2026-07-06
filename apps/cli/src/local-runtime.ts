@@ -1,4 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -19,6 +20,8 @@ import {
 } from '@duckcodeailabs/dql-notebook';
 import {
   loadSemanticLayerFromDir,
+  normalizeDqlArtifactReference,
+  serializeMetricDefinitionToYaml,
   resolveSemanticLayerAsync,
   getDialect,
   Parser,
@@ -38,6 +41,7 @@ import {
   queryCompleteLineagePaths,
   LineageGraph,
   type SemanticLayer,
+  type MetricDefinition,
   type SemanticLayerProviderConfig,
   type SemanticLayerResult,
   type LineageBlockInput,
@@ -111,6 +115,7 @@ import {
   loadSkills,
   writeSkill,
   deleteSkill,
+  deriveGeneratedDraftSlug,
   type Skill,
   type WriteSkillInput,
   type AgentAnswer,
@@ -134,8 +139,10 @@ import {
   planResearch,
   loadSemanticMetrics,
   routeReasoningEffort,
+  routeForCascadeAnswerTier,
   clampReasoningEffort,
   bumpReasoningEffort,
+  upsertGeneratedDqlArtifactDraft,
   type AgentRun,
   type AgentRunArtifact,
   type AgentRunEvaluation,
@@ -150,6 +157,9 @@ import {
   type AgentRunStopReason,
   type AgentRunTrustState,
   type AgentRouteExecutor,
+  type AnalysisDepth,
+  type CascadeAnswerResult,
+  type CascadeAnswerRouteTier,
   type ConversationalKind,
   type PlanBlock,
   type ReasoningEffort,
@@ -188,7 +198,7 @@ import {
   runtimeVariables,
 } from './governance-runtime.js';
 import { LocalAppStorage, LocalNotebookResearchStorage, defaultLocalAppsDbPath, defaultNotebookResearchDbPath } from '@duckcodeailabs/dql-project';
-import type { BlockRecord, NotebookResearchDiagnostics, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
+import type { BlockRecord, NotebookResearchDiagnostics, NotebookResearchDqlArtifact, NotebookResearchDqlPromotion, NotebookResearchDqlPromotionAction, NotebookResearchIntent, NotebookResearchNextActionFilter, NotebookResearchPlan, NotebookResearchReadinessFilter, NotebookResearchRun, NotebookResearchRunListResult, NotebookResearchSort, NotebookResearchSourceCellInput, TestAssertionResult, TestResultSummary } from '@duckcodeailabs/dql-project';
 import {
   Certifier,
   ENTERPRISE_RULES,
@@ -360,6 +370,18 @@ function parseAgentRunRequestedMode(value: unknown): AgentRunRequestedMode | und
     : undefined;
 }
 
+function parseAgentRunReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  return value === 'low' || value === 'medium' || value === 'high'
+    ? value
+    : undefined;
+}
+
+function parseAgentRunAnalysisDepth(value: unknown): AnalysisDepth | undefined {
+  return value === 'quick' || value === 'deep'
+    ? value
+    : undefined;
+}
+
 function parseAgentRunSelectedObject(value: unknown): AgentRunSelectedObject | undefined {
   const record = agentRunRecord(value);
   if (!record) return undefined;
@@ -410,8 +432,18 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       history: parseAgentRunHistory(record.history),
       threadId: agentRunString(record.threadId),
       runId: agentRunString(record.runId),
+      reasoningEffort: parseAgentRunReasoningEffort(record.reasoningEffort),
+      analysisDepth: parseAgentRunAnalysisDepth(record.analysisDepth) ?? parseAgentRunAnalysisDepth(record.depth),
     },
   };
+}
+
+export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'dqlArtifact'>): boolean {
+  if (governedAnswer.kind === 'no_answer') return false;
+  if (governedAnswer.kind === 'certified' || governedAnswer.certification === 'certified') return false;
+  const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
+  if (governedAnswer.dqlArtifact && finalText) return false;
+  return true;
 }
 
 // ── Server-side conversation threads ────────────────────────────────────────
@@ -442,6 +474,9 @@ async function conversationContextFromThread(
       trustLabel: turn.trustLabel,
       certification: turn.certification,
       contextPackId: turn.contextPackId,
+      dqlArtifact: turn.dqlArtifact,
+      cascade: turn.cascade,
+      sourceSql: turn.sql,
       requestedFilters: conversationStringArray(contract.filters),
       requestedDimensions: conversationStringArray(contract.dimensions),
       requestedMeasures: conversationStringArray(contract.measures),
@@ -452,6 +487,7 @@ async function conversationContextFromThread(
             rowsSample: turn.result.rowsSample,
             dimensionValues: turn.result.dimensionValues,
             measureColumns: turn.result.measureColumns,
+            rowCount: turn.result.rowCount,
           })
         : undefined,
     });
@@ -506,6 +542,7 @@ function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
   const questionPlan = agentRunRecord(contextPack?.questionPlan);
   const requestedShape = agentRunRecord(questionPlan?.requestedShape);
   const rowCountRaw = result?.rowCount;
+  const measureColumns = conversationMeasureColumns(columns, requestedShape, rows);
   return {
     question: run.question,
     answerSummary: run.answer ?? run.summary,
@@ -516,11 +553,14 @@ function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
       ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
     contextPackId: agentRunString(payload?.contextPackId),
     sql: agentRunString(payload?.proposedSql) ?? agentRunString(payload?.sql),
+    dqlArtifact: agentRunRecord(payload?.dqlArtifact) as ConversationTurnInput['dqlArtifact'],
+    cascade: agentRunRecord(payload?.cascade) as CascadeAnswerResult | undefined,
     result: columns.length > 0 || rows.length > 0
       ? {
           columns,
           rowsSample,
           dimensionValues: conversationDimensionValues(columns, rows),
+          measureColumns,
           rowCount: typeof rowCountRaw === 'number' ? rowCountRaw : rows.length || undefined,
         }
       : undefined,
@@ -536,6 +576,26 @@ function conversationResultColumns(value: unknown): string[] {
       : agentRunString((column as { name?: unknown })?.name) ?? '')
     .filter(Boolean)
     .slice(0, 24);
+}
+
+function conversationMeasureColumns(
+  columns: string[],
+  requestedShape: Record<string, unknown> | undefined,
+  rows: Array<Record<string, unknown>>,
+): string[] | undefined {
+  const requested = conversationStringArray(requestedShape?.measures) ?? [];
+  const numericColumns = columns.filter((column) =>
+    rows.some((row) => typeof row[column] === 'number' && Number.isFinite(row[column] as number))
+  );
+  const metricNamedColumns = columns.filter((column) =>
+    /\b(revenue|sales|amount|total|count|average|avg|sum|spend|cost|margin|profit|value|points?|score|quantity|units?|rate|volume)\b/i.test(
+      column.replace(/_/g, ' '),
+    )
+  );
+  const unique = Array.from(new Set([...requested, ...numericColumns, ...metricNamedColumns]
+    .map((value) => value.trim())
+    .filter(Boolean)));
+  return unique.length > 0 ? unique.slice(0, 24) : undefined;
 }
 
 /** Distinct string values per low-cardinality column — the deictic-resolution fuel. */
@@ -846,7 +906,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
     const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
-    const reasoningEffort = resolveRunReasoningEffort(projectRoot, resolvedProvider, route, isRepair);
+    const reasoningEffort = request.reasoningEffort
+      ? resolveRequestedRunReasoningEffort(projectRoot, resolvedProvider, request.reasoningEffort, isRepair)
+      : resolveRunReasoningEffort(projectRoot, resolvedProvider, route, isRepair);
+    const analysisDepth = request.analysisDepth ?? (route === 'research' ? 'deep' as const : undefined);
     const contextEnvelope = {
       mode: 'agent_run',
       selectedObject: request.selectedObject,
@@ -854,12 +917,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       instruction: [
         'Route through the governed DQL answer loop.',
         'Prefer certified DQL blocks when they exactly cover the question.',
-        'Generated SQL remains review-required and must use the bounded preview executor.',
+        'Generated DQL artifacts remain review-required; SQL is only the bounded preview/compiled evidence.',
         'If the question needs investigation, return the clearest answer and next review action without certifying generated work.',
         ...(isRepair ? [`This is a repair attempt — fix the previous failure: ${repair?.repairHint}`] : []),
       ].join(' '),
     };
     const controller = new AbortController();
+    // Best-effort active warehouse dialect so Lane-2 semantic compiles emit
+    // dialect-correct SQL (e.g. DATE_TRUNC / identifier quoting). Absent when no
+    // connection is configured — the compiler then uses its default dialect.
+    let semanticDriver: string | undefined;
+    try {
+      semanticDriver = requireActiveConnection().driver;
+    } catch {
+      semanticDriver = undefined;
+    }
     await runner.run(
       {
         provider: resolvedProvider,
@@ -873,7 +945,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sql: JSON.stringify(contextEnvelope, null, 2),
         },
         reasoningEffort,
+        ...(analysisDepth ? { analysisDepth } : {}),
         projectRoot,
+        ...(semanticDriver ? { semanticDriver } : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
         getSchemaContext: getSchemaContextForAgent,
@@ -892,6 +966,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       throw new Error(providerError ?? 'The AI provider did not return a governed answer.');
     }
     return governedAnswer;
+  }
+
+  function resolvedRunRouteFromAnswer(governedAnswer: AgentAnswer): AgentRunRoute | undefined {
+    return routeForCascadeAnswerTier(governedAnswer.route?.tier as CascadeAnswerRouteTier | undefined);
+  }
+
+  function groundingGapRepairHint(governedAnswer: AgentAnswer): string {
+    const details = governedAnswer.refusalDetails;
+    if (!details) return governedAnswer.text;
+    const offending = details.offending;
+    const tokens = [
+      details.code ? `code=${details.code}` : undefined,
+      offending?.relation ? `relation=${offending.relation}` : undefined,
+      offending?.column ? `column=${offending.column}` : undefined,
+      details.message ? `message=${details.message}` : undefined,
+    ].filter((token): token is string => Boolean(token));
+    return tokens.length > 0 ? tokens.join('; ') : governedAnswer.text;
   }
 
   const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emitAnswerDelta }) => {
@@ -927,14 +1018,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ],
       };
     }
+    const resolvedRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
-    const needsClarification = governedAnswer.kind === 'no_answer';
+    const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
+    const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
+    const groundingRepairHint = isGroundingGap ? groundingGapRepairHint(governedAnswer) : undefined;
+    // A provider outage is a retryable infrastructure failure, not a question the
+    // user needs to clarify — surface it as blocked so the UI offers a retry.
+    const needsClarification = governedAnswer.kind === 'no_answer' && !isGroundingGap && !isProviderError;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
-    // Synthesis: for a genuinely generated (non-certified) answer, compose an
-    // adaptive, well-formatted reply over the executed rows — streamed — instead of
-    // the loop's raw draft. Certified answers keep their fast path (no extra call).
+    const runnableSql = governedAnswer.kind === 'no_answer' ? undefined : sql;
+    // Synthesis is a legacy polish pass. Certified/no-answer paths and lanes
+    // that already produced DQL-first final prose keep the fast path.
     let synthesizedAnswer: string | undefined;
-    if (!needsClarification && !isCertified) {
+    if (shouldSynthesizeAgentRunAnswer(governedAnswer)) {
       try {
         const provider = await createBlockStudioAssistProvider(projectRoot);
         if (provider) {
@@ -968,23 +1065,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         synthesizedAnswer = undefined;
       }
     }
-    const status: AgentRunStatus = needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
-    const trustState: AgentRunTrustState = needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
-    const stopReason: AgentRunStopReason = needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
+    const status: AgentRunStatus = isProviderError ? 'blocked' : needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
+    const trustState: AgentRunTrustState = isProviderError ? 'blocked' : needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
+    const stopReason: AgentRunStopReason = isProviderError ? 'blocked' : needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
       : [
-          ...(sql ? [{ id: 'insert-sql', label: 'Insert SQL cell', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
+          { id: 'create-block', label: governedAnswer.dqlArtifact ? 'Review DQL draft' : 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
           { id: 'research-gap', label: 'Research deeper', route: 'research' },
-          { id: 'create-block', label: 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+          ...(runnableSql ? [{ id: 'insert-sql', label: 'Insert SQL preview', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
         ];
     return {
+      resolvedRoute,
       summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
       trustState,
       stopReason,
-      artifacts: needsClarification
+      artifacts: governedAnswer.kind === 'no_answer'
         ? []
         : [agentRunArtifact(
             'answer',
@@ -994,7 +1092,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             isCertified ? 'certified' : 'review_required',
           )],
       evaluations: [
-        agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.'),
+        agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.', {
+          plannedRoute: route,
+          resolvedRoute,
+          aiRoute: governedAnswer.route,
+        }),
         agentRunEvaluation(
           'trust-boundary',
           'Trust boundary',
@@ -1007,6 +1109,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               : 'The answer is generated or semantic-layer backed and remains review-required.',
           governedAnswer.route,
         ),
+        ...(isGroundingGap ? [
+          {
+            ...agentRunEvaluation(
+              'grounding-gap',
+              'Metadata grounding',
+              false,
+              'warning',
+              'The answer loop found a metadata grounding gap that can be retried with wider context.',
+              {
+                refusalCode: governedAnswer.refusalCode,
+                refusalDetails: governedAnswer.refusalDetails,
+                validationWarnings: governedAnswer.validationWarnings,
+                route: governedAnswer.route,
+              },
+            ),
+            suggestedRepair: groundingRepairHint,
+            repairAction: { kind: 'retry' as const, hint: groundingRepairHint },
+          },
+        ] : []),
         ...(governedAnswer.executionError ? [
           agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
         ] : []),
@@ -1236,8 +1357,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? [{ id: 'answer-follow-up', label: 'Answer follow-up', route: 'research' }]
           : [
               ...(researchRun?.id ? [{ id: 'open-research', label: 'Open research dossier', artifactKind: 'research_run' as const }] : []),
-              ...(researchRun?.generatedSql || researchRun?.reviewedSql ? [{ id: 'insert-sql', label: 'Insert SQL cell', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
-              { id: 'create-block', label: 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+              { id: 'create-block', label: 'Review DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+              ...(researchRun?.generatedSql || researchRun?.reviewedSql ? [{ id: 'insert-sql', label: 'Insert SQL preview', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
             ],
       };
     },
@@ -1252,12 +1373,79 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           agentRunEvaluation('review-boundary', 'Review boundary', true, 'warning', 'Generated SQL must be reviewed before it becomes certified analytics.'),
         ],
         nextActions: [
-          { id: 'insert-sql', label: 'Insert SQL cell', artifactKind: 'sql_cell' },
-          { id: 'create-block', label: 'Promote to DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
+          { id: 'insert-sql', label: 'Insert SQL preview', artifactKind: 'sql_cell' },
+          { id: 'create-block', label: 'Review as DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
         ],
       };
     },
     dql_block_draft: async ({ request, routeDecision, attempt, repairHint }) => {
+      const contextRecord = agentRunRecord(request.conversationContext);
+      const carriedDqlArtifact = normalizeDqlArtifactReference(contextRecord?.dqlArtifact)
+        ?? normalizeDqlArtifactReference(request.workspaceContext?.dqlArtifact);
+      if (carriedDqlArtifact && (attempt ?? 0) === 0) {
+        const sourceQuestion = agentRunString(contextRecord?.sourceQuestion) ?? request.question;
+        const session = await createDqlArtifactGenerationSessionForProject(projectRoot, {
+          question: sourceQuestion,
+          dqlArtifact: carriedDqlArtifact,
+          inputMode: 'upload',
+          inputPath: carriedDqlArtifact.sourcePath,
+          domain: agentRunWorkspaceValue(request, 'domain'),
+          owner: agentRunWorkspaceValue(request, 'owner'),
+          tags: ['agent-run', 'review-required'],
+          contextPackId: agentRunString(contextRecord?.contextPackId),
+          routeIntent: agentRunString(contextRecord?.route),
+          sourceBlock: carriedDqlArtifact.sourcePath,
+        }, semanticLayer);
+        const candidate = session.candidates[0];
+        const validation = candidate?.validation && typeof candidate.validation === 'object'
+          ? candidate.validation as { valid?: boolean; diagnostics?: unknown[] }
+          : undefined;
+        const ready = validation?.valid !== false;
+        const payload = {
+          target: 'block',
+          name: candidate?.name ?? carriedDqlArtifact.name ?? 'DQL block draft',
+          path: candidate?.draftSave?.path ?? candidate?.savedPath,
+          importId: session.id,
+          candidateId: candidate?.id,
+          source: candidate?.dqlSource,
+          dqlSource: candidate?.dqlSource,
+          dqlArtifact: carriedDqlArtifact,
+          certifierVerdict: {
+            ready,
+            diagnostics: validation?.diagnostics ?? [],
+          },
+          generation: session.generation,
+        };
+        return {
+          summary: ready
+            ? 'Saved the generated DQL artifact as a review-required block draft.'
+            : 'Saved the generated DQL artifact as a block draft with review blockers or warnings.',
+          artifacts: [agentRunArtifact(
+            'dql_block_draft',
+            payload.name,
+            payload,
+            payload.path,
+          )],
+          evaluations: [
+            agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to DQL block draft generation.'),
+            agentRunEvaluation('dql-artifact-reuse', 'Used generated DQL artifact', true, 'info', 'Persisted the existing DQL artifact without regenerating it from SQL.', { importId: session.id, path: payload.path }),
+            agentRunEvaluation(
+              'certification-boundary',
+              'Certification boundary',
+              ready,
+              'warning',
+              ready
+                ? 'The draft has no automatic validation blockers, but certification still requires human review.'
+                : 'The draft has validation blockers that must be resolved before certification review.',
+              payload,
+            ),
+          ],
+          nextActions: [
+            { id: 'open-review', label: 'Open review checklist', artifactKind: 'dql_block_draft' },
+            { id: 'build-app', label: 'Build app from block', route: 'app_build', artifactKind: 'app_draft' },
+          ],
+        };
+      }
       const result = await buildAgentPromptArtifact(request, 'block', { attempt, repairHint });
       const ready = result.target === 'block' ? result.certifierVerdict.ready : false;
       return {
@@ -1673,8 +1861,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
-    const scanRuntimeSchema = async (): Promise<AgentSchemaTable[]> => {
-      if (!connection) return [];
+    const scanRuntimeSchema = async (): Promise<{ ranked: AgentSchemaTable[]; snapshot: AgentSchemaTable[] }> => {
+      if (!connection) return { ranked: [], snapshot: [] };
       const result = await executor.executeQuery(
         `SELECT table_schema, table_name, column_name, data_type
          FROM information_schema.columns
@@ -1685,18 +1873,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         runtimeVariables({}),
         connection,
       );
-      return buildAgentSchemaContext(question, result.rows);
+      return {
+        ranked: buildAgentSchemaContext(question, result.rows),
+        snapshot: buildAgentSchemaContext(question, result.rows, { includeUnscored: true, limit: 500 }),
+      };
     };
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
     if (catalogContext.length > 0) {
       if (!connection) return catalogContext;
-      const runtimeContext = shouldAugmentAgentRuntimeSchema(question)
-        ? await scanRuntimeSchema().catch(() => [])
-        : [];
+      const runtimeScan = shouldAugmentAgentRuntimeSchema(question)
+        ? await scanRuntimeSchema().catch(() => undefined)
+        : undefined;
+      const runtimeContext = runtimeScan?.ranked ?? [];
       const merged = mergeAgentSchemaContexts(catalogContext, runtimeContext);
       const enriched = await enrichAgentSchemaContextWithValueMatches(question, merged, executor, connection);
-      recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, runtimeContext.length > 0
-        ? 'catalog plus runtime schema for composite Ask AI question'
+      recordAgentRuntimeSchemaSnapshot(projectRoot, !runtimeScan?.snapshot.length
+        ? enriched
+        : mergeAgentSchemaSampleValues(runtimeScan.snapshot, enriched), runtimeContext.length > 0
+        ? 'full information_schema runtime scan for composite Ask AI question'
         : 'catalog enriched runtime schema');
       return enriched;
     }
@@ -1704,8 +1898,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (!connection) return [];
     try {
       const schemaContext = await scanRuntimeSchema();
-      const enriched = await enrichAgentSchemaContextWithValueMatches(question, schemaContext, executor, connection);
-      recordAgentRuntimeSchemaSnapshot(projectRoot, enriched, 'information_schema runtime scan');
+      const enriched = await enrichAgentSchemaContextWithValueMatches(question, schemaContext.ranked, executor, connection);
+      recordAgentRuntimeSchemaSnapshot(projectRoot, schemaContext.snapshot, 'full information_schema runtime scan');
       return enriched;
     } catch {
       return [];
@@ -1802,6 +1996,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sql: JSON.stringify(contextEnvelope, null, 2),
         },
         reasoningEffort,
+        analysisDepth: 'deep',
         projectRoot,
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -1886,6 +2081,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       intents: 0,
       notebooks: 0,
     },
+    reviewMetrics: {
+      totalReviewCount: 0,
+      openReviewCount: 0,
+      terminalReviewCount: 0,
+      draftCreatedCount: 0,
+      certifiedCount: 0,
+      completedCount: 0,
+      rejectedCount: 0,
+      draftCreationRate: null,
+      certifyConversionRate: null,
+      medianOpenReviewAgeMs: null,
+      medianTimeToDraftMs: null,
+      medianTimeToCertificationMs: null,
+      medianTimeToTerminalMs: null,
+    },
     limit: input.limit,
     offset: input.offset ?? 0,
   });
@@ -1932,6 +2142,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       context?: unknown;
       generatedSql?: string;
       reviewedSql?: string;
+      dqlArtifact?: NotebookResearchDqlArtifact;
     } = {},
   ): Promise<NotebookResearchRun> => {
     const question = notebookResearchString(input.question) || run.question;
@@ -1942,6 +2153,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const context = input.context === undefined ? run.context : input.context;
     let generatedSql = notebookResearchString(input.generatedSql) ?? run.generatedSql;
     let reviewedSql = notebookResearchString(input.reviewedSql) ?? run.reviewedSql;
+    let dqlArtifact = normalizeDqlArtifactReference(input.dqlArtifact) ?? run.dqlArtifact;
     const startedAt = new Date().toISOString();
     storage.updateRun(run.id, {
       domain,
@@ -1952,6 +2164,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       context,
       generatedSql,
       reviewedSql,
+      dqlArtifact,
       status: 'running',
       reviewStatus: 'needs_review',
       error: '',
@@ -1969,8 +2182,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           intent,
           researchPattern: notebookResearchIntentPattern(intent),
         },
-        strictness: 'balanced',
-        limit: 100,
+        strictness: 'exploratory',
+        limit: 160,
       }).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         return {
@@ -2013,6 +2226,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   }, null, 2),
                 },
                 reasoningEffort: resolveRunReasoningEffort(projectRoot, resolvedProvider, 'research', false),
+                analysisDepth: 'deep',
                 projectRoot,
                 executeCertifiedBlock: executeCertifiedBlockForAgent,
                 executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -2032,8 +2246,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           if (!governedAnswer) {
             generationWarnings.push(`AI SQL generation did not return a governed answer. Metadata context was saved for review.${providerError ? ` ${providerError}` : ''}`);
           } else {
+            dqlArtifact = normalizeDqlArtifactReference(governedAnswer.dqlArtifact) ?? dqlArtifact;
             generatedSql = notebookResearchString(governedAnswer.proposedSql) ?? notebookResearchString(governedAnswer.sql);
-            if (!generatedSql) {
+            if (!generatedSql && !dqlArtifact) {
               generationWarnings.push('AI returned a governed answer without SQL. Metadata context was saved; add reviewed SQL before DQL promotion.');
             }
           }
@@ -2095,7 +2310,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const evidence = {
         trustStatus: {
           label: governedAnswer?.trustLabel
-            ?? (reviewedSql ? 'Reviewed notebook SQL' : generatedSql ? 'AI-generated research SQL' : 'Metadata-grounded research plan'),
+            ?? (reviewedSql ? 'Reviewed notebook SQL' : generatedSql ? 'AI-generated research SQL' : dqlArtifact ? 'AI-generated DQL artifact' : 'Metadata-grounded research plan'),
           reviewRequired: true,
         },
         contextPackId: contextPack.id,
@@ -2133,6 +2348,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ?? notebookResearchSummary(question, resultPreview, previewError);
       const recommendation = previewError
         ? 'Review the SQL, selected metadata, and connection context before rerunning.'
+        : dqlArtifact && !reviewedSql
+          ? 'Review the DQL artifact, parameter choices, grain, and evidence before promoting this research into a DQL draft block.'
         : sqlForPreview
           ? 'Review the SQL, parameter choices, grain, and evidence before promoting this research into a DQL draft block.'
           : 'Review the selected metadata context, then paste reviewed SQL or configure an AI provider before DQL draft promotion.';
@@ -2143,6 +2360,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         previewError,
         generatedSql,
         reviewedSql,
+        dqlArtifact,
         routeDecision,
       });
       return storage.updateRun(run.id, {
@@ -2160,6 +2378,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         researchPlan,
         generatedSql,
         reviewedSql,
+        dqlArtifact,
         display: display && display.ok ? display.display : undefined,
         contextPackId: contextPack.id,
         routeDecision,
@@ -2190,9 +2409,47 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     run: NotebookResearchRun,
     input: { domain?: string; owner?: string; tags?: string[]; provider?: string } = {},
   ): Promise<{ run: NotebookResearchRun; session: DqlGenerationSession }> => {
-    const sql = notebookResearchString(run.reviewedSql) ?? notebookResearchString(run.generatedSql);
-    if (!sql) throw new Error('Notebook research needs generated or reviewed SQL before DQL draft promotion.');
+    const reviewedSql = notebookResearchString(run.reviewedSql);
+    const dqlArtifact = normalizeDqlArtifactReference(run.dqlArtifact);
+    const sql = reviewedSql ?? notebookResearchString(run.generatedSql);
     const sourcePath = `${run.notebookPath}${run.sourceCellId ? `#${run.sourceCellId}` : ''}`;
+    if (!reviewedSql && dqlArtifact) {
+      const session = await createDqlArtifactGenerationSessionForProject(projectRoot, {
+        question: run.question,
+        dqlArtifact,
+        inputMode: 'upload',
+        inputPath: dqlArtifact.sourcePath ?? sourcePath,
+        domain: notebookResearchString(input.domain) ?? run.domain,
+        owner: notebookResearchString(input.owner) ?? run.owner,
+        tags: ['notebook-research', 'review-required', ...(Array.isArray(input.tags) ? input.tags : [])],
+        generatedSql: notebookResearchString(run.generatedSql),
+        contextPackId: run.contextPackId,
+        routeIntent: run.intent,
+        sourceBlock: dqlArtifact.sourcePath,
+      }, semanticLayer);
+      const draftPath = session.candidates.find((candidate) => candidate.draftSave?.path)?.draftSave?.path
+        ?? session.candidates.find((candidate) => candidate.savedPath)?.savedPath;
+      const promotion = buildNotebookDqlPromotionSummary(session, draftPath);
+      const updated = storage.markPromoted(run.id, {
+        draftBlockPath: draftPath,
+        dqlImportId: session.id,
+        dqlCandidateIds: session.candidates.map((candidate) => candidate.id),
+        dqlPromotion: promotion,
+      }) ?? run;
+      const planned = storage.updateRun(updated.id, {
+        researchPlan: buildNotebookResearchPlan({
+          run: updated,
+          evidence: updated.evidence,
+          resultPreview: updated.resultPreview as ReturnType<typeof normalizeQueryResult> | undefined,
+          generatedSql: updated.generatedSql,
+          reviewedSql: updated.reviewedSql,
+          dqlArtifact: updated.dqlArtifact,
+          routeDecision: updated.routeDecision,
+        }),
+      }) ?? updated;
+      return { run: planned, session };
+    }
+    if (!sql) throw new Error('Notebook research needs reviewed SQL, generated SQL, or a DQL artifact before DQL draft promotion.');
     const session = await createDqlGenerationSessionForProject(projectRoot, {
       inputMode: 'upload',
       sources: [{ path: sourcePath.endsWith('.sql') ? sourcePath : `${sourcePath}.sql`, content: sql }],
@@ -2218,6 +2475,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         resultPreview: updated.resultPreview as ReturnType<typeof normalizeQueryResult> | undefined,
         generatedSql: updated.generatedSql,
         reviewedSql: updated.reviewedSql,
+        dqlArtifact: updated.dqlArtifact,
         routeDecision: updated.routeDecision,
       }),
     }) ?? updated;
@@ -2811,11 +3069,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: parsed.error ?? 'Invalid agent run request.' }));
           return;
         }
-        // The UI does not send retrieval signals; probe the local catalog so the
-        // router can short-circuit obvious governed matches without an LLM call.
-        if (!parsed.request.signals && !parsed.request.requestedMode) {
-          parsed.request.signals = computeAgentRunSignals(projectRoot, parsed.request.question);
-        }
+        // The answer-loop cascade now proves certified/semantic/generated tiers
+        // after retrieval and execution. Avoid pre-routing ordinary Ask runs from
+        // token-overlap signals; explicit callers may still provide signals.
         // Thread-scoped runs: the persisted thread supplies prior turns (server
         // state wins; the client-built context stays the no-threadId fallback).
         const conversationStore = parsed.request.threadId ? getConversationStore() : null;
@@ -2877,6 +3133,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const notebookPath = (record && agentRunString(record.notebookPath))
           ?? `notebooks/certification-requests/${Date.now()}.dqlnb`;
         const generatedSql = record ? agentRunString(record.generatedSql) : undefined;
+        const dqlArtifact = record ? normalizeDqlArtifactReference(record.dqlArtifact) : undefined;
         try {
           const storage = openNotebookResearchStorage();
           try {
@@ -2888,9 +3145,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               domain: record ? agentRunString(record.domain) : undefined,
               owner: record ? agentRunString(record.owner) : undefined,
               generatedSql,
+              dqlArtifact,
               context: {
                 surface: 'stakeholder_request_certification',
                 requestedContext: agentRunRecord(record?.context) ?? null,
+                dqlArtifact: dqlArtifact ?? null,
               },
             });
             res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -2927,6 +3186,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // DRAFT proposals (each with its stored Certifier verdict) so the notebook
     // "Get Started" surface can route them into human review. dryRun preview —
     // nothing is written or certified by this call.
+    if (req.method === 'GET' && path === '/api/agent-runs/tier-distribution') {
+      try {
+        const store = getConversationStore();
+        const limitParam = Number(url.searchParams.get('limit'));
+        const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
+        const distribution = store
+          ? store.tierDistribution({ ...(limit ? { limit } : {}) })
+          : { total: 0, byRouteTier: {}, byTerminalLane: {} };
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(distribution));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if ((req.method === 'GET' || req.method === 'POST') && path === '/api/propose') {
       try {
         let owner: string | undefined;
@@ -2946,6 +3222,67 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const readiness = buildProposeReadiness(projectRoot, loadProjectConfig(projectRoot), { owner, limit });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(readiness));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Composting preview: mine certified block clusters for semantic metric
+    // candidates. Read-only; returns draft YAML + PR body text for review.
+    if ((req.method === 'GET' || req.method === 'POST') && path === '/api/propose/composting') {
+      try {
+        let owner: string | undefined;
+        let limit: number | undefined;
+        let minSupport: number | undefined;
+        if (req.method === 'POST') {
+          const body = await readJSON(req).catch(() => ({}));
+          if (typeof body?.owner === 'string') owner = body.owner;
+          if (typeof body?.limit === 'number' && Number.isFinite(body.limit) && body.limit > 0) limit = body.limit;
+          if (typeof body?.minSupport === 'number' && Number.isFinite(body.minSupport) && body.minSupport > 1) minSupport = body.minSupport;
+        } else {
+          const ownerParam = url.searchParams.get('owner');
+          if (ownerParam) owner = ownerParam;
+          const limitParam = Number(url.searchParams.get('limit'));
+          if (Number.isFinite(limitParam) && limitParam > 0) limit = limitParam;
+          const minSupportParam = Number(url.searchParams.get('minSupport'));
+          if (Number.isFinite(minSupportParam) && minSupportParam > 1) minSupport = minSupportParam;
+        }
+        const changeset = buildSemanticCompostingChangeset(projectRoot, { owner, limit, minSupport });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(changeset));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Composting generation: writes only approved metric candidate ids under
+    // semantic-layer/metrics/_drafts plus a PR-body artifact. Nothing certified.
+    if (req.method === 'POST' && path === '/api/propose/composting/generate') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as {
+          ids?: unknown;
+          owner?: unknown;
+          limit?: unknown;
+          minSupport?: unknown;
+        };
+        const ids = Array.isArray(body?.ids)
+          ? body.ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+          : [];
+        if (ids.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide non-empty { ids } to generate semantic composting drafts.' }));
+          return;
+        }
+        const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const limit = typeof body?.limit === 'number' && Number.isFinite(body.limit) && body.limit > 0 ? body.limit : undefined;
+        const minSupport = typeof body?.minSupport === 'number' && Number.isFinite(body.minSupport) && body.minSupport > 1 ? body.minSupport : undefined;
+        const result = generateSemanticCompostingDrafts(projectRoot, ids, { owner, limit, minSupport });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -4139,9 +4476,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 	        const notebookPath = notebookResearchString(body.notebookPath) ?? notebookResearchString(body.path);
 	        const question = notebookResearchString(body.question);
 	        const sourceCell = notebookResearchSourceCellPayload(body);
-	        const sourceCellId = notebookResearchString(body.sourceCellId) ?? notebookResearchSourceCellId(sourceCell);
-	        const sourceCellName = notebookResearchString(body.sourceCellName) ?? notebookResearchSourceCellName(sourceCell);
-	        const sourceCellFingerprint = notebookResearchString(body.sourceCellFingerprint) ?? notebookResearchSourceCellFingerprint(sourceCell);
+        const sourceCellId = notebookResearchString(body.sourceCellId) ?? notebookResearchSourceCellId(sourceCell);
+        const sourceCellName = notebookResearchString(body.sourceCellName) ?? notebookResearchSourceCellName(sourceCell);
+        const sourceCellFingerprint = notebookResearchString(body.sourceCellFingerprint) ?? notebookResearchSourceCellFingerprint(sourceCell);
+        const dqlArtifact = normalizeDqlArtifactReference(body.dqlArtifact);
 	        if (!notebookPath || !question) {
 	          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
 	          res.end(serializeJSON({ error: 'notebookPath and question are required.' }));
@@ -4161,6 +4499,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           context: body.context,
           generatedSql: notebookResearchString(body.generatedSql),
           reviewedSql: notebookResearchString(body.reviewedSql),
+          dqlArtifact,
         });
         const run = body.run === true
           ? await runNotebookResearch(storage, created, {
@@ -4171,6 +4510,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               context: body.context,
               generatedSql: notebookResearchString(body.generatedSql),
               reviewedSql: notebookResearchString(body.reviewedSql),
+              dqlArtifact,
             })
           : created;
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -4212,8 +4552,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             intent,
             researchPattern: notebookResearchIntentPattern(intent),
           },
-          strictness: 'balanced',
-          limit: 100,
+          strictness: 'exploratory',
+          limit: 160,
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(notebookResearchContextPreview(contextPack)));
@@ -4437,6 +4777,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             routeDecision: body.routeDecision,
             generatedSql: notebookResearchString(body.generatedSql),
             reviewedSql: notebookResearchString(body.reviewedSql),
+            dqlArtifact: normalizeDqlArtifactReference(body.dqlArtifact),
             warnings: Array.isArray(body.warnings) ? body.warnings.filter((item: unknown): item is string => typeof item === 'string') : undefined,
             reviewStatus: notebookResearchReviewStatus(body.reviewStatus),
             dqlPromotionAction: notebookResearchPromotionAction(body.dqlPromotionAction),
@@ -4449,6 +4790,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               previewError: updated.error,
               generatedSql: updated.generatedSql,
               reviewedSql: updated.reviewedSql,
+              dqlArtifact: updated.dqlArtifact,
               routeDecision: updated.routeDecision,
             }),
           }) ?? updated;
@@ -4469,6 +4811,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             context: body.context,
             generatedSql: notebookResearchString(body.generatedSql),
             reviewedSql: notebookResearchString(body.reviewedSql),
+            dqlArtifact: normalizeDqlArtifactReference(body.dqlArtifact),
           });
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ run: withNotebookResearchChecklist(updated) }));
@@ -7833,15 +8176,27 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
  * answer-loop runner — never the MCP `claudeCodeRunner`, which doesn't emit a governed
  * answer envelope. Everything else uses the Settings-resolved default runner.
  */
-function resolveGovernedAnswerRunner(projectRoot: string): { provider: ProviderId; runner: LLMAgentRunner } | null {
+export function resolveGovernedAnswerRunner(projectRoot: string): { provider: ProviderId; runner: LLMAgentRunner } | null {
   const active = getActiveProvider(projectRoot);
-  if (active === 'claude-code' || active === 'codex') {
+  if (isGovernedAnswerProviderId(active)) {
     return { provider: active, runner: createDqlAgentProviderRunner(active) };
   }
   const resolved = resolveDefaultLLMProvider(projectRoot);
   if (!resolved) return null;
-  const runner = getLLMRunner(resolved);
-  return runner ? { provider: resolved, runner } : null;
+  if (isGovernedAnswerProviderId(resolved)) {
+    return { provider: resolved, runner: createDqlAgentProviderRunner(resolved) };
+  }
+  return null;
+}
+
+function isGovernedAnswerProviderId(value: unknown): value is ProviderSettingsId {
+  return value === 'anthropic'
+    || value === 'openai'
+    || value === 'gemini'
+    || value === 'ollama'
+    || value === 'custom-openai'
+    || value === 'claude-code'
+    || value === 'codex';
 }
 
 /** Map a runner provider id to the settings id whose reasoning ceiling applies. */
@@ -7887,6 +8242,17 @@ function resolveRunReasoningEffort(
   const ceiling = getEffectiveProviderConfig(projectRoot, reasoningSettingsIdFor(provider)).reasoningEffort;
   let desired: ReasoningEffort = route ? routeReasoningEffort(route) : 'medium';
   if (isRepair) desired = bumpReasoningEffort(desired);
+  return ceiling ? clampReasoningEffort(desired, ceiling) : desired;
+}
+
+function resolveRequestedRunReasoningEffort(
+  projectRoot: string,
+  provider: ProviderId,
+  requested: ReasoningEffort,
+  isRepair: boolean,
+): ReasoningEffort {
+  const ceiling = getEffectiveProviderConfig(projectRoot, reasoningSettingsIdFor(provider)).reasoningEffort;
+  const desired = isRepair ? bumpReasoningEffort(requested) : requested;
   return ceiling ? clampReasoningEffort(desired, ceiling) : desired;
 }
 
@@ -8231,6 +8597,13 @@ export interface ProposeReadinessResult {
     blockingTotal: number;
     /** Total certifier warnings across the queue. */
     warningTotal: number;
+    /** Review telemetry for the ranked queue. */
+    reviewTelemetry?: {
+      existingDrafts: number;
+      medianReviewAgeHours: number | null;
+      readyForReviewRate: number | null;
+      estimatedReviewMinutes: number;
+    };
   };
   /**
    * Deterministic PLAN of the bounded, business-only seed (writes nothing).
@@ -8238,7 +8611,43 @@ export interface ProposeReadinessResult {
    */
   plan: ProposePlan;
   /** Ranked DRAFT proposals for the selected scope (engine order preserved). */
-  proposals: ProposalResult[];
+  proposals: ReviewableProposalResult[];
+}
+
+export interface ReviewableProposalResult extends ProposalResult {
+  /** One-screen review handoff for the certification flywheel. */
+  review: {
+    queueRank: number;
+    status: 'new' | 'draft_exists' | 'ready_for_review';
+    priorityScore: number;
+    blockingCount: number;
+    warningCount: number;
+    estimatedReviewMinutes: number;
+    draftPath: string;
+    draftExists: boolean;
+    firstSeenAt?: string;
+    lastUpdatedAt?: string;
+    reviewAgeHours?: number;
+    certifyCommand: string;
+    payload: {
+      question: string;
+      model: string;
+      domain: string;
+      sqlPreview?: string;
+      outputs: string[];
+      grain?: string;
+      pattern?: string;
+      evidence: string[];
+      resultSample: { status: 'not_run'; rows: [] };
+      nearestCertifiedBlock?: {
+        name: string;
+        path?: string;
+        domain?: string;
+        overlapScore: number;
+        sharedOutputs: string[];
+      };
+    };
+  };
 }
 
 /**
@@ -8315,6 +8724,11 @@ export function buildProposeReadiness(
     warningTotal += proposal.certification.warnings.length;
     if (proposal.certification.errors.length === 0) readyForReview += 1;
   }
+  const reviewableProposals = buildReviewableProposals(projectRoot, manifestPath, projectConfig, summary.proposals, options.owner);
+  const reviewAges = reviewableProposals
+    .map((proposal) => proposal.review.reviewAgeHours)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  const estimatedReviewMinutes = reviewableProposals.reduce((sum, proposal) => sum + proposal.review.estimatedReviewMinutes, 0);
 
   return {
     ready: true,
@@ -8330,10 +8744,704 @@ export function buildProposeReadiness(
       readyForReview,
       blockingTotal,
       warningTotal,
+      reviewTelemetry: {
+        existingDrafts: reviewableProposals.filter((proposal) => proposal.review.draftExists).length,
+        medianReviewAgeHours: median(reviewAges),
+        readyForReviewRate: ratio(readyForReview, summary.proposalsRanked),
+        estimatedReviewMinutes,
+      },
     },
     plan,
-    proposals: summary.proposals,
+    proposals: reviewableProposals,
   };
+}
+
+function buildReviewableProposals(
+  projectRoot: string,
+  dbtManifestPath: string,
+  projectConfig: ProjectConfig,
+  proposals: ProposalResult[],
+  owner?: string,
+): ReviewableProposalResult[] {
+  const manifest = safeBuildProjectManifest(projectRoot);
+  return proposals.map((proposal, index) => {
+    const preview = buildProposePreview(projectRoot, dbtManifestPath, proposal.slug, {
+      config: projectConfig.propose,
+      owner,
+    });
+    const draftPath = proposal.path ?? resolveProposeDraftPath(projectRoot, proposal.domain, proposal.slug);
+    const draftFile = join(projectRoot, draftPath);
+    const draftExists = existsSync(draftFile);
+    const stats = draftExists ? statSync(draftFile) : undefined;
+    const firstSeenAt = stats ? stableFsTime(stats.birthtimeMs, stats.ctimeMs) : undefined;
+    const lastUpdatedAt = stats ? stableFsTime(stats.mtimeMs, stats.ctimeMs) : undefined;
+    const reviewAgeHours = firstSeenAt ? hoursSince(firstSeenAt) : undefined;
+    const blockingCount = proposal.certification.errors.length;
+    const warningCount = proposal.certification.warnings.length;
+    const outputs = preview?.outputs ?? proposal.inference.declaredOutputs;
+    const status = blockingCount === 0
+      ? 'ready_for_review'
+      : draftExists
+        ? 'draft_exists'
+        : 'new';
+
+    return {
+      ...proposal,
+      review: {
+        queueRank: index + 1,
+        status,
+        priorityScore: proposal.ranking.score,
+        blockingCount,
+        warningCount,
+        estimatedReviewMinutes: estimateProposalReviewMinutes(blockingCount, warningCount, Boolean(preview?.sqlPreview)),
+        draftPath,
+        draftExists,
+        firstSeenAt,
+        lastUpdatedAt,
+        reviewAgeHours,
+        certifyCommand: `dql certify --from-draft ${quoteCliArg(draftPath)} --owner you@example.com`,
+        payload: {
+          question: preview?.examples?.[0] ?? proposal.inference.examples[0]?.question ?? `Review ${proposal.slug}`,
+          model: proposal.model,
+          domain: proposal.domain,
+          sqlPreview: preview?.sqlPreview,
+          outputs,
+          grain: preview?.grain ?? proposal.inference.grain,
+          pattern: preview?.pattern ?? proposal.inference.pattern,
+          evidence: proposal.evidence,
+          resultSample: { status: 'not_run', rows: [] },
+          nearestCertifiedBlock: findNearestCertifiedBlock(manifest, proposal, outputs),
+        },
+      },
+    };
+  });
+}
+
+function safeBuildProjectManifest(projectRoot: string): DQLManifest {
+  try {
+    return buildManifest({ projectRoot });
+  } catch {
+    return { blocks: {} } as DQLManifest;
+  }
+}
+
+function resolveProposeDraftPath(projectRoot: string, domain: string, slug: string): string {
+  const safeDomain = domain
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/^[-/]+|[-/]+$/g, '');
+  return safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))
+    ? `domains/${safeDomain}/blocks/_drafts/${slug}.dql`
+    : `blocks/_drafts/${slug}.dql`;
+}
+
+function findNearestCertifiedBlock(
+  manifest: DQLManifest,
+  proposal: ProposalResult,
+  outputs: string[],
+): ReviewableProposalResult['review']['payload']['nearestCertifiedBlock'] {
+  const outputSet = new Set(outputs.map((output) => output.toLowerCase()));
+  let best: ReviewableProposalResult['review']['payload']['nearestCertifiedBlock'];
+  for (const block of Object.values(manifest.blocks ?? {})) {
+    if (String(block.status ?? '').toLowerCase() !== 'certified') continue;
+    const blockOutputs = (block.declaredOutputs ?? []).map((output) => output.toLowerCase());
+    const sharedOutputs = blockOutputs.filter((output) => outputSet.has(output));
+    const sameDomain = block.domain === proposal.domain;
+    const overlapScore = sharedOutputs.length * 10 + (sameDomain ? 5 : 0);
+    if (overlapScore <= 0) continue;
+    if (!best || overlapScore > best.overlapScore) {
+      best = {
+        name: block.name,
+        path: block.filePath,
+        domain: block.domain,
+        overlapScore,
+        sharedOutputs,
+      };
+    }
+  }
+  return best;
+}
+
+function estimateProposalReviewMinutes(blockingCount: number, warningCount: number, hasSqlPreview: boolean): number {
+  const base = hasSqlPreview ? 12 : 18;
+  return base + blockingCount * 8 + warningCount * 4;
+}
+
+function stableFsTime(primaryMs: number, fallbackMs: number): string | undefined {
+  const ms = Number.isFinite(primaryMs) && primaryMs > 0 ? primaryMs : fallbackMs;
+  return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : undefined;
+}
+
+function hoursSince(iso: string): number {
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return 0;
+  return Number(Math.max(0, (Date.now() - ts) / 3_600_000).toFixed(2));
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const value = sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+  return Number(value.toFixed(2));
+}
+
+function ratio(numerator: number, denominator: number): number | null {
+  if (denominator === 0) return null;
+  return Number((numerator / denominator).toFixed(4));
+}
+
+function quoteCliArg(value: string): string {
+  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+export interface SemanticCompostingChangesetResult {
+  ready: boolean;
+  reason?: string;
+  summary: {
+    certifiedBlocksScanned: number;
+    eligibleMetricClusters: number;
+    candidatesRanked: number;
+    existingDrafts: number;
+    donorBlocksUsed: number;
+    minSupport: number;
+  };
+  candidates: SemanticCompostingMetricCandidate[];
+  prBody: string;
+}
+
+export interface SemanticCompostingMetricCandidate {
+  id: string;
+  kind: 'metric';
+  name: string;
+  label: string;
+  description: string;
+  domain: string;
+  table: string;
+  type: MetricDefinition['type'];
+  sql: string;
+  filter?: string;
+  status: 'draft';
+  support: number;
+  donorBlocks: Array<{
+    name: string;
+    path: string;
+    domain?: string;
+    outputs: string[];
+    filters: string[];
+  }>;
+  draftPath: string;
+  draftExists: boolean;
+  yaml: string;
+  provenance: {
+    normalizedExpression: string;
+    normalizedFilter?: string;
+    recurringFilters: string[];
+  };
+  review: {
+    priorityScore: number;
+    rationale: string;
+  };
+}
+
+export interface GenerateSemanticCompostingDraftsResult {
+  ready: boolean;
+  reason?: string;
+  draftsWritten: number;
+  draftsSkipped: number;
+  candidates: SemanticCompostingMetricCandidate[];
+  paths: string[];
+  prBody: string;
+  prBodyPath?: string;
+}
+
+interface CompostMetricAccumulator {
+  domain: string;
+  table: string;
+  type: MetricDefinition['type'];
+  expression: string;
+  normalizedExpression: string;
+  filter?: string;
+  normalizedFilter?: string;
+  aliases: string[];
+  donors: Map<string, SemanticCompostingMetricCandidate['donorBlocks'][number]>;
+}
+
+interface ExtractedAggregateMetric {
+  expression: string;
+  alias?: string;
+  type: MetricDefinition['type'];
+}
+
+/**
+ * Mine certified block clusters for recurring metric definitions and render a
+ * reviewable semantic-layer changeset. This is read-only: callers must confirm
+ * candidate ids through generateSemanticCompostingDrafts before files are written.
+ */
+export function buildSemanticCompostingChangeset(
+  projectRoot: string,
+  options: { minSupport?: number; limit?: number; owner?: string } = {},
+): SemanticCompostingChangesetResult {
+  let manifest: DQLManifest;
+  try {
+    manifest = buildManifest({ projectRoot });
+  } catch (error) {
+    return {
+      ready: false,
+      reason: error instanceof Error ? error.message : String(error),
+      summary: {
+        certifiedBlocksScanned: 0,
+        eligibleMetricClusters: 0,
+        candidatesRanked: 0,
+        existingDrafts: 0,
+        donorBlocksUsed: 0,
+        minSupport: Math.max(2, Math.floor(options.minSupport ?? 2)),
+      },
+      candidates: [],
+      prBody: '',
+    };
+  }
+
+  const minSupport = Math.max(2, Math.floor(options.minSupport ?? 2));
+  const limit = Number.isFinite(options.limit) && Number(options.limit) > 0 ? Math.floor(Number(options.limit)) : 10;
+  const owner = options.owner?.trim() || resolveLocalOwner(projectRoot, { persist: false });
+  const existingMetricNames = new Set(
+    Object.entries(manifest.metrics ?? {})
+      .filter(([, metric]) => !isSemanticDraftMetricPath(metric.filePath))
+      .map(([name]) => name.toLowerCase()),
+  );
+  const certifiedBlocks = Object.values(manifest.blocks ?? {})
+    .filter((block) => String(block.status ?? '').toLowerCase() === 'certified');
+  const groups = new Map<string, CompostMetricAccumulator>();
+
+  for (const block of certifiedBlocks) {
+    const table = singleTableDependency(block);
+    if (!table) continue;
+    const where = extractCompostingWhereClause(block.sql);
+    const normalizedFilter = where ? normalizeCompostingSql(where) : undefined;
+    const metrics = extractCompostingAggregateMetrics(block.sql);
+    if (metrics.length === 0) continue;
+    const donor = {
+      name: block.name,
+      path: block.filePath,
+      domain: block.domain,
+      outputs: blockOutputNames(block),
+      filters: where ? splitCompostingFilters(where) : [],
+    };
+
+    for (const metric of metrics) {
+      const normalizedExpression = normalizeCompostingSql(metric.expression);
+      const domain = block.domain?.trim() || 'misc';
+      const key = [
+        domain.toLowerCase(),
+        table.toLowerCase(),
+        metric.type,
+        normalizedExpression,
+        normalizedFilter ?? '',
+      ].join('\0');
+      const existing = groups.get(key);
+      if (existing) {
+        existing.aliases.push(metric.alias ?? '');
+        existing.donors.set(block.filePath, donor);
+      } else {
+        groups.set(key, {
+          domain,
+          table,
+          type: metric.type,
+          expression: metric.expression,
+          normalizedExpression,
+          filter: where,
+          normalizedFilter,
+          aliases: [metric.alias ?? ''],
+          donors: new Map([[block.filePath, donor]]),
+        });
+      }
+    }
+  }
+
+  const usedNames = new Set(existingMetricNames);
+  const candidates = Array.from(groups.values())
+    .filter((group) => group.donors.size >= minSupport)
+    .sort((a, b) => b.donors.size - a.donors.size || a.normalizedExpression.localeCompare(b.normalizedExpression))
+    .map((group) => buildCompostingMetricCandidate(projectRoot, group, owner, usedNames))
+    .filter((candidate): candidate is SemanticCompostingMetricCandidate => Boolean(candidate))
+    .slice(0, limit);
+  const donorBlocksUsed = new Set(candidates.flatMap((candidate) => candidate.donorBlocks.map((donor) => donor.path))).size;
+
+  return {
+    ready: true,
+    summary: {
+      certifiedBlocksScanned: certifiedBlocks.length,
+      eligibleMetricClusters: Array.from(groups.values()).filter((group) => group.donors.size >= minSupport).length,
+      candidatesRanked: candidates.length,
+      existingDrafts: candidates.filter((candidate) => candidate.draftExists).length,
+      donorBlocksUsed,
+      minSupport,
+    },
+    candidates,
+    prBody: renderCompostingPrBody(candidates),
+  };
+}
+
+export function generateSemanticCompostingDrafts(
+  projectRoot: string,
+  candidateIds?: string[],
+  options: { minSupport?: number; limit?: number; owner?: string } = {},
+): GenerateSemanticCompostingDraftsResult {
+  const changeset = buildSemanticCompostingChangeset(projectRoot, options);
+  if (!changeset.ready) {
+    return {
+      ready: false,
+      reason: changeset.reason,
+      draftsWritten: 0,
+      draftsSkipped: 0,
+      candidates: [],
+      paths: [],
+      prBody: '',
+    };
+  }
+
+  const wanted = candidateIds && candidateIds.length > 0 ? new Set(candidateIds) : undefined;
+  const selected = wanted ? changeset.candidates.filter((candidate) => wanted.has(candidate.id)) : changeset.candidates;
+  const paths: string[] = [];
+  let draftsWritten = 0;
+  let draftsSkipped = 0;
+  for (const candidate of selected) {
+    const absolutePath = join(projectRoot, candidate.draftPath);
+    if (existsSync(absolutePath)) {
+      draftsSkipped += 1;
+    } else {
+      mkdirSync(dirname(absolutePath), { recursive: true });
+      writeFileSync(absolutePath, candidate.yaml, 'utf-8');
+      draftsWritten += 1;
+    }
+    paths.push(candidate.draftPath);
+  }
+
+  let prBodyPath: string | undefined;
+  const prBody = renderCompostingPrBody(selected);
+  if (selected.length > 0) {
+    prBodyPath = 'semantic-layer/metrics/_drafts/PR_BODY.md';
+    const absolutePrBodyPath = join(projectRoot, prBodyPath);
+    mkdirSync(dirname(absolutePrBodyPath), { recursive: true });
+    writeFileSync(absolutePrBodyPath, prBody, 'utf-8');
+  }
+
+  return {
+    ready: true,
+    draftsWritten,
+    draftsSkipped,
+    candidates: selected,
+    paths,
+    prBody,
+    prBodyPath,
+  };
+}
+
+function buildCompostingMetricCandidate(
+  projectRoot: string,
+  group: CompostMetricAccumulator,
+  owner: string,
+  usedNames: Set<string>,
+): SemanticCompostingMetricCandidate | undefined {
+  const baseName = preferredCompostingMetricName(group);
+  const name = dedupeCompostingName(baseName, usedNames);
+  if (!name) return undefined;
+  usedNames.add(name.toLowerCase());
+  const label = titleFromSlug(name);
+  const donors = Array.from(group.donors.values()).sort((a, b) => a.path.localeCompare(b.path));
+  const support = donors.length;
+  const domainSlug = slugForPath(group.domain);
+  const draftPath = `semantic-layer/metrics/_drafts/${domainSlug}/${name}.yaml`;
+  const recurringFilters = group.filter ? splitCompostingFilters(group.filter) : [];
+  const metric: MetricDefinition = {
+    name,
+    label,
+    description: `Draft metric composted from ${support} certified DQL blocks. Review the expression, filter, grain, and owner before certification.`,
+    domain: group.domain,
+    status: 'draft',
+    sql: group.expression,
+    type: group.type,
+    table: group.table,
+    filter: group.filter,
+    tags: ['composted', 'human-review'],
+    owner,
+    source: {
+      provider: 'dql',
+      objectType: 'composted_metric',
+      objectId: `composted:${name}`,
+      objectName: label,
+      importedAt: new Date().toISOString(),
+      extra: {
+        support,
+        donorBlocks: donors.map((donor) => donor.name),
+        donorPaths: donors.map((donor) => donor.path),
+        normalizedExpression: group.normalizedExpression,
+        normalizedFilter: group.normalizedFilter,
+      },
+    },
+  };
+  return {
+    id: `metric:${name}:${stableShortHash(`${group.domain}|${group.table}|${group.normalizedExpression}|${group.normalizedFilter ?? ''}`)}`,
+    kind: 'metric',
+    name,
+    label,
+    description: metric.description,
+    domain: group.domain,
+    table: group.table,
+    type: group.type,
+    sql: group.expression,
+    filter: group.filter,
+    status: 'draft',
+    support,
+    donorBlocks: donors,
+    draftPath,
+    draftExists: existsSync(join(projectRoot, draftPath)),
+    yaml: serializeMetricDefinitionToYaml(metric),
+    provenance: {
+      normalizedExpression: group.normalizedExpression,
+      normalizedFilter: group.normalizedFilter,
+      recurringFilters,
+    },
+    review: {
+      priorityScore: support * 10 + recurringFilters.length * 2,
+      rationale: `Recurring ${group.type} metric found in ${support} certified blocks${group.filter ? ' with the same filter' : ''}.`,
+    },
+  };
+}
+
+function singleTableDependency(block: ManifestBlock): string | undefined {
+  const dependencies = Array.from(new Set((block.tableDependencies ?? []).filter((table) => table && !table.startsWith('ref:'))));
+  if (dependencies.length === 1) return dependencies[0];
+  const rawRefs = Array.from(new Set((block.rawTableRefs ?? []).filter(Boolean)));
+  return rawRefs.length === 1 ? rawRefs[0] : undefined;
+}
+
+function blockOutputNames(block: ManifestBlock): string[] {
+  if (Array.isArray(block.declaredOutputs) && block.declaredOutputs.length > 0) return block.declaredOutputs;
+  if (Array.isArray(block.outputContract) && block.outputContract.length > 0) return block.outputContract.map((output) => output.name);
+  if (Array.isArray(block.outputs) && block.outputs.length > 0) return block.outputs.map((output) => output.name);
+  return [];
+}
+
+function isSemanticDraftMetricPath(filePath: string | undefined): boolean {
+  return Boolean(filePath?.replaceAll('\\', '/').includes('semantic-layer/metrics/_drafts/'));
+}
+
+function extractCompostingAggregateMetrics(sql: string): ExtractedAggregateMetric[] {
+  const select = extractCompostingSelectClause(sql);
+  if (!select) return [];
+  return splitCompostingTopLevel(select, ',').flatMap((item): ExtractedAggregateMetric[] => {
+    const parsed = parseCompostingSelectItem(item);
+    if (!parsed) return [];
+    return [parsed];
+  });
+}
+
+function extractCompostingSelectClause(sql: string): string | undefined {
+  const source = stripSqlTerminator(sql);
+  const selectMatch = /\bselect\b/i.exec(source);
+  if (!selectMatch) return undefined;
+  const fromIndex = findTopLevelKeyword(source, 'from', selectMatch.index + selectMatch[0].length);
+  if (fromIndex < 0) return undefined;
+  return source.slice(selectMatch.index + selectMatch[0].length, fromIndex).trim();
+}
+
+function parseCompostingSelectItem(item: string): ExtractedAggregateMetric | undefined {
+  const { expression, alias } = splitCompostingAlias(item.trim());
+  const normalizedExpression = expression.trim();
+  const distinctCount = normalizedExpression.match(/^count\s*\(\s*distinct\s+[\s\S]+\)$/i);
+  if (distinctCount) {
+    return { expression: normalizedExpression, alias, type: 'count_distinct' };
+  }
+  const count = normalizedExpression.match(/^count\s*\([\s\S]*\)$/i);
+  if (count) return { expression: normalizedExpression, alias, type: 'count' };
+  const aggregate = normalizedExpression.match(/^(sum|avg|min|max)\s*\([\s\S]+\)$/i);
+  if (!aggregate) return undefined;
+  return {
+    expression: normalizedExpression,
+    alias,
+    type: aggregate[1].toLowerCase() as MetricDefinition['type'],
+  };
+}
+
+function splitCompostingAlias(item: string): { expression: string; alias?: string } {
+  const asMatch = item.match(/^([\s\S]+?)\s+as\s+("[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_$]*)$/i);
+  if (asMatch) return { expression: asMatch[1].trim(), alias: stripIdentifierQuotes(asMatch[2]) };
+  return { expression: item.trim() };
+}
+
+function extractCompostingWhereClause(sql: string): string | undefined {
+  const source = stripSqlTerminator(sql);
+  const whereIndex = findTopLevelKeyword(source, 'where', 0);
+  if (whereIndex < 0) return undefined;
+  const start = whereIndex + 'where'.length;
+  const endCandidates = ['group by', 'having', 'order by', 'limit', 'qualify']
+    .map((keyword) => findTopLevelKeyword(source, keyword, start))
+    .filter((index) => index >= 0);
+  const end = endCandidates.length > 0 ? Math.min(...endCandidates) : source.length;
+  const where = source.slice(start, end).trim();
+  return where || undefined;
+}
+
+function splitCompostingFilters(where: string): string[] {
+  return splitCompostingTopLevel(where, 'and')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function splitCompostingTopLevel(input: string, delimiter: ',' | 'and'): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote && input[i - 1] !== '\\') quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') depth += 1;
+    else if (char === ')') depth = Math.max(0, depth - 1);
+    if (depth !== 0) continue;
+    if (delimiter === ',' && char === ',') {
+      out.push(input.slice(start, i).trim());
+      start = i + 1;
+    } else if (
+      delimiter === 'and'
+      && input.slice(i, i + 3).toLowerCase() === 'and'
+      && !/[A-Za-z0-9_]/.test(input[i - 1] ?? '')
+      && !/[A-Za-z0-9_]/.test(input[i + 3] ?? '')
+    ) {
+      out.push(input.slice(start, i).trim());
+      start = i + 3;
+      i += 2;
+    }
+  }
+  out.push(input.slice(start).trim());
+  return out.filter(Boolean);
+}
+
+function findTopLevelKeyword(input: string, keyword: string, fromIndex: number): number {
+  const lower = input.toLowerCase();
+  const target = keyword.toLowerCase();
+  let depth = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  for (let i = Math.max(0, fromIndex); i <= input.length - target.length; i += 1) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote && input[i - 1] !== '\\') quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0) continue;
+    if (
+      lower.slice(i, i + target.length) === target
+      && !/[A-Za-z0-9_]/.test(input[i - 1] ?? '')
+      && !/[A-Za-z0-9_]/.test(input[i + target.length] ?? '')
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function preferredCompostingMetricName(group: CompostMetricAccumulator): string {
+  const aliases = group.aliases.map((alias) => slugForIdentifier(alias)).filter(Boolean);
+  const counts = new Map<string, number>();
+  for (const alias of aliases) counts.set(alias, (counts.get(alias) ?? 0) + 1);
+  const preferredAlias = Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  if (preferredAlias) return preferredAlias;
+  const expressionName = slugForIdentifier(group.expression.replace(/\b(sum|avg|min|max|count|distinct)\b/gi, ''));
+  return expressionName ? `${expressionName}_${group.type}` : `${group.type}_metric`;
+}
+
+function dedupeCompostingName(baseName: string, usedNames: Set<string>): string | undefined {
+  const base = slugForIdentifier(baseName).slice(0, 72).replace(/_+$/g, '');
+  if (!base) return undefined;
+  if (!usedNames.has(base.toLowerCase())) return base;
+  let index = 2;
+  while (usedNames.has(`${base}_${index}`.toLowerCase())) index += 1;
+  return `${base}_${index}`;
+}
+
+function normalizeCompostingSql(value: string): string {
+  return value
+    .replace(/["`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function slugForIdentifier(value: string): string {
+  return value
+    .trim()
+    .replace(/["`[\]]/g, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function slugForPath(value: string): string {
+  return slugForIdentifier(value) || 'misc';
+}
+
+function stripIdentifierQuotes(value: string): string {
+  return value.replace(/^["`\[]|["`\]]$/g, '').trim();
+}
+
+function titleFromSlug(value: string): string {
+  return value.split('_').filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+}
+
+function stableShortHash(value: string): string {
+  return createHash('sha1').update(value).digest('hex').slice(0, 10);
+}
+
+function renderCompostingPrBody(candidates: SemanticCompostingMetricCandidate[]): string {
+  const lines = [
+    '# Semantic Composting Changeset',
+    '',
+    'This changeset proposes draft semantic metrics mined from recurring logic in certified DQL blocks.',
+    'Review each metric expression, filter, owner, grain compatibility, and downstream impact before marking it certified.',
+    '',
+  ];
+  if (candidates.length === 0) {
+    lines.push('No recurring certified-block metric clusters met the current support threshold.');
+    return `${lines.join('\n')}\n`;
+  }
+  for (const candidate of candidates) {
+    lines.push(`## ${candidate.label}`);
+    lines.push('');
+    lines.push(`- Draft path: \`${candidate.draftPath}\``);
+    lines.push(`- Domain/table: \`${candidate.domain}\` / \`${candidate.table}\``);
+    lines.push(`- Expression: \`${candidate.sql}\``);
+    if (candidate.filter) lines.push(`- Filter: \`${candidate.filter}\``);
+    lines.push(`- Support: ${candidate.support} certified block(s)`);
+    lines.push(`- Donors: ${candidate.donorBlocks.map((donor) => `\`${donor.path}\``).join(', ')}`);
+    lines.push('');
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 /**
@@ -9711,6 +10819,7 @@ interface ParsedSemanticBlockConfig {
   metric?: string;
   metrics: string[];
   dimensions: string[];
+  filters: Array<{ dimension: string; operator: string; values: string[] }>;
   timeDimension?: string;
   granularity?: string;
   limit?: number;
@@ -9737,6 +10846,19 @@ function parseBlockStudioStringField(source: string, key: string): string | unde
   return source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? undefined;
 }
 
+function parseSemanticRequestedFilters(source: string): Array<{ dimension: string; operator: string; values: string[] }> {
+  return parseBlockStudioArrayField(source, 'requested_filters')
+    .map((entry) => {
+      const match = entry.match(/^([^=<>!]+)\s*=\s*(.+)$/);
+      if (!match) return undefined;
+      const dimension = match[1]?.trim();
+      const value = match[2]?.trim();
+      if (!dimension || !value) return undefined;
+      return { dimension, operator: 'equals', values: [value] };
+    })
+    .filter((filter): filter is { dimension: string; operator: string; values: string[] } => Boolean(filter));
+}
+
 function parseSemanticBlockConfig(source: string): ParsedSemanticBlockConfig {
   const blockType = (parseBlockStudioStringField(source, 'type') ?? 'custom').toLowerCase() === 'semantic'
     ? 'semantic'
@@ -9744,6 +10866,7 @@ function parseSemanticBlockConfig(source: string): ParsedSemanticBlockConfig {
   const metric = parseBlockStudioStringField(source, 'metric');
   const metrics = parseBlockStudioArrayField(source, 'metrics');
   const dimensions = parseBlockStudioArrayField(source, 'dimensions');
+  const filters = parseSemanticRequestedFilters(source);
   const timeDimension = parseBlockStudioStringField(source, 'time_dimension');
   const granularity = parseBlockStudioStringField(source, 'granularity');
   const limitMatch = source.match(/\blimit\s*=\s*(\d+)/i);
@@ -9752,6 +10875,7 @@ function parseSemanticBlockConfig(source: string): ParsedSemanticBlockConfig {
     metric,
     metrics,
     dimensions,
+    filters,
     timeDimension,
     granularity,
     limit: limitMatch ? Number.parseInt(limitMatch[1], 10) : undefined,
@@ -9941,6 +11065,7 @@ function composeSemanticBlockSql(
       ? composeRuntimeSemanticQuery({
           metrics,
           dimensions: config.dimensions,
+          filters: config.filters,
           timeDimension: config.timeDimension && config.granularity
             ? { name: config.timeDimension, granularity: config.granularity }
             : undefined,
@@ -9955,6 +11080,7 @@ function composeSemanticBlockSql(
       : semanticLayer.composeQuery({
           metrics,
           dimensions: config.dimensions,
+          filters: config.filters,
           timeDimension: config.timeDimension && config.granularity
             ? { name: config.timeDimension, granularity: config.granularity }
             : undefined,
@@ -10154,6 +11280,119 @@ export interface CreateDqlGenerationSessionForProjectOptions {
   owner?: string;
   tags?: string[];
   provider?: string;
+}
+
+export interface CreateDqlArtifactGenerationSessionForProjectOptions {
+  question: string;
+  dqlArtifact: NotebookResearchDqlArtifact;
+  inputPath?: string;
+  inputMode?: BlockStudioImportInputMode;
+  domain?: string;
+  owner?: string;
+  tags?: string[];
+  generatedSql?: string;
+  contextPackId?: string;
+  routeIntent?: string;
+  sourceBlock?: string;
+}
+
+export async function createDqlArtifactGenerationSessionForProject(
+  projectRoot: string,
+  options: CreateDqlArtifactGenerationSessionForProjectOptions,
+  semanticLayer?: SemanticLayer,
+): Promise<DqlGenerationSession> {
+  const dqlArtifact = normalizeDqlArtifactReference(options.dqlArtifact);
+  if (!dqlArtifact) throw new Error('A DQL artifact with source is required for DQL draft promotion.');
+  const question = notebookResearchString(options.question) ?? dqlArtifact.name ?? 'Generated DQL artifact';
+  const slug = deriveGeneratedDraftSlug(dqlArtifact.name ?? question);
+  const domain = notebookResearchString(options.domain) ?? 'misc';
+  const owner = notebookResearchString(options.owner) ?? '';
+  const tags = Array.from(new Set(['notebook-research', 'review-required', 'dql-artifact', ...(Array.isArray(options.tags) ? options.tags : [])]
+    .map((tag) => notebookResearchString(tag))
+    .filter((tag): tag is string => Boolean(tag))));
+  const proposedContractId = `${domain}.Unknown.${slug}`;
+  const draft = upsertGeneratedDqlArtifactDraft(projectRoot, {
+    slug,
+    question,
+    proposedContractId,
+    owner,
+    proposedDomain: domain,
+    dqlArtifact,
+    sourceQuestion: question,
+    sourceBlock: options.sourceBlock,
+    contextPackId: options.contextPackId,
+    routeIntent: options.routeIntent,
+    outputs: Array.from(new Set([...(dqlArtifact.dimensions ?? []), ...(dqlArtifact.metrics ?? [])])),
+  });
+  const now = new Date().toISOString();
+  const uniqueSuffix = createHash('sha1').update(`${now}:${draft.path}:${dqlArtifact.source}`).digest('hex').slice(0, 12);
+  const importId = `imp_dql_artifact_${uniqueSuffix}`;
+  const candidateId = `cand_${slug.replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'dql_artifact'}_${uniqueSuffix.slice(0, 6)}`;
+  const sourcePath = dqlArtifact.sourcePath ?? options.inputPath ?? draft.path;
+  const savedSource = readFileSync(join(projectRoot, draft.path), 'utf-8');
+  const candidate: DqlGenerationCandidate = {
+    id: candidateId,
+    sourceKind: 'raw-sql-file',
+    sourcePath,
+    name: dqlArtifact.name ?? slug,
+    domain,
+    description: question,
+    owner,
+    tags,
+    grain: dqlArtifact.timeDimension ? `${dqlArtifact.timeDimension.name}.${dqlArtifact.timeDimension.granularity}` : undefined,
+    outputs: Array.from(new Set([...(dqlArtifact.dimensions ?? []), ...(dqlArtifact.metrics ?? [])])),
+    dimensions: dqlArtifact.dimensions,
+    allowedFilters: dqlArtifact.filters?.map((filter) => filter.dimension),
+    parameterPolicy: dqlArtifact.filters?.map((filter) => ({ name: filter.dimension, policy: 'dynamic' })),
+    sql: notebookResearchString(options.generatedSql) ?? '',
+    dqlSource: savedSource,
+    validation: validateBlockStudioSource(savedSource, semanticLayer),
+    preview: null,
+    lineage: {
+      sourceTables: [],
+      parameters: [],
+      warnings: [],
+      statementIndex: 1,
+      totalStatements: 1,
+    },
+    confidence: 0.95,
+    splitStrategy: 'manual',
+    warnings: [],
+    conversionNotes: ['Persisted the DQL artifact returned by the governed answer; no SQL-to-DQL regeneration was required.'],
+    aiAssistance: [],
+    reviewStatus: 'draft',
+    savedPath: draft.path,
+    generationMode: 'deterministic',
+    generationProvider: 'dql-artifact',
+    llmContext: `Persisted generated DQL artifact for: ${question}`,
+    evidence: [],
+    draftSave: { status: 'saved', path: draft.path, savedAt: now },
+    recommendedAction: 'create_new',
+    similarityMatches: [],
+  };
+  const session: DqlGenerationSession = {
+    id: importId,
+    sourceKind: 'raw-sql-file',
+    inputPath: sourcePath,
+    inputMode: options.inputMode ?? 'upload',
+    sourceFiles: [sourcePath],
+    createdAt: now,
+    updatedAt: now,
+    defaults: { domain, owner, tags },
+    candidateIds: [candidate.id],
+    mode: 'ai-import',
+    generation: {
+      provider: 'dql-artifact',
+      aiEnabled: false,
+      contextObjectCount: 0,
+      createdDrafts: 1,
+      warnings: [],
+    },
+    candidates: [candidate],
+  };
+  writeBlockStudioImportSession(projectRoot, session);
+  await refreshLocalMetadataCatalog(projectRoot);
+  return session;
 }
 
 export async function createDqlGenerationSessionForProject(
@@ -11958,60 +13197,6 @@ function agentResultToSynthesisPreview(result: AgentAnswer['result']): Synthesiz
     rowCount: typeof result.rowCount === 'number' ? result.rowCount : allRows.length,
     stats: computeResultStats(resolvedColumns, allRows),
   };
-}
-
-const SIGNAL_STOPWORDS = new Set([
-  'the', 'a', 'an', 'of', 'for', 'to', 'by', 'in', 'on', 'and', 'or', 'is', 'are', 'was', 'were',
-  'what', 'which', 'how', 'show', 'me', 'my', 'our', 'this', 'that', 'top', 'give', 'get', 'list',
-]);
-
-function signalTokens(text: string): Set<string> {
-  return new Set(
-    text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
-      .filter((token) => token.length > 2 && !SIGNAL_STOPWORDS.has(token)),
-  );
-}
-
-/** Best token-overlap ratio between the question and any candidate name/description. */
-function bestOverlap(questionTokens: Set<string>, candidates: string[]): number {
-  if (questionTokens.size === 0) return 0;
-  let best = 0;
-  for (const candidate of candidates) {
-    const candTokens = signalTokens(candidate);
-    if (candTokens.size === 0) continue;
-    let hits = 0;
-    for (const token of candTokens) if (questionTokens.has(token)) hits += 1;
-    if (hits === 0) continue;
-    // Ratio of the candidate's tokens the question covers — rewards a tight match.
-    const ratio = hits / Math.min(candTokens.size, questionTokens.size);
-    if (ratio > best) best = ratio;
-  }
-  return Math.min(1, best);
-}
-
-/**
- * Cheap, offline retrieval-signal probe. Fills certifiedScore/metricScore/hasRetrieval
- * from local catalog name/description overlap so the deterministic router can reach
- * confidence (and skip the LLM) on obvious governed matches. Best-effort — any failure
- * yields empty signals and the router simply leans on its LLM classification.
- */
-function computeAgentRunSignals(projectRoot: string, question: string): { certifiedScore: number; metricScore: number; hasRetrieval: boolean } {
-  try {
-    const tokens = signalTokens(question);
-    if (tokens.size === 0) return { certifiedScore: 0, metricScore: 0, hasRetrieval: false };
-    const certifiedBlocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
-    const blockStrings = certifiedBlocks.flatMap((block) => [block.name, block.description ?? ''].filter(Boolean));
-    const metrics = loadSemanticMetrics(projectRoot);
-    const metricStrings = metrics.map((metric) => {
-      const node = metric as { name?: string; label?: string; id?: string };
-      return node.name ?? node.label ?? node.id ?? '';
-    }).filter(Boolean);
-    const certifiedScore = bestOverlap(tokens, blockStrings);
-    const metricScore = bestOverlap(tokens, metricStrings);
-    return { certifiedScore, metricScore, hasRetrieval: certifiedScore > 0 || metricScore > 0 };
-  } catch {
-    return { certifiedScore: 0, metricScore: 0, hasRetrieval: false };
-  }
 }
 
 /** Up to three example questions built from real catalog blocks (falls back to generic asks). */
@@ -14363,7 +15548,7 @@ function recordAgentRuntimeSchemaSnapshot(projectRoot: string, schemaContext: Ag
   try {
     recordRuntimeSchemaSnapshot(projectRoot, {
       source,
-      tables: schemaContext.slice(0, 80).map((table) => ({
+      tables: schemaContext.map((table) => ({
         relation: table.relation,
         schema: table.schema,
         name: table.name,
@@ -14546,7 +15731,9 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
   const questionReady = Boolean(notebookResearchString(run.question));
   const hasReviewedSql = Boolean(notebookResearchString(run.reviewedSql));
   const hasGeneratedSql = Boolean(notebookResearchString(run.generatedSql));
+  const hasDqlArtifact = Boolean(normalizeDqlArtifactReference(run.dqlArtifact)?.source);
   const hasSql = hasReviewedSql || hasGeneratedSql;
+  const hasPromotableSource = hasReviewedSql || hasDqlArtifact;
   const preview = notebookResearchPreviewInfo(run.resultPreview);
   const previewReady = run.status === 'ready' && preview.hasPreview;
   const evidenceReady = notebookResearchEvidenceCount(run.evidence) > 0 || Boolean(run.contextPackId);
@@ -14565,7 +15752,7 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
   const warnings: string[] = [];
 
   if (!questionReady) blockers.push('Add a business question before review.');
-  if (!hasSql && !reuseRecommended) blockers.push('Add reviewed SQL or generate SQL before promotion.');
+  if (!hasSql && !hasDqlArtifact && !reuseRecommended) blockers.push('Add reviewed SQL, generate SQL, or attach a DQL artifact before promotion.');
   if (run.status === 'error') blockers.push(run.error ? `Fix preview error: ${run.error}` : 'Fix the failed preview before promotion.');
   if (!previewReady && run.status !== 'error' && !reuseRecommended) warnings.push('Run a bounded preview before certification review.');
   if (!evidenceReady && !reuseRecommended) warnings.push('Inspect metadata evidence before turning this into a reusable block.');
@@ -14584,10 +15771,12 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     },
     {
       id: 'sql',
-      label: 'Reviewed SQL',
-      status: hasReviewedSql || (reuseRecommended && !hasSql) ? 'passed' : hasGeneratedSql ? 'warning' : 'blocked',
+      label: hasDqlArtifact && !hasReviewedSql ? 'DQL artifact' : 'Reviewed SQL',
+      status: hasReviewedSql || hasDqlArtifact || (reuseRecommended && !hasSql) ? 'passed' : hasGeneratedSql ? 'warning' : 'blocked',
       detail: reuseRecommended && !hasSql
         ? 'Existing certified DQL should be reused; no new SQL is required.'
+        : hasDqlArtifact && !hasReviewedSql
+        ? 'Generated DQL artifact is saved for reviewer promotion.'
         : hasReviewedSql
         ? 'Reviewer SQL is saved.'
         : hasGeneratedSql
@@ -14629,11 +15818,13 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'parameters',
       label: 'Parameter review',
-      status: reuseRecommended && !hasSql ? 'passed' : !hasSql ? 'pending' : dynamicParameters.length > 0 ? 'passed' : 'warning',
+      status: reuseRecommended && !hasSql ? 'passed' : !hasSql && !hasDqlArtifact ? 'pending' : hasDqlArtifact && !hasSql ? 'passed' : dynamicParameters.length > 0 ? 'passed' : 'warning',
       detail: reuseRecommended && !hasSql
         ? 'Use the certified block parameters; no new SQL parameterization is required.'
+        : !hasSql && hasDqlArtifact
+        ? 'Review parameters declared in the DQL artifact.'
         : !hasSql
-        ? 'Add SQL before checking runtime parameters.'
+        ? 'Add SQL or a DQL artifact before checking runtime parameters.'
         : dynamicParameters.length > 0
           ? `Detected ${dynamicParameters.length.toLocaleString()} dynamic parameter${dynamicParameters.length === 1 ? '' : 's'}: ${dynamicParameters.slice(0, 6).map((item) => item.name).join(', ')}.`
           : staticParameters.length > 0
@@ -14643,20 +15834,20 @@ function buildNotebookResearchReviewChecklist(run: NotebookResearchRun): Noteboo
     {
       id: 'dql_draft',
       label: 'DQL draft',
-      status: reuseRecommended && !hasDraft ? 'passed' : hasDraft ? 'passed' : hasReviewedSql && evidenceReady ? 'pending' : 'blocked',
+      status: reuseRecommended && !hasDraft ? 'passed' : hasDraft ? 'passed' : hasPromotableSource && evidenceReady ? 'pending' : 'blocked',
       detail: reuseRecommended && !hasDraft
         ? 'No new draft is required because an existing DQL block should be reused.'
         : hasDraft
         ? `Draft saved at ${run.draftBlockPath}.`
-        : !hasReviewedSql
-          ? 'Save reviewed SQL before DQL draft creation.'
+        : !hasPromotableSource
+          ? 'Save reviewed SQL or review the generated DQL artifact before DQL draft creation.'
           : evidenceReady
-            ? 'Create a draft after SQL review.'
+            ? (hasDqlArtifact && !hasReviewedSql ? 'Create a draft after DQL artifact review.' : 'Create a draft after SQL review.')
             : 'Save metadata evidence before creating a reusable DQL draft.',
     },
   ];
 
-  const readyForDqlDraft = questionReady && hasReviewedSql && evidenceReady && run.status !== 'error';
+  const readyForDqlDraft = questionReady && hasPromotableSource && evidenceReady && run.status !== 'error';
   const readyForCertificationReview = readyForDqlDraft && previewReady && hasDraft && !reuseRecommended && !promotionReviewRequired;
   return { readyForDqlDraft, readyForCertificationReview, blockers, warnings, items };
 }
@@ -14668,11 +15859,14 @@ function buildNotebookResearchPlan(input: {
   previewError?: string;
   generatedSql?: string;
   reviewedSql?: string;
+  dqlArtifact?: NotebookResearchDqlArtifact;
   routeDecision?: unknown;
 }): NotebookResearchPlan {
   const reviewedSql = notebookResearchString(input.reviewedSql);
   const generatedSql = notebookResearchString(input.generatedSql);
   const sql = reviewedSql ?? generatedSql;
+  const dqlArtifact = normalizeDqlArtifactReference(input.dqlArtifact) ?? input.run.dqlArtifact;
+  const hasDqlArtifact = Boolean(dqlArtifact?.source);
   const parameterized = sql ? parameterizeSqlForDqlImport(sql) : null;
   const evidence = input.evidence && typeof input.evidence === 'object' && !Array.isArray(input.evidence)
     ? input.evidence as Record<string, unknown>
@@ -14711,6 +15905,7 @@ function buildNotebookResearchPlan(input: {
     promotion: {
       path: notebookResearchPlanPromotionPath({
         hasSql: Boolean(sql),
+        hasDqlArtifact,
         hasEvidence,
         hasPreview,
         previewError: input.previewError,
@@ -14721,6 +15916,7 @@ function buildNotebookResearchPlan(input: {
     },
     reviewFocus: notebookResearchPlanFocus(input.run.intent, {
       hasSql: Boolean(sql),
+      hasDqlArtifact,
       hasEvidence,
       hasPreview,
       dynamicParameterCount: parameterized?.parameterPolicy.filter((entry) => entry.policy === 'dynamic').length ?? 0,
@@ -14733,6 +15929,7 @@ function buildNotebookResearchPlan(input: {
 
 function notebookResearchPlanPromotionPath(input: {
   hasSql: boolean;
+  hasDqlArtifact: boolean;
   hasEvidence: boolean;
   hasPreview: boolean;
   previewError?: string;
@@ -14740,7 +15937,7 @@ function notebookResearchPlanPromotionPath(input: {
   promotionAction?: string;
 }): NotebookResearchPlan['promotion']['path'] {
   if (input.promotionAction === 'reuse_existing') return 'reuse_existing';
-  if (!input.hasSql) return 'needs_sql';
+  if (!input.hasSql && !input.hasDqlArtifact) return 'needs_sql';
   if (!input.hasEvidence) return 'review_context';
   if (input.previewError || !input.hasPreview) return 'run_preview';
   if (input.draftBlockPath) return 'open_certification';
@@ -14751,6 +15948,7 @@ function notebookResearchPlanFocus(
   intent: NotebookResearchIntent,
   input: {
     hasSql: boolean;
+    hasDqlArtifact: boolean;
     hasEvidence: boolean;
     hasPreview: boolean;
     dynamicParameterCount: number;
@@ -14759,7 +15957,7 @@ function notebookResearchPlanFocus(
   },
 ): string[] {
   const focus = new Set<string>();
-  if (!input.hasSql) focus.add('Add reviewed SQL or configure AI SQL generation.');
+  if (!input.hasSql && !input.hasDqlArtifact) focus.add('Add reviewed SQL, a DQL artifact, or configure AI generation.');
   if (!input.hasEvidence) focus.add('Save metadata context evidence before DQL promotion.');
   if (!input.hasPreview) focus.add('Run a bounded preview and inspect result shape.');
   if (input.dynamicParameterCount === 0) focus.add('Confirm whether this should be static or parameterized.');
@@ -15261,7 +16459,11 @@ function dedupeAgentSchemaColumns(columns: AgentSchemaTable['columns']): AgentSc
   return Array.from(byName.values());
 }
 
-export function buildAgentSchemaContext(question: string, rows: unknown[]): AgentSchemaTable[] {
+export function buildAgentSchemaContext(
+  question: string,
+  rows: unknown[],
+  options: { includeUnscored?: boolean; limit?: number } = {},
+): AgentSchemaTable[] {
   const byRelation = new Map<string, AgentSchemaTable>();
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue;
@@ -15288,14 +16490,15 @@ export function buildAgentSchemaContext(question: string, rows: unknown[]): Agen
   }
   const tokens = agentSchemaTokens(question);
   const shouldProbeValues = extractAgentValueSearchTerms(question).length > 0;
+  const limit = Math.max(1, Math.trunc(options.limit ?? 12));
   return Array.from(byRelation.values())
     .map((table) => ({
       table,
       score: scoreAgentSchemaTable(table, tokens) + (shouldProbeValues ? scoreAgentValueProbeTable(table) : 0),
     }))
-    .filter((entry) => entry.score > 0)
+    .filter((entry) => options.includeUnscored || entry.score > 0)
     .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
-    .slice(0, 12)
+    .slice(0, limit)
     .map((entry) => entry.table);
 }
 
@@ -15321,14 +16524,42 @@ function mergeAgentSchemaContexts(...contexts: AgentSchemaTable[][]): AgentSchem
   return Array.from(byRelation.values()).slice(0, 16);
 }
 
+function mergeAgentSchemaSampleValues(snapshot: AgentSchemaTable[], enriched: AgentSchemaTable[]): AgentSchemaTable[] {
+  const samples = new Map<string, string[]>();
+  for (const table of enriched) {
+    for (const column of table.columns) {
+      if (!column.sampleValues?.length) continue;
+      samples.set(`${table.relation.toLowerCase()}\u0000${column.name.toLowerCase()}`, column.sampleValues);
+    }
+  }
+  if (samples.size === 0) return snapshot;
+  return snapshot.map((table) => ({
+    ...table,
+    columns: table.columns.map((column) => {
+      const sampleValues = samples.get(`${table.relation.toLowerCase()}\u0000${column.name.toLowerCase()}`);
+      return sampleValues?.length
+        ? { ...column, sampleValues: uniqueStrings([...(column.sampleValues ?? []), ...sampleValues]).slice(0, 8) }
+        : column;
+    }),
+  }));
+}
+
 function shouldAugmentAgentRuntimeSchema(question: string): boolean {
   const lower = question.toLowerCase();
   const wantsProduct = /\bproducts?\b|\bproduct[_ ]name\b|\bsku\b/.test(lower);
   const wantsCustomer = /\bcustomers?\b|\bbuyers?\b|\bbought\b|\bpurchased?\b/.test(lower);
   const wantsMetric = /\brevenu|\bsales\b|\bamount\b|\bspend\b|\border/.test(lower);
   const wantsCategory = /\bcat(?:egor|agor)(?:y|ies)\b|\bsub[- ]?cat(?:egor|agor)(?:y|ies)\b/.test(lower);
+  const wantsSupply = /\bsuppl(?:y|ies|ier|iers)\b|\bsupply[- ]?chain\b|\bingredients?\b|\bmaterials?\b/.test(lower);
+  const wantsOrderDetail = /\borders?\b|\border[_ -]?items?\b|\border[_ -]?details?\b|\border[_ -]?id\b/.test(lower);
+  const wantsDetail = /\bdetails?\b|\bcomplete\b|\bbreakdown\b|\ball\s+values?\b/.test(lower);
   const referencesPriorRows = /\b(?:above|previous|prior|these|those|same)\s+(?:orders?|results?|rows?|customers?|products?)\b/.test(lower);
-  return (wantsProduct && wantsCustomer && wantsMetric) || (referencesPriorRows && (wantsProduct || wantsCategory));
+  return (
+    (wantsProduct && wantsCustomer && wantsMetric)
+    || (wantsProduct && wantsSupply && (wantsOrderDetail || wantsMetric || wantsDetail))
+    || (wantsSupply && wantsOrderDetail && (wantsMetric || wantsDetail))
+    || (referencesPriorRows && (wantsProduct || wantsCategory || wantsSupply || wantsOrderDetail))
+  );
 }
 
 async function enrichAgentSchemaContextWithValueMatches(

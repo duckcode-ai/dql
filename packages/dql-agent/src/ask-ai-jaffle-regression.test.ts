@@ -7,10 +7,11 @@ import {
   defaultKgPath,
   reindexProject,
 } from './index.js';
-import { answer, type AgentResultPayload } from './answer-loop.js';
+import { answer as answerBase, type AgentResultPayload } from './answer-loop.js';
 import { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode } from './kg/types.js';
 import { buildLocalContextPack, openMetadataCatalog } from './metadata/catalog.js';
+import { expandGroundingFromCatalog } from './grounding/regrounding.js';
 import type { AgentMessage, AgentProvider } from './providers/types.js';
 
 class ThrowingProvider implements AgentProvider {
@@ -22,6 +23,22 @@ class ThrowingProvider implements AgentProvider {
 
   async generate(_messages: AgentMessage[]): Promise<string> {
     throw new Error('Unexpected provider call in deterministic Ask AI regression');
+  }
+}
+
+class SequencedProvider implements AgentProvider {
+  readonly name = 'openai' as const;
+  readonly calls: AgentMessage[][] = [];
+
+  constructor(private readonly responses: string[]) {}
+
+  async available(): Promise<boolean> {
+    return true;
+  }
+
+  async generate(messages: AgentMessage[]): Promise<string> {
+    this.calls.push(messages);
+    return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)] ?? '';
   }
 }
 
@@ -45,7 +62,71 @@ describe('Ask AI jaffle-shop regression', () => {
   it('demotes wrong certified blocks and carries category context into the customer follow-up', async () => {
     const kg = new KGStore(defaultKgPath(projectRoot));
     try {
-      const provider = new ThrowingProvider();
+      const provider = new SequencedProvider([
+        [
+          '```json',
+          JSON.stringify({
+            summary: 'Product revenue by category generated from certified category context.',
+            sql: [
+              'SELECT',
+              '  product_name AS product_name,',
+              "  CASE WHEN product_type = 'jaffle' THEN 'Food' WHEN product_type = 'beverage' THEN 'Drink' ELSE product_type END AS category,",
+              '  SUM(product_price) AS revenue',
+              'FROM order_items',
+              'GROUP BY 1, 2',
+              'ORDER BY revenue DESC',
+              'LIMIT 10',
+            ].join('\n'),
+            viz: 'bar',
+            outputs: ['product_name', 'category', 'revenue'],
+          }),
+          '```',
+        ].join('\n'),
+        [
+          '```json',
+          JSON.stringify({
+            summary: 'Top customers for the prior categories generated from order items and customer metadata.',
+            sql: [
+              'SELECT',
+              '  c.customer_name AS customer_name,',
+              '  f.product_type AS category,',
+              '  SUM(f.product_price) AS revenue',
+              'FROM order_items AS f',
+              'JOIN fct_orders AS o ON f.order_id = o.order_id',
+              'JOIN dim_customers AS c ON o.customer_id = c.customer_id',
+              "WHERE f.product_type IN ('jaffle', 'beverage')",
+              'GROUP BY c.customer_name, f.product_type',
+              'ORDER BY revenue DESC',
+              'LIMIT 5',
+            ].join('\n'),
+            viz: 'table',
+            outputs: ['customer_name', 'category', 'revenue'],
+          }),
+          '```',
+        ].join('\n'),
+        [
+          '```json',
+          JSON.stringify({
+            summary: 'Top customers for the carried-forward prior categories generated from order items and customer metadata.',
+            sql: [
+              'SELECT',
+              '  c.customer_name AS customer_name,',
+              '  f.product_type AS category,',
+              '  SUM(f.product_price) AS revenue',
+              'FROM order_items AS f',
+              'JOIN fct_orders AS o ON f.order_id = o.order_id',
+              'JOIN dim_customers AS c ON o.customer_id = c.customer_id',
+              "WHERE f.product_type IN ('jaffle', 'beverage')",
+              'GROUP BY c.customer_name, f.product_type',
+              'ORDER BY revenue DESC',
+              'LIMIT 5',
+            ].join('\n'),
+            viz: 'table',
+            outputs: ['customer_name', 'category', 'revenue'],
+          }),
+          '```',
+        ].join('\n'),
+      ]);
       const firstQuestion =
         'Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue etc';
       const firstContextPack = await buildLocalContextPack(projectRoot, {
@@ -53,7 +134,7 @@ describe('Ask AI jaffle-shop regression', () => {
         limit: 40,
       });
 
-      const firstAnswer = await answer({
+      const firstAnswer = await answerBase({
         question: firstQuestion,
         kg,
         provider,
@@ -106,7 +187,7 @@ describe('Ask AI jaffle-shop regression', () => {
         limit: 40,
         followUp,
       });
-      const followUpAnswer = await answer({
+      const followUpAnswer = await answerBase({
         question: followUpQuestion,
         kg,
         provider,
@@ -140,7 +221,7 @@ describe('Ask AI jaffle-shop regression', () => {
         limit: 40,
         followUp,
       });
-      const bareFollowUpAnswer = await answer({
+      const bareFollowUpAnswer = await answerBase({
         question: bareFollowUpQuestion,
         kg,
         provider,
@@ -164,14 +245,38 @@ describe('Ask AI jaffle-shop regression', () => {
   it('does not certify product blocks for misspelled beverage customer questions', async () => {
     const kg = new KGStore(defaultKgPath(projectRoot));
     try {
-      const provider = new ThrowingProvider();
+      const provider = new SequencedProvider([
+        [
+          '```json',
+          JSON.stringify({
+            summary: 'Top beverage customers generated from order items, orders, and customer metadata.',
+            sql: [
+              'SELECT',
+              '  c.customer_name AS customer_name,',
+              '  f.product_type AS category,',
+              '  SUM(f.product_price) AS revenue,',
+              '  COUNT(*) AS units',
+              'FROM order_items AS f',
+              'JOIN fct_orders AS o ON f.order_id = o.order_id',
+              'JOIN dim_customers AS c ON o.customer_id = c.customer_id',
+              "WHERE f.product_type = 'beverage'",
+              'GROUP BY c.customer_name, f.product_type',
+              'ORDER BY revenue DESC, units DESC',
+              'LIMIT 10',
+            ].join('\n'),
+            viz: 'bar',
+            outputs: ['customer_name', 'category', 'revenue', 'units'],
+          }),
+          '```',
+        ].join('\n'),
+      ]);
       const question = 'who are the best cusomers for buying the beverage products?';
       const contextPack = await buildLocalContextPack(projectRoot, {
         question,
         limit: 40,
       });
 
-      const result = await answer({
+      const result = await answerBase({
         question,
         kg,
         provider,
@@ -182,6 +287,8 @@ describe('Ask AI jaffle-shop regression', () => {
 
       expect(result.kind).toBe('uncertified');
       expect(result.sourceCertifiedBlock).not.toBe('top_products');
+      expect(provider.calls).toHaveLength(1);
+      expect(provider.calls[0]?.map((message) => message.content).join('\n\n')).toContain('order_items');
       expect(result.proposedSql).toMatch(/JOIN\s+fct_orders/i);
       expect(result.proposedSql).toMatch(/JOIN\s+dim_customers/i);
       expect(result.proposedSql).toMatch(/WHERE\s+f\.product_type\s+=\s+'beverage'/i);
@@ -203,6 +310,120 @@ describe('Ask AI jaffle-shop regression', () => {
           }),
         ]),
       );
+    } finally {
+      kg.close();
+    }
+  });
+
+  it('answers product, supply, and order detail questions and expands follow-ups without grounding dead-ends', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const provider = new SequencedProvider([
+        [
+          '```sql',
+          'SELECT',
+          '  oi.product_id,',
+          '  oi.order_id,',
+          '  s.supply_id,',
+          '  s.supply_name,',
+          '  SUM(oi.product_price) AS product_value,',
+          '  SUM(s.supply_cost) AS supply_cost',
+          'FROM order_items oi',
+          'JOIN supplies s ON oi.product_id = s.product_id',
+          'GROUP BY oi.product_id, oi.order_id, s.supply_id, s.supply_name',
+          'ORDER BY product_value DESC',
+          'LIMIT 10',
+          '```',
+        ].join('\n'),
+        [
+          '```sql',
+          'SELECT',
+          '  oi.product_id,',
+          '  oi.product_name,',
+          '  oi.product_type,',
+          '  oi.order_id,',
+          '  s.supply_id,',
+          '  s.supply_name,',
+          '  s.supply_cost,',
+          '  oi.product_price AS product_value',
+          'FROM order_items oi',
+          'JOIN supplies s ON oi.product_id = s.product_id',
+          'ORDER BY product_value DESC, oi.product_id, s.supply_id',
+          'LIMIT 10',
+          '```',
+        ].join('\n'),
+      ]);
+      const question = 'Can you give me the complete supply chain with product and order details with top 10 value';
+      const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const firstAnswer = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        executeCertifiedBlock,
+        executeGeneratedSql,
+        expandGroundingContext: createCatalogExpander(projectRoot),
+      });
+
+      expect(firstAnswer.kind).toBe('uncertified');
+      expect(firstAnswer.proposedSql).toMatch(/JOIN\s+supplies/i);
+      expect(firstAnswer.result?.columns).toEqual([
+        'product_id',
+        'order_id',
+        'supply_id',
+        'supply_name',
+        'product_value',
+        'supply_cost',
+      ]);
+      expect(firstAnswer.result?.rowCount).toBe(10);
+      expect(firstAnswer.text).not.toMatch(/needs more context|could not safely/i);
+
+      const followUp = {
+        kind: 'drilldown' as const,
+        sourceQuestion: question,
+        sourceAnswer: firstAnswer.text,
+        priorResultColumns: ['product_id', 'order_id', 'supply_id', 'supply_name', 'product_value', 'supply_cost'],
+        priorResultValues: {
+          product_id: uniqueStrings(
+            (firstAnswer.result?.rows as Array<Record<string, unknown>>).map((row) => String(row.product_id)),
+          ),
+          supply_id: uniqueStrings(
+            (firstAnswer.result?.rows as Array<Record<string, unknown>>).map((row) => String(row.supply_id)),
+          ),
+        },
+        priorMeasures: ['product_value', 'supply_cost'],
+      };
+      const followUpQuestion = 'can you include the product details with previous results and give me final including all values';
+      const followUpContextPack = await buildLocalContextPack(projectRoot, {
+        question: followUpQuestion,
+        limit: 40,
+        followUp,
+      });
+      const followUpAnswer = await answerBase({
+        question: followUpQuestion,
+        kg,
+        provider,
+        contextPack: followUpContextPack,
+        followUp,
+        executeCertifiedBlock,
+        executeGeneratedSql,
+        expandGroundingContext: createCatalogExpander(projectRoot),
+      });
+
+      expect(followUpAnswer.kind).toBe('uncertified');
+      expect(followUpAnswer.proposedSql).toMatch(/JOIN\s+supplies/i);
+      expect(followUpAnswer.result?.columns).toEqual([
+        'product_id',
+        'product_name',
+        'product_type',
+        'order_id',
+        'supply_id',
+        'supply_name',
+        'supply_cost',
+        'product_value',
+      ]);
+      expect(followUpAnswer.result?.rowCount).toBe(10);
+      expect(followUpAnswer.text).not.toMatch(/needs more context|could not safely/i);
     } finally {
       kg.close();
     }
@@ -237,7 +458,7 @@ describe('Ask AI jaffle-shop regression', () => {
       expect(contextPack.questionPlan.requestedShape.filters).not.toEqual(expect.arrayContaining(['Drink']));
       expect(contextPack.questionPlan.requestedShape.measures).not.toEqual(expect.arrayContaining(['revenue']));
 
-      const result = await answer({
+      const result = await answerBase({
         question,
         kg,
         provider,
@@ -269,6 +490,17 @@ describe('Ask AI jaffle-shop regression', () => {
     } finally {
       catalog.close();
     }
+  }
+
+  function createCatalogExpander(projectRoot: string) {
+    return async (request: Parameters<typeof expandGroundingFromCatalog>[1]) => {
+      const catalog = openMetadataCatalog(projectRoot);
+      try {
+        return expandGroundingFromCatalog(catalog, request);
+      } finally {
+        catalog.close();
+      }
+    };
   }
 
   async function executeGeneratedSql(sql: string): Promise<AgentResultPayload> {
@@ -383,6 +615,13 @@ function seedJaffleProject(projectRoot: string): void {
         product_price: dbtColumn('product_price', 'number', 'Product revenue amount.'),
         ordered_at: dbtColumn('ordered_at', 'timestamp', 'Order timestamp.'),
       }),
+      'model.jaffle_shop.supplies': dbtModel('supplies', 'Supply rows linked to products for supply-chain analysis.', ['products', 'supplies', 'supply-chain'], {
+        supply_id: dbtColumn('supply_id', 'text', 'Supply identifier.'),
+        product_id: dbtColumn('product_id', 'text', 'Product SKU.'),
+        supply_name: dbtColumn('supply_name', 'text', 'Supply display name.'),
+        supply_cost: dbtColumn('supply_cost', 'number', 'Unit supply cost.'),
+        is_perishable_supply: dbtColumn('is_perishable_supply', 'boolean', 'Whether the supply is perishable.'),
+      }),
       'model.jaffle_shop.fct_orders': dbtModel('fct_orders', 'Order fact rows with customer ids and subtotal revenue.', ['orders', 'customers', 'revenue'], {
         order_id: dbtColumn('order_id', 'number', 'Order identifier.'),
         customer_id: dbtColumn('customer_id', 'number', 'Customer identifier.'),
@@ -413,6 +652,13 @@ function seedJaffleDatabase(db: Database.Database): void {
       product_type TEXT NOT NULL,
       product_price REAL NOT NULL,
       ordered_at TEXT NOT NULL
+    );
+    CREATE TABLE supplies (
+      supply_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      supply_name TEXT NOT NULL,
+      supply_cost REAL NOT NULL,
+      is_perishable_supply INTEGER NOT NULL
     );
     CREATE TABLE fct_orders (
       order_id INTEGER PRIMARY KEY,
@@ -460,6 +706,20 @@ function seedJaffleDatabase(db: Database.Database): void {
       (9, 1005, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-03-03'),
       (10, 1006, 'JF001', 'Classic Jaffle', 'jaffle', 12.00, '2024-03-15'),
       (11, 1007, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-04-08');
+
+    INSERT INTO supplies VALUES
+      ('SUP-001', 'JF001', 'bread', 0.33, 1),
+      ('SUP-002', 'JF001', 'cheese', 0.20, 1),
+      ('SUP-003', 'JF001', 'serving boat', 0.11, 0),
+      ('SUP-004', 'JF002', 'bread', 0.33, 1),
+      ('SUP-005', 'JF002', 'mushrooms', 0.44, 1),
+      ('SUP-006', 'JF003', 'bread', 0.33, 1),
+      ('SUP-007', 'JF003', 'egg', 0.27, 1),
+      ('SUP-008', 'JF003', 'napkin', 0.04, 0),
+      ('SUP-009', 'DR001', '16oz compostable cup', 0.13, 0),
+      ('SUP-010', 'DR001', 'coffee', 0.52, 1),
+      ('SUP-011', 'DR002', '16oz compostable cup', 0.13, 0),
+      ('SUP-012', 'DR002', 'chai mix', 0.98, 1);
   `);
 }
 

@@ -145,6 +145,80 @@ describe('buildManifest DataLex contract validation', () => {
   });
 });
 
+describe('buildManifest semantic lineage metadata', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dql-semantic-lineage-'));
+    mkdirSync(join(tmpDir, 'semantic-layer', 'metrics'), { recursive: true });
+    mkdirSync(join(tmpDir, 'semantic-layer', 'dimensions'), { recursive: true });
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({
+      project: 'semantic-lineage',
+      semanticLayer: { provider: 'dql', path: './semantic-layer' },
+    }));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('carries semantic status, owner, and file path into lineage nodes', () => {
+    writeFileSync(join(tmpDir, 'semantic-layer', 'metrics', 'revenue.yaml'), [
+      'name: total_revenue',
+      'label: Total Revenue',
+      'description: Certified revenue definition',
+      'domain: finance',
+      'status: certified',
+      'owner: finance@example.com',
+      'sql: SUM(amount)',
+      'type: sum',
+      'table: mart.orders',
+      '',
+    ].join('\n'));
+    writeFileSync(join(tmpDir, 'semantic-layer', 'dimensions', 'segment.yaml'), [
+      'name: customer_segment',
+      'label: Customer Segment',
+      'description: Segment at order time',
+      'domain: finance',
+      'status: pending_recertification',
+      'owner: data@example.com',
+      'sql: segment',
+      'type: string',
+      'table: mart.orders',
+      '',
+    ].join('\n'));
+
+    const manifest = buildManifest({ projectRoot: tmpDir });
+
+    expect(manifest.metrics.total_revenue).toMatchObject({
+      status: 'certified',
+      owner: 'finance@example.com',
+      filePath: 'semantic-layer/metrics/revenue.yaml',
+    });
+    expect(manifest.dimensions.customer_segment).toMatchObject({
+      domain: 'finance',
+      status: 'pending_recertification',
+      owner: 'data@example.com',
+      filePath: 'semantic-layer/dimensions/segment.yaml',
+    });
+
+    const metricNode = manifest.lineage.nodes.find((node) => node.id === 'metric:total_revenue');
+    const dimensionNode = manifest.lineage.nodes.find((node) => node.id === 'dimension:customer_segment');
+    expect(metricNode).toMatchObject({
+      status: 'certified',
+      owner: 'finance@example.com',
+      filePath: 'semantic-layer/metrics/revenue.yaml',
+      metadata: { table: 'mart.orders', sql: 'SUM(amount)' },
+    });
+    expect(dimensionNode).toMatchObject({
+      domain: 'finance',
+      status: 'pending_recertification',
+      owner: 'data@example.com',
+      filePath: 'semantic-layer/dimensions/segment.yaml',
+    });
+  });
+});
+
 describe('buildManifest dbt import filters', () => {
   let tmpDir: string;
 
@@ -580,6 +654,34 @@ block "Notebook Revenue" {
       && diagnostic.filePath === 'blocks/_drafts/legacy.dql'
       && diagnostic.message.includes('Failed to parse block file'),
     )).toBe(true);
+  });
+
+  it('indexes semantic order and limit draft metadata', () => {
+    mkdirSync(join(tmpDir, 'blocks', '_drafts'), { recursive: true });
+    writeFileSync(join(tmpDir, 'blocks', '_drafts', 'top_revenue_channels.dql'), `block "Top Revenue Channels" {
+  domain = "finance"
+  type = "semantic"
+  status = "draft"
+  metric = "total_revenue"
+  dimensions = ["channel"]
+  time_dimension = "order_date"
+  granularity = "month"
+  requested_filters = ["channel=Online"]
+  order_by = ["total_revenue desc"]
+  limit = 5
+  draft_path = "blocks/_drafts/top_revenue_channels.dql"
+}`);
+
+    const manifest = buildManifest({ projectRoot: tmpDir, dqlVersion: 'test' });
+
+    expect(manifest.blocks['Top Revenue Channels']?.draftMetadata).toMatchObject({
+      requestedFilters: ['channel=Online'],
+      orderBy: ['total_revenue desc'],
+      limit: 5,
+      timeDimension: 'order_date',
+      granularity: 'month',
+      draftPath: 'blocks/_drafts/top_revenue_channels.dql',
+    });
   });
 
   it('validates datalex_contract references when configured with a DataLex manifest', () => {

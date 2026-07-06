@@ -4,7 +4,7 @@
 // open Build through the ai-build bus; this modal wraps the clean
 // <AiBuildResult> surface so those doors never reach the Q&A answer loop.
 //
-// target:'cell' results insert into the active SQL cell of the open notebook
+// target:'cell' results insert a review-required SQL preview into the open notebook
 // (if any). target:'block' results open the generated draft in Block Studio.
 
 import React, { useEffect, useState } from 'react';
@@ -26,13 +26,13 @@ export function AiBuildDialog(): JSX.Element | null {
 
   const close = () => setRequest(null);
 
-  // target:'cell' — append a fresh SQL cell with the generated SQL. The shared
+  // target:'cell' — append a fresh SQL preview cell. The shared
   // dialog has no "active cell" of its own, so it inserts a new cell.
   const insertCell = (sql: string) => {
     const trimmed = sql.trim();
     if (!trimmed) return;
     const cell = makeCell('sql', trimmed);
-    cell.name = 'ai_sql_draft';
+    cell.name = 'ai_sql_preview';
     dispatch({ type: 'ADD_CELL', cell });
   };
 

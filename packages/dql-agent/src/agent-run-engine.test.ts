@@ -12,6 +12,7 @@ import {
   type AgentRouteExecutorResult,
   type AgentRunEvent,
   type AgentRunPlanner,
+  type AgentRunRoute,
 } from "./agent-run-engine.js";
 import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction } from "./intent-controller.js";
@@ -44,6 +45,7 @@ describe("AgentRunEngine", () => {
       store,
       idGenerator: () => "run-certified",
       now: fixedClock(),
+      planner: fixedRoutePlanner("certified_answer"),
       executors: {
         certified_answer: () => ({
           answer: "Revenue is $2.8M.",
@@ -61,7 +63,6 @@ describe("AgentRunEngine", () => {
     const run = await engine.run({
       question: "what is total revenue?",
       intent: "exact_certified_lookup",
-      signals: { certifiedScore: 0.9, hasRetrieval: true },
     }, (event) => events.push(event));
 
     expect(run).toMatchObject({
@@ -92,6 +93,7 @@ describe("AgentRunEngine", () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-certified-shape-repair",
       now: fixedClock(),
+      planner: fixedRoutePlanner("certified_answer"),
       gates: defaultAgentRunGates,
       executors: {
         certified_answer: () => ({
@@ -134,11 +136,15 @@ describe("AgentRunEngine", () => {
     const run = await engine.run({
       question: "show revenue by product with product name, category, and revenue",
       intent: "exact_certified_lookup",
-      signals: { certifiedScore: 0.9, hasRetrieval: true },
     }, (event) => events.push(event));
 
     expect(run.route).toBe("generated_answer");
-    expect(run.repairAttempts).toBe(1);
+    expect(run.repairAttempts).toBe(0);
+    expect(run.escalationAttempts).toBe(1);
+    expect(run.budgetUsage?.usage).toMatchObject({
+      laneExecutionAttemptsUsed: 0,
+      engineEscalationsUsed: 1,
+    });
     expect(run.steps.map((step) => step.route)).toEqual(["certified_answer", "generated_answer"]);
     expect(run.steps[0]?.evaluations.some((evaluation) => evaluation.id === "answer-shape" && !evaluation.passed)).toBe(true);
     expect(events.some((event) =>
@@ -162,7 +168,8 @@ describe("AgentRunEngine", () => {
     expect(run.artifacts).toEqual([
       expect.objectContaining({ kind: "research_run", trustState: "review_required" }),
     ]);
-    expect(run.nextActions.map((action) => action.id)).toEqual(["insert-sql", "create-block"]);
+    expect(run.nextActions.map((action) => action.id)).toEqual(["create-block", "insert-sql"]);
+    expect(run.nextActions[0]).toMatchObject({ label: "Review DQL draft" });
   });
 
   it("separates generated answers from explicit SQL-cell artifacts", async () => {
@@ -185,6 +192,38 @@ describe("AgentRunEngine", () => {
     expect(sqlCell.route).toBe("sql_cell");
     expect(sqlCell.artifacts[0]?.kind).toBe("sql_cell");
     expect(sqlCell.stopReason).toBe("artifact_created");
+  });
+
+  it("finalizes the run route from an executor-resolved cascade route", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-resolved-certified",
+      now: fixedClock(),
+      executors: {
+        generated_answer: () => ({
+          resolvedRoute: "certified_answer",
+          summary: "Answered from certified block revenue_total.",
+          answer: "Revenue is $2.8M.",
+          status: "completed",
+          trustState: "certified",
+          stopReason: "certified_answer_found",
+          artifacts: [{
+            id: "answer:certified",
+            kind: "answer",
+            title: "Certified answer",
+            trustState: "certified",
+            payload: { route: { tier: "certified_block", ref: "revenue_total" } },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "what is total revenue?", requestedMode: "ask" });
+
+    expect(run.route).toBe("certified_answer");
+    expect(run.status).toBe("completed");
+    expect(run.trustState).toBe("certified");
+    expect(run.steps[0]?.route).toBe("generated_answer");
+    expect(run.steps[0]?.resolvedRoute).toBe("certified_answer");
   });
 
   it("routes block and app requests to their durable artifact surfaces", async () => {
@@ -317,9 +356,83 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     expect(run.route).toBe("sql_cell");
     expect(run.status).toBe("needs_review");
     expect(run.repairAttempts).toBe(1);
+    expect(run.escalationAttempts).toBe(0);
+    expect(run.budgetUsage?.usage).toMatchObject({
+      laneExecutionAttemptsUsed: 1,
+      engineEscalationsUsed: 0,
+    });
     expect(run.steps[0]?.attempts).toBe(2);
     expect(run.steps[0]?.status).toBe("repaired");
     expect(events.map((event) => event.type)).toContain("repair.attempted");
+  });
+
+  it("prefers machine-facing repairAction hints over planner prose during retry", async () => {
+    const events: AgentRunEvent[] = [];
+    const seenRepairHints: Array<string | undefined> = [];
+    let calls = 0;
+    const planner: AgentRunPlanner = {
+      plan: ({ request }) => ({
+        source: "deterministic",
+        rationale: "Test plan",
+        steps: [{
+          id: "step-1",
+          route: "generated_answer",
+          goal: request.question,
+          successCriteria: [],
+        }],
+      }),
+      replan: () => ({
+        decision: "repair",
+        repairHint: "planner returned broad prose",
+      }),
+    };
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-machine-repair-hint",
+      now: fixedClock(),
+      planner,
+      executors: {
+        generated_answer: ({ repairHint }) => {
+          calls += 1;
+          seenRepairHints.push(repairHint);
+          if (calls === 1) {
+            return {
+              summary: "Grounding gap.",
+              evaluations: [{
+                id: "grounding-gap",
+                label: "Metadata grounding",
+                passed: false,
+                severity: "warning",
+                message: "A metadata relation was missing from the inspected context.",
+                suggestedRepair: "Retry with wider metadata context.",
+                repairAction: {
+                  kind: "retry",
+                  hint: "code=unknown_relation; relation=dev.supplies",
+                },
+              }],
+            };
+          }
+          return {
+            summary: "Repaired answer.",
+            answer: "Repaired answer.",
+            evaluations: [{
+              id: "grounding-gap",
+              label: "Metadata grounding",
+              passed: true,
+              severity: "info",
+              message: "Context expanded.",
+            }],
+          };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: "include product supply details", requestedMode: "ask" }, (event) => events.push(event));
+
+    expect(run.repairAttempts).toBe(1);
+    expect(seenRepairHints).toEqual([undefined, "code=unknown_relation; relation=dev.supplies"]);
+    expect(events.find((event) => event.type === "repair.attempted")?.payload).toMatchObject({
+      repairHint: "code=unknown_relation; relation=dev.supplies",
+    });
   });
 
   it("escalates a generated answer with no grounding to research", async () => {
@@ -348,8 +461,48 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     expect(run.steps).toHaveLength(2);
     expect(run.steps[0]?.status).toBe("escalated");
     expect(run.steps[1]?.route).toBe("research");
-    expect(run.repairAttempts).toBe(1);
+    expect(run.repairAttempts).toBe(0);
+    expect(run.escalationAttempts).toBe(1);
+    expect(run.budgetUsage?.usage).toMatchObject({
+      laneExecutionAttemptsUsed: 0,
+      engineEscalationsUsed: 1,
+    });
     expect(events.map((event) => event.type)).toContain("escalated");
+  });
+
+  it("does not run an escalation after the engine escalation budget is exhausted", async () => {
+    let researchCalls = 0;
+    const events: AgentRunEvent[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-escalation-budget",
+      now: fixedClock(),
+      maxEngineEscalations: 0,
+      gates: defaultAgentRunGates,
+      executors: {
+        generated_answer: () => ({ answer: "", artifacts: [] }),
+        research: () => {
+          researchCalls += 1;
+          return { summary: "Should not run." };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: "show me something ungrounded",
+      intent: "ad_hoc_ranking",
+      signals: { certifiedScore: 0.1, hasRetrieval: true },
+    }, (event) => events.push(event));
+
+    expect(researchCalls).toBe(0);
+    expect(run.route).toBe("generated_answer");
+    expect(run.status).toBe("blocked");
+    expect(run.repairAttempts).toBe(0);
+    expect(run.escalationAttempts).toBe(0);
+    expect(run.budgetUsage?.limits.engineEscalations).toBe(0);
+    expect(events.some((event) =>
+      event.type === "escalated"
+      && event.message.includes("budget exhausted")
+    )).toBe(true);
   });
 
   it("escalates an app build with no certified coverage to a block draft", async () => {
@@ -394,6 +547,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
 
     expect(calls).toBe(2); // initial build + one repair, then budget exhausted
     expect(run.repairAttempts).toBe(1);
+    expect(run.escalationAttempts).toBe(0);
     expect(run.status).toBe("needs_review");
   });
 
@@ -638,4 +792,32 @@ describe("AgentRunEngine — conversation route", () => {
 
 function fixedClock(): () => Date {
   return () => new Date("2026-06-29T00:00:00.000Z");
+}
+
+function fixedRoutePlanner(route: AgentRunRoute): AgentRunPlanner {
+  return {
+    plan: ({ request, routeDecision }) => ({
+      source: "deterministic",
+      rationale: routeDecision.reason,
+      steps: [{
+        id: "step-1",
+        route,
+        goal: request.question,
+        successCriteria: [],
+      }],
+    }),
+    replan: ({ currentStep }) => {
+      const failing = currentStep.evaluations.find((evaluation) => !evaluation.passed && evaluation.suggestedRepair);
+      if (failing?.repairAction?.kind === "escalate") {
+        return {
+          decision: "escalate",
+          route: failing.repairAction.route,
+          repairHint: failing.repairAction.hint ?? failing.suggestedRepair,
+        };
+      }
+      return failing?.suggestedRepair
+        ? { decision: "repair", repairHint: failing.suggestedRepair }
+        : { decision: "accept" };
+    },
+  };
 }

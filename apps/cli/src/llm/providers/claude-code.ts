@@ -2,7 +2,10 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { dqlMcpToolNamesForSurface } from '@duckcodeailabs/dql-agent';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal } from '../types.js';
+
+const CLAUDE_CODE_ALLOWED_TOOLS = dqlMcpToolNamesForSurface('claude_code').join(' ');
 
 /**
  * `claude-code` provider: spawns the `claude` CLI in headless print mode and
@@ -34,7 +37,7 @@ export const claudeCodeRunner: AgentRunner = {
         'stream-json',
         '--verbose',
         '--allowedTools',
-        'mcp__dql__search_blocks mcp__dql__get_block mcp__dql__list_metrics mcp__dql__list_dimensions mcp__dql__lineage_impact mcp__dql__certify mcp__dql__suggest_block',
+        CLAUDE_CODE_ALLOWED_TOOLS,
       ],
       { cwd: req.projectRoot, stdio: ['ignore', 'pipe', 'pipe'] },
     );
@@ -95,8 +98,11 @@ function buildPrompt(req: AgentRunRequest): string {
     ? `\n\nThe user is authoring a notebook cell with this upstream SQL:\n\`\`\`sql\n${req.upstream.sql}\n\`\`\`\n`
     : '';
   return [
-    'You are the DQL authoring agent. Ground every answer in existing DQL blocks, metrics, and dimensions. Use the mcp__dql__* tools to search, inspect, and ultimately propose a new block.',
+    'You are the DQL authoring agent. Ground every answer in existing DQL blocks, metrics, and dimensions. Use mcp__dql__ask_dql first for analytics questions, then follow its nextTool.',
     '',
+    'Use mcp__dql__query_semantic_model when semantic metrics/dimensions/time grains can answer before deep warehouse search; surface its DQL artifact and draft path when present. For certified exact fits, use mcp__dql__query_via_block. For custom grains, rankings, drilldowns, or missing certified/semantic fits, use mcp__dql__inspect_metadata_context and mcp__dql__query_via_metadata, then surface the review-required DQL artifact/source and draft path.',
+    'For follow-ups that refer to prior/previous results, pass followUp.priorResultRef and followUp.priorDqlArtifact into mcp__dql__query_via_metadata instead of answering from vague follow-up prose.',
+    'If mcp__dql__query_via_metadata reports a known relation outside the inspected context, use mcp__dql__expand_context with the prior contextPackId and retry mcp__dql__query_via_metadata once with the new contextPackId and regroundAttemptsUsed: 1.',
     'When the user is ready for a concrete block, call mcp__dql__suggest_block with name, domain, owner, description, and sql. The response returns governance-gate results.',
     upstream,
     '',
@@ -174,3 +180,8 @@ function emitProposalFromResult(output: unknown, emit: (turn: AgentTurn) => void
     },
   });
 }
+
+export const __test__ = {
+  CLAUDE_CODE_ALLOWED_TOOLS,
+  buildPrompt,
+};

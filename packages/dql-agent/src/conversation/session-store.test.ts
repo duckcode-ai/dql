@@ -43,6 +43,26 @@ describe('ConversationStore', () => {
       trustLabel: 'certified',
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       contextPackId: 'ctx_abc',
+      cascade: {
+        terminalLane: 'semantic',
+        routeTier: 'semantic_metric',
+        label: 'Lane 2 semantic DQL artifact was terminal',
+        artifactKind: 'semantic_block',
+        outcome: {
+          lane: 'semantic',
+          routeTier: 'semantic_metric',
+          metrics: ['revenue'],
+          dimensions: ['category'],
+          rowCount: 2,
+        },
+      },
+      dqlArtifact: {
+        kind: 'semantic_block',
+        name: 'food_vs_drink_revenue',
+        source: 'block "food_vs_drink_revenue" {\n  type = "semantic"\n  metric = "revenue"\n}',
+        metrics: ['revenue'],
+        dimensions: ['category'],
+      },
       result: {
         columns: Array.from({ length: 40 }, (_, i) => `col_${i}`),
         rowsSample: Array.from({ length: 20 }, () => ['Food', 240877]),
@@ -61,6 +81,36 @@ describe('ConversationStore', () => {
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });
     expect(stored.sourceCertifiedBlock).toBe('food_vs_drink_revenue');
     expect(stored.contextPackId).toBe('ctx_abc');
+    expect(stored.cascade).toMatchObject({
+      terminalLane: 'semantic',
+      routeTier: 'semantic_metric',
+      outcome: {
+        lane: 'semantic',
+        metrics: ['revenue'],
+        dimensions: ['category'],
+      },
+    });
+    expect(stored.dqlArtifact).toMatchObject({
+      kind: 'semantic_block',
+      name: 'food_vs_drink_revenue',
+      metrics: ['revenue'],
+      dimensions: ['category'],
+      source: expect.stringContaining('metric = "revenue"'),
+    });
+  });
+
+  it('aggregates tier distribution across threads', () => {
+    const t1 = store.createThread();
+    const t2 = store.createThread();
+    store.appendTurn(t1.id, { question: 'a', cascade: { terminalLane: 'certified', routeTier: 'certified_block', label: 'x', outcome: { lane: 'certified', routeTier: 'certified_block', executionStatus: 'executed' } } });
+    store.appendTurn(t1.id, { question: 'b', cascade: { terminalLane: 'semantic', routeTier: 'semantic_metric', label: 'x', outcome: { lane: 'semantic', routeTier: 'semantic_metric' } } });
+    store.appendTurn(t2.id, { question: 'c', cascade: { terminalLane: 'semantic', routeTier: 'semantic_metric', label: 'x', outcome: { lane: 'semantic', routeTier: 'semantic_metric' } } });
+    store.appendTurn(t2.id, { question: 'd', cascade: { terminalLane: 'generated', routeTier: 'generated_sql', label: 'x', outcome: { lane: 'generated', routeTier: 'generated_sql', hasSqlPreview: true, executionStatus: 'executed' } } });
+
+    const dist = store.tierDistribution();
+    expect(dist.total).toBe(4);
+    expect(dist.byRouteTier).toMatchObject({ certified_block: 1, semantic_metric: 2, generated_sql: 1 });
+    expect(dist.byTerminalLane).toMatchObject({ certified: 1, semantic: 2, generated: 1 });
   });
 
   it('searches turns by keyword, scoped to a thread', () => {

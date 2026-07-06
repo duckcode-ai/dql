@@ -2,13 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SemanticLayer } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer, parseProposal } from "./answer-loop.js";
+import { answer as answerBase, parseProposal } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import type { CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
 import type { CertifiedBlockFit } from "./metadata/block-fit.js";
-import type { AgentProvider, AgentMessage } from "./providers/types.js";
+import type { AgentProvider, AgentMessage, AgentToolDefinition, ProviderToolLoopOptions } from "./providers/types.js";
 
 class StubProvider implements AgentProvider {
   readonly name = "claude" as const;
@@ -26,6 +27,42 @@ class StubProvider implements AgentProvider {
     this.calls.push(messages);
     return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)];
   }
+}
+
+class ToolStubProvider extends StubProvider {
+  toolCalls: Array<{ toolNames: string[]; maxToolCalls?: number }> = [];
+
+  async generateWithTools(
+    messages: AgentMessage[],
+    tools: AgentToolDefinition[],
+    options?: ProviderToolLoopOptions,
+  ): Promise<string> {
+    this.messages = messages;
+    this.toolCalls.push({ toolNames: tools.map((tool) => tool.name), maxToolCalls: options?.maxToolCalls });
+    const tool = tools.find((candidate) => candidate.name === "inspect_metadata_context");
+    if (tool) {
+      const input = { question: "tool-assisted generation" };
+      const output = await tool.run(input);
+      options?.onToolCall?.({ name: tool.name, input, output, isError: false });
+    }
+    return "```json\n{\"summary\":\"Tool-assisted SQL proposal.\",\"sql\":\"SELECT region, COUNT(*) AS order_count FROM orders GROUP BY region\",\"viz\":\"bar\",\"outputs\":[\"region\",\"order_count\"]}\n```";
+  }
+}
+
+function inspectMetadataTool(observed: unknown[] = []): AgentToolDefinition {
+  return {
+    name: "inspect_metadata_context",
+    description: "Inspect context.",
+    inputSchema: { type: "object", properties: { question: { type: "string" } } },
+    run: async (args) => {
+      observed.push(args);
+      return { contextPackId: "ctx_test", selectedRelations: ["orders"] };
+    },
+  };
+}
+
+function answer(input: Parameters<typeof answerBase>[0]) {
+  return answerBase(input);
 }
 
 let dir: string;
@@ -214,11 +251,37 @@ describe("answer (block-first loop)", () => {
     expect(result.kind).toBe("certified");
     expect(result.block?.nodeId).toBe("block:revenue_total");
     expect(result.citations[0].gitSha).toBe("abc12345");
-    expect(result.evidence?.route[0].tool).toBe("search_certified_artifacts");
+    expect(result.evidence?.route[0]).toMatchObject({
+      tool: "cascade_triage",
+      status: "checked",
+    });
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "cascade_certified",
+          status: "selected",
+        }),
+        expect.objectContaining({
+          tool: "search_certified_artifacts",
+          status: "selected",
+        }),
+      ]),
+    );
     expect(result.evidence?.selectedAssets[0].nodeId).toBe(
       "block:revenue_total",
     );
     expect(result.evidence?.outcome?.name).toContain("Revenue leadership");
+    expect(result.cascade).toMatchObject({
+      terminalLane: "certified",
+      routeTier: "certified_block",
+      ref: "revenue_total",
+      outcome: {
+        lane: "certified",
+        routeTier: "certified_block",
+        ref: "revenue_total",
+        executionStatus: "not_requested",
+      },
+    });
   });
 
   it("Tier 2: a governed semantic metric EXECUTES deterministically with zero LLM calls", async () => {
@@ -334,6 +397,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          sourcePath: "blocks/total_revenue.dql",
+          sql: "SELECT SUM(amount) AS total_revenue FROM orders",
         },
         {
           nodeId: "term:Lifetime Revenue",
@@ -366,6 +431,11 @@ describe("answer (block-first loop)", () => {
     expect(result.block?.nodeId).toBe("block:total_revenue");
     expect(result.result?.rowCount).toBe(1);
     expect(result.sourceTier).toBe("certified_artifact");
+    expect(result.dqlArtifact?.kind).toBe("certified_block");
+    expect(result.dqlArtifact?.name).toBe("total_revenue");
+    expect(result.dqlArtifact?.sourcePath).toBe("blocks/total_revenue.dql");
+    expect(result.dqlArtifact?.source).toContain('status = "certified"');
+    expect(result.dqlArtifact?.source).toContain("SELECT SUM(amount) AS total_revenue FROM orders");
     expect(provider.calls).toHaveLength(0);
   });
 
@@ -505,6 +575,331 @@ describe("answer (block-first loop)", () => {
     expect(Array.isArray(result.citations)).toBe(true);
   });
 
+  it("uses bounded provider tool calls for generated proposals when available", async () => {
+    const observed: unknown[] = [];
+    const provider = new ToolStubProvider("fallback should not be called");
+    const result = await answer({
+      question: "What is the order count by region and product category?",
+      provider,
+      kg,
+      answerLoopTools: [inspectMetadataTool(observed)],
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(provider.toolCalls).toEqual([
+      { toolNames: ["inspect_metadata_context"], maxToolCalls: 8 },
+    ]);
+    expect(provider.messages.at(-1)?.content).toContain("8 call(s) (multi_entity");
+    expect(observed).toEqual([{ question: "tool-assisted generation" }]);
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("COUNT(*) AS order_count");
+    expect(result.dqlArtifact?.source).toContain('outputs = ["region", "order_count"]');
+    expect(result.evidence?.toolCalls).toEqual([
+      expect.objectContaining({
+        name: "inspect_metadata_context",
+        status: "checked",
+        inputSummary: expect.stringContaining("tool-assisted generation"),
+        outputSummary: expect.stringContaining("ctx_test"),
+        order: 1,
+      }),
+    ]);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "inspect_metadata_context",
+          status: "checked",
+          label: "Provider tool observed: inspect_metadata_context",
+        }),
+      ]),
+    );
+  });
+
+  it("carries structured DQL metadata into generated artifacts and draft capture", async () => {
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Top product supply value by product and supply.",
+        sql: [
+          "SELECT product_name, supply_name, SUM(order_value) AS total_value",
+          "FROM analytics.product_supply_orders",
+          "WHERE is_perishable = true",
+          "GROUP BY product_name, supply_name",
+          "ORDER BY total_value DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["product_name", "supply_name", "total_value"],
+        dql: {
+          entity: "product_supply",
+          dimensions: ["product_name", "supply_name"],
+          filters: ["is_perishable = true", "top 10 by total_value"],
+        },
+      }),
+      "```",
+    ].join("\n"));
+    let captured: {
+      proposedEntity?: string;
+      requestedDimensions?: string[];
+      requestedFilters?: string[];
+      outputs?: string[];
+    } | undefined;
+    const result = await answer({
+      question: "Give me the complete supply chain with product and order details with top 10 value",
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "analytics.product_supply_orders",
+        name: "product_supply_orders",
+        columns: [
+          { name: "product_name" },
+          { name: "supply_name" },
+          { name: "is_perishable" },
+          { name: "order_value" },
+        ],
+      }],
+      captureGeneratedDraft: ({ proposedEntity, requestedDimensions, requestedFilters, outputs }) => {
+        captured = { proposedEntity, requestedDimensions, requestedFilters, outputs };
+        return {
+          path: "blocks/_drafts/product_supply_top_10_value.dql",
+          askedTimes: 1,
+          proposedContractId: "supply_chain.Unknown.product_supply_top_10_value",
+        };
+      },
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.dqlArtifact?.sourcePath).toBe("blocks/_drafts/product_supply_top_10_value.dql");
+    expect(result.dqlArtifact?.source).toContain('proposed_entity = "product_supply"');
+    expect(result.dqlArtifact?.source).toContain('requested_dimensions = ["product_name", "supply_name"]');
+    expect(result.dqlArtifact?.source).toContain('requested_filters = ["is_perishable = true", "top 10 by total_value"]');
+    expect(result.dqlArtifact?.source).toContain('outputs = ["product_name", "supply_name", "total_value"]');
+    expect(captured).toEqual({
+      proposedEntity: "product_supply",
+      requestedDimensions: ["product_name", "supply_name"],
+      requestedFilters: ["is_perishable = true", "top 10 by total_value"],
+      outputs: ["product_name", "supply_name", "total_value"],
+    });
+  });
+
+  it("uses a smaller lookup budget for simple generated proposals", async () => {
+    const provider = new ToolStubProvider("fallback should not be called");
+    const result = await answer({
+      question: "What is the median order value?",
+      provider,
+      kg,
+      answerLoopTools: [inspectMetadataTool()],
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(provider.toolCalls).toEqual([
+      { toolNames: ["inspect_metadata_context"], maxToolCalls: 3 },
+    ]);
+    expect(provider.messages.at(-1)?.content).toContain("3 call(s) (lookup");
+    expect(result.kind).toBe("uncertified");
+  });
+
+  it("expands the provider tool budget for deep analysis requests", async () => {
+    const provider = new ToolStubProvider("fallback should not be called");
+    const result = await answer({
+      question: "What is the order count by region?",
+      provider,
+      kg,
+      analysisDepth: "deep",
+      answerLoopTools: [inspectMetadataTool()],
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(provider.toolCalls).toEqual([
+      { toolNames: ["inspect_metadata_context"], maxToolCalls: 15 },
+    ]);
+    expect(provider.messages.at(-1)?.content).toContain("15 call(s) (deep_research");
+    expect(result.kind).toBe("uncertified");
+  });
+
+  it("uses deep-mode candidate selection to avoid an invalid first generated SQL proposal", async () => {
+    const provider = new StubProvider([
+      [
+        "```json",
+        JSON.stringify({
+          summary: "First candidate uses an unavailable customer column.",
+          sql: "SELECT customer_name, COUNT(*) AS order_count FROM analytics.orders GROUP BY customer_name",
+          viz: "bar",
+          outputs: ["customer_name", "order_count"],
+        }),
+        "```",
+      ].join("\n"),
+      [
+        "```json",
+        JSON.stringify({
+          summary: "Order count by region from the inspected orders table.",
+          sql: "SELECT region, COUNT(*) AS order_count FROM analytics.orders GROUP BY region",
+          viz: "bar",
+          outputs: ["region", "order_count"],
+        }),
+        "```",
+      ].join("\n"),
+      [
+        "```json",
+        JSON.stringify({
+          summary: "Third candidate uses an unavailable relation.",
+          sql: "SELECT region, COUNT(*) AS order_count FROM analytics.order_regions GROUP BY region",
+          viz: "bar",
+          outputs: ["region", "order_count"],
+        }),
+        "```",
+      ].join("\n"),
+    ]);
+    const executedSql: string[] = [];
+
+    const result = await answer({
+      question: "Deep research order count by region",
+      provider,
+      kg,
+      analysisDepth: "deep",
+      schemaContext: [{
+        relation: "analytics.orders",
+        name: "orders",
+        columns: [
+          { name: "order_id" },
+          { name: "region" },
+        ],
+      }],
+      executeGeneratedSql: async (sql) => {
+        executedSql.push(sql);
+        return {
+          columns: ["region", "order_count"],
+          rows: [{ region: "West", order_count: 3 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    // Initial (invalid) + three diverse alternatives (direct / query-plan /
+    // decomposition) = 4 candidates generated.
+    expect(provider.calls).toHaveLength(4);
+    expect(executedSql).toEqual([
+      "SELECT region, COUNT(*) AS order_count FROM analytics.orders GROUP BY region",
+    ]);
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("GROUP BY region");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Deep candidate selection reviewed 4 candidates and selected candidate 2"),
+      ]),
+    );
+  });
+
+  it("deep mode diversifies even when the first candidate is clean, and reports agreement", async () => {
+    // All candidates return the same valid SQL, so they all execute and AGREE —
+    // but the point is that deep mode + an executor generates alternatives at all
+    // (a valid-but-wrong first candidate could otherwise never be out-voted).
+    const provider = new StubProvider(
+      [
+        "```json",
+        JSON.stringify({
+          summary: "Order count by region.",
+          sql: "SELECT region, COUNT(*) AS order_count FROM analytics.orders GROUP BY region",
+          viz: "bar",
+          outputs: ["region", "order_count"],
+        }),
+        "```",
+      ].join("\n"),
+    );
+    const result = await answer({
+      question: "Deep research order count by region",
+      provider,
+      kg,
+      analysisDepth: "deep",
+      schemaContext: [{
+        relation: "analytics.orders",
+        name: "orders",
+        columns: [{ name: "order_id" }, { name: "region" }],
+      }],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "order_count"],
+        rows: [{ region: "West", order_count: 3 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    // Initial + 3 diverse alternatives — diversified despite a clean first candidate.
+    expect(provider.calls.length).toBeGreaterThan(1);
+    expect(result.kind).toBe("uncertified");
+    expect(result.validationWarnings.join(" ")).toContain("executed candidates agreed on the result");
+  });
+
+  it("renders rich prior result refs from the conversation snapshot into generated-answer prompts", async () => {
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product supply rows with product details from the prior result context.",
+        sql: [
+          "SELECT product_id, supply_id, supply_name, supply_cost",
+          "FROM analytics.product_supplies",
+          "ORDER BY supply_cost DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["product_id", "supply_id", "supply_name", "supply_cost"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answer({
+      question: "can you include product details with previous results and give final",
+      provider,
+      kg,
+      conversationSnapshot: {
+        threadId: "thread_products",
+        recentTurns: [
+          {
+            id: "turn_signups",
+            question: "how many signups last quarter",
+            answerSummary: "There were 412 signups.",
+            resultColumns: ["quarter", "signups"],
+            resultRowCount: 1,
+          },
+        ],
+        recalledTurns: [
+          {
+            id: "turn_products",
+            question: "give me product and supply info",
+            answerSummary: "Product to supply breakdown.",
+            resultColumns: ["product_id", "supply_id", "supply_name", "supply_cost"],
+            resultRowCount: 65,
+            sourceSql: "SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies",
+            dqlArtifact: {
+              kind: "sql_block",
+              name: "product_supply_breakdown",
+              source: "block \"product_supply_breakdown\" {\n  type = \"custom\"\n}",
+            },
+          },
+        ],
+      },
+      schemaContext: [
+        {
+          relation: "analytics.product_supplies",
+          name: "product_supplies",
+          columns: [
+            { name: "product_id" },
+            { name: "supply_id" },
+            { name: "supply_name" },
+            { name: "supply_cost" },
+          ],
+        },
+      ],
+    });
+
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("Recalled earlier turns");
+    expect(prompt).toContain("rows: 65");
+    expect(prompt).toContain("sql: SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies");
+    expect(prompt).toContain("dql: product_supply_breakdown");
+    expect(result.kind).toBe("uncertified");
+  });
+
   it("executes generated SQL as an uncertified bounded preview when the host supplies an executor", async () => {
     const llmReply =
       "Median order value by region based on the available manifest context.\n\n" +
@@ -528,6 +923,14 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.rowCount).toBe(2);
     expect(result.evidence?.execution?.status).toBe("executed");
     expect(result.evidence?.execution?.message).toContain("uncertified bounded preview");
+    expect(result.dqlArtifact?.kind).toBe("sql_block");
+    expect(result.dqlArtifact?.name).toBe("median_order_value_region");
+    expect(result.dqlArtifact?.source).toContain('block "median_order_value_region"');
+    expect(result.dqlArtifact?.source).toContain('type = "custom"');
+    expect(result.dqlArtifact?.source).toContain('status = "draft"');
+    expect(result.dqlArtifact?.source).toContain('outputs = ["region", "median_order_value"]');
+    expect(result.dqlArtifact?.source).toContain('query = """');
+    expect(result.dqlArtifact?.source).toContain("SELECT region, MEDIAN(amount) AS median_order_value FROM fct_orders GROUP BY region");
     expect(result.evidence?.route).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -649,7 +1052,7 @@ describe("answer (block-first loop)", () => {
         "Viz: table",
     );
 
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -838,8 +1241,22 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Customer order performance ranking generated from the inspected customer mart.",
+        sql: [
+          "SELECT customer_name, count_lifetime_orders AS orders, ROUND(lifetime_spend, 2) AS lifetime_spend",
+          "FROM analytics.customers",
+          "ORDER BY lifetime_spend DESC, count_lifetime_orders DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "orders", "lifetime_spend"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Can you show me the orders by customer who have performed better?",
       provider,
       kg,
@@ -870,6 +1287,8 @@ describe("answer (block-first loop)", () => {
     expect(result.block).toBeUndefined();
     expect(result.proposedSql).toContain("analytics.customers");
     expect(result.proposedSql).not.toContain("total_customers");
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("count_lifetime_orders");
   });
 
   it("honors an already-demoted category revenue route for a product-grain revenue request", async () => {
@@ -905,7 +1324,22 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product-grain revenue ranking generated from order items after using the certified category block only as context.",
+        sql: [
+          "SELECT product_name, product_type AS category, SUM(product_price) AS revenue",
+          "FROM analytics.order_items",
+          "GROUP BY product_name, product_type",
+          "ORDER BY revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["product_name", "category", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
     const schemaContext = [
       {
         relation: "analytics.order_items",
@@ -921,7 +1355,7 @@ describe("answer (block-first loop)", () => {
     ];
     const question =
       "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue";
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -996,6 +1430,8 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("SUM(product_price) AS revenue");
     expect(result.proposedSql).not.toContain("food_vs_drink_revenue");
     expect(result.result?.columns).toEqual(["product_name", "category", "revenue"]);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("food_vs_drink_revenue");
     expect(result.evidence?.route).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1014,11 +1450,29 @@ describe("answer (block-first loop)", () => {
     );
   });
 
-  it("adapts certified source SQL expressions when only projected source-shape columns are selected", async () => {
-    const provider = new StubProvider("should not be called");
+  it("passes certified source SQL expressions to the provider when only projected source-shape columns are selected", async () => {
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product revenue by category generated from certified source SQL shape context.",
+        sql: [
+          "SELECT",
+          "  product_name AS product_name,",
+          "  CASE WHEN is_food_item THEN 'Food' ELSE 'Drink' END AS category,",
+          "  SUM(product_price) AS revenue",
+          "FROM dev.order_items",
+          "GROUP BY 1, 2",
+          "ORDER BY revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["product_name", "category", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
     const question =
       "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue";
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1081,7 +1535,11 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("top_products");
+    expect(prompt).toContain("food_vs_drink_revenue");
+    expect(prompt).toContain("CASE WHEN is_food_item THEN 'Food' ELSE 'Drink' END AS category");
     expect(result.kind).toBe("uncertified");
     expect(result.reviewStatus).toBe("draft_ready");
     expect(result.proposedSql).toContain("product_name AS product_name");
@@ -1100,7 +1558,26 @@ describe("answer (block-first loop)", () => {
   });
 
   it("generates a customer drilldown for a singular prior product reference", async () => {
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Customer drilldown generated from the selected order-item relation for the prior product.",
+        sql: [
+          "SELECT",
+          "  f.customer_name AS customer_name,",
+          "  f.product_name AS product_name,",
+          "  SUM(f.product_price) AS revenue",
+          "FROM dev.order_items AS f",
+          "WHERE f.product_name = 'for richer or pourover'",
+          "GROUP BY f.customer_name, f.product_name",
+          "ORDER BY revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "product_name", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
     const question = "who are the customers for this product?";
     const schemaContext = [
       {
@@ -1115,7 +1592,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1152,7 +1629,10 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("dev.order_items");
+    expect(prompt).toContain("for richer or pourover");
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("f.customer_name AS customer_name");
     expect(result.proposedSql).toContain("f.product_name AS product_name");
@@ -1169,7 +1649,27 @@ describe("answer (block-first loop)", () => {
   });
 
   it("generates a product-customer revenue view for combined product and buyer requests", async () => {
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product/customer revenue view generated from the selected order-item relation.",
+        sql: [
+          "SELECT",
+          "  f.product_name AS product_name,",
+          "  CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END AS category,",
+          "  f.customer_name AS customer_name,",
+          "  SUM(f.product_price) AS revenue,",
+          "  COUNT(*) AS units",
+          "FROM dev.order_items AS f",
+          "GROUP BY f.product_name, CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END, f.customer_name",
+          "ORDER BY revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["product_name", "category", "customer_name", "revenue", "units"],
+      }),
+      "```",
+    ].join("\n"));
     const question = "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue and also give the complete view of customers who bought these product";
     const schemaContext = [
       {
@@ -1185,7 +1685,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1217,7 +1717,11 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("dev.order_items");
+    expect(prompt).toContain("customer_name");
+    expect(prompt).toContain("selected order item relation for product/customer revenue view");
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("f.product_name AS product_name");
     expect(result.proposedSql).toContain("CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END AS category");
@@ -1259,7 +1763,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1291,14 +1795,35 @@ describe("answer (block-first loop)", () => {
     expect(result.validationWarnings).toEqual(
       expect.arrayContaining([
         expect.stringContaining("missing requested output column"),
-        "Generated result shape did not satisfy the requested product/customer answer contract.",
+        "SQL preview result shape did not satisfy the requested product/customer answer contract.",
       ]),
     );
     expect(result.result?.columns).toEqual(["customer_name", "orders", "lifetime_spend"]);
   });
 
   it("generates product categories for a prior customer set even when category is derived", async () => {
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product category rows for the prior customers generated from the selected order-item relation.",
+        sql: [
+          "SELECT",
+          "  f.customer_name AS customer_name,",
+          "  f.product_name AS product_name,",
+          "  CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END AS category,",
+          "  SUM(f.product_price) AS revenue,",
+          "  COUNT(*) AS units",
+          "FROM dev.order_items AS f",
+          "WHERE f.customer_name IN ('Mr. Matthew Meyer', 'Aaron Gardner')",
+          "GROUP BY f.customer_name, f.product_name, CASE WHEN f.is_food_item THEN 'Food' ELSE 'Drink' END",
+          "ORDER BY customer_name ASC, revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "product_name", "category", "revenue", "units"],
+      }),
+      "```",
+    ].join("\n"));
     const question = "what are the product catagories for these customers";
     const schemaContext = [
       {
@@ -1314,7 +1839,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1352,7 +1877,10 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("dev.order_items");
+    expect(prompt).toContain("Mr. Matthew Meyer");
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("f.customer_name AS customer_name");
     expect(result.proposedSql).toContain("f.product_name AS product_name");
@@ -1370,7 +1898,30 @@ describe("answer (block-first loop)", () => {
   });
 
   it("generates product and category rows for above-order follow-ups using prior customers", async () => {
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product and category rows for the prior customers generated from order items joined to customers.",
+        sql: [
+          "SELECT",
+          "  c.customer_name AS customer_name,",
+          "  f.product_name AS product_name,",
+          "  f.product_type AS category,",
+          "  SUM(f.product_price) AS revenue,",
+          "  COUNT(*) AS units",
+          "FROM order_items AS f",
+          "JOIN fct_orders AS b ON f.order_id = b.order_id",
+          "JOIN dim_customers AS c ON b.customer_id = c.customer_id",
+          "WHERE c.customer_name IN ('Mr. Matthew Meyer', 'Aaron Gardner')",
+          "GROUP BY c.customer_name, f.product_name, f.product_type",
+          "ORDER BY customer_name ASC, revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "product_name", "category", "revenue", "units"],
+      }),
+      "```",
+    ].join("\n"));
     const question = "what the are the products and sub catogories for the above orders";
     const schemaContext = [
       {
@@ -1404,7 +1955,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1446,7 +1997,10 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("order_items");
+    expect(prompt).toContain("selected prior customer order relation");
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("f.product_name AS product_name");
     expect(result.proposedSql).toContain("f.product_type AS category");
@@ -1496,18 +2050,26 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider(
-      "Top customers for the prior categories.\n\n" +
-        "```sql\n" +
-        "SELECT customer_name, product_type AS category, SUM(product_price) AS revenue\n" +
-        "FROM analytics.order_items\n" +
-        "WHERE product_type IN ('Food', 'Drink')\n" +
-        "GROUP BY customer_name, product_type\n" +
-        "ORDER BY revenue DESC\n" +
-        "LIMIT 5\n" +
-        "```\n\n" +
-        "Viz: table",
-    );
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Top customers for the prior categories generated from the selected product/customer relation.",
+        sql: [
+          "SELECT",
+          "  f.customer_name AS customer_name,",
+          "  f.product_type AS category,",
+          "  SUM(f.product_price) AS revenue",
+          "FROM analytics.order_items AS f",
+          "WHERE f.product_type IN ('Food', 'Drink')",
+          "GROUP BY f.customer_name, f.product_type",
+          "ORDER BY revenue DESC",
+          "LIMIT 5",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "category", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
     const question = "who are the top 5 customers for these categories?";
     const schemaContext = [
       {
@@ -1521,7 +2083,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -1574,15 +2136,19 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("analytics.order_items");
+    expect(prompt).toContain("Food");
     expect(result.kind).toBe("uncertified");
     expect(result.block).toBeUndefined();
     expect(result.reviewStatus).toBe("draft_ready");
-	    expect(result.sourceCertifiedBlock).toBe("food_vs_drink_revenue");
-	    expect(result.proposedSql).toContain("product_type IN ('Food', 'Drink')");
-	    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
-	    expect(result.proposedSql).toContain("LIMIT 5");
-	    expect(result.proposedSql).not.toContain("order_item_id_sum");
-	    expect(result.proposedSql).not.toContain("top_customers");
+    expect(result.sourceCertifiedBlock).toBe("food_vs_drink_revenue");
+    expect(result.proposedSql).toContain("product_type IN ('Food', 'Drink')");
+    expect(result.proposedSql).toContain("SUM(f.product_price) AS revenue");
+    expect(result.proposedSql).toContain("LIMIT 5");
+    expect(result.proposedSql).not.toContain("order_item_id_sum");
+    expect(result.proposedSql).not.toContain("top_customers");
     expect(result.result?.columns).toEqual(["customer_name", "category", "revenue"]);
     expect(result.evidence?.route).toEqual(
       expect.arrayContaining([
@@ -1667,9 +2233,31 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Customer category follow-up generated from order items joined to orders and customers.",
+        sql: [
+          "SELECT",
+          "  c.customer_name AS customer_name,",
+          "  f.product_type AS category,",
+          "  SUM(f.product_price) AS revenue",
+          "FROM order_items AS f",
+          "JOIN fct_orders AS b ON f.order_id = b.order_id",
+          "JOIN dim_customers AS c ON b.customer_id = c.customer_id",
+          "WHERE f.product_type IN ('jaffle', 'beverage')",
+          "GROUP BY c.customer_name, f.product_type",
+          "ORDER BY revenue DESC",
+          "LIMIT 5",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "category", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question,
-      provider: new StubProvider("should not be called"),
+      provider,
       kg,
       schemaContext,
       contextPack: contextPackForRankedRelations(question, schemaContext.map((table, index) => ({
@@ -1707,6 +2295,10 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("order_items");
+    expect(prompt).toContain("food_vs_drink_revenue");
     expect(result.kind).toBe("uncertified");
     expect(result.sourceCertifiedBlock).toBe("food_vs_drink_revenue");
     expect(result.proposedSql).toContain("c.customer_name AS customer_name");
@@ -1786,7 +2378,7 @@ describe("answer (block-first loop)", () => {
         "```sql\nSELECT player_name, season, total_points FROM analytics.player_scoring ORDER BY total_points ASC LIMIT 10\n```\n\n" +
         "Viz: table",
     );
-    const result = await answer({
+    const result = await answerBase({
       question: "Who scored the least points?",
       provider,
       kg,
@@ -1815,7 +2407,8 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("ORDER BY total_points ASC");
     expect(result.proposedSql).toContain("season");
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("analytics.player_scoring");
   });
 
   it("uses context-pack block SQL to invert certified top rankings without hallucinating tables", async () => {
@@ -1836,8 +2429,17 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Least scoring players generated by adapting the certified top-scorers SQL shape.",
+        sql: "SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points ASC LIMIT 10",
+        viz: "table",
+        outputs: ["player_name", "season", "total_points"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Who scored the least points?",
       provider,
       kg,
@@ -1847,6 +2449,14 @@ describe("answer (block-first loop)", () => {
         focusObjectKey: "dql:block:Top 10 Goal Scorers",
         mode: "question",
         trustLabel: "mixed",
+        trustLabelInfo: {
+          id: "ai_generated",
+          base: "AI-Generated",
+          qualifier: "mixed context",
+          display: "AI-Generated · mixed context",
+          severity: "caution",
+          color: "amber",
+        },
         objects: [
           {
             objectKey: "dql:block:Top 10 Goal Scorers",
@@ -1877,6 +2487,24 @@ describe("answer (block-first loop)", () => {
           certifiedCandidateFits: [],
           candidateConflicts: [],
         },
+        allowedSqlContext: {
+          relations: [
+            {
+              relation: "NBA_GAMES.RAW.fct_player_performance",
+              name: "fct_player_performance",
+              source: "certified block dependency",
+              columns: [],
+            },
+          ],
+          sourceBlockSql: [
+            {
+              objectKey: "dql:block:Top 10 Goal Scorers",
+              name: "Top 10 Goal Scorers",
+              status: "certified",
+              sql: "SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
+            },
+          ],
+        },
       } as any,
       executeGeneratedSql: async (sql) => ({
         columns: ["PLAYER_NAME", "SEASON", "TOTAL_POINTS"],
@@ -1891,7 +2519,10 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("ORDER BY total_points ASC");
     expect(result.proposedSql).not.toContain("game_logs");
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("trust_label_canonical: AI-Generated · mixed context");
+    expect(prompt).toContain("Worked examples from certified blocks");
   });
 
   it("generates dynamic customer ranking SQL instead of selecting total_customers for ad hoc performance questions", async () => {
@@ -1936,8 +2567,22 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Better-performing customers generated from the inspected customer mart.",
+        sql: [
+          "SELECT customer_name, count_lifetime_orders AS orders, ROUND(lifetime_spend, 2) AS lifetime_spend",
+          "FROM dev.customers",
+          "ORDER BY lifetime_spend DESC, count_lifetime_orders DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "orders", "lifetime_spend"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Can you show me the orders by customer who have performed better?",
       provider,
       kg,
@@ -1971,13 +2616,9 @@ describe("answer (block-first loop)", () => {
     expect(result.sql).toContain("lifetime_spend");
     expect(result.result?.rowCount).toBe(2);
     expect(result.analysisPlan?.intent).toBe("ad_hoc_analysis");
-    expect(result.analysisPlan?.assumptions).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("local metadata planner"),
-      ]),
-    );
     expect(result.evidence?.selectedAssets.some((asset) => asset.name === "top_customers")).toBe(true);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("dev.customers");
   });
 
   it("generates least-order customer names instead of reusing selected summary blocks", async () => {
@@ -2034,8 +2675,22 @@ describe("answer (block-first loop)", () => {
       ],
       [],
     );
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Least-order customers generated from the inspected customer mart.",
+        sql: [
+          "SELECT customer_name, count_lifetime_orders AS orders, ROUND(lifetime_spend, 2) AS lifetime_spend",
+          "FROM dev.customers",
+          "ORDER BY count_lifetime_orders ASC, lifetime_spend ASC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_name", "orders", "lifetime_spend"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "I need the customer names who order least performance and less orders?",
       provider,
       kg,
@@ -2071,7 +2726,8 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).not.toContain("total_customers");
     expect(result.proposedSql).not.toContain("revenue_by_month");
     expect(result.result?.rowCount).toBe(2);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("count_lifetime_orders");
   });
 
   it("generates dynamic SQL for a named-customer metric instead of selecting a broad certified KPI", async () => {
@@ -2272,8 +2928,23 @@ describe("answer (block-first loop)", () => {
 
   it("generates generic dbt-only ranking SQL from inspected relation columns", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product revenue ranking generated from the inspected dbt relation.",
+        sql: [
+          "SELECT product_name, SUM(revenue) AS revenue_sum",
+          "FROM analytics.product_revenue",
+          "GROUP BY product_name",
+          "ORDER BY revenue_sum DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["product_name", "revenue_sum"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Which products have the highest revenue?",
       provider,
       kg,
@@ -2300,18 +2971,77 @@ describe("answer (block-first loop)", () => {
 
     expect(result.kind).toBe("uncertified");
     expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.dqlArtifact?.kind).toBe("sql_block");
     expect(result.proposedSql).toContain("FROM analytics.product_revenue");
     expect(result.proposedSql).toContain("product_name");
     expect(result.proposedSql).toContain("SUM(revenue)");
     expect(result.proposedSql).toContain("ORDER BY revenue_sum DESC");
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("analytics.product_revenue");
+    expect(prompt).toContain("product_name");
+    expect(prompt).toContain("revenue");
+  });
+
+  it("skips legacy schema proposal builders by default", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider([
+      "Provider-authored product revenue query.\n\n",
+      "```sql",
+      "SELECT product_name, SUM(revenue) AS provider_revenue",
+      "FROM analytics.product_revenue",
+      "GROUP BY product_name",
+      "ORDER BY provider_revenue DESC",
+      "LIMIT 10",
+      "```",
+      "",
+      "Viz: bar",
+    ].join("\n"));
+    const result = await answerBase({
+      question: "Which products have the highest revenue?",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.product_revenue",
+          schema: "analytics",
+          name: "product_revenue",
+          source: "dbt manifest",
+          columns: [
+            { name: "product_name", type: "VARCHAR" },
+            { name: "month", type: "DATE" },
+            { name: "revenue", type: "DECIMAL" },
+          ],
+        },
+      ],
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(provider.calls).toHaveLength(1);
+    expect(result.proposedSql).toContain("provider_revenue");
+    expect(result.proposedSql).not.toContain("revenue_sum");
   });
 
   it("uses governed lineage aliases when physical metric columns do not match the business term", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Product revenue ranking generated from the governed lineage alias on product_price.",
+        sql: [
+          "SELECT product_name, SUM(product_price) AS revenue_sum",
+          "FROM analytics.order_items",
+          "GROUP BY product_name",
+          "ORDER BY revenue_sum DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["product_name", "revenue_sum"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Which products have the highest revenue?",
       provider,
       kg,
@@ -2344,13 +3074,29 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("product_name");
     expect(result.proposedSql).toContain("SUM(product_price)");
     expect(result.proposedSql).not.toContain("SUM(revenue)");
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("Governed aliases from lineage: revenue");
   });
 
   it("generates generic dbt-only trend SQL from inspected relation columns", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Monthly revenue trend generated from the inspected dbt relation.",
+        sql: [
+          "SELECT month, SUM(revenue) AS revenue_sum",
+          "FROM analytics.monthly_revenue",
+          "GROUP BY month",
+          "ORDER BY month ASC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "line",
+        outputs: ["month", "revenue_sum"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Show revenue by month",
       provider,
       kg,
@@ -2374,13 +3120,29 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("FROM analytics.monthly_revenue");
     expect(result.proposedSql).toContain("GROUP BY month");
     expect(result.proposedSql).toContain("SUM(revenue)");
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("analytics.monthly_revenue");
   });
 
   it("generates distinct entity count SQL when the question asks how many customers", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Customer count by region generated from the inspected customer orders relation.",
+        sql: [
+          "SELECT region, COUNT(DISTINCT customer_id) AS customer_count",
+          "FROM analytics.customer_orders",
+          "GROUP BY region",
+          "ORDER BY customer_count DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["region", "customer_count"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "How many customers by region?",
       provider,
       kg,
@@ -2404,13 +3166,29 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("region");
     expect(result.proposedSql).toContain("COUNT(DISTINCT customer_id) AS customer_count");
     expect(result.proposedSql).toContain("GROUP BY region");
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("customer_id");
   });
 
   it("generates distinct order count SQL for count-by-time questions", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Monthly order count generated from the inspected orders relation.",
+        sql: [
+          "SELECT month, COUNT(DISTINCT order_id) AS order_count",
+          "FROM analytics.orders",
+          "GROUP BY month",
+          "ORDER BY month ASC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "line",
+        outputs: ["month", "order_count"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Number of orders by month",
       provider,
       kg,
@@ -2434,12 +3212,28 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("FROM analytics.orders");
     expect(result.proposedSql).toContain("COUNT(DISTINCT order_id) AS order_count");
     expect(result.proposedSql).toContain("GROUP BY month");
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("order_id");
   });
 
   it("prefers the context-pack selected relation when several dbt tables look plausible", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by product generated from the metadata-selected relation.",
+        sql: [
+          "SELECT product_name, SUM(net_revenue) AS revenue_sum",
+          "FROM analytics.fct_product_revenue",
+          "GROUP BY product_name",
+          "ORDER BY revenue_sum DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["product_name", "revenue_sum"],
+      }),
+      "```",
+    ].join("\n"));
     const schemaContext = [
       {
         relation: "analytics.product_revenue_summary",
@@ -2464,7 +3258,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question: "Show revenue by product",
       provider,
       kg,
@@ -2495,12 +3289,31 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("FROM analytics.fct_product_revenue");
     expect(result.proposedSql).toContain("SUM(net_revenue)");
     expect(result.proposedSql).not.toContain("analytics.product_revenue_summary");
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("analytics.fct_product_revenue");
+    expect(prompt).toContain("selected by metadata planner for product revenue");
   });
 
   it("generates generic join SQL when a metric fact table needs a requested dimension table", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by customer segment generated from the selected fact and dimension tables.",
+        sql: [
+          "SELECT d.segment AS segment, SUM(f.revenue) AS revenue_sum",
+          "FROM analytics.fct_orders AS f",
+          "JOIN analytics.dim_customers AS d ON f.customer_id = d.customer_id",
+          "GROUP BY d.segment",
+          "ORDER BY revenue_sum DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["segment", "revenue_sum"],
+      }),
+      "```",
+    ].join("\n"));
     const schemaContext = [
       {
         relation: "analytics.fct_orders",
@@ -2527,7 +3340,7 @@ describe("answer (block-first loop)", () => {
       },
     ];
 
-    const result = await answer({
+    const result = await answerBase({
       question: "Show revenue by customer segment",
       provider,
       kg,
@@ -2574,7 +3387,114 @@ describe("answer (block-first loop)", () => {
       rightColumn: "customer_id",
       reason: "shared key customer_id",
     });
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("Suggested join paths from selected metadata");
+  });
+
+  it("renders KG cross-domain join routes as relationship evidence for generated SQL", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "dbt_model:fct_revenue",
+          kind: "dbt_model",
+          name: "fct_revenue",
+          domain: "revenue",
+          description: "Revenue fact table keyed by customer.",
+          sourceTier: "dbt_manifest",
+        },
+        {
+          nodeId: "entity:Customer",
+          kind: "entity",
+          name: "Customer",
+          domain: "customer",
+          description: "Customer entity joining revenue and support activity.",
+          sourceTier: "semantic_layer",
+        },
+        {
+          nodeId: "dbt_model:fct_support_tickets",
+          kind: "dbt_model",
+          name: "fct_support_tickets",
+          domain: "support",
+          description: "Support ticket fact table keyed by customer.",
+          sourceTier: "dbt_manifest",
+        },
+      ],
+      [
+        { src: "dbt_model:fct_revenue", dst: "entity:Customer", kind: "related_to", weight: 0.9 },
+        { src: "entity:Customer", dst: "dbt_model:fct_support_tickets", kind: "related_to", weight: 0.9 },
+      ],
+    );
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by support tickets generated from selected cross-domain context.",
+        sql: [
+          "SELECT r.customer_id, SUM(r.revenue) AS revenue_sum, COUNT(t.ticket_id) AS ticket_count",
+          "FROM analytics.fct_revenue AS r",
+          "JOIN analytics.fct_support_tickets AS t ON r.customer_id = t.customer_id",
+          "GROUP BY r.customer_id",
+          "ORDER BY revenue_sum DESC",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["customer_id", "revenue_sum", "ticket_count"],
+      }),
+      "```",
+    ].join("\n"));
+    const schemaContext = [
+      {
+        relation: "analytics.fct_revenue",
+        schema: "analytics",
+        name: "fct_revenue",
+        source: "dbt manifest",
+        columns: [
+          { name: "customer_id", type: "VARCHAR" },
+          { name: "revenue", type: "DECIMAL" },
+        ],
+      },
+      {
+        relation: "analytics.fct_support_tickets",
+        schema: "analytics",
+        name: "fct_support_tickets",
+        source: "dbt manifest",
+        columns: [
+          { name: "customer_id", type: "VARCHAR" },
+          { name: "ticket_id", type: "VARCHAR" },
+        ],
+      },
+    ];
+
+    const result = await answerBase({
+      question: "Show revenue by support tickets by customer",
+      provider,
+      kg,
+      schemaContext,
+      contextPack: contextPackForRankedRelations("Show revenue by support tickets by customer", [
+        {
+          relation: "analytics.fct_revenue",
+          name: "fct_revenue",
+          source: "dbt manifest",
+          columns: schemaContext[0]!.columns,
+          rank: 1,
+          score: 78,
+          reason: "selected revenue fact table",
+        },
+        {
+          relation: "analytics.fct_support_tickets",
+          name: "fct_support_tickets",
+          source: "dbt manifest",
+          columns: schemaContext[1]!.columns,
+          rank: 2,
+          score: 72,
+          reason: "selected support fact table",
+        },
+      ], { dimensionTerms: ["support", "customer"] }),
+    });
+
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(result.kind).toBe("uncertified");
+    expect(prompt).toContain("Knowledge graph join routes");
+    expect(prompt).toMatch(/dbt_model:fct_(revenue|support_tickets) -> entity:Customer -> dbt_model:fct_(revenue|support_tickets)/);
+    expect(prompt).toContain("SQL must still use inspected relation columns");
   });
 
   it("renders ranked relation cards with column meaning for provider-generated SQL", async () => {
@@ -2585,38 +3505,63 @@ describe("answer (block-first loop)", () => {
         "Viz: line",
     );
 
+    const rankedRelations = [
+      {
+        relation: "analytics.fct_product_revenue",
+        name: "fct_product_revenue",
+        source: "dbt manifest",
+        columns: [
+          { name: "product_id", type: "VARCHAR", description: "Product key" },
+          { name: "product_name", type: "VARCHAR", description: "Product display name", sampleValues: ["Starter"] },
+          { name: "month", type: "DATE", description: "Revenue month" },
+          { name: "net_revenue", type: "DECIMAL", description: "Revenue after refunds and test-account exclusions" },
+        ],
+        rank: 1,
+        score: 81.5,
+        reason: "selected by metadata planner for product revenue change",
+      },
+      {
+        relation: "analytics.dim_products",
+        name: "dim_products",
+        source: "dbt manifest",
+        columns: [
+          { name: "product_id", type: "VARCHAR", description: "Product key" },
+          { name: "product_category", type: "VARCHAR", description: "Product category" },
+        ],
+        rank: 2,
+        score: 55,
+        reason: "selected dimension table for product attributes",
+      },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        relation: `analytics.join_candidate_${index + 3}`,
+        name: `join_candidate_${index + 3}`,
+        source: "dbt manifest",
+        columns: [
+          { name: "product_id", type: "VARCHAR" },
+          { name: `candidate_value_${index + 3}`, type: "DECIMAL" },
+        ],
+        rank: index + 3,
+        score: 40 - index,
+        reason: `available join candidate ${index + 3}`,
+      })),
+    ];
+
     const result = await answer({
       question: "Why did revenue change by product?",
       provider,
       kg,
-      contextPack: contextPackForRankedRelations("Why did revenue change by product?", [
-        {
-          relation: "analytics.fct_product_revenue",
-          name: "fct_product_revenue",
-          source: "dbt manifest",
-          columns: [
-            { name: "product_id", type: "VARCHAR", description: "Product key" },
-            { name: "product_name", type: "VARCHAR", description: "Product display name", sampleValues: ["Starter"] },
-            { name: "month", type: "DATE", description: "Revenue month" },
-            { name: "net_revenue", type: "DECIMAL", description: "Revenue after refunds and test-account exclusions" },
-          ],
-          rank: 1,
-          score: 81.5,
-          reason: "selected by metadata planner for product revenue change",
-        },
-        {
-          relation: "analytics.dim_products",
-          name: "dim_products",
-          source: "dbt manifest",
-          columns: [
-            { name: "product_id", type: "VARCHAR", description: "Product key" },
-            { name: "product_category", type: "VARCHAR", description: "Product category" },
-          ],
-          rank: 2,
-          score: 55,
-          reason: "selected dimension table for product attributes",
-        },
-      ]),
+      contextPack: contextPackForRankedRelations("Why did revenue change by product?", rankedRelations, {
+        topRejected: [
+          {
+            objectKey: "dbt:model:dim_suppliers",
+            objectType: "dbt_model",
+            name: "dim_suppliers",
+            reason: "Lower retrieval score than selected context window.",
+            score: 18,
+            rejectedRank: 41,
+          },
+        ],
+      }),
     });
 
     const prompt = provider.messages.map((message) => message.content).join("\n\n");
@@ -2629,6 +3574,7 @@ describe("answer (block-first loop)", () => {
     expect(prompt).toContain("analytics.fct_product_revenue.product_id -> analytics.dim_products.product_id (shared key product_id)");
     expect(prompt).toContain("product_name VARCHAR - Product display name; matched values: \"Starter\"");
     expect(prompt).toContain("net_revenue DECIMAL - Revenue after refunds and test-account exclusions");
+    expect(prompt).toContain("Other available relations (names only - expand context before using columns): analytics.join_candidate_13, analytics.join_candidate_14, dim_suppliers");
     expect(result.analysisPlan?.candidateTables[0]).toMatchObject({
       relation: "analytics.fct_product_revenue",
       reason: "metadata rank 1: selected by metadata planner for product revenue change",
@@ -2641,9 +3587,81 @@ describe("answer (block-first loop)", () => {
     });
   });
 
+  it("renders expanded deep context budget for research questions", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Deep research SQL uses the lower-ranked wide relation.",
+        sql: "SELECT col_1, col_120 FROM analytics.deep_relation_39 LIMIT 10",
+        viz: "table",
+        outputs: ["col_1", "col_120"],
+      }),
+      "```",
+    ].join("\n"));
+    const rankedRelations = Array.from({ length: 45 }, (_, index) => ({
+      relation: `analytics.deep_relation_${index + 1}`,
+      name: `deep_relation_${index + 1}`,
+      source: "dbt manifest",
+      columns: Array.from({ length: index === 38 ? 130 : 3 }, (__, columnIndex) => ({
+        name: `col_${columnIndex + 1}`,
+        type: columnIndex === 119 ? "DECIMAL" : "VARCHAR",
+        ...(columnIndex === 119 ? { description: "Deep-column metric needed for research" } : {}),
+      })),
+      rank: index + 1,
+      score: 100 - index,
+      reason: `deep context candidate ${index + 1}`,
+    }));
+    const contextPack = contextPackForRankedRelations(
+      "Deep research why revenue changed by product and supplier",
+      rankedRelations,
+      {
+        needsResearchWorkspace: true,
+        objects: [
+          { objectKey: "dbt:model:deep_relation_39", objectType: "dbt_model", name: "deep_relation_39", fullName: "analytics.deep_relation_39" },
+          { objectKey: "dbt:model:deep_relation_41", objectType: "dbt_model", name: "deep_relation_41", fullName: "analytics.deep_relation_41" },
+        ],
+        edges: [
+          { edgeType: "related_to", fromKey: "dbt:model:deep_relation_39", toKey: "dbt:model:deep_relation_41", confidence: 0.91 },
+        ],
+      },
+    );
+
+    const result = await answer({
+      question: "Deep research why revenue changed by product and supplier",
+      provider,
+      kg,
+      contextPack,
+      analysisDepth: "deep",
+    });
+
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(result.kind).toBe("uncertified");
+    expect(prompt).toContain("Context budget: deep");
+    expect(prompt).toContain("[rank 39, score 62.0] analytics.deep_relation_39 (dbt manifest)");
+    expect(prompt).toContain("col_120 DECIMAL - Deep-column metric needed for research");
+    expect(prompt).toContain("Other available relations (names only - expand context before using columns): analytics.deep_relation_41");
+    expect(prompt).toContain("Context graph edges:");
+    expect(prompt).toContain("related_to: dbt:model:deep_relation_39 -> dbt:model:deep_relation_41");
+  });
+
   it("generates review-required entity profile SQL from inspected schema context", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Kevin Durant profile generated from inspected player stats schema.",
+        sql: [
+          "SELECT player_name, season, team_name, total_points, total_assists, total_rebounds",
+          "FROM analytics.int_player_stats",
+          "WHERE player_name = 'Kevin Durant'",
+          "LIMIT 50",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["player_name", "season", "team_name", "total_points", "total_assists", "total_rebounds"],
+      }),
+      "```",
+    ].join("\n"));
     const schemaContext = [
       {
         relation: "analytics.int_player_stats",
@@ -2660,7 +3678,7 @@ describe("answer (block-first loop)", () => {
         ],
       },
     ];
-    const result = await answer({
+    const result = await answerBase({
       question: "Can you research on Kevin Durant profile and provide me the complete stats",
       provider,
       kg,
@@ -2756,21 +3774,37 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("player_name = 'Kevin Durant'");
     expect(result.proposedSql).toContain("total_points");
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("analytics.int_player_stats");
   });
 
   it("generates entity profile SQL from catalog-only dbt models in a large repo", async () => {
     kg.rebuild([], []);
     const projectRoot = join(dir, "large-dbt-project");
     seedLargeDbtProfileProject(projectRoot);
-    const provider = new StubProvider("should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Kevin Durant profile generated from the selected athlete box score model.",
+        sql: [
+          "SELECT athlete_name, game_date, pts, ast, reb",
+          "FROM NBA_DB.ANALYTICS.athlete_box_scores",
+          "WHERE athlete_name = 'Kevin Durant'",
+          "ORDER BY game_date DESC",
+          "LIMIT 50",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["athlete_name", "game_date", "pts", "ast", "reb"],
+      }),
+      "```",
+    ].join("\n"));
     const question = "Can you research Kevin Durant profile and provide complete stats";
     const contextPack = await buildLocalContextPack(projectRoot, {
       question,
       limit: 80,
     });
 
-    const result = await answer({
+    const result = await answerBase({
       question,
       provider,
       kg,
@@ -2805,13 +3839,30 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("game_date");
     expect(result.proposedSql).toContain("pts");
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(0);
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("NBA_DB.ANALYTICS.athlete_box_scores");
   });
 
   it("uses certified block SQL shape as context for entity profiles when dbt columns are unavailable", async () => {
     kg.rebuild([], []);
-    const provider = new StubProvider("should not be called");
-    const result = await answer({
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Kevin Durant profile generated from certified player-performance SQL shape.",
+        sql: [
+          "SELECT player_name, season, total_points, games_played,",
+          "  ROUND(total_points / NULLIF(games_played, 0), 2) AS points_per_game",
+          "FROM NBA_GAMES.RAW.fct_player_performance",
+          "WHERE player_name = 'Kevin Durant'",
+          "ORDER BY season DESC",
+          "LIMIT 50",
+        ].join("\n"),
+        viz: "table",
+        outputs: ["player_name", "season", "total_points", "games_played", "points_per_game"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
       question: "Can you research on Kevin Durant profile and provide me the complete stats",
       provider,
       kg,
@@ -2931,14 +3982,14 @@ describe("answer (block-first loop)", () => {
     });
 
     expect(result.kind).toBe("uncertified");
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("Worked examples from certified blocks");
+    expect(prompt).toContain("points_per_game");
     expect(result.proposedSql).toContain("NBA_GAMES.RAW.fct_player_performance");
     expect(result.proposedSql).toContain("player_name = 'Kevin Durant'");
     expect(result.proposedSql).toContain("points_per_game");
-    expect(result.validationWarnings ?? []).not.toEqual(
-      expect.arrayContaining([expect.stringContaining("Column validation was advisory")]),
-    );
     expect(result.result?.rowCount).toBe(1);
-    expect(provider.calls).toHaveLength(0);
   });
 
   it("passes certified SQL shape context to the provider when relation columns are sparse", async () => {
@@ -3233,26 +4284,45 @@ describe("answer (block-first loop)", () => {
         "```sql\nSELECT week, SUM(amount) AS revenue FROM fct_orders WHERE segment = 'Enterprise' GROUP BY week\n```\n\n" +
         "Viz: line",
     );
-	  const result = await answer({
-	    question: "Drill into Enterprise last week",
-	    provider,
-	    kg,
+    let capturedSourceDqlArtifact: unknown;
+    const result = await answer({
+      question: "Drill into Enterprise last week",
+      provider,
+      kg,
       followUp: {
         kind: "drilldown",
-	      sourceBlockName: "revenue_total",
-	      filters: ["Enterprise", "last week"],
-	    },
-	    captureGeneratedDraft: ({ followUp, sourceBlock }) => ({
-	      path: `blocks/_drafts/${followUp?.sourceBlockName ?? sourceBlock?.name ?? "draft"}.dql`,
-	      askedTimes: 1,
-	      proposedContractId: "growth.Unknown.enterprise_drilldown",
-	    }),
-	  });
-	    expect(result.kind).toBe("uncertified");
-	    expect(result.reviewStatus).toBe("draft_ready");
-	    expect(result.text).toContain("This is an uncertified drilldown.");
-	    expect(result.proposedSql).toContain("segment = 'Enterprise'");
-	    expect(result.sourceCertifiedBlock).toBe("revenue_total");
+        sourceBlockName: "revenue_total",
+        filters: ["Enterprise", "last week"],
+        priorDqlArtifact: {
+          kind: "certified_block",
+          name: "revenue_total",
+          sourcePath: "blocks/revenue_total.dql",
+          source: 'block "revenue_total" {\n  status = "certified"\n  query = """SELECT SUM(amount) AS revenue FROM fct_orders"""\n}',
+        },
+      },
+      captureGeneratedDraft: ({ followUp, sourceBlock, sourceDqlArtifact }) => {
+        capturedSourceDqlArtifact = sourceDqlArtifact;
+        return {
+          path: `blocks/_drafts/${followUp?.sourceBlockName ?? sourceBlock?.name ?? "draft"}.dql`,
+          askedTimes: 1,
+          proposedContractId: "growth.Unknown.enterprise_drilldown",
+        };
+      },
+    });
+    expect(result.kind).toBe("uncertified");
+    expect(result.reviewStatus).toBe("draft_ready");
+    expect(result.text).toContain("This is an uncertified drilldown.");
+    expect(result.proposedSql).toContain("segment = 'Enterprise'");
+    expect(result.sourceCertifiedBlock).toBe("revenue_total");
+      expect(result.dqlArtifact?.source).toContain('source_dql_kind = "certified_block"');
+      expect(result.dqlArtifact?.source).toContain('source_dql_name = "revenue_total"');
+      expect(result.dqlArtifact?.source).toContain('source_dql_path = "blocks/revenue_total.dql"');
+      expect(result.dqlArtifact?.source).toMatch(/source_dql_hash = "[a-f0-9]{64}"/);
+      expect(capturedSourceDqlArtifact).toMatchObject({
+        kind: "certified_block",
+        name: "revenue_total",
+        sourcePath: "blocks/revenue_total.dql",
+      });
 	    expect(result.draftBlock?.path).toBe("blocks/_drafts/revenue_total.dql");
 	    expect(result.promoteCommand).toContain("dql certify --from-draft");
     expect(result.evidence?.route).toEqual(
@@ -3273,7 +4343,7 @@ describe("answer (block-first loop)", () => {
       ),
     ).toBe(true);
     expect(result.evidence?.validation?.message).toContain(
-      "drilldown SQL is not certified",
+      "Review-required drilldown DQL artifact is not certified",
     );
   });
 
@@ -3360,16 +4430,35 @@ describe("answer (block-first loop)", () => {
 
     expect(result.kind).toBe("no_answer");
     expect(result.text).toContain("could not safely prepare");
+    expect(result.text).toContain("review-required DQL artifact");
+    expect(result.text).toContain("SQL preview failed validation");
     expect(result.evidence?.validation?.message).toContain("filters \"Enterprise\" on customer");
     expect(executed).toBe(false);
     expect(captured).toBe(false);
   });
 
   it("plans a clear entity follow-up drilldown from inspected values and source block SQL", async () => {
-    const provider = new StubProvider("provider should not be called");
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Enterprise revenue by customer for last week, generated from inspected context.",
+        sql: [
+          "SELECT customer, SUM(revenue) AS revenue_total",
+          "FROM main.revenue",
+          "WHERE segment = 'Enterprise' AND week = DATE '2026-06-08'",
+          "GROUP BY customer",
+          "ORDER BY revenue_total DESC",
+          "LIMIT 50",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["customer", "revenue_total"],
+      }),
+      "```",
+    ].join("\n"));
     let executedSql = "";
     let capturedSql = "";
-    const result = await answer({
+    let capturedOutputs: string[] | undefined;
+    const result = await answerBase({
       question: "Break Enterprise revenue down by customer last week",
       provider,
       kg,
@@ -3447,8 +4536,9 @@ describe("answer (block-first loop)", () => {
           sql,
         };
       },
-      captureGeneratedDraft: ({ sql }) => {
+      captureGeneratedDraft: ({ sql, outputs }) => {
         capturedSql = sql;
+        capturedOutputs = outputs;
         return {
           path: "blocks/_drafts/break_enterprise_revenue_down_by_customer_last_week.dql",
           askedTimes: 1,
@@ -3466,13 +4556,18 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).not.toContain("total_revenue");
     expect(executedSql).toBe(result.proposedSql);
     expect(capturedSql).toBe(result.proposedSql);
-    expect(provider.calls).toHaveLength(0);
+    expect(capturedOutputs).toEqual(["customer", "revenue_total"]);
+    expect(result.dqlArtifact?.source).toContain('outputs = ["customer", "revenue_total"]');
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(prompt).toContain("main.revenue");
+    expect(prompt).toContain("week = DATE '2026-06-08'");
     expect(result.draftBlock?.path).toContain("blocks/_drafts/");
   });
 
   it("repairs generated SQL once after a retryable execution failure", async () => {
     const provider = new StubProvider([
-      "Draft using the first guessed column.\n\n```sql\nSELECT customer, SUM(total) AS revenue FROM orders GROUP BY customer\n```\n\nViz: bar",
+      "Draft using available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM orders GROUP BY customer_name\n```\n\nViz: bar",
       "Corrected draft using the available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
     ]);
     let attempts = 0;
@@ -3493,7 +4588,7 @@ describe("answer (block-first loop)", () => {
       ],
       executeGeneratedSql: async (sql) => {
         attempts += 1;
-        if (attempts === 1) throw new Error('Binder Error: Referenced column "customer" not found');
+        if (attempts === 1) throw new Error('Runtime Error: transient preview execution failure');
         return {
           columns: ["customer_name", "revenue"],
           rows: [{ customer_name: "Acme", revenue: 10 }],
@@ -3506,6 +4601,87 @@ describe("answer (block-first loop)", () => {
     expect(result.executionError).toBeUndefined();
     expect(result.proposedSql).toContain("customer_name");
     expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(provider.calls).toHaveLength(2);
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "cascade_budget",
+          label: "Repair budget used: re-ground 0/2, execution 1/2",
+        }),
+      ]),
+    );
+  });
+
+  it("does not repair generated SQL when the execution repair budget is exhausted", async () => {
+    const provider = new StubProvider([
+      "Draft using available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM orders GROUP BY customer_name\n```\n\nViz: bar",
+      "This repair should not be requested.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```",
+    ]);
+    let attempts = 0;
+    const result = await answer({
+      question: "Repair revenue by customer",
+      provider,
+      kg,
+      cascadeBudgetModel: { lane: { execution: 0 } },
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async () => {
+        attempts += 1;
+        throw new Error('Runtime Error: transient preview execution failure');
+      },
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.executionError).toContain("transient preview execution failure");
+    expect(result.analysisPlan?.repairAttempts).toBe(0);
+    expect(attempts).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+    expect(result.evidence?.route.map((step) => step.tool)).not.toContain("cascade_budget");
+  });
+
+  it("does not execute repaired SQL that fails the grounded context guard", async () => {
+    const provider = new StubProvider([
+      "Draft using available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
+      "Incorrect repair that escapes the inspected context.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.shadow_orders GROUP BY customer_name\n```\n\nViz: bar",
+    ]);
+    let attempts = 0;
+    const result = await answer({
+      question: "Repair revenue by customer",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => {
+        attempts += 1;
+        if (/shadow_orders/i.test(sql)) throw new Error("shadow repair should not execute");
+        throw new Error("Runtime Error: transient preview execution failure");
+      },
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(attempts).toBe(1);
+    expect(result.proposedSql).toContain("FROM dev.orders");
+    expect(result.proposedSql).not.toContain("shadow_orders");
+    expect(result.executionError).toContain("outside the inspected metadata context");
+    expect(result.analysisPlan?.repairAttempts).toBe(0);
     expect(provider.calls).toHaveLength(2);
   });
 
@@ -3560,6 +4736,14 @@ describe("answer (block-first loop)", () => {
     expect(result.analysisPlan?.repairAttempts).toBe(1);
     expect(provider.calls).toHaveLength(1);
     expect(result.executionError).toBeUndefined();
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "cascade_budget",
+          label: "Repair budget used: re-ground 0/2, execution 1/2",
+        }),
+      ]),
+    );
   });
 
   it("self-repairs context-validation failures: bad column on turn 1, corrected JOIN on turn 2 executes", async () => {
@@ -3626,6 +4810,86 @@ describe("answer (block-first loop)", () => {
     expect(result.validationWarnings).toEqual(
       expect.arrayContaining([expect.stringContaining("Repaired after context-validation failure")]),
     );
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "cascade_budget",
+          label: "Repair budget used: re-ground 1/2, execution 0/2",
+        }),
+      ]),
+    );
+  });
+
+  it("re-grounds unknown relations from an expansion callback before asking the model to repair", async () => {
+    const provider = new StubProvider(
+      "```sql\nSELECT oi.product_id, s.supply_name, SUM(oi.product_price) AS product_value\nFROM dev.order_items oi\nJOIN dev.supplies s ON oi.product_id = s.product_id\nGROUP BY oi.product_id, s.supply_name\nORDER BY product_value DESC\nLIMIT 10\n```",
+    );
+    let executedSql: string | undefined;
+    const question = "Complete supply chain with product and order details top 10 value";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "dev.order_items",
+          name: "order_items",
+          source: "dbt manifest",
+          columns: [
+            { name: "product_id", type: "VARCHAR" },
+            { name: "product_price", type: "DECIMAL" },
+          ],
+          rank: 1,
+          score: 80,
+          reason: "selected order item fact table",
+        },
+      ], {
+        metricTerms: ["value"],
+        dimensionTerms: ["product", "supply"],
+        routeIntent: "entity_drilldown",
+      }),
+      expandGroundingContext: async (request) => {
+        expect(request.code).toBe("unknown_relation");
+        expect(request.offending?.relation).toBe("dev.supplies");
+        return {
+          relations: [{
+            relation: "dev.supplies",
+            name: "supplies",
+            source: "runtime schema snapshot",
+            columns: [
+              { name: "product_id", type: "VARCHAR" },
+              { name: "supply_name", type: "VARCHAR" },
+            ],
+          }],
+          notes: ["dev.supplies columns: product_id, supply_name"],
+        };
+      },
+      executeGeneratedSql: async (sql) => {
+        executedSql = sql;
+        return {
+          columns: ["product_id", "supply_name", "product_value"],
+          rows: [{ product_id: "JAF-001", supply_name: "bread", product_value: 120 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(provider.calls).toHaveLength(1);
+    expect(executedSql).toContain("dev.supplies");
+    expect(result.kind).toBe("uncertified");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Re-grounded metadata context before repair")]),
+    );
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "cascade_budget",
+          label: "Repair budget used: re-ground 1/2, execution 0/2",
+        }),
+      ]),
+    );
   });
 
   it("rejects provider SQL that selects unknown columns from a joined CTE before execution", async () => {
@@ -3679,11 +4943,53 @@ describe("answer (block-first loop)", () => {
     });
 
     expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("grounding_gap");
+    expect(result.refusalDetails).toMatchObject({
+      code: "unknown_column",
+      offending: { column: "fake_column" },
+    });
     expect(result.text).toContain('column "fake_column"');
     expect(executed).toBe(false);
     // Initial generation + exactly ONE bounded self-repair attempt (which still
     // fails against this stub) — invalid SQL is never executed either way.
     expect(provider.calls).toHaveLength(2);
+  });
+
+  it("tags a provider outage with the provider_error refusal code (not a clarify)", async () => {
+    class ThrowingProvider extends StubProvider {
+      async generate(): Promise<string> {
+        throw new Error("upstream 503");
+      }
+    }
+    const provider = new ThrowingProvider("unused");
+    const question = "Revenue by segment ranked";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.fct_orders",
+          name: "fct_orders",
+          source: "dbt manifest",
+          columns: [
+            { name: "segment", type: "VARCHAR" },
+            { name: "amount", type: "DECIMAL" },
+          ],
+          rank: 1,
+          score: 80,
+          reason: "selected revenue fact table",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["segment"],
+        mode: "ad_hoc_ranking",
+        routeIntent: "ad_hoc_ranking",
+      }),
+    });
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("provider_error");
+    expect(result.refusalDetails).toMatchObject({ code: "provider_error" });
   });
 
   it("asks for clarification when no metadata can ground an analytical question", async () => {
@@ -3698,6 +5004,71 @@ describe("answer (block-first loop)", () => {
     expect(result.analysisPlan?.intent).toBe("clarify");
     expect(result.text).toContain("which metric or business object");
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("continues past generic catalog clarify when inspected SQL context can answer", async () => {
+    kg.rebuild([], []);
+    const contextPack = contextPackForRankedRelations("Show revenue by region", [{
+      relation: "analytics.fct_orders",
+      name: "fct_orders",
+      source: "runtime schema",
+      columns: [
+        { name: "region" },
+        { name: "amount" },
+      ],
+      rank: 1,
+      score: 90,
+      reason: "runtime schema matched revenue by region",
+    }], {
+      metricTerms: ["revenue"],
+      dimensionTerms: ["region"],
+      routeIntent: "ad_hoc_ranking",
+    });
+    contextPack.routeDecision = {
+      route: "clarify",
+      intent: "clarify",
+      reason: "DQL needs one more business or metadata detail before it can safely generate SQL.",
+      trustLabel: "mixed",
+      reviewStatus: "none",
+      selectedEvidence: [],
+      missingContext: [{
+        kind: "metadata",
+        severity: "blocking",
+        message: "No certified block, semantic metric, dbt model, or runtime schema matched strongly enough to answer safely.",
+      }],
+      followUps: [],
+    };
+    const provider = new StubProvider([
+      "Revenue by region.",
+      "",
+      "```sql",
+      "SELECT region, SUM(amount) AS revenue",
+      "FROM analytics.fct_orders",
+      "GROUP BY region",
+      "```",
+      "",
+      "Viz: bar",
+    ].join("\n"));
+
+    const result = await answer({
+      question: "Show revenue by region",
+      provider,
+      kg,
+      contextPack,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "revenue"],
+        rows: [{ region: "North", revenue: 10 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe("uncertified");
+    expect(result.route?.tier).toBe("generated_sql");
+    expect(result.route?.label).toBe("Prepared review-required DQL artifact with SQL preview.");
+    expect(result.dqlArtifact?.kind).toBe("sql_block");
+    expect(result.proposedSql).toContain("analytics.fct_orders");
+    expect(provider.calls.length).toBeLessThanOrEqual(1);
   });
 });
 
@@ -3733,6 +5104,17 @@ function contextPackForRankedRelations(
       status?: string;
       sql: string;
     }>;
+    topRejected?: Array<{
+      objectKey: string;
+      objectType: string;
+      name: string;
+      reason: string;
+      score: number;
+      rejectedRank: number;
+    }>;
+    needsResearchWorkspace?: boolean;
+    objects?: Array<Record<string, unknown>>;
+    edges?: Array<Record<string, unknown>>;
   } = {},
 ) {
   const metricTerms = options.metricTerms ?? ["revenue"];
@@ -3758,14 +5140,21 @@ function contextPackForRankedRelations(
       outputShape: "table",
       needsGeneratedSql: true,
       shouldConsiderCertifiedExact: false,
-      needsResearchWorkspace: false,
+      needsResearchWorkspace: options.needsResearchWorkspace ?? false,
       searchQueries: [question],
       searchTerms: [...metricTerms, ...dimensionTerms],
+      requestedShape: {
+        dimensions: dimensionTerms,
+        measures: metricTerms,
+        requiredOutputs: [...dimensionTerms, ...metricTerms],
+        filters: [],
+        followUpReferences: [],
+      },
       confidence: 0.85,
       reasons: ["test context"],
     },
-    objects: [],
-    edges: [],
+    objects: options.objects ?? [],
+    edges: options.edges ?? [],
     queryRuns: [],
     citations: [],
     evidenceSummaries: [],
@@ -3802,7 +5191,7 @@ function contextPackForRankedRelations(
         columns: relation.columns.map((column) => column.name),
         rank: relation.rank,
       })),
-      topRejected: [],
+      topRejected: options.topRejected ?? [],
       certifiedCandidateFits: options.certifiedCandidateFits ?? [],
       candidateConflicts: [],
     },
@@ -3815,6 +5204,65 @@ function contextPackForRankedRelations(
 }
 
 describe("parseProposal", () => {
+  it("extracts a structured JSON proposal from a fenced object", () => {
+    const raw = [
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by region at region grain.",
+        sql: "SELECT region, SUM(amount) AS revenue FROM orders GROUP BY region",
+        viz: "bar",
+        outputs: ["region", "revenue"],
+      }),
+      "```",
+    ].join("\n");
+    expect(parseProposal(raw)).toEqual({
+      text: "Revenue by region at region grain.",
+      sql: "SELECT region, SUM(amount) AS revenue FROM orders GROUP BY region",
+      viz: "bar",
+      outputs: ["region", "revenue"],
+    });
+  });
+
+  it("extracts DQL metadata from a structured JSON proposal", () => {
+    const raw = [
+      "```json",
+      JSON.stringify({
+        summary: "Product supply value at product and supply grain.",
+        sql: "SELECT product_name, supply_name, SUM(order_value) AS total_value FROM product_supply_orders GROUP BY product_name, supply_name",
+        viz: "table",
+        outputs: ["product_name", "supply_name", "total_value"],
+        dql: {
+          entity: "product_supply",
+          dimensions: ["product_name", "supply_name", "product_name"],
+          filters: ["top 10 by total_value", "top 10 by total_value"],
+        },
+      }),
+      "```",
+    ].join("\n");
+    expect(parseProposal(raw)).toEqual({
+      text: "Product supply value at product and supply grain.",
+      sql: "SELECT product_name, supply_name, SUM(order_value) AS total_value FROM product_supply_orders GROUP BY product_name, supply_name",
+      viz: "table",
+      outputs: ["product_name", "supply_name", "total_value"],
+      proposedEntity: "product_supply",
+      requestedDimensions: ["product_name", "supply_name"],
+      requestedFilters: ["top 10 by total_value"],
+    });
+  });
+
+  it("extracts a structured JSON proposal from a raw object", () => {
+    const raw = JSON.stringify({
+      answer: "One KPI row.",
+      query: "SELECT COUNT(*) AS order_count FROM orders",
+      visualization: "single_value",
+    });
+    expect(parseProposal(raw)).toEqual({
+      text: "One KPI row.",
+      sql: "SELECT COUNT(*) AS order_count FROM orders",
+      viz: "single_value",
+    });
+  });
+
   it("extracts SQL block + viz line + summary text", () => {
     const raw = "Revenue summary.\n\n```sql\nSELECT 1\n```\n\nViz: line";
     expect(parseProposal(raw)).toEqual({
@@ -3838,6 +5286,15 @@ describe("parseProposal", () => {
     const parsed = parseProposal(raw);
     expect(parsed.sql).toBeUndefined();
     expect(parsed.text).toBe("I refuse");
+  });
+
+  it("falls back to the legacy SQL parser when JSON is malformed", () => {
+    const raw = '```json\n{"summary": "bad"\n```\n\nFallback summary.\n```sql\nSELECT 3\n```\nViz: table';
+    expect(parseProposal(raw)).toEqual({
+      text: "Fallback summary.",
+      sql: "SELECT 3",
+      viz: "table",
+    });
   });
 });
 
@@ -3955,6 +5412,440 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.proposedSql ?? result.sql ?? "").toMatch(/SUM\(amount\)/i);
   });
 
+  it("compiles metric, dimension, and time grain through SemanticLayer.composeQuery before provider generation", async () => {
+    kg.rebuild(
+      [
+        revenueMetric("total_revenue", "Total recognized revenue"),
+      ],
+      [],
+    );
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+        },
+      ],
+      dimensions: [
+        {
+          name: "channel",
+          label: "Channel",
+          description: "Sales channel.",
+          domain: "finance",
+          sql: "channel",
+          type: "string",
+          table: "orders",
+        },
+        {
+          name: "order_date",
+          label: "Order Date",
+          description: "Order date.",
+          domain: "finance",
+          sql: "order_date",
+          type: "date",
+          table: "orders",
+          isTimeDimension: true,
+        },
+      ],
+    });
+    const provider = new StubProvider("should not be called");
+    let capturedDqlArtifact: unknown;
+
+    const result = await answer({
+      question: "Show monthly revenue by channel",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["channel", "order_date_month", "total_revenue"],
+        rows: [{ channel: "Direct", order_date_month: "2026-01-01", total_revenue: 123 }],
+        rowCount: 1,
+        sql,
+      }),
+      captureGeneratedDraft: ({ dqlArtifact }) => {
+        capturedDqlArtifact = dqlArtifact;
+        return {
+          path: "blocks/_drafts/monthly_revenue_by_channel.dql",
+          askedTimes: 1,
+          proposedContractId: "finance.Unknown.monthly_revenue_by_channel",
+        };
+      },
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.cascade).toMatchObject({
+      terminalLane: "semantic",
+      routeTier: "semantic_metric",
+      ref: "total_revenue",
+      artifactKind: "semantic_block",
+      outcome: {
+        lane: "semantic",
+        routeTier: "semantic_metric",
+        ref: "total_revenue",
+        artifactKind: "semantic_block",
+        metrics: ["total_revenue"],
+        dimensions: ["channel"],
+        rowCount: 1,
+      },
+    });
+    expect(provider.calls).toHaveLength(0);
+    expect(result.proposedSql).toContain("SUM(amount) AS total_revenue");
+    expect(result.proposedSql).toContain("channel AS channel");
+    expect(result.proposedSql).toContain("DATE_TRUNC('month', orders.order_date) AS order_date_month");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.dqlArtifact?.kind).toBe("semantic_block");
+    expect(result.dqlArtifact?.name).toBe("monthly_revenue_by_channel");
+    expect(result.dqlArtifact?.source).toContain('type = "semantic"');
+    expect(result.dqlArtifact?.source).toContain('block "monthly_revenue_by_channel"');
+    expect(result.dqlArtifact?.source).toContain('metric = "total_revenue"');
+    expect(result.dqlArtifact?.source).toContain('dimensions = ["channel"]');
+    expect(result.dqlArtifact?.source).toContain('time_dimension = "order_date"');
+    expect(result.dqlArtifact?.source).toContain('granularity = "month"');
+    expect(result.evidence?.route).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tool: "cascade_semantic",
+          status: "selected",
+          detail: "total_revenue",
+        }),
+        expect.objectContaining({
+          tool: "cascade_generated",
+          status: "skipped",
+        }),
+      ]),
+    );
+    expect(result.draftBlock?.path).toBe("blocks/_drafts/monthly_revenue_by_channel.dql");
+    expect(capturedDqlArtifact).toMatchObject({
+      kind: "semantic_block",
+      name: "monthly_revenue_by_channel",
+      source: expect.stringContaining('type = "semantic"'),
+      metrics: ["total_revenue"],
+      dimensions: ["channel"],
+      timeDimension: { name: "order_date", granularity: "month" },
+    });
+  });
+
+  it("falls back to ONE LLM member selection when deterministic selection misses (Lane 2, not Lane 3)", async () => {
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+        },
+      ],
+      dimensions: [
+        {
+          name: "channel",
+          label: "Channel",
+          description: "Sales channel.",
+          domain: "finance",
+          sql: "channel",
+          type: "string",
+          table: "orders",
+        },
+      ],
+    });
+    // "acquisition medium" is a paraphrase of `channel` that the deterministic
+    // token matcher cannot resolve, so composeSemanticQueryForQuestion misses —
+    // but the metric still matches, so the LLM member fallback fires.
+    const provider = new StubProvider(
+      '```json\n{"metrics":["total_revenue"],"dimensions":["channel"]}\n```',
+    );
+
+    const result = await answer({
+      question: "revenue by acquisition medium",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["channel", "total_revenue"],
+        rows: [{ channel: "Direct", total_revenue: 100 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    // Exactly ONE provider call — the member selection — and the compiler produced the SQL.
+    expect(provider.calls).toHaveLength(1);
+    expect(result.proposedSql).toContain("SUM(amount) AS total_revenue");
+    expect(result.proposedSql).toContain("channel AS channel");
+    expect(result.dqlArtifact?.kind).toBe("semantic_block");
+  });
+
+  it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {
+    const certifiedMetric: KGNode = {
+      ...revenueMetric("total_revenue", "Total recognized revenue"),
+      certification: "certified",
+    };
+    kg.rebuild([certifiedMetric], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+          status: "certified",
+        },
+      ],
+      dimensions: [],
+    });
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What is total revenue?",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({ columns: ["total_revenue"], rows: [{ total_revenue: 42 }], rowCount: 1, sql }),
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    // Verified — above generated SQL, below human-certified. The invariant holds:
+    // AI never stamps its own answer 'certified'.
+    expect(result.trustLabelInfo?.id).toBe("reviewed");
+    expect(result.kind).not.toBe("certified");
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("compiles multiple semantic metrics through SemanticLayer.composeQuery", async () => {
+    kg.rebuild(
+      [
+        revenueMetric("total_revenue", "Total recognized revenue"),
+        {
+          nodeId: "metric:order_count",
+          kind: "metric",
+          name: "order_count",
+          domain: "finance",
+          description: "Count of orders",
+          tags: ["orders"],
+          llmContext: "sql: COUNT(order_id)\ntable: orders",
+          sourceTier: "semantic_layer",
+          certification: "ai_generated",
+          provenance: "semantic layer",
+        },
+      ],
+      [],
+    );
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+        },
+        {
+          name: "order_count",
+          label: "Order Count",
+          description: "Count of orders.",
+          domain: "finance",
+          sql: "order_id",
+          type: "count",
+          table: "orders",
+        },
+      ],
+      dimensions: [
+        {
+          name: "channel",
+          label: "Channel",
+          description: "Sales channel.",
+          domain: "finance",
+          sql: "channel",
+          type: "string",
+          table: "orders",
+        },
+      ],
+    });
+    const provider = new StubProvider("should not be called");
+
+    const result = await answer({
+      question: "Show revenue and orders by channel",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["channel", "total_revenue", "order_count"],
+        rows: [{ channel: "Direct", total_revenue: 123, order_count: 4 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(provider.calls).toHaveLength(0);
+    expect(result.proposedSql).toContain("SUM(amount) AS total_revenue");
+    expect(result.proposedSql).toContain("COUNT(order_id) AS order_count");
+    expect(result.dqlArtifact?.metrics).toEqual(expect.arrayContaining(["total_revenue", "order_count"]));
+    expect(result.dqlArtifact?.source).toContain('metrics = [');
+    expect(result.dqlArtifact?.source).toContain('"total_revenue"');
+    expect(result.dqlArtifact?.source).toContain('"order_count"');
+    expect(result.text).toContain("governed semantic metrics");
+  });
+
+  it("falls through to generated DQL when the semantic layer cannot express the requested dimension", async () => {
+    kg.rebuild(
+      [
+        revenueMetric("total_revenue", "Total recognized revenue"),
+      ],
+      [],
+    );
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+        },
+      ],
+      dimensions: [
+        {
+          name: "channel",
+          label: "Channel",
+          description: "Sales channel.",
+          domain: "finance",
+          sql: "channel",
+          type: "string",
+          table: "orders",
+        },
+      ],
+    });
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by product from inspected SQL context.",
+        sql: "SELECT product_name, SUM(amount) AS total_revenue FROM orders GROUP BY product_name",
+        viz: "bar",
+        outputs: ["product_name", "total_revenue"],
+      }),
+      "```",
+    ].join("\n"));
+
+    const result = await answer({
+      question: "Show revenue by product",
+      provider,
+      kg,
+      semanticLayer,
+      schemaContext: [
+        {
+          relation: "orders",
+          name: "orders",
+          columns: [
+            { name: "product_name" },
+            { name: "amount" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_name", "total_revenue"],
+        rows: [{ product_name: "JAF-001", total_revenue: 123 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    // Two calls: one governed member-selection attempt (declines — product is not
+    // a semantic dimension) then Lane-3 generation. R3.5 spends one cheap call to
+    // try the governed tier before falling through.
+    expect(provider.calls).toHaveLength(2);
+    expect(result.route?.tier).toBe("generated_sql");
+    expect(result.dqlArtifact?.kind).toBe("sql_block");
+    expect(result.dqlArtifact?.source).toContain('type = "custom"');
+    expect(result.dqlArtifact?.source).toContain("SELECT product_name, SUM(amount) AS total_revenue FROM orders GROUP BY product_name");
+  });
+
+  it("compiles semantic filters, order, and limit through SemanticLayer.composeQuery", async () => {
+    kg.rebuild(
+      [
+        revenueMetric("total_revenue", "Total recognized revenue"),
+      ],
+      [],
+    );
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+        },
+      ],
+      dimensions: [
+        {
+          name: "channel",
+          label: "Channel",
+          description: "Sales channel.",
+          domain: "finance",
+          sql: "channel",
+          type: "string",
+          table: "orders",
+        },
+        {
+          name: "order_date",
+          label: "Order Date",
+          description: "Order date.",
+          domain: "finance",
+          sql: "order_date",
+          type: "date",
+          table: "orders",
+          isTimeDimension: true,
+        },
+      ],
+    });
+    const provider = new StubProvider("should not be called");
+
+    const result = await answer({
+      question: "Show top 5 monthly revenue for Online channel",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["channel", "order_date_month", "total_revenue"],
+        rows: [{ channel: "Online", order_date_month: "2026-01-01", total_revenue: 123 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(provider.calls).toHaveLength(0);
+    expect(result.proposedSql).toContain("WHERE channel = 'Online'");
+    expect(result.proposedSql).toContain("ORDER BY total_revenue DESC");
+    expect(result.proposedSql).toContain("LIMIT 5");
+    expect(result.dqlArtifact?.filters).toEqual([
+      { dimension: "channel", operator: "equals", values: ["Online"] },
+    ]);
+    expect(result.dqlArtifact?.orderBy).toEqual([{ name: "total_revenue", direction: "desc" }]);
+    expect(result.dqlArtifact?.limit).toBe(5);
+    expect(result.dqlArtifact?.source).toContain('requested_filters = ["channel=Online"]');
+    expect(result.dqlArtifact?.source).toContain('order_by = ["total_revenue desc"]');
+    expect(result.dqlArtifact?.source).toContain("limit = 5");
+  });
+
   it("routes an ad-hoc analytical question to generated_sql", async () => {
     seedMetricsKg();
     const provider = new StubProvider(
@@ -3962,6 +5853,20 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     );
     const result = await answer({ question: "median order value by region", provider, kg });
     expect(result.route?.tier).toBe("generated_sql");
+    expect(result.route?.label).toBe("Prepared review-required DQL artifact with SQL preview.");
+    expect(result.dqlArtifact?.kind).toBe("sql_block");
+    expect(result.cascade).toMatchObject({
+      terminalLane: "generated",
+      routeTier: "generated_sql",
+      artifactKind: "sql_block",
+      outcome: {
+        lane: "generated",
+        routeTier: "generated_sql",
+        artifactKind: "sql_block",
+        hasSqlPreview: true,
+        executionStatus: "not_requested",
+      },
+    });
   });
 
   it("preserves certified-first routing (certified_block route)", async () => {
@@ -3971,6 +5876,16 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.kind).toBe("certified");
     expect(result.route?.tier).toBe("certified_block");
     expect(result.route?.ref).toBe("revenue_total");
+    expect(result.cascade).toMatchObject({
+      terminalLane: "certified",
+      routeTier: "certified_block",
+      ref: "revenue_total",
+      outcome: {
+        lane: "certified",
+        routeTier: "certified_block",
+        ref: "revenue_total",
+      },
+    });
   });
 
   it("keeps an honest refusal as no_answer when nothing fits", async () => {
@@ -3979,5 +5894,16 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     const result = await answer({ question: "qwfp zxcv asdf", provider, kg });
     expect(result.kind).toBe("no_answer");
     expect(result.route?.tier).toBe("no_answer");
+    expect(result.cascade).toMatchObject({
+      terminalLane: "refusal",
+      routeTier: "no_answer",
+      refusalCode: "model_declined",
+      outcome: {
+        lane: "refusal",
+        routeTier: "no_answer",
+        refusalCode: "model_declined",
+        reason: "I cannot answer that.",
+      },
+    });
   });
 });

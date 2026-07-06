@@ -54,6 +54,7 @@ local databases, data files, AI pins, saved views, and layout overrides.
 | --- | --- |
 | `dql diff <path>` | Semantic diff of a `.dql` or `.dqlnb` against git HEAD |
 | `dql diff <before> <after>` | Semantic diff between two files on disk |
+| `dql diff <path> --impact --write-recertification` | Mark impacted semantic metric/dimension YAML as `pending_recertification` |
 
 Exits **1** on changes — scriptable like `git diff`.
 
@@ -101,7 +102,7 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `dql agent ask "<question>"` | Ask through the certified-first local agent loop |
 | `dql agent reindex` | Rebuild `.dql/cache/agent-kg.sqlite` and metadata cache |
 | `dql agent feedback up\|down` | Record answer feedback |
-| `dql agent eval <file.yml>` | Run agent routing/eval checks |
+| `dql agent eval <file.yml>` | Run answer-loop eval checks with metrics and JSON traces; cases can assert `expected.minToolCalls` for tool-observed deep/research flows |
 | `dql mcp [path]` | Run the DQL MCP server over stdio |
 | `dql mcp --http [path]` | Run loopback HTTP MCP with a bearer token |
 | `dql mcp test [path]` | Verify manifest, metadata catalog, agent index, and MCP tool readiness |
@@ -146,7 +147,9 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `--ai` | Include AI provider, MCP, and metadata checks in `dql doctor` |
 | `--ai-layout` | Store dynamic GenUI layout metadata for `dql app generate` |
 | `--provider <name>` | Select agent provider where supported |
-| `--execute` | Execute bounded generated SQL previews during agent eval |
+| `--execute` | Execute bounded generated SQL previews during agent eval and score expected rows |
+| `--min-answer-rate <0..1>` | For `dql eval`: fail when answerable cases route to missing context below this non-refusal rate |
+| `--min-tool-requirement <0..1>` | For `dql agent eval`: fail when cases with `expected.minToolCalls` fall below this pass rate |
 
 ## Exit codes
 

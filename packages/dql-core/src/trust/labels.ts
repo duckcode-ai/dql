@@ -239,6 +239,7 @@ export function trustLabelIdForStatus(status: string | undefined): TrustLabelId 
     case 'draft':
     case 'draft_ready':
     case 'pending':
+    case 'pending_recertification':
     case 'analyst_review_required':
       return 'ai_generated';
     case 'conflict':

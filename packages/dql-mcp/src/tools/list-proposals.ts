@@ -1,24 +1,14 @@
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
+import type { DimensionDefinition, MetricDefinition, SemanticLayer } from '@duckcodeailabs/dql-core';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const listProposalsInput = {
-  askedAtLeastTimes: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe('Filter to drafts asked at least N times (defaults to 1).'),
-  since: z
-    .string()
-    .optional()
-    .describe(
-      'ISO 8601 timestamp; only return drafts whose last_asked is on or after this. Useful for "what got asked this week?".',
-    ),
-};
+export const listProposalsInput = zodInputShapeForTool('list_proposals');
 
 export interface ProposalSummary {
+  kind: 'block_draft' | 'semantic_metric_draft' | 'semantic_recertification';
+  artifactType: 'block' | 'metric' | 'dimension';
   draftPath: string;
   slug: string;
   question: string;
@@ -29,7 +19,18 @@ export interface ProposalSummary {
   proposedDomain: string;
   proposedEntity: string;
   upstreamRefs: string[];
+  sourceDqlArtifact?: ProposalSourceDqlArtifact;
+  status?: string;
   certifyHint: string;
+}
+
+export interface ProposalSourceDqlArtifact {
+  kind?: string;
+  name?: string;
+  path?: string;
+  hash?: string;
+  metrics: string[];
+  dimensions: string[];
 }
 
 /**
@@ -48,8 +49,6 @@ export function listProposals(
   args: { askedAtLeastTimes?: number; since?: string } = {},
 ): { proposals: ProposalSummary[] } {
   const draftFiles = collectProposalDraftFiles(ctx.projectRoot);
-  if (draftFiles.length === 0) return { proposals: [] };
-
   const minTimes = args.askedAtLeastTimes ?? 1;
   const sinceMs = args.since ? Date.parse(args.since) : null;
 
@@ -61,10 +60,20 @@ export function listProposals(
     if (sinceMs !== null && Date.parse(summary.lastAsked) < sinceMs) continue;
     proposals.push(summary);
   }
+  for (const summary of collectSemanticRecertificationProposals(ctx)) {
+    if (summary.askedTimes < minTimes) continue;
+    if (sinceMs !== null && (!Number.isFinite(Date.parse(summary.lastAsked)) || Date.parse(summary.lastAsked) < sinceMs)) continue;
+    proposals.push(summary);
+  }
+  for (const summary of collectSemanticMetricDraftProposals(ctx)) {
+    if (summary.askedTimes < minTimes) continue;
+    if (sinceMs !== null && (!Number.isFinite(Date.parse(summary.lastAsked)) || Date.parse(summary.lastAsked) < sinceMs)) continue;
+    proposals.push(summary);
+  }
 
   proposals.sort((a, b) => {
     if (b.askedTimes !== a.askedTimes) return b.askedTimes - a.askedTimes;
-    return Date.parse(b.lastAsked) - Date.parse(a.lastAsked);
+    return dateSortValue(b.lastAsked) - dateSortValue(a.lastAsked);
   });
 
   return { proposals };
@@ -118,8 +127,11 @@ function parseProposal(
   const proposedDomain = pickStringField(content, 'proposed_domain') ?? '';
   const proposedEntity = pickStringField(content, 'proposed_entity') ?? '';
   const upstreamRefs = pickArrayField(content, 'upstream_refs');
+  const sourceDqlArtifact = parseSourceDqlArtifact(content);
   const certifyHint = `dql certify --from-draft ${draftPath} --domain ${proposedDomain || '<domain>'} --contract ${proposedContractId || '<id>'}@1 --owner <you@example.com>`;
   return {
+    kind: 'block_draft',
+    artifactType: 'block',
     draftPath,
     slug,
     question,
@@ -130,7 +142,146 @@ function parseProposal(
     proposedDomain,
     proposedEntity,
     upstreamRefs,
+    ...(sourceDqlArtifact ? { sourceDqlArtifact } : {}),
     certifyHint,
+  };
+}
+
+function collectSemanticRecertificationProposals(ctx: DQLContext): ProposalSummary[] {
+  const layer = safeSemanticLayer(ctx);
+  if (!layer) return [];
+  const proposals: ProposalSummary[] = [];
+  for (const metric of layer.listMetrics()) {
+    if (metric.status !== 'pending_recertification') continue;
+    proposals.push(semanticRecertificationProposal('metric', metric));
+  }
+  for (const dimension of layer.listDimensions()) {
+    if (dimension.status !== 'pending_recertification') continue;
+    proposals.push(semanticRecertificationProposal('dimension', dimension));
+  }
+  return proposals;
+}
+
+function collectSemanticMetricDraftProposals(ctx: DQLContext): ProposalSummary[] {
+  const layer = safeSemanticLayer(ctx);
+  if (!layer) return [];
+  const proposals: ProposalSummary[] = [];
+  for (const metric of layer.listMetrics()) {
+    if (metric.status !== 'draft') continue;
+    const path = semanticDefinitionPath(metric, 'metric');
+    if (!isSemanticMetricDraftPath(path)) continue;
+    proposals.push(semanticMetricDraftProposal(metric, path));
+  }
+  return proposals;
+}
+
+function safeSemanticLayer(ctx: DQLContext): SemanticLayer | null {
+  try {
+    return ctx.semanticLayer;
+  } catch {
+    return null;
+  }
+}
+
+function semanticRecertificationProposal(
+  kind: 'metric' | 'dimension',
+  definition: MetricDefinition | DimensionDefinition,
+): ProposalSummary {
+  const path = semanticDefinitionPath(definition, kind);
+  const label = kind === 'metric' ? 'metric' : 'dimension';
+  const domain = kind === 'metric' ? (definition as MetricDefinition).domain : definition.domain;
+  return {
+    kind: 'semantic_recertification',
+    artifactType: kind,
+    draftPath: path,
+    slug: definition.name,
+    question: `Recertify semantic ${label} "${definition.name}" after upstream lineage or definition drift.`,
+    askedTimes: 1,
+    firstAsked: '',
+    lastAsked: semanticImportedAt(definition) ?? '',
+    proposedContractId: `semantic.${kind}.${definition.name}`,
+    proposedDomain: domain ?? '',
+    proposedEntity: definition.name,
+    upstreamRefs: [definition.table].filter(Boolean),
+    status: definition.status,
+    certifyHint: `Review ${path}, rerun semantic validation, then set status to "certified" after human recertification.`,
+  };
+}
+
+function semanticMetricDraftProposal(metric: MetricDefinition, path: string): ProposalSummary {
+  const support = semanticSupportCount(metric);
+  const lastAsked = semanticImportedAt(metric) ?? '';
+  const donorBlocks = semanticStringArrayExtra(metric, 'donorBlocks');
+  const donorPaths = semanticStringArrayExtra(metric, 'donorPaths');
+  return {
+    kind: 'semantic_metric_draft',
+    artifactType: 'metric',
+    draftPath: path,
+    slug: metric.name,
+    question: metric.description || `Review draft semantic metric "${metric.name}" for certification.`,
+    askedTimes: support,
+    firstAsked: lastAsked,
+    lastAsked,
+    proposedContractId: `semantic.metric.${metric.name}`,
+    proposedDomain: metric.domain ?? '',
+    proposedEntity: metric.name,
+    upstreamRefs: [metric.table, ...donorPaths, ...donorBlocks].filter(Boolean),
+    status: metric.status,
+    certifyHint: `Review ${path}, confirm expression/grain/filters, then move it out of _drafts and set status to "certified" after human approval.`,
+  };
+}
+
+function semanticDefinitionPath(definition: MetricDefinition | DimensionDefinition, kind: 'metric' | 'dimension'): string {
+  const path = definition.source?.extra?.path;
+  if (typeof path === 'string' && path.trim().length > 0) {
+    const normalized = path.replace(/\\/g, '/').replace(/^\/+/, '');
+    return normalized.startsWith('semantic-layer/') ? normalized : `semantic-layer/${normalized}`;
+  }
+  return `semantic-layer/${kind === 'metric' ? 'metrics' : 'dimensions'}/${definition.name}.yaml`;
+}
+
+function isSemanticMetricDraftPath(path: string): boolean {
+  return /(^|\/)semantic-layer\/metrics\/_drafts\//.test(path.replace(/\\/g, '/'));
+}
+
+function semanticImportedAt(definition: MetricDefinition | DimensionDefinition): string | undefined {
+  return typeof definition.source?.importedAt === 'string' ? definition.source.importedAt : undefined;
+}
+
+function semanticSupportCount(definition: MetricDefinition | DimensionDefinition): number {
+  const support = definition.source?.extra?.support;
+  if (typeof support === 'number' && Number.isFinite(support) && support > 0) return Math.floor(support);
+  const donors = semanticStringArrayExtra(definition, 'donorBlocks');
+  return Math.max(1, donors.length);
+}
+
+function semanticStringArrayExtra(definition: MetricDefinition | DimensionDefinition, key: string): string[] {
+  const value = definition.source?.extra?.[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+}
+
+function dateSortValue(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseSourceDqlArtifact(content: string): ProposalSourceDqlArtifact | undefined {
+  const kind = pickStringField(content, 'source_dql_kind');
+  const name = pickStringField(content, 'source_dql_name');
+  const path = pickStringField(content, 'source_dql_path');
+  const hash = pickStringField(content, 'source_dql_hash');
+  const metrics = pickArrayField(content, 'source_dql_metrics');
+  const dimensions = pickArrayField(content, 'source_dql_dimensions');
+  if (!kind && !name && !path && !hash && metrics.length === 0 && dimensions.length === 0) {
+    return undefined;
+  }
+  return {
+    ...(kind ? { kind } : {}),
+    ...(name ? { name } : {}),
+    ...(path ? { path } : {}),
+    ...(hash ? { hash } : {}),
+    metrics,
+    dimensions,
   };
 }
 

@@ -4,10 +4,21 @@ import { dirname, join } from "node:path";
 import {
   classifyConversationalTurn,
   decideAgentAction,
-  looksLikeComposeApp,
   type IntentDecision,
   type IntentSignals,
 } from "./intent-controller.js";
+import { selectCascadeRunRoute } from "./cascade/route-policy.js";
+import {
+  canUseEngineEscalation,
+  canUseLaneRepair,
+  cascadeBudgetTrace,
+  createCascadeBudgetState,
+  recordEngineEscalation,
+  recordLaneRepair,
+  type CascadeAnalysisDepth,
+  type CascadeBudgetTrace,
+  type PartialCascadeBudgetModel,
+} from "./cascade/budgets.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
 import type { ReasoningEffort } from "./providers/reasoning-effort.js";
 
@@ -130,6 +141,10 @@ export interface AgentRunRequest {
   /** Server-side conversation thread this run belongs to (persistence + resume). */
   threadId?: string;
   runId?: string;
+  /** Optional run-specific model effort. Hosts should still apply provider/settings ceilings. */
+  reasoningEffort?: ReasoningEffort;
+  /** Optional run-specific context depth for governed answer retrieval and prompting. */
+  analysisDepth?: CascadeAnalysisDepth;
 }
 
 export interface AgentRunEvent {
@@ -186,6 +201,7 @@ export interface AgentRunStep {
   id: string;
   index: number;
   route: AgentRunRoute;
+  resolvedRoute?: AgentRunRoute;
   goal: string;
   successCriteria: string[];
   status: AgentRunStepStatus;
@@ -217,7 +233,12 @@ export interface AgentRun {
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
   nextActions: AgentRunNextAction[];
+  /** Same-lane repair reruns. Escalations are tracked separately. */
   repairAttempts: number;
+  /** Engine-level route escalations, separate from same-lane repairs. */
+  escalationAttempts?: number;
+  /** Visible budget model and spend for audits/traces. */
+  budgetUsage?: CascadeBudgetTrace;
 }
 
 export interface AgentRouteExecutionContext {
@@ -246,6 +267,12 @@ export interface AgentRouteExecutionContext {
 export interface AgentRouteExecutorResult {
   summary?: string;
   answer?: string;
+  /**
+   * Route resolved by a deeper executor-owned cascade. For example, Ask mode may
+   * execute through the generated-answer route, then the answer loop can prove
+   * the result came from a certified block.
+   */
+  resolvedRoute?: AgentRunRoute;
   /** How to read `answer` for trust; defaults to "governed". */
   answerKind?: AgentRunAnswerKind;
   status?: AgentRunStatus;
@@ -292,6 +319,9 @@ export interface AgentRunReplanInput {
   attemptsUsed: number;
   repairAttemptsUsed: number;
   maxRepairAttempts: number;
+  engineEscalationsUsed?: number;
+  maxEngineEscalations?: number;
+  budgetUsage?: CascadeBudgetTrace;
 }
 
 export type AgentRunReplanDecision =
@@ -330,12 +360,12 @@ export interface AgentRunEngineOptions {
   idGenerator?: () => string;
   now?: () => Date;
   maxRepairAttempts?: number;
+  maxEngineEscalations?: number;
+  budgets?: PartialCascadeBudgetModel;
   maxSteps?: number;
 }
 
-const DEFAULT_MAX_REPAIR_ATTEMPTS = 2;
 const DEFAULT_MAX_STEPS = 4;
-const CERTIFIED_MATCH_THRESHOLD = 0.5;
 
 /**
  * Routes whose gate failure is better answered by switching routes than by
@@ -536,7 +566,7 @@ export class AgentRunEngine {
   private readonly store?: AgentRunStore;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
-  private readonly maxRepairAttempts: number;
+  private readonly budgetModel: PartialCascadeBudgetModel;
   private readonly maxSteps: number;
 
   constructor(options: AgentRunEngineOptions = {}) {
@@ -547,7 +577,14 @@ export class AgentRunEngine {
     this.store = options.store;
     this.idGenerator = options.idGenerator ?? randomUUID;
     this.now = options.now ?? (() => new Date());
-    this.maxRepairAttempts = options.maxRepairAttempts ?? DEFAULT_MAX_REPAIR_ATTEMPTS;
+    this.budgetModel = {
+      ...options.budgets,
+      lane: {
+        ...options.budgets?.lane,
+        execution: options.maxRepairAttempts ?? options.budgets?.lane?.execution,
+      },
+      engineEscalations: options.maxEngineEscalations ?? options.budgets?.engineEscalations,
+    };
     this.maxSteps = Math.max(1, options.maxSteps ?? DEFAULT_MAX_STEPS);
   }
 
@@ -629,7 +666,7 @@ export class AgentRunEngine {
         ...step,
         route: answerAnywayRoute(constrainRouteForAudience(step.route, audience), request, audience),
       }));
-      let repairAttemptsTotal = 0;
+      const budgets = createCascadeBudgetState(this.budgetModel);
       let stepCount = 0;
       let finalStep: AgentRunStep | undefined;
       let finalResult: AgentRouteExecutorResult | undefined;
@@ -681,7 +718,7 @@ export class AgentRunEngine {
             request,
             route,
             routeDecision,
-            maxRepairAttempts: this.maxRepairAttempts,
+            maxRepairAttempts: budgets.limits.lane.execution,
             attempt,
             stepGoal: planned.goal,
             priorEvaluations,
@@ -712,12 +749,6 @@ export class AgentRunEngine {
             break;
           }
 
-          // Out of modify budget — accept the best result we have.
-          if (repairAttemptsTotal >= this.maxRepairAttempts) {
-            stepStatus = "needs_review";
-            break;
-          }
-
           const currentStep: AgentRunStep = {
             id: stepId,
             index: stepCount,
@@ -736,8 +767,11 @@ export class AgentRunEngine {
             currentStep,
             remainingSteps: queue,
             attemptsUsed: attempt,
-            repairAttemptsUsed: repairAttemptsTotal,
-            maxRepairAttempts: this.maxRepairAttempts,
+            repairAttemptsUsed: budgets.usage.laneExecutionAttemptsUsed,
+            maxRepairAttempts: budgets.limits.lane.execution,
+            engineEscalationsUsed: budgets.usage.engineEscalationsUsed,
+            maxEngineEscalations: budgets.limits.engineEscalations,
+            budgetUsage: cascadeBudgetTrace(budgets),
           });
           emit({
             type: "replan.decided",
@@ -747,27 +781,51 @@ export class AgentRunEngine {
           });
 
           if (decision.decision === "repair") {
-            repairAttemptsTotal += 1;
+            const nextRepairHint = repairHintForEvaluation(failing, decision.repairHint);
+            if (!canUseLaneRepair(budgets, "execution")) {
+              stepStatus = "needs_review";
+              emit({
+                type: "repair.attempted",
+                message: `Repair budget exhausted for ${route.replaceAll("_", " ")}.`,
+                route,
+                payload: {
+                  repairHint: nextRepairHint,
+                  budgetUsage: cascadeBudgetTrace(budgets),
+                },
+              });
+              break;
+            }
+            recordLaneRepair(budgets, "execution");
             attempt += 1;
-            repairHint = decision.repairHint || failing.suggestedRepair;
+            repairHint = nextRepairHint;
             priorEvaluations = evaluations;
             emit({
               type: "repair.attempted",
               message: `Repairing ${route.replaceAll("_", " ")}: ${repairHint}`,
               route,
-              payload: { attempt, repairHint },
+              payload: { attempt, repairHint, budgetUsage: cascadeBudgetTrace(budgets) },
             });
             continue;
           }
           if (decision.decision === "escalate") {
-            repairAttemptsTotal += 1;
-            escalation = { route: decision.route, goal: decision.goal, hint: decision.repairHint || failing.suggestedRepair };
+            if (!canUseEngineEscalation(budgets)) {
+              stepStatus = "needs_review";
+              emit({
+                type: "escalated",
+                message: `Escalation budget exhausted for ${route.replaceAll("_", " ")}.`,
+                route,
+                payload: { decision, budgetUsage: cascadeBudgetTrace(budgets) },
+              });
+              break;
+            }
+            recordEngineEscalation(budgets);
+            escalation = { route: decision.route, goal: decision.goal, hint: repairHintForEvaluation(failing, decision.repairHint) };
             stepStatus = "escalated";
             emit({
               type: "escalated",
               message: `Escalating ${route.replaceAll("_", " ")} → ${decision.route.replaceAll("_", " ")}.`,
               route,
-              payload: decision,
+              payload: { ...decision, budgetUsage: cascadeBudgetTrace(budgets) },
             });
             break;
           }
@@ -816,6 +874,7 @@ export class AgentRunEngine {
           id: stepId,
           index: stepCount,
           route,
+          resolvedRoute: result.resolvedRoute,
           goal: planned.goal,
           successCriteria: planned.successCriteria,
           status: outcome.status === "blocked" ? "blocked" : stepStatus,
@@ -873,7 +932,7 @@ export class AgentRunEngine {
         finalResult,
         finalOutcome,
         clarifyOutcome,
-        repairAttemptsTotal,
+        budgetUsage: cascadeBudgetTrace(budgets),
         events,
       });
       emit({
@@ -882,6 +941,7 @@ export class AgentRunEngine {
         route: run.route,
         status: run.status,
         trustState: run.trustState,
+        payload: { budgetUsage: run.budgetUsage },
       });
       run.completedAt = this.timestamp();
       await this.store?.save(run);
@@ -920,6 +980,8 @@ export class AgentRunEngine {
         events,
         nextActions: [],
         repairAttempts: 0,
+        escalationAttempts: 0,
+        budgetUsage: cascadeBudgetTrace(createCascadeBudgetState(this.budgetModel)),
       };
       await this.store?.save(run);
       return run;
@@ -938,10 +1000,12 @@ export class AgentRunEngine {
     finalResult?: AgentRouteExecutorResult;
     finalOutcome?: StepOutcome;
     clarifyOutcome?: { step: AgentRunStep; question?: string };
-    repairAttemptsTotal: number;
+    budgetUsage: CascadeBudgetTrace;
     events: AgentRunEvent[];
   }): AgentRun {
     const { finalStep, finalResult, finalOutcome } = input;
+    const repairAttempts = input.budgetUsage.usage.laneExecutionAttemptsUsed;
+    const escalationAttempts = input.budgetUsage.usage.engineEscalationsUsed;
     const completedAt = this.timestamp();
 
     if (!finalStep || !finalResult || !finalOutcome) {
@@ -971,11 +1035,13 @@ export class AgentRunEngine {
         }],
         events: input.events,
         nextActions: [],
-        repairAttempts: input.repairAttemptsTotal,
+        repairAttempts,
+        escalationAttempts,
+        budgetUsage: input.budgetUsage,
       };
     }
 
-    const route = finalStep.route;
+    const route = finalResult.resolvedRoute ?? finalStep.resolvedRoute ?? finalStep.route;
     // Aggregate artifacts across every accepted step so a multi-step plan
     // (e.g. research → block draft) surfaces all of its durable work, while the
     // status/trust/answer reflect the final step.
@@ -1005,7 +1071,9 @@ export class AgentRunEngine {
         resolveAudience(input.request),
         finalOutcome.status,
       ),
-      repairAttempts: finalResult.repairAttempts ?? input.repairAttemptsTotal,
+      repairAttempts: finalResult.repairAttempts ?? repairAttempts,
+      escalationAttempts,
+      budgetUsage: input.budgetUsage,
     };
   }
 
@@ -1080,6 +1148,13 @@ function describeReplan(decision: AgentRunReplanDecision): string {
     default:
       return "Accepting the current result.";
   }
+}
+
+function repairHintForEvaluation(evaluation: AgentRunEvaluation, plannerHint?: string): string {
+  return evaluation.repairAction?.hint
+    ?? plannerHint
+    ?? evaluation.suggestedRepair
+    ?? "Revise and retry.";
 }
 
 /**
@@ -1194,36 +1269,7 @@ function requestedModeToAction(mode: AgentRunRequestedMode | undefined): IntentD
 }
 
 export function selectRoute(request: AgentRunRequest, decision: IntentDecision): AgentRunRoute {
-  const mode = request.requestedMode ?? "auto";
-  if (mode === "research") return "research";
-  if (mode === "sql") return "sql_cell";
-  if (mode === "block") return "dql_block_draft";
-  if (mode === "app") return "app_build";
-
-  // A conversational turn is decided first — before the authoring/app regexes —
-  // so a greeting never trips "create a … block" style matches.
-  if (decision.action === "converse") return "conversation";
-
-  const question = request.question;
-  if (looksLikeDqlBlockRequest(question)) return "dql_block_draft";
-  if (looksLikeSqlCellRequest(question)) return "sql_cell";
-  if (looksLikeComposeApp(question)) return "app_build";
-
-  if (decision.action === "compose_app") return "app_build";
-  if (decision.action === "investigate") return "research";
-  if (decision.action === "clarify") return "clarify";
-
-  const certifiedScore = request.signals?.certifiedScore ?? 0;
-  if (certifiedScore >= CERTIFIED_MATCH_THRESHOLD) return "certified_answer";
-  return "generated_answer";
-}
-
-function looksLikeSqlCellRequest(question: string): boolean {
-  return /\b(sql|query|notebook cell|cell draft|write a select|generate a query)\b/i.test(question);
-}
-
-function looksLikeDqlBlockRequest(question: string): boolean {
-  return /\b(dql block|block draft|draft block|create.*block|turn .* into .*block|promote .* block)\b/i.test(question);
+  return selectCascadeRunRoute(request, decision);
 }
 
 function defaultExecutorResult(
@@ -1277,7 +1323,7 @@ function defaultOutcome(route: AgentRunRoute): Pick<AgentRun, "status" | "trustS
 
 function defaultEvaluations(
   route: AgentRunRoute,
-  request: AgentRunRequest,
+  _request: AgentRunRequest,
   decision?: IntentDecision,
 ): AgentRunEvaluation[] {
   // A conversational reply carries no governance checks — it renders as plain chat.
@@ -1293,9 +1339,9 @@ function defaultEvaluations(
     base.push({
       id: "certified-context",
       label: "Certified context",
-      passed: (request.signals?.certifiedScore ?? 0) >= CERTIFIED_MATCH_THRESHOLD,
-      severity: "blocking",
-      message: "A certified DQL block or governed artifact must cover the answer.",
+      passed: true,
+      severity: "info",
+      message: "Certified status must come from the route executor or resolved answer-loop tier, not token-overlap routing.",
     });
   }
   if (route === "generated_answer" || route === "sql_cell") {
@@ -1427,12 +1473,12 @@ function defaultNextActions(route: AgentRunRoute, status: AgentRunStatus): Agent
   }
   if (route === "research") {
     return [
-      { id: "insert-sql", label: "Insert SQL cell", route: "sql_cell", artifactKind: "sql_cell" },
-      { id: "create-block", label: "Create DQL draft", route: "dql_block_draft", artifactKind: "dql_block_draft" },
+      { id: "create-block", label: "Review DQL draft", route: "dql_block_draft", artifactKind: "dql_block_draft" },
+      { id: "insert-sql", label: "Insert SQL preview", route: "sql_cell", artifactKind: "sql_cell" },
     ];
   }
   if (route === "sql_cell") {
-    return [{ id: "create-block", label: "Promote to DQL draft", route: "dql_block_draft", artifactKind: "dql_block_draft" }];
+    return [{ id: "create-block", label: "Review as DQL draft", route: "dql_block_draft", artifactKind: "dql_block_draft" }];
   }
   if (route === "dql_block_draft") {
     return [{ id: "open-review", label: "Open review checklist", artifactKind: "dql_block_draft" }];

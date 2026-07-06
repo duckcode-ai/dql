@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { dump as dumpYaml, load as loadYaml } from 'js-yaml';
 import {
   diffDQL,
   diffNotebook,
@@ -10,6 +11,7 @@ import {
   LineageGraph,
   type DiffReport,
   type ImpactReport,
+  type RecertItem,
 } from '@duckcodeailabs/dql-core';
 import { findRepoContext, readHeadBlob } from '../git-service.js';
 import type { CLIFlags } from '../args.js';
@@ -32,10 +34,17 @@ export async function runDiff(
 
   // ---- Impact mode: --impact turns `dql diff` into an impact/re-cert gate ----
   if (flags.impact) {
-    const impact = computeImpact(firstArg, report, flags);
-    emitImpact(report, impact, flags);
+    const impactContext = computeImpact(firstArg, report, flags);
+    const impact = impactContext?.impact ?? null;
+    const recertificationChangeset = impact && flags.writeRecertification
+      ? writeRecertificationChangeset(impactContext!.projectRoot, impact)
+      : null;
+    emitImpact(report, impact, flags, recertificationChangeset);
     // Gate: non-zero when certified downstream is invalidated without re-cert.
-    if (impact && impact.hasCertifiedInvalidation) process.exit(1);
+    if (impact && impact.hasCertifiedInvalidation) {
+      const unresolved = recertificationChangeset ? recertificationChangeset.skipped > 0 : true;
+      if (unresolved) process.exit(1);
+    }
     return;
   }
 
@@ -89,16 +98,36 @@ function diffByExtension(path: string, before: string | null, after: string): Di
  * Returns `null` when no project/manifest can be located — in that case the
  * gate is a no-op (we cannot know downstream impact without a graph).
  */
-function computeImpact(changedPath: string, report: DiffReport, flags: CLIFlags): ImpactReport | null {
-  const graph = loadProjectLineageGraph(changedPath, flags);
-  if (!graph) return null;
-  return computeImpactFromDiff(graph, report.changes);
+interface ImpactContext {
+  projectRoot: string;
+  impact: ImpactReport;
 }
 
-function emitImpact(report: DiffReport, impact: ImpactReport | null, flags: CLIFlags): void {
+function computeImpact(changedPath: string, report: DiffReport, flags: CLIFlags): ImpactContext | null {
+  const graphContext = loadProjectLineageGraph(changedPath, flags);
+  if (!graphContext) return null;
+  return {
+    projectRoot: graphContext.projectRoot,
+    impact: computeImpactFromDiff(graphContext.graph, report.changes),
+  };
+}
+
+interface RecertificationChangesetResult {
+  written: number;
+  skipped: number;
+  paths: string[];
+  skippedItems: Array<{ id: string; reason: string }>;
+}
+
+function emitImpact(
+  report: DiffReport,
+  impact: ImpactReport | null,
+  flags: CLIFlags,
+  recertificationChangeset: RecertificationChangesetResult | null = null,
+): void {
   if (flags.format === 'json') {
     if (impact) {
-      console.log(JSON.stringify(impact, null, 2));
+      console.log(JSON.stringify(recertificationChangeset ? { ...impact, recertificationChangeset } : impact, null, 2));
     } else {
       // No graph available — emit a minimal, still-structured payload so the
       // `--format json` contract holds and consumers can detect the gap.
@@ -129,6 +158,13 @@ function emitImpact(report: DiffReport, impact: ImpactReport | null, flags: CLIF
     return;
   }
   console.log(renderImpactText(impact));
+  if (recertificationChangeset) {
+    console.log('');
+    console.log(`  Recertification changeset: ${recertificationChangeset.written} file(s) updated, ${recertificationChangeset.skipped} skipped.`);
+    for (const path of recertificationChangeset.paths) {
+      console.log(`    - ${path}`);
+    }
+  }
 }
 
 /**
@@ -136,7 +172,7 @@ function emitImpact(report: DiffReport, impact: ImpactReport | null, flags: CLIF
  * graph from `dql-manifest.json`. Walks up from the file looking for
  * `dql.config.json`; falls back to cwd. Returns `null` if no manifest is found.
  */
-function loadProjectLineageGraph(changedPath: string, _flags: CLIFlags): LineageGraph | null {
+function loadProjectLineageGraph(changedPath: string, _flags: CLIFlags): { projectRoot: string; graph: LineageGraph } | null {
   const projectRoot = findProjectRoot(resolve(changedPath));
   if (!projectRoot) return null;
 
@@ -145,15 +181,97 @@ function loadProjectLineageGraph(changedPath: string, _flags: CLIFlags): Lineage
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
     if (manifest.lineage?.nodes && manifest.lineage?.edges) {
-      return LineageGraph.fromJSON({
-        nodes: manifest.lineage.nodes,
-        edges: manifest.lineage.edges,
-      });
+      return {
+        projectRoot,
+        graph: LineageGraph.fromJSON({
+          nodes: manifest.lineage.nodes,
+          edges: manifest.lineage.edges,
+        }),
+      };
     }
   } catch {
     return null;
   }
   return null;
+}
+
+function writeRecertificationChangeset(projectRoot: string, impact: ImpactReport): RecertificationChangesetResult {
+  const result: RecertificationChangesetResult = {
+    written: 0,
+    skipped: 0,
+    paths: [],
+    skippedItems: [],
+  };
+  for (const item of impact.requiresRecert) {
+    if (item.type !== 'metric' && item.type !== 'dimension') {
+      result.skipped += 1;
+      result.skippedItems.push({ id: item.id, reason: 'only semantic metric and dimension YAML files are writable' });
+      continue;
+    }
+    if (!item.filePath) {
+      result.skipped += 1;
+      result.skippedItems.push({ id: item.id, reason: 'missing semantic definition file path' });
+      continue;
+    }
+    const relativePath = normalizeRecertificationPath(item.filePath);
+    if (!relativePath.startsWith('semantic-layer/')) {
+      result.skipped += 1;
+      result.skippedItems.push({ id: item.id, reason: 'semantic file path is outside semantic-layer/' });
+      continue;
+    }
+    const absolutePath = join(projectRoot, relativePath);
+    if (!existsSync(absolutePath)) {
+      result.skipped += 1;
+      result.skippedItems.push({ id: item.id, reason: 'semantic definition file does not exist' });
+      continue;
+    }
+    const updated = markSemanticDefinitionPending(readFileSync(absolutePath, 'utf-8'), item);
+    if (!updated) {
+      result.skipped += 1;
+      result.skippedItems.push({ id: item.id, reason: 'could not find matching semantic definition in YAML' });
+      continue;
+    }
+    writeFileSync(absolutePath, updated, 'utf-8');
+    result.written += 1;
+    result.paths.push(relativePath);
+  }
+  return result;
+}
+
+function normalizeRecertificationPath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function markSemanticDefinitionPending(content: string, item: RecertItem): string | null {
+  const raw = loadYaml(content);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const document = raw as Record<string, unknown>;
+  const collectionKey = item.type === 'metric' ? 'metrics' : 'dimensions';
+  let changed = false;
+
+  if (typeof document.name === 'string' && document.name === item.name) {
+    document.status = 'pending_recertification';
+    changed = true;
+  }
+
+  const collection = document[collectionKey];
+  if (Array.isArray(collection)) {
+    for (const entry of collection) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (record.name === item.name) {
+        record.status = 'pending_recertification';
+        changed = true;
+      }
+    }
+  }
+
+  if (!changed) return null;
+  return dumpYaml(document, {
+    lineWidth: 120,
+    noRefs: true,
+    sortKeys: false,
+  });
 }
 
 /** Walk up from a path to the nearest directory containing `dql.config.json`. */

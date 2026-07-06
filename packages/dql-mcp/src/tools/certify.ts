@@ -1,11 +1,9 @@
-import { z } from 'zod';
 import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { DQLContext } from '../context.js';
 import { manifestBlockToRecord } from './util.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const certifyInput = {
-  name: z.string().describe('Block name to evaluate.'),
-};
+export const certifyInput = zodInputShapeForTool('certify');
 
 export function certify(ctx: DQLContext, args: { name: string }) {
   const manifestBlock = ctx.manifest.blocks[args.name];

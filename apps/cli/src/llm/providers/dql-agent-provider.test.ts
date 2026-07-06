@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { __test__, resolveEffectiveQuestion } from './dql-agent-provider.js';
 import type { AgentRunRequest } from '../types.js';
-import type { AgentMessage, AgentProvider } from '@duckcodeailabs/dql-agent';
+import { dqlToolNamesForSurface, type AgentMessage, type AgentProvider } from '@duckcodeailabs/dql-agent';
 
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
   return { provider: 'ollama', messages, projectRoot: '/tmp/x' } as AgentRunRequest;
@@ -38,6 +38,39 @@ describe('resolveEffectiveQuestion — clarify follow-up folding', () => {
       { role: 'user', content: 'revenue by product' },
     ]));
     expect(out).toBe('revenue by product');
+  });
+});
+
+describe('answer-loop tool surface', () => {
+  it('uses the canonical registry surface instead of a provider-local allowlist', () => {
+    const tools = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools');
+    const names = tools.map((tool) => tool.name);
+
+    expect(names).toEqual(dqlToolNamesForSurface('answer_loop'));
+    expect(names).toEqual(expect.arrayContaining([
+      'query_semantic_model',
+      'inspect_metadata_context',
+      'expand_context',
+      'query_via_metadata',
+    ]));
+  });
+});
+
+describe('governed answer formatting', () => {
+  it('formats the terminal cascade lane for CLI and agent traces', () => {
+    expect(__test__.formatCascadeOutcome({
+      terminalLane: 'semantic',
+      routeTier: 'semantic_metric',
+      label: 'Lane 2 semantic DQL artifact was terminal',
+      outcome: { lane: 'semantic', routeTier: 'semantic_metric' },
+    })).toBe('Lane 2 semantic · Semantic metric');
+
+    expect(__test__.formatCascadeOutcome({
+      terminalLane: 'generated',
+      routeTier: 'generated_sql',
+      label: 'Lane 3 generated DQL artifact was terminal',
+      outcome: { lane: 'generated', routeTier: 'generated_sql', hasSqlPreview: true, executionStatus: 'executed' },
+    })).toBe('Lane 3 generated · Generated SQL');
   });
 });
 
@@ -174,6 +207,7 @@ describe('conversation context follow-up routing', () => {
               },
               measureColumns: ['revenue'],
             },
+            sourceSql: 'SELECT product_name, category, revenue FROM analytics.product_revenue ORDER BY revenue DESC',
           },
           {
             id: 'turn_customers',
@@ -204,6 +238,151 @@ describe('conversation context follow-up routing', () => {
         product_name: ['for richer or pourover'],
       },
       priorMeasures: ['revenue'],
+    });
+  });
+
+  it('carries a named prior result ref with schema, row count, and source SQL', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'can you include product details with previous results and give final' }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_products',
+        turns: [
+          {
+            id: 'turn_products',
+            question: 'give me product and supply info',
+            answerSummary: 'Product to supply breakdown.',
+            result: {
+              columns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+              rowCount: 65,
+              dimensionValues: {
+                product_id: ['BEV-001', 'JAF-001'],
+                supply_id: ['SUP-005', 'SUP-009'],
+              },
+              measureColumns: ['supply_cost'],
+            },
+            sourceSql: 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies ORDER BY supply_cost DESC LIMIT 10',
+            dqlArtifact: {
+              kind: 'sql_block',
+              name: 'product_supply_breakdown',
+              source: 'block "product_supply_breakdown" {\n  type = "custom"\n  query = """SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies ORDER BY supply_cost DESC LIMIT 10"""\n}',
+              orderBy: [{ name: 'supply_cost', direction: 'desc' }],
+              limit: 10,
+            },
+          },
+        ],
+      },
+    } as AgentRunRequest, 'can you include product details with previous results and give final');
+
+    expect(followUp).toMatchObject({
+      kind: 'generic',
+      priorResultRef: {
+        id: 'turn_products',
+        question: 'give me product and supply info',
+        columns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+        rowCount: 65,
+        sourceSql: 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies ORDER BY supply_cost DESC LIMIT 10',
+      },
+      priorDqlArtifact: {
+        kind: 'sql_block',
+        name: 'product_supply_breakdown',
+        source: expect.stringContaining('block "product_supply_breakdown"'),
+        orderBy: [{ name: 'supply_cost', direction: 'desc' }],
+        limit: 10,
+      },
+    });
+
+    const rewritten = __test__.rewriteFollowUpQuestion('can you include product details with previous results and give final', followUp);
+    expect(rewritten).toContain('Follow-up request: can you include product details with previous results and give final');
+    expect(rewritten).toContain('Prior question: give me product and supply info');
+    expect(rewritten).toContain('Prior result ref: result:turn_products');
+    expect(rewritten).toContain('schema=[product_id, supply_id, supply_name, supply_cost]');
+    expect(rewritten).toContain('row_count=65');
+    expect(rewritten).toContain('Prior DQL artifact: kind=sql_block');
+    expect(rewritten).toContain('name=product_supply_breakdown');
+    expect(rewritten).toContain('order_by=[supply_cost desc]');
+    expect(rewritten).toContain('limit=10');
+    expect(rewritten).toContain('source_sql=SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies ORDER BY supply_cost DESC LIMIT 10');
+    expect(rewritten).toContain('Resolved prior result values: product_id=[BEV-001, JAF-001]; supply_id=[SUP-005, SUP-009]');
+  });
+
+  it('can bind a follow-up to a semantically recalled older result instead of an unrelated active turn', () => {
+    const question = 'can you include product details with previous results and give final';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_signups',
+        turns: [
+          {
+            id: 'turn_signups',
+            question: 'how many signups last quarter',
+            answerSummary: 'There were 412 signups.',
+            result: {
+              columns: ['quarter', 'signups'],
+              dimensionValues: { quarter: ['Q2'] },
+              measureColumns: ['signups'],
+              rowCount: 1,
+            },
+          },
+        ],
+        serverSnapshot: {
+          threadId: 'thread_products',
+          recentTurns: [
+            {
+              id: 'turn_signups',
+              question: 'how many signups last quarter',
+              answerSummary: 'There were 412 signups.',
+              resultColumns: ['quarter', 'signups'],
+              resultRowCount: 1,
+              resultDimensionValues: { quarter: ['Q2'] },
+            },
+          ],
+          recalledTurns: [
+            {
+              id: 'turn_supply',
+              question: 'give me product and supply info',
+              answerSummary: 'Product to supply breakdown.',
+              resultColumns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+              resultRowCount: 65,
+              resultDimensionValues: {
+                product_id: ['BEV-001', 'JAF-001'],
+                supply_id: ['SUP-005', 'SUP-009'],
+              },
+              sourceSql: 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies',
+              dqlArtifact: {
+                kind: 'sql_block',
+                name: 'product_supply_breakdown',
+                source: 'block "product_supply_breakdown" {\n  type = "custom"\n}',
+              },
+            },
+          ],
+        },
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toMatchObject({
+      kind: 'generic',
+      sourceTurnId: 'turn_supply',
+      sourceQuestion: 'give me product and supply info',
+      priorResultColumns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+      priorResultValues: {
+        product_id: ['BEV-001', 'JAF-001'],
+        supply_id: ['SUP-005', 'SUP-009'],
+      },
+      priorResultRef: {
+        id: 'turn_supply',
+        rowCount: 65,
+        sourceSql: 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies',
+      },
+      priorDqlArtifact: {
+        kind: 'sql_block',
+        name: 'product_supply_breakdown',
+      },
     });
   });
 
@@ -281,6 +460,26 @@ describe('conversation context follow-up routing', () => {
       },
       priorMeasures: ['revenue'],
     });
+  });
+
+  it('converts regex drilldown carry to contextual when the conversation snapshot says topic shift', () => {
+    const guarded = __test__.applyTopicShiftGuard({
+      kind: 'drilldown',
+      sourceQuestion: 'Top products by revenue',
+      filters: ['BEV-001'],
+      dimensions: ['product'],
+      priorResultValues: { product_id: ['BEV-001'] },
+      priorMeasures: ['revenue'],
+    }, { threadId: 't1', recentTurns: [], topicRelation: 'shift' } as any);
+
+    expect(guarded).toMatchObject({
+      kind: 'contextual',
+      sourceQuestion: 'Top products by revenue',
+    });
+    expect(guarded?.filters).toBeUndefined();
+    expect(guarded?.dimensions).toBeUndefined();
+    expect(guarded?.priorResultValues).toBeUndefined();
+    expect(guarded?.priorMeasures).toBeUndefined();
   });
 
   it('does not invent filters when deictic words have no prior result values', () => {

@@ -104,6 +104,14 @@ find domains blocks -path "*/_drafts/*.dql" 2>/dev/null
 Questions that get asked repeatedly accumulate in `_drafts/` — that's your
 prioritized review queue for what to certify next.
 
+When several certified blocks repeat the same metric expression or filtered
+definition, the local runtime can propose a semantic-layer composting changeset:
+draft metric YAML under `semantic-layer/metrics/_drafts/` plus a PR-body summary
+with the donor blocks that proved the pattern. The preview endpoint is
+read-only (`/api/propose/composting`); the generate endpoint writes only selected
+candidate ids (`/api/propose/composting/generate`). These drafts are still
+human-reviewed and start with `status: draft`.
+
 Measure the follow-up path with an eval suite:
 
 ```bash
@@ -112,10 +120,15 @@ dql agent eval docs/guides/agent-evals.yml --format json
 
 > **You should see** certified hit rate, generated follow-up pass rate, safe
 > refusal rate, wrong-certified count, draft capture count, and context size
-> metrics. Add `--execute` when a local runtime is running and you want bounded
-> SQL previews compared against expected rows. Add `--save` when eval-generated
-> drafts should be written to the local draft queue; otherwise eval reports the
-> draft path without mutating the project.
+> metrics. JSON output also includes a per-case trace for context selection,
+> follow-up rewrite/carry, lane routing, validation, execution, draft capture, and scoring. Add
+> `--execute` when a local runtime is running and you want bounded SQL previews
+> compared against expected rows. Add `--save` when eval-generated drafts should
+> be written to the local draft queue; otherwise eval reports the draft path
+> without mutating the project. For tool-observed flows, add
+> `expected.minToolCalls` to a case so a deep/research eval fails when the
+> provider loop returns without using the governed tools; use
+> `--min-tool-requirement 1` to make those tool-observation cases a hard gate.
 
 ---
 

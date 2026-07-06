@@ -418,8 +418,10 @@ async function runAppReindex(targetPath: string | null, flags: CLIFlags): Promis
     console.log(JSON.stringify({ ok: true, ...stats }, null, 2));
     return;
   }
+  const kgStatus = stats.kgRebuilt ? "KG rebuilt" : "KG fresh";
+  const catalogStatus = stats.metadataRefreshed ? "metadata refreshed" : "metadata fresh";
   console.log(
-    `  ✓ Knowledge graph and metadata catalog reindexed — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`,
+    `  ✓ ${kgStatus}; ${catalogStatus} — ${stats.nodes} nodes, ${stats.edges} edges, ${stats.skills} skill(s).`,
   );
 }
 

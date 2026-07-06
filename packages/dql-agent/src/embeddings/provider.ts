@@ -90,6 +90,132 @@ export function defaultEmbeddingProvider(): EmbeddingProvider {
   return new HashedTokenEmbeddingProvider();
 }
 
+/** Minimal fetch signature so the OpenAI provider stays dependency-free and testable. */
+export type EmbeddingFetch = (url: string, init: {
+  method: string;
+  headers: Record<string, string>;
+  body: string;
+  signal?: AbortSignal;
+}) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+
+export interface OpenAIEmbeddingOptions {
+  apiKey: string;
+  model?: string;
+  baseUrl?: string;
+  dimensions?: number;
+  fetchImpl?: EmbeddingFetch;
+}
+
+/**
+ * Real embeddings via an OpenAI-compatible `/embeddings` endpoint (dependency-free
+ * over fetch). Opt-in: only constructed when an API key is configured. Falls back
+ * to the hashed provider at the resolver level when unavailable, so offline and
+ * un-keyed projects keep working deterministically.
+ */
+export class OpenAIEmbeddingProvider implements EmbeddingProvider {
+  readonly id: string;
+  readonly dimensions: number;
+  private readonly apiKey: string;
+  private readonly model: string;
+  private readonly baseUrl: string;
+  private readonly fetchImpl: EmbeddingFetch;
+
+  constructor(options: OpenAIEmbeddingOptions) {
+    this.apiKey = options.apiKey;
+    this.model = options.model ?? 'text-embedding-3-small';
+    this.baseUrl = (options.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '');
+    this.dimensions = options.dimensions ?? 1536;
+    this.id = `openai:${this.model}`;
+    this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init) as ReturnType<EmbeddingFetch>);
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const response = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
+      body: JSON.stringify({ model: this.model, input: texts }),
+    });
+    if (!response.ok) throw new Error(`Embedding request failed (${response.status})`);
+    const payload = await response.json() as { data?: Array<{ embedding?: number[]; index?: number }> };
+    const rows = payload.data ?? [];
+    // Preserve request order via the returned index.
+    const out: number[][] = new Array(texts.length).fill(null).map(() => []);
+    rows.forEach((row, i) => {
+      const index = typeof row.index === 'number' ? row.index : i;
+      out[index] = row.embedding ?? [];
+    });
+    return out;
+  }
+}
+
+/**
+ * Content-hash cache around any provider so repeated texts (block example
+ * questions, metric labels) are embedded once. Bounded LRU-ish by insertion order.
+ */
+export class CachingEmbeddingProvider implements EmbeddingProvider {
+  readonly id: string;
+  readonly dimensions: number;
+  private readonly inner: EmbeddingProvider;
+  private readonly cache = new Map<string, number[]>();
+  private readonly maxEntries: number;
+
+  constructor(inner: EmbeddingProvider, maxEntries = 4096) {
+    this.inner = inner;
+    this.id = `cached:${inner.id}`;
+    this.dimensions = inner.dimensions;
+    this.maxEntries = maxEntries;
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    const missing: { text: string; key: string }[] = [];
+    const keys = texts.map((text) => {
+      const key = createHash('sha1').update(text).digest('hex');
+      if (!this.cache.has(key)) missing.push({ text, key });
+      return key;
+    });
+    if (missing.length > 0) {
+      const vectors = await this.inner.embed(missing.map((entry) => entry.text));
+      missing.forEach((entry, i) => this.put(entry.key, vectors[i] ?? []));
+    }
+    return keys.map((key) => this.cache.get(key) ?? []);
+  }
+
+  private put(key: string, vector: number[]): void {
+    this.cache.set(key, vector);
+    if (this.cache.size > this.maxEntries) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+  }
+}
+
+export interface EmbeddingResolveOptions {
+  /** API key for an OpenAI-compatible embeddings endpoint. */
+  openaiApiKey?: string;
+  model?: string;
+  baseUrl?: string;
+  fetchImpl?: EmbeddingFetch;
+}
+
+/**
+ * Pick the best available embedding provider: a real OpenAI-compatible embedder
+ * when an API key is configured (wrapped in a content-hash cache), else the safe
+ * deterministic hashed-token provider. This is the single place config chooses an
+ * embedder, so retrieval/matching call sites just call resolveEmbeddingProvider().
+ */
+export function resolveEmbeddingProvider(options: EmbeddingResolveOptions = {}): EmbeddingProvider {
+  if (options.openaiApiKey) {
+    return new CachingEmbeddingProvider(new OpenAIEmbeddingProvider({
+      apiKey: options.openaiApiKey,
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    }));
+  }
+  return defaultEmbeddingProvider();
+}
+
 export interface HybridRankItem<T> {
   item: T;
   /** Text the item is embedded/searched on. */

@@ -33,7 +33,7 @@ describe('LocalNotebookResearchStorage', () => {
 	    expect(tables.map((row) => row.name)).toEqual(['notebook_research_runs_fts']);
   });
 
-	  it('reports research diagnostics for enterprise queue health', () => {
+  it('reports research diagnostics for enterprise queue health', () => {
     const db = (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
     const activeScoring = store.createRun({
       notebookPath: 'notebooks/nba_research.dqlnb',
@@ -87,7 +87,7 @@ describe('LocalNotebookResearchStorage', () => {
     expect(diagnostics.search).toMatchObject({
       indexed: true,
       indexRows: 3,
-      indexVersion: '3',
+      indexVersion: '4',
       stale: false,
     });
     expect(diagnostics.limits).toEqual({
@@ -134,6 +134,56 @@ describe('LocalNotebookResearchStorage', () => {
     });
     expect(store.getRun(activeScoring.id)?.reviewStatus).toBe('needs_review');
     expect(store.getRun(activeRevenue.id)?.reviewStatus).toBe('needs_review');
+  });
+
+  it('reports review latency and certification conversion metrics for the research queue', () => {
+    const db = (store as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db;
+    const base = Date.parse('2026-07-05T12:00:00.000Z');
+    const created = new Date(base).toISOString();
+    const open = store.createRun({
+      notebookPath: 'notebooks/review_metrics.dqlnb',
+      question: 'open review',
+      generatedSql: 'select 1',
+    });
+    const draft = store.createRun({
+      notebookPath: 'notebooks/review_metrics.dqlnb',
+      question: 'draft created',
+      generatedSql: 'select 2',
+    });
+    const certified = store.createRun({
+      notebookPath: 'notebooks/review_metrics.dqlnb',
+      question: 'certified',
+      generatedSql: 'select 3',
+    });
+    const rejected = store.createRun({
+      notebookPath: 'notebooks/review_metrics.dqlnb',
+      question: 'rejected',
+      generatedSql: 'select 4',
+    });
+
+    db.prepare('UPDATE notebook_research_runs SET created_at = ?, updated_at = ? WHERE id = ?').run(created, created, open.id);
+    db.prepare('UPDATE notebook_research_runs SET review_status = ?, created_at = ?, updated_at = ? WHERE id = ?')
+      .run('draft_created', created, new Date(base + 30_000).toISOString(), draft.id);
+    db.prepare('UPDATE notebook_research_runs SET review_status = ?, created_at = ?, updated_at = ? WHERE id = ?')
+      .run('certified', created, new Date(base + 90_000).toISOString(), certified.id);
+    db.prepare('UPDATE notebook_research_runs SET review_status = ?, created_at = ?, updated_at = ? WHERE id = ?')
+      .run('rejected', created, new Date(base + 120_000).toISOString(), rejected.id);
+
+    const metrics = store.listRunsPage().reviewMetrics;
+    expect(metrics).toMatchObject({
+      totalReviewCount: 4,
+      openReviewCount: 2,
+      terminalReviewCount: 2,
+      draftCreatedCount: 1,
+      certifiedCount: 1,
+      rejectedCount: 1,
+      draftCreationRate: 0.25,
+      certifyConversionRate: 0.5,
+      medianTimeToDraftMs: 30_000,
+      medianTimeToCertificationMs: 90_000,
+      medianTimeToTerminalMs: 105_000,
+    });
+    expect(metrics.medianOpenReviewAgeMs).toBeGreaterThan(0);
   });
 
 	  it('stores notebook research runs independently from Apps', () => {
@@ -285,6 +335,59 @@ describe('LocalNotebookResearchStorage', () => {
 	    expect(seeded.created[0].sourceCellName).toBe('Top Assists SQL');
 	    expect(seeded.created[0].sourceCellFingerprint).toMatch(/^fnv1a:/);
 	  });
+
+  it('persists DQL artifacts as promotable notebook research context', () => {
+    const dqlArtifact = {
+      kind: 'semantic_block' as const,
+      name: 'product_supply_top_value',
+      sourcePath: 'blocks/_drafts/product_supply_top_value.dql',
+      source: `block "product_supply_top_value" {
+  type = "semantic"
+  status = "draft"
+  metric = "supply_value"
+  dimensions = ["product_name", "supply_name"]
+}`,
+      metrics: ['supply_value'],
+      dimensions: ['product_name', 'supply_name'],
+      filters: [{ dimension: 'is_perishable', operator: '=', values: ['true'] }],
+      orderBy: [{ name: 'supply_value', direction: 'desc' as const }],
+      limit: 10,
+    };
+    const created = store.createRun({
+      notebookPath: 'notebooks/supply_chain.dqlnb',
+      domain: 'supply_chain',
+      question: 'Can you give me the complete supply chain with product and order details with top 10 value?',
+      dqlArtifact,
+    });
+
+    expect(created.dqlArtifact).toMatchObject({
+      kind: 'semantic_block',
+      name: 'product_supply_top_value',
+      metrics: ['supply_value'],
+      dimensions: ['product_name', 'supply_name'],
+      limit: 10,
+    });
+
+    const updated = store.updateRun(created.id, {
+      status: 'ready',
+      evidence: {
+        contextPackId: 'ctx_supply',
+        selectedEvidence: [{ name: 'semantic model supply_chain', reason: 'metric and dimensions matched' }],
+      },
+      resultPreview: {
+        columns: ['product_name', 'supply_name', 'supply_value'],
+        rows: [{ product_name: 'JAF-003', supply_name: 'mustard', supply_value: 42 }],
+        rowCount: 1,
+      },
+    });
+
+    expect(updated?.dqlArtifact?.filters).toEqual([{ dimension: 'is_perishable', operator: '=', values: ['true'] }]);
+    expect(store.getRun(created.id)?.dqlArtifact?.orderBy).toEqual([{ name: 'supply_value', direction: 'desc' }]);
+    expect(store.listRunsPage({ search: 'product_supply_top_value supply_value' }).runs.map((run) => run.id)).toEqual([created.id]);
+    expect(store.listRunsPage({ readiness: 'draft_ready' }).runs.map((run) => run.id)).toEqual([created.id]);
+    expect(store.listRunsPage({ nextAction: 'create_dql_draft' }).runs.map((run) => run.id)).toEqual([created.id]);
+    expect(store.listRunsPage({ nextAction: 'review_sql' }).runs).toEqual([]);
+  });
 
 	  it('matches unlinked historical runs to source coverage by fingerprint', () => {
 	    const created = store.createRun({

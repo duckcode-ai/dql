@@ -1,15 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const getBlockInput = {
-  name: z.string().describe('Block name (as shown in search_blocks).'),
-  includeSource: z
-    .boolean()
-    .optional()
-    .describe('When true, include the full .dql source text. Default true.'),
-};
+export const getBlockInput = zodInputShapeForTool('get_block');
 
 export function getBlock(
   ctx: DQLContext,

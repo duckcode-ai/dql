@@ -22,6 +22,7 @@
  *   dql eval [path] --format json            Emit a machine-readable JSON report
  *   dql eval [path] --min-route-accuracy 0.9 Fail (exit 1) below this route accuracy
  *   dql eval [path] --min-refusal 0.8        Fail (exit 1) below this refusal recall
+ *   dql eval [path] --min-answer-rate 0.9    Fail below answer rate on answerable cases
  *   dql eval [path] --no-examples            Skip manifest block examples (yaml only)
  */
 
@@ -86,11 +87,21 @@ export interface EvalCaseResult {
   grainMatch?: boolean;
   refusalMatch?: boolean;
   failures: string[];
+  trace: EvalTraceStage[];
+}
+
+export interface EvalTraceStage {
+  stage: 'context' | 'route' | 'scoring';
+  status: 'passed' | 'failed' | 'not_run' | 'info';
+  message: string;
+  payload?: unknown;
 }
 
 export interface EvalScores {
   total: number;
   passed: number;
+  /** answer rate: non-refusal route / cases that did not expect a safe refusal. */
+  answerRate: number | null;
   /** route accuracy: cases whose expected route matched / cases with a route expectation. */
   routeAccuracy: number | null;
   /** block-selection accuracy: correct block / cases that expected a specific block. */
@@ -103,10 +114,24 @@ export interface EvalScores {
   refusalRecall: number | null;
 }
 
+export type EvalRouteDistribution = Record<EvalRoute, number>;
+export type EvalCategoryDistribution = Record<EvalCategory, number>;
+export type EvalSourceDistribution = Record<EvalCase['source'], number>;
+
+export interface EvalDistributions {
+  /** Router-selected cascade tier for each case. This is the PR drift signal. */
+  actualRoutes: EvalRouteDistribution;
+  /** Expected tier coverage from the golden set, when authored. */
+  expectedRoutes: EvalRouteDistribution;
+  categories: EvalCategoryDistribution;
+  sources: EvalSourceDistribution;
+}
+
 export interface EvalReport {
   ok: boolean;
   scores: EvalScores;
-  thresholds: { minRouteAccuracy: number | null; minRefusal: number | null };
+  distributions: EvalDistributions;
+  thresholds: { minRouteAccuracy: number | null; minRefusal: number | null; minAnswerRate: number | null };
   results: EvalCaseResult[];
 }
 
@@ -229,7 +254,7 @@ export function scoreCase(
     }
   }
 
-  return {
+  const result: Omit<EvalCaseResult, 'trace'> = {
     name: testCase.name,
     question: testCase.question,
     source: testCase.source,
@@ -249,6 +274,78 @@ export function scoreCase(
     refusalMatch,
     failures,
   };
+  return {
+    ...result,
+    trace: buildRoutingEvalTrace(testCase, plan, result),
+  };
+}
+
+function buildRoutingEvalTrace(
+  testCase: EvalCase,
+  plan: PlanAgentAnswerResult,
+  result: Omit<EvalCaseResult, 'trace'>,
+): EvalTraceStage[] {
+  const contextPack = plan.contextPack;
+  const routeDecision = plan.routeDecision;
+  return [
+    {
+      stage: 'context',
+      status: contextPack ? 'passed' : 'not_run',
+      message: contextPack
+        ? `Context pack ${plan.contextPackId} selected ${contextPack.objects?.length ?? 0} object(s).`
+        : 'No context pack was returned by the router.',
+      payload: contextPack
+        ? {
+            contextPackId: plan.contextPackId,
+            selectedObjectCount: contextPack.objects?.length ?? 0,
+            allowedRelationCount: contextPack.allowedSqlContext?.relations?.length ?? 0,
+            selectedRelations: contextPack.retrievalDiagnostics?.selectedRelations?.slice(0, 12).map((relation) => relation.relation) ?? [],
+            missingContext: plan.missingContext,
+            warnings: plan.warnings,
+          }
+        : undefined,
+    },
+    {
+      stage: 'route',
+      status: routeDecision ? 'passed' : 'failed',
+      message: routeDecision
+        ? `Router selected ${result.actualRoute}${result.actualBlock ? ` via ${result.actualBlock}` : ''}.`
+        : 'Router did not return a route decision.',
+      payload: {
+        route: routeDecision?.route,
+        mappedRoute: result.actualRoute,
+        intent: routeDecision?.intent,
+        reason: routeDecision?.reason,
+        trustLabel: routeDecision?.trustLabel,
+        reviewStatus: routeDecision?.reviewStatus,
+        exactObjectKey: routeDecision?.exactObjectKey,
+        selectedEvidence: routeDecision?.selectedEvidence?.slice(0, 12),
+      },
+    },
+    {
+      stage: 'scoring',
+      status: result.passed ? 'passed' : 'failed',
+      message: result.passed
+        ? 'Case passed all configured expectations.'
+        : `Case failed ${result.failures.length} expectation(s).`,
+      payload: {
+        category: testCase.category,
+        expected: {
+          route: result.expectRoute,
+          block: result.expectBlock,
+          grain: result.expectGrain,
+          refuse: result.expectRefuse,
+        },
+        actual: {
+          route: result.actualRoute,
+          block: result.actualBlock,
+          grain: result.actualGrain,
+          hasBlockingMissingContext: result.hasBlockingMissingContext,
+        },
+        failures: result.failures,
+      },
+    },
+  ];
 }
 
 function ratio(numerator: number, denominator: number): number | null {
@@ -262,6 +359,7 @@ export function computeScores(results: EvalCaseResult[]): EvalScores {
   const blockCases = results.filter((r) => r.expectBlock !== undefined);
   const grainCases = results.filter((r) => r.expectGrain !== undefined);
   const refusalExpected = results.filter((r) => r.expectRefuse === true);
+  const answerExpected = results.filter((r) => r.expectRefuse !== true);
 
   // Refusal precision: of every case where the router refused, how many should have?
   const routerRefused = results.filter((r) => r.actualRoute === 'missing_context');
@@ -270,6 +368,10 @@ export function computeScores(results: EvalCaseResult[]): EvalScores {
   return {
     total: results.length,
     passed: results.filter((r) => r.passed).length,
+    answerRate: ratio(
+      answerExpected.filter((r) => r.actualRoute !== 'missing_context').length,
+      answerExpected.length,
+    ),
     routeAccuracy: ratio(routeCases.filter((r) => r.routeMatch).length, routeCases.length),
     blockSelectionAccuracy: ratio(
       blockCases.filter((r) => r.blockMatch).length,
@@ -282,6 +384,52 @@ export function computeScores(results: EvalCaseResult[]): EvalScores {
       refusalExpected.length,
     ),
   };
+}
+
+function emptyRouteDistribution(): EvalRouteDistribution {
+  return {
+    certified: 0,
+    generated: 0,
+    missing_context: 0,
+    research: 0,
+  };
+}
+
+function emptyCategoryDistribution(): EvalCategoryDistribution {
+  return {
+    certified: 0,
+    generated: 0,
+    insufficient_context: 0,
+    conflict: 0,
+    wrong_grain: 0,
+  };
+}
+
+function emptySourceDistribution(): EvalSourceDistribution {
+  return {
+    block_example: 0,
+    yaml: 0,
+  };
+}
+
+/** Aggregate stable PR-facing distribution counters from scored cases. */
+export function computeDistributions(results: EvalCaseResult[]): EvalDistributions {
+  const actualRoutes = emptyRouteDistribution();
+  const expectedRoutes = emptyRouteDistribution();
+  const categories = emptyCategoryDistribution();
+  const sources = emptySourceDistribution();
+
+  for (const result of results) {
+    actualRoutes[result.actualRoute] += 1;
+    categories[result.category] += 1;
+    sources[result.source] += 1;
+    if (result.expectRoute) expectedRoutes[result.expectRoute] += 1;
+    if (result.expectRefuse === true && !result.expectRoute) {
+      expectedRoutes.missing_context += 1;
+    }
+  }
+
+  return { actualRoutes, expectedRoutes, categories, sources };
 }
 
 interface RawYamlCase {
@@ -361,7 +509,12 @@ export function loadYamlEvalCases(projectRoot: string): EvalCase[] {
  */
 export async function runEvalHarness(
   projectRoot: string,
-  options: { includeBlockExamples: boolean; minRouteAccuracy: number | null; minRefusal: number | null },
+  options: {
+    includeBlockExamples: boolean;
+    minRouteAccuracy: number | null;
+    minRefusal: number | null;
+    minAnswerRate?: number | null;
+  },
 ): Promise<EvalReport> {
   const manifest = buildManifest({
     projectRoot,
@@ -381,12 +534,19 @@ export async function runEvalHarness(
   }
 
   const scores = computeScores(results.length > 0 ? results : ZERO_RESULTS);
-  const ok = meetsThresholds(scores, options.minRouteAccuracy, options.minRefusal);
+  const distributions = computeDistributions(results.length > 0 ? results : ZERO_RESULTS);
+  const minAnswerRate = options.minAnswerRate ?? null;
+  const ok = meetsThresholds(scores, options.minRouteAccuracy, options.minRefusal, minAnswerRate);
 
   return {
     ok,
     scores,
-    thresholds: { minRouteAccuracy: options.minRouteAccuracy, minRefusal: options.minRefusal },
+    distributions,
+    thresholds: {
+      minRouteAccuracy: options.minRouteAccuracy,
+      minRefusal: options.minRefusal,
+      minAnswerRate,
+    },
     results,
   };
 }
@@ -396,6 +556,7 @@ export function meetsThresholds(
   scores: EvalScores,
   minRouteAccuracy: number | null,
   minRefusal: number | null,
+  minAnswerRate: number | null = null,
 ): boolean {
   if (
     minRouteAccuracy !== null &&
@@ -407,11 +568,19 @@ export function meetsThresholds(
   if (minRefusal !== null && scores.refusalRecall !== null && scores.refusalRecall < minRefusal) {
     return false;
   }
+  if (minAnswerRate !== null && scores.answerRate !== null && scores.answerRate < minAnswerRate) {
+    return false;
+  }
   return true;
 }
 
 function formatRate(value: number | null): string {
   return value === null ? 'n/a' : `${Math.round(value * 1000) / 10}%`;
+}
+
+function formatCountAndShare(count: number, total: number): string {
+  const share = total === 0 ? 'n/a' : formatRate(count / total);
+  return `${count} (${share})`;
 }
 
 export async function runEval(
@@ -434,11 +603,13 @@ export async function runEval(
   const includeBlockExamples = !flags.noExamples;
   const minRouteAccuracy = flags.minRouteAccuracy ?? null;
   const minRefusal = flags.minRefusal ?? null;
+  const minAnswerRate = flags.minAnswerRate ?? null;
 
   const report = await runEvalHarness(projectRoot, {
     includeBlockExamples,
     minRouteAccuracy,
     minRefusal,
+    minAnswerRate,
   });
 
   if (flags.format === 'json') {
@@ -452,7 +623,7 @@ export async function runEval(
 }
 
 function printReport(report: EvalReport): void {
-  const { results, scores } = report;
+  const { results, scores, distributions } = report;
 
   console.log('\n  DQL Eval — routing accuracy');
   console.log('  ' + '='.repeat(50));
@@ -477,14 +648,22 @@ function printReport(report: EvalReport): void {
   console.log('\n  Scores');
   console.log('  ' + '-'.repeat(50));
   console.log(`  Cases passed:            ${scores.passed}/${scores.total}`);
+  console.log(`  Answer rate:             ${formatRate(scores.answerRate)}`);
   console.log(`  Route accuracy:          ${formatRate(scores.routeAccuracy)}`);
   console.log(`  Block-selection accuracy:${formatRate(scores.blockSelectionAccuracy).padStart(7)}`);
   console.log(`  Grain-match precision:   ${formatRate(scores.grainMatchPrecision)}`);
   console.log(`  Refusal precision:       ${formatRate(scores.refusalPrecision)}`);
   console.log(`  Refusal recall:          ${formatRate(scores.refusalRecall)}`);
 
+  console.log('\n  Cascade distribution');
+  console.log('  ' + '-'.repeat(50));
+  console.log(`  Certified:               ${formatCountAndShare(distributions.actualRoutes.certified, scores.total)}`);
+  console.log(`  Generated:               ${formatCountAndShare(distributions.actualRoutes.generated, scores.total)}`);
+  console.log(`  Missing context:         ${formatCountAndShare(distributions.actualRoutes.missing_context, scores.total)}`);
+  console.log(`  Research:                ${formatCountAndShare(distributions.actualRoutes.research, scores.total)}`);
+
   const t = report.thresholds;
-  if (t.minRouteAccuracy !== null || t.minRefusal !== null) {
+  if (t.minRouteAccuracy !== null || t.minRefusal !== null || t.minAnswerRate !== null) {
     console.log('\n  Thresholds');
     console.log('  ' + '-'.repeat(50));
     if (t.minRouteAccuracy !== null) {
@@ -492,6 +671,9 @@ function printReport(report: EvalReport): void {
     }
     if (t.minRefusal !== null) {
       console.log(`  --min-refusal ${t.minRefusal}  (refusal recall ${formatRate(scores.refusalRecall)})`);
+    }
+    if (t.minAnswerRate !== null) {
+      console.log(`  --min-answer-rate ${t.minAnswerRate}  (answer rate ${formatRate(scores.answerRate)})`);
     }
     console.log(`\n  ${report.ok ? '✓ PASS — thresholds met.' : '✕ FAIL — below configured thresholds.'}`);
   }

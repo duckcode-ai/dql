@@ -1,101 +1,29 @@
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
 import {
   buildLocalContextPack,
+  expandGroundingFromCatalog,
+  mcpTier2RegroundRepairBudget,
   openMetadataCatalog,
   recordQueryRun,
+  renderGeneratedSqlDqlArtifact,
+  resolveLocalOwner,
   upsertGeneratedDraft,
   validateSqlAgainstLocalContext,
+  type GroundingExpansionResult,
   type LocalContextPack,
+  type MetadataFollowUpContext,
+  type SqlContextValidationResult,
 } from '@duckcodeailabs/dql-agent';
 import type {
   DataLexConformance,
   DataLexRelationship,
   JoinPathResolution,
 } from '@duckcodeailabs/dql-core';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const queryViaMetadataInput = {
-  question: z
-    .string()
-    .min(1)
-    .describe(
-      'The user question being answered, verbatim. Used for the draft block name and description.',
-    ),
-  proposedSql: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      'SQL the agent inferred from the inspected metadata context. Omit to return the catalog route plan and allowed SQL context before writing SQL.',
-    ),
-  contextPackId: z
-    .string()
-    .optional()
-    .describe('Context-pack id returned by inspect_metadata_context. When supplied, query_via_metadata validates SQL against that exact catalog context.'),
-  intent: z
-    .enum([
-      'diagnose_change',
-      'driver_breakdown',
-      'segment_compare',
-      'entity_drilldown',
-      'anomaly_investigation',
-      'trust_gap_review',
-    ])
-    .optional()
-    .describe('Optional deep-research intent for dashboard drilldowns and investigation-style answers.'),
-  upstreamRefs: z
-    .array(z.string())
-    .optional()
-    .describe('Tables / blocks the agent thinks are involved.'),
-  followUp: z
-    .object({
-      kind: z.enum(['generic', 'drilldown']),
-      sourceBlockName: z.string().optional(),
-      sourceQuestion: z.string().optional(),
-      sourceAnswer: z.string().optional(),
-      filters: z.array(z.string()).optional(),
-      dimensions: z.array(z.string()).optional(),
-    })
-    .optional()
-    .describe('Structured prior-answer context for follow-up drilldowns. Generated SQL remains uncertified.'),
-  proposedDomain: z
-    .string()
-    .optional()
-    .describe(
-      'Best guess at the DataLex domain that owns this question (e.g. "customer", "finance"). Used to suggest a contract id.',
-    ),
-  proposedEntity: z
-    .string()
-    .optional()
-    .describe(
-      'Best guess at the entity (PascalCase, e.g. "Customer"). Used together with proposedDomain to suggest a contract id.',
-    ),
-  saveDraft: z
-    .boolean()
-    .optional()
-    .describe(
-      'Persist a draft .dql file under the local draft queue for later human review and certification. Default true.',
-    ),
-  dryRun: z
-    .boolean()
-    .optional()
-    .describe(
-      'If true, return the proposed SQL + lineage without executing. Default false (execute).',
-    ),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(10000)
-    .optional()
-    .describe('Max rows to return on execution.'),
-  serverUrl: z
-    .string()
-    .optional()
-    .describe(
-      'Base URL of the local DQL runtime (default http://127.0.0.1:3474). Start it with `dql serve`.',
-    ),
-};
+const DEFAULT_QUERY_VIA_METADATA_ROW_LIMIT = 200;
+
+export const queryViaMetadataInput = zodInputShapeForTool('query_via_metadata');
 
 /**
  * Tier-2 of the graduated-trust loop. Use ONLY after `query_via_block` has
@@ -120,11 +48,13 @@ export async function queryViaMetadata(
     contextPackId?: string;
     intent?: MetadataResearchIntent;
     upstreamRefs?: string[];
+    outputs?: string[];
     followUp?: MetadataFollowUpContext;
     proposedDomain?: string;
     proposedEntity?: string;
     saveDraft?: boolean;
     dryRun?: boolean;
+    regroundAttemptsUsed?: number;
     limit?: number;
     serverUrl?: string;
   },
@@ -154,7 +84,7 @@ export async function queryViaMetadata(
       intent,
       reviewStatus: 'none',
       planningOnly: true,
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       datalexJoinGuidance,
       routeDecision: contextPack?.routeDecision,
       allowedSqlContext: contextPack?.allowedSqlContext,
@@ -175,6 +105,13 @@ export async function queryViaMetadata(
     filterValues: args.followUp?.filters,
   });
   if (!contextValidation.ok) {
+    const groundingGap = buildGroundingGapResponse(ctx.projectRoot, {
+      question: args.question,
+      proposedSql,
+      contextPack,
+      validation: contextValidation,
+    });
+    const repairPlan = buildMetadataRepairPlan(contextPack, groundingGap, args.regroundAttemptsUsed);
     recordTier2QueryRun(ctx.projectRoot, { slug, question: args.question, status: 'rejected', errorCode: contextValidation.code, contextPack });
     return {
       uncertified: true,
@@ -183,14 +120,24 @@ export async function queryViaMetadata(
       errorCode: contextValidation.code,
       trustStatus: metadataTrustStatus('rejected', intent, undefined, contextValidation.error, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'rejected', error: contextValidation.error, validationWarnings: contextValidation.warnings }, contextPack),
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       error: contextValidation.error,
       validationWarnings: contextValidation.warnings,
       proposedSql,
+      groundingGap,
+      repairAction: groundingGap && repairPlan?.budget.attemptsRemaining
+        ? {
+            kind: 'retry',
+            hint: groundingGap.recommendedNextStep,
+          }
+        : undefined,
+      repairBudget: repairPlan?.budget,
+      repairPlan,
       draftBlock: undefined,
     };
   }
-  const safety = buildMetadataPreviewSql(proposedSql, args.limit ?? 200);
+  const rowLimit = args.limit ?? DEFAULT_QUERY_VIA_METADATA_ROW_LIMIT;
+  const safety = buildMetadataPreviewSql(proposedSql, rowLimit);
   if (!safety.ok) {
     recordTier2QueryRun(ctx.projectRoot, { slug, question: args.question, status: 'rejected', errorCode: 'unsafe_sql', contextPack });
     return {
@@ -200,7 +147,7 @@ export async function queryViaMetadata(
       errorCode: safety.code,
       trustStatus: metadataTrustStatus('rejected', intent, undefined, safety.error, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'rejected', error: safety.error, validationWarnings: contextValidation.warnings }, contextPack),
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       error: safety.error,
       validationWarnings: contextValidation.warnings,
       proposedSql,
@@ -209,25 +156,30 @@ export async function queryViaMetadata(
   }
 
   let draftBlock: { path: string; askedTimes: number; proposedContractId: string } | undefined;
+  const draftRecord = {
+    slug,
+    question: args.question,
+    proposedSql,
+    proposedContractId,
+    owner: resolveLocalOwner(ctx.projectRoot, { persist: args.saveDraft !== false }),
+    proposedDomain: args.proposedDomain,
+    proposedEntity: args.proposedEntity,
+    upstreamRefs: args.upstreamRefs ?? [],
+    outputs: args.outputs,
+    sourceDqlArtifact: args.followUp?.priorDqlArtifact,
+    sourceQuestion: args.followUp?.sourceQuestion,
+    sourceBlock: args.followUp?.sourceBlockName,
+    followupKind: args.followUp?.kind,
+    requestedFilters: args.followUp?.filters,
+    requestedDimensions: args.followUp?.dimensions,
+    contextPackId: contextPack?.id,
+    routeIntent: contextPack?.routeDecision.intent ?? intent,
+    validationWarnings: contextValidation.warnings,
+  };
   if (args.saveDraft !== false) {
-    draftBlock = upsertGeneratedDraft(ctx.projectRoot, {
-      slug,
-      question: args.question,
-      proposedSql,
-      proposedContractId,
-      proposedDomain: args.proposedDomain,
-      proposedEntity: args.proposedEntity,
-      upstreamRefs: args.upstreamRefs ?? [],
-      sourceQuestion: args.followUp?.sourceQuestion,
-      sourceBlock: args.followUp?.sourceBlockName,
-      followupKind: args.followUp?.kind,
-      requestedFilters: args.followUp?.filters,
-      requestedDimensions: args.followUp?.dimensions,
-      contextPackId: contextPack?.id,
-      routeIntent: contextPack?.routeDecision.intent ?? intent,
-      validationWarnings: contextValidation.warnings,
-    });
+    draftBlock = upsertGeneratedDraft(ctx.projectRoot, draftRecord);
   }
+  const dqlArtifact = buildMetadataDqlArtifact(draftRecord, draftBlock);
 
   if (args.dryRun) {
     return {
@@ -236,11 +188,12 @@ export async function queryViaMetadata(
       reviewStatus: 'draft_ready',
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, undefined, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'dry_run', draftBlock, validationWarnings: contextValidation.warnings }, contextPack),
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       datalexJoinGuidance,
       reason: 'dryRun=true; SQL not executed. Returned proposal only.',
       proposedSql,
       draftBlock,
+      dqlArtifact,
       validationWarnings: contextValidation.warnings,
       promote: draftBlock
         ? `if you want this question certified, run: dql certify --from-draft ${draftBlock.path}`
@@ -273,9 +226,10 @@ export async function queryViaMetadata(
       intent,
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'runtime_unavailable', draftBlock, error, validationWarnings: contextValidation.warnings }, contextPack),
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       error,
       draftBlock,
+      dqlArtifact,
       validationWarnings: contextValidation.warnings,
     };
   }
@@ -288,9 +242,10 @@ export async function queryViaMetadata(
       intent,
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, error, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'runtime_error', draftBlock, error, validationWarnings: contextValidation.warnings }, contextPack),
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       error,
       draftBlock,
+      dqlArtifact,
       validationWarnings: contextValidation.warnings,
     };
   }
@@ -310,13 +265,15 @@ export async function queryViaMetadata(
       intent,
       trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, payload.error, contextValidation.warnings),
       evidence: metadataEvidence(intent, args, { status: 'execution_failed', draftBlock, error: payload.error, validationWarnings: contextValidation.warnings }, contextPack),
-      contextPack,
+      ...contextPackResponseFields(contextPack),
       error: payload.error,
       draftBlock,
+      dqlArtifact,
       validationWarnings: contextValidation.warnings,
     };
   }
   const rows = payload.result?.rows ?? [];
+  const returnedRows = rows.slice(0, rowLimit);
   recordTier2QueryRun(ctx.projectRoot, {
     slug,
     question: args.question,
@@ -338,16 +295,20 @@ export async function queryViaMetadata(
       durationMs: payload.result?.executionTime ?? null,
       validationWarnings: contextValidation.warnings,
     }, contextPack),
-    contextPack,
+    ...contextPackResponseFields(contextPack),
     datalexJoinGuidance,
     reason: 'no certified block matched the question; result derived from manifest + dbt schema',
     question: args.question,
     rowCount: rows.length,
+    returnedRowCount: returnedRows.length,
+    maxRowsReturned: rowLimit,
+    rowsTruncated: rows.length > returnedRows.length,
     durationMs: payload.result?.executionTime ?? null,
     columns: payload.result?.columns ?? [],
-    rows: args.limit ? rows.slice(0, args.limit) : rows,
+    rows: returnedRows,
     proposedSql,
     draftBlock,
+    dqlArtifact,
     validationWarnings: contextValidation.warnings,
     promote: draftBlock
       ? `if you want this question certified, run: dql certify --from-draft ${draftBlock.path}`
@@ -385,6 +346,192 @@ interface JoinGuidanceRegistry {
     target: string,
     opts?: { baseDomain?: string; targetDomain?: string },
   ): JoinPathResolution;
+}
+
+type FailedSqlContextValidation = Extract<SqlContextValidationResult, { ok: false }>;
+
+interface MetadataGroundingGap {
+  code: 'unknown_relation' | 'unknown_column';
+  error: string;
+  offending?: {
+    relation?: string;
+    column?: string;
+  };
+  suggestedExpansion?: {
+    relations: Array<{
+      relation: string;
+      name: string;
+      source: string;
+      columnCompleteness?: 'complete' | 'partial';
+      columns: Array<{ name: string; type?: string }>;
+    }>;
+    notes: string[];
+  };
+  catalogLookupError?: string;
+  recommendedNextStep: string;
+}
+
+interface MetadataRepairPlan {
+  reason: 'allowed_context_gap';
+  exhausted: boolean;
+  nextTool: 'expand_context' | 'inspect_metadata_context';
+  contextPackId?: string;
+  relations: string[];
+  retryTool: 'query_via_metadata';
+  retryHint: string;
+  budget: ReturnType<typeof mcpTier2RegroundRepairBudget>;
+}
+
+interface MetadataContextPackSummary {
+  id?: string;
+  trustLabel?: string;
+  route?: string;
+  intent?: string;
+  selectedRelations: Array<{ relation: string; reason?: string; columns?: string[] }>;
+  selectedJoinPaths: Array<{ leftRelation: string; leftColumn: string; rightRelation: string; rightColumn: string; reason?: string }>;
+  warnings: string[];
+}
+
+function buildMetadataDqlArtifact(
+  rec: Parameters<typeof renderGeneratedSqlDqlArtifact>[0],
+  draftBlock: { path: string } | undefined,
+) {
+  return {
+    kind: 'sql_block' as const,
+    name: rec.slug,
+    sourcePath: draftBlock?.path,
+    source: renderGeneratedSqlDqlArtifact({
+      ...rec,
+      ...(draftBlock?.path ? { draftPath: draftBlock.path } : {}),
+    }),
+  };
+}
+
+function buildGroundingGapResponse(
+  projectRoot: string,
+  args: {
+    question: string;
+    proposedSql: string;
+    contextPack?: LocalContextPack;
+    validation: FailedSqlContextValidation;
+  },
+): MetadataGroundingGap | undefined {
+  if (args.validation.code !== 'unknown_relation' && args.validation.code !== 'unknown_column') return undefined;
+  let expansion: GroundingExpansionResult | undefined;
+  let catalogLookupError: string | undefined;
+  const catalog = openMetadataCatalog(projectRoot);
+  try {
+    expansion = expandGroundingFromCatalog(catalog, {
+      question: args.question,
+      sql: args.proposedSql,
+      code: args.validation.code,
+      offending: args.validation.offending,
+      contextPack: args.contextPack,
+    });
+  } catch (err) {
+    catalogLookupError = err instanceof Error ? err.message : String(err);
+  } finally {
+    catalog.close();
+  }
+
+  return {
+    code: args.validation.code,
+    error: args.validation.error,
+    offending: args.validation.offending,
+    suggestedExpansion: expansion ? summarizeGroundingExpansion(expansion) : undefined,
+    ...(catalogLookupError ? { catalogLookupError } : {}),
+    recommendedNextStep: formatGroundingGapNextStep(args.validation, expansion),
+  };
+}
+
+function buildMetadataRepairPlan(
+  contextPack: LocalContextPack | undefined,
+  groundingGap: MetadataGroundingGap | undefined,
+  explicitAttemptsUsed?: number,
+): MetadataRepairPlan | undefined {
+  if (!groundingGap) return undefined;
+  const inferredAttemptsUsed = contextPack?.retrievalDiagnostics.strategy === 'expanded_context' ? 1 : 0;
+  const attemptsUsed = Math.max(inferredAttemptsUsed, explicitAttemptsUsed ?? 0);
+  const budget = mcpTier2RegroundRepairBudget(attemptsUsed);
+  const relations = groundingGap.suggestedExpansion?.relations
+    ?.map((relation) => relation.relation)
+    .filter(Boolean)
+    .slice(0, 8) ?? [];
+  const exhausted = budget.attemptsRemaining <= 0;
+  return {
+    reason: 'allowed_context_gap',
+    exhausted,
+    nextTool: !exhausted && relations.length > 0 && contextPack?.id ? 'expand_context' : 'inspect_metadata_context',
+    contextPackId: contextPack?.id,
+    relations: exhausted ? [] : relations,
+    retryTool: 'query_via_metadata',
+    retryHint: exhausted
+      ? 'MCP tier-2 re-ground repair budget is exhausted. Stop retrying query_via_metadata and return the grounding gap for review or broader inspection.'
+      : groundingGap.recommendedNextStep,
+    budget,
+  };
+}
+
+function contextPackResponseFields(contextPack: LocalContextPack | undefined): {
+  contextPackId?: string;
+  contextPackSummary?: MetadataContextPackSummary;
+} {
+  if (!contextPack) return {};
+  return {
+    contextPackId: contextPack.id,
+    contextPackSummary: compactContextPackForResponse(contextPack),
+  };
+}
+
+function compactContextPackForResponse(contextPack: LocalContextPack | undefined): MetadataContextPackSummary | undefined {
+  if (!contextPack) return undefined;
+  return {
+    id: contextPack.id,
+    trustLabel: contextPack.trustLabel,
+    route: contextPack.routeDecision.route,
+    intent: contextPack.routeDecision.intent,
+    selectedRelations: (contextPack.retrievalDiagnostics.selectedRelations ?? []).slice(0, 8).map((relation) => ({
+      relation: relation.relation,
+      reason: relation.reason,
+      columns: relation.columns?.slice(0, 12),
+    })),
+    selectedJoinPaths: (contextPack.retrievalDiagnostics.selectedJoinPaths ?? []).slice(0, 8).map((join) => ({
+      leftRelation: join.leftRelation,
+      leftColumn: join.leftColumn,
+      rightRelation: join.rightRelation,
+      rightColumn: join.rightColumn,
+      reason: join.reason,
+    })),
+    warnings: contextPack.warnings.slice(0, 8),
+  };
+}
+
+function summarizeGroundingExpansion(expansion: GroundingExpansionResult) {
+  return {
+    relations: expansion.relations.slice(0, 8).map((relation) => ({
+      relation: relation.relation,
+      name: relation.name,
+      source: relation.source,
+      columnCompleteness: relation.columnCompleteness,
+      columns: relation.columns.slice(0, 32).map((column) => ({
+        name: column.name,
+        type: column.type,
+      })),
+    })),
+    notes: expansion.notes.slice(0, 8),
+  };
+}
+
+function formatGroundingGapNextStep(
+  validation: FailedSqlContextValidation,
+  expansion: GroundingExpansionResult | undefined,
+): string {
+  const target = validation.offending?.relation ?? validation.offending?.column ?? 'the missing identifier';
+  if (expansion && expansion.relations.length > 0) {
+    const relations = expansion.relations.slice(0, 4).map((relation) => relation.relation).join(', ');
+    return `Retry query_via_metadata after expanding the inspected context with ${relations}. The missing identifier was ${target}.`;
+  }
+  return `The missing identifier was ${target}, and no matching relation or column was found in the catalog. Re-inspect metadata or ask the user which object they mean.`;
 }
 
 /**
@@ -503,15 +650,6 @@ type MetadataResearchIntent =
   | 'entity_drilldown'
   | 'anomaly_investigation'
   | 'trust_gap_review';
-
-type MetadataFollowUpContext = {
-  kind: 'generic' | 'drilldown';
-  sourceBlockName?: string;
-  sourceQuestion?: string;
-  sourceAnswer?: string;
-  filters?: string[];
-  dimensions?: string[];
-};
 
 function normalizeMetadataResearchIntent(value: unknown, question: string): MetadataResearchIntent {
   if (

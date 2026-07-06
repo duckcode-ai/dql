@@ -1,0 +1,55 @@
+name: Judged eval (credentialed)
+
+# Deeper eval than the required offline golden-eval gate: executes generated SQL
+# and runs the LLM-as-judge (R3.2). Requires a model API key, so it runs on a
+# schedule and on manual dispatch only — never blocks a PR. The required
+# offline `golden-eval` job in ci.yml stays the PR gate.
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: '0 6 * * 1'
+
+jobs:
+  judged-eval:
+    name: judged eval (execute + judge)
+    runs-on: ubuntu-latest
+    # Skip cleanly when no key is configured, so forks without the secret don't fail.
+    if: ${{ github.repository == 'duckcode-ai/dql' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Guard — require an API key
+        id: guard
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "No model API key configured; skipping judged eval." >&2
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: dql agent eval --execute --judge
+        if: steps.guard.outputs.run == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          node apps/cli/dist/index.js agent eval apps/cli/test/fixtures/jaffle-supply-chain/eval/golden.yaml \
+            --execute --judge --format json > judged-eval-report.json || true
+          cat judged-eval-report.json
+      - name: Upload judged eval report
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: judged-eval-report
+          path: judged-eval-report.json
+          if-no-files-found: ignore

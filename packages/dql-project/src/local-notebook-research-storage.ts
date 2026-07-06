@@ -2,26 +2,29 @@ import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import type Database from 'better-sqlite3';
+import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckcodeailabs/dql-core';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
 
-const HAS_SQL_SQL = "(COALESCE(NULLIF(TRIM(reviewed_sql), ''), NULLIF(TRIM(generated_sql), '')) IS NOT NULL)";
 const HAS_REVIEWED_SQL = "(NULLIF(TRIM(reviewed_sql), '') IS NOT NULL)";
 const HAS_GENERATED_SQL = "(NULLIF(TRIM(generated_sql), '') IS NOT NULL)";
+const HAS_DQL_ARTIFACT_SQL = "(dql_artifact IS NOT NULL AND TRIM(dql_artifact) <> '' AND TRIM(dql_artifact) <> 'null')";
+const HAS_SQL_SQL = `(${HAS_REVIEWED_SQL} OR ${HAS_GENERATED_SQL} OR ${HAS_DQL_ARTIFACT_SQL})`;
+const HAS_PROMOTABLE_SOURCE_SQL = `(${HAS_REVIEWED_SQL} OR ${HAS_DQL_ARTIFACT_SQL})`;
 const HAS_PREVIEW_SQL = "(result_preview IS NOT NULL AND TRIM(result_preview) <> '')";
 const HAS_DRAFT_SQL = "(draft_block_path IS NOT NULL AND TRIM(draft_block_path) <> '')";
 const HAS_EVIDENCE_SQL = "((evidence IS NOT NULL AND TRIM(evidence) <> '' AND TRIM(evidence) <> 'null') OR (context_pack_id IS NOT NULL AND TRIM(context_pack_id) <> ''))";
 const OPEN_REVIEW_SQL = "(review_status NOT IN ('completed', 'certified', 'rejected'))";
 const REUSE_RECOMMENDED_SQL = "(COALESCE(dql_promotion_action, '') = 'reuse_existing')";
-const DRAFT_READY_SQL = `(${OPEN_REVIEW_SQL} AND TRIM(question) <> '' AND ${HAS_REVIEWED_SQL} AND ${HAS_EVIDENCE_SQL} AND status <> 'error')`;
+const DRAFT_READY_SQL = `(${OPEN_REVIEW_SQL} AND TRIM(question) <> '' AND ${HAS_PROMOTABLE_SOURCE_SQL} AND ${HAS_EVIDENCE_SQL} AND status <> 'error')`;
 const CERTIFICATION_READY_SQL = `(${DRAFT_READY_SQL} AND ${HAS_PREVIEW_SQL} AND ${HAS_DRAFT_SQL} AND COALESCE(dql_promotion_action, '') NOT IN ('reuse_existing', 'review_required'))`;
 const BLOCKED_SQL = `(${OPEN_REVIEW_SQL} AND (status = 'error' OR TRIM(question) = '' OR (NOT ${REUSE_RECOMMENDED_SQL} AND NOT ${HAS_SQL_SQL})))`;
 const NEXT_ACTION_SQL = `CASE
   WHEN review_status IN ('completed', 'rejected', 'certified') THEN 'continue_review'
   WHEN ${BLOCKED_SQL} THEN 'fix_blockers'
   WHEN ${REUSE_RECOMMENDED_SQL} THEN 'reuse_existing'
-  WHEN NOT ${HAS_REVIEWED_SQL} AND ${HAS_GENERATED_SQL} THEN 'review_sql'
+  WHEN NOT ${HAS_DQL_ARTIFACT_SQL} AND NOT ${HAS_REVIEWED_SQL} AND ${HAS_GENERATED_SQL} THEN 'review_sql'
   WHEN NOT ${HAS_EVIDENCE_SQL} THEN 'review_context'
   WHEN NOT ${HAS_PREVIEW_SQL} THEN 'run_preview'
   WHEN NOT ${HAS_DRAFT_SQL} AND ${DRAFT_READY_SQL} THEN 'create_dql_draft'
@@ -41,7 +44,7 @@ const NEXT_ACTION_PRIORITY_SQL = `CASE (${NEXT_ACTION_SQL})
   WHEN 'continue_review' THEN 8
   ELSE 9
 END`;
-const SEARCH_INDEX_VERSION = '3';
+const SEARCH_INDEX_VERSION = '4';
 const RESEARCH_DOMAIN_GROUP_LIMIT = 100;
 const RESEARCH_INTENT_GROUP_LIMIT = 50;
 const RESEARCH_NOTEBOOK_GROUP_LIMIT = 100;
@@ -82,6 +85,22 @@ export type NotebookResearchNextActionFilter =
   | 'open_certification'
   | 'complete_review'
   | 'continue_review';
+
+export interface NotebookResearchReviewMetrics {
+  totalReviewCount: number;
+  openReviewCount: number;
+  terminalReviewCount: number;
+  draftCreatedCount: number;
+  certifiedCount: number;
+  completedCount: number;
+  rejectedCount: number;
+  draftCreationRate: number | null;
+  certifyConversionRate: number | null;
+  medianOpenReviewAgeMs: number | null;
+  medianTimeToDraftMs: number | null;
+  medianTimeToCertificationMs: number | null;
+  medianTimeToTerminalMs: number | null;
+}
 
 const NOTEBOOK_NEXT_ACTION_PRIORITY: NotebookResearchNextActionFilter[] = [
   'fix_blockers',
@@ -130,6 +149,8 @@ export interface NotebookResearchDqlPromotion {
   createdAt: string;
 }
 
+export type NotebookResearchDqlArtifact = DqlArtifactReference;
+
 export interface NotebookResearchPlan {
   sqlState: 'missing' | 'generated' | 'reviewed';
   grain?: string;
@@ -174,6 +195,7 @@ export interface NotebookResearchRun {
   researchPlan?: NotebookResearchPlan;
   generatedSql?: string;
   reviewedSql?: string;
+  dqlArtifact?: NotebookResearchDqlArtifact;
   display?: unknown;
   contextPackId?: string;
   routeDecision?: unknown;
@@ -221,6 +243,7 @@ export interface CreateNotebookResearchRunInput {
   context?: unknown;
   generatedSql?: string;
   reviewedSql?: string;
+  dqlArtifact?: NotebookResearchDqlArtifact;
 }
 
 export interface UpdateNotebookResearchRunInput {
@@ -241,6 +264,7 @@ export interface UpdateNotebookResearchRunInput {
   researchPlan?: NotebookResearchPlan;
   generatedSql?: string;
   reviewedSql?: string;
+  dqlArtifact?: NotebookResearchDqlArtifact;
   display?: unknown;
   contextPackId?: string;
   routeDecision?: unknown;
@@ -346,6 +370,7 @@ export interface NotebookResearchRunListResult {
     intents: number;
     notebooks: number;
   };
+  reviewMetrics: NotebookResearchReviewMetrics;
 	  limit?: number;
 	  offset: number;
 	}
@@ -431,6 +456,12 @@ type NotebookResearchNextActionCountRow = {
   nextContinueReview?: number;
 };
 
+type NotebookResearchReviewMetricRow = {
+  reviewStatus?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+};
+
 function notebookSummaryNextAction(
   counts: Record<NotebookResearchNextActionFilter, number>,
 ): { action: NotebookResearchNextActionFilter; count: number } | undefined {
@@ -453,6 +484,81 @@ function actionCountsFromRow(row: NotebookResearchNextActionCountRow): Record<No
     complete_review: row.nextCompleteReview ?? 0,
     continue_review: row.nextContinueReview ?? 0,
   };
+}
+
+function computeNotebookResearchReviewMetrics(
+  rows: NotebookResearchReviewMetricRow[],
+  nowMs = Date.now(),
+): NotebookResearchReviewMetrics {
+  const openAges: number[] = [];
+  const draftTimes: number[] = [];
+  const certificationTimes: number[] = [];
+  const terminalTimes: number[] = [];
+  let draftCreatedCount = 0;
+  let certifiedCount = 0;
+  let completedCount = 0;
+  let rejectedCount = 0;
+
+  for (const row of rows) {
+    const status = parseReviewStatus(row.reviewStatus);
+    const createdAt = timestampMs(row.createdAt);
+    const updatedAt = timestampMs(row.updatedAt);
+    if (status === 'draft_created') draftCreatedCount += 1;
+    if (status === 'certified') certifiedCount += 1;
+    if (status === 'completed') completedCount += 1;
+    if (status === 'rejected') rejectedCount += 1;
+
+    if (createdAt === null) continue;
+    if (status === 'needs_review' || status === 'draft_created') {
+      openAges.push(Math.max(0, nowMs - createdAt));
+    }
+    if (status === 'draft_created' && updatedAt !== null) {
+      draftTimes.push(Math.max(0, updatedAt - createdAt));
+    }
+    if (status === 'certified' && updatedAt !== null) {
+      certificationTimes.push(Math.max(0, updatedAt - createdAt));
+    }
+    if ((status === 'completed' || status === 'certified' || status === 'rejected') && updatedAt !== null) {
+      terminalTimes.push(Math.max(0, updatedAt - createdAt));
+    }
+  }
+
+  const terminalReviewCount = certifiedCount + completedCount + rejectedCount;
+  return {
+    totalReviewCount: rows.length,
+    openReviewCount: rows.length - terminalReviewCount,
+    terminalReviewCount,
+    draftCreatedCount,
+    certifiedCount,
+    completedCount,
+    rejectedCount,
+    draftCreationRate: ratioNumber(draftCreatedCount, rows.length),
+    certifyConversionRate: ratioNumber(certifiedCount, terminalReviewCount),
+    medianOpenReviewAgeMs: medianNumber(openAges),
+    medianTimeToDraftMs: medianNumber(draftTimes),
+    medianTimeToCertificationMs: medianNumber(certificationTimes),
+    medianTimeToTerminalMs: medianNumber(terminalTimes),
+  };
+}
+
+function ratioNumber(numerator: number, denominator: number): number | null {
+  if (denominator <= 0) return null;
+  return Number((numerator / denominator).toFixed(4));
+}
+
+function medianNumber(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return Math.round(sorted[mid]!);
+  return Math.round((sorted[mid - 1]! + sorted[mid]!) / 2);
+}
+
+function timestampMs(value: unknown): number | null {
+  const raw = optionalString(value);
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export interface NotebookResearchSourceCoverageQuery {
@@ -507,6 +613,7 @@ export class LocalNotebookResearchStorage {
       status: 'draft',
       generatedSql: cleanOptionalString(input.generatedSql),
       reviewedSql: cleanOptionalString(input.reviewedSql),
+      dqlArtifact: normalizeDqlArtifactReference(input.dqlArtifact),
       warnings: [],
       reviewStatus: 'needs_review',
       dqlCandidateIds: [],
@@ -517,10 +624,10 @@ export class LocalNotebookResearchStorage {
       INSERT INTO notebook_research_runs (
         id, notebook_path, domain, owner, source_cell_id, source_cell_name, source_cell_fingerprint, title, question,
         intent, context, status, summary, recommendation, result_preview,
-        evidence, research_plan, generated_sql, reviewed_sql, display, context_pack_id,
+        evidence, research_plan, generated_sql, reviewed_sql, dql_artifact, display, context_pack_id,
         route_decision, warnings, review_status, error, draft_block_path,
         dql_import_id, dql_candidate_ids, dql_promotion_action, dql_promotion, created_at, updated_at, last_run_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       run.id,
       run.notebookPath,
@@ -541,6 +648,7 @@ export class LocalNotebookResearchStorage {
       null,
       run.generatedSql ?? null,
       run.reviewedSql ?? null,
+      json(run.dqlArtifact),
       null,
       null,
       null,
@@ -670,6 +778,12 @@ export class LocalNotebookResearchStorage {
       nextCompleteReview?: number;
       nextContinueReview?: number;
     } | undefined;
+    const reviewMetricRows = this.db.prepare(`
+      SELECT review_status AS reviewStatus, created_at AS createdAt, updated_at AS updatedAt
+      FROM notebook_research_runs
+      ${countWhereSql}
+    `).all(...countParams) as NotebookResearchReviewMetricRow[];
+    const reviewMetrics = computeNotebookResearchReviewMetrics(reviewMetricRows);
     const domains = this.db.prepare(`
       SELECT
         COALESCE(NULLIF(TRIM(domain), ''), 'uncategorized') AS domain,
@@ -915,6 +1029,7 @@ export class LocalNotebookResearchStorage {
         intents: groupCounts?.intents ?? intents.length,
         notebooks: groupCounts?.notebooks ?? notebooks.length,
       },
+      reviewMetrics,
 	      limit: normalized.limit,
 	      offset: normalized.offset,
 	    };
@@ -1045,7 +1160,7 @@ export class LocalNotebookResearchStorage {
       UPDATE notebook_research_runs
       SET domain = ?, owner = ?, source_cell_id = ?, source_cell_name = ?, source_cell_fingerprint = ?, title = ?, question = ?,
           intent = ?, context = ?, status = ?, summary = ?, recommendation = ?,
-          result_preview = ?, evidence = ?, research_plan = ?, generated_sql = ?, reviewed_sql = ?,
+          result_preview = ?, evidence = ?, research_plan = ?, generated_sql = ?, reviewed_sql = ?, dql_artifact = ?,
           display = ?, context_pack_id = ?, route_decision = ?, warnings = ?,
           review_status = ?, error = ?, draft_block_path = ?, dql_import_id = ?,
           dql_candidate_ids = ?, dql_promotion_action = ?, dql_promotion = ?, updated_at = ?, last_run_at = ?
@@ -1068,6 +1183,7 @@ export class LocalNotebookResearchStorage {
       input.researchPlan === undefined ? json(current.researchPlan) : json(input.researchPlan),
       input.generatedSql === undefined ? (current.generatedSql ?? null) : (cleanOptionalString(input.generatedSql) ?? null),
       input.reviewedSql === undefined ? (current.reviewedSql ?? null) : (cleanOptionalString(input.reviewedSql) ?? null),
+      input.dqlArtifact === undefined ? json(current.dqlArtifact) : json(normalizeDqlArtifactReference(input.dqlArtifact)),
       input.display === undefined ? json(current.display) : json(input.display),
       input.contextPackId === undefined ? (current.contextPackId ?? null) : (cleanOptionalString(input.contextPackId) ?? null),
       input.routeDecision === undefined ? json(current.routeDecision) : json(input.routeDecision),
@@ -1301,6 +1417,7 @@ export class LocalNotebookResearchStorage {
         research_plan TEXT,
         generated_sql TEXT,
         reviewed_sql TEXT,
+        dql_artifact TEXT,
         display TEXT,
         context_pack_id TEXT,
         route_decision TEXT,
@@ -1335,6 +1452,7 @@ export class LocalNotebookResearchStorage {
     this.ensureColumn('notebook_research_runs', 'owner', 'TEXT');
     this.ensureColumn('notebook_research_runs', 'source_cell_fingerprint', 'TEXT');
     this.ensureColumn('notebook_research_runs', 'research_plan', 'TEXT');
+    this.ensureColumn('notebook_research_runs', 'dql_artifact', 'TEXT');
     this.backfillDomains();
 	    this.db.exec('CREATE INDEX IF NOT EXISTS idx_notebook_research_promotion_action ON notebook_research_runs(dql_promotion_action)');
 	    this.db.exec('CREATE INDEX IF NOT EXISTS idx_notebook_research_domain ON notebook_research_runs(domain, updated_at)');
@@ -1369,6 +1487,7 @@ export class LocalNotebookResearchStorage {
   private initSearchIndex(): void {
     try {
       this.dropSearchIndexIfMissingColumn('owner');
+      this.dropSearchIndexIfMissingColumn('dql_artifact_text');
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS notebook_research_runs_fts USING fts5(
           id UNINDEXED,
@@ -1386,6 +1505,7 @@ export class LocalNotebookResearchStorage {
           dql_promotion_action,
           generated_sql,
           reviewed_sql,
+          dql_artifact_text,
           context_text,
           evidence_text,
           research_plan_text,
@@ -1439,8 +1559,8 @@ export class LocalNotebookResearchStorage {
       INSERT INTO notebook_research_runs_fts (
         id, notebook_path, domain, owner, source_cell_name, title, question, intent, summary, recommendation,
         warnings, draft_block_path, dql_promotion_action, generated_sql, reviewed_sql,
-        context_text, evidence_text, research_plan_text, promotion_text
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        dql_artifact_text, context_text, evidence_text, research_plan_text, promotion_text
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
   }
 
@@ -1499,6 +1619,7 @@ function rowToRun(row: Record<string, unknown>): NotebookResearchRun {
     researchPlan: parseResearchPlan(parseJson(row.research_plan)),
     generatedSql: optionalString(row.generated_sql),
     reviewedSql: optionalString(row.reviewed_sql),
+    dqlArtifact: normalizeDqlArtifactReference(parseJson(row.dql_artifact)),
     display: parseJson(row.display),
     contextPackId: optionalString(row.context_pack_id),
     routeDecision: parseJson(row.route_decision),
@@ -1825,6 +1946,7 @@ const RESEARCH_SEARCH_FALLBACK_FIELDS = [
   "LOWER(COALESCE(dql_promotion_action, ''))",
   "LOWER(COALESCE(generated_sql, ''))",
   "LOWER(COALESCE(reviewed_sql, ''))",
+  "LOWER(COALESCE(dql_artifact, ''))",
   "LOWER(COALESCE(context, ''))",
   "LOWER(COALESCE(result_preview, ''))",
   "LOWER(COALESCE(evidence, ''))",
@@ -1869,6 +1991,7 @@ function searchIndexValues(run: NotebookResearchRun): unknown[] {
     run.dqlPromotionAction ?? '',
     run.generatedSql ?? '',
     run.reviewedSql ?? '',
+    searchTextFromValue(run.dqlArtifact),
     searchTextFromValue({
       sourceCellId: run.sourceCellId,
       sourceCellFingerprint: run.sourceCellFingerprint,

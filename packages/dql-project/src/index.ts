@@ -70,6 +70,7 @@ export type {
   NotebookResearchDqlPromotion,
   NotebookResearchDqlPromotionCandidate,
   NotebookResearchDqlPromotionMatch,
+  NotebookResearchDqlArtifact,
 } from './local-notebook-research-storage.js';
 export { ManifestCache } from './manifest-cache.js';
 export type {

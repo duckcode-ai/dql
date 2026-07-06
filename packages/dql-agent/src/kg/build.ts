@@ -16,6 +16,7 @@ import type {
   ManifestTerm,
   SemanticLayer,
 } from '@duckcodeailabs/dql-core';
+import { trustLabelIdForStatus } from '@duckcodeailabs/dql-core';
 import type { KGNode, KGEdge, KGNodeKind, KGCertification } from './types.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from '../metadata/block-fingerprints.js';
 
@@ -68,6 +69,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       tags: block.tags ?? [],
       llmContext: block.llmContext,
       examples: block.examples,
+      sql: block.sql,
       businessOutcome: block.businessOutcome,
       businessOwner: block.businessOwner,
       decisionUse: block.decisionUse,
@@ -105,7 +107,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       dataStateDetail: block.dataStateDetail,
       sourcePath: block.filePath,
       sourceTier: 'certified_artifact',
-      certification: block.status === 'certified' ? 'certified' : 'analyst_review_required',
+      certification: certificationFromStatus(block.status),
       provenance: 'DQL block',
     });
     for (const termRef of block.termRefs ?? []) {
@@ -166,7 +168,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       llmContext: cellSummary || undefined,
       sourcePath: nb.filePath,
       sourceTier: 'certified_artifact',
-      certification: 'analyst_review_required',
+      certification: 'ai_generated',
       provenance: 'DQL notebook',
     });
     for (const cell of nb.cells) {
@@ -183,10 +185,13 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       kind: 'metric',
       name: m.name,
       domain: m.domain,
+      status: m.status,
+      owner: m.owner,
       description: m.description,
+      tags: m.tags ?? [],
       sourcePath: m.filePath,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(m.status),
       provenance: 'DQL semantic metric',
     });
   }
@@ -198,10 +203,14 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       nodeId,
       kind: 'dimension',
       name: d.name,
+      domain: d.domain,
+      status: d.status,
+      owner: d.owner,
       description: d.description,
+      tags: d.tags ?? [],
       sourcePath: d.filePath,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(d.status),
       provenance: 'DQL semantic dimension',
     });
   }
@@ -232,7 +241,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       kind: 'dashboard',
       name: d.title,
       domain: d.domain,
-      status: 'certified',
+      status: d.lifecycle,
       description: d.description,
       tags: d.tags ?? [],
       businessOutcome: d.businessOutcome,
@@ -243,7 +252,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       caveats: d.caveats,
       sourcePath: d.filePath,
       sourceTier: 'certified_artifact',
-      certification: 'certified',
+      certification: certificationFromStatus(d.lifecycle),
       provenance: 'DQL dashboard',
     });
     for (const blockId of d.blockIds) {
@@ -262,7 +271,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       kind: 'app',
       name: a.name,
       domain: a.domain,
-      status: 'certified',
+      status: a.lifecycle,
       owner: a.owners[0],
       description: a.description,
       tags: a.tags ?? [],
@@ -274,7 +283,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       caveats: a.caveats,
       sourcePath: a.filePath,
       sourceTier: 'certified_artifact',
-      certification: 'certified',
+      certification: certificationFromStatus(a.lifecycle),
       provenance: 'DQL app',
     });
     for (const dashboardId of a.dashboards) {
@@ -303,7 +312,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       primaryTerms: domain.primaryTerms,
       sourcePath: domain.filePath,
       sourceTier: 'business_context',
-      certification: 'analyst_review_required',
+      certification: 'ai_generated',
       provenance: 'DQL domain',
     });
   }
@@ -345,7 +354,8 @@ export function buildKGFromManifest(manifest: DQLManifest): {
 }
 
 function certificationFromStatus(status: string | undefined): KGCertification {
-  return status === 'certified' ? 'certified' : 'analyst_review_required';
+  const label = trustLabelIdForStatus(status);
+  return !status && label === 'insufficient_context' ? 'ai_generated' : label;
 }
 
 function termTags(term: ManifestTerm): string[] {
@@ -392,6 +402,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       kind: 'metric',
       name: qualifiedSemanticName(metric.cube, metric.name),
       domain: metric.domain,
+      status: metric.status,
       owner: metric.owner,
       description: metric.description,
       tags: metric.tags ?? [],
@@ -404,7 +415,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         metric.sql ? `sql: ${metric.sql}` : '',
       ].filter(Boolean).join('\n') || undefined,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(metric.status),
       provenance: metric.source?.provider === 'dbt'
         ? `dbt ${metric.source.objectType}`
         : metric.source?.provider ?? 'semantic layer',
@@ -420,6 +431,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       kind: 'dimension',
       name: qualifiedSemanticName(dimension.cube, dimension.name),
       domain: dimension.domain,
+      status: dimension.status,
       owner: dimension.owner,
       description: dimension.description,
       tags: dimension.tags ?? [],
@@ -431,7 +443,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         dimension.sql ? `sql: ${dimension.sql}` : '',
       ].filter(Boolean).join('\n') || undefined,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(dimension.status),
       provenance: dimension.source?.provider === 'dbt'
         ? `dbt ${dimension.source.objectType}`
         : dimension.source?.provider ?? 'semantic layer',
@@ -447,6 +459,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       kind: 'measure',
       name: qualifiedSemanticName(measure.cube, measure.name),
       domain: measure.domain,
+      status: semanticObjectStatus(measure),
       owner: measure.owner,
       description: measure.description,
       tags: measure.tags ?? [],
@@ -459,7 +472,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         measure.aggTimeDimension ? `agg_time_dimension: ${measure.aggTimeDimension}` : '',
       ].filter(Boolean).join('\n') || undefined,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(semanticObjectStatus(measure)),
       provenance: measure.source?.provider === 'dbt'
         ? `dbt ${measure.source.objectType}`
         : measure.source?.provider ?? 'semantic layer',
@@ -475,6 +488,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       kind: 'entity',
       name: qualifiedSemanticName(entity.cube, entity.name),
       domain: entity.domain,
+      status: semanticObjectStatus(entity),
       owner: entity.owner,
       description: entity.description,
       tags: entity.tags ?? [],
@@ -486,7 +500,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         entity.expr ? `expr: ${entity.expr}` : '',
       ].filter(Boolean).join('\n') || undefined,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(semanticObjectStatus(entity)),
       provenance: entity.source?.provider === 'dbt'
         ? `dbt ${entity.source.objectType}`
         : entity.source?.provider ?? 'semantic layer',
@@ -502,6 +516,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       kind: 'semantic_model',
       name: model.name,
       domain: model.domain,
+      status: semanticObjectStatus(model),
       owner: model.owner,
       description: model.description,
       tags: model.tags ?? [],
@@ -516,7 +531,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         model.timeDimensions.length ? `time_dimensions: ${model.timeDimensions.join(', ')}` : '',
       ].filter(Boolean).join('\n') || undefined,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(semanticObjectStatus(model)),
       provenance: model.source?.provider === 'dbt'
         ? `dbt ${model.source.objectType}`
         : model.source?.provider ?? 'semantic layer',
@@ -532,6 +547,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       kind: 'saved_query',
       name: query.name,
       domain: query.domain,
+      status: semanticObjectStatus(query),
       owner: query.owner,
       description: query.description,
       tags: query.tags ?? [],
@@ -544,7 +560,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         query.granularity ? `granularity: ${query.granularity}` : '',
       ].filter(Boolean).join('\n') || undefined,
       sourceTier: 'semantic_layer',
-      certification: 'ai_generated',
+      certification: certificationFromStatus(semanticObjectStatus(query)),
       provenance: query.source?.provider === 'dbt'
         ? `dbt ${query.source.objectType}`
         : query.source?.provider ?? 'semantic layer',
@@ -564,6 +580,12 @@ function qualifiedSemanticName(cube: string | undefined, name: string): string {
 function semanticSourcePath(extra: Record<string, unknown> | undefined): string | undefined {
   const path = extra?.path ?? (extra?.raw && typeof extra.raw === 'object' ? (extra.raw as Record<string, unknown>).original_file_path : undefined);
   return typeof path === 'string' ? path : undefined;
+}
+
+function semanticObjectStatus(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as { status?: unknown };
+  return typeof record.status === 'string' && record.status.trim().length > 0 ? record.status.trim() : undefined;
 }
 
 function renderColumnsContext(columns: Record<string, { name: string; description?: string; type?: string }>): string {

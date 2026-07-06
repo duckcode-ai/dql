@@ -14,7 +14,6 @@
  * gracefully (a clear hint) when no dbt manifest is present.
  */
 
-import { z } from 'zod';
 import { resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import {
   buildSchemaGrounding,
@@ -25,6 +24,7 @@ import {
   type DbtArtifacts,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLContext } from '../context.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
 /** Load dbt artifacts for the project, or undefined when no manifest exists. */
 function loadArtifacts(ctx: DQLContext): DbtArtifacts | undefined {
@@ -42,10 +42,7 @@ const NO_MANIFEST_HINT =
 
 // ─── search_metadata ──────────────────────────────────────────────────────────
 
-export const searchMetadataInput = {
-  query: z.string().describe('Natural-language request to find relevant tables for.'),
-  limit: z.number().int().min(1).max(40).optional().describe('Max tables to return (default 12).'),
-};
+export const searchMetadataInput = zodInputShapeForTool('search_metadata');
 
 export async function searchMetadata(ctx: DQLContext, args: { query: string; limit?: number }) {
   const artifacts = loadArtifacts(ctx);
@@ -68,9 +65,7 @@ export async function searchMetadata(ctx: DQLContext, args: { query: string; lim
 
 // ─── get_table_schema ─────────────────────────────────────────────────────────
 
-export const getTableSchemaInput = {
-  table: z.string().describe('Model name, alias, or qualified relation (e.g. order_items or dev.order_items).'),
-};
+export const getTableSchemaInput = zodInputShapeForTool('get_table_schema');
 
 export function getTableSchema(ctx: DQLContext, args: { table: string }) {
   const artifacts = loadArtifacts(ctx);
@@ -109,13 +104,7 @@ export function getTableSchema(ctx: DQLContext, args: { table: string }) {
 
 // ─── validate_sql ─────────────────────────────────────────────────────────────
 
-export const validateSqlInput = {
-  sql: z.string().describe('A read-only SELECT/WITH query to validate against the dbt schema.'),
-  query: z
-    .string()
-    .optional()
-    .describe('Optional original request, used to scope the grounding to relevant tables.'),
-};
+export const validateSqlInput = zodInputShapeForTool('validate_sql');
 
 export async function validateSql(ctx: DQLContext, args: { sql: string; query?: string }) {
   const artifacts = loadArtifacts(ctx);

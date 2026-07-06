@@ -18,6 +18,10 @@
     "./lineage": {
       "types": "./dist/lineage/index.d.ts",
       "import": "./dist/lineage/index.js"
+    },
+    "./artifacts": {
+      "types": "./dist/artifacts/index.d.ts",
+      "import": "./dist/artifacts/index.js"
     }
   },
   "scripts": {

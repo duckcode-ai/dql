@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
 import {
   KGStore,
@@ -11,15 +10,13 @@ import {
   validateAppPlan,
   type MetadataAllowedSqlContext,
   type MetadataObject,
+  type ReindexProjectResult,
 } from '@duckcodeailabs/dql-agent';
 import { resolveTrustLabel, trustLabelIdForRoute } from '@duckcodeailabs/dql-core';
-import { suggestBlock, suggestBlockInput } from './suggest-block.js';
+import { suggestBlock } from './suggest-block.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const askDqlInput = {
-  question: z.string().min(1).describe('Business or analytics question to route through governed DQL context.'),
-  focusObjectKey: z.string().optional().describe('Optional metadata object key to bias retrieval.'),
-  limit: z.number().int().min(1).max(160).optional().describe('Maximum metadata objects in the context pack.'),
-};
+export const askDqlInput = zodInputShapeForTool('ask_dql');
 
 export async function askDql(
   ctx: DQLContext,
@@ -101,14 +98,7 @@ export async function askDql(
   };
 }
 
-export const buildDqlAppInput = {
-  prompt: z.string().min(1).describe('App outcome request, for example "Build a Customer 360 for Melissa Lopez".'),
-  domain: z.string().optional().describe('Optional business domain to prioritize.'),
-  owner: z.string().optional().describe('Owner identity to store on the generated app.'),
-  aiLayout: z.boolean().optional().describe('Store richer dynamic GenUI layout metadata.'),
-  saveDraft: z.boolean().optional().describe('Write the app draft files. Default true.'),
-  overwrite: z.boolean().optional().describe('Overwrite an existing app folder if it already exists. Default false.'),
-};
+export const buildDqlAppInput = zodInputShapeForTool('build_dql_app');
 
 export async function buildDqlApp(
   ctx: DQLContext,
@@ -168,15 +158,13 @@ export async function buildDqlApp(
   }
 }
 
-export const inspectDqlProjectInput = {
-  refresh: z.boolean().optional().describe('Refresh metadata and agent index before returning status. Default true.'),
-};
+export const inspectDqlProjectInput = zodInputShapeForTool('inspect_dql_project');
 
 export async function inspectDqlProject(
   ctx: DQLContext,
   args: { refresh?: boolean },
 ) {
-  let index: { nodes: number; edges: number; skills: number } | undefined;
+  let index: ReindexProjectResult | undefined;
   let catalog: { path: string; refreshed: boolean; objectCount: number; edgeCount: number; diagnostics: unknown[] } | undefined;
   if (args.refresh !== false) {
     index = await reindexProject(ctx.projectRoot, { kgPath: defaultKgPath(ctx.projectRoot) });
@@ -206,7 +194,7 @@ export async function inspectDqlProject(
   };
 }
 
-export const buildDqlBlockInput = suggestBlockInput;
+export const buildDqlBlockInput = zodInputShapeForTool('build_dql_block');
 
 export function buildDqlBlock(
   ctx: DQLContext,

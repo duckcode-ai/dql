@@ -9,7 +9,6 @@
  * been built yet, `kg_search` returns an empty result with a hint.
  */
 
-import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import type { DQLContext } from '../context.js';
 import {
@@ -20,22 +19,9 @@ import {
   reindexProject,
   type KGNodeKind,
 } from '@duckcodeailabs/dql-agent';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const kgSearchInput = {
-  query: z.string().describe('Natural-language or keyword query.'),
-  kinds: z
-    .array(
-	      z.enum([
-	        'block', 'term', 'business_view',
-	        'metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query', 'domain',
-	        'dbt_model', 'dbt_source', 'notebook', 'dashboard', 'app', 'skill',
-	      ]),
-    )
-    .optional()
-    .describe('Optional filter: only return nodes of these kinds.'),
-  domain: z.string().optional().describe('Filter to a single business domain.'),
-  limit: z.number().int().min(1).max(50).optional().describe('Max hits (default 10).'),
-};
+export const kgSearchInput = zodInputShapeForTool('kg_search');
 
 export async function kgSearch(
   ctx: DQLContext,
@@ -101,12 +87,7 @@ export async function kgSearch(
   }
 }
 
-export const inspectMetadataContextInput = {
-  question: z.string().describe('User question to ground in the local SQLite metadata catalog.'),
-  focusObjectKey: z.string().optional().describe('Optional object key, such as dql:block:Revenue or semantic:metric:revenue.'),
-  objectTypes: z.array(z.string()).optional().describe('Optional metadata object type filter.'),
-  limit: z.number().int().min(1).max(160).optional().describe('Maximum selected objects in the context pack.'),
-};
+export const inspectMetadataContextInput = zodInputShapeForTool('inspect_metadata_context');
 
 export async function inspectMetadataContext(
   ctx: DQLContext,
@@ -115,6 +96,7 @@ export async function inspectMetadataContext(
     focusObjectKey?: string;
     objectTypes?: string[];
     limit?: number;
+    strictness?: 'balanced' | 'exploratory';
   },
 ) {
   const refresh = await ensureMetadataCatalogFresh(ctx.projectRoot)
@@ -134,7 +116,8 @@ export async function inspectMetadataContext(
     question: args.question,
     focusObjectKey: args.focusObjectKey,
     objectTypes: args.objectTypes,
-    limit: args.limit,
+    limit: args.limit ?? (args.strictness === 'exploratory' ? 160 : undefined),
+    strictness: args.strictness,
   });
   return {
     catalog: {
@@ -148,14 +131,7 @@ export async function inspectMetadataContext(
   };
 }
 
-export const feedbackRecordInput = {
-  user: z.string().describe('User who submitted the feedback.'),
-  question: z.string().describe('Original question.'),
-  answerKind: z.enum(['certified', 'uncertified']).describe('How the answer was classified.'),
-  blockId: z.string().optional().describe('Block id the answer was anchored to (if any).'),
-  rating: z.enum(['up', 'down']).describe('Thumbs up or down.'),
-  comment: z.string().optional().describe('Optional free-text rationale.'),
-};
+export const feedbackRecordInput = zodInputShapeForTool('feedback_record');
 
 export function feedbackRecord(
   ctx: DQLContext,

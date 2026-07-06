@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { DQLManifest } from '@duckcodeailabs/dql-core';
-import { buildKGFromManifest } from './build.js';
+import { SemanticLayer, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildKGFromManifest, buildKGFromSemanticLayer } from './build.js';
 
 describe('buildKGFromManifest', () => {
   it('indexes business terms and business views as first-class KG context', () => {
@@ -110,6 +110,7 @@ describe('buildKGFromManifest', () => {
         expect.objectContaining({
           nodeId: 'block:Revenue Total',
           datalexContract: 'commerce.Revenue.net_revenue@1',
+          sql: 'select sum(amount) as revenue from fct_orders',
         }),
         expect.objectContaining({
           nodeId: 'business_view:Revenue Health',
@@ -192,5 +193,166 @@ describe('buildKGFromManifest', () => {
         }),
       ]),
     );
+  });
+
+  it('maps manifest semantic metric and dimension status into KG certification', () => {
+    const manifest = {
+      manifestVersion: 2,
+      dqlVersion: 'test',
+      generatedAt: '2026-06-12T00:00:00.000Z',
+      project: 'test',
+      projectRoot: '/tmp/dql',
+      domains: {},
+      blocks: {},
+      businessViews: {},
+      terms: {},
+      notebooks: {},
+      metrics: {
+        total_revenue: {
+          name: 'total_revenue',
+          type: 'sum',
+          table: 'orders',
+          domain: 'finance',
+          status: 'certified',
+        },
+      },
+      dimensions: {
+        channel: {
+          name: 'channel',
+          table: 'orders',
+          type: 'string',
+          status: 'review',
+        },
+      },
+      sources: {},
+      apps: {},
+      dashboards: {},
+      lineage: { nodes: [], edges: [] },
+      diagnostics: [],
+    } as DQLManifest;
+
+    const graph = buildKGFromManifest(manifest);
+
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'metric:total_revenue',
+        status: 'certified',
+        certification: 'certified',
+      }),
+      expect.objectContaining({
+        nodeId: 'dimension:channel',
+        status: 'review',
+        certification: 'reviewed',
+      }),
+    ]));
+  });
+
+  it('maps semantic-layer metric and dimension status into KG certification', () => {
+    const layer = new SemanticLayer({
+      metrics: [{
+        name: 'total_revenue',
+        label: 'Total Revenue',
+        description: 'Revenue metric.',
+        domain: 'finance',
+        status: 'certified',
+        sql: 'amount',
+        type: 'sum',
+        table: 'orders',
+      }],
+      dimensions: [{
+        name: 'channel',
+        label: 'Channel',
+        description: 'Sales channel.',
+        domain: 'finance',
+        status: 'draft',
+        sql: 'channel',
+        type: 'string',
+        table: 'orders',
+      }],
+    });
+
+    const graph = buildKGFromSemanticLayer(layer);
+
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'metric:total_revenue',
+        status: 'certified',
+        certification: 'certified',
+      }),
+      expect.objectContaining({
+        nodeId: 'dimension:channel',
+        status: 'draft',
+        certification: 'ai_generated',
+      }),
+    ]));
+  });
+
+  it('maps app and dashboard lifecycle into KG certification', () => {
+    const manifest = {
+      manifestVersion: 2,
+      dqlVersion: 'test',
+      generatedAt: '2026-06-12T00:00:00.000Z',
+      project: 'test',
+      projectRoot: '/tmp/dql',
+      domains: {},
+      blocks: {},
+      businessViews: {},
+      terms: {},
+      notebooks: {},
+      metrics: {},
+      dimensions: {},
+      sources: {},
+      apps: {
+        'growth-app': {
+          id: 'growth-app',
+          name: 'Growth App',
+          domain: 'growth',
+          visibility: 'shared',
+          lifecycle: 'review',
+          owners: ['analytics'],
+          tags: [],
+          filePath: 'apps/growth',
+          members: [],
+          roles: [],
+          policies: [],
+          rlsBindings: [],
+          schedules: [],
+          dashboards: ['overview'],
+          notebooks: [],
+        },
+      },
+      dashboards: {
+        'growth-app/overview': {
+          id: 'overview',
+          appId: 'growth-app',
+          qualifiedId: 'growth-app/overview',
+          title: 'Overview',
+          domain: 'growth',
+          lifecycle: 'draft',
+          tags: [],
+          filePath: 'apps/growth/dashboards/overview.dqld',
+          blockIds: [],
+          blockPathRefs: [],
+          unresolvedBlockRefs: [],
+        },
+      },
+      lineage: { nodes: [], edges: [] },
+      diagnostics: [],
+    } as DQLManifest;
+
+    const graph = buildKGFromManifest(manifest);
+
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'app:growth-app',
+        status: 'review',
+        certification: 'reviewed',
+      }),
+      expect.objectContaining({
+        nodeId: 'dashboard:growth-app/overview',
+        status: 'draft',
+        certification: 'ai_generated',
+      }),
+    ]));
   });
 });

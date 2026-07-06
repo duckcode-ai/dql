@@ -19,6 +19,7 @@ export interface MetricDefinition {
   label: string;
   description: string;
   domain: string;
+  status?: string;
   sql: string;
   type: 'sum' | 'count' | 'count_distinct' | 'avg' | 'min' | 'max' | 'custom';
   table: string;
@@ -39,6 +40,7 @@ export interface DimensionDefinition {
   label: string;
   description: string;
   domain?: string;
+  status?: string;
   sql: string;
   type: 'string' | 'number' | 'date' | 'boolean';
   table: string;
@@ -288,6 +290,7 @@ export function parseMetricDefinition(raw: Record<string, unknown>): MetricDefin
     label: String(raw.label ?? raw.name ?? ''),
     description: String(raw.description ?? ''),
     domain: String(raw.domain ?? ''),
+    status: parseStatus(raw.status),
     sql: String(raw.sql ?? ''),
     type: validateMetricType(String(raw.type ?? 'sum')),
     table: String(raw.table ?? ''),
@@ -296,6 +299,10 @@ export function parseMetricDefinition(raw: Record<string, unknown>): MetricDefin
     owner: raw.owner ? String(raw.owner) : undefined,
     cube: raw.cube ? String(raw.cube) : undefined,
     aggregation: raw.aggregation ? String(raw.aggregation) : undefined,
+    metricType: raw.metricType ? String(raw.metricType) : raw.metric_type ? String(raw.metric_type) : undefined,
+    typeParams: parseRecord(raw.typeParams ?? raw.type_params),
+    filter: parseSemanticFilter(raw.filter),
+    aggTimeDimension: raw.aggTimeDimension ? String(raw.aggTimeDimension) : raw.agg_time_dimension ? String(raw.agg_time_dimension) : undefined,
     source: parseSourceMetadata(raw.source),
   };
 }
@@ -306,12 +313,16 @@ export function parseDimensionDefinition(raw: Record<string, unknown>): Dimensio
     label: String(raw.label ?? raw.name ?? ''),
     description: String(raw.description ?? ''),
     domain: raw.domain != null ? String(raw.domain) : undefined,
+    status: parseStatus(raw.status),
     sql: String(raw.sql ?? ''),
     type: validateDimensionType(String(raw.type ?? 'string')),
     table: String(raw.table ?? ''),
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     owner: raw.owner ? String(raw.owner) : undefined,
     cube: raw.cube ? String(raw.cube) : undefined,
+    expr: raw.expr ? String(raw.expr) : undefined,
+    isTimeDimension: Boolean(raw.isTimeDimension ?? raw.is_time_dimension ?? false),
+    typeParams: parseRecord(raw.typeParams ?? raw.type_params),
     source: parseSourceMetadata(raw.source),
   };
 }
@@ -1237,6 +1248,21 @@ function validateReviewStatus(value: unknown): BlockCompanionDefinition['reviewS
   return undefined;
 }
 
+function parseRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function parseSemanticFilter(value: unknown): MetricDefinition['filter'] {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    const filters = value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object' && !Array.isArray(item)));
+    return filters.length > 0 ? filters : undefined;
+  }
+  return parseRecord(value);
+}
+
 function parseSourceMetadata(value: unknown): SemanticSourceMetadata | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const raw = value as Record<string, unknown>;
@@ -1255,4 +1281,8 @@ function parseSourceMetadata(value: unknown): SemanticSourceMetadata | undefined
     importedAt: raw.importedAt ? String(raw.importedAt) : raw.imported_at ? String(raw.imported_at) : undefined,
     extra,
   };
+}
+
+function parseStatus(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }

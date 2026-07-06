@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import {
   ArrowRight,
   Blocks,
@@ -43,6 +44,7 @@ import { TableOutput } from '../output/TableOutput';
 import type { QueryResult, AppSummary } from '../../store/types';
 import { buildConversationContext } from './agentConversationContext';
 import { emitNotebookResearchChanged } from '../../utils/notebook-research';
+import type { AgentConversationDqlArtifact } from '../../llm/types';
 
 export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
@@ -296,11 +298,14 @@ export function UnifiedAgentRunPanel({
     setCertifying((current) => ({ ...current, [run.id]: 'pending' }));
     try {
       const sql = answerSqlFromRun(run);
+      const dqlArtifact = answerDqlArtifactFromRun(run);
+      const cascade = answerCascadeFromRun(run);
       const result = await api.requestCertification({
         question: run.question,
         generatedSql: sql,
+        dqlArtifact,
         notebookPath: typeof workspaceContext?.notebookPath === 'string' ? workspaceContext.notebookPath : notebookPath,
-        context: { agentRunId: run.id, route: run.route, selectedObject: run.selectedObject },
+        context: { agentRunId: run.id, route: run.route, selectedObject: run.selectedObject, dqlArtifact, cascade },
       });
       if (result.ok) {
         emitNotebookResearchChanged({
@@ -1293,6 +1298,7 @@ function ArtifactView({
     return <AppProposalArtifact artifact={artifact} payload={payload} t={t} onOpenApp={onOpenApp} />;
   }
   const resultData = extractResult(payload);
+  const dqlArtifact = resolveArtifactDqlView(payload);
   const sql = typeof payload.sql === 'string'
     ? payload.sql
     : typeof payload.sqlPreview === 'string'
@@ -1302,6 +1308,16 @@ function ArtifactView({
         : undefined;
   const name = typeof payload.name === 'string' ? payload.name : artifact.title;
   const path = typeof payload.path === 'string' ? payload.path : artifact.ref;
+  const draftBlock = payload.draftBlock && typeof payload.draftBlock === 'object' && !Array.isArray(payload.draftBlock)
+    ? payload.draftBlock as Record<string, unknown>
+    : undefined;
+  const draftBlockPath = typeof draftBlock?.path === 'string' ? draftBlock.path : undefined;
+  const draftBlockName = typeof draftBlock?.name === 'string' ? draftBlock.name : undefined;
+  const dqlPath = dqlArtifact?.sourcePath ?? draftBlockPath ?? (artifact.kind === 'dql_block_draft' ? path : undefined);
+  const dqlName = dqlArtifact?.name ?? draftBlockName ?? name;
+  const dqlOpenLabel = dqlArtifact?.kind === 'sql_block' || artifact.kind === 'dql_block_draft'
+    ? 'Open DQL draft'
+    : 'Open DQL artifact';
   const plan = payload.plan && typeof payload.plan === 'object' ? payload.plan as Record<string, unknown> : undefined;
   const steps = Array.isArray(plan?.steps) ? plan.steps as Array<Record<string, unknown>> : [];
   const gaps = Array.isArray(plan?.gaps) ? plan.gaps.map(String) : [];
@@ -1360,10 +1376,23 @@ function ArtifactView({
         </div>
       ) : null}
       {resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} /> : null}
+      {dqlArtifact ? (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Blocks size={12} /><span>View DQL artifact</span>
+          </summary>
+          {dqlArtifact.sourcePath ? (
+            <div style={{ marginTop: 6, fontSize: 10.5, color: t.textMuted }}>
+              {dqlArtifact.sourcePath}
+            </div>
+          ) : null}
+          <pre style={{ ...codeStyle(t), marginTop: 6 }}>{dqlArtifact.source}</pre>
+        </details>
+      ) : null}
       {sql ? (
         <details>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
-            <Code2 size={12} /><span>View query</span>
+            <Code2 size={12} /><span>{artifactSqlDisclosureLabel(Boolean(dqlArtifact))}</span>
           </summary>
           <pre style={{ ...codeStyle(t), marginTop: 6 }}>{sql}</pre>
         </details>
@@ -1383,10 +1412,10 @@ function ArtifactView({
           <button type="button" onClick={() => onOpenResearch(researchRunId, notebookPath)} style={smallButtonStyle(t)}>Open research</button>
         ) : null}
         {sql && onInsertSql ? (
-          <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL</button>
+          <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
         ) : null}
-        {path && artifact.kind === 'dql_block_draft' && onOpenBlock ? (
-          <button type="button" onClick={() => onOpenBlock(path, name)} style={smallButtonStyle(t)}>Open block</button>
+        {dqlPath && onOpenBlock ? (
+          <button type="button" onClick={() => onOpenBlock(dqlPath, dqlName)} style={smallButtonStyle(t)}>{dqlOpenLabel}</button>
         ) : null}
       </div>
     </div>
@@ -1602,6 +1631,19 @@ function extractResult(payload: Record<string, unknown>): QueryResult | undefine
   return undefined;
 }
 
+export function resolveArtifactDqlView(payload: Record<string, unknown>): AgentConversationDqlArtifact | undefined {
+  const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
+  if (dqlArtifact) return dqlArtifact;
+  const researchRun = payload.researchRun && typeof payload.researchRun === 'object' && !Array.isArray(payload.researchRun)
+    ? payload.researchRun as Record<string, unknown>
+    : undefined;
+  return normalizeDqlArtifactReference(researchRun?.dqlArtifact);
+}
+
+export function artifactSqlDisclosureLabel(hasDqlArtifact: boolean): string {
+  return hasDqlArtifact ? 'View compiled SQL preview' : 'View SQL preview';
+}
+
 /** Notebook-cell-style result view: chart + table toggle, reusing the same renderers. */
 function ResultView({ result, themeMode, t }: { result: QueryResult; themeMode: ThemeMode; t: Theme }) {
   const [view, setView] = useState<'chart' | 'table'>('chart');
@@ -1738,6 +1780,37 @@ function answerSqlFromRun(run: AgentRun): string | undefined {
     const researchRun = payload.researchRun && typeof payload.researchRun === 'object' ? payload.researchRun as Record<string, unknown> : undefined;
     const sql = payload.proposedSql ?? payload.sql ?? payload.sqlPreview ?? researchRun?.generatedSql ?? researchRun?.reviewedSql;
     if (typeof sql === 'string' && sql.trim()) return sql;
+  }
+  return undefined;
+}
+
+function answerDqlArtifactFromRun(run: AgentRun): AgentConversationDqlArtifact | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
+    if (dqlArtifact) return dqlArtifact;
+    const researchRun = payload.researchRun && typeof payload.researchRun === 'object' && !Array.isArray(payload.researchRun)
+      ? payload.researchRun as Record<string, unknown>
+      : undefined;
+    const researchArtifact = normalizeDqlArtifactReference(researchRun?.dqlArtifact);
+    if (researchArtifact) return researchArtifact;
+  }
+  return undefined;
+}
+
+function answerCascadeFromRun(run: AgentRun): unknown {
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    if (payload.cascade && typeof payload.cascade === 'object' && !Array.isArray(payload.cascade)) {
+      return payload.cascade;
+    }
+    const researchRun = payload.researchRun && typeof payload.researchRun === 'object' && !Array.isArray(payload.researchRun)
+      ? payload.researchRun as Record<string, unknown>
+      : undefined;
+    const cascade = researchRun?.cascade;
+    if (cascade && typeof cascade === 'object' && !Array.isArray(cascade)) {
+      return cascade;
+    }
   }
   return undefined;
 }

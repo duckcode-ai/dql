@@ -8,7 +8,7 @@
 //   • a prompt box (+ optional context: active cell SQL / selection)
 //   • the POST /api/ai/build call (api.aiBuild, coded to the shared contract)
 //   • two result cards:
-//       - target:'cell'  → SQL + "Insert into cell" / "Refine" / "Discard"
+//       - target:'cell'  → SQL preview + "Insert preview" / "Refine" / "Discard"
 //       - target:'block' → semantic name, "AI-generated · draft" badge, one-line
 //         description, collapsible SQL, outputs chips, grain, examples,
 //         "what's missing to certify", "Open in Block Studio" / "Refine" /
@@ -55,7 +55,7 @@ interface AiBuildResultProps {
   initialPrompt?: string;
   /** Context handed to the build: the active SQL cell + any selection. */
   context?: { cellSql?: string; selection?: string };
-  /** Insert/replace the active SQL cell's source (target:'cell'). */
+  /** Insert/replace the active SQL cell's source from a review-required SQL preview (target:'cell'). */
   onInsertCell?: (sql: string) => void;
   /** Open the generated draft block in Block Studio (target:'block'). */
   onOpenBlock?: (path: string, name: string) => void;
@@ -203,7 +203,7 @@ export function AiBuildResult({
           </div>
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
             {target === 'cell'
-              ? 'Generate SQL into a notebook cell.'
+              ? 'Create a review-required SQL preview for a notebook cell.'
               : blockMode === 'edit'
                 ? 'Rewrite an existing draft DQL block.'
                 : 'Generate a reusable draft DQL block.'}
@@ -284,7 +284,7 @@ export function AiBuildResult({
             }}
             rows={3}
             placeholder={target === 'cell'
-              ? 'Describe the SQL you want, e.g. "monthly revenue by region for the last 12 months".'
+              ? 'Describe the preview SQL you want, e.g. "monthly revenue by region for the last 12 months".'
               : blockMode === 'edit'
                 ? 'Describe the change, e.g. "add a 12-month trailing window and exclude test accounts".'
                 : 'Describe the reusable block, e.g. "active customers by signup cohort".'}
@@ -350,6 +350,24 @@ export function AiBuildResult({
 
 // ── Cell result ────────────────────────────────────────────────────────────
 
+export interface CellResultCopy {
+  heading: string;
+  badge: string;
+  guidance: string;
+  insertLabel: string;
+  insertedLabel: string;
+}
+
+export function resolveCellResultCopy(): CellResultCopy {
+  return {
+    heading: 'SQL preview',
+    badge: 'Review-required',
+    guidance: 'Use this as a notebook preview. For reusable governed analytics, promote the reviewed logic into a DQL draft.',
+    insertLabel: 'Insert preview',
+    insertedLabel: 'Preview inserted',
+  };
+}
+
 function CellResultCard({
   t,
   sql,
@@ -373,23 +391,27 @@ function CellResultCard({
   onDiscard: () => void;
   onOpenSkills: () => void;
 }): JSX.Element {
+  const copy = resolveCellResultCopy();
   return (
     <section style={cardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <Sparkles size={14} strokeWidth={2} color={t.accent} />
-        <div style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Generated SQL</div>
-        <span style={aiDraftBadgeStyle(t)}>AI-generated</span>
+        <div style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>{copy.heading}</div>
+        <span style={aiDraftBadgeStyle(t)}>{copy.badge}</span>
         <RouteBadge t={t} route={route} />
       </div>
       {explanation ? (
         <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, fontFamily: t.font }}>{explanation}</div>
       ) : null}
+      <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.45, fontFamily: t.font }}>
+        {copy.guidance}
+      </div>
       <CodeBlock t={t} code={sql} />
       <GuidedBySkills t={t} skills={appliedSkills} onOpenSkills={onOpenSkills} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" onClick={onInsert} disabled={inserted} style={{ ...primaryButtonStyle(t), opacity: inserted ? 0.65 : 1 }}>
           {inserted ? <CheckCircle2 size={13} strokeWidth={2} /> : <SquarePlus size={13} strokeWidth={2} />}
-          {inserted ? 'Inserted' : 'Insert into cell'}
+          {inserted ? copy.insertedLabel : copy.insertLabel}
         </button>
         <button type="button" onClick={onRefine} style={ghostButtonStyle(t)}>
           <RotateCcw size={13} strokeWidth={2} /> Refine
@@ -734,14 +756,14 @@ export function RouteBadge({ t, route }: { t: Theme; route?: AiRoute }): JSX.Ele
 }
 
 /** Fallback label when the backend left `label` empty. */
-function defaultRouteLabel(route: AiRoute): string {
+export function defaultRouteLabel(route: AiRoute): string {
   switch (route.tier) {
     case 'certified_block':
       return route.ref ? `Certified block ${route.ref}` : 'Certified block';
     case 'semantic_metric':
       return route.ref ? `Answered from metric ${route.ref}` : 'Answered from metric';
     case 'generated_sql':
-      return 'Generated SQL';
+      return 'Generated SQL preview';
     case 'business_context':
       return 'From business context';
     default:

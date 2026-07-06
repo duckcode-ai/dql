@@ -1166,49 +1166,51 @@ function loadSemanticDefinitions(
     for (const m of layer.listMetrics()) {
       metrics[m.name] = {
         name: m.name,
+        label: m.label,
         type: m.type,
         table: m.table,
         domain: m.domain,
+        status: m.status,
         description: m.description,
         sql: m.sql,
+        owner: m.owner,
+        tags: m.tags,
+        filePath: semanticDefinitionFilePath(projectRoot, semanticDir, m.source?.extra),
       };
     }
 
     for (const d of layer.listDimensions()) {
       dimensions[d.name] = {
         name: d.name,
+        label: d.label,
         table: d.table,
+        domain: d.domain,
         type: d.type,
+        status: d.status,
         description: d.description,
+        sql: d.sql,
+        owner: d.owner,
+        tags: d.tags,
+        filePath: semanticDefinitionFilePath(projectRoot, semanticDir, d.source?.extra),
       };
-    }
-
-    // Try to find file paths for metrics and dimensions
-    const metricFiles = scanFilesRecursive(join(semanticDir, 'metrics'), ['.yaml', '.yml']);
-    for (const f of metricFiles) {
-      try {
-        const content = JSON.parse(JSON.stringify(
-          // Simple YAML-like parse for name field
-          Object.fromEntries(
-            readFileSync(f, 'utf-8')
-              .split('\n')
-              .filter((l) => l.includes(':') && !l.startsWith('#'))
-              .map((l) => {
-                const [k, ...v] = l.split(':');
-                return [k.trim(), v.join(':').trim()];
-              }),
-          ),
-        ));
-        if (content.name && metrics[content.name]) {
-          metrics[content.name].filePath = relative(projectRoot, f);
-        }
-      } catch { /* skip */ }
     }
   } catch {
     // Non-fatal — semantic layer may not exist or be misconfigured
   }
 
   return { metrics, dimensions };
+}
+
+function semanticDefinitionFilePath(
+  projectRoot: string,
+  semanticDir: string,
+  extra: Record<string, unknown> | undefined,
+): string | undefined {
+  const path = extra?.path;
+  if (typeof path !== 'string' || path.trim().length === 0) return undefined;
+  const normalized = path.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (normalized.startsWith('semantic-layer/')) return normalized;
+  return relative(projectRoot, join(semanticDir, normalized)).replace(/\\/g, '/');
 }
 
 // ---- Source Collection ----
@@ -1941,13 +1943,27 @@ function buildManifestLineage(
   const lineageMetrics: LineageMetricInput[] = Object.values(metrics).map((m) => ({
     name: m.name,
     table: m.table,
-    domain: m.domain ?? '',
+    domain: m.domain,
     type: m.type,
+    status: m.status as any,
+    owner: m.owner,
+    filePath: m.filePath,
+    description: m.description,
+    sql: m.sql,
+    tags: m.tags,
   }));
 
   const lineageDimensions: LineageDimensionInput[] = Object.values(dimensions).map((d) => ({
     name: d.name,
     table: d.table,
+    domain: d.domain,
+    type: d.type,
+    status: d.status as any,
+    owner: d.owner,
+    filePath: d.filePath,
+    description: d.description,
+    sql: d.sql,
+    tags: d.tags,
   }));
 
   const lineageBusinessViews: LineageBusinessViewInput[] = Object.values(businessViews ?? {}).map((view) => ({
@@ -2096,7 +2112,12 @@ function buildManifestLineage(
       domain: n.domain,
       owner: n.owner,
       status: n.status,
-      filePath: blocks[n.name]?.filePath ?? businessViews?.[n.name]?.filePath ?? terms?.[n.name]?.filePath ?? n.metadata?.filePath,
+      filePath: blocks[n.name]?.filePath
+        ?? businessViews?.[n.name]?.filePath
+        ?? terms?.[n.name]?.filePath
+        ?? metrics[n.name]?.filePath
+        ?? dimensions[n.name]?.filePath
+        ?? n.metadata?.filePath,
       columns: n.columns,
       metadata: n.metadata,
     })),
@@ -2467,9 +2488,25 @@ function extractDraftMetadata(block: any): NonNullable<ManifestBlock['draftMetad
   const metadata = stripUndefined({
     sourceQuestion: typeof block.sourceQuestion === 'string' ? block.sourceQuestion : undefined,
     sourceBlock: typeof block.sourceBlock === 'string' ? block.sourceBlock : undefined,
+    sourceDqlKind: typeof block.sourceDqlKind === 'string' ? block.sourceDqlKind : undefined,
+    sourceDqlName: typeof block.sourceDqlName === 'string' ? block.sourceDqlName : undefined,
+    sourceDqlPath: typeof block.sourceDqlPath === 'string' ? block.sourceDqlPath : undefined,
+    sourceDqlHash: typeof block.sourceDqlHash === 'string' ? block.sourceDqlHash : undefined,
+    sourceDqlMetrics: Array.isArray(block.sourceDqlMetrics) ? block.sourceDqlMetrics : undefined,
+    sourceDqlDimensions: Array.isArray(block.sourceDqlDimensions) ? block.sourceDqlDimensions : undefined,
+    sourceDqlFilters: Array.isArray(block.sourceDqlFilters) ? block.sourceDqlFilters : undefined,
+    sourceDqlTimeDimension: typeof block.sourceDqlTimeDimension === 'string' ? block.sourceDqlTimeDimension : undefined,
+    sourceDqlGranularity: typeof block.sourceDqlGranularity === 'string' ? block.sourceDqlGranularity : undefined,
+    sourceDqlOrderBy: Array.isArray(block.sourceDqlOrderBy) ? block.sourceDqlOrderBy : undefined,
+    sourceDqlLimit: typeof block.sourceDqlLimit === 'number' ? block.sourceDqlLimit : undefined,
     followupKind: typeof block.followupKind === 'string' ? block.followupKind : undefined,
     requestedFilters: Array.isArray(block.requestedFilters) ? block.requestedFilters : undefined,
     requestedDimensions: Array.isArray(block.requestedDimensions) ? block.requestedDimensions : undefined,
+    orderBy: Array.isArray(block.orderBy) ? block.orderBy : undefined,
+    limit: typeof block.limit === 'number' ? block.limit : undefined,
+    timeDimension: typeof block.timeDimension === 'string' ? block.timeDimension : undefined,
+    granularity: typeof block.granularity === 'string' ? block.granularity : undefined,
+    draftPath: typeof block.draftPath === 'string' ? block.draftPath : undefined,
     contextPackId: typeof block.contextPackId === 'string' ? block.contextPackId : undefined,
     routeIntent: typeof block.routeIntent === 'string' ? block.routeIntent : undefined,
     askedTimes: typeof block.askedTimes === 'number' ? block.askedTimes : undefined,
