@@ -4,6 +4,7 @@ import type * as UnifiedAgentRunPanelModule from './UnifiedAgentRunPanel';
 
 let resolveArtifactDqlView: typeof UnifiedAgentRunPanelModule.resolveArtifactDqlView;
 let artifactSqlDisclosureLabel: typeof UnifiedAgentRunPanelModule.artifactSqlDisclosureLabel;
+let deriveResultChartConfig: typeof UnifiedAgentRunPanelModule.deriveResultChartConfig;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -11,6 +12,54 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     const module = await import('./UnifiedAgentRunPanel');
     resolveArtifactDqlView = module.resolveArtifactDqlView;
     artifactSqlDisclosureLabel = module.artifactSqlDisclosureLabel;
+    deriveResultChartConfig = module.deriveResultChartConfig;
+  });
+
+  it('charts an arbitrary 3-column result whose names do not match the strict auto-detector', () => {
+    const { config, chartable } = deriveResultChartConfig({
+      columns: ['product_name', 'total_value', 'order_count'],
+      rows: [
+        { product_name: 'Widget', total_value: 100, order_count: 4 },
+        { product_name: 'Gadget', total_value: 80, order_count: 2 },
+      ],
+      rowCount: 2,
+    });
+    expect(chartable).toBe(true);
+    expect(config.chart).toBe('bar');
+    expect(config.x).toBe('product_name');
+    expect(config.y).toBe('total_value');
+  });
+
+  it('picks a line chart when the category column is time-like', () => {
+    const { config, chartable } = deriveResultChartConfig({
+      columns: ['month', 'revenue'],
+      rows: [{ month: '2026-01', revenue: 10 }, { month: '2026-02', revenue: 20 }],
+      rowCount: 2,
+    });
+    expect(chartable).toBe(true);
+    expect(config.chart).toBe('line');
+    expect(config.x).toBe('month');
+  });
+
+  it('is not chartable when there is no numeric column', () => {
+    const { chartable } = deriveResultChartConfig({
+      columns: ['status', 'owner'],
+      rows: [{ status: 'open', owner: 'a' }, { status: 'closed', owner: 'b' }],
+      rowCount: 2,
+    });
+    expect(chartable).toBe(false);
+  });
+
+  it('honors an explicit agent chart config over the heuristic', () => {
+    const { config } = deriveResultChartConfig(
+      {
+        columns: ['region', 'sales'],
+        rows: [{ region: 'NA', sales: 5 }],
+        rowCount: 1,
+      },
+      { chart: 'pie', x: 'region', y: 'sales' },
+    );
+    expect(config.chart).toBe('pie');
   });
 
   it('treats a returned DQL artifact as the primary inspectable artifact', () => {
