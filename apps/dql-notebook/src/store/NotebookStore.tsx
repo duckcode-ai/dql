@@ -420,6 +420,8 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return { ...state, savingFile: action.saving };
 
     case 'FILE_ADDED':
+      // Dedup by path — a file must never appear twice in the tree/sidebar.
+      if (state.files.some((f) => f.path === action.file.path)) return state;
       return { ...state, files: [...state.files, action.file] };
 
     case 'SET_TABLE_COLUMNS':

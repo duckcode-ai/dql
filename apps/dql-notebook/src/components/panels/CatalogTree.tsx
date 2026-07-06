@@ -34,6 +34,35 @@ function matchesTree(node: SemanticTreeNode, q: string): boolean {
   return (node.children ?? []).some((child) => matchesTree(child, q));
 }
 
+/**
+ * Collapse duplicate siblings. The backend semantic tree can emit the same object
+ * under two groups (e.g. a cube's measures appear both as `measure` and `metric`
+ * leaves in two "Measures" groups), which shows every item twice. Merge same-label
+ * groups (combining their children) and drop leaves that insert the same reference.
+ * Runs recursively so the whole subtree is de-duplicated.
+ */
+export function dedupeSiblings(nodes: SemanticTreeNode[]): SemanticTreeNode[] {
+  const out: SemanticTreeNode[] = [];
+  const index = new Map<string, SemanticTreeNode>();
+  for (const node of nodes) {
+    const isGroup = (node.children?.length ?? 0) > 0;
+    const key = isGroup ? `group:${node.label.toLowerCase()}` : `leaf:${nodeRef(node).toLowerCase()}`;
+    const existing = index.get(key);
+    if (existing) {
+      // Same-label group seen again → merge its children into the first.
+      if (isGroup && existing.children) existing.children = existing.children.concat(node.children ?? []);
+      continue; // duplicate leaf, or already-merged group
+    }
+    const copy: SemanticTreeNode = node.children ? { ...node, children: [...node.children] } : node;
+    index.set(key, copy);
+    out.push(copy);
+  }
+  for (const node of out) {
+    if (node.children) node.children = dedupeSiblings(node.children);
+  }
+  return out;
+}
+
 // Per-type icon + tone, so each semantic object reads at a glance — the same
 // icon-led style as the Database tab's table/column rows.
 const KIND_ICON: Record<string, { Icon: React.ComponentType<any>; tone: (t: Theme) => string }> = {
@@ -66,7 +95,7 @@ export function SemanticTreeView({
 }) {
   const t = themes[themeMode];
   const q = search.trim().toLowerCase();
-  const roots = (tree.children ?? []).filter((node) => matchesTree(node, q));
+  const roots = dedupeSiblings(tree.children ?? []).filter((node) => matchesTree(node, q));
   if (roots.length === 0) {
     return <div style={{ padding: '16px 12px', fontSize: 11.5, color: t.textMuted, textAlign: 'center' }}>{q ? 'No matches.' : 'No semantic objects.'}</div>;
   }
