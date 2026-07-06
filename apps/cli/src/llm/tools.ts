@@ -1,14 +1,19 @@
 import {
   DQLContext,
+  askDql,
   searchBlocks,
   getBlock,
-  listMetrics,
-  listDimensions,
+  queryViaBlock,
+  querySemanticModel,
+  queryViaMetadata,
+  expandContext,
   lineageImpact,
   certify,
   suggestBlock,
   kgSearch,
+  inspectMetadataContext,
 } from '@duckcodeailabs/dql-mcp';
+import { dqlToolDefinitionsForSurface, getDqlToolDefinition, type DqlToolName } from '@duckcodeailabs/dql-agent';
 
 export interface AgentTool {
   name: string;
@@ -17,149 +22,38 @@ export interface AgentTool {
   run(args: unknown): Promise<unknown>;
 }
 
-const SEARCH_BLOCKS_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    query: { type: 'string', description: 'Substring matched against name, description, or tags.' },
-    domain: { type: 'string', description: 'Filter to a single business domain.' },
-    status: {
-      type: 'string',
-      enum: ['draft', 'review', 'certified', 'deprecated', 'pending_recertification'],
-      description: 'Filter by certification status.',
-    },
-    limit: { type: 'number', description: 'Max results (default 50).' },
-  },
-} as const;
-
-const GET_BLOCK_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['name'],
-  properties: {
-    name: { type: 'string', description: 'Block name (as shown in search_blocks).' },
-    includeSource: { type: 'boolean', description: 'Include full .dql source text. Default true.' },
-  },
-} as const;
-
-const DOMAIN_FILTER_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    domain: { type: 'string', description: 'Filter to a single domain.' },
-  },
-} as const;
-
-const LINEAGE_IMPACT_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['focus'],
-  properties: {
-    focus: { type: 'string', description: 'Node id ("block:revenue") or bare name.' },
-    upstreamDepth: { type: 'number' },
-    downstreamDepth: { type: 'number' },
-    paths: { type: 'boolean', description: 'Include full source→leaf paths (slower on large graphs).' },
-  },
-} as const;
-
-const CERTIFY_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['name'],
-  properties: {
-    name: { type: 'string', description: 'Block name to certify.' },
-  },
-} as const;
-
-const SUGGEST_BLOCK_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['name', 'domain', 'owner', 'description', 'sql'],
-  properties: {
-    name: { type: 'string', description: 'Proposed block name (kebab_case).' },
-    domain: { type: 'string', description: 'Business domain (finance, product, …).' },
-    owner: { type: 'string', description: 'Block owner identity (email or team handle).' },
-    description: { type: 'string', description: 'One-line description.' },
-    sql: { type: 'string', description: 'The block body SQL.' },
-    tags: { type: 'array', items: { type: 'string' } },
-    chartType: { type: 'string', description: 'Optional visualization type.' },
-  },
-} as const;
-
-const KG_SEARCH_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['query'],
-  properties: {
-    query: { type: 'string', description: 'Natural-language or keyword query.' },
-    kinds: {
-      type: 'array',
-      items: {
-        type: 'string',
-        enum: [
-          'block', 'term', 'business_view',
-          'metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query', 'domain',
-          'dbt_model', 'dbt_source', 'notebook', 'dashboard', 'app', 'skill',
-        ],
-      },
-      description: 'Optional KG node-kind filter.',
-    },
-    domain: { type: 'string', description: 'Filter to a single business domain.' },
-    limit: { type: 'number', description: 'Max hits (default 10).' },
-  },
-} as const;
-
 export function buildAgentTools(ctx: DQLContext): AgentTool[] {
-  return [
-    {
-      name: 'kg_search',
-      description: 'Search the DQL knowledge graph across business terms, business views, blocks, apps, dashboards, notebooks, semantic objects, and dbt/source metadata.',
-      inputSchema: KG_SEARCH_SCHEMA,
-      run: async (args) => kgSearch(ctx, args as Parameters<typeof kgSearch>[1]),
-    },
-    {
-      name: 'search_blocks',
-      description: 'Find certified DQL blocks by keyword, domain, or status.',
-      inputSchema: SEARCH_BLOCKS_SCHEMA,
-      run: async (args) => searchBlocks(ctx, args as Parameters<typeof searchBlocks>[1]),
-    },
-    {
-      name: 'get_block',
-      description: 'Return full metadata, dependencies, and SQL for a block.',
-      inputSchema: GET_BLOCK_SCHEMA,
-      run: async (args) => getBlock(ctx, args as Parameters<typeof getBlock>[1]),
-    },
-    {
-      name: 'list_metrics',
-      description: 'List semantic-layer metrics, optionally filtered by domain.',
-      inputSchema: DOMAIN_FILTER_SCHEMA,
-      run: async (args) => listMetrics(ctx, args as Parameters<typeof listMetrics>[1]),
-    },
-    {
-      name: 'list_dimensions',
-      description: 'List semantic-layer dimensions, optionally filtered by domain.',
-      inputSchema: DOMAIN_FILTER_SCHEMA,
-      run: async (args) => listDimensions(ctx, args as Parameters<typeof listDimensions>[1]),
-    },
-    {
-      name: 'lineage_impact',
-      description: 'Return upstream/downstream lineage for a block, metric, or model.',
-      inputSchema: LINEAGE_IMPACT_SCHEMA,
-      run: async (args) => lineageImpact(ctx, args as Parameters<typeof lineageImpact>[1]),
-    },
-    {
-      name: 'certify',
-      description: 'Run governance rules against a block and report pass/fail.',
-      inputSchema: CERTIFY_SCHEMA,
-      run: async (args) => certify(ctx, args as Parameters<typeof certify>[1]),
-    },
-    {
-      name: 'suggest_block',
-      description:
-        'Write a proposed block to the local draft queue and return governance results. ' +
-        'Use this at the end of a conversation to hand the user a reviewable draft.',
-      inputSchema: SUGGEST_BLOCK_SCHEMA,
-      run: async (args) => suggestBlock(ctx, args as Parameters<typeof suggestBlock>[1]),
-    },
-  ];
+  const handlers = nativeToolHandlers(ctx);
+  return dqlToolDefinitionsForSurface('native').map((definition) => {
+    const handler = handlers[definition.name];
+    if (!handler) throw new Error(`Native DQL tool handler is missing for ${definition.name}`);
+    return registryTool(definition.name, handler);
+  });
+}
+
+function registryTool(name: DqlToolName, run: AgentTool['run']): AgentTool {
+  const definition = getDqlToolDefinition(name);
+  return {
+    name: definition.name,
+    description: definition.description,
+    inputSchema: definition.inputSchema,
+    run,
+  };
+}
+
+function nativeToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, AgentTool['run']>> {
+  return {
+    ask_dql: async (args) => askDql(ctx, args as Parameters<typeof askDql>[1]),
+    query_semantic_model: async (args) => querySemanticModel(ctx, args as Parameters<typeof querySemanticModel>[1]),
+    kg_search: async (args) => kgSearch(ctx, args as Parameters<typeof kgSearch>[1]),
+    search_blocks: async (args) => searchBlocks(ctx, args as Parameters<typeof searchBlocks>[1]),
+    get_block: async (args) => getBlock(ctx, args as Parameters<typeof getBlock>[1]),
+    query_via_block: async (args) => queryViaBlock(ctx, args as Parameters<typeof queryViaBlock>[1]),
+    inspect_metadata_context: async (args) => inspectMetadataContext(ctx, args as Parameters<typeof inspectMetadataContext>[1]),
+    query_via_metadata: async (args) => queryViaMetadata(ctx, args as Parameters<typeof queryViaMetadata>[1]),
+    expand_context: async (args) => expandContext(ctx, args as Parameters<typeof expandContext>[1]),
+    lineage_impact: async (args) => lineageImpact(ctx, args as Parameters<typeof lineageImpact>[1]),
+    certify: async (args) => certify(ctx, args as Parameters<typeof certify>[1]),
+    suggest_block: async (args) => suggestBlock(ctx, args as Parameters<typeof suggestBlock>[1]),
+  };
 }

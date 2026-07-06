@@ -1,0 +1,50 @@
+cases:
+  - name: food drink category scalar routes to certified block
+    question: "What is revenue by food and drink?"
+    expectRoute: certified
+    expectBlock: food_vs_drink_revenue
+    expectGrain: category
+
+  - name: product revenue ranking routes to certified block
+    question: "What are the top products by revenue?"
+    expectRoute: certified
+    expectBlock: top_products
+    expectGrain: product
+
+  - name: top customers lifetime spend routes to certified block
+    question: "Show me top customers by lifetime spend"
+    expectRoute: certified
+    expectBlock: top_customers
+    expectGrain: customer
+
+  - name: supply chain product order details require generated SQL
+    question: "Can you give me the complete supply chain with product and order details with top 10 value"
+    expectRoute: generated
+
+  - name: supply chain without top n still requires generated SQL
+    question: "Complete supply chain with product and order details"
+    expectRoute: generated
+
+  - name: product supply follow-up shape stays generated
+    question: "Can you include the product details with previous supply results and give me final including all values"
+    expectRoute: generated
+
+  - name: product and supply info routes to generated SQL
+    question: "Show product and supply info"
+    expectRoute: generated
+
+  - name: perishable supplies by product routes to generated SQL
+    question: "Which supplies are perishable by product?"
+    expectRoute: generated
+
+  - name: order item revenue by category routes to generated SQL
+    question: "Show order item revenue by product category"
+    expectRoute: generated
+
+  - name: beverage customer drilldown is not the product certified block
+    question: "Who are the best customers for buying the beverage products?"
+    expectRoute: generated
+
+  - name: off-topic weather question refuses safely
+    question: "What is the weather in Chicago?"
+    expectRefuse: true

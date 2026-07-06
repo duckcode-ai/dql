@@ -7,9 +7,12 @@ import {
   buildDbtStatus,
   buildProposeReadiness,
   buildProposeCandidatePreview,
+  buildSemanticCompostingChangeset,
   generateProposeDrafts,
+  generateSemanticCompostingDrafts,
   buildSemanticLayerDiagnostics,
   createBlockArtifacts,
+  createDqlArtifactGenerationSessionForProject,
   createDqlGenerationSessionForProject,
   createSemanticBuilderBlock,
   discoverDbtProfileConnections,
@@ -26,11 +29,13 @@ import {
   prepareLocalExecution,
   dashboardRuntimeVariables,
   resolveDefaultLLMProvider,
+  resolveGovernedAnswerRunner,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
   saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
   setBlockStudioStatus,
+  shouldSynthesizeAgentRunAnswer,
   serializeJSON,
   startLocalServer,
   validateBlockStudioSource,
@@ -42,12 +47,13 @@ import {
   providerSettingsPath,
   saveProviderSettings,
 } from './settings/provider-settings.js';
+import { getRunner } from './llm/index.js';
 import { afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
-import { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 
 const tempDirs: string[] = [];
@@ -96,15 +102,63 @@ describe('agent run runtime API', () => {
         resultDimensionValues: { category: ['Food', 'Drink'] },
         priorMeasures: ['revenue'],
       },
+      reasoningEffort: 'high',
+      analysisDepth: 'deep',
     });
 
     expect(parsed.error).toBeUndefined();
+    expect(parsed.request?.reasoningEffort).toBe('high');
+    expect(parsed.request?.analysisDepth).toBe('deep');
     expect(parsed.request?.conversationContext).toEqual({
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       resultColumns: ['category', 'revenue'],
       resultDimensionValues: { category: ['Food', 'Drink'] },
       priorMeasures: ['revenue'],
     });
+  });
+
+  it('ignores invalid governed agent run depth and reasoning values', () => {
+    const parsed = parseAgentRunRequestBody({
+      question: 'orders',
+      reasoningEffort: 'maximum',
+      analysisDepth: 'wide',
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.request?.reasoningEffort).toBeUndefined();
+    expect(parsed.request?.analysisDepth).toBeUndefined();
+  });
+
+  it('skips synthesis for DQL-first answers that already carry final prose', () => {
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'uncertified',
+      certification: 'ai_generated',
+      text: 'Top products by value are ready for review.',
+      dqlArtifact: {
+        kind: 'sql_block',
+        name: 'top_products_by_value',
+        source: 'block "top_products_by_value" { query = """select 1""" }',
+      },
+    })).toBe(false);
+  });
+
+  it('keeps synthesis only for legacy non-certified answers without a DQL artifact', () => {
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'uncertified',
+      certification: 'ai_generated',
+      text: 'Draft answer',
+    })).toBe(true);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'certified',
+      certification: 'certified',
+      text: 'Certified answer',
+    })).toBe(false);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'no_answer',
+      text: 'Need more context.',
+    })).toBe(false);
   });
 
   it('threads conversation context through the HTTP agent-run endpoint into the route executor', async () => {
@@ -126,7 +180,7 @@ describe('agent run runtime API', () => {
           generated_answer: ({ request }) => {
             observedContext = request.conversationContext;
             return {
-              summary: 'Answered with generated SQL (review required).',
+              summary: 'Prepared review-required DQL artifact with SQL preview.',
               answer: 'Top customers for the prior categories.',
               status: 'needs_review',
               trustState: 'review_required',
@@ -179,6 +233,171 @@ describe('agent run runtime API', () => {
         resultDimensionValues: { category: ['Food', 'Drink'] },
         priorMeasures: ['revenue'],
       });
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    }
+  });
+
+  it('preserves supply-chain DQL artifacts through certification request and promotion', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-supply-chain-artifact-handoff-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    const dqlArtifact = {
+      kind: 'sql_block',
+      name: 'product_supply_top_10_value',
+      sourcePath: 'ask-ai/product_supply_top_10_value.dql',
+      metrics: ['total_value'],
+      dimensions: ['product_id', 'product_name', 'supply_id', 'supply_name'],
+      filters: [{ dimension: 'is_perishable', operator: '=', values: ['true'] }],
+      orderBy: [{ name: 'total_value', direction: 'desc' }],
+      limit: 10,
+      source: `block "product_supply_top_10_value" {
+  domain = "supply_chain"
+  type = "custom"
+  status = "draft"
+  owner = "analytics"
+  outputs = ["product_id", "product_name", "supply_id", "supply_name", "total_value"]
+  requested_dimensions = ["product_name", "supply_name"]
+  requested_filters = ["is_perishable = true", "top 10 by total_value"]
+  order_by = ["total_value desc"]
+  limit = 10
+
+  query = """
+    SELECT product_id, product_name, supply_id, supply_name, SUM(supply_cost) AS total_value
+    FROM jaffle_shop.dev.product_supplies
+    GROUP BY product_id, product_name, supply_id, supply_name
+    ORDER BY total_value DESC
+    LIMIT 10
+  """
+}`,
+    };
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => {
+          server = created;
+        },
+      });
+      const certificationResponse = await fetch(`http://127.0.0.1:${port}/api/agent-runs/request-certification`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Can you give me the complete supply chain with product and order details with top 10 value?',
+          notebookPath: 'notebooks/supply-chain-review.dqlnb',
+          domain: 'supply_chain',
+          owner: 'analytics',
+          dqlArtifact,
+          context: { route: 'generated_answer', example: 'product supply detail' },
+        }),
+      });
+
+      expect(certificationResponse.status).toBe(201);
+      const certification = await certificationResponse.json() as { ok: boolean; researchRunId: string };
+      expect(certification.ok).toBe(true);
+      expect(certification.researchRunId).toBeTruthy();
+
+      const runResponse = await fetch(`http://127.0.0.1:${port}/api/notebook/research/${encodeURIComponent(certification.researchRunId)}`);
+      expect(runResponse.status).toBe(200);
+      const runPayload = await runResponse.json() as { run: { dqlArtifact?: typeof dqlArtifact; generatedSql?: string; reviewChecklist?: { readyForDqlDraft: boolean } } };
+      expect(runPayload.run.generatedSql).toBeUndefined();
+      expect(runPayload.run.dqlArtifact).toMatchObject({
+        kind: 'sql_block',
+        name: 'product_supply_top_10_value',
+        metrics: ['total_value'],
+        dimensions: ['product_id', 'product_name', 'supply_id', 'supply_name'],
+        limit: 10,
+      });
+      expect(runPayload.run.reviewChecklist?.readyForDqlDraft).toBe(false);
+
+      const promoteResponse = await fetch(`http://127.0.0.1:${port}/api/notebook/research/${encodeURIComponent(certification.researchRunId)}/promote-dql`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: 'supply_chain', owner: 'analytics' }),
+      });
+      expect(promoteResponse.status).toBe(200);
+      const promoted = await promoteResponse.json() as {
+        run: { draftBlockPath?: string; dqlPromotionAction?: string };
+        session: { generation: { provider: string }; candidates: Array<{ sql: string; dqlSource: string; draftSave?: { path?: string } }> };
+      };
+      const candidate = promoted.session.candidates[0];
+      expect(promoted.session.generation.provider).toBe('dql-artifact');
+      expect(candidate.sql).toBe('');
+      expect(candidate.dqlSource).toContain('requested_dimensions = ["product_name", "supply_name"]');
+      expect(candidate.dqlSource).toContain('requested_filters = ["is_perishable = true", "top 10 by total_value"]');
+      expect(candidate.dqlSource).toContain('outputs = ["product_id", "product_name", "supply_id", "supply_name", "total_value"]');
+      expect(promoted.run.draftBlockPath).toBe(candidate.draftSave?.path);
+      expect(readFileSync(join(projectRoot, promoted.run.draftBlockPath!), 'utf-8')).toBe(candidate.dqlSource);
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    }
+  });
+
+  it('does not synthesize certified-score signals for ordinary HTTP Ask runs', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-no-signals-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    let observedSignals: unknown = 'not-called';
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => {
+          server = created;
+        },
+        agentRunExecutors: {
+          generated_answer: ({ request }) => {
+            observedSignals = request.signals;
+            return {
+              summary: 'Prepared review-required DQL artifact with SQL preview.',
+              answer: 'Revenue answer.',
+              status: 'needs_review',
+              trustState: 'review_required',
+              stopReason: 'human_review_required',
+              artifacts: [{
+                id: 'answer:no-signals',
+                kind: 'answer',
+                title: 'Review-required answer',
+                trustState: 'review_required',
+                payload: { text: 'Revenue answer.' },
+              }],
+              evaluations: [],
+              nextActions: [],
+            };
+          },
+        },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'What is customer revenue?',
+          audience: 'stakeholder',
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const payload = await response.json() as { run: any };
+      expect(payload.run.route).toBe('generated_answer');
+      expect(observedSignals).toBeUndefined();
     } finally {
       await new Promise<void>((resolve) => {
         if (!server) {
@@ -330,6 +549,38 @@ describe('AI provider settings', () => {
     expect(resolveDefaultLLMProvider(projectRoot)).toBe('openai');
   });
 
+  it('routes governed OpenAI answers through the DQL answer-loop runner, not the native SDK runner', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-provider-openai-'));
+    tempDirs.push(projectRoot);
+
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-test-openai',
+      model: 'gpt-test',
+    });
+
+    const governed = resolveGovernedAnswerRunner(projectRoot);
+    expect(governed?.provider).toBe('openai');
+    expect(governed?.runner).toBeTruthy();
+    expect(governed?.runner).not.toBe(getRunner('openai'));
+  });
+
+  it('routes governed Claude Code answers through the DQL answer-loop runner, not the MCP chat runner', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-provider-claude-code-'));
+    tempDirs.push(projectRoot);
+
+    saveProviderSettings(projectRoot, {
+      id: 'claude-code',
+      enabled: true,
+    });
+
+    const governed = resolveGovernedAnswerRunner(projectRoot);
+    expect(governed?.provider).toBe('claude-code');
+    expect(governed?.runner).toBeTruthy();
+    expect(governed?.runner).not.toBe(getRunner('claude-code'));
+  });
+
   it('clears the active default when that provider is disabled', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-provider-disable-'));
     tempDirs.push(projectRoot);
@@ -409,6 +660,45 @@ term "Player Points" {
     expect(candidate.dqlSource).toContain('sourceSystems = ["TRANSFORMED"]');
     expect(candidate.reviewCadence).toBe('quarterly');
     expect(candidate.dqlSource).toContain('reviewCadence = "quarterly"');
+  });
+
+  it('persists generated DQL artifacts without regenerating from SQL', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-artifact-generation-'));
+    tempDirs.push(projectRoot);
+
+    const session = await createDqlArtifactGenerationSessionForProject(projectRoot, {
+      question: 'Show monthly revenue by channel.',
+      domain: 'finance',
+      owner: 'analytics',
+      tags: ['ask-ai'],
+      dqlArtifact: {
+        kind: 'semantic_block',
+        name: 'monthly_revenue_by_channel',
+        sourcePath: 'semantic/monthly_revenue_by_channel.dql',
+        source: `block "monthly_revenue_by_channel" {
+  type = "semantic"
+  status = "draft"
+  metric = "total_revenue"
+  dimensions = ["channel"]
+  time_dimension = "order_date"
+  granularity = "month"
+}`,
+        metrics: ['total_revenue'],
+        dimensions: ['channel'],
+        timeDimension: { name: 'order_date', granularity: 'month' },
+      },
+    });
+
+    const candidate = session.candidates[0];
+    expect(session.generation.provider).toBe('dql-artifact');
+    expect(session.generation.aiEnabled).toBe(false);
+    expect(session.generation.createdDrafts).toBe(1);
+    expect(candidate.generationProvider).toBe('dql-artifact');
+    expect(candidate.sql).toBe('');
+    expect(candidate.savedPath).toBe(candidate.draftSave.path);
+    expect(candidate.dqlSource).toContain('block "monthly_revenue_by_channel"');
+    expect(candidate.dqlSource).toContain('proposed_contract_id = "finance.Unknown.monthly_revenue_channel"');
+    expect(readFileSync(join(projectRoot, candidate.draftSave.path!), 'utf-8')).toBe(candidate.dqlSource);
   });
 
   it('keeps deterministic AI import local and infers ranking after parameterization', async () => {
@@ -1234,6 +1524,27 @@ describe('buildAgentSchemaContext', () => {
     );
     expect(context[0]?.relation).toBe('dev.order_items');
   });
+
+  it('can preserve unscored tables for runtime schema snapshots without changing default prompt ranking', () => {
+    const rows = [
+      { table_schema: 'dev', table_name: 'orders', column_name: 'order_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'orders', column_name: 'order_total', data_type: 'DECIMAL' },
+      { table_schema: 'dev', table_name: 'supplies', column_name: 'supply_id', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'supplies', column_name: 'supply_name', data_type: 'VARCHAR' },
+      { table_schema: 'dev', table_name: 'warehouse_bins', column_name: 'bin_id', data_type: 'VARCHAR' },
+    ];
+
+    const promptContext = buildAgentSchemaContext('Show order totals', rows);
+    const snapshotContext = buildAgentSchemaContext('Show order totals', rows, {
+      includeUnscored: true,
+      limit: 50,
+    });
+
+    expect(promptContext.map((table) => table.relation)).toEqual(['dev.orders']);
+    expect(snapshotContext.map((table) => table.relation)).toEqual(
+      expect.arrayContaining(['dev.orders', 'dev.supplies', 'dev.warehouse_bins']),
+    );
+  });
 });
 
 describe('extractAgentValueSearchTerms', () => {
@@ -1709,6 +2020,16 @@ describe('validateBlockStudioSource', () => {
         table: 'orders',
         tags: [],
       },
+      {
+        name: 'channel',
+        label: 'Channel',
+        description: 'Sales channel',
+        domain: 'finance',
+        sql: 'channel',
+        type: 'string',
+        table: 'orders',
+        tags: [],
+      },
     ],
     hierarchies: [],
   });
@@ -1730,6 +2051,25 @@ describe('validateBlockStudioSource', () => {
     expect(validation.executableSql).toContain('SUM(revenue) AS total_revenue');
     expect(validation.executableSql).toContain('customer_type AS customer_type');
     expect(validation.executableSql).toContain('GROUP BY customer_type');
+  });
+
+  it('composes executable SQL for semantic blocks with requested filters', () => {
+    const source = `block "Revenue by Online Channel" {
+  domain = "finance"
+  type = "semantic"
+  description = ""
+  owner = ""
+  tags = []
+  metric = "total_revenue"
+  dimensions = ["channel"]
+  requested_filters = ["channel=Online"]
+}`;
+
+    const validation = validateBlockStudioSource(source, semanticLayer);
+
+    expect(validation.valid).toBe(true);
+    expect(validation.executableSql).toContain("WHERE channel = 'Online'");
+    expect(validation.executableSql).toContain('GROUP BY channel');
   });
 
   it('returns an actionable diagnostic when a semantic block is missing a metric', () => {
@@ -2033,6 +2373,24 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
     expect(result.summary.readyForReview).toBe(
       result.proposals.filter((p) => p.certification.errors.length === 0).length,
     );
+    expect(result.summary.reviewTelemetry).toMatchObject({
+      existingDrafts: 0,
+      readyForReviewRate: result.summary.readyForReview / result.summary.proposalsRanked,
+    });
+    expect(result.summary.reviewTelemetry?.estimatedReviewMinutes).toBeGreaterThan(0);
+    for (const [index, proposal] of result.proposals.entries()) {
+      expect(proposal.review.queueRank).toBe(index + 1);
+      expect(proposal.review.draftPath).toMatch(/^blocks\/_drafts\/.+\.dql$/);
+      expect(proposal.review.certifyCommand).toContain(`dql certify --from-draft ${proposal.review.draftPath}`);
+      expect(proposal.review.payload).toMatchObject({
+        model: proposal.model,
+        domain: proposal.domain,
+        outputs: proposal.inference.declaredOutputs,
+        resultSample: { status: 'not_run', rows: [] },
+      });
+      expect(proposal.review.payload.sqlPreview).toContain(proposal.model);
+      expect(proposal.review.estimatedReviewMinutes).toBeGreaterThan(0);
+    }
   });
 
   it('does not write any draft files (dryRun preview only)', () => {
@@ -2069,6 +2427,29 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
     expect(source).not.toContain('status = "certified"');
   });
 
+  it('surfaces existing draft review latency and certify handoff in readiness', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-review-telemetry-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p', propose: { aiEnrichment: 'off' } }), 'utf-8');
+    writeManifest(projectRoot);
+
+    await generateProposeDrafts(projectRoot, ['dim_customers'], undefined, { owner: 'me@example.com' });
+
+    const readiness = buildProposeReadiness(projectRoot, undefined, { owner: 'me@example.com' });
+    const dimCustomers = readiness.proposals.find((proposal) => proposal.slug === 'dim_customers');
+
+    expect(readiness.summary.reviewTelemetry?.existingDrafts).toBeGreaterThanOrEqual(1);
+    expect(dimCustomers?.review).toMatchObject({
+      status: expect.stringMatching(/draft_exists|ready_for_review/),
+      draftExists: true,
+      draftPath: 'blocks/_drafts/dim_customers.dql',
+    });
+    expect(dimCustomers?.review.firstSeenAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(dimCustomers?.review.lastUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(typeof dimCustomers?.review.reviewAgeHours).toBe('number');
+    expect(dimCustomers?.review.certifyCommand).toContain('dql certify --from-draft blocks/_drafts/dim_customers.dql');
+  });
+
   it('generateProposeDrafts never writes a plumbing model even if explicitly requested', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-propose-generate-plumbing-'));
     tempDirs.push(projectRoot);
@@ -2078,6 +2459,127 @@ describe('buildProposeReadiness (/api/propose handler core)', () => {
     const result = await generateProposeDrafts(projectRoot, ['stg_orders']);
     expect(result.draftsWritten).toBe(0);
     expect(existsSync(join(projectRoot, 'blocks', '_drafts', 'stg_orders.dql'))).toBe(false);
+  });
+});
+
+describe('semantic composting changesets', () => {
+  function writeCertifiedRevenueCluster(projectRoot: string): void {
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    writeFileSync(join(projectRoot, 'blocks', 'revenue_by_product.dql'), `block "Revenue By Product" {
+  domain = "sales"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  outputs = ["product_name", "completed_revenue"]
+  query = """
+    SELECT product_name, SUM(amount) AS completed_revenue
+    FROM analytics.orders
+    WHERE status = 'completed'
+    GROUP BY product_name
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'blocks', 'revenue_by_region.dql'), `block "Revenue By Region" {
+  domain = "sales"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  outputs = ["region", "completed_revenue"]
+  query = """
+    SELECT region, SUM(amount) AS completed_revenue
+    FROM analytics.orders
+    WHERE status = 'completed'
+    GROUP BY region
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'blocks', 'draft_revenue.dql'), `block "Draft Revenue" {
+  domain = "sales"
+  type = "custom"
+  status = "draft"
+  owner = "analytics@example.com"
+  outputs = ["completed_revenue"]
+  query = """
+    SELECT SUM(amount) AS completed_revenue
+    FROM analytics.orders
+  """
+}
+`);
+  }
+
+  it('mines certified block clusters into reviewable semantic metric draft changesets', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-composting-'));
+    tempDirs.push(projectRoot);
+    writeCertifiedRevenueCluster(projectRoot);
+
+    const changeset = buildSemanticCompostingChangeset(projectRoot, { owner: 'owner@example.com' });
+    const candidate = changeset.candidates[0];
+
+    expect(changeset.ready).toBe(true);
+    expect(changeset.summary.certifiedBlocksScanned).toBe(2);
+    expect(changeset.summary.candidatesRanked).toBe(1);
+    expect(candidate).toMatchObject({
+      kind: 'metric',
+      name: 'completed_revenue',
+      domain: 'sales',
+      type: 'sum',
+      sql: 'SUM(amount)',
+      filter: "status = 'completed'",
+      support: 2,
+      draftPath: 'semantic-layer/metrics/_drafts/sales/completed_revenue.yaml',
+      draftExists: false,
+    });
+    expect(candidate.donorBlocks.map((donor) => donor.path).sort()).toEqual([
+      'blocks/revenue_by_product.dql',
+      'blocks/revenue_by_region.dql',
+    ]);
+    expect(candidate.yaml).toContain('status: draft');
+    expect(candidate.yaml).toContain('owner: owner@example.com');
+    expect(changeset.prBody).toContain('blocks/revenue_by_product.dql');
+  });
+
+  it('writes approved semantic composting drafts and PR-body provenance only on generate', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-composting-generate-'));
+    tempDirs.push(projectRoot);
+    writeCertifiedRevenueCluster(projectRoot);
+
+    const preview = buildSemanticCompostingChangeset(projectRoot, { owner: 'owner@example.com' });
+    expect(existsSync(join(projectRoot, preview.candidates[0].draftPath))).toBe(false);
+
+    const result = generateSemanticCompostingDrafts(
+      projectRoot,
+      [preview.candidates[0].id],
+      { owner: 'owner@example.com' },
+    );
+
+    expect(result.ready).toBe(true);
+    expect(result.draftsWritten).toBe(1);
+    expect(result.paths).toEqual(['semantic-layer/metrics/_drafts/sales/completed_revenue.yaml']);
+    expect(result.prBodyPath).toBe('semantic-layer/metrics/_drafts/PR_BODY.md');
+    expect(existsSync(join(projectRoot, 'semantic-layer', 'metrics', '_drafts', 'sales', 'completed_revenue.yaml'))).toBe(true);
+    expect(readFileSync(join(projectRoot, 'semantic-layer', 'metrics', '_drafts', 'PR_BODY.md'), 'utf-8')).toContain('Semantic Composting Changeset');
+
+    const metric = loadSemanticLayerFromDir(join(projectRoot, 'semantic-layer')).getMetric('completed_revenue');
+    expect(metric).toMatchObject({
+      name: 'completed_revenue',
+      status: 'draft',
+      domain: 'sales',
+      sql: 'SUM(amount)',
+      type: 'sum',
+      table: expect.stringContaining('orders'),
+      filter: "status = 'completed'",
+      owner: 'owner@example.com',
+    });
+    expect(metric?.source?.extra?.support).toBe(2);
+
+    const afterGenerate = buildSemanticCompostingChangeset(projectRoot, { owner: 'owner@example.com' });
+    expect(afterGenerate.summary.existingDrafts).toBe(1);
+    expect(afterGenerate.candidates[0]).toMatchObject({
+      name: 'completed_revenue',
+      draftExists: true,
+      draftPath: 'semantic-layer/metrics/_drafts/sales/completed_revenue.yaml',
+    });
   });
 });
 

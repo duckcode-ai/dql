@@ -1,59 +1,73 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
+import {
+  dqlToolDefinitionsForSurface,
+  getDqlToolDefinition,
+  type DqlToolName,
+  type DqlToolSurface,
+} from '@duckcodeailabs/dql-agent';
 import { DQLContext, findProjectRoot } from './context.js';
-import { searchBlocks, searchBlocksInput } from './tools/search-blocks.js';
-import { getBlock, getBlockInput } from './tools/get-block.js';
-import { queryViaBlock, queryViaBlockInput } from './tools/query-via-block.js';
-import { listMetrics, listMetricsInput, listDimensions, listDimensionsInput } from './tools/semantic.js';
-import { lineageImpact, lineageImpactInput } from './tools/lineage-impact.js';
-import { certify, certifyInput } from './tools/certify.js';
-import { suggestBlock, suggestBlockInput } from './tools/suggest-block.js';
-import { queryViaMetadata, queryViaMetadataInput } from './tools/query-via-metadata.js';
-import { listProposals, listProposalsInput } from './tools/list-proposals.js';
+import { zodRawShapeFromJsonSchema } from './tool-schema.js';
+import { searchBlocks } from './tools/search-blocks.js';
+import { getBlock } from './tools/get-block.js';
+import { queryViaBlock } from './tools/query-via-block.js';
+import { listMetrics, listDimensions } from './tools/semantic.js';
+import { lineageImpact } from './tools/lineage-impact.js';
+import { certify } from './tools/certify.js';
+import { suggestBlock } from './tools/suggest-block.js';
+import { expandContext } from './tools/expand-context.js';
+import { querySemanticModel } from './tools/query-semantic-model.js';
+import { queryViaMetadata } from './tools/query-via-metadata.js';
+import { listProposals } from './tools/list-proposals.js';
 import {
   feedbackRecord,
-  feedbackRecordInput,
   inspectMetadataContext,
-  inspectMetadataContextInput,
   kgSearch,
-  kgSearchInput,
 } from './tools/kg.js';
 import {
   askDql,
-  askDqlInput,
   buildDqlApp,
-  buildDqlAppInput,
   buildDqlBlock,
-  buildDqlBlockInput,
   inspectDqlProject,
-  inspectDqlProjectInput,
 } from './tools/workflows.js';
 import {
   approveHint,
-  approveHintInput,
   listHints,
-  listHintsInput,
   recordCorrection,
-  recordCorrectionInput,
 } from './tools/hints.js';
 import {
   getTableSchema,
-  getTableSchemaInput,
   searchMetadata,
-  searchMetadataInput,
   validateSql,
-  validateSqlInput,
 } from './tools/metadata.js';
 
 export interface CreateServerOptions {
   projectRoot?: string;
   version?: string;
+  /**
+   * `agentic` is the default bounded surface for LLM clients. `full` exposes
+   * the historical expert/admin MCP surface for explicit maintenance sessions.
+   */
+  toolProfile?: McpToolProfile;
 }
 
-export const DQL_MCP_INSTRUCTIONS =
+export type McpToolProfile = 'agentic' | 'full';
+
+interface McpToolRegistration {
+  name: DqlToolName;
+  inputSchema: Record<string, z.ZodTypeAny>;
+  run(args: any): unknown | Promise<unknown>;
+}
+
+const DQL_MCP_AGENTIC_INSTRUCTIONS =
   'DQL is a governed analytics MCP server. Start each session with ' +
   '`inspect_dql_project`; route every analytics question through `ask_dql` ' +
   'before writing SQL. It returns the safe route, trust label, certified ' +
   'candidate when available, allowed SQL context, and next tool.\n' +
+  'Semantic compile: when the semantic layer contains the requested metric, ' +
+  'dimension, or time grain, use `query_semantic_model` before deep dbt or ' +
+  'warehouse search. Return the DQL semantic artifact, draft path when present, and generated SQL as ' +
+  'reviewable context unless it is backed by a certified block.\n' +
   'Tier 1 certified: for an exact saved block or direct KPI, use ' +
   '`search_blocks`/`get_block` for discovery and `query_via_block` only when ' +
   'a certified block grain exactly answers the question.\n' +
@@ -61,7 +75,18 @@ export const DQL_MCP_INSTRUCTIONS =
   'rankings, breakdowns, comparisons, drill-throughs, or different grain, use ' +
   'certified assets only as context. Call `inspect_metadata_context`, then `query_via_metadata` with ' +
   'one read-only SELECT/WITH query from the inspected context. Surface ' +
-  '`uncertified: true`, the trust status, and draft path verbatim.\n' +
+  '`uncertified: true`, the trust status, the returned `dqlArtifact.source`, ' +
+  'and draft path verbatim; treat SQL as compiled/preview evidence, not the default artifact.\n' +
+  'Follow-ups: when the user refers to prior/previous results, pass `followUp.priorResultRef` ' +
+  '(id, question, columns, rowCount, sourceSql if known) and `followUp.priorDqlArtifact` ' +
+  '(the previous `dqlArtifact.source` plus metrics/dimensions/filters) into `query_via_metadata`; ' +
+  'do not answer a drilldown from vague follow-up prose alone.\n' +
+  'Deep research: call `inspect_metadata_context` with `strictness: "exploratory"` ' +
+  'before writing SQL when the user asks for broad investigation, many entities, or full context.\n' +
+  'Repair loop: if `query_via_metadata` reports an unknown relation that exists ' +
+  'in the metadata catalog/runtime schema, call `expand_context` with the prior ' +
+  'contextPackId and relation, then retry `query_via_metadata` once with the new contextPackId ' +
+  'and `regroundAttemptsUsed: 1`.\n' +
   'Tier 3 missing context: if metadata does not identify a safe table, metric, ' +
   'dimension, or grain, refuse and ask for what is missing.\n' +
   'Trust labels are one canonical vocabulary: Certified, Reviewed, ' +
@@ -72,11 +97,16 @@ export const DQL_MCP_INSTRUCTIONS =
   'but disagree, `ask_dql` returns route `conflict` with BOTH definitions and ' +
   'owners. Present both sides and ask the user which is authoritative — never ' +
   'silently pick one.\n' +
-  'Use `build_dql_block` for reusable draft blocks, `build_dql_app` for app ' +
-  'drafts with certified tiles plus review-only gaps, `certify` for governance, ' +
-  '`lineage_impact` for dependencies, `kg_search` for the knowledge graph, and ' +
-  '`feedback_record` for answer quality. Never present generated SQL or draft ' +
-  'output as certified.\n' +
+  'Use `suggest_block` for reusable draft blocks, `certify` for governance, ' +
+  '`lineage_impact` for dependencies, and `kg_search` for the knowledge graph. ' +
+  'Never present generated SQL or draft output as certified.';
+
+const DQL_MCP_FULL_PROFILE_INSTRUCTIONS =
+  '\nFull expert profile only: `build_dql_block`, `build_dql_app`, ' +
+  '`list_proposals`, `feedback_record`, `record_correction`, `approve_hint`, ' +
+  '`list_hints`, `search_metadata`, `get_table_schema`, `validate_sql`, ' +
+  '`list_metrics`, and `list_dimensions` are available for maintenance, legacy, ' +
+  'and governance-admin workflows. Prefer the bounded governed cascade tools for normal analytics questions.\n' +
   'Correction memory: when an analyst corrects a Tier-2 answer, call ' +
   '`record_correction` with the scope (metric/dbt model/domain/dialect). It ' +
   'creates a scoped CANDIDATE hint that is NOT used until a human runs ' +
@@ -84,196 +114,155 @@ export const DQL_MCP_INSTRUCTIONS =
   'AFTER certified routing (never overriding certified answers) and are cited. ' +
   'Use `list_hints` to review pending corrections.';
 
+export const DQL_MCP_INSTRUCTIONS = DQL_MCP_AGENTIC_INSTRUCTIONS;
+
+export function dqlMcpInstructionsForProfile(profile: McpToolProfile): string {
+  return profile === 'full'
+    ? `${DQL_MCP_AGENTIC_INSTRUCTIONS}${DQL_MCP_FULL_PROFILE_INSTRUCTIONS}`
+    : DQL_MCP_AGENTIC_INSTRUCTIONS;
+}
+
 export function createDQLMCPServer(options: CreateServerOptions = {}): McpServer {
   const projectRoot = options.projectRoot ?? findProjectRoot(process.cwd());
   const ctx = new DQLContext({ projectRoot, dqlVersion: options.version });
+  const toolProfile = resolveMcpToolProfile(options.toolProfile);
 
   const server = new McpServer(
     { name: 'dql-mcp', version: options.version ?? '0.1.0' },
-    { instructions: DQL_MCP_INSTRUCTIONS },
+    { instructions: dqlMcpInstructionsForProfile(toolProfile) },
   );
 
-  server.registerTool(
-    'inspect_dql_project',
-    {
-      description:
-        'Front-door project health/context tool for MCP clients. Refreshes metadata/index by default and returns block, app, dashboard, semantic, catalog, and recommended-next-step status.',
-      inputSchema: inspectDqlProjectInput,
-    },
-    async (args) => wrap(await inspectDqlProject(ctx, args)),
-  );
-  server.registerTool(
-    'ask_dql',
-    {
-      description:
-        'High-level governed ask router. Use first for business questions. Returns certified-vs-generated route, contextPackId, exact block candidate, allowed SQL context, missing context, trust status, and next safe DQL tool.',
-      inputSchema: askDqlInput,
-    },
-    async (args) => wrap(await askDql(ctx, args)),
-  );
-  server.registerTool(
-    'build_dql_block',
-    {
-      description:
-        'High-level draft-block tool. Writes a proposed block to the local draft queue (domains/<domain>/blocks/_drafts/ when available, otherwise blocks/_drafts/) with governance results. Does not certify automatically.',
-      inputSchema: buildDqlBlockInput,
-    },
-    async (args) => wrap(await buildDqlBlock(ctx, args)),
-  );
-  server.registerTool(
-    'build_dql_app',
-    {
-      description:
-        'High-level app builder. Creates or plans a governed DQL app draft from a prompt using certified tiles first and review-only placeholders for missing evidence.',
-      inputSchema: buildDqlAppInput,
-    },
-    async (args) => wrap(await buildDqlApp(ctx, args)),
-  );
-  server.registerTool(
-    'search_blocks',
-    { description: 'Find certified DQL blocks by keyword, domain, or status.', inputSchema: searchBlocksInput },
-    async (args) => wrap(await searchBlocks(ctx, args)),
-  );
-  server.registerTool(
-    'get_block',
-    { description: 'Return full metadata, dependencies, and SQL for a block.', inputSchema: getBlockInput },
-    async (args) => wrap(await getBlock(ctx, args)),
-  );
-  server.registerTool(
-    'query_via_block',
-    {
-      description:
-        'Tier-1 of graduated trust. Execute a certified block against the local DQL runtime when the block grain exactly answers the user question. Refuses non-certified blocks and refuses unresolved datalex_contract references when a DataLex manifest is loaded. For named-entity filters, custom rankings, breakdowns, comparisons, or drill-throughs, use the block as context and call query_via_metadata instead.',
-      inputSchema: queryViaBlockInput,
-    },
-    async (args) => wrap(await queryViaBlock(ctx, args)),
-  );
-  server.registerTool(
-    'query_via_metadata',
-    {
-      description:
-        'Tier-2 of graduated trust. Use when no certified block exactly answers the requested grain, including why-changed diagnostics, named customer/user/account filters, rankings, breakdowns, comparisons, anomalies, and drill-throughs. Call inspect_metadata_context first; pass its contextPackId when available. If proposedSql is omitted, this returns the catalog route plan, allowed SQL context, and missing context. When the question spans entities, the response also includes `datalexJoinGuidance` from the DataLex model: the canonical key to join each business concept on, and which joins fan out — follow it so generated SQL stays grain-safe (don\'t double-count). If proposedSql is supplied, it must be one read-only SELECT/WITH query using only inspected relations/columns. The runtime executes a bounded preview, returns `uncertified: true` plus trustStatus/evidence, and saves a draft block under the local draft queue. Surface the `uncertified` flag and review path verbatim.',
-      inputSchema: queryViaMetadataInput,
-    },
-    async (args) => wrap(await queryViaMetadata(ctx, args)),
-  );
-  server.registerTool(
-    'list_proposals',
-    {
-      description:
-        'List Tier-2 draft proposals from blocks/_drafts/ and domains/<domain>/blocks/_drafts/ ordered by askedTimes DESC. Filter with askedAtLeastTimes / since. Use this to surface "questions that get asked repeatedly are good certify candidates" — the prioritization signal for the human review queue.',
-      inputSchema: listProposalsInput,
-    },
-    async (args) => wrap(listProposals(ctx, args)),
-  );
-  server.registerTool(
-    'list_metrics',
-    { description: 'List semantic-layer metrics, optionally filtered by domain.', inputSchema: listMetricsInput },
-    async (args) => wrap(await listMetrics(ctx, args)),
-  );
-  server.registerTool(
-    'list_dimensions',
-    { description: 'List semantic-layer dimensions, optionally filtered by domain.', inputSchema: listDimensionsInput },
-    async (args) => wrap(await listDimensions(ctx, args)),
-  );
-  server.registerTool(
-    'lineage_impact',
-    { description: 'Return upstream/downstream lineage for a block, metric, or model.', inputSchema: lineageImpactInput },
-    async (args) => wrap(await lineageImpact(ctx, args)),
-  );
-  server.registerTool(
-    'certify',
-    { description: 'Run governance rules against a block and report pass/fail.', inputSchema: certifyInput },
-    async (args) => wrap(await certify(ctx, args)),
-  );
-  server.registerTool(
-    'suggest_block',
-    {
-      description:
-        'Write a curated proposed block to the local draft queue with a hand-shaped name + structure, plus the governance gate result. Use when proposing a SHARED building block on top of multiple Tier-2 proposals. For one-shot ad-hoc Tier-2 captures, use `query_via_metadata` instead — it auto-saves the draft.',
-      inputSchema: suggestBlockInput,
-    },
-    async (args) => wrap(await suggestBlock(ctx, args)),
-  );
-  server.registerTool(
-    'kg_search',
-    { description: 'Search the agent knowledge graph (FTS5) over terms, business views, blocks, metrics, dimensions, dashboards, apps, notebooks, and dbt/source metadata.', inputSchema: kgSearchInput },
-    async (args) => wrap(await kgSearch(ctx, args)),
-  );
-  server.registerTool(
-    'search_metadata',
-    {
-      description:
-        'Grounded-SQL retrieval: rank dbt tables relevant to a request and return each table\'s fully-qualified warehouse relation (database.schema.table) and {{ ref() }} form. Use before writing SQL so you reference the REAL relation, never a bare model name.',
-      inputSchema: searchMetadataInput,
-    },
-    async (args) => wrap(await searchMetadata(ctx, args)),
-  );
-  server.registerTool(
-    'get_table_schema',
-    {
-      description:
-        'Return the qualified relation, {{ ref() }} form, real columns + types, and inferred join keys for a dbt table (by model name, alias, or qualified relation).',
-      inputSchema: getTableSchemaInput,
-    },
-    async (args) => wrap(getTableSchema(ctx, args)),
-  );
-  server.registerTool(
-    'validate_sql',
-    {
-      description:
-        'Validate that a read-only SELECT/WITH query references ONLY relations and columns that exist in the dbt schema. Returns the precise offending table/column on a miss so you can correct it.',
-      inputSchema: validateSqlInput,
-    },
-    async (args) => wrap(await validateSql(ctx, args)),
-  );
-  server.registerTool(
-    'inspect_metadata_context',
-    {
-      description:
-        'Build the local SQLite metadata context pack for a question. Use before Tier-2 SQL generation to inspect certified blocks, semantic metrics, DQL terms/views, dbt/warehouse objects, lineage edges, diagnostics, selected evidence, rejected candidates, and trust labels.',
-      inputSchema: inspectMetadataContextInput,
-    },
-    async (args) => wrap(await inspectMetadataContext(ctx, args)),
-  );
-  server.registerTool(
-    'feedback_record',
-    { description: 'Record thumbs-up/down feedback on an answer; feeds self-learning + promotion suggestions.', inputSchema: feedbackRecordInput },
-    async (args) => wrap(feedbackRecord(ctx, args)),
-  );
-  server.registerTool(
-    'record_correction',
-    {
-      description:
-        'Capture an analyst correction of a Tier-2 generated answer as a scoped, Git-versioned CANDIDATE hint (not used until approved). Writes a trace + hint under .dql/ and reindexes the local cache.',
-      inputSchema: recordCorrectionInput,
-    },
-    async (args) => wrap(recordCorrection(ctx, args)),
-  );
-  server.registerTool(
-    'approve_hint',
-    {
-      description:
-        'Human review of a candidate correction hint. Approving makes the scoped hint usable in future Tier-2 drafts (after certified routing, never overriding it). Updates .dql/ and the local index.',
-      inputSchema: approveHintInput,
-    },
-    async (args) => wrap(approveHint(ctx, args)),
-  );
-  server.registerTool(
-    'list_hints',
-    {
-      description:
-        'List scoped correction hints (optionally filtered by status/domain/metric) for review. Approved hints are the ones folded into future answers.',
-      inputSchema: listHintsInput,
-    },
-    async (args) => wrap(listHints(ctx, args)),
-  );
+  for (const tool of buildMcpToolRegistrations(ctx, toolProfile)) {
+    server.registerTool(
+      tool.name,
+      {
+        description: toolDescription(tool.name),
+        inputSchema: tool.inputSchema,
+      },
+      async (args: any) => wrap(await tool.run(args)),
+    );
+  }
 
   return server;
 }
 
-function wrap(result: unknown) {
+function buildMcpToolRegistrations(ctx: DQLContext, profile: McpToolProfile = 'agentic'): McpToolRegistration[] {
+  const handlers = mcpToolHandlers(ctx);
+  const surface: DqlToolSurface = profile === 'full' ? 'mcp' : 'mcp_agentic';
+  return dqlToolDefinitionsForSurface(surface).map((definition) => {
+    const handler = handlers[definition.name];
+    if (!handler) throw new Error(`MCP DQL tool handler is missing for ${definition.name}`);
+    return {
+      name: definition.name,
+      inputSchema: zodRawShapeFromJsonSchema(definition.inputSchema),
+      run: handler.run,
+    };
+  });
+}
+
+function resolveMcpToolProfile(explicit?: McpToolProfile): McpToolProfile {
+  if (explicit) return explicit;
+  const raw = process.env.DQL_MCP_TOOL_PROFILE?.trim().toLowerCase();
+  return raw === 'full' || raw === 'expert' || raw === 'admin' ? 'full' : 'agentic';
+}
+
+function mcpToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, Pick<McpToolRegistration, 'run'>>> {
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+    ask_dql: {
+      run: (args) => askDql(ctx, args as Parameters<typeof askDql>[1]),
+    },
+    query_semantic_model: {
+      run: (args) => querySemanticModel(ctx, args as Parameters<typeof querySemanticModel>[1]),
+    },
+    kg_search: {
+      run: (args) => kgSearch(ctx, args as Parameters<typeof kgSearch>[1]),
+    },
+    search_blocks: {
+      run: (args) => searchBlocks(ctx, args as Parameters<typeof searchBlocks>[1]),
+    },
+    get_block: {
+      run: (args) => getBlock(ctx, args as Parameters<typeof getBlock>[1]),
+    },
+    query_via_block: {
+      run: (args) => queryViaBlock(ctx, args as Parameters<typeof queryViaBlock>[1]),
+    },
+    inspect_metadata_context: {
+      run: (args) => inspectMetadataContext(ctx, args as Parameters<typeof inspectMetadataContext>[1]),
+    },
+    expand_context: {
+      run: (args) => expandContext(ctx, args as Parameters<typeof expandContext>[1]),
+    },
+    query_via_metadata: {
+      run: (args) => queryViaMetadata(ctx, args as Parameters<typeof queryViaMetadata>[1]),
+    },
+    list_metrics: {
+      run: (args) => listMetrics(ctx, args as Parameters<typeof listMetrics>[1]),
+    },
+    list_dimensions: {
+      run: (args) => listDimensions(ctx, args as Parameters<typeof listDimensions>[1]),
+    },
+    lineage_impact: {
+      run: (args) => lineageImpact(ctx, args as Parameters<typeof lineageImpact>[1]),
+    },
+    certify: {
+      run: (args) => certify(ctx, args as Parameters<typeof certify>[1]),
+    },
+    suggest_block: {
+      run: (args) => suggestBlock(ctx, args as Parameters<typeof suggestBlock>[1]),
+    },
+    search_metadata: {
+      run: (args) => searchMetadata(ctx, args as Parameters<typeof searchMetadata>[1]),
+    },
+    get_table_schema: {
+      run: (args) => getTableSchema(ctx, args as Parameters<typeof getTableSchema>[1]),
+    },
+    validate_sql: {
+      run: (args) => validateSql(ctx, args as Parameters<typeof validateSql>[1]),
+    },
+    inspect_dql_project: {
+      run: (args) => inspectDqlProject(ctx, args as Parameters<typeof inspectDqlProject>[1]),
+    },
+    build_dql_block: {
+      run: (args) => buildDqlBlock(ctx, args as Parameters<typeof buildDqlBlock>[1]),
+    },
+    build_dql_app: {
+      run: (args) => buildDqlApp(ctx, args as Parameters<typeof buildDqlApp>[1]),
+    },
+    list_proposals: {
+      run: (args) => listProposals(ctx, args as Parameters<typeof listProposals>[1]),
+    },
+    feedback_record: {
+      run: (args) => feedbackRecord(ctx, args as Parameters<typeof feedbackRecord>[1]),
+    },
+    record_correction: {
+      run: (args) => recordCorrection(ctx, args as Parameters<typeof recordCorrection>[1]),
+    },
+    approve_hint: {
+      run: (args) => approveHint(ctx, args as Parameters<typeof approveHint>[1]),
+    },
+    list_hints: {
+      run: (args) => listHints(ctx, args as Parameters<typeof listHints>[1]),
+    },
   };
 }
+
+function toolDescription(name: DqlToolName): string {
+  return getDqlToolDefinition(name).description;
+}
+
+function wrap(result: unknown) {
+  const text = process.env.DQL_MCP_PRETTY_JSON === '1'
+    ? JSON.stringify(result, null, 2)
+    : JSON.stringify(result);
+  return {
+    content: [{ type: 'text' as const, text }],
+  };
+}
+
+export const __test__ = {
+  buildMcpToolRegistrations,
+  dqlMcpInstructionsForProfile,
+  resolveMcpToolProfile,
+  wrap,
+  zodRawShapeFromJsonSchema,
+};

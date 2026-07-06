@@ -1,5 +1,62 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildConversationContext, type ConversationThreadItem } from './agentConversationContext';
+import type * as UnifiedAgentRunPanelModule from './UnifiedAgentRunPanel';
+
+let resolveArtifactDqlView: typeof UnifiedAgentRunPanelModule.resolveArtifactDqlView;
+let artifactSqlDisclosureLabel: typeof UnifiedAgentRunPanelModule.artifactSqlDisclosureLabel;
+
+describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
+  beforeAll(async () => {
+    vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
+    const module = await import('./UnifiedAgentRunPanel');
+    resolveArtifactDqlView = module.resolveArtifactDqlView;
+    artifactSqlDisclosureLabel = module.artifactSqlDisclosureLabel;
+  });
+
+  it('treats a returned DQL artifact as the primary inspectable artifact', () => {
+    const artifact = resolveArtifactDqlView({
+      sqlPreview: 'SELECT date_trunc(\'month\', order_date) AS month, SUM(revenue) AS total_revenue FROM orders GROUP BY 1',
+      dqlArtifact: {
+        kind: 'semantic_block',
+        name: 'monthly_revenue',
+        sourcePath: 'semantic-layer/blocks/revenue/monthly_revenue.yaml',
+        source: '  block "monthly_revenue" {\n    type = "semantic"\n    metric = "total_revenue"\n  }\n',
+      },
+    });
+
+    expect(artifact).toMatchObject({
+      kind: 'semantic_block',
+      name: 'monthly_revenue',
+      sourcePath: 'semantic-layer/blocks/revenue/monthly_revenue.yaml',
+      source: 'block "monthly_revenue" {\n    type = "semantic"\n    metric = "total_revenue"\n  }',
+    });
+    expect(artifactSqlDisclosureLabel(Boolean(artifact))).toBe('View compiled SQL preview');
+  });
+
+  it('can resolve a nested research-run DQL artifact before falling back to SQL preview language', () => {
+    const artifact = resolveArtifactDqlView({
+      researchRun: {
+        reviewedSql: 'SELECT 1',
+        dqlArtifact: {
+          kind: 'sql_block',
+          name: 'product_supply_top_value',
+          source: 'block "product_supply_top_value" {\n  status = "draft"\n}',
+        },
+      },
+    });
+
+    expect(artifact).toMatchObject({
+      kind: 'sql_block',
+      name: 'product_supply_top_value',
+    });
+    expect(artifactSqlDisclosureLabel(Boolean(artifact))).toBe('View compiled SQL preview');
+  });
+
+  it('labels SQL-only output as a preview instead of the default query artifact', () => {
+    expect(resolveArtifactDqlView({ sql: 'SELECT 1' })).toBeUndefined();
+    expect(artifactSqlDisclosureLabel(false)).toBe('View SQL preview');
+  });
+});
 
 describe('buildConversationContext', () => {
   it('carries prior result columns and low-cardinality dimension values for follow-ups', () => {
@@ -60,6 +117,88 @@ describe('buildConversationContext', () => {
       priorMeasures: ['revenue'],
       reviewStatus: 'certified',
       certification: 'certified',
+    });
+  });
+
+  it('carries the prior DQL artifact for DQL-first follow-up grounding', () => {
+    const items: ConversationThreadItem[] = [
+      {
+        kind: 'run',
+        id: 'r1',
+        run: {
+          id: 'run_semantic',
+          question: 'monthly revenue by channel',
+          completedAt: '2026-07-03T00:00:01.000Z',
+          artifacts: [{
+            kind: 'answer',
+            payload: {
+              cascade: {
+                terminalLane: 'semantic',
+                routeTier: 'semantic_metric',
+                label: 'Lane 2 semantic DQL artifact was terminal',
+                artifactKind: 'semantic_block',
+                outcome: {
+                  lane: 'semantic',
+                  routeTier: 'semantic_metric',
+                  metrics: ['total_revenue'],
+                  dimensions: ['channel'],
+                  rowCount: 1,
+                },
+              },
+              dqlArtifact: {
+                kind: 'semantic_block',
+                name: 'monthly_revenue_by_channel',
+                sourcePath: 'semantic-layer/blocks/revenue/monthly_revenue_by_channel.yaml',
+                source: 'block "monthly_revenue_by_channel" {\n  type = "semantic"\n  metric = "total_revenue"\n}',
+                metrics: ['total_revenue'],
+                dimensions: ['channel'],
+                filters: [{ dimension: 'channel', operator: 'equals', values: ['Online'] }],
+                timeDimension: { name: 'order_date', granularity: 'month' },
+              },
+              result: {
+                columns: ['month', 'channel', 'total_revenue'],
+                rows: [{ month: '2026-06-01', channel: 'Online', total_revenue: 1200 }],
+                rowCount: 1,
+              },
+            },
+          }],
+          summary: 'Monthly revenue by channel.',
+          answer: 'Online revenue was 1200.',
+        },
+      },
+    ];
+
+    expect(buildConversationContext(items)).toMatchObject({
+      dqlArtifact: {
+        kind: 'semantic_block',
+        name: 'monthly_revenue_by_channel',
+        metrics: ['total_revenue'],
+        dimensions: ['channel'],
+        filters: [{ dimension: 'channel', operator: 'equals', values: ['Online'] }],
+        timeDimension: { name: 'order_date', granularity: 'month' },
+      },
+      cascade: {
+        terminalLane: 'semantic',
+        routeTier: 'semantic_metric',
+        outcome: {
+          lane: 'semantic',
+          metrics: ['total_revenue'],
+          dimensions: ['channel'],
+        },
+      },
+      turns: [
+        {
+          id: 'run_semantic',
+          dqlArtifact: {
+            kind: 'semantic_block',
+            source: expect.stringContaining('metric = "total_revenue"'),
+          },
+          cascade: {
+            terminalLane: 'semantic',
+            routeTier: 'semantic_metric',
+          },
+        },
+      ],
     });
   });
 

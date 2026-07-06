@@ -11,6 +11,19 @@ import { TableOutput } from '../output/TableOutput';
 type AiSqlMode = 'notebook' | 'block';
 type DraftRunStatus = 'idle' | 'generating' | 'running' | 'ready' | 'error' | 'fixing';
 
+interface SqlDraftDialogCopy {
+  ariaLabel: string;
+  heading: string;
+  subtitle: string;
+  draftTitle: string;
+  draftSubtitle: string;
+  waitingText: string;
+  emptyText: string;
+  footerText: string;
+  generateLabel: string;
+  insertLabel: string;
+}
+
 export interface AiSqlDraftMeta {
   question: string;
   title?: string;
@@ -73,6 +86,12 @@ export function AiSqlDraftDialog({
   const isBlockMode = mode === 'block';
   const isRepairMode = Boolean(!isBlockMode && initialSqlDraft?.trim() && initialError?.trim());
   const previewText = isBlockMode ? blockMeta.blockSource : activeSql;
+  const hasReturnedDqlArtifact = Boolean(!isBlockMode && answer?.dqlArtifact?.source?.trim());
+  const copy = resolveSqlDraftDialogCopy({
+    mode,
+    isRepairMode,
+    hasReturnedDqlArtifact,
+  });
   const hasReviewOutput = Boolean(events.length > 0 || text || error || previewText || previewError);
   const showQuestionEditor = questionExpanded || !hasReviewOutput;
   const previewRowCount = previewResult?.rowCount ?? previewResult?.rows.length ?? 0;
@@ -239,7 +258,7 @@ export function AiSqlDraftDialog({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={mode === 'block' ? 'Build DQL block' : 'Build SQL draft'}
+      aria-label={copy.ariaLabel}
       style={overlayStyle}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -250,12 +269,10 @@ export function AiSqlDraftDialog({
           <div style={iconWrapStyle(t)}><Sparkles size={17} strokeWidth={2} /></div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary }}>
-              {isBlockMode ? 'Build DQL block' : isRepairMode ? 'Fix SQL draft' : 'Build SQL draft'}
+              {copy.heading}
             </div>
             <div style={{ fontSize: 12, color: t.textSecondary, marginTop: 2 }}>
-              {isBlockMode
-                ? 'Metadata, dbt, certified blocks, and schema first. Generated work stays review-required.'
-                : 'Metadata, dbt, semantic context, and schema first. Generated SQL stays review-required.'}
+              {copy.subtitle}
             </div>
           </div>
           <button type="button" onClick={onClose} title="Close" style={iconButtonStyle(t)}><X size={15} /></button>
@@ -331,11 +348,24 @@ export function AiSqlDraftDialog({
               {previewText ? (
                 <div style={draftPreviewWrapStyle(t)}>
                   {isBlockMode ? <pre style={blockPreviewStyle(t)}>{blockMeta.blockSource}</pre> : null}
+                  {hasReturnedDqlArtifact ? (
+                    <div style={dqlArtifactReviewStyle(t)}>
+                      <div style={draftReviewHeaderStyle(t)}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={draftTitleStyle(t)}>DQL artifact</div>
+                          <div style={draftSubtitleStyle(t)}>
+                            Review this draft source before using the compiled SQL preview.
+                          </div>
+                        </div>
+                      </div>
+                      <pre style={blockPreviewStyle(t)}>{blockMeta.blockSource}</pre>
+                    </div>
+                  ) : null}
                   <div style={draftReviewHeaderStyle(t)}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={draftTitleStyle(t)}>SQL draft</div>
+                      <div style={draftTitleStyle(t)}>{copy.draftTitle}</div>
                       <div style={draftSubtitleStyle(t)}>
-                        Review grain, joins, filters, and result shape before using this SQL.
+                        {copy.draftSubtitle}
                       </div>
                     </div>
                     <button
@@ -399,7 +429,7 @@ export function AiSqlDraftDialog({
                 </div>
               ) : (
                 <div style={emptySqlStyle(t)}>
-                  {running ? (isBlockMode ? 'Waiting for the agent to produce a block...' : 'Waiting for the agent to produce SQL...') : 'No SQL was returned. Add more schema context or ask for a specific metric/table grain.'}
+                  {running ? copy.waitingText : copy.emptyText}
                 </div>
               )}
               {events.some((event) => event.kind === 'thinking') && (
@@ -416,11 +446,7 @@ export function AiSqlDraftDialog({
 
         <div style={footerStyle(t)}>
           <span style={{ fontSize: 11, color: t.textMuted }}>
-            {isBlockMode
-              ? 'Use this as a draft block. Run, test, save, then certify.'
-              : isRepairMode
-                ? 'Review the repair, run preview, then apply the fixed SQL to this cell.'
-                : 'Use this as a SQL draft. Run, review joins/grain, then insert it into the notebook.'}
+            {copy.footerText}
           </span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="button" onClick={onClose} style={secondaryButtonStyle(t)}>Cancel</button>
@@ -430,11 +456,11 @@ export function AiSqlDraftDialog({
               </button>
             ) : (
               <button type="button" onClick={() => void generate()} disabled={!question.trim()} style={primaryButtonStyle(t, Boolean(question.trim()))}>
-                <Send size={13} /> {isBlockMode ? 'Generate block' : isRepairMode ? 'Generate replacement SQL' : 'Generate SQL'}
+                <Send size={13} /> {copy.generateLabel}
               </button>
             )}
             <button type="button" onClick={insert} disabled={!activeSql || running} style={insertButtonStyle(t, Boolean(activeSql) && !running)}>
-              <CheckCircle2 size={13} /> {insertLabel ?? (isBlockMode ? 'Use draft block' : 'Insert SQL cell')}
+              <CheckCircle2 size={13} /> {insertLabel ?? copy.insertLabel}
             </button>
           </div>
         </div>
@@ -488,13 +514,74 @@ function buildSqlRepairPrompt(question: string, sql: string, error: string, mode
   ].join('\n');
 }
 
+export function resolveSqlDraftDialogCopy(input: {
+  mode: AiSqlMode;
+  isRepairMode?: boolean;
+  hasReturnedDqlArtifact?: boolean;
+}): SqlDraftDialogCopy {
+  if (input.mode === 'block') {
+    return {
+      ariaLabel: 'Build DQL block',
+      heading: 'Build DQL block',
+      subtitle: 'Metadata, dbt, certified blocks, and schema first. Generated work stays review-required.',
+      draftTitle: 'DQL block draft',
+      draftSubtitle: 'Review DQL metadata, tests, lineage, grain, and result shape before certification.',
+      waitingText: 'Waiting for the agent to produce a DQL block...',
+      emptyText: 'No DQL block was returned. Add more business context or ask for a specific metric/table grain.',
+      footerText: 'Use this as a draft block. Run, test, save, then certify.',
+      generateLabel: 'Generate block',
+      insertLabel: 'Use draft block',
+    };
+  }
+  if (input.isRepairMode) {
+    return {
+      ariaLabel: 'Fix SQL preview',
+      heading: 'Fix SQL preview',
+      subtitle: 'Repair the notebook preview SQL, then review it before promoting the logic into DQL.',
+      draftTitle: 'SQL preview',
+      draftSubtitle: 'Review the repaired SQL and result shape before applying it to the notebook cell.',
+      waitingText: 'Waiting for the agent to repair SQL...',
+      emptyText: 'No repaired SQL was returned. Edit directly or add more error context.',
+      footerText: 'Review the repair, run preview, then apply the fixed SQL to this cell.',
+      generateLabel: 'Generate replacement SQL',
+      insertLabel: 'Insert SQL preview',
+    };
+  }
+  if (input.hasReturnedDqlArtifact) {
+    return {
+      ariaLabel: 'Review DQL artifact',
+      heading: 'Review DQL artifact',
+      subtitle: 'The returned DQL artifact is the review target. SQL is a bounded compiled preview for notebook execution.',
+      draftTitle: 'Compiled SQL preview',
+      draftSubtitle: 'Review the DQL artifact first; use this SQL only as the executable preview.',
+      waitingText: 'Waiting for the agent to produce a DQL artifact...',
+      emptyText: 'No compiled SQL preview was returned. Review the DQL artifact or ask for a narrower grain.',
+      footerText: 'Review the DQL artifact, run the compiled preview, then insert SQL only when you need a notebook cell.',
+      generateLabel: 'Regenerate preview',
+      insertLabel: 'Insert SQL preview',
+    };
+  }
+  return {
+    ariaLabel: 'Build SQL preview',
+    heading: 'Build SQL preview',
+    subtitle: 'Metadata, dbt, semantic context, and schema first. SQL stays review-required until promoted into DQL.',
+    draftTitle: 'SQL preview',
+    draftSubtitle: 'Review grain, joins, filters, and result shape before using this SQL.',
+    waitingText: 'Waiting for the agent to produce SQL preview...',
+    emptyText: 'No SQL preview was returned. Add more schema context or ask for a specific metric/table grain.',
+    footerText: 'Use this as a notebook SQL preview. For reusable analytics, promote the reviewed logic into DQL.',
+    generateLabel: 'Generate SQL preview',
+    insertLabel: 'Insert SQL preview',
+  };
+}
+
 function statusLabel(status: DraftRunStatus, isBlockMode: boolean, hasPreviewText: boolean): string {
-  if (status === 'generating') return isBlockMode ? 'Generating block' : 'Generating SQL';
+  if (status === 'generating') return isBlockMode ? 'Generating block' : 'Generating SQL preview';
   if (status === 'running') return 'Running preview';
   if (status === 'fixing') return 'Fixing SQL';
   if (status === 'ready') return isBlockMode ? 'Block preview ready' : 'SQL preview ready';
   if (status === 'error') return 'Needs fix';
-  if (hasPreviewText) return isBlockMode ? 'Block draft ready' : 'SQL draft ready';
+  if (hasPreviewText) return isBlockMode ? 'Block draft ready' : 'SQL preview ready';
   return 'AI response';
 }
 
@@ -507,14 +594,19 @@ function runStatusText(status: DraftRunStatus, result: QueryResult | null, error
   return 'Review required';
 }
 
-function buildBlockDraftMeta(
+export function buildBlockDraftMeta(
   question: string,
   answer: AgentAnswerEnvelope | null,
   proposal: BlockProposal | null,
   sql: string,
   text: string,
 ): AiSqlDraftMeta {
-  const title = proposal?.name ?? answer?.block?.name ?? answer?.result?.blockName ?? titleFromQuestion(question);
+  const answerDqlSource = answer?.dqlArtifact?.source?.trim();
+  const title = proposal?.name
+    ?? answer?.dqlArtifact?.name
+    ?? answer?.block?.name
+    ?? answer?.result?.blockName
+    ?? titleFromQuestion(question);
   const description = proposal?.description
     ?? answer?.answer
     ?? answer?.text
@@ -522,7 +614,7 @@ function buildBlockDraftMeta(
   const domain = proposal?.domain ?? answer?.block?.domain ?? inferDomain(question);
   const owner = proposal?.owner ?? answer?.evidence?.outcome?.owner ?? 'analytics';
   const tags = uniqueList([...(proposal?.tags ?? []), 'ai-generated', 'review-required']);
-  const blockSource = extractBlockDraft(text) || buildDqlBlockSource({
+  const blockSource = proposal?.dqlSource?.trim() || answerDqlSource || extractBlockDraft(text) || buildDqlBlockSource({
     name: title,
     domain,
     owner,
@@ -542,13 +634,14 @@ function buildBlockDraftMeta(
   };
 }
 
-function extractSqlDraft(answer: AgentAnswerEnvelope | null, proposal: BlockProposal | null, text: string): string {
+export function extractSqlDraft(answer: AgentAnswerEnvelope | null, proposal: BlockProposal | null, text: string): string {
   const sql = firstNonEmpty([
     answer?.proposedSql,
     answer?.sql,
     answer?.result?.sql,
     answer?.analysisPlan?.sql,
     proposal?.sql,
+    extractQueryFromBlock(answer?.dqlArtifact?.source ?? ''),
     extractQueryFromBlock(extractBlockDraft(text)),
     extractFencedSql(text),
   ]);
@@ -893,6 +986,17 @@ function draftPreviewWrapStyle(t: Theme): React.CSSProperties {
     padding: 14,
     borderTop: `1px solid ${t.headerBorder}`,
     background: t.cellBg,
+  };
+}
+
+function dqlArtifactReviewStyle(t: Theme): React.CSSProperties {
+  return {
+    display: 'grid',
+    gap: 8,
+    padding: 10,
+    border: `1px solid ${t.accent}38`,
+    borderRadius: 8,
+    background: `${t.accent}0f`,
   };
 }
 

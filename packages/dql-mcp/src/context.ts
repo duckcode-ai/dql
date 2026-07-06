@@ -120,7 +120,10 @@ function buildGraphFromManifest(manifest: DQLManifest): LineageGraph {
       domain: node.domain,
       owner: node.owner,
       status: node.status as 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification' | undefined,
-      metadata: node.metadata,
+      metadata: {
+        ...(node.metadata ?? {}),
+        ...(node.filePath ? { filePath: node.filePath } : {}),
+      },
       columns: node.columns,
     });
   }

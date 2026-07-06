@@ -1,6 +1,6 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
-import type { Business360ResultV2 } from '@duckcodeailabs/dql-core';
-import type { AgentConversationContext } from '../llm/types';
+import { normalizeDqlArtifactReference, type Business360ResultV2 } from '@duckcodeailabs/dql-core';
+import type { AgentAnswerCascade, AgentConversationContext, AgentConversationDqlArtifact } from '../llm/types';
 import type {
   Cell,
   NotebookFile,
@@ -307,6 +307,7 @@ export interface NotebookResearchRun {
   researchPlan?: NotebookResearchPlan;
   generatedSql?: string;
   reviewedSql?: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
   display?: DashboardDisplayMetadata;
   contextPackId?: string;
   routeDecision?: unknown;
@@ -395,6 +396,21 @@ export interface NotebookResearchListResponse {
     owners: number;
     intents: number;
     notebooks: number;
+  };
+  reviewMetrics: {
+    totalReviewCount: number;
+    openReviewCount: number;
+    terminalReviewCount: number;
+    draftCreatedCount: number;
+    certifiedCount: number;
+    completedCount: number;
+    rejectedCount: number;
+    draftCreationRate: number | null;
+    certifyConversionRate: number | null;
+    medianOpenReviewAgeMs: number | null;
+    medianTimeToDraftMs: number | null;
+    medianTimeToCertificationMs: number | null;
+    medianTimeToTerminalMs: number | null;
   };
   limit?: number;
   offset: number;
@@ -574,6 +590,7 @@ export interface CreateAgentRunInput {
 export interface RequestCertificationInput {
   question: string;
   generatedSql?: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
   notebookPath?: string;
   domain?: string;
   owner?: string;
@@ -633,6 +650,8 @@ export interface AgentConversationTurn {
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   sql?: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
+  cascade?: AgentAnswerCascade;
   result?: AgentConversationTurnResult;
   contract?: Record<string, unknown>;
   createdAt: string;
@@ -739,7 +758,7 @@ export interface NotebookResearchContextPreview {
 export type NotebookResearchUpdateInput =
   Partial<Pick<
     NotebookResearchRun,
-    'domain' | 'owner' | 'title' | 'question' | 'intent' | 'context' | 'evidence' | 'contextPackId' | 'routeDecision' | 'generatedSql' | 'reviewedSql' | 'warnings' | 'reviewStatus' | 'recommendation' | 'dqlPromotionAction'
+    'domain' | 'owner' | 'title' | 'question' | 'intent' | 'context' | 'evidence' | 'contextPackId' | 'routeDecision' | 'generatedSql' | 'reviewedSql' | 'dqlArtifact' | 'warnings' | 'reviewStatus' | 'recommendation' | 'dqlPromotionAction'
   >> & {
     sourceCell?: NotebookResearchSourceCellPayload;
     sourceCellId?: string | null;
@@ -1437,6 +1456,7 @@ function normalizeNotebookResearchRun(raw: NotebookResearchRun): NotebookResearc
     owner: typeof raw?.owner === 'string' && raw.owner.trim() ? raw.owner : undefined,
     warnings: Array.isArray(raw?.warnings) ? raw.warnings : [],
     dqlCandidateIds: Array.isArray(raw?.dqlCandidateIds) ? raw.dqlCandidateIds : [],
+    dqlArtifact: normalizeDqlArtifactReference(raw?.dqlArtifact),
     dqlPromotionAction: normalizeNotebookPromotionAction(raw?.dqlPromotionAction ?? raw?.dqlPromotion?.recommendedAction),
     dqlPromotion: normalizeNotebookDqlPromotion(raw?.dqlPromotion),
     researchPlan: normalizeNotebookResearchPlan(raw?.researchPlan),
@@ -1506,6 +1526,29 @@ function normalizeParameterPolicy(value: unknown): Array<{ name: string; policy:
 
 function finiteCount(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function nullableFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeNotebookResearchReviewMetrics(value: unknown): NotebookResearchListResponse['reviewMetrics'] {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return {
+    totalReviewCount: finiteCount(raw.totalReviewCount),
+    openReviewCount: finiteCount(raw.openReviewCount),
+    terminalReviewCount: finiteCount(raw.terminalReviewCount),
+    draftCreatedCount: finiteCount(raw.draftCreatedCount),
+    certifiedCount: finiteCount(raw.certifiedCount),
+    completedCount: finiteCount(raw.completedCount),
+    rejectedCount: finiteCount(raw.rejectedCount),
+    draftCreationRate: nullableFiniteNumber(raw.draftCreationRate),
+    certifyConversionRate: nullableFiniteNumber(raw.certifyConversionRate),
+    medianOpenReviewAgeMs: nullableFiniteNumber(raw.medianOpenReviewAgeMs),
+    medianTimeToDraftMs: nullableFiniteNumber(raw.medianTimeToDraftMs),
+    medianTimeToCertificationMs: nullableFiniteNumber(raw.medianTimeToCertificationMs),
+    medianTimeToTerminalMs: nullableFiniteNumber(raw.medianTimeToTerminalMs),
+  };
 }
 
 function normalizeNotebookResearchDiagnostics(raw: NotebookResearchDiagnostics): NotebookResearchDiagnostics {
@@ -2656,6 +2699,7 @@ export const api = {
           ? Math.max(0, Math.floor(raw.groupCounts.notebooks))
           : (Array.isArray(raw.notebooks) ? raw.notebooks.length : 0),
       },
+      reviewMetrics: normalizeNotebookResearchReviewMetrics(raw.reviewMetrics),
       limit: raw.limit,
       offset: typeof raw.offset === 'number' ? raw.offset : 0,
     };
@@ -2680,6 +2724,7 @@ export const api = {
     context?: unknown;
     generatedSql?: string;
     reviewedSql?: string;
+    dqlArtifact?: AgentConversationDqlArtifact;
     run?: boolean;
   }): Promise<NotebookResearchRun> {
     const raw = await request<{ run: NotebookResearchRun }>('/api/notebook/research', {
@@ -2776,7 +2821,7 @@ export const api = {
 
   async runNotebookResearch(id: string, input?: Partial<Pick<
     NotebookResearchRun,
-    'domain' | 'owner' | 'sourceCellFingerprint' | 'question' | 'intent' | 'context' | 'generatedSql' | 'reviewedSql'
+    'domain' | 'owner' | 'sourceCellFingerprint' | 'question' | 'intent' | 'context' | 'generatedSql' | 'reviewedSql' | 'dqlArtifact'
   >>): Promise<NotebookResearchRun> {
     const raw = await request<{ run: NotebookResearchRun }>(`/api/notebook/research/${encodeURIComponent(id)}/run`, {
       method: 'POST',

@@ -15,6 +15,13 @@ interface ParsedBlockDocument extends BlockFields {
   metric: string;
   metrics: string[];
   dimensions: string[];
+  requestedFilters: string[];
+  sourceDqlKind: string;
+  sourceDqlName: string;
+  sourceDqlPath: string;
+  sourceDqlHash: string;
+  sourceDqlMetrics: string[];
+  sourceDqlDimensions: string[];
   timeDimension: string;
   granularity: string;
   query: string;
@@ -263,6 +270,13 @@ function parseBlockDocument(content: string): ParsedBlockDocument | null {
     metric: str('metric'),
     metrics: parseArrayField(content, 'metrics'),
     dimensions: parseArrayField(content, 'dimensions'),
+    requestedFilters: parseArrayField(content, 'requested_filters'),
+    sourceDqlKind: str('source_dql_kind'),
+    sourceDqlName: str('source_dql_name'),
+    sourceDqlPath: str('source_dql_path'),
+    sourceDqlHash: str('source_dql_hash'),
+    sourceDqlMetrics: parseArrayField(content, 'source_dql_metrics'),
+    sourceDqlDimensions: parseArrayField(content, 'source_dql_dimensions'),
     timeDimension: str('time_dimension'),
     granularity: str('granularity'),
     query: queryMatch?.[1]?.trim() ?? '',
@@ -310,6 +324,7 @@ function normalizeBlockDocument(doc: ParsedBlockDocument): string {
   if (doc.llmContext) {
     lines.push(`  llmContext = "${escapeDqlString(doc.llmContext)}"`);
   }
+  appendSourceDqlMetadata(lines, doc);
 
   if (doc.blockType === 'semantic') {
     const semanticMetrics = doc.metrics.length > 0
@@ -330,6 +345,9 @@ function normalizeBlockDocument(doc: ParsedBlockDocument): string {
     }
     if (doc.granularity) {
       lines.push(`  granularity = "${escapeDqlString(doc.granularity)}"`);
+    }
+    if (doc.requestedFilters.length > 0) {
+      lines.push(`  requested_filters = [${Array.from(new Set(doc.requestedFilters)).map((filter) => `"${escapeDqlString(filter)}"`).join(', ')}]`);
     }
   }
 
@@ -352,6 +370,27 @@ function normalizeBlockDocument(doc: ParsedBlockDocument): string {
 
   lines.push('}');
   return lines.join('\n') + '\n';
+}
+
+function appendSourceDqlMetadata(lines: string[], doc: ParsedBlockDocument): void {
+  if (doc.sourceDqlKind) {
+    lines.push(`  source_dql_kind = "${escapeDqlString(doc.sourceDqlKind)}"`);
+  }
+  if (doc.sourceDqlName) {
+    lines.push(`  source_dql_name = "${escapeDqlString(doc.sourceDqlName)}"`);
+  }
+  if (doc.sourceDqlPath) {
+    lines.push(`  source_dql_path = "${escapeDqlString(doc.sourceDqlPath)}"`);
+  }
+  if (doc.sourceDqlHash) {
+    lines.push(`  source_dql_hash = "${escapeDqlString(doc.sourceDqlHash)}"`);
+  }
+  if (doc.sourceDqlMetrics.length > 0) {
+    lines.push(`  source_dql_metrics = [${Array.from(new Set(doc.sourceDqlMetrics)).map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
+  }
+  if (doc.sourceDqlDimensions.length > 0) {
+    lines.push(`  source_dql_dimensions = [${Array.from(new Set(doc.sourceDqlDimensions)).map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
+  }
 }
 
 function buildVisualizationSection(chartConfig: CellChartConfig): string {

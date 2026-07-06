@@ -117,7 +117,7 @@ export class KGStore {
    * arrays inside one transaction. Feedback rows are preserved across
    * rebuilds because they're index inputs.
    */
-  rebuild(nodes: KGNode[], edges: KGEdge[]): void {
+  rebuild(nodes: KGNode[], edges: KGEdge[], options: { fingerprint?: string } = {}): void {
     const insertNode = this.db.prepare(`
       INSERT INTO kg_nodes (
         node_id, kind, name, domain, status, owner, description, llm_context,
@@ -161,6 +161,13 @@ export class KGStore {
         insertEdge.run(e.src, e.dst, e.kind, e.weight ?? 1.0);
       }
       this.db.prepare(`INSERT OR REPLACE INTO kg_meta (key, value) VALUES ('built_at', ?)`).run(now);
+      this.db.prepare(`INSERT OR REPLACE INTO kg_meta (key, value) VALUES ('node_count', ?)`).run(String(nodes.length));
+      this.db.prepare(`INSERT OR REPLACE INTO kg_meta (key, value) VALUES ('edge_count', ?)`).run(String(edges.length));
+      if (options.fingerprint) {
+        this.db.prepare(`INSERT OR REPLACE INTO kg_meta (key, value) VALUES ('fingerprint', ?)`).run(options.fingerprint);
+      } else {
+        this.db.prepare(`DELETE FROM kg_meta WHERE key = 'fingerprint'`).run();
+      }
     });
     txn();
   }
@@ -377,6 +384,7 @@ function rowToNode(row: {
     llmContext: row.llm_context ?? undefined,
     tags: safeJSON(row.tags_json, [] as string[]),
     examples: safeJSON(row.examples_json, [] as KGNode['examples'] extends infer T ? T : never) as KGNode['examples'],
+    sql: metadata.sql,
     sourcePath: row.source_path ?? undefined,
     gitSha: row.git_sha ?? undefined,
     sourceTier: metadata.sourceTier,
@@ -417,6 +425,7 @@ function nodeMetadata(node: KGNode): Partial<KGNode> {
     'sourceTier',
     'certification',
     'provenance',
+    'sql',
     'freshness',
     'businessOutcome',
     'businessOwner',
@@ -497,6 +506,6 @@ function sanitizeFtsQuery(raw: string): string {
     .map((t) => t.replace(/[^\p{L}\p{N}_]/gu, ''))
     .filter((t) => t.length > 1 && !STOP_WORDS.has(t.toLowerCase()))
     .slice(0, 48)
-    .map((t) => `"${t}"`)
+    .map((t) => `"${t}"*`)
     .join(' OR ');
 }

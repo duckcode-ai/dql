@@ -1,9 +1,7 @@
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const listMetricsInput = {
-  domain: z.string().optional().describe('Filter to a single domain.'),
-};
+export const listMetricsInput = zodInputShapeForTool('list_metrics');
 
 export function listMetrics(ctx: DQLContext, args: { domain?: string }) {
   const metrics = ctx.semanticLayer.listMetrics(args.domain);
@@ -21,9 +19,7 @@ export function listMetrics(ctx: DQLContext, args: { domain?: string }) {
   };
 }
 
-export const listDimensionsInput = {
-  domain: z.string().optional().describe('Filter to a single domain.'),
-};
+export const listDimensionsInput = zodInputShapeForTool('list_dimensions');
 
 export function listDimensions(ctx: DQLContext, args: { domain?: string }) {
   const dims = ctx.semanticLayer.listDimensions(args.domain);

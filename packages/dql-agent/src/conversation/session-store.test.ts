@@ -43,6 +43,26 @@ describe('ConversationStore', () => {
       trustLabel: 'certified',
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       contextPackId: 'ctx_abc',
+      cascade: {
+        terminalLane: 'semantic',
+        routeTier: 'semantic_metric',
+        label: 'Lane 2 semantic DQL artifact was terminal',
+        artifactKind: 'semantic_block',
+        outcome: {
+          lane: 'semantic',
+          routeTier: 'semantic_metric',
+          metrics: ['revenue'],
+          dimensions: ['category'],
+          rowCount: 2,
+        },
+      },
+      dqlArtifact: {
+        kind: 'semantic_block',
+        name: 'food_vs_drink_revenue',
+        source: 'block "food_vs_drink_revenue" {\n  type = "semantic"\n  metric = "revenue"\n}',
+        metrics: ['revenue'],
+        dimensions: ['category'],
+      },
       result: {
         columns: Array.from({ length: 40 }, (_, i) => `col_${i}`),
         rowsSample: Array.from({ length: 20 }, () => ['Food', 240877]),
@@ -61,6 +81,22 @@ describe('ConversationStore', () => {
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });
     expect(stored.sourceCertifiedBlock).toBe('food_vs_drink_revenue');
     expect(stored.contextPackId).toBe('ctx_abc');
+    expect(stored.cascade).toMatchObject({
+      terminalLane: 'semantic',
+      routeTier: 'semantic_metric',
+      outcome: {
+        lane: 'semantic',
+        metrics: ['revenue'],
+        dimensions: ['category'],
+      },
+    });
+    expect(stored.dqlArtifact).toMatchObject({
+      kind: 'semantic_block',
+      name: 'food_vs_drink_revenue',
+      metrics: ['revenue'],
+      dimensions: ['category'],
+      source: expect.stringContaining('metric = "revenue"'),
+    });
   });
 
   it('searches turns by keyword, scoped to a thread', () => {

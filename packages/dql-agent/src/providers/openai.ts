@@ -1,6 +1,8 @@
 import type {
   AgentProvider,
   AgentMessage,
+  AgentToolDefinition,
+  ProviderToolLoopOptions,
   ProviderRunOptions,
 } from './types.js';
 import { consumeSse } from './claude.js';
@@ -86,6 +88,129 @@ export class OpenAIProvider implements AgentProvider {
     throw new Error(`openai: ${lastStatus} ${lastBody}`);
   }
 
+  async generateWithTools(
+    messages: AgentMessage[],
+    tools: AgentToolDefinition[],
+    options: ProviderToolLoopOptions = {},
+  ): Promise<string> {
+    if (!this.apiKey && !this.allowNoApiKey) {
+      throw new Error('openai: OPENAI_API_KEY is not set');
+    }
+    if (tools.length === 0) return this.generate(messages, options);
+
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const model = options.model ?? this.defaultModel;
+    const completionTokenBudget = options.maxTokens ?? 1024;
+    const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
+    const chatMessages: Array<Record<string, unknown>> = messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+    const toolDefs = tools.map((tool) => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
+
+    const maxToolCalls = Math.max(0, Math.min(30, options.maxToolCalls ?? 8));
+    let toolCallsUsed = 0;
+    let lastText = '';
+    let useMaxCompletionTokens = false;
+    let includeTemperature = true;
+
+    for (;;) {
+      const bodyBase = {
+        model,
+        messages: chatMessages,
+        tools: toolDefs,
+        tool_choice: 'auto',
+        ...openaiReasoning(model, options),
+      };
+      const body: Record<string, unknown> = {
+        ...bodyBase,
+        [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: completionTokenBudget,
+      };
+      if (includeTemperature) body.temperature = options.temperature ?? 0.2;
+
+      const res = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+      if (!res.ok) {
+        const errorBody = await res.text().catch(() => res.statusText);
+        if (!useMaxCompletionTokens && shouldRetryWithMaxCompletionTokens(errorBody)) {
+          useMaxCompletionTokens = true;
+          continue;
+        }
+        if (includeTemperature && shouldRetryWithoutTemperature(errorBody)) {
+          includeTemperature = false;
+          continue;
+        }
+        throw new Error(`openai: ${res.status} ${errorBody}`);
+      }
+
+      const message = extractOpenAIChatMessage(await res.json());
+      if (message.content) lastText = message.content;
+      if (!message.toolCalls.length) return message.content ?? lastText;
+      if (toolCallsUsed + message.toolCalls.length > maxToolCalls) {
+        options.onToolCall?.({
+          name: 'tool_budget_exhausted',
+          input: {
+            requestedToolCalls: message.toolCalls.map((call) => call.name),
+            maxToolCalls,
+            toolCallsUsed,
+          },
+          output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
+          isError: true,
+        });
+        return lastText || JSON.stringify({
+          summary: `Tool-call budget exhausted after ${toolCallsUsed} call(s).`,
+        });
+      }
+
+      chatMessages.push({
+        role: 'assistant',
+        content: message.content ?? null,
+        tool_calls: message.toolCalls.map((call) => ({
+          id: call.id,
+          type: 'function',
+          function: { name: call.name, arguments: call.argumentsJson },
+        })),
+      });
+
+      for (const call of message.toolCalls) {
+        toolCallsUsed += 1;
+        const tool = toolMap.get(call.name);
+        const args = parseToolArguments(call.argumentsJson);
+        let output: unknown;
+        let isError = false;
+        if (!tool) {
+          output = { error: `Unknown tool: ${call.name}` };
+          isError = true;
+        } else {
+          try {
+            output = await tool.run(args);
+          } catch (err) {
+            output = { error: err instanceof Error ? err.message : String(err) };
+            isError = true;
+          }
+        }
+        options.onToolCall?.({ name: call.name, input: args, output, isError });
+        chatMessages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: compactToolOutput(output),
+        });
+      }
+    }
+  }
+
   async generateStream(
     messages: AgentMessage[],
     options: ProviderRunOptions,
@@ -145,4 +270,46 @@ function extractOpenAIChatContent(json: unknown): string {
     choices?: Array<{ message?: { content?: string } }>;
   };
   return parsed.choices?.[0]?.message?.content ?? '';
+}
+
+function extractOpenAIChatMessage(json: unknown): {
+  content?: string;
+  toolCalls: Array<{ id: string; name: string; argumentsJson: string }>;
+} {
+  const message = (json as {
+    choices?: Array<{
+      message?: {
+        content?: string | null;
+        tool_calls?: Array<{
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
+      };
+    }>;
+  }).choices?.[0]?.message;
+  return {
+    content: typeof message?.content === 'string' ? message.content : undefined,
+    toolCalls: (message?.tool_calls ?? []).flatMap((call, index) => {
+      const name = call.function?.name;
+      if (!name) return [];
+      return [{
+        id: call.id ?? `tool_${index}`,
+        name,
+        argumentsJson: call.function?.arguments ?? '{}',
+      }];
+    }),
+  };
+}
+
+function parseToolArguments(raw: string): unknown {
+  try {
+    return raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    return { _raw: raw };
+  }
+}
+
+function compactToolOutput(output: unknown): string {
+  const text = typeof output === 'string' ? output : JSON.stringify(output);
+  return text.length > 12000 ? `${text.slice(0, 12000)}...` : text;
 }

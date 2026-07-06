@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConversationStore, defaultConversationPath } from './session-store.js';
-import { recallRelevantTurns } from './snapshot.js';
+import { buildConversationSnapshot, recallRelevantTurns } from './snapshot.js';
 import { MemoryStore, defaultMemoryPath } from '../memory/sqlite-memory.js';
 
 describe('semantic recall over conversation history', () => {
@@ -41,6 +41,66 @@ describe('semantic recall over conversation history', () => {
       excludeTurnIds: [first.id],
     });
     expect(hits).toHaveLength(0);
+  });
+
+  it('keeps prior result refs rich enough for follow-up grounding', () => {
+    const thread = store.createThread();
+    store.appendTurn(thread.id, {
+      question: 'give me product and supply info',
+      answerSummary: 'Product to supply breakdown.',
+      sql: 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies',
+      dqlArtifact: {
+        kind: 'sql_block',
+        name: 'product_supply_breakdown',
+        source: 'block "product_supply_breakdown" {\n  type = "custom"\n}',
+      },
+      cascade: {
+        terminalLane: 'generated',
+        routeTier: 'generated_sql',
+        label: 'Lane 3 generated DQL artifact was terminal',
+        artifactKind: 'sql_block',
+        outcome: {
+          lane: 'generated',
+          routeTier: 'generated_sql',
+          hasSqlPreview: true,
+          executionStatus: 'executed',
+          rowCount: 65,
+        },
+      },
+      result: {
+        columns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+        rowCount: 65,
+        dimensionValues: {
+          product_id: ['BEV-001', 'JAF-001'],
+          supply_id: ['SUP-005', 'SUP-009'],
+        },
+        measureColumns: ['supply_cost'],
+      },
+    });
+
+    const snapshot = buildConversationSnapshot(store, thread.id, {
+      question: 'can you include product details with previous results and give final',
+    });
+
+    expect(snapshot?.recentTurns[0]).toMatchObject({
+      question: 'give me product and supply info',
+      resultColumns: ['product_id', 'supply_id', 'supply_name', 'supply_cost'],
+      resultRowCount: 65,
+      sourceSql: 'SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies',
+      dqlArtifact: {
+        kind: 'sql_block',
+        name: 'product_supply_breakdown',
+      },
+      cascade: {
+        terminalLane: 'generated',
+        routeTier: 'generated_sql',
+        outcome: {
+          lane: 'generated',
+          executionStatus: 'executed',
+          rowCount: 65,
+        },
+      },
+    });
   });
 
   it('promotion is the only path into durable memory (isolation)', () => {

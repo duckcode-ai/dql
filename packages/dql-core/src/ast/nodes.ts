@@ -360,12 +360,28 @@ export interface BlockDeclNode extends BaseNode {
   proposedEntity?: string;
   sourceQuestion?: string;
   sourceBlock?: string;
+  sourceDqlKind?: string;
+  sourceDqlName?: string;
+  sourceDqlPath?: string;
+  sourceDqlHash?: string;
+  sourceDqlMetrics?: string[];
+  sourceDqlDimensions?: string[];
+  sourceDqlFilters?: string[];
+  sourceDqlTimeDimension?: string;
+  sourceDqlGranularity?: string;
+  sourceDqlOrderBy?: string[];
+  sourceDqlLimit?: number;
   followupKind?: string;
   contextPackId?: string;
   routeIntent?: string;
+  timeDimension?: string;
+  granularity?: string;
+  draftPath?: string;
   upstreamRefs?: string[];
   requestedFilters?: string[];
   requestedDimensions?: string[];
+  orderBy?: string[];
+  limit?: number;
   validationWarnings?: string[];
 }
 

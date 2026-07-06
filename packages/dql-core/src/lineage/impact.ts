@@ -53,6 +53,11 @@ export type SemanticVerdict = 'semantic' | 'non-semantic';
 export interface ChangedBlock {
   /** Block name (matches `block:<name>` in the lineage graph). */
   name: string;
+  /**
+   * Optional exact lineage node id. When omitted, impact analysis keeps the
+   * historic block-only behavior and resolves `block:${name}`.
+   */
+  nodeId?: string;
   /** Whether the change affects what the block computes. */
   verdict: SemanticVerdict;
   /** Field paths that changed (for block-changed diffs). */
@@ -143,9 +148,13 @@ export interface DomainTrustDelta {
 
 export interface RecertItem {
   id: string;
+  type: string;
   name: string;
   domain?: string;
   owner?: string;
+  status?: string;
+  filePath?: string;
+  recommendedStatus?: 'pending_recertification';
   /** The changed block(s) whose semantics this artifact transitively depends on. */
   invalidatedBy: string[];
 }
@@ -202,7 +211,7 @@ export function computeImpact(
   const sourceIds: string[] = [];
   const sourceNameById = new Map<string, string>();
   for (const block of semantic) {
-    const id = `block:${block.name}`;
+    const id = block.nodeId ?? `block:${block.name}`;
     if (graph.getNode(id)) {
       sourceIds.push(id);
       sourceNameById.set(id, block.name);
@@ -241,9 +250,13 @@ export function computeImpact(
     }
     requiresRecert.push({
       id: node.id,
+      type: node.type,
       name: node.name,
       domain: node.domain,
       owner: node.owner,
+      status: node.status,
+      filePath: typeof node.metadata?.filePath === 'string' ? node.metadata.filePath : undefined,
+      recommendedStatus: 'pending_recertification',
       invalidatedBy: [...(reachedBy.get(node.id) ?? new Set())].sort(),
     });
   }

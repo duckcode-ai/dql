@@ -15,6 +15,8 @@ import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import type Database from 'better-sqlite3';
 import { sanitizeFtsQuery } from '../memory/fts-query.js';
+import type { AgentDqlArtifactReference } from '../answer-loop.js';
+import type { CascadeAnswerResult } from '../cascade/cascade.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -31,6 +33,7 @@ const MAX_DIMENSION_KEYS = 8;
 const MAX_DIMENSION_VALUES = 24;
 const MAX_ANSWER_TEXT = 4000;
 const MAX_SUMMARY = 1200;
+const MAX_DQL_SOURCE = 3000;
 
 export interface ConversationThread {
   id: string;
@@ -65,6 +68,8 @@ export interface ConversationTurnInput {
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   sql?: string;
+  dqlArtifact?: AgentDqlArtifactReference;
+  cascade?: CascadeAnswerResult;
   result?: ConversationTurnResult;
   /** The turn's answer contract / requested shape, for working-state reduction. */
   contract?: Record<string, unknown>;
@@ -129,6 +134,8 @@ export class ConversationStore {
         source_certified_block TEXT,
         context_pack_id        TEXT,
         sql                    TEXT,
+        dql_artifact_json      TEXT NOT NULL DEFAULT '{}',
+        cascade_json           TEXT NOT NULL DEFAULT '{}',
         result_json            TEXT NOT NULL DEFAULT '{}',
         contract_json          TEXT NOT NULL DEFAULT '{}',
         created_at             TEXT NOT NULL,
@@ -147,6 +154,14 @@ export class ConversationStore {
         tokenize = 'porter unicode61'
       );
     `);
+    this.ensureColumn('conversation_turns', 'dql_artifact_json', "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn('conversation_turns', 'cascade_json', "TEXT NOT NULL DEFAULT '{}'");
+  }
+
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((item) => item.name === column)) return;
+    this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`).run();
   }
 
   createThread(input: { surface?: string; title?: string; notebookPath?: string } = {}): ConversationThread {
@@ -200,10 +215,12 @@ export class ConversationStore {
     const now = new Date().toISOString();
     const id = `trn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const result = capTurnResult(input.result);
+    const dqlArtifact = capDqlArtifact(input.dqlArtifact);
     const turn: ConversationTurn = {
       ...input,
       answerText: input.answerText?.slice(0, MAX_ANSWER_TEXT),
       answerSummary: input.answerSummary?.slice(0, MAX_SUMMARY),
+      dqlArtifact,
       result,
       id,
       threadId,
@@ -219,8 +236,8 @@ export class ConversationStore {
         INSERT INTO conversation_turns (
           id, thread_id, seq, question, answer_summary, answer_text, route,
           trust_label, certification, source_certified_block, context_pack_id,
-          sql, result_json, contract_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sql, dql_artifact_json, cascade_json, result_json, contract_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         turn.id,
         threadId,
@@ -234,6 +251,8 @@ export class ConversationStore {
         turn.sourceCertifiedBlock ?? null,
         turn.contextPackId ?? null,
         turn.sql ?? null,
+        JSON.stringify(turn.dqlArtifact ?? {}),
+        JSON.stringify(turn.cascade ?? {}),
         JSON.stringify(turn.result ?? {}),
         JSON.stringify(turn.contract ?? {}),
         now,
@@ -241,6 +260,12 @@ export class ConversationStore {
       const tags = [
         turn.sourceCertifiedBlock ?? '',
         turn.route ?? '',
+        turn.cascade?.terminalLane ?? '',
+        turn.cascade?.routeTier ?? '',
+        turn.dqlArtifact?.name ?? '',
+        turn.dqlArtifact?.kind ?? '',
+        ...(turn.dqlArtifact?.metrics ?? []),
+        ...(turn.dqlArtifact?.dimensions ?? []),
         ...(turn.result?.columns ?? []),
         ...Object.keys(turn.result?.dimensionValues ?? {}),
       ].filter(Boolean).join(' ');
@@ -364,6 +389,29 @@ function capTurnResult(result: ConversationTurnResult | undefined): Conversation
   };
 }
 
+function capDqlArtifact(artifact: AgentDqlArtifactReference | undefined): AgentDqlArtifactReference | undefined {
+  if (!artifact?.source?.trim()) return undefined;
+  return {
+    kind: artifact.kind,
+    source: artifact.source.slice(0, MAX_DQL_SOURCE),
+    name: artifact.name?.slice(0, 180),
+    sourcePath: artifact.sourcePath?.slice(0, 400),
+    metrics: artifact.metrics?.slice(0, MAX_COLUMNS),
+    dimensions: artifact.dimensions?.slice(0, MAX_COLUMNS),
+    filters: artifact.filters?.slice(0, MAX_DIMENSION_KEYS).map((filter) => ({
+      dimension: filter.dimension.slice(0, 180),
+      operator: filter.operator.slice(0, 80),
+      values: filter.values.slice(0, MAX_DIMENSION_VALUES).map((value) => value.slice(0, 240)),
+    })),
+    timeDimension: artifact.timeDimension
+      ? {
+          name: artifact.timeDimension.name.slice(0, 180),
+          granularity: artifact.timeDimension.granularity.slice(0, 80),
+        }
+      : undefined,
+  };
+}
+
 type ThreadRow = {
   id: string;
   surface: string;
@@ -390,6 +438,8 @@ type TurnRow = {
   source_certified_block: string | null;
   context_pack_id: string | null;
   sql: string | null;
+  dql_artifact_json: string;
+  cascade_json: string;
   result_json: string;
   contract_json: string;
   created_at: string;
@@ -412,6 +462,8 @@ function rowToThread(row: ThreadRow): ConversationThread {
 
 function rowToTurn(row: TurnRow): ConversationTurn {
   const result = safeJSON(row.result_json, {} as ConversationTurnResult);
+  const dqlArtifact = safeJSON(row.dql_artifact_json, {} as AgentDqlArtifactReference);
+  const cascade = safeJSON(row.cascade_json, {} as CascadeAnswerResult);
   const contract = safeJSON(row.contract_json, {} as Record<string, unknown>);
   return {
     id: row.id,
@@ -426,6 +478,8 @@ function rowToTurn(row: TurnRow): ConversationTurn {
     sourceCertifiedBlock: row.source_certified_block ?? undefined,
     contextPackId: row.context_pack_id ?? undefined,
     sql: row.sql ?? undefined,
+    dqlArtifact: Object.keys(dqlArtifact).length > 0 ? capDqlArtifact(dqlArtifact) : undefined,
+    cascade: Object.keys(cascade).length > 0 ? cascade : undefined,
     result: Object.keys(result).length > 0 ? result : undefined,
     contract: Object.keys(contract).length > 0 ? contract : undefined,
     createdAt: row.created_at,

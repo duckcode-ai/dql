@@ -27,6 +27,10 @@ import {
   type SemanticLayer,
   type ColumnLineageEntry,
   type ColumnSource,
+  normalizeDqlArtifactReference,
+  composeEffectiveTrust,
+  type DqlArtifactReference,
+  type ResolvedTrustLabel,
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
@@ -41,6 +45,11 @@ import {
   type CertifiedBlockApplicability,
 } from './analysis-planner.js';
 import { extractSimpleSelectShape, sourceSqlShapeColumns } from './sql-shape.js';
+import {
+  buildRuntimeValueIndex,
+  normalizeValueIndexText,
+  type RuntimeValueIndexEntry,
+} from '../grounding/value-index.js';
 import {
   grainMatches,
   requestedGrainFromPlan,
@@ -209,9 +218,19 @@ export interface MetadataFollowUpContext {
   dimensions?: string[];
   priorResultColumns?: string[];
   priorResultValues?: Record<string, string[]>;
+  priorResultRef?: {
+    id: string;
+    question?: string;
+    columns: string[];
+    rowCount?: number;
+    sourceSql?: string;
+  };
+  priorDqlArtifact?: MetadataDqlArtifactReference;
   priorLimit?: number;
   priorMeasures?: string[];
 }
+
+export type MetadataDqlArtifactReference = DqlArtifactReference;
 
 export type MetadataAgentIntent =
   | 'exact_certified_lookup'
@@ -263,6 +282,10 @@ export interface RuntimeSchemaSnapshot {
   tables: RuntimeSchemaTable[];
 }
 
+export interface RuntimeValueMatch extends RuntimeValueIndexEntry {
+  score: number;
+}
+
 export interface MetadataMissingContext {
   kind: 'metric' | 'table' | 'baseline' | 'dimension' | 'filter' | 'semantic' | 'value' | 'metadata';
   message: string;
@@ -275,6 +298,7 @@ export interface MetadataAllowedSqlRelation {
   objectKey?: string;
   source: string;
   columns: RuntimeSchemaColumn[];
+  columnCompleteness?: 'complete' | 'partial';
 }
 
 export interface MetadataAllowedSqlContext {
@@ -319,6 +343,8 @@ export interface MetadataRouteDecision {
   /** Structured full answer-shape fit verdict for the best-matching certified candidate, when evaluated. */
   blockFit?: CertifiedBlockFit;
   trustLabel: MetadataTrustLabel;
+  /** Canonical shared trust vocabulary; additive companion to legacy `trustLabel`. */
+  trustLabelInfo?: ResolvedTrustLabel;
   reviewStatus: 'certified' | 'draft_ready' | 'needs_review' | 'none' | 'conflict';
   exactObjectKey?: string;
   certifiedApplicability?: CertifiedBlockApplicability;
@@ -374,6 +400,8 @@ export interface LocalContextPack {
   mode: 'question' | 'build' | 'debug' | 'certify' | 'impact' | 'explain';
   questionPlan: AnalysisQuestionPlan;
   trustLabel: MetadataTrustLabel;
+  /** Canonical shared trust vocabulary; additive companion to legacy `trustLabel`. */
+  trustLabelInfo?: ResolvedTrustLabel;
   objects: MetadataObject[];
   edges: MetadataEdge[];
   queryRuns: QueryRunSummary[];
@@ -411,7 +439,7 @@ export interface LocalContextPack {
   /** Conflicting approved hints surfaced for review (advisory). */
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
-    strategy: 'sqlite_fts' | 'reused_pack_refinement';
+    strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context';
     selectedObjects: number;
     selectedEvidence: Array<{
       objectKey: string;
@@ -438,6 +466,7 @@ export interface LocalContextPack {
       rightColumn: string;
       reason: string;
       confidence: number;
+      source?: 'dbt_lineage' | 'metadata_guess' | 'kg_path' | 'datalex';
     }>;
     schemaShapeCandidates?: Array<{
       objectKey: string;
@@ -522,6 +551,9 @@ interface SchemaShapeCandidate {
   reasons: string[];
 }
 
+const SCHEMA_SHAPE_CACHE_LIMIT = 64;
+const schemaShapeCandidateCache = new Map<string, SchemaShapeCandidate[]>();
+
 interface RawDbtCatalogEntry {
   uniqueId: string;
   name: string;
@@ -531,6 +563,7 @@ interface RawDbtCatalogEntry {
   relation: string;
   database?: string;
   schema?: string;
+  catalogColumns?: RuntimeSchemaColumn[];
 }
 
 const OBJECT_PRIORITY: Record<string, number> = {
@@ -548,11 +581,14 @@ const OBJECT_PRIORITY: Record<string, number> = {
   dbt_column: 11,
   warehouse_table: 12,
   warehouse_column: 12.5,
+  runtime_value: 12.2,
   notebook: 13,
   dashboard: 14,
   app: 15,
   domain: 16,
 };
+
+const COLUMN_OBJECT_TYPES = new Set(['dbt_column', 'warehouse_column', 'runtime_column', 'runtime_value']);
 
 export function defaultMetadataPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'cache', 'metadata.sqlite');
@@ -668,12 +704,20 @@ export async function buildLocalContextPack(
       return { ...reusedPayload, id: reusedId };
     }
     const priorSeedObjects = priorPack && priorPackFresh
-      && (request.conversationTopicRelation === 'continuation' || request.conversationTopicRelation === 'return')
+      && (
+        request.conversationTopicRelation === 'continuation'
+        || request.conversationTopicRelation === 'refinement'
+        || request.conversationTopicRelation === 'return'
+      )
       ? priorPack.objects.slice(0, 24)
       : [];
 
     const runtimeSnapshot = request.runtimeSchemaSnapshot ?? catalog.latestRuntimeSchemaSnapshot();
     const runtimeObjects = runtimeSnapshot ? runtimeSchemaObjects(runtimeSnapshot) : [];
+    const runtimeValueObjects = runtimeValueMatchObjects(catalog.searchRuntimeValues(
+      metadataValueSearchTerms(request.question, questionPlan, followUp),
+      32,
+    ));
     const selectedObjects = selectedContextObjects(request.selectedContext);
     const followUpObjects = followUpContextObjects(followUp);
     const followUpSourceObjects = catalog.getObjectsByKeys(followUpSourceObjectKeys(followUp));
@@ -688,13 +732,13 @@ export async function buildLocalContextPack(
         limit: Math.max(request.limit ?? 80, 20),
       })
     ));
-    const schemaShapeCandidates = schemaShapeCandidateObjects(catalog, questionPlan, request, runtimeObjects);
+    const schemaShapeCandidates = schemaShapeCandidateObjects(catalog, questionPlan, request, mergeObjects([...runtimeObjects, ...runtimeValueObjects]));
     const schemaShapeObjects = schemaShapeCandidates.map((candidate) => candidate.object);
     const exact = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
     const ranked = rankMetadataObjects({
       rows: mergeObjects(exact
-        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects, ...priorSeedObjects]
-        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects, ...priorSeedObjects]),
+        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]
+        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 80,
@@ -710,7 +754,7 @@ export async function buildLocalContextPack(
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
     const graphObjects = catalog.getObjectsByKeys(edgeObjectKeys);
     const rankedObjects = rankMetadataObjects({
-      rows: mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...selectedObjects]),
+      rows: mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects]),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 120,
@@ -722,13 +766,17 @@ export async function buildLocalContextPack(
     );
     const objects = mergeObjects([...rankedObjects, ...sqlParentObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
+    const contextEdges = mergeMetadataEdges([
+      ...edgeWalk,
+      ...catalog.edgesForKeys(objectKeys, 2),
+    ]);
     const queryRuns = catalog.queryRunsForObjectKeys(objectKeys, 20);
     const diagnostics = catalog.diagnostics();
     const warnings = buildWarnings(diagnostics, objects);
     const trustLabel = deriveTrust(objects);
-    const citations = buildCitations(objects, edgeWalk);
-    const evidenceSummaries = buildEvidenceSummaries(objects, edgeWalk, queryRuns, diagnostics);
-    const allowedSqlContext = sortAllowedSqlContextForAnalysisPlan(buildAllowedSqlContext(objects, edgeWalk), questionPlan);
+    const citations = buildCitations(objects, contextEdges);
+    const evidenceSummaries = buildEvidenceSummaries(objects, contextEdges, queryRuns, diagnostics);
+    const allowedSqlContext = sortAllowedSqlContextForAnalysisPlan(buildAllowedSqlContext(objects, contextEdges), questionPlan);
     const selectedRelations = allowedSqlContext.relations.slice(0, 24).map((relation, index) => {
       const scored = scoreAllowedSqlRelationWithAnalysisPlan(relation, questionPlan);
       return {
@@ -741,7 +789,7 @@ export async function buildLocalContextPack(
         rank: index + 1,
       };
     });
-    const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext);
+    const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext, contextEdges);
     const evidenceRoles = buildEvidenceRoles(objects, queryRuns);
     const reranked = rankMetadataObjects({
       rows: mergeObjects([...searchRows, ...schemaShapeObjects, ...objects]),
@@ -751,7 +799,7 @@ export async function buildLocalContextPack(
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
     const compileConflicts = catalog.compileConflicts();
-    const routeDecision = await planContextPackRoute({
+    const routeDecision = withMetadataTrustLabelInfo(await planContextPackRoute({
       request,
       objects,
       allowedSqlContext,
@@ -761,7 +809,7 @@ export async function buildLocalContextPack(
       questionPlan,
       compileConflicts,
       rankedObjects: reranked.ranked,
-    });
+    }));
     const certifiedCandidateFits = buildCertifiedCandidateFitDiagnostics({
       request,
       objects,
@@ -786,8 +834,9 @@ export async function buildLocalContextPack(
       mode,
       questionPlan,
       trustLabel,
+      trustLabelInfo: metadataTrustLabelInfo(trustLabel),
       objects,
-      edges: edgeWalk,
+      edges: contextEdges,
       queryRuns,
       citations,
       evidenceSummaries,
@@ -1031,6 +1080,30 @@ export class MetadataCatalog {
         captured_at  TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_runtime_schema_snapshots_captured ON runtime_schema_snapshots(captured_at DESC);
+
+      CREATE TABLE IF NOT EXISTS runtime_value_index (
+        value_key        TEXT PRIMARY KEY,
+        relation         TEXT NOT NULL,
+        schema_name      TEXT,
+        table_name       TEXT,
+        column_name      TEXT NOT NULL,
+        column_type      TEXT,
+        value            TEXT NOT NULL,
+        normalized_value TEXT NOT NULL,
+        source           TEXT,
+        captured_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_runtime_value_index_relation ON runtime_value_index(relation, column_name);
+      CREATE INDEX IF NOT EXISTS idx_runtime_value_index_captured ON runtime_value_index(captured_at DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS runtime_value_fts USING fts5(
+        value_key UNINDEXED,
+        relation,
+        column_name,
+        value,
+        normalized_value,
+        tokenize = 'porter unicode61'
+      );
 
       CREATE TABLE IF NOT EXISTS metadata_state (
         key   TEXT PRIMARY KEY,
@@ -1404,17 +1477,71 @@ export class MetadataCatalog {
       tables: normalizeRuntimeSchemaTables(snapshot.tables).slice(0, 500),
     };
     const id = `schema_${Date.parse(capturedAt) || Date.now()}`;
-    this.db.prepare(`
+    const valueEntries = buildRuntimeValueIndex(cleanSnapshot);
+    const insertSnapshot = this.db.prepare(`
       INSERT OR REPLACE INTO runtime_schema_snapshots (
         id, source, payload_json, captured_at
       ) VALUES (?, ?, ?, ?)
-    `).run(
-      id,
-      cleanSnapshot.source ?? null,
-      JSON.stringify(cleanSnapshot),
-      capturedAt,
-    );
+    `);
+    const insertValue = this.db.prepare(`
+      INSERT OR REPLACE INTO runtime_value_index (
+        value_key, relation, schema_name, table_name, column_name, column_type,
+        value, normalized_value, source, captured_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertValueFts = this.db.prepare(`
+      INSERT INTO runtime_value_fts (value_key, relation, column_name, value, normalized_value)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const setState = this.db.prepare(`
+      INSERT OR REPLACE INTO metadata_state (key, value) VALUES (?, ?)
+    `);
+    const txn = this.db.transaction(() => {
+      insertSnapshot.run(
+        id,
+        cleanSnapshot.source ?? null,
+        JSON.stringify(cleanSnapshot),
+        capturedAt,
+      );
+      this.db.prepare('DELETE FROM runtime_value_fts').run();
+      this.db.prepare('DELETE FROM runtime_value_index').run();
+      for (const entry of valueEntries) {
+        insertValue.run(
+          entry.valueKey,
+          entry.relation,
+          entry.schema ?? null,
+          entry.tableName ?? null,
+          entry.columnName,
+          entry.columnType ?? null,
+          entry.value,
+          entry.normalizedValue,
+          entry.source ?? null,
+          entry.capturedAt,
+        );
+        insertValueFts.run(entry.valueKey, entry.relation, entry.columnName, entry.value, entry.normalizedValue);
+      }
+      setState.run('runtime_value_index_count', String(valueEntries.length));
+      setState.run('runtime_value_index_captured_at', capturedAt);
+    });
+    txn();
     return cleanSnapshot;
+  }
+
+  searchRuntimeValues(terms: string[], limit = 40): RuntimeValueMatch[] {
+    const cleanTerms = uniqueStrings(terms.map(normalizeValueIndexText).filter(Boolean)).slice(0, 8);
+    const query = sanitizeFtsQuery(cleanTerms.join(' '));
+    if (!query) return [];
+    const rows = this.db.prepare(`
+      SELECT v.*,
+             bm25(runtime_value_fts) AS rank
+      FROM runtime_value_fts
+      JOIN runtime_value_index AS v ON v.value_key = runtime_value_fts.value_key
+      WHERE runtime_value_fts MATCH ?
+      ORDER BY rank
+      LIMIT ?
+    `).all(query, Math.max(1, limit)) as RuntimeValueIndexRow[];
+    return rows.map((row) => rowToRuntimeValueMatch(row, cleanTerms))
+      .sort((a, b) => b.score - a.score || a.relation.localeCompare(b.relation) || a.columnName.localeCompare(b.columnName));
   }
 
   latestRuntimeSchemaSnapshot(): RuntimeSchemaSnapshot | null {
@@ -1565,6 +1692,20 @@ interface QueryRunRow {
   error_code: string | null;
   payload_json: string;
   created_at: string;
+}
+
+interface RuntimeValueIndexRow {
+  value_key: string;
+  relation: string;
+  schema_name: string | null;
+  table_name: string | null;
+  column_name: string;
+  column_type: string | null;
+  value: string;
+  normalized_value: string;
+  source: string | null;
+  captured_at: string;
+  rank?: number;
 }
 
 function loadAgentManifest(projectRoot: string): DQLManifest {
@@ -1753,6 +1894,7 @@ function addDbtDagObjects(
         materialized: model.materialized,
         dependsOn: model.dependsOn,
         columns: model.columns ?? [],
+        columnCompleteness: 'partial',
       }),
     };
     objects.set(objectKey, mergeObject(objects.get(objectKey), object));
@@ -1771,6 +1913,7 @@ function addDbtDagObjects(
           uniqueId: model.uniqueId,
           type: column.type,
           relation,
+          columnCompleteness: 'partial',
         }),
       }));
       const edge = {
@@ -1828,6 +1971,7 @@ function addRawDbtManifestCatalogObjects(
     return;
   }
 
+  const catalogColumns = loadRawDbtCatalogColumns(join(dirname(manifestPath), 'catalog.json'));
   const entries: RawDbtCatalogEntry[] = [];
   for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
     if (node.resource_type !== 'model') continue;
@@ -1844,6 +1988,7 @@ function addRawDbtManifestCatalogObjects(
       relation: [database, schema, name].filter(Boolean).join('.'),
       database,
       schema,
+      catalogColumns: catalogColumns.get(uniqueId),
     };
     entries.push(entry);
     addRawDbtCatalogObject({
@@ -1867,6 +2012,7 @@ function addRawDbtManifestCatalogObjects(
       relation: [database, schema, name].filter(Boolean).join('.'),
       database,
       schema,
+      catalogColumns: catalogColumns.get(uniqueId),
     };
     entries.push(entry);
     addRawDbtCatalogObject({
@@ -1891,7 +2037,10 @@ function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
   const database = input.database ?? stringValue(input.node.database);
   const schema = input.schema ?? stringValue(input.node.schema);
   const relation = input.relation || [database, schema, input.name].filter(Boolean).join('.');
-  const columns = rawDbtColumns(input.node.columns);
+  const columns = input.catalogColumns && input.catalogColumns.length > 0
+    ? input.catalogColumns
+    : rawDbtColumns(input.node.columns);
+  const columnCompleteness = input.catalogColumns && input.catalogColumns.length > 0 ? 'complete' : 'partial';
   input.objects.set(input.objectKey, mergeObject(existing, {
     objectKey: input.objectKey,
     objectType: input.objectType,
@@ -1911,6 +2060,7 @@ function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
       dependsOn: rawDbtDependsOn(input.node),
       tags: metadataStringArray(input.node.tags),
       catalogOnly: existing ? undefined : true,
+      columnCompleteness,
       columns,
     }),
   }));
@@ -1933,6 +2083,7 @@ function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
         uniqueId: input.uniqueId,
         type: column.type,
         relation,
+        columnCompleteness: 'partial',
         catalogOnly: existingColumn ? undefined : true,
       }),
     }));
@@ -2101,6 +2252,38 @@ function rawDbtDependsOn(node: Record<string, unknown>): string[] {
     ? node.depends_on as Record<string, unknown>
     : null;
   return metadataStringArray(dependsOn?.nodes);
+}
+
+function loadRawDbtCatalogColumns(catalogPath: string): Map<string, RuntimeSchemaColumn[]> {
+  const out = new Map<string, RuntimeSchemaColumn[]>();
+  let raw: { nodes?: Record<string, Record<string, unknown>>; sources?: Record<string, Record<string, unknown>> };
+  try {
+    raw = JSON.parse(readFileSync(catalogPath, 'utf-8')) as typeof raw;
+  } catch {
+    return out;
+  }
+  for (const entries of [raw.nodes ?? {}, raw.sources ?? {}]) {
+    for (const [uniqueId, node] of Object.entries(entries)) {
+      const columns = rawDbtCatalogColumns(node.columns);
+      if (columns.length > 0) out.set(uniqueId, columns);
+    }
+  }
+  return out;
+}
+
+function rawDbtCatalogColumns(value: unknown): RuntimeSchemaColumn[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const record = entry as Record<string, unknown>;
+    const name = stringValue(record.name) ?? stringValue(record.column_name) ?? key;
+    if (!name) return [];
+    return [{
+      name,
+      type: stringValue(record.type) ?? stringValue(record.data_type),
+      description: stringValue(record.comment) ?? stringValue(record.description),
+    }];
+  });
 }
 
 function rawDbtColumns(value: unknown): RuntimeSchemaColumn[] {
@@ -2655,7 +2838,7 @@ async function planContextPackRoute(input: {
   // prompt. Only fires when both conflicting sides are actually among the
   // selected candidates for THIS question, so non-conflicting asks are
   // unaffected even when a conflict exists elsewhere in the project.
-  const routeConflict = pickRouteConflict(input.compileConflicts ?? [], input.rankedObjects ?? [], input.objects);
+  const routeConflict = pickRouteConflict(input.compileConflicts ?? [], input.rankedObjects ?? [], input.objects, input.request.question);
   if (routeConflict) {
     const selectedEvidenceForConflict = input.evidenceRoles.slice(0, 16);
     return {
@@ -3350,6 +3533,7 @@ function evidenceRoleForObject(object: MetadataObject): MetadataEvidenceRole {
   if (object.objectType === 'dql_term' || object.objectType === 'business_view') return 'business_context';
   if (object.objectType === 'dbt_model' || object.objectType === 'dbt_source' || object.objectType === 'dbt_column') return 'dbt_model';
   if (object.objectType === 'warehouse_table' || object.objectType === 'warehouse_column') return 'warehouse_schema';
+  if (object.objectType === 'runtime_value') return 'value_match';
   if (object.objectType === 'runtime_table' || object.objectType === 'runtime_column') return 'runtime_schema';
   if (object.objectType === 'selected_context') return 'selected_context';
   if (object.objectType === 'skill') return 'skill_guidance';
@@ -3360,6 +3544,7 @@ function evidenceReasonForObject(object: MetadataObject): string {
   if (object.objectType === 'dql_block' && isCertifiedMetadataObject(object)) return 'Certified block can be exact answer only when grain matches; otherwise it is context.';
   if (object.objectType.startsWith('semantic_')) return 'Semantic definition can ground metric and dimension meaning.';
   if (object.objectType.startsWith('dbt_')) return 'dbt metadata supplies physical model and column context.';
+  if (object.objectType === 'runtime_value') return 'Observed runtime value matched a literal in the question.';
   if (object.objectType === 'runtime_table' || object.objectType === 'runtime_column') return 'Runtime schema supplies executable table and column context.';
   return reasonForObject(object);
 }
@@ -3373,7 +3558,7 @@ function sqlParentObjectsForSelectedColumns(
   const parentByRelation = new Map<string, Array<{ object: MetadataObject; relation: MetadataAllowedSqlRelation }>>();
   for (const object of candidateObjects) {
     if (!isSqlParentObject(object) || selectedKeys.has(object.objectKey)) continue;
-    const relation = metadataRelationFromObject(object);
+    const relation = metadataObjectToAllowedSqlRelation(object);
     const key = relation ? normalizeRelationKey(relation.relation) : '';
     if (!relation || !key) continue;
     const existing = parentByRelation.get(key) ?? [];
@@ -3384,7 +3569,7 @@ function sqlParentObjectsForSelectedColumns(
   const scoredParents = new Map<string, { object: MetadataObject; score: number }>();
   for (const object of selectedObjects) {
     if (!isSqlColumnObject(object)) continue;
-    const relation = metadataRelationFromObject(object);
+    const relation = metadataObjectToAllowedSqlRelation(object);
     const key = relation ? normalizeRelationKey(relation.relation) : '';
     if (!key) continue;
     for (const parent of parentByRelation.get(key) ?? []) {
@@ -3412,8 +3597,56 @@ function schemaShapeCandidateObjects(
 ): SchemaShapeCandidate[] {
   if (!questionPlan.needsGeneratedSql) return [];
   const candidates = new Map<string, SchemaShapeCandidate>();
+  for (const candidate of cachedCatalogSchemaShapeCandidates(catalog, questionPlan, request)) {
+    candidates.set(candidate.object.objectKey, candidate);
+  }
   const considerObject = (object: MetadataObject): void => {
-    const relation = metadataRelationFromObject(object);
+    const relation = metadataObjectToAllowedSqlRelation(object);
+    if (!relation || relation.columns.length === 0) return;
+    const shape = schemaShapeMatchForQuestion(relation, questionPlan);
+    if (shape.score <= 0) return;
+    const relationScore = scoreAllowedSqlRelationWithAnalysisPlan(relation, questionPlan);
+    const objectScore = scoreMetadataObjectWithAnalysisPlan(object, questionPlan);
+    const score = Number((shape.score + relationScore.score + objectScore.score).toFixed(3));
+    if (score < schemaShapeMinimumScore(questionPlan)) return;
+    candidates.set(object.objectKey, {
+      object,
+      relation,
+      score,
+      reasons: [
+        ...shape.reasons,
+        ...relationScore.reasons.filter((reason) =>
+          /analysis terms|metric terms|dimension terms|columns match|inspected\/projected columns/i.test(reason)
+        ).slice(0, 3),
+      ],
+    });
+    trimSchemaShapeCandidateMap(candidates, 64);
+  };
+  for (const object of mergeObjects(runtimeObjects.filter(isSqlParentObject))) {
+    considerObject(object);
+  }
+  return Array.from(candidates.values())
+    .sort((a, b) => b.score - a.score || a.relation.relation.localeCompare(b.relation.relation))
+    .slice(0, 24);
+}
+
+function cachedCatalogSchemaShapeCandidates(
+  catalog: MetadataCatalog,
+  questionPlan: AnalysisQuestionPlan,
+  request: BuildLocalContextPackRequest,
+): SchemaShapeCandidate[] {
+  const cacheKey = schemaShapeCacheKey(catalog, questionPlan);
+  if (cacheKey) {
+    const cached = schemaShapeCandidateCache.get(cacheKey);
+    if (cached) {
+      schemaShapeCandidateCache.delete(cacheKey);
+      schemaShapeCandidateCache.set(cacheKey, cached);
+      return cached;
+    }
+  }
+  const candidates = new Map<string, SchemaShapeCandidate>();
+  const considerObject = (object: MetadataObject): void => {
+    const relation = metadataObjectToAllowedSqlRelation(object);
     if (!relation || relation.columns.length === 0) return;
     const shape = schemaShapeMatchForQuestion(relation, questionPlan);
     if (shape.score <= 0) return;
@@ -3440,12 +3673,24 @@ function schemaShapeCandidateObjects(
   }, (objects) => {
     for (const object of objects) considerObject(object);
   });
-  for (const object of mergeObjects(runtimeObjects.filter(isSqlParentObject))) {
-    considerObject(object);
-  }
-  return Array.from(candidates.values())
+  const result = Array.from(candidates.values())
     .sort((a, b) => b.score - a.score || a.relation.relation.localeCompare(b.relation.relation))
     .slice(0, 24);
+  if (cacheKey) {
+    schemaShapeCandidateCache.set(cacheKey, result);
+    while (schemaShapeCandidateCache.size > SCHEMA_SHAPE_CACHE_LIMIT) {
+      const oldest = schemaShapeCandidateCache.keys().next().value;
+      if (!oldest) break;
+      schemaShapeCandidateCache.delete(oldest);
+    }
+  }
+  return result;
+}
+
+function schemaShapeCacheKey(catalog: MetadataCatalog, questionPlan: AnalysisQuestionPlan): string | null {
+  const fingerprint = catalog.state('fingerprint');
+  if (!fingerprint) return null;
+  return `${fingerprint}:${sha256(stableStringify(questionPlan))}`;
 }
 
 function schemaShapeScanBatchSize(request: BuildLocalContextPackRequest): number {
@@ -3643,10 +3888,12 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
       byRelation.set(key, { ...relation, columns: dedupeRuntimeColumns(relation.columns).slice(0, 120) });
       return;
     }
+    const columnCompleteness = mergeRelationCompletenessForCatalog(existing, relation);
     byRelation.set(key, {
       ...existing,
       objectKey: existing.objectKey ?? relation.objectKey,
       source: mergeRelationSources(existing.source, relation.source),
+      columnCompleteness,
       columns: mergeRelationColumns(existing, relation).slice(0, 120),
     });
   };
@@ -3655,7 +3902,7 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
     if (object.objectType === 'warehouse_table' && !warehouseTableHasTrustedReference(object, objectsByKey)) {
       continue;
     }
-    const relation = metadataRelationFromObject(object);
+    const relation = metadataObjectToAllowedSqlRelation(object);
     if (relation) addRelation(relation);
     if (object.objectType === 'dql_block' && !isCertifiedMetadataObject(object)) {
       continue;
@@ -3666,6 +3913,7 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         name: table.split('.').at(-1) ?? table,
         objectKey: object.objectKey,
         source: 'certified block dependency',
+        columnCompleteness: 'partial',
         columns: [],
       });
     }
@@ -3675,6 +3923,7 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         name: table.split('.').at(-1) ?? table,
         objectKey: object.objectKey,
         source: 'certified block SQL reference',
+        columnCompleteness: 'partial',
         columns: [],
       });
     }
@@ -3686,6 +3935,7 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
         name: shape.relation.split('.').at(-1) ?? shape.relation,
         objectKey: object.objectKey,
         source: 'certified source SQL shape',
+        columnCompleteness: 'partial',
         columns: sourceSqlShapeColumns(sourceSql),
       });
     }
@@ -3695,9 +3945,9 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
     if (edge.edgeType !== 'maps_to_dbt_model' && edge.edgeType !== 'uses_dbt_model') continue;
     const from = objectsByKey.get(edge.fromKey);
     const to = objectsByKey.get(edge.toKey);
-    const fromRelation = from ? metadataRelationFromObject(from) : null;
-    const toRelation = to ? metadataRelationFromObject(to) : null;
-    if (fromRelation && toRelation) addRelation({ ...fromRelation, columns: toRelation.columns, source: 'dbt mapped warehouse table' });
+    const fromRelation = from ? metadataObjectToAllowedSqlRelation(from) : null;
+    const toRelation = to ? metadataObjectToAllowedSqlRelation(to) : null;
+    if (fromRelation && toRelation) addRelation({ ...fromRelation, columns: toRelation.columns, columnCompleteness: toRelation.columnCompleteness, source: 'dbt mapped warehouse table' });
   }
 
   applyLineageColumnAliases(byRelation, objectsByKey, edges);
@@ -3735,7 +3985,7 @@ function applyLineageColumnAliases(
     const from = objectsByKey.get(edge.fromKey);
     const to = objectsByKey.get(edge.toKey);
     if (!from || !to) continue;
-    const targetRelation = metadataRelationFromObject(to);
+    const targetRelation = metadataObjectToAllowedSqlRelation(to);
     if (!targetRelation) continue;
     const alias = semanticAliasFromLineageOutput(from);
     if (!alias || namesEqualForCatalog(alias, to.name)) continue;
@@ -3812,12 +4062,39 @@ function firstExampleQuestion(examples: unknown): string | undefined {
 
 function buildSelectedJoinPaths(
   allowedSqlContext: MetadataAllowedSqlContext,
+  edges: MetadataEdge[],
 ): NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']> {
   const relations = allowedSqlContext.relations
     .filter((relation) => relation.columns.some((column) => isJoinKeyColumnForCatalog(column.name)))
     .slice(0, 16);
   const joins: NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']> = [];
   const seen = new Set<string>();
+  const lookup = buildSelectedRelationLookup(relations);
+  const pushJoin = (join: NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']>[number]) => {
+    const key = catalogJoinDedupeKey(join.leftRelation, join.leftColumn, join.rightRelation, join.rightColumn);
+    if (seen.has(key)) return;
+    seen.add(key);
+    joins.push(join);
+  };
+
+  for (const edge of edges) {
+    if (edge.edgeType !== 'depends_on') continue;
+    const left = lookupRelationForCatalogEdge(edge.fromKey, lookup);
+    const right = lookupRelationForCatalogEdge(edge.toKey, lookup);
+    if (!left || !right || normalizeRelationKey(left.relation) === normalizeRelationKey(right.relation)) continue;
+    const join = pickCatalogJoinColumns(left, right);
+    if (!join) continue;
+    pushJoin({
+      leftRelation: left.relation,
+      leftColumn: join.leftColumn,
+      rightRelation: right.relation,
+      rightColumn: join.rightColumn,
+      reason: `dbt lineage: ${left.name} depends_on ${right.name}; ${catalogJoinReason(join.leftColumn, join.rightColumn, join.confidence)}`,
+      confidence: Math.max(join.confidence, 0.98),
+      source: 'dbt_lineage',
+    });
+  }
+
   for (let leftIndex = 0; leftIndex < relations.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < relations.length; rightIndex += 1) {
       const left = relations[leftIndex]!;
@@ -3825,27 +4102,87 @@ function buildSelectedJoinPaths(
       const join = pickCatalogJoinColumns(left, right);
       if (!join) continue;
       const oriented = orientCatalogJoinPath(left, right, join);
-      const key = [
-        normalizeRelationKey(oriented.leftRelation.relation),
-        oriented.leftColumn.toLowerCase(),
-        normalizeRelationKey(oriented.rightRelation.relation),
-        oriented.rightColumn.toLowerCase(),
-      ].join('|');
-      if (seen.has(key)) continue;
-      seen.add(key);
-      joins.push({
+      pushJoin({
         leftRelation: oriented.leftRelation.relation,
         leftColumn: oriented.leftColumn,
         rightRelation: oriented.rightRelation.relation,
         rightColumn: oriented.rightColumn,
         reason: catalogJoinReason(join.leftColumn, join.rightColumn, join.confidence),
         confidence: join.confidence,
+        source: 'metadata_guess',
       });
     }
   }
   return joins
-    .sort((a, b) => b.confidence - a.confidence || a.leftRelation.localeCompare(b.leftRelation))
+    .sort((a, b) => joinSourceRank(a.source) - joinSourceRank(b.source) || b.confidence - a.confidence || a.leftRelation.localeCompare(b.leftRelation))
     .slice(0, 12);
+}
+
+function buildSelectedRelationLookup(relations: MetadataAllowedSqlRelation[]): {
+  byObjectKey: Map<string, MetadataAllowedSqlRelation>;
+  byLookupKey: Map<string, MetadataAllowedSqlRelation[]>;
+} {
+  const byObjectKey = new Map<string, MetadataAllowedSqlRelation>();
+  const byLookupKey = new Map<string, MetadataAllowedSqlRelation[]>();
+  const addLookup = (key: string | undefined, relation: MetadataAllowedSqlRelation) => {
+    const normalized = normalizeRelationKey(key ?? '');
+    if (!normalized) return;
+    const existing = byLookupKey.get(normalized) ?? [];
+    if (!existing.some((candidate) => normalizeRelationKey(candidate.relation) === normalizeRelationKey(relation.relation))) {
+      existing.push(relation);
+    }
+    byLookupKey.set(normalized, existing);
+  };
+  for (const relation of relations) {
+    if (relation.objectKey) byObjectKey.set(relation.objectKey, relation);
+    addLookup(relation.relation, relation);
+    addLookup(relation.name, relation);
+    addLookup(relationTailKey(relation.relation), relation);
+  }
+  return { byObjectKey, byLookupKey };
+}
+
+function lookupRelationForCatalogEdge(
+  edgeKey: string,
+  lookup: ReturnType<typeof buildSelectedRelationLookup>,
+): MetadataAllowedSqlRelation | undefined {
+  const exact = lookup.byObjectKey.get(edgeKey);
+  if (exact) return exact;
+  const tail = edgeKey.split(':').at(-1);
+  const candidates = [
+    edgeKey,
+    tail,
+    tail ? relationTailKey(tail) : undefined,
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeRelationKey(candidate ?? '');
+    if (!normalized) continue;
+    const matches = lookup.byLookupKey.get(normalized);
+    if (matches?.length === 1) return matches[0];
+  }
+  return undefined;
+}
+
+function catalogJoinDedupeKey(
+  leftRelation: string,
+  leftColumn: string,
+  rightRelation: string,
+  rightColumn: string,
+): string {
+  return [
+    `${normalizeRelationKey(leftRelation)}.${normalizeColumnKeyForCatalog(leftColumn)}`,
+    `${normalizeRelationKey(rightRelation)}.${normalizeColumnKeyForCatalog(rightColumn)}`,
+  ].sort().join('|');
+}
+
+function joinSourceRank(source: NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']>[number]['source']): number {
+  switch (source) {
+    case 'dbt_lineage': return 0;
+    case 'datalex': return 1;
+    case 'kg_path': return 2;
+    case 'metadata_guess': return 3;
+    default: return 4;
+  }
 }
 
 function orientCatalogJoinPath(
@@ -3990,6 +4327,7 @@ function coalesceRelationAliases(relations: MetadataAllowedSqlRelation[]): Metad
       ...target,
       objectKey: target.objectKey ?? relation.objectKey,
       source: mergeRelationSources(target.source, relation.source),
+      columnCompleteness: mergeRelationCompletenessForCatalog(target, relation),
       columns: mergeRelationColumns(target, relation).slice(0, 120),
     });
     skipped.add(relationKey);
@@ -4013,6 +4351,21 @@ function mergeRelationColumns(
     return dedupeRuntimeColumns([...existing.columns, ...incoming.columns]);
   }
   return dedupeRuntimeColumns([...existing.columns, ...incoming.columns]);
+}
+
+function mergeRelationCompletenessForCatalog(
+  existing: Pick<MetadataAllowedSqlRelation, 'columnCompleteness' | 'columns'>,
+  incoming: Pick<MetadataAllowedSqlRelation, 'columnCompleteness' | 'columns'>,
+): MetadataAllowedSqlRelation['columnCompleteness'] {
+  if (relationCompletenessValue(existing) === 'complete' || relationCompletenessValue(incoming) === 'complete') {
+    return 'complete';
+  }
+  return 'partial';
+}
+
+function relationCompletenessValue(relation: Pick<MetadataAllowedSqlRelation, 'columnCompleteness' | 'columns'>): 'complete' | 'partial' {
+  if (relation.columnCompleteness) return relation.columnCompleteness;
+  return relation.columns.length === 0 ? 'partial' : 'complete';
 }
 
 function relationSourceIncludes(source: string | undefined, value: string): boolean {
@@ -4046,7 +4399,24 @@ function warehouseTableHasTrustedReference(
   });
 }
 
-function metadataRelationFromObject(object: MetadataObject): MetadataAllowedSqlRelation | null {
+export function metadataObjectToAllowedSqlRelation(object: MetadataObject): MetadataAllowedSqlRelation | null {
+  if (object.objectType === 'runtime_value') {
+    const relation = metadataPayloadString(object, 'relation');
+    const columnName = metadataPayloadString(object, 'column');
+    if (!relation || !columnName) return null;
+    return {
+      relation,
+      name: relation.split('.').at(-1) ?? relation,
+      objectKey: object.objectKey,
+      source: 'runtime value index',
+      columnCompleteness: 'partial',
+      columns: [{
+        name: columnName,
+        type: metadataPayloadString(object, 'type'),
+        sampleValues: metadataStringArray(object.payload?.sampleValues),
+      }],
+    };
+  }
   if (object.objectType === 'dbt_column' || object.objectType === 'runtime_column' || object.objectType === 'warehouse_column') {
     const relation = metadataPayloadString(object, 'relation');
     if (!relation) return null;
@@ -4054,12 +4424,13 @@ function metadataRelationFromObject(object: MetadataObject): MetadataAllowedSqlR
       relation,
       name: relation.split('.').at(-1) ?? relation,
       objectKey: object.objectKey,
-      source: object.objectType === 'runtime_column'
-        ? 'runtime schema snapshot'
-        : object.objectType === 'warehouse_column'
-          ? 'DQL block column lineage'
-          : 'dbt manifest',
-      columns: [{
+	      source: object.objectType === 'runtime_column'
+	        ? 'runtime schema snapshot'
+	        : object.objectType === 'warehouse_column'
+	          ? 'DQL block column lineage'
+	          : 'dbt manifest',
+	      columnCompleteness: 'partial',
+	      columns: [{
         name: object.name,
         type: metadataPayloadString(object, 'type') ?? metadataPayloadString(object, 'data_type'),
         description: object.description,
@@ -4074,8 +4445,17 @@ function metadataRelationFromObject(object: MetadataObject): MetadataAllowedSqlR
     name: relation.split('.').at(-1) ?? object.name,
     objectKey: object.objectKey,
     source: object.objectType === 'runtime_table' ? 'runtime schema snapshot' : object.sourceSystem ?? 'local metadata catalog',
+    columnCompleteness: relationColumnCompletenessFromObject(object),
     columns: metadataRuntimeColumns(object.payload?.columns),
   };
+}
+
+function relationColumnCompletenessFromObject(object: MetadataObject): MetadataAllowedSqlRelation['columnCompleteness'] {
+  if (object.objectType === 'runtime_table') return 'complete';
+  if (object.payload?.columnCompleteness === 'complete' || object.payload?.catalogColumnCompleteness === 'complete') return 'complete';
+  if (object.payload?.columnCompleteness === 'partial' || object.payload?.catalogColumnCompleteness === 'partial') return 'partial';
+  if (object.objectType === 'warehouse_table') return 'partial';
+  return 'partial';
 }
 
 function runtimeSchemaObjects(snapshot: RuntimeSchemaSnapshot): MetadataObject[] {
@@ -4094,6 +4474,7 @@ function runtimeSchemaObjects(snapshot: RuntimeSchemaSnapshot): MetadataObject[]
       payload: compactObject({
         relation,
         schema: table.schema,
+        columnCompleteness: 'complete',
         columns: table.columns,
       }),
       updatedAt: capturedAt,
@@ -4109,12 +4490,38 @@ function runtimeSchemaObjects(snapshot: RuntimeSchemaSnapshot): MetadataObject[]
       payload: compactObject({
         relation,
         type: column.type,
+        columnCompleteness: 'partial',
         sampleValues: column.sampleValues,
       }),
       updatedAt: capturedAt,
     }));
     return [tableObject, ...columns];
   });
+}
+
+function runtimeValueMatchObjects(matches: RuntimeValueMatch[]): MetadataObject[] {
+  return matches.map((match) => ({
+    objectKey: match.valueKey,
+    objectType: 'runtime_value',
+    name: `${match.columnName} = ${match.value}`,
+    fullName: `${match.relation}.${match.columnName}:${match.value}`,
+    description: `Observed value "${match.value}" in ${match.relation}.${match.columnName}.`,
+    status: 'runtime_observed',
+    sourceSystem: match.source ?? 'runtime value index',
+    score: match.score,
+    payload: compactObject({
+      relation: match.relation,
+      schema: match.schema,
+      table: match.tableName,
+      column: match.columnName,
+      type: match.columnType,
+      value: match.value,
+      normalizedValue: match.normalizedValue,
+      sampleValues: [match.value],
+      capturedAt: match.capturedAt,
+    }),
+    updatedAt: match.capturedAt,
+  }));
 }
 
 function selectedContextObjects(value: unknown): MetadataObject[] {
@@ -4162,8 +4569,45 @@ function normalizeFollowUpContext(value: unknown): MetadataFollowUpContext | nul
     dimensions: metadataStringArray(record.dimensions),
     priorResultColumns: metadataStringArray(record.priorResultColumns),
     priorResultValues: metadataStringRecordArray(record.priorResultValues),
+    priorResultRef: normalizePriorResultRef(record.priorResultRef),
+    priorDqlArtifact: normalizePriorDqlArtifact(record.priorDqlArtifact),
     priorLimit: typeof record.priorLimit === 'number' ? record.priorLimit : undefined,
     priorMeasures: metadataStringArray(record.priorMeasures),
+  };
+}
+
+function normalizePriorResultRef(value: unknown): MetadataFollowUpContext['priorResultRef'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const id = stringValue(record.id);
+  const columns = metadataStringArray(record.columns) ?? [];
+  if (!id || columns.length === 0) return undefined;
+  const rowCount = typeof record.rowCount === 'number' && Number.isFinite(record.rowCount)
+    ? record.rowCount
+    : undefined;
+  const sourceSql = stringValue(record.sourceSql);
+  return {
+    id,
+    question: stringValue(record.question),
+    columns: columns.slice(0, 32),
+    rowCount,
+    sourceSql: sourceSql ? sourceSql.slice(0, 1200) : undefined,
+  };
+}
+
+function normalizePriorDqlArtifact(value: unknown): MetadataDqlArtifactReference | undefined {
+  const artifact = normalizeDqlArtifactReference(value);
+  if (!artifact) return undefined;
+  return {
+    ...artifact,
+    source: artifact.source.slice(0, 3000),
+    metrics: artifact.metrics?.slice(0, 32),
+    dimensions: artifact.dimensions?.slice(0, 32),
+    filters: artifact.filters
+      ?.filter((filter) => filter.values.length > 0)
+      .slice(0, 12)
+      .map((filter) => ({ ...filter, values: filter.values.slice(0, 12) })),
+    orderBy: artifact.orderBy?.slice(0, 12),
   };
 }
 
@@ -4207,6 +4651,11 @@ function followUpContextObjects(followUp: MetadataFollowUpContext | null): Metad
     ...(followUp.filters ?? []),
     ...(followUp.dimensions ?? []),
     ...(followUp.priorResultColumns ?? []),
+    followUp.priorResultRef?.id ? `result:${followUp.priorResultRef.id}` : '',
+    followUp.priorResultRef?.question ?? '',
+    ...(followUp.priorResultRef?.columns ?? []),
+    followUp.priorResultRef?.sourceSql ? followUp.priorResultRef.sourceSql.slice(0, 600) : '',
+    ...dqlArtifactSearchTerms(followUp.priorDqlArtifact, { includeSource: true }),
     ...Object.entries(followUp.priorResultValues ?? {}).flatMap(([key, values]) => [key, ...values]),
   ].join(' ');
   return [{
@@ -4229,11 +4678,68 @@ function followUpContextObjects(followUp: MetadataFollowUpContext | null): Metad
       dimensions: followUp.dimensions,
       priorResultColumns: followUp.priorResultColumns,
       priorResultValues: followUp.priorResultValues,
+      priorResultRef: followUp.priorResultRef,
+      priorDqlArtifact: followUp.priorDqlArtifact,
       priorLimit: followUp.priorLimit,
       priorMeasures: followUp.priorMeasures,
     }),
   }];
 }
+
+function metadataValueSearchTerms(
+  question: string,
+  questionPlan: AnalysisQuestionPlan,
+  followUp: MetadataFollowUpContext | null,
+): string[] {
+  const terms: string[] = [
+    ...questionPlan.entities.map((entity) => entity.text),
+    ...questionPlan.filterTerms,
+    ...(followUp?.filters ?? []),
+    ...Object.values(followUp?.priorResultValues ?? {}).flat(),
+  ];
+  for (const match of question.matchAll(/["']([^"']{2,120})["']/g)) terms.push(match[1]);
+  for (const match of question.matchAll(/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g)) terms.push(match[0]);
+  for (const match of question.matchAll(/\b[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+){1,4}\b/g)) terms.push(match[0]);
+  for (const match of question.matchAll(/\b(?:for|named|called|only|where|customer|user|account|product|region|segment|category|status)\s+([A-Za-z0-9@._-]+(?:\s+[A-Za-z0-9@._-]+){0,4})/gi)) {
+    terms.push(match[1]);
+  }
+  return uniqueStrings(terms
+    .map(cleanMetadataValueSearchTerm)
+    .filter((term) => term.length >= 2 && !METADATA_VALUE_STOP_TERMS.has(term.toLowerCase()))
+  ).slice(0, 10);
+}
+
+function cleanMetadataValueSearchTerm(term: string): string {
+  return term
+    .replace(/[?.,;:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:account|category|customer|member|named|called|only|product|region|segment|sku|status|subscriber|user|where)\s+/i, '')
+    .replace(/\s+\b(?:last|next|this)\b.*$/i, '')
+    .replace(/\s+\b(?:daily|weekly|monthly|quarterly|yearly)\b.*$/i, '')
+    .trim();
+}
+
+const METADATA_VALUE_STOP_TERMS = new Set([
+  'account',
+  'category',
+  'customer',
+  'last month',
+  'last quarter',
+  'last week',
+  'last year',
+  'member',
+  'product',
+  'region',
+  'segment',
+  'sku',
+  'status',
+  'this month',
+  'this quarter',
+  'this week',
+  'this year',
+  'user',
+]);
 
 function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpContext | null): string {
   if (!followUp) return question;
@@ -4246,7 +4752,10 @@ function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpCo
       question,
       followUp.sourceQuestion ?? '',
       ...(followUp.priorResultColumns ?? []),
+      followUp.priorResultRef?.question ?? '',
+      ...(followUp.priorResultRef?.columns ?? []),
       ...(followUp.priorMeasures ?? []),
+      ...dqlArtifactSearchTerms(followUp.priorDqlArtifact, { includeSource: false }),
     ].filter(Boolean).join(' ');
   }
   return [
@@ -4256,8 +4765,30 @@ function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpCo
     ...(followUp.filters ?? []),
     ...(followUp.dimensions ?? []),
     ...(followUp.priorResultColumns ?? []),
+    followUp.priorResultRef?.question ?? '',
+    ...(followUp.priorResultRef?.columns ?? []),
+    followUp.priorResultRef?.sourceSql ? followUp.priorResultRef.sourceSql.slice(0, 600) : '',
+    ...dqlArtifactSearchTerms(followUp.priorDqlArtifact, { includeSource: true }),
     ...Object.entries(followUp.priorResultValues ?? {}).flatMap(([key, values]) => [key, ...values]),
   ].filter(Boolean).join(' ');
+}
+
+function dqlArtifactSearchTerms(
+  artifact: MetadataDqlArtifactReference | undefined,
+  options: { includeSource: boolean },
+): string[] {
+  if (!artifact) return [];
+  return [
+    artifact.name ?? '',
+    artifact.sourcePath ?? '',
+    ...(artifact.metrics ?? []),
+    ...(artifact.dimensions ?? []),
+    ...(artifact.filters ?? []).flatMap((filter) => [filter.dimension, filter.operator, ...filter.values]),
+    artifact.timeDimension ? `${artifact.timeDimension.name} ${artifact.timeDimension.granularity}` : '',
+    ...(artifact.orderBy ?? []).map((order) => `${order.name} ${order.direction}`),
+    typeof artifact.limit === 'number' ? `limit ${artifact.limit}` : '',
+    options.includeSource ? artifact.source.slice(0, 900) : '',
+  ].filter(Boolean);
 }
 
 function uniqueMetadataSearchQueries(values: string[]): string[] {
@@ -4349,6 +4880,18 @@ function dedupeRuntimeColumns(columns: RuntimeSchemaColumn[]): RuntimeSchemaColu
 function metadataStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const normalized = value.toLowerCase();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(value);
+  }
+  return out;
 }
 
 function metadataStringRecordArray(value: unknown): Record<string, string[]> | undefined {
@@ -4538,6 +5081,26 @@ function rowToQueryRun(row: QueryRunRow): QueryRunSummary {
   };
 }
 
+function rowToRuntimeValueMatch(row: RuntimeValueIndexRow, terms: string[]): RuntimeValueMatch {
+  const normalized = row.normalized_value;
+  const exactBoost = terms.some((term) => term === normalized) ? 1 : 0;
+  const containsBoost = terms.some((term) => normalized.includes(term) || term.includes(normalized)) ? 0.5 : 0;
+  const rankScore = row.rank ? 1 / (1 + Math.max(0, row.rank)) : 1;
+  return {
+    valueKey: row.value_key,
+    relation: row.relation,
+    schema: row.schema_name ?? undefined,
+    tableName: row.table_name ?? undefined,
+    columnName: row.column_name,
+    columnType: row.column_type ?? undefined,
+    value: row.value,
+    normalizedValue: row.normalized_value,
+    source: row.source ?? undefined,
+    capturedAt: row.captured_at,
+    score: Number((rankScore + exactBoost + containsBoost).toFixed(3)),
+  };
+}
+
 function safeJson<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -4573,21 +5136,58 @@ function rankMetadataObjects(args: {
     })
     .sort((a, b) => b.score - a.score || objectPriority(a.row) - objectPriority(b.row) || a.row.name.localeCompare(b.row.name))
     .map((item, index) => ({ ...item, rank: index + 1 }));
-  const cutoff = ranked[Math.max(0, args.limit - 1)];
+  const selectedRanked = selectRankedMetadataObjects(ranked, args.limit);
+  const selectedKeys = new Set(selectedRanked.map((item) => item.row.objectKey));
+  const rejectedRanked = ranked.filter((item) => !selectedKeys.has(item.row.objectKey));
+  const cutoff = selectedRanked.at(-1);
   return {
-    selected: ranked.slice(0, args.limit).map((item) => item.row),
+    selected: selectedRanked.map((item) => item.row),
     ranked,
-    rejected: ranked.slice(args.limit).slice(0, 24).map((item) => ({
+    rejected: rejectedRanked.slice(0, 24).map((item) => ({
       objectKey: item.row.objectKey,
       objectType: item.row.objectType,
       name: item.row.name,
       reason: cutoff
-        ? `Lower retrieval score than selected context window (cutoff ${cutoff.score.toFixed(1)}); ${item.reason}`
+        ? `Outside balanced context window (cutoff ${cutoff.score.toFixed(1)}); ${item.reason}`
         : item.reason,
       score: item.score,
       rejectedRank: item.rank,
     })),
   };
+}
+
+function selectRankedMetadataObjects(ranked: RankedMetadataObject[], limit: number): RankedMetadataObject[] {
+  if (ranked.length <= limit) return ranked;
+  const columnCount = ranked.filter((item) => COLUMN_OBJECT_TYPES.has(item.row.objectType)).length;
+  const nonColumnCount = ranked.length - columnCount;
+  if (columnCount === 0 || nonColumnCount === 0) return ranked.slice(0, limit);
+
+  const columnCap = Math.max(4, Math.floor(limit * 0.35));
+  const selected: RankedMetadataObject[] = [];
+  const deferredColumns: RankedMetadataObject[] = [];
+  let selectedColumns = 0;
+  for (const item of ranked) {
+    if (selected.length >= limit) break;
+    if (COLUMN_OBJECT_TYPES.has(item.row.objectType)) {
+      if (selectedColumns >= columnCap) {
+        deferredColumns.push(item);
+        continue;
+      }
+      selectedColumns += 1;
+    }
+    selected.push(item);
+  }
+
+  if (selected.length < limit) {
+    const selectedKeys = new Set(selected.map((item) => item.row.objectKey));
+    for (const item of [...deferredColumns, ...ranked]) {
+      if (selected.length >= limit) break;
+      if (selectedKeys.has(item.row.objectKey)) continue;
+      selected.push(item);
+      selectedKeys.add(item.row.objectKey);
+    }
+  }
+  return selected.sort((a, b) => a.rank - b.rank);
 }
 
 function scoreMetadataObject(row: MetadataObject, terms: string[]): number {
@@ -4598,6 +5198,7 @@ function scoreMetadataObject(row: MetadataObject, terms: string[]): number {
   if (row.status === 'draft') score -= 8;
   if (row.objectType === 'dql_block' && row.status !== 'certified') score -= 16;
   if (row.objectType === 'semantic_metric') score += 10;
+  if (row.objectType === 'runtime_value') score += 14;
   if (row.objectType === 'dbt_model' || row.objectType === 'dbt_column') score += 4;
   score += scoreText([
     row.objectType,
@@ -4619,6 +5220,7 @@ function objectPriority(row: MetadataObject): number {
 function priorityTier(row: MetadataObject): string {
   if (row.objectType === 'dql_block' && row.status === 'certified') return 'certified_block';
   if (row.objectType === 'semantic_metric') return 'semantic_metric';
+  if (row.objectType === 'runtime_value') return 'value_match';
   if (row.objectType === 'dql_term' || row.objectType === 'business_view') return 'business_context';
   if (row.objectType.startsWith('dbt_') || row.objectType === 'warehouse_table') return 'dbt_warehouse_context';
   if (row.objectType === 'notebook') return 'notebook_evidence';
@@ -4638,6 +5240,7 @@ function reasonForObject(row: MetadataObject): string {
   if (row.objectType === 'dql_block' && row.status === 'certified') return 'Certified reusable answer candidate';
   if (row.objectType === 'dql_block_output') return 'Certified block output column lineage';
   if (row.objectType === 'semantic_metric') return 'Semantic metric matched the question';
+  if (row.objectType === 'runtime_value') return 'Observed runtime value matched the question literal';
   if (row.objectType === 'dql_term' || row.objectType === 'business_view') return 'DQL business context';
   if (row.objectType.startsWith('dbt_') || row.objectType === 'warehouse_table' || row.objectType === 'warehouse_column') return 'dbt or warehouse metadata supplies physical context';
   if (row.objectType === 'app' || row.objectType === 'dashboard') return 'Published consumption context';
@@ -4653,6 +5256,14 @@ function mergeObjects(rows: MetadataObject[]): MetadataObject[] {
   return Array.from(byKey.values());
 }
 
+function mergeMetadataEdges(rows: MetadataEdge[]): MetadataEdge[] {
+  const byKey = new Map<string, MetadataEdge>();
+  for (const row of rows) {
+    putEdge(byKey, row);
+  }
+  return Array.from(byKey.values());
+}
+
 function deriveTrust(objects: MetadataObject[]): MetadataTrustLabel {
   if (objects.length === 0) return 'unknown';
   const statuses = objects.map((row) => row.status ?? '');
@@ -4660,6 +5271,28 @@ function deriveTrust(objects: MetadataObject[]): MetadataTrustLabel {
   if (statuses.some((status) => status === 'certified') && statuses.some((status) => status && status !== 'certified')) return 'mixed';
   if (statuses.some((status) => status === 'draft' || status === 'ai_generated' || status === 'analyst_review_required')) return 'draft';
   return statuses.some((status) => status === 'certified') ? 'mixed' : 'unknown';
+}
+
+function withMetadataTrustLabelInfo(decision: MetadataRouteDecision): MetadataRouteDecision {
+  return {
+    ...decision,
+    trustLabelInfo: metadataTrustLabelInfo(decision.trustLabel),
+  };
+}
+
+function metadataTrustLabelInfo(label: MetadataTrustLabel): ResolvedTrustLabel {
+  switch (label) {
+    case 'certified':
+      return composeEffectiveTrust({ id: 'certified' });
+    case 'conflict':
+      return composeEffectiveTrust({ id: 'conflict' });
+    case 'draft':
+      return composeEffectiveTrust({ id: 'ai_generated' });
+    case 'mixed':
+      return composeEffectiveTrust({ id: 'ai_generated', existingQualifier: 'mixed context' });
+    case 'unknown':
+      return composeEffectiveTrust({ id: 'insufficient_context' });
+  }
 }
 
 function buildCitations(objects: MetadataObject[], edges: MetadataEdge[]): LocalContextPack['citations'] {
@@ -4783,6 +5416,7 @@ function pickRouteConflict(
   compileConflicts: ManifestConflictDetail[],
   rankedObjects: RankedMetadataObject[],
   fallbackObjects: MetadataObject[],
+  question: string,
 ): MetadataRouteConflict | undefined {
   if (compileConflicts.length === 0) return undefined;
 
@@ -4798,6 +5432,7 @@ function pickRouteConflict(
   }
 
   for (const conflict of compileConflicts) {
+    if (!conflictMatchesQuestion(conflict, question)) continue;
     const sideNames = conflict.sides.map((side) => normalizeConflictName(side.name)).filter(Boolean);
     if (sideNames.length < 2) continue;
     const presentSides = sideNames.filter((name) => topNames.has(name));
@@ -4818,6 +5453,16 @@ function pickRouteConflict(
     };
   }
   return undefined;
+}
+
+function conflictMatchesQuestion(conflict: ManifestConflictDetail, question: string): boolean {
+  const questionTokens = new Set(tokenize(question.replace(/_/g, ' ')));
+  const conceptTokens = tokenize(conflict.concept.replace(/_/g, ' '));
+  if (conceptTokens.length > 0 && conceptTokens.every((token) => questionTokens.has(token))) return true;
+  const sideHits = conflict.sides.filter((side) =>
+    tokenize(side.name).some((token) => questionTokens.has(token))
+  ).length;
+  return sideHits >= 2;
 }
 
 function normalizeConflictName(value: string | undefined): string {
@@ -4848,6 +5493,6 @@ function sanitizeFtsQuery(raw: string): string {
     .map((term) => term.replace(/[^\p{L}\p{N}_]/gu, ''))
     .filter((term) => term.length > 1 && !STOP_WORDS.has(term.toLowerCase()))
     .slice(0, 48)
-    .map((term) => `"${term}"`)
+    .map((term) => `"${term}"*`)
     .join(' OR ');
 }

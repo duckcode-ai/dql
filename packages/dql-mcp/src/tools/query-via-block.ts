@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { InvariantResult } from '@duckcodeailabs/dql-governance';
@@ -14,23 +13,11 @@ import {
   type DataStateLike,
 } from '@duckcodeailabs/dql-core';
 import type { DQLContext } from '../context.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const queryViaBlockInput = {
-  name: z.string().describe('Certified block to execute.'),
-  limit: z.number().int().min(1).max(10000).optional().describe('Max rows to return.'),
-  question: z
-    .string()
-    .optional()
-    .describe(
-      'Original question this block is being served for. When provided, query_via_block re-checks the block grain against the requested grain (defense in depth) and refuses on a genuine grain mismatch.',
-    ),
-  serverUrl: z
-    .string()
-    .optional()
-    .describe(
-      'Base URL of the local DQL runtime (default http://127.0.0.1:3474). Start it with `dql serve`.',
-    ),
-};
+const DEFAULT_QUERY_VIA_BLOCK_ROW_LIMIT = 200;
+
+export const queryViaBlockInput = zodInputShapeForTool('query_via_block');
 
 /**
  * Execute a certified block by name. Delegates SQL prep + warehouse execution
@@ -136,6 +123,8 @@ export async function queryViaBlock(
   };
   if (payload.error) return { error: payload.error };
   const rows = payload.result?.rows ?? [];
+  const rowLimit = args.limit ?? DEFAULT_QUERY_VIA_BLOCK_ROW_LIMIT;
+  const returnedRows = rows.slice(0, rowLimit);
 
   // Invariant enforcement: the runtime evaluates the block's declared
   // invariants against this run's result. A real violation downgrades the
@@ -173,9 +162,12 @@ export async function queryViaBlock(
       ? { invariantResults }
       : {}),
     rowCount: rows.length,
+    returnedRowCount: returnedRows.length,
+    maxRowsReturned: rowLimit,
+    rowsTruncated: rows.length > returnedRows.length,
     durationMs: payload.result?.executionTime ?? null,
     columns: payload.result?.columns ?? [],
-    rows: args.limit ? rows.slice(0, args.limit) : rows,
+    rows: returnedRows,
   };
 }
 

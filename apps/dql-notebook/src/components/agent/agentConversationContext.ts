@@ -1,3 +1,6 @@
+import type { AgentAnswerCascade, AgentConversationDqlArtifact } from '../../llm/types';
+import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core';
+
 export type ConversationThreadItem =
   | { kind: 'user'; id: string; text: string }
   | {
@@ -29,6 +32,8 @@ export interface ConversationStateTurn {
   requestedDimensions?: string[];
   requestedMeasures?: string[];
   answerContract?: unknown;
+  dqlArtifact?: AgentConversationDqlArtifact;
+  cascade?: AgentAnswerCascade;
   topN?: number;
   result?: {
     columns: string[];
@@ -63,6 +68,8 @@ export function buildConversationContext(items: ConversationThreadItem[]): Recor
     sourceQuestion: activeTurn.question,
     sourceAnswerSummary: activeTurn.answerSummary,
     answerContract: activeTurnContract(activeTurn),
+    dqlArtifact: activeTurn.dqlArtifact,
+    cascade: activeTurn.cascade,
     resultColumns: activeResult?.columns,
     resultRowsSample: activeResult?.rowsSample,
     resultDimensionValues: activeResult?.dimensionValues,
@@ -76,6 +83,7 @@ export function buildConversationContext(items: ConversationThreadItem[]): Recor
     reviewStatus: activeTurn.reviewStatus,
     certification: activeTurn.certification,
     route: activeTurn.route,
+    sourceSql: activeTurn.sourceSql,
     updatedAt: activeTurn.completedAt,
   });
 }
@@ -113,6 +121,8 @@ function turnFromRunItem(item: Extract<ConversationThreadItem, { kind: 'run' }>)
     requestedDimensions: stringArray(requestedShape?.dimensions),
     requestedMeasures: stringArray(requestedShape?.measures),
     answerContract,
+    dqlArtifact: dqlArtifactFromPayload(payload),
+    cascade: cascadeFromPayload(payload),
     topN: topNFromRequestedShape(requestedShape),
     result: resultColumns.length > 0 || rows.length > 0
       ? compactRecord({
@@ -175,6 +185,36 @@ function sourceSqlFromPayload(
     ?? stringValue(result?.sql)
     ?? stringValue(artifactPayload(payload?.query)?.sql)
     ?? stringValue(artifactPayload(payload?.plan)?.sql);
+}
+
+function dqlArtifactFromPayload(payload: Record<string, unknown> | undefined): AgentConversationDqlArtifact | undefined {
+  const artifact = normalizeDqlArtifactReference(payload?.dqlArtifact);
+  return artifact ? {
+    ...artifact,
+    source: artifact.source.slice(0, 3000),
+    filters: artifact.filters
+      ?.filter((filter) => filter.values.length > 0)
+      .slice(0, 12)
+      .map((filter) => ({ ...filter, values: filter.values.slice(0, 12) })),
+    orderBy: artifact.orderBy?.slice(0, 8),
+  } : undefined;
+}
+
+function cascadeFromPayload(payload: Record<string, unknown> | undefined): AgentAnswerCascade | undefined {
+  const cascade = artifactPayload(payload?.cascade);
+  if (!cascade) return undefined;
+  const terminalLane = stringValue(cascade.terminalLane);
+  const routeTier = stringValue(cascade.routeTier);
+  if (!terminalLane && !routeTier) return undefined;
+  return {
+    terminalLane,
+    routeTier,
+    label: stringValue(cascade.label),
+    ref: stringValue(cascade.ref),
+    artifactKind: stringValue(cascade.artifactKind),
+    refusalCode: stringValue(cascade.refusalCode),
+    outcome: artifactPayload(cascade.outcome),
+  };
 }
 
 function summarizeConversationTurns(turns: ConversationStateTurn[]): string | undefined {

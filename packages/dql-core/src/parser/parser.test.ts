@@ -126,6 +126,35 @@ describe('Parser', () => {
     }
   });
 
+  it('parses semantic block order and limit draft metadata', () => {
+    const ast = parse(`block "Top Revenue Channels" {
+      domain = "finance"
+      type = "semantic"
+      status = "draft"
+      metric = "total_revenue"
+      dimensions = ["channel"]
+      time_dimension = "order_date"
+      granularity = "month"
+      requested_filters = ["channel=Online"]
+      order_by = ["total_revenue desc"]
+      limit = 5
+      draft_path = "blocks/_drafts/top_revenue_channels.dql"
+    }`);
+
+    const block = ast.statements[0];
+    expect(block.kind).toBe(NodeKind.BlockDecl);
+    if (block.kind === NodeKind.BlockDecl) {
+      expect(block.metricRef).toBe('total_revenue');
+      expect(block.dimensionsRef).toEqual(['channel']);
+      expect(block.timeDimension).toBe('order_date');
+      expect(block.granularity).toBe('month');
+      expect(block.requestedFilters).toEqual(['channel=Online']);
+      expect(block.orderBy).toEqual(['total_revenue desc']);
+      expect(block.limit).toBe(5);
+      expect(block.draftPath).toBe('blocks/_drafts/top_revenue_channels.dql');
+    }
+  });
+
   it('parses a dashboard with variables and charts', () => {
     const source = `dashboard "Daily Report" {
       let today = CURRENT_DATE

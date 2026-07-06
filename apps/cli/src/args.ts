@@ -53,14 +53,24 @@ export interface CLIFlags {
   comment?: string;
   /** `dql agent ask --thread <id>` — continue a persisted conversation thread. */
   thread?: string;
+  /** `dql agent ask/eval --reasoning-effort low|medium|high` — affects provider effort and context depth. */
+  reasoningEffort?: string;
+  /** `dql agent ask/eval --analysis-depth quick|deep` — controls context budget. */
+  analysisDepth?: string;
   /** `dql eval --min-route-accuracy <0..1>` — fail CI below this route accuracy. */
   minRouteAccuracy?: number;
   /** `dql eval --min-refusal <0..1>` — fail CI below this refusal recall. */
   minRefusal?: number;
+  /** `dql eval --min-answer-rate <0..1>` — fail CI below answer rate on non-refusal cases. */
+  minAnswerRate?: number;
+  /** `dql agent eval --min-tool-requirement <0..1>` — fail below this tool-observed requirement pass rate. */
+  minToolRequirement?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
   noExamples?: boolean;
   /** `dql diff --impact` — compute downstream impact + re-cert gate for changed blocks. */
   impact?: boolean;
+  /** `dql diff --impact --write-recertification` — mark impacted semantic YAML as pending recertification. */
+  writeRecertification?: boolean;
 }
 
 export interface ParsedArgs {
@@ -184,16 +194,28 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.comment = argv[++i];
     } else if (arg === '--thread' && i + 1 < argv.length) {
       flags.thread = argv[++i];
+    } else if (arg === '--reasoning-effort' && i + 1 < argv.length) {
+      flags.reasoningEffort = argv[++i];
+    } else if ((arg === '--analysis-depth' || arg === '--depth') && i + 1 < argv.length) {
+      flags.analysisDepth = argv[++i];
     } else if (arg === '--min-route-accuracy' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRouteAccuracy = value;
     } else if (arg === '--min-refusal' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRefusal = value;
+    } else if (arg === '--min-answer-rate' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minAnswerRate = value;
+    } else if (arg === '--min-tool-requirement' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minToolRequirement = value;
     } else if (arg === '--no-examples') {
       flags.noExamples = true;
     } else if (arg === '--impact') {
       flags.impact = true;
+    } else if (arg === '--write-recertification' || arg === '--write-recertification-changeset') {
+      flags.writeRecertification = true;
     } else if (!command) {
       command = arg;
     } else if (!file) {

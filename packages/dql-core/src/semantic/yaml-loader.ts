@@ -5,7 +5,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, relative } from 'node:path';
 import * as yaml from 'js-yaml';
 import {
   SemanticLayer,
@@ -15,6 +15,8 @@ import {
   parseCubeDefinition,
   parseSegmentDefinition,
   parsePreAggregationDefinition,
+  type MetricDefinition,
+  type DimensionDefinition,
 } from './semantic-layer.js';
 
 /**
@@ -49,7 +51,9 @@ export function loadSemanticLayerFromDir(semanticLayerDir: string): SemanticLaye
         const content = readFileSync(filePath, 'utf-8');
         const raw = yaml.load(content) as Record<string, unknown>;
         if (raw && typeof raw === 'object') {
-          for (const item of expandDefinitions(raw, keys)) loader(item);
+          for (const item of expandDefinitions(raw, keys)) {
+            loader(withLocalSemanticSource(item, semanticLayerDir, filePath, folder));
+          }
         }
       } catch {
         // Skip malformed YAML files
@@ -108,6 +112,58 @@ export function loadSemanticLayerFromConfig(
   return layer;
 }
 
+/**
+ * Serialize a MetricDefinition back into stable semantic-layer YAML.
+ * Used by governance flows that propose human-reviewed semantic changesets.
+ */
+export function serializeMetricDefinitionToYaml(metric: MetricDefinition): string {
+  return dumpSemanticYaml(stripUndefined({
+    name: metric.name,
+    label: metric.label,
+    description: metric.description,
+    domain: metric.domain,
+    status: metric.status,
+    sql: metric.sql,
+    type: metric.type,
+    table: metric.table,
+    filters: metric.filters,
+    filter: metric.filter,
+    tags: metric.tags,
+    owner: metric.owner,
+    cube: metric.cube,
+    aggregation: metric.aggregation,
+    metricType: metric.metricType,
+    typeParams: metric.typeParams,
+    aggTimeDimension: metric.aggTimeDimension,
+    source: serializeSourceMetadata(metric.source),
+  }));
+}
+
+/**
+ * Serialize a DimensionDefinition back into stable semantic-layer YAML.
+ * This mirrors the metric serializer so future composting can propose reusable
+ * dimensions without hand-building YAML strings.
+ */
+export function serializeDimensionDefinitionToYaml(dimension: DimensionDefinition): string {
+  return dumpSemanticYaml(stripUndefined({
+    name: dimension.name,
+    label: dimension.label,
+    description: dimension.description,
+    domain: dimension.domain,
+    status: dimension.status,
+    sql: dimension.sql,
+    type: dimension.type,
+    table: dimension.table,
+    tags: dimension.tags,
+    owner: dimension.owner,
+    cube: dimension.cube,
+    expr: dimension.expr,
+    isTimeDimension: dimension.isTimeDimension,
+    typeParams: dimension.typeParams,
+    source: serializeSourceMetadata(dimension.source),
+  }));
+}
+
 function expandDefinitions(raw: Record<string, unknown>, collectionKeys: string[]): Record<string, unknown>[] {
   for (const key of collectionKeys) {
     const collection = raw[key];
@@ -117,6 +173,61 @@ function expandDefinitions(raw: Record<string, unknown>, collectionKeys: string[
   }
   if (typeof raw.name === 'string' && raw.name.trim().length > 0) return [raw];
   return [];
+}
+
+function withLocalSemanticSource(
+  raw: Record<string, unknown>,
+  semanticLayerDir: string,
+  filePath: string,
+  folder: string,
+): Record<string, unknown> {
+  const existing = raw.source && typeof raw.source === 'object' && !Array.isArray(raw.source)
+    ? raw.source as Record<string, unknown>
+    : {};
+  const existingExtra = existing.extra && typeof existing.extra === 'object' && !Array.isArray(existing.extra)
+    ? existing.extra as Record<string, unknown>
+    : {};
+  const relativePath = relative(semanticLayerDir, filePath).replace(/\\/g, '/');
+  const objectName = typeof raw.name === 'string' ? raw.name : undefined;
+  return {
+    ...raw,
+    source: {
+      ...existing,
+      provider: typeof existing.provider === 'string' ? existing.provider : 'dql',
+      objectType: typeof existing.objectType === 'string' ? existing.objectType : folder.replace(/s$/, ''),
+      objectId: typeof existing.objectId === 'string' ? existing.objectId : objectName ?? relativePath,
+      objectName: typeof existing.objectName === 'string' ? existing.objectName : objectName,
+      extra: {
+        ...existingExtra,
+        path: typeof existingExtra.path === 'string' ? existingExtra.path : relativePath,
+        raw: existingExtra.raw ?? raw,
+      },
+    },
+  };
+}
+
+function dumpSemanticYaml(value: Record<string, unknown>): string {
+  return yaml.dump(value, {
+    lineWidth: 120,
+    noRefs: true,
+    sortKeys: false,
+  });
+}
+
+function stripUndefined<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
+}
+
+function serializeSourceMetadata(source: MetricDefinition['source'] | DimensionDefinition['source']): Record<string, unknown> | undefined {
+  if (!source) return undefined;
+  return stripUndefined({
+    provider: source.provider,
+    objectType: source.objectType,
+    objectId: source.objectId,
+    objectName: source.objectName,
+    importedAt: source.importedAt,
+    extra: source.extra,
+  });
 }
 
 function addIfNamed<T extends { name: string }>(item: T, add: (item: T) => void): void {

@@ -76,6 +76,8 @@ const HELP = `
     dql fmt <file.dql|.dqlnb>       Format DQL/notebook file in place
     dql diff <path>                 Diff a .dql/.dqlnb file vs HEAD
     dql diff <before> <after>       Semantic diff between two files
+    dql diff <path> --impact --write-recertification
+                                    Mark impacted semantic YAML pending recertification
     dql notebook [path]             Launch the browser-first notebook for a project
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql compile [path]              Generate project manifest (dql-manifest.json)
@@ -128,6 +130,8 @@ const HELP = `
                                       For "migrate layout": apply domain-first file moves
       --dry-run                       For "migrate layout": preview file moves
       --execute                       For "agent eval": run bounded SQL previews
+      --min-answer-rate <0..1>        For "eval": fail below non-refusal rate on answerable cases
+      --min-tool-requirement <0..1>    For "agent eval": fail below required tool-call pass rate
       --thread <id>                   For "agent ask": continue a persisted conversation thread
       --ai                            For "doctor": include AI, MCP, and metadata checks
   `;

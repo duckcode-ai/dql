@@ -179,11 +179,16 @@ function buildReplanUserPrompt(input: AgentRunReplanInput): string {
   const { currentStep, attemptsUsed, maxRepairAttempts } = input;
   const failing = currentStep.evaluations.filter((evaluation) => !evaluation.passed);
   const suggestedEscalation = AGENT_RUN_ESCALATION_MAP[currentStep.route];
+  const engineEscalationsUsed = input.engineEscalationsUsed ?? input.budgetUsage?.usage.engineEscalationsUsed;
+  const maxEngineEscalations = input.maxEngineEscalations ?? input.budgetUsage?.limits.engineEscalations;
   const lines: string[] = [];
   lines.push(`Question: ${input.request.question}`);
   lines.push(`Current route: ${currentStep.route}`);
   lines.push(`Step goal: ${currentStep.goal}`);
   lines.push(`Repair attempts used so far: ${attemptsUsed} of ${maxRepairAttempts}.`);
+  if (engineEscalationsUsed !== undefined && maxEngineEscalations !== undefined) {
+    lines.push(`Engine escalations used so far: ${engineEscalationsUsed} of ${maxEngineEscalations}.`);
+  }
   lines.push(`Failing evaluations: ${JSON.stringify(failing.map(summariseEvaluation))}`);
   if (suggestedEscalation) lines.push(`Suggested escalation route: ${suggestedEscalation}`);
   if (input.remainingSteps.length) {

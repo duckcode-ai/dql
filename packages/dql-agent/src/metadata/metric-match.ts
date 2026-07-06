@@ -15,7 +15,7 @@
  *     spend/sales/income/arr; orders ⇄ purchases; ...), and of each metric's
  *     searchable text (name + synonyms + label + description + tags),
  *   - lexical token overlap blended through the spec-11 `hybridRank`
- *     (alpha defaults to 0 → pure lexical, offline-stable for tests),
+ *     (small non-zero alpha by default when lexical signal exists),
  *   - a strong boost when a measure FAMILY (e.g. "revenue") is shared between
  *     the question and the metric, which is what makes "total revenue" reach the
  *     revenue family even though the exact word never appears in a metric name.
@@ -136,14 +136,17 @@ export interface MatchSemanticMetricOptions {
    * so ad-hoc questions still fall through to generated SQL. Default 0.34.
    */
   threshold?: number;
-  /** Vector-similarity weight; 0 (default) = offline-stable pure lexical. */
+  /** Vector-similarity weight; defaults to a small conservative blend. */
   alpha?: number;
   provider?: EmbeddingProvider;
 }
 
+export const DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA = 0.18;
+
 /**
  * Pick the single best governed metric for a question, or `null` when no metric
- * clears the confidence bar. Deterministic + offline by default (alpha=0).
+ * clears the confidence bar. Deterministic + offline by default because the
+ * default provider is the hashed-token embedding.
  *
  * Scoring per candidate metric:
  *   base   = lexical token overlap fraction (question content tokens present in
@@ -206,10 +209,14 @@ export async function matchSemanticMetric(
     return { metric, text: metricSearchText(metric), ftsScore: fts, family: sharedFamily };
   });
 
+  const hasLexicalSignal = items.some((entry) => entry.ftsScore > 0);
   const ranked = await hybridRank(
     question,
     items.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),
-    { alpha: options.alpha ?? 0, provider: options.provider ?? (options.alpha ? defaultEmbeddingProvider() : undefined) },
+    {
+      alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA : 0,
+      provider: options.provider ?? defaultEmbeddingProvider(),
+    },
   );
 
   const best = ranked[0];

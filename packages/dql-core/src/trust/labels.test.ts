@@ -68,6 +68,7 @@ describe('canonical trust-label vocabulary', () => {
     expect(trustLabelIdForStatus('certified')).toBe('certified');
     expect(trustLabelIdForStatus('approved')).toBe('certified');
     expect(trustLabelIdForStatus('draft')).toBe('ai_generated');
+    expect(trustLabelIdForStatus('pending_recertification')).toBe('ai_generated');
     expect(trustLabelIdForStatus('conflict')).toBe('conflict');
     expect(trustLabelIdForStatus('uncertified')).toBe('insufficient_context');
     // Unknown status degrades safely (backward compatible).

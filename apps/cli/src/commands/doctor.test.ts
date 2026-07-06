@@ -280,7 +280,7 @@ type: string
     expect(report.retrieval.topRejectedEvidence.length).toBeGreaterThan(0);
     expect(report.retrieval.topRejectedEvidence[0]).toEqual(expect.objectContaining({
       objectType: 'dql_block',
-      reason: expect.stringContaining('Lower retrieval score than selected context window'),
+      reason: expect.stringContaining('Outside balanced context window'),
     }));
   });
 

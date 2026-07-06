@@ -16,37 +16,77 @@
  */
 
 import {
-  resolveTrustLabel,
-  composeEffectiveTrust,
+  type SemanticLayer,
   type ResolvedTrustLabel,
   type TrustLabelId,
-  type DataStateLike,
+  type DqlArtifactReference,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
-import type { AgentProvider, AgentMessage } from './providers/types.js';
+import type { AgentProvider, AgentMessage, AgentToolDefinition } from './providers/types.js';
 import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { ConversationSnapshot } from './conversation/snapshot.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
-import type { GeneratedDraftBlock } from './metadata/drafts.js';
-import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan, type RequestedAnswerShape } from './metadata/analysis-planner.js';
+import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
+import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metadata/drafts.js';
+import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan } from './metadata/analysis-planner.js';
 import { certifiedFitAllowsTier1, evaluateCertifiedBlockFit } from './metadata/block-fit.js';
 import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
 import { decideAgentAction, type IntentDecision } from './intent-controller.js';
-import { validateSqlAgainstLocalContext } from './metadata/sql-context-validation.js';
-import { buildGroundingFromRuntimeRelations, resolveRelationsInSql, validateSqlAgainstGrounding, type SchemaGrounding } from './metadata/sql-grounding.js';
+import type {
+  SqlContextValidationCode,
+  SqlContextValidationOffending,
+} from './metadata/sql-context-validation.js';
+import type { GroundingContextExpander } from './grounding/regrounding.js';
+import { createContextLedger, type ContextLedger } from './grounding/context-ledger.js';
 import { validateAnswerResultShape } from './answer-shape.js';
 import {
   compactSqlSnippet,
   extractSimpleSelectShape,
   selectExpressionOutputName,
 } from './metadata/sql-shape.js';
+import { composeSemanticQueryForQuestion, type SemanticBridgeQueryResult } from './semantic-bridge/compose.js';
+import {
+  cascadeTraceToEvidenceRouteSteps,
+  createCascadeAnswerResult,
+  createCascadeTrace,
+  type CascadeAnswerResult,
+  type CascadeLane,
+} from './cascade/cascade.js';
+import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
+import { stampTrustLabel } from './trust/stamp.js';
+import {
+  QUICK_PROMPT_CONTEXT_BUDGET,
+  canUseLaneRepair,
+  cascadeBudgetTrace,
+  createCascadeBudgetState,
+  promptContextBudgetForQuestion,
+  proposalToolBudgetForQuestion,
+  recordLaneRepair,
+  type CascadeAnalysisDepth,
+  type CascadeBudgetTrace,
+  type PartialCascadeBudgetModel,
+  type PromptContextBudget,
+} from './cascade/budgets.js';
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
 export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
+export type AnswerRefusalCode = 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error';
+export type AnalysisDepth = CascadeAnalysisDepth;
+
+export interface AgentRefusalDetails {
+  /**
+   * Validator or provider-specific code behind a no-answer outcome. For
+   * grounding gaps, this preserves the exact validation code so repair loops can
+   * re-ground the named identifier instead of parsing prose.
+   */
+  code?: AnswerRefusalCode | SqlContextValidationCode;
+  message: string;
+  offending?: SqlContextValidationOffending;
+}
 
 /**
  * The chosen route, surfaced on EVERY AI result (spec 17, part C) so the UI can
@@ -103,7 +143,7 @@ export interface AgentEvidenceAsset {
   name: string;
   description?: string;
   sourceTier?: AnswerSourceTier | 'memory' | 'project';
-  certification?: AnswerCertification | 'certified' | 'uncertified';
+  certification?: TrustLabelId | AnswerCertification | 'uncertified' | 'analyst_review_required';
   provenance?: string;
   sourcePath?: string;
   owner?: string;
@@ -119,6 +159,14 @@ export interface AgentEvidenceContextItem {
   label: string;
   value: string;
   source?: string;
+}
+
+export interface AgentEvidenceToolCall {
+  name: string;
+  status: Extract<AgentEvidenceRouteStatus, 'checked' | 'failed'>;
+  inputSummary?: string;
+  outputSummary?: string;
+  order: number;
 }
 
 export interface AgentEvidenceOutcome {
@@ -166,7 +214,7 @@ export interface AgentAnalysisPlan {
   trustedContext: Array<{
     kind: KGNode['kind'] | 'memory';
     name: string;
-    certification?: AnswerCertification | 'certified' | 'uncertified';
+    certification?: TrustLabelId | AnswerCertification | 'uncertified' | 'analyst_review_required';
     sourceTier?: AnswerSourceTier | 'memory' | 'project';
   }>;
   assumptions: string[];
@@ -184,6 +232,16 @@ export interface AgentJoinPath {
   reason?: string;
 }
 
+export interface AgentPriorResultReference {
+  id: string;
+  question?: string;
+  columns: string[];
+  rowCount?: number;
+  sourceSql?: string;
+}
+
+export type AgentDqlArtifactReference = DqlArtifactReference;
+
 export interface AgentFollowUpContext {
   /**
    * 'generic'/'drilldown' — regex-classified follow-ups with routing force.
@@ -199,6 +257,8 @@ export interface AgentFollowUpContext {
   dimensions?: string[];
   priorResultColumns?: string[];
   priorResultValues?: Record<string, string[]>;
+  priorResultRef?: AgentPriorResultReference;
+  priorDqlArtifact?: AgentDqlArtifactReference;
   priorLimit?: number;
   priorMeasures?: string[];
   resolvedReferences?: string[];
@@ -213,6 +273,8 @@ export interface AgentEvidence {
   selectedAssets: AgentEvidenceAsset[];
   sourceTables: AgentEvidenceAsset[];
   semanticObjects: AgentEvidenceAsset[];
+  /** Real provider-visible tool observations, distinct from deterministic route breadcrumbs. */
+  toolCalls?: AgentEvidenceToolCall[];
   validation?: {
     status: 'passed' | 'warning' | 'failed' | 'not_run';
     message: string;
@@ -241,6 +303,13 @@ export interface AgentAnswer {
   intentDecision?: IntentDecision;
   /** Final answer text (NL summary). */
   text: string;
+  /**
+   * Machine-readable reason for no-answer outcomes. This keeps grounding gaps
+   * distinct from genuine ambiguity so callers can retry wider instead of asking
+   * the user for clarification.
+   */
+  refusalCode?: AnswerRefusalCode;
+  refusalDetails?: AgentRefusalDetails;
   /** Alias for UI envelopes. */
   answer?: string;
   /** Certified path: the matched block. */
@@ -255,6 +324,8 @@ export interface AgentAnswer {
   sql?: string;
   /** Suggested viz type for the proposed SQL (line/bar/single_value/...). */
   suggestedViz?: string;
+  /** DQL-first artifact source assembled deterministically for the answer, when available. */
+  dqlArtifact?: AgentDqlArtifactReference;
   /** Draft block id/path once a host persists the proposal. */
   draftBlockId?: string;
   draftBlock?: GeneratedDraftBlock;
@@ -296,6 +367,8 @@ export interface AgentAnswer {
    * single exit point in `answer()`.
    */
   route?: AiRoute;
+  /** Structured terminal lane chosen by the governed answer cascade. */
+  cascade?: CascadeAnswerResult;
   /**
    * Internal: the governed metric the semantic tier matched (spec 17, part C).
    * Used only to build `route` at the `answer()` exit point; not part of the
@@ -358,6 +431,13 @@ export interface AnswerLoopInput {
    */
   reasoningEffort?: ReasoningEffort;
   /**
+   * Prompt/context depth. Quick keeps normal Ask AI fast; deep widens metadata
+   * rendering for research, diagnostics, or explicitly high-effort runs.
+   */
+  analysisDepth?: AnalysisDepth;
+  /** Optional shared repair/escalation budget model for this answer-loop run. */
+  cascadeBudgetModel?: PartialCascadeBudgetModel;
+  /**
    * Governed block executor supplied by the CLI/UI/Slack host. The answer loop
    * keeps retrieval deterministic, while hosts enforce persona/RBAC/RLS in the
    * runtime they already own.
@@ -376,10 +456,35 @@ export interface AnswerLoopInput {
     followUp?: AgentFollowUpContext;
     contextPack?: LocalContextPack;
     sourceBlock?: KGNode;
+    sourceDqlArtifact?: GeneratedDraftSourceDqlArtifact;
+    dqlArtifact?: NonNullable<AgentAnswer['dqlArtifact']>;
+    proposedEntity?: string;
+    requestedFilters?: string[];
+    requestedDimensions?: string[];
     validationWarnings: string[];
+    outputs?: string[];
   }) => Promise<GeneratedDraftBlock | undefined> | GeneratedDraftBlock | undefined;
   /** Runtime schema/column context supplied by the host for generated analysis. */
   schemaContext?: AgentSchemaTable[];
+  /**
+   * Optional resolved semantic layer. When supplied, the semantic lane compiles
+   * metric/member selections through SemanticLayer.composeQuery before falling
+   * back to generated SQL.
+   */
+  semanticLayer?: SemanticLayer;
+  semanticDriver?: string;
+  semanticTableMapping?: Record<string, string>;
+  /**
+   * Optional host-backed catalog/runtime expansion for context-validation misses.
+   * The answer loop stays closed-world, but the host can widen the inspected
+   * world when the validator names an existing relation or column it did not see.
+   */
+  expandGroundingContext?: GroundingContextExpander;
+  /**
+   * Optional bounded tool surface for Lanes 2-3. Providers without native tool
+   * support ignore this through the generate() fallback.
+   */
+  answerLoopTools?: AgentToolDefinition[];
   /** Shared local metadata context pack from `.dql/cache/metadata.sqlite`. */
   contextPack?: LocalContextPack;
 }
@@ -392,24 +497,26 @@ const ARTIFACT_KINDS: KGNodeKind[] = [...EXECUTABLE_ARTIFACT_KINDS, ...BUSINESS_
 const SEMANTIC_KINDS: KGNodeKind[] = ['metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query'];
 const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
 
-/**
- * Map an answer-loop result's source tier + certification + review state to a
- * canonical trust-label id from the one shared vocabulary in dql-core.
- * Additive and lenient — keeps the legacy `trustLabel` string untouched.
- */
-function canonicalTrustLabelId(result: AgentAnswer): TrustLabelId {
-  if (result.kind === 'no_answer') return 'insufficient_context';
-  if (result.certification === 'certified' || result.kind === 'certified') return 'certified';
-  if (result.sourceTier === 'business_context' && result.reviewStatus === 'certified') return 'reviewed';
-  if (
-    result.certification === 'ai_generated' ||
-    result.certification === 'analyst_review_required' ||
-    result.reviewStatus === 'analyst_review_required' ||
-    result.reviewStatus === 'draft_ready'
-  ) {
-    return 'ai_generated';
+function refusalCodeForValidation(code: SqlContextValidationCode | undefined): AnswerRefusalCode {
+  if (code === 'unknown_relation' || code === 'unknown_column' || code === 'insufficient_context' || code === 'missing_baseline') {
+    return 'grounding_gap';
   }
-  return 'insufficient_context';
+  if (code === 'ambiguous_filter') return 'ambiguous';
+  return 'model_declined';
+}
+
+function formatOffendingValidationToken(offending: SqlContextValidationOffending | undefined): string {
+  if (!offending?.relation && !offending?.column) return '';
+  const parts = [
+    offending.relation ? `relation=${offending.relation}` : undefined,
+    offending.column ? `column=${offending.column}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return `Offending metadata token: ${parts.join(', ')}`;
+}
+
+function formatValidationWarningsForPrompt(warnings: string[]): string {
+  const useful = warnings.filter((warning) => warning.trim().length > 0).slice(0, 6);
+  return useful.length > 0 ? `Additional inspected-context notes:\n${useful.map((warning) => `- ${warning}`).join('\n')}` : '';
 }
 
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
@@ -420,11 +527,6 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   // health (stale/failed upstream) into the label so it reads "Certified ·
   // stale data" / "Certified · upstream failed". Non-certified or fresh answers
   // are unaffected.
-  const id = canonicalTrustLabelId(result);
-  const dataState =
-    id === 'certified'
-      ? ((result.block as { dataState?: DataStateLike } | undefined)?.dataState)
-      : undefined;
   const { _semanticMetricMatch, ...publicResult } = result;
   const chosenRoute = result.route ?? deriveAiRoute(result, _semanticMetricMatch);
   // P0 — record the high-level action this turn warranted, so callers can route
@@ -445,7 +547,21 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   return {
     ...publicResult,
     intentDecision,
-    trustLabelInfo: composeEffectiveTrust({ id, dataState }),
+    trustLabelInfo: stampTrustLabel(result),
+    cascade: publicResult.cascade ?? createCascadeAnswerResult({
+      routeTier: chosenRoute.tier,
+      label: chosenRoute.label,
+      ref: chosenRoute.ref,
+      artifactKind: result.dqlArtifact?.kind,
+      refusalCode: result.refusalCode,
+      reason: result.refusalDetails?.message ?? (result.kind === 'no_answer' ? result.text : undefined),
+      rowCount: result.result?.rowCount,
+      executionStatus: cascadeExecutionStatus(result),
+      draftBlockId: result.draftBlockId ?? result.draftBlock?.path,
+      metrics: result.dqlArtifact?.metrics,
+      dimensions: result.dqlArtifact?.dimensions,
+      hasSqlPreview: Boolean(result.proposedSql ?? result.sql),
+    }),
     // Stamp the SELECTED skills that shaped the answer (transparency). Computed
     // here so every return site inside runAnswerLoop stays untouched.
     appliedSkills:
@@ -458,6 +574,14 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     // site inside runAnswerLoop stays untouched (spec 17, part C).
     route: chosenRoute,
   };
+}
+
+function cascadeExecutionStatus(result: AgentAnswer): 'executed' | 'failed' | 'not_requested' | 'not_applicable' {
+  if (result.kind === 'no_answer') return 'not_applicable';
+  if (result.executionError) return 'failed';
+  if (result.result) return 'executed';
+  if (result.block || result.dqlArtifact || result.proposedSql || result.sql) return 'not_requested';
+  return 'not_applicable';
 }
 
 /**
@@ -485,7 +609,7 @@ function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute 
       ref,
     };
   }
-  // Uncertified: a governed metric matched → semantic_metric; else generated SQL.
+  // Uncertified: a governed metric matched → semantic_metric; else generated preview.
   if (result.sourceTier === 'semantic_layer' && metricMatch) {
     return {
       tier: 'semantic_metric',
@@ -493,7 +617,9 @@ function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute 
       ref: metricMatch.metric.name,
     };
   }
-  return { tier: 'generated_sql', label: 'Answered with generated SQL (review required).' };
+  return result.dqlArtifact
+    ? { tier: 'generated_sql', label: 'Prepared review-required DQL artifact with SQL preview.' }
+    : { tier: 'generated_sql', label: 'Prepared review-required SQL preview.' };
 }
 
 async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
@@ -529,6 +655,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const questionPlan = input.contextPack?.questionPlan?.requestedShape
     ? input.contextPack.questionPlan
     : buildAnalysisQuestionPlan(question, input.followUp);
+  const repairBudgetState = createCascadeBudgetState(input.cascadeBudgetModel);
   const fallbackIntent = classifyAgentIntent({
     question,
     followUp: input.followUp,
@@ -537,7 +664,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     manifestHits,
     schemaContext,
   });
-  const intent = catalogRoute ? agentIntentFromCatalogRoute(catalogRoute) : fallbackIntent;
+  let intent = catalogRoute ? agentIntentFromCatalogRoute(catalogRoute) : fallbackIntent;
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
@@ -630,6 +757,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       sql: result?.sql,
       suggestedViz: result?.chartConfig ? chartNameFromConfig(result.chartConfig) : undefined,
     });
+    const dqlArtifact = buildCertifiedBlockDqlArtifact(artifactHit.node, result);
     return {
       kind: certifiedShapePassed ? 'certified' : 'uncertified',
       sourceTier,
@@ -642,6 +770,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       result,
       executionError,
       sql: result?.sql,
+      dqlArtifact,
       trustLabel: certifiedShapePassed ? input.contextPack?.trustLabel ?? 'certified' : 'mixed',
       sourceCertifiedBlock: artifactHit.node.kind === 'block' ? artifactHit.node.name : undefined,
       contextPackId: input.contextPack?.id,
@@ -680,8 +809,20 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
   let semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes).catch(() => null);
 
-  // Clarify only when there is ALSO no confident governed-metric match.
-  if ((intent === 'clarify' || catalogRoute?.route === 'clarify') && !semanticMetricMatch) {
+  const clarifyBeforeGeneration = shouldClarifyBeforeGeneration({
+    intent,
+    routeDecision: catalogRoute,
+    hasSemanticMetricMatch: Boolean(semanticMetricMatch),
+    schemaContextCount: schemaContext.length,
+    allowedRelationCount: input.contextPack?.allowedSqlContext?.relations.length ?? 0,
+    sourceBlockSqlCount: input.contextPack?.allowedSqlContext?.sourceBlockSql.length ?? 0,
+    metadataObjectCount: considered.length,
+  });
+
+  // Clarify only when there is ALSO no confident governed-metric match and no
+  // usable schema/catalog context. A conservative catalog "clarify" decision is
+  // not a terminal lane if runtime or SQL context can still answer with review.
+  if (clarifyBeforeGeneration) {
     const text = composeCatalogClarificationText(question, catalogRoute) ?? composeClarificationText(question, considered, schemaContext);
     const analysisPlan = buildAnalysisPlan({
       question,
@@ -714,12 +855,14 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         considered,
         memoryContext: input.memoryContext ?? [],
         analysisPlan,
+        budgetTrace: cascadeBudgetTrace(repairBudgetState),
       }),
       contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
     };
   }
+  if (intent === 'clarify') intent = questionPlan.routeIntent;
 
   // Stage 2/3: generate only after certified artifacts miss. Semantic context
   // wins over raw dbt manifest context; memory is appended last as advisory.
@@ -753,9 +896,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
     (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
   );
+  const kgJoinPathHints = buildKgJoinPathHints(kg, contextNodes, questionPlan);
   const contextBlocks = contextNodes.filter((n) => n.kind === 'block');
   const contextBusiness = contextNodes.filter((n) => BUSINESS_CONTEXT_KINDS.includes(n.kind));
   const contextOther = contextNodes.filter((n) => n.kind !== 'block' && !BUSINESS_CONTEXT_KINDS.includes(n.kind));
+  const promptBudget = promptContextBudgetForQuestion({
+    questionPlan,
+    requestedDepth: input.analysisDepth,
+    reasoningEffort: input.reasoningEffort,
+  });
 
   const messages: AgentMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -777,30 +926,31 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       intent,
       input.contextPack,
       input.conversationSnapshot,
+      kgJoinPathHints,
+      promptBudget,
     ),
   });
   messages.push({ role: 'user', content: question });
 
-  const localProposal = buildSchemaAwareProposal({
-    question,
-    intent,
-    schemaContext,
-    followUp: input.followUp,
-    contextPack: input.contextPack,
-    questionPlan,
-  }) ?? buildContextPackAwareProposal({
-    question,
-    intent,
-    contextPack: input.contextPack,
-  });
   // ── Tier 2: semantic-layer metrics + dimensions (governed hierarchy) ──────
-  // Certified blocks already missed (Stage 1). Before ANY generation — local
-  // proposal or LLM — a confidently matched governed metric whose definition can
+  // Certified blocks already missed (Stage 1). Before LLM generation, a
+  // confidently matched governed metric whose definition can
   // express the question's full requested shape (scalar KPI, or a group-by whose
   // dimensions all resolve to columns on the metric's own table) answers
   // deterministically. Only when no metric fits does the question fall through
   // to SQL generation, where the metric still grounds the prompt as context.
   let governedMetricAnswer = false;
+  let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
+  if (input.semanticLayer && semanticMetricMatch) {
+    semanticBridgeAnswer = composeSemanticQueryForQuestion({
+      semanticLayer: input.semanticLayer,
+      question,
+      questionPlan,
+      matchedMetric: semanticMetricMatch.metric,
+      ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
+      ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
+    });
+  }
   const metricFirst = semanticMetricMatch
     ? buildGovernedMetricFirstSql({
         metric: semanticMetricMatch.metric,
@@ -814,9 +964,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       })
     : undefined;
 
+  let contextLedger: ContextLedger = createContextLedger({
+    contextPack: input.contextPack,
+    schemaContext,
+  });
   let proposed = '';
   let parsed: ParsedProposal;
-  if (metricFirst) {
+  const proposalToolCalls: AgentEvidenceToolCall[] = [];
+  if (semanticBridgeAnswer) {
+    governedMetricAnswer = true;
+    parsed = {
+      sql: semanticBridgeAnswer.sql,
+      text: `Answered from governed semantic metric${semanticBridgeAnswer.metrics.length === 1 ? '' : 's'} ${semanticBridgeAnswer.metrics.join(', ')}${semanticBridgeAnswer.dimensions.length > 0 ? ` by ${semanticBridgeAnswer.dimensions.join(', ')}` : ''}. This result is uncertified until reviewed and promoted.`,
+      viz: semanticBridgeAnswer.dimensions.length === 0 && !semanticBridgeAnswer.timeDimension ? 'single_value' : undefined,
+    };
+  } else if (metricFirst) {
     semanticMetricMatch = { ...semanticMetricMatch!, metric: metricFirst.metric };
     governedMetricAnswer = true;
     parsed = {
@@ -824,11 +986,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       text: `Answered from the governed metric ${metricFirst.metric.name}${metricFirst.dimensions.length > 0 ? ` by ${metricFirst.dimensions.join(', ')}` : ''}. This result is uncertified until reviewed and promoted.`,
       viz: metricFirst.dimensions.length === 0 ? 'single_value' : undefined,
     };
-  } else if (localProposal) {
-    parsed = localProposal;
   } else {
     try {
-      proposed = await provider.generate(messages, { signal: input.signal, reasoningEffort: input.reasoningEffort });
+      proposed = await generateProposalWithOptionalTools({
+        provider,
+        messages,
+        tools: input.answerLoopTools,
+        questionPlan,
+        intent,
+        signal: input.signal,
+        reasoningEffort: input.reasoningEffort,
+        analysisDepth: input.analysisDepth,
+        toolCalls: proposalToolCalls,
+      });
     } catch (err) {
       const text = `Provider error: ${(err as Error).message}`;
       return {
@@ -850,6 +1020,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           manifestHits,
           considered,
           memoryContext: input.memoryContext ?? [],
+          toolCalls: proposalToolCalls,
         }),
         contextPack: input.contextPack,
         considered,
@@ -858,6 +1029,30 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
 
     parsed = parseProposal(proposed);
+  }
+  let deepCandidateResult: AgentResultPayload | undefined;
+  let deepCandidateExecutionError: string | undefined;
+  let deepCandidateNotes: string[] = [];
+  if (!governedMetricAnswer && input.analysisDepth === 'deep' && parsed.sql) {
+    const selection = await selectDeepGeneratedProposalCandidate({
+      provider,
+      messages,
+      question,
+      questionPlan,
+      intent,
+      initial: { raw: proposed, parsed },
+      contextLedger,
+      executeGeneratedSql: input.executeGeneratedSql,
+      signal: input.signal,
+      reasoningEffort: input.reasoningEffort,
+    });
+    if (selection.selected) {
+      proposed = selection.selected.raw;
+      parsed = selection.selected.parsed;
+      deepCandidateResult = selection.selected.result;
+      deepCandidateExecutionError = selection.selected.executionError;
+    }
+    deepCandidateNotes = selection.notes;
   }
   // `governedMetricAnswer` (declared above): true when `parsed.sql` was
   // synthesized deterministically from a governed semantic-layer metric (not the
@@ -898,6 +1093,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       reviewStatus: 'none',
       confidence: 0.1,
       text,
+      refusalCode: 'model_declined',
+      refusalDetails: {
+        code: 'model_declined',
+        message: text,
+      },
       answer: text,
       citations: [],
       memoryContext: input.memoryContext,
@@ -921,28 +1121,31 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // model emitted to its real warehouse relation from the runtime schema BEFORE
   // governance validation. Same resolver the build path uses — one grounding,
   // no weak path. `allowedSqlContext` relations are already qualified.
-  let grounding: SchemaGrounding | undefined;
-  if (parsed.sql && schemaContext.length > 0) {
-    grounding = buildGroundingFromRuntimeRelations(
-      schemaContext.map((table) => ({
-        relation: table.relation,
-        name: table.name,
-        columns: table.columns.map((column) => ({ name: column.name, type: column.type, description: column.description })),
-      })),
-    );
-    parsed.sql = resolveRelationsInSql(parsed.sql, grounding, { prefer: 'qualified' }).sql;
+  if (parsed.sql) {
+    parsed.sql = contextLedger.qualifySql(parsed.sql).sql;
   }
 
   // Validation gate. Governed metric SQL synthesized from the semantic layer is
   // already trusted (deterministic + grounded); model SQL is validated against the
   // inspected context to catch hallucinated relations/columns.
   const semanticMetricRoute = activeTier === 'semantic_layer' && Boolean(semanticMetricMatch);
-  type AnswerValidation = { ok: true; warnings: string[] } | { ok: false; error: string; warnings: string[] };
+  const scalarGovernedMetricRecoveryAllowed = questionPlan.requestedShape.dimensions.length === 0
+    && questionPlan.requestedShape.filters.length === 0
+    && !questionPlan.requestedShape.topN;
+  type AnswerValidation =
+    | { ok: true; warnings: string[] }
+    | {
+        ok: false;
+        code?: SqlContextValidationCode;
+        error: string;
+        warnings: string[];
+        offending?: SqlContextValidationOffending;
+      };
   let contextValidation: AnswerValidation;
   if (governedMetricAnswer) {
     contextValidation = { ok: true, warnings: [] };
   } else {
-    const c = validateSqlAgainstLocalContext(parsed.sql, input.contextPack, {
+    const c = contextLedger.validateSql(parsed.sql, {
       question,
       intent,
       filterValues: input.followUp?.filters,
@@ -950,7 +1153,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     });
     contextValidation = c.ok
       ? { ok: true, warnings: c.warnings }
-      : { ok: false, error: c.error, warnings: c.warnings };
+      : { ok: false, code: c.code, error: c.error, warnings: c.warnings, offending: c.offending };
   }
 
   // Spec 17, part C — semantic-metric route recovery. A metric question is often
@@ -963,27 +1166,71 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   //   2) Otherwise fall back to a CLEAN governed-metric definition (direct or exact
   //      leaf-measure; no fuzzy family guess that could answer the wrong measure).
   if (!contextValidation.ok && semanticMetricRoute && semanticMetricMatch) {
-    const grounded = grounding ? validateSqlAgainstGrounding(parsed.sql, grounding) : undefined;
+    const grounded = contextLedger.validateRuntimeGrounding(parsed.sql);
     if (grounded?.ok) {
       contextValidation = { ok: true, warnings: grounded.warnings };
-    } else {
+    } else if (scalarGovernedMetricRecoveryAllowed) {
       const recovered = resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes);
       if (recovered) {
         semanticMetricMatch = { ...semanticMetricMatch, metric: recovered.metric };
-        parsed.sql = grounding
-          ? resolveRelationsInSql(recovered.sql, grounding, { prefer: 'qualified' }).sql
-          : recovered.sql;
+        parsed.sql = contextLedger.qualifySql(recovered.sql).sql;
         parsed.viz = parsed.viz ?? 'single_value';
         parsed.text = parsed.text
           || `Answered from the governed metric ${recovered.metric.name}. This result is uncertified until reviewed and promoted.`;
         governedMetricAnswer = true;
         contextValidation = {
           ok: true,
-          warnings: ['Generated SQL failed context validation; answered from the governed metric definition instead.'],
+          warnings: ['SQL preview failed context validation; answered from the governed metric definition instead.'],
         };
       }
     }
   }
+
+  if (!contextValidation.ok && !governedMetricAnswer && input.expandGroundingContext && canUseLaneRepair(repairBudgetState, 'reground')) {
+    recordLaneRepair(repairBudgetState, 'reground');
+    try {
+      const expansion = await input.expandGroundingContext({
+        question,
+        sql: parsed.sql,
+        code: contextValidation.code ?? 'insufficient_context',
+        offending: contextValidation.offending,
+        contextPack: contextLedger.contextPack,
+        schemaContext: contextLedger.schemaContext,
+      });
+      const merged = contextLedger.withExpansion(expansion);
+      if (merged.notes.length > 0) {
+        contextLedger = merged.ledger;
+        parsed.sql = contextLedger.qualifySql(parsed.sql).sql;
+        const revalidated = contextLedger.validateSql(parsed.sql, {
+          question,
+          intent,
+          filterValues: input.followUp?.filters,
+          trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+        });
+        contextValidation = revalidated.ok
+          ? {
+              ok: true,
+              warnings: [
+                ...revalidated.warnings,
+                ...merged.notes.map((note) => `Re-grounded metadata context before repair: ${note}`),
+              ],
+            }
+          : {
+              ok: false,
+              code: revalidated.code,
+              error: revalidated.error,
+              warnings: [
+                ...revalidated.warnings,
+                ...merged.notes.map((note) => `Re-grounded metadata context before repair: ${note}`),
+              ],
+              offending: revalidated.offending,
+            };
+      }
+    } catch {
+      // Re-grounding is best-effort; the bounded self-repair below still runs.
+    }
+  }
+
   // One bounded self-repair before refusing: hand the model the EXACT guard
   // error (e.g. `column "product_name" outside the inspected columns for
   // order_items`) so it can correct itself — usually by joining the relation
@@ -991,15 +1238,18 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // provider get the same single chance; any provider failure keeps the honest
   // refusal below. This mirrors the engine-level repair loop, applied to the
   // context-validation gate that previously refused on first failure.
-  if (!contextValidation.ok && !governedMetricAnswer) {
+  if (!contextValidation.ok && !governedMetricAnswer && canUseLaneRepair(repairBudgetState, 'reground')) {
+    recordLaneRepair(repairBudgetState, 'reground');
     try {
       const failedSql = parsed.sql ?? '';
       const repairPrompt = [
         `Your SQL was rejected before execution: ${contextValidation.error}`,
+        formatOffendingValidationToken(contextValidation.offending),
+        formatValidationWarningsForPrompt(contextValidation.warnings),
         'Correct it using ONLY the relations and columns from the inspected context above.',
         'If a needed column lives on a different relation, JOIN that relation using the suggested join paths.',
         'If the requested column does not exist anywhere in the inspected context, return the closest answerable SQL and say what is missing.',
-        'Return the corrected SQL in a single ```sql code block.',
+        'Return a single ```json fenced object: {"summary":"...","sql":"SELECT ...","viz":"table","outputs":["column"],"dql":{"entity":"...","dimensions":["..."],"filters":["..."]}}.',
       ].join('\n');
       const repairRaw = await provider.generate(
         [...messages, { role: 'assistant', content: failedSql }, { role: 'user', content: repairPrompt }],
@@ -1007,19 +1257,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       );
       const reparsed = parseProposal(repairRaw);
       if (reparsed.sql) {
-        if (grounding) {
-          reparsed.sql = resolveRelationsInSql(reparsed.sql, grounding, { prefer: 'qualified' }).sql;
-        }
-        const revalidated = validateSqlAgainstLocalContext(reparsed.sql, input.contextPack, {
+        reparsed.sql = contextLedger.qualifySql(reparsed.sql).sql;
+        const revalidated = contextLedger.validateSql(reparsed.sql, {
           question,
           intent,
           filterValues: input.followUp?.filters,
           trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
-        });        if (revalidated.ok) {
+        });
+        if (revalidated.ok) {
           const repairedSql: string = reparsed.sql;
           parsed.sql = repairedSql;
           parsed.text = reparsed.text || parsed.text;
           parsed.viz = reparsed.viz ?? parsed.viz;
+          applyParsedProposalMetadata(parsed, reparsed);
           contextValidation = {
             ok: true,
             warnings: [...revalidated.warnings, 'Repaired after context-validation failure (1 repair).'],
@@ -1031,18 +1281,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
   if (!contextValidation.ok) {
-    const text = `I could not safely prepare this generated SQL from the inspected context. ${contextValidation.error}`;
+    const text = `I could not safely prepare this review-required DQL artifact from the inspected context. The SQL preview failed validation: ${contextValidation.error}`;
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,
-      routeReason: catalogRoute?.reason ?? 'Generated SQL failed metadata context validation before preview execution or draft capture.',
+      routeReason: catalogRoute?.reason ?? 'SQL preview for the review-required DQL artifact failed metadata context validation before preview execution or draft capture.',
       selectedNodes: contextNodes,
       schemaContext,
       sql: parsed.sql,
       suggestedViz: parsed.viz ?? 'table',
       assumptions: [
-        'Generated SQL was rejected before execution because it did not match inspected metadata context.',
+        'SQL preview was rejected before execution because it did not match inspected metadata context.',
         ...contextValidation.warnings,
+        ...deepCandidateNotes,
       ],
     });
     return {
@@ -1052,13 +1303,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       reviewStatus: 'none',
       confidence: 0.15,
       text,
+      refusalCode: refusalCodeForValidation(contextValidation.code),
+      refusalDetails: {
+        code: contextValidation.code ?? 'insufficient_context',
+        message: contextValidation.error,
+        offending: contextValidation.offending,
+      },
       answer: text,
       proposedSql: parsed.sql,
       sql: parsed.sql,
       trustLabel: input.contextPack?.trustLabel,
       sourceCertifiedBlock: followUpSourceBlock?.name ?? input.followUp?.sourceBlockName,
       contextPackId: input.contextPack?.id,
-      validationWarnings: contextValidation.warnings,
+      validationWarnings: [...contextValidation.warnings, ...deepCandidateNotes],
       selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
       citations: [],
       memoryContext: input.memoryContext,
@@ -1076,7 +1333,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       }),
       contextPack: input.contextPack,
       considered,
-      providerUsed: localProposal ? 'schema_planner' : provider.name,
+      providerUsed: provider.name,
     };
   }
 
@@ -1105,24 +1362,52 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // The repair turn returns error-recovery prose ("the column X was not recognized…"),
   // NOT a user-facing answer. Keep it for the trace only — never as the answer text.
   let repairNarrative: string | undefined;
-  if (input.executeGeneratedSql) {
+  if (deepCandidateResult) {
+    result = deepCandidateResult;
+  }
+  if (deepCandidateExecutionError) {
+    executionError = deepCandidateExecutionError;
+  }
+  if (input.executeGeneratedSql && !result) {
     try {
-      result = await input.executeGeneratedSql(parsed.sql);
+      if (!executionError) result = await input.executeGeneratedSql(parsed.sql);
     } catch (err) {
       executionError = err instanceof Error ? err.message : String(err);
+    }
+    if (executionError) {
       if (isRetryableGeneratedSqlError(executionError)) {
         const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);
-        if (localRepairSql) {
-          repairAttempts = 1;
-          parsed.sql = localRepairSql;
-          try {
-            result = await input.executeGeneratedSql(parsed.sql);
-            executionError = undefined;
-          } catch (retryErr) {
-            executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        if (localRepairSql && canUseLaneRepair(repairBudgetState, 'execution')) {
+          recordLaneRepair(repairBudgetState, 'execution');
+          const qualifiedLocalRepairSql = contextLedger.qualifySql(localRepairSql).sql;
+          const localRepairValidation = contextLedger.validateSql(qualifiedLocalRepairSql, {
+            question,
+            intent,
+            filterValues: input.followUp?.filters,
+            trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+          });
+          if (localRepairValidation.ok) {
+            repairAttempts = 1;
+            parsed.sql = qualifiedLocalRepairSql;
+            contextValidation = {
+              ok: true,
+              warnings: [
+                ...localRepairValidation.warnings,
+                'Execution-repaired SQL passed context validation.',
+              ],
+            };
+            try {
+              result = await input.executeGeneratedSql(parsed.sql);
+              executionError = undefined;
+            } catch (retryErr) {
+              executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            }
+          } else {
+            executionError = localRepairValidation.error;
           }
         }
-        if (executionError) {
+        if (executionError && canUseLaneRepair(repairBudgetState, 'execution')) {
+          recordLaneRepair(repairBudgetState, 'execution');
           const repairedRaw = await requestSqlRepair({
             provider,
             baseMessages: messages,
@@ -1135,16 +1420,35 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           });
           const repaired = parseProposal(repairedRaw);
           if (repaired.sql) {
-            repairAttempts += 1;
-            // Adopt the corrected SQL, but do NOT let the repair prose become the answer.
-            repairNarrative = repaired.text?.trim() || undefined;
-            parsed.sql = repaired.sql;
-            parsed.viz = repaired.viz ?? parsed.viz;
-            try {
-              result = await input.executeGeneratedSql(parsed.sql);
-              executionError = undefined;
-            } catch (retryErr) {
-              executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            repaired.sql = contextLedger.qualifySql(repaired.sql).sql;
+            const repairedValidation = contextLedger.validateSql(repaired.sql, {
+              question,
+              intent,
+              filterValues: input.followUp?.filters,
+              trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+            });
+            if (repairedValidation.ok) {
+              repairAttempts += 1;
+              // Adopt the corrected SQL, but do NOT let the repair prose become the answer.
+              repairNarrative = repaired.text?.trim() || undefined;
+              parsed.sql = repaired.sql;
+              parsed.viz = repaired.viz ?? parsed.viz;
+              applyParsedProposalMetadata(parsed, repaired);
+              contextValidation = {
+                ok: true,
+                warnings: [
+                  ...repairedValidation.warnings,
+                  'Execution-repaired SQL passed context validation.',
+                ],
+              };
+              try {
+                result = await input.executeGeneratedSql(parsed.sql);
+                executionError = undefined;
+              } catch (retryErr) {
+                executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+              }
+            } else {
+              executionError = repairedValidation.error;
             }
           }
         }
@@ -1155,15 +1459,14 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     question,
     intent,
     routeReason: catalogRoute?.reason ?? (intent === 'drillthrough'
-      ? 'The user asked for a drill-through or follow-up, so DQL generated review-required SQL from the prior context and current metadata.'
+      ? 'The user asked for a drill-through or follow-up, so DQL prepared a review-required artifact with a SQL preview from the prior context and current metadata.'
       : 'The question asks for a custom analysis, ranking, breakdown, comparison, or grain that should not be answered by a loose certified block match.'),
     selectedNodes: contextNodes,
     schemaContext,
     sql: parsed.sql,
     suggestedViz: parsed.viz ?? 'table',
     assumptions: [
-      'Generated SQL is an uncertified preview until an analyst reviews and promotes it.',
-      ...(localProposal ? ['A local metadata planner selected a review-required SQL grain before provider generation.'] : []),
+      'The SQL preview is uncertified until an analyst reviews and promotes the DQL artifact.',
       ...(repairNarrative ? [`Auto-corrected the query after an execution error: ${repairNarrative}`] : []),
       ...contextValidation.warnings,
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
@@ -1174,7 +1477,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     if (resultShape && generatedResultShapeIsHardMismatch(question, questionPlan, resultShape)) {
       const shapeWarnings = resultShape.warnings;
       const text = [
-        'I could not produce a safe combined product/customer answer from the generated SQL.',
+        'I could not produce a safe combined product/customer answer from the SQL preview for the review-required DQL artifact.',
         shapeWarnings.join(' '),
         'The result was rejected instead of returning a partial customer-only or product-only table.',
       ].filter(Boolean).join(' ');
@@ -1182,7 +1485,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         ...(input.contextPack?.warnings ?? []),
         ...contextValidation.warnings,
         ...shapeWarnings,
-        'Generated result shape did not satisfy the requested product/customer answer contract.',
+        'SQL preview result shape did not satisfy the requested product/customer answer contract.',
       ];
       return {
         kind: 'no_answer',
@@ -1215,18 +1518,38 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           considered,
           memoryContext: input.memoryContext ?? [],
           analysisPlan,
+          budgetTrace: cascadeBudgetTrace(repairBudgetState),
         }),
         contextPack: input.contextPack,
         considered,
-        providerUsed: localProposal ? 'schema_planner' : provider.name,
+        providerUsed: provider.name,
       };
     }
     const validationWarnings = [
       ...(input.contextPack?.warnings ?? []),
       ...contextValidation.warnings,
+      ...deepCandidateNotes,
       ...(resultShape?.warnings ?? []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ];
+    const generatedOutputs = parsed.outputs?.length ? parsed.outputs : resultColumnNames(result);
+    const generatedRequestedFilters = mergeProposalStringLists(input.followUp?.filters, parsed.requestedFilters);
+    const generatedRequestedDimensions = mergeProposalStringLists(input.followUp?.dimensions, parsed.requestedDimensions);
+    const dqlArtifact = semanticBridgeAnswer?.dqlArtifact ?? buildGeneratedSqlDqlArtifact({
+      question,
+      sql: parsed.sql,
+      intent,
+      domain,
+      followUp: input.followUp,
+      contextPack: input.contextPack,
+      sourceBlock: followUpSourceBlock ?? undefined,
+      sourceDqlArtifact: input.followUp?.priorDqlArtifact,
+      proposedEntity: parsed.proposedEntity,
+      requestedFilters: generatedRequestedFilters,
+      requestedDimensions: generatedRequestedDimensions,
+      validationWarnings,
+      outputs: generatedOutputs,
+    });
     let draftBlock: GeneratedDraftBlock | undefined;
     let draftCaptureError: string | undefined;
     if (input.captureGeneratedDraft && parsed.sql) {
@@ -1238,13 +1561,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           followUp: input.followUp,
           contextPack: input.contextPack,
           sourceBlock: followUpSourceBlock ?? undefined,
+          sourceDqlArtifact: input.followUp?.priorDqlArtifact,
+          dqlArtifact,
+          proposedEntity: parsed.proposedEntity,
+          requestedFilters: generatedRequestedFilters,
+          requestedDimensions: generatedRequestedDimensions,
           validationWarnings,
+          outputs: generatedOutputs,
         });
       } catch (err) {
         draftCaptureError = err instanceof Error ? err.message : String(err);
         validationWarnings.push(`Draft capture failed: ${draftCaptureError}`);
       }
     }
+    const answerDqlArtifact = dqlArtifact && draftBlock?.path
+      ? { ...dqlArtifact, sourcePath: dqlArtifact.sourcePath ?? draftBlock.path }
+      : dqlArtifact;
     const sourceCertifiedBlock = followUpSourceBlock?.name ?? input.followUp?.sourceBlockName;
     const trustExplanation = generatedTrustExplanation({
       followUp: input.followUp,
@@ -1260,7 +1592,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       sourceTier: activeTier,
       certification: 'ai_generated',
       reviewStatus: 'draft_ready',
-      confidence: activeTier === 'semantic_layer' ? 0.72 : 0.55,
+      confidence: governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
       text: generatedText,
       answer: generatedText,
       proposedSql: parsed.sql,
@@ -1268,6 +1600,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       result,
       executionError,
       suggestedViz: parsed.viz ?? 'table',
+      dqlArtifact: answerDqlArtifact,
       draftBlock,
       draftBlockId: draftBlock?.path,
       promoteCommand: draftBlock ? `dql certify --from-draft ${draftBlock.path}` : undefined,
@@ -1278,32 +1611,38 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
       citations: generatedCitations,
       memoryContext: input.memoryContext,
-    analysisPlan,
-    evidence: buildGeneratedEvidence({
-      question,
-      activeTier,
-      intent,
-      contextNodes,
-      schemaContext,
-      followUp: input.followUp,
-      contextPack: input.contextPack,
-      businessHits,
-      semanticHits,
-      manifestHits,
-      considered,
-      citations: generatedCitations,
-      memoryContext: input.memoryContext ?? [],
-      result,
-      executionError,
-      executorWasAvailable: Boolean(input.executeGeneratedSql),
       analysisPlan,
-    }),
-    contextPack: input.contextPack,
-    considered,
-    providerUsed: localProposal ? 'schema_planner' : provider.name,
-    // Carry the governed metric match so the exit point can name a
-    // `semantic_metric` route (spec 17, part C).
-    _semanticMetricMatch: activeTier === 'semantic_layer' ? semanticMetricMatch ?? undefined : undefined,
+      evidence: buildGeneratedEvidence({
+        question,
+        activeTier,
+        terminalLane: governedMetricAnswer ? 'semantic' : 'generated',
+        terminalDetail: governedMetricAnswer
+          ? semanticBridgeAnswer?.metrics.join(', ') ?? semanticMetricMatch?.metric.name
+          : answerDqlArtifact?.name ?? draftBlock?.path,
+        intent,
+        contextNodes,
+        schemaContext,
+        followUp: input.followUp,
+        contextPack: input.contextPack,
+        businessHits,
+        semanticHits,
+        manifestHits,
+        considered,
+        citations: generatedCitations,
+        memoryContext: input.memoryContext ?? [],
+        result,
+        executionError,
+        executorWasAvailable: Boolean(input.executeGeneratedSql),
+        analysisPlan,
+        toolCalls: proposalToolCalls,
+        budgetTrace: cascadeBudgetTrace(repairBudgetState),
+      }),
+      contextPack: input.contextPack,
+      considered,
+      providerUsed: provider.name,
+      // Carry the governed metric match so the exit point can name a
+      // `semantic_metric` route (spec 17, part C).
+      _semanticMetricMatch: governedMetricAnswer && activeTier === 'semantic_layer' ? semanticMetricMatch ?? undefined : undefined,
   };
 }
 
@@ -1317,6 +1656,20 @@ function trimResultToRequestedTopN(result: AgentResultPayload, plan: AnalysisQue
   };
 }
 
+function resultColumnNames(result?: AgentResultPayload): string[] | undefined {
+  if (!result?.columns) return undefined;
+  const columns = result.columns
+    .map((column) => {
+      if (typeof column === 'string') return column.trim();
+      if (column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string') {
+        return (column as { name: string }).name.trim();
+      }
+      return '';
+    })
+    .filter(Boolean);
+  return columns?.length ? columns : undefined;
+}
+
 const SYSTEM_PROMPT = `You are the DQL Analytics Agent.
 
 Rules:
@@ -1326,16 +1679,21 @@ Rules:
 2. Use certified DQL blocks only when the user's question exactly asks for that
    saved block, direct KPI, or definition. For single-user/customer/account,
    custom filters, rankings, breakdowns, comparisons, drill-throughs, or custom
-   grains, generate review-required SQL from supplied metadata and cite
-   certified context as evidence.
-3. If you must generate SQL, return it inside a single \`\`\`sql code block.
-4. Provide a one-paragraph natural-language summary BEFORE the SQL block. In it,
-   state your QUERY PLAN first: the grain (one row per WHAT), the measures and how
-   they aggregate, the dimensions/filters, and the exact join path + join keys
-   between the grounded tables. Then write SQL that matches that plan — an explicit
-   grain and join path prevents wrong-grain answers and fan-out (row-multiplying) joins.
-5. Suggest a visualization type from this list, on a line starting with "Viz:":
-   line, bar, area, pie, single_value, table, pivot, kpi.
+   grains, prepare a review-required DQL artifact with a SQL preview from
+   supplied metadata and cite certified context as evidence.
+3. If you must create a SQL preview, return a single \`\`\`json fenced object with:
+   {"summary": "...", "sql": "SELECT ...", "viz": "table", "outputs": ["column_a"], "dql": {"entity": "orders", "dimensions": ["region"], "filters": ["last 30 days"]}}.
+   The SQL string must be one read-only SELECT/WITH statement. Do not include a
+   separate SQL code fence when using JSON. The optional "dql" object is
+   metadata for the deterministic draft-DQL renderer; do not hand-write a full
+   DQL block.
+4. In summary, state your QUERY PLAN first: the grain (one row per WHAT), the
+   measures and how they aggregate, the dimensions/filters, and the exact join
+   path + join keys between the grounded tables. Then make the SQL match that
+   plan — an explicit grain and join path prevents wrong-grain answers and
+   fan-out (row-multiplying) joins.
+5. Use a visualization type from this list in the "viz" JSON field: line, bar,
+   area, pie, single_value, table, pivot, kpi.
 6. NEVER fabricate column names that are not present in the supplied schema,
    dbt metadata, or certified source SQL shape context. If a requested filter
    value is supplied as a matched value, prefer the table and column that
@@ -1348,11 +1706,12 @@ Rules:
    clarifying question instead of guessing.
 9. Write directly to the analyst. Do not say "the user is asking", "the user
    requested", "I will generate", or describe internal routing. State the
-   answer, the certified context used, and the review requirement.
+   answer, the certified context used, the DQL artifact expectation, and the
+   review requirement.
 10. For notebook research, SQL build or repair, DQL import/build, or DQL reuse
    checks, start with one line in this form: "Outcome: <decision>". Use one of
-   these decisions: Reuse certified block, Use existing draft, Generate SQL
-   cell, Fix SQL, Create DQL draft, Needs review, Cannot answer yet.`;
+   these decisions: Reuse certified block, Use existing draft, Review SQL preview,
+   Fix SQL, Create DQL draft, Needs review, Cannot answer yet.`;
 
 function renderContextPrompt(
   blocks: KGNode[],
@@ -1366,10 +1725,13 @@ function renderContextPrompt(
   intent: AgentIntent = 'ad_hoc_analysis',
   contextPack?: LocalContextPack,
   conversationSnapshot?: ConversationSnapshot,
+  kgJoinPathHints: string[] = [],
+  budget: PromptContextBudget = QUICK_PROMPT_CONTEXT_BUDGET,
 ): string {
   const intentSection = `## Routing intent\n\nintent: ${intent}\n${intent === 'exact_certified_lookup'
     ? 'Use a certified artifact only if it exactly answers the question.'
-    : 'Generate review-required SQL for this question. Certified blocks are trusted context, not a reason to answer the wrong grain.'}`;
+    : 'Prepare a review-required DQL artifact with a SQL preview for this question. Certified blocks are trusted context, not a reason to answer the wrong grain.'}`;
+  const budgetSection = `\n\n## Context budget\n\nContext budget: ${budget.label} (relations=${budget.relationCardLimit}, relation_columns=${budget.relationColumnLimit}, objects=${budget.contextObjectLimit}, edges=${budget.edgeLimit}).`;
   const blockSection = blocks.length > 0
     ? `## Relevant DQL blocks\n\n${blocks
         .map((b) => `- \`${b.nodeId}\` (${b.domain ?? 'unscoped'}, ${b.status ?? b.certification ?? 'review_required'}): ${b.description ?? b.llmContext ?? '(no description)'}`)
@@ -1385,12 +1747,15 @@ function renderContextPrompt(
         .map((n) => `- ${n.kind} \`${n.name}\`${n.domain ? ` (domain: ${n.domain})` : ''}${n.description ? ` — ${n.description}` : ''}${n.llmContext ? `\n  ${n.llmContext.replace(/\n/g, '\n  ')}` : ''}`)
         .join('\n')}`
     : '';
+  const kgJoinSection = kgJoinPathHints.length > 0
+    ? `\n\n## Knowledge graph join routes\n\nUse these as relationship/navigation evidence for multi-entity analysis. SQL must still use inspected relation columns from the schema or metadata context.\n${kgJoinPathHints.map((hint) => `- ${hint}`).join('\n')}`
+    : '';
   const schemaSection = schemaContext.length > 0
     ? `\n\n## Runtime schema context\n\nUse only these runtime relations and columns when generating SQL unless the dbt manifest context gives an equivalent relation.\n${schemaContext
-        .slice(0, 12)
+        .slice(0, budget.schemaTableLimit)
         .map((table) => {
           const cols = table.columns
-            .slice(0, 50)
+            .slice(0, budget.schemaColumnLimit)
             .map((col) => {
               const sampleValues = col.sampleValues?.length
                 ? `; matched values: ${col.sampleValues.slice(0, 4).map(formatPromptValue).join(', ')}`
@@ -1410,17 +1775,17 @@ function renderContextPrompt(
     : '';
   // Approved, scope-matched correction hints from the Hint Graph. These are
   // human-reviewed lessons (often from a prior wrong→right SQL correction), so
-  // they carry more weight than advisory memory when generating SQL — but they
+  // they carry more weight than advisory memory when preparing a SQL preview — but they
   // still must NOT override a certified artifact that already answers exactly.
   const appliedHints = contextPack?.appliedHints ?? [];
   const hintsSection = appliedHints.length > 0
-    ? `\n\n## Applied governed hints (human-approved corrections)\n\nReviewed, scope-matched corrections from your team. Apply them when generating SQL to avoid known mistakes; they refine generated SQL but MUST NOT override a certified artifact that already answers the question.\n${appliedHints
+    ? `\n\n## Applied governed hints (human-approved corrections)\n\nReviewed, scope-matched corrections from your team. Apply them when preparing a SQL preview to avoid known mistakes; they refine the DQL artifact's SQL preview but MUST NOT override a certified artifact that already answers the question.\n${appliedHints
         .slice(0, 6)
         .map((h) => `- \`${h.title}\`: ${h.guidance}${h.correctedSql ? `\n  corrected SQL pattern: ${h.correctedSql.replace(/\s+/g, ' ').trim().slice(0, 240)}` : ''}`)
         .join('\n')}`
     : '';
   const extraSection = extraContext?.trim()
-    ? `\n\n## Current notebook/app context\n\nThis context may help interpret the user's request, but it MUST NOT override certified artifacts, semantic metrics, dbt metadata, or generated SQL validation.\n\n${extraContext.trim()}`
+    ? `\n\n## Current notebook/app context\n\nThis context may help interpret the user's request, but it MUST NOT override certified artifacts, semantic metrics, dbt metadata, or SQL preview validation.\n\n${extraContext.trim()}`
     : '';
   const followUpSection = followUp
     ? `\n\n## Follow-up routing context\n\n${renderFollowUpContext(followUp)}`
@@ -1429,9 +1794,42 @@ function renderContextPrompt(
     ? `\n\n## Conversation state (session)\n\n${renderConversationSnapshot(conversationSnapshot)}`
     : '';
   const contextPackSection = contextPack
-    ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack)}`
+    ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack, budget)}`
     : '';
-  return `${intentSection}\n\n${blockSection}${businessSection}${otherSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${conversationSection}${extraSection}${followUpSection}`;
+  return `${intentSection}${budgetSection}\n\n${blockSection}${businessSection}${otherSection}${kgJoinSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${conversationSection}${extraSection}${followUpSection}`;
+}
+
+function buildKgJoinPathHints(kg: KGStore, nodes: KGNode[], questionPlan: AnalysisQuestionPlan): string[] {
+  const candidates = nodes
+    .filter((node) => ['block', 'business_view', 'metric', 'entity', 'semantic_model', 'dbt_model', 'dbt_source'].includes(node.kind))
+    .slice(0, 8);
+  if (candidates.length < 2) return [];
+  const domains = new Set(candidates.map((node) => node.domain).filter((domain): domain is string => Boolean(domain)));
+  const shouldSearch = domains.size > 1 || questionPlan.entities.length > 1 || questionPlan.dimensionTerms.length > 1;
+  if (!shouldSearch) return [];
+
+  const hints: string[] = [];
+  const seen = new Set<string>();
+  for (let leftIndex = 0; leftIndex < candidates.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex += 1) {
+      if (hints.length >= 6) return hints;
+      const left = candidates[leftIndex]!;
+      const right = candidates[rightIndex]!;
+      const path = kg.findJoinPath(left.nodeId, right.nodeId, 4);
+      if (!path || path.length < 2) continue;
+      const key = path.join('>');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hints.push(path.map((nodeId) => formatKgPathNode(kg, nodeId)).join(' -> '));
+    }
+  }
+  return hints;
+}
+
+function formatKgPathNode(kg: KGStore, nodeId: string): string {
+  const node = kg.getNode(nodeId);
+  if (!node) return nodeId;
+  return `${node.kind}:${node.name}`;
 }
 
 /**
@@ -1460,26 +1858,33 @@ function renderConversationSnapshot(snapshot: ConversationSnapshot): string {
   }
   if (snapshot.recentTurns.length > 0) {
     const turns = snapshot.recentTurns.slice(-4).map((turn, index) => {
-      const line = [
-        `Q: ${turn.question}`,
-        turn.answerSummary ? `A: ${turn.answerSummary}` : '',
-        turn.resultColumns?.length ? `cols: ${turn.resultColumns.slice(0, 6).join(', ')}` : '',
-        turn.sourceCertifiedBlock ? `block: ${turn.sourceCertifiedBlock}` : '',
-      ].filter(Boolean).join(' | ');
-      return `${index + 1}. ${line.slice(0, 280)}`;
+      return `${index + 1}. ${renderConversationSnapshotTurnLine(turn, 520)}`;
     });
     parts.push(`Recent turns:\n${turns.join('\n')}`);
   }
   if (snapshot.recalledTurns?.length) {
     parts.push(`Recalled earlier turns (semantic match):\n${snapshot.recalledTurns.slice(0, 3)
-      .map((turn) => `- Q: ${turn.question}${turn.answerSummary ? ` | A: ${turn.answerSummary}` : ''}`.slice(0, 280))
+      .map((turn) => `- ${renderConversationSnapshotTurnLine(turn, 520)}`)
       .join('\n')}`);
   }
   parts.push('Use this only where the question refers to it. On a new topic, answer fresh.');
   return parts.join('\n\n');
 }
 
-function renderContextPackForPrompt(contextPack: LocalContextPack): string {
+function renderConversationSnapshotTurnLine(turn: ConversationSnapshot['recentTurns'][number], max: number): string {
+  const line = [
+    `Q: ${turn.question}`,
+    turn.answerSummary ? `A: ${turn.answerSummary}` : '',
+    turn.resultColumns?.length ? `cols: ${turn.resultColumns.slice(0, 6).join(', ')}` : '',
+    typeof turn.resultRowCount === 'number' ? `rows: ${turn.resultRowCount}` : '',
+    turn.sourceSql ? `sql: ${compactSqlSnippet(turn.sourceSql, 180)}` : '',
+    turn.dqlArtifact?.name ? `dql: ${turn.dqlArtifact.name}` : '',
+    turn.sourceCertifiedBlock ? `block: ${turn.sourceCertifiedBlock}` : '',
+  ].filter(Boolean).join(' | ');
+  return line.slice(0, max);
+}
+
+function renderContextPackForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
   const questionPlan = contextPack.questionPlan
     ? [
         `Question plan: ${contextPack.questionPlan.mode} -> ${contextPack.questionPlan.routeIntent}`,
@@ -1498,9 +1903,9 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
     ? `\nCertified block fit: ${contextPack.routeDecision.blockFit.kind} / ${contextPack.routeDecision.blockFit.confidence} (${contextPack.routeDecision.blockFit.reasons.join('; ')})`
     : '';
   const warnings = contextPack.warnings.length
-    ? `Warnings:\n${contextPack.warnings.slice(0, 8).map((warning) => `- ${warning}`).join('\n')}\n`
+    ? `Warnings:\n${contextPack.warnings.slice(0, budget.warningLimit).map((warning) => `- ${warning}`).join('\n')}\n`
     : '';
-  const objects = contextPack.objects.slice(0, 18).map((object) => {
+  const objects = contextPack.objects.slice(0, budget.contextObjectLimit).map((object) => {
     const detail = [
       object.objectType,
       object.domain ? `domain: ${object.domain}` : '',
@@ -1515,22 +1920,25 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
   const route = contextPack.routeDecision
     ? `\nRoute decision: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}\nReason: ${contextPack.routeDecision.reason}${certifiedApplicability}${blockFit}\nMissing context: ${contextPack.routeDecision.missingContext.map((item) => item.message).join(' ') || 'none'}`
     : '';
-  const allowed = renderAllowedSqlRelationsForPrompt(contextPack);
-  const joins = renderCandidateJoinsForPrompt(contextPack);
-  const lineage = renderColumnLineageForPrompt(contextPack);
+  const allowed = renderAllowedSqlRelationsForPrompt(contextPack, budget);
+  const joins = renderCandidateJoinsForPrompt(contextPack, budget);
+  const lineage = renderColumnLineageForPrompt(contextPack, budget);
+  const edges = renderContextEdgesForPrompt(contextPack, budget);
   const relationDiagnostics = contextPack.retrievalDiagnostics?.selectedRelations?.length
-    ? `\nSelected relation reasoning:\n${contextPack.retrievalDiagnostics.selectedRelations.slice(0, 8).map((relation) => `- ${relation.relation} (score ${relation.score.toFixed(1)}): ${relation.reason}`).join('\n')}`
+    ? `\nSelected relation reasoning:\n${contextPack.retrievalDiagnostics.selectedRelations.slice(0, budget.selectedRelationReasonLimit).map((relation) => `- ${relation.relation} (score ${relation.score.toFixed(1)}): ${relation.reason}`).join('\n')}`
     : '';
-  const sourceSql = renderSourceBlockSqlContext(contextPack);
+  const sourceSql = renderSourceBlockSqlContext(contextPack, budget);
   return [
     `context_pack_id: ${contextPack.id}`,
     `trust_label: ${contextPack.trustLabel}`,
+    contextPack.trustLabelInfo ? `trust_label_canonical: ${contextPack.trustLabelInfo.display}` : '',
     questionPlan.trim(),
     route.trim(),
     warnings.trim(),
     `Selected evidence:\n${objects || '- none'}`,
     allowed.trim(),
     joins.trim(),
+    edges.trim(),
     lineage.trim(),
     relationDiagnostics.trim(),
     sourceSql.trim(),
@@ -1538,16 +1946,16 @@ function renderContextPackForPrompt(contextPack: LocalContextPack): string {
   ].filter(Boolean).join('\n');
 }
 
-function renderCandidateJoinsForPrompt(contextPack: LocalContextPack): string {
+function renderCandidateJoinsForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
   const joins = contextPack.retrievalDiagnostics.selectedJoinPaths?.length
-    ? contextPack.retrievalDiagnostics.selectedJoinPaths.slice(0, 8).map((join) => ({
+    ? contextPack.retrievalDiagnostics.selectedJoinPaths.slice(0, budget.joinPathLimit).map((join) => ({
         leftRelation: join.leftRelation,
         leftColumn: join.leftColumn,
         rightRelation: join.rightRelation,
         rightColumn: join.rightColumn,
         reason: join.reason,
       }))
-    : buildCandidateJoinPaths(schemaContextWithAllowedSqlContext([], contextPack)).slice(0, 8);
+    : buildCandidateJoinPaths(schemaContextWithAllowedSqlContext([], contextPack)).slice(0, budget.joinPathLimit);
   if (joins.length === 0) return '';
   return [
     'Suggested join paths from selected metadata:',
@@ -1557,15 +1965,29 @@ function renderCandidateJoinsForPrompt(contextPack: LocalContextPack): string {
   ].join('\n');
 }
 
-function renderColumnLineageForPrompt(contextPack: LocalContextPack): string {
+function renderContextEdgesForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
+  if (budget.edgeLimit <= 0) return '';
+  const edges = contextPack.edges.slice(0, budget.edgeLimit);
+  if (edges.length === 0) return '';
+  return [
+    'Context graph edges:',
+    'Use these object relationships as metadata evidence; SQL still must use inspected relation columns and join keys.',
+    ...edges.map((edge) => {
+      const confidence = typeof edge.confidence === 'number' ? ` (confidence ${edge.confidence.toFixed(2)})` : '';
+      return `- ${edge.edgeType}: ${edge.fromKey} -> ${edge.toKey}${confidence}`;
+    }),
+  ].join('\n');
+}
+
+function renderColumnLineageForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
   const lineageEdges = contextPack.edges
     .filter((edge) => edge.edgeType === 'derives_from')
-    .slice(0, 12);
+    .slice(0, budget.lineageEdgeLimit);
   if (lineageEdges.length === 0) return '';
   const objectsByKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
   return [
     'Column lineage from governed metadata:',
-    'Use this when adapting certified blocks or dbt models into generated SQL so derived output columns map back to their physical source columns.',
+    'Use this when adapting certified blocks or dbt models into a DQL artifact SQL preview so derived output columns map back to their physical source columns.',
     ...lineageEdges.map((edge) => {
       const from = objectsByKey.get(edge.fromKey);
       const to = objectsByKey.get(edge.toKey);
@@ -1586,17 +2008,17 @@ function formatLineageObjectForPrompt(
   return object.fullName ?? object.name ?? object.objectKey;
 }
 
-function renderAllowedSqlRelationsForPrompt(contextPack: LocalContextPack): string {
+function renderAllowedSqlRelationsForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
   const relations = contextPack.allowedSqlContext?.relations ?? [];
   if (relations.length === 0) return '';
   const selectedLookup = selectedRelationLookup(contextPack);
-  const cards = relations.slice(0, 12).map((relation, index) => {
+  const cards = relations.slice(0, budget.relationCardLimit).map((relation, index) => {
     const selection = relationSelectionFor(relation.relation, selectedLookup);
     const rank = selection?.rank ?? index + 1;
     const score = typeof selection?.score === 'number' ? `, score ${selection.score.toFixed(1)}` : '';
     const reason = selection?.reason ? `\n  why selected: ${selection.reason}` : '';
     const columns = relation.columns.length
-      ? relation.columns.slice(0, 32).map(formatRelationColumnForPrompt).join(', ')
+      ? relation.columns.slice(0, budget.relationColumnLimit).map(formatRelationColumnForPrompt).join(', ')
       : '(columns unavailable; use certified source SQL shape or inspect metadata before inventing columns)';
     return [
       `- [rank ${rank}${score}] ${relation.relation} (${relation.source})`,
@@ -1604,11 +2026,38 @@ function renderAllowedSqlRelationsForPrompt(contextPack: LocalContextPack): stri
       `\n  columns: ${columns}`,
     ].join('');
   });
+  const otherRelations = renderOtherAvailableRelationsForPrompt(contextPack, budget);
   return [
     'Selected SQL relation context:',
     'Use these ranked relations and columns as the primary SQL-generation boundary. Prefer lower rank when multiple relations look plausible.',
     ...cards,
-  ].join('\n');
+    otherRelations,
+  ].filter(Boolean).join('\n');
+}
+
+function renderOtherAvailableRelationsForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
+  const names = new Map<string, string>();
+  for (const relation of (contextPack.allowedSqlContext?.relations ?? []).slice(budget.otherRelationStart, budget.otherRelationEnd)) {
+    names.set(normalizePromptRelationName(relation.relation), relation.relation);
+  }
+  for (const item of contextPack.retrievalDiagnostics.topRejected ?? []) {
+    if (!isRelationLikeRejectedObject(item.objectType)) continue;
+    names.set(normalizePromptRelationName(item.name), item.name);
+  }
+  const values = [...names.values()].slice(0, budget.otherRelationLimit);
+  if (values.length === 0) return '';
+  return `Other available relations (names only - expand context before using columns): ${values.join(', ')}`;
+}
+
+function isRelationLikeRejectedObject(objectType: string): boolean {
+  return objectType === 'dbt_model'
+    || objectType === 'dbt_source'
+    || objectType === 'warehouse_table'
+    || objectType === 'runtime_table';
+}
+
+function normalizePromptRelationName(name: string): string {
+  return name.toLowerCase().replace(/["`]/g, '').trim();
 }
 
 function formatRelationColumnForPrompt(column: AgentSchemaColumn): string {
@@ -1620,16 +2069,16 @@ function formatRelationColumnForPrompt(column: AgentSchemaColumn): string {
   return `${column.name}${type}${description}${samples}`;
 }
 
-function renderSourceBlockSqlContext(contextPack: LocalContextPack): string {
+function renderSourceBlockSqlContext(contextPack: LocalContextPack, budget: PromptContextBudget): string {
   const sources = contextPack.allowedSqlContext?.sourceBlockSql ?? [];
   if (sources.length === 0) return '';
-  const lines = sources.slice(0, 5).map((source) => {
+  const lines = sources.slice(0, budget.sourceSqlLimit).map((source) => {
     const shape = extractSimpleSelectShape(source.sql);
     const projectedColumns = shape
       ? shape.selectExpressions
           .map(selectExpressionOutputName)
           .filter((value): value is string => Boolean(value))
-          .slice(0, 24)
+          .slice(0, budget.sourceSqlColumnLimit)
           .join(', ')
       : '';
     const snippet = compactSqlSnippet(source.sql, 280);
@@ -1645,7 +2094,7 @@ function renderSourceBlockSqlContext(contextPack: LocalContextPack): string {
       snippet ? `  sql: ${snippet}` : '',
     ].filter(Boolean).join('\n');
   });
-  return `## Worked examples from certified blocks (few-shot patterns)\n\nThese certified blocks already answer similar questions. Learn their join paths, grain, and filters and ADAPT them to the question — do not copy blindly, and do not relabel generated SQL as certified.\n${lines.join('\n')}`;
+  return `## Worked examples from certified blocks (few-shot patterns)\n\nThese certified blocks already answer similar questions. Learn their join paths, grain, and filters and ADAPT them to the question — do not copy blindly, and do not relabel a review-required DQL artifact or SQL preview as certified.\n${lines.join('\n')}`;
 }
 
 function contextPackCitations(contextPack: LocalContextPack | undefined, limit: number): AgentCitation[] {
@@ -1716,17 +2165,6 @@ function sourceTierFromContextPack(contextPack: LocalContextPack | undefined): A
   return undefined;
 }
 
-function isGeneratedAgentIntent(intent: AgentIntent): boolean {
-  return intent === 'ad_hoc_analysis'
-    || intent === 'drillthrough'
-    || intent === 'ad_hoc_ranking'
-    || intent === 'driver_breakdown'
-    || intent === 'diagnose_change'
-    || intent === 'segment_compare'
-    || intent === 'entity_drilldown'
-    || intent === 'anomaly_investigation';
-}
-
 function metadataObjectKindForCitation(objectType: string): AgentCitation['kind'] {
   if (objectType === 'dql_block') return 'block';
   if (objectType === 'dql_term') return 'term';
@@ -1759,14 +2197,45 @@ function renderFollowUpContext(followUp: AgentFollowUpContext): string {
     followUp.dimensions?.length ? `requested dimensions: ${followUp.dimensions.join(', ')}` : '',
     followUp.priorResultColumns?.length ? `prior result columns: ${followUp.priorResultColumns.join(', ')}` : '',
     followUp.priorResultValues ? `prior result values: ${formatPriorResultValues(followUp.priorResultValues)}` : '',
+    followUp.priorResultRef ? renderPriorResultReference(followUp.priorResultRef) : '',
+    followUp.priorDqlArtifact ? renderPriorDqlArtifactReference(followUp.priorDqlArtifact) : '',
     followUp.priorLimit ? `prior result limit: ${followUp.priorLimit}` : '',
   ].filter(Boolean);
   const rule = followUp.kind === 'drilldown'
-    ? 'routing rule: find a distinct certified drilldown block first; if none exists, generate review-required SQL as a draft drilldown. Do not silently re-run the source block unless it explicitly supports the requested filter or dimension.'
+    ? 'routing rule: find a distinct certified drilldown block first; if none exists, prepare a review-required DQL artifact with a SQL preview as a draft drilldown. Do not silently re-run the source block unless it explicitly supports the requested filter or dimension.'
     : followUp.kind === 'contextual'
       ? 'routing rule: this is prior-turn context (advisory). The user may be continuing from it — resolve references like "these"/"those"/"same" against it when the question refers to it. If this question starts a genuinely new topic, ignore the prior-turn context entirely and answer fresh.'
       : 'routing rule: reuse the prior certified block when the user asks a generic follow-up.';
   return [...parts, rule].join('\n');
+}
+
+function renderPriorResultReference(ref: AgentPriorResultReference): string {
+  const lines = [
+    `prior result ref: result:${ref.id}`,
+    ref.question ? `prior result question: ${ref.question.slice(0, 220)}` : '',
+    ref.columns.length ? `prior result schema: ${ref.columns.slice(0, 24).join(', ')}` : '',
+    typeof ref.rowCount === 'number' ? `prior result row count: ${ref.rowCount}` : '',
+    ref.sourceSql ? `prior result source SQL: ${compactSqlSnippet(ref.sourceSql, 500)}` : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+function renderPriorDqlArtifactReference(artifact: AgentDqlArtifactReference): string {
+  const lines = [
+    `prior DQL artifact kind: ${artifact.kind}`,
+    artifact.name ? `prior DQL artifact name: ${artifact.name}` : '',
+    artifact.sourcePath ? `prior DQL artifact path: ${artifact.sourcePath}` : '',
+    artifact.metrics?.length ? `prior DQL metrics: ${artifact.metrics.slice(0, 12).join(', ')}` : '',
+    artifact.dimensions?.length ? `prior DQL dimensions: ${artifact.dimensions.slice(0, 12).join(', ')}` : '',
+    artifact.filters?.length ? `prior DQL filters: ${artifact.filters.slice(0, 8).map(formatDqlArtifactFilter).join('; ')}` : '',
+    artifact.timeDimension ? `prior DQL time: ${artifact.timeDimension.name} / ${artifact.timeDimension.granularity}` : '',
+    artifact.source.trim() ? `prior DQL artifact source:\n${compactSqlSnippet(artifact.source, 1400)}` : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+function formatDqlArtifactFilter(filter: { dimension: string; operator: string; values: string[] }): string {
+  return `${filter.dimension} ${filter.operator} ${filter.values.slice(0, 8).join(', ')}`;
 }
 
 function formatPriorResultValues(values: Record<string, string[]>): string {
@@ -1791,9 +2260,9 @@ function generatedTrustExplanation(input: {
   ];
   const grain = filters.length ? ` at the requested ${filters.join('/')} grain` : ' at the requested drilldown grain';
   const draft = input.draftBlock
-    ? ` The draft was saved at \`${input.draftBlock.path}\` for review.`
-    : ' The generated SQL still needs analyst review before certification.';
-  return `This is an uncertified drilldown.${source} then generated new SQL${grain}.${draft}`;
+    ? ` The DQL draft was saved at \`${input.draftBlock.path}\` for review.`
+    : ' The review-required DQL artifact and SQL preview still need analyst review before certification.';
+  return `This is an uncertified drilldown.${source} then prepared a SQL preview${grain}.${draft}`;
 }
 
 function cleanGeneratedSummary(text: string): string {
@@ -1801,6 +2270,7 @@ function cleanGeneratedSummary(text: string): string {
     .trim()
     .replace(/^(?:the user (?:is asking|asked|wants|requested)[^.]*\.\s*)+/i, '')
     .replace(/\s*(?:therefore,\s*)?i will generate review-required sql[^.]*\.\s*/gi, ' ')
+    .replace(/\s*(?:therefore,\s*)?i will prepare (?:a )?review-required dql artifact[^.]*\.\s*/gi, ' ')
     .replace(/\s*(?:therefore,\s*)?i will generate[^.]*\.\s*/gi, ' ')
     .trim();
 }
@@ -1809,370 +2279,230 @@ interface ParsedProposal {
   text: string;
   sql?: string;
   viz?: string;
+  outputs?: string[];
+  proposedEntity?: string;
+  requestedFilters?: string[];
+  requestedDimensions?: string[];
 }
 
 /**
- * Public for tests. Pulls the first ```sql block and an optional Viz: line
- * out of an LLM response.
+ * Public for tests. Prefer the structured W2.7 JSON proposal contract, then
+ * fall back to the legacy prose + ```sql block + Viz line format.
  */
 export function parseProposal(raw: string): ParsedProposal {
+  const structured = parseStructuredProposal(raw);
+  if (structured) return structured;
   const sqlMatch = raw.match(/```sql\s*([\s\S]*?)```/i);
   const sql = sqlMatch ? sqlMatch[1].trim() : undefined;
   const vizMatch = raw.match(/^Viz:\s*([a-z_]+)/im);
   const viz = vizMatch ? vizMatch[1].trim().toLowerCase() : undefined;
   // Strip the SQL block + Viz line from the prose to keep the summary clean.
   const text = raw
+    .replace(/```json[\s\S]*?```/gi, '')
     .replace(/```sql[\s\S]*?```/gi, '')
     .replace(/^Viz:.*$/gim, '')
     .trim();
   return { text, sql, viz };
 }
 
-function buildSchemaAwareProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
-  followUp?: AgentFollowUpContext;
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-}): ParsedProposal | undefined {
-  if (!isGeneratedAgentIntent(input.intent)) return undefined;
-  const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext, input.contextPack);
-  const productCustomerProposal = buildProductCustomerRevenueProposal({ ...input, schemaContext });
-  if (productCustomerProposal) return productCustomerProposal;
-  const customerProductCategoryProposal = buildCustomerProductCategoryBuyerProposal({ ...input, schemaContext });
-  if (customerProductCategoryProposal) return customerProductCategoryProposal;
-  if (requiresProductCustomerRevenueCompositeAnswer(input.question)) {
-    return undefined;
-  }
-  const customerCategoryReverseProposal = buildProductCategoryByCustomerProposal({ ...input, schemaContext });
-  if (customerCategoryReverseProposal) return customerCategoryReverseProposal;
-  const customerCategoryProposal = buildCustomerCategoryDrilldownProposal({ ...input, schemaContext });
-  if (customerCategoryProposal) return customerCategoryProposal;
-  const drilldownProposal = buildMatchedEntityDrilldownProposal({ ...input, schemaContext });
-  if (drilldownProposal) return drilldownProposal;
-  const profileProposal = buildEntityProfileProposal({ ...input, schemaContext });
-  if (profileProposal) return profileProposal;
-  if (isFilteredEntityQuestion(input.question)) return undefined;
-  const lower = input.question.toLowerCase();
-  const asksForCustomerPerformance = /\bcustomers?\b/.test(lower)
-    && /\border|orders|spend|revenue|perform|performed|better|top|best|rank|ranking|bottom|least|fewest|lowest|less|worst|underperform/.test(lower)
-    && !/\b(order details|specific orders|each order|all orders|order line|line item)\b/.test(lower);
-  if (asksForCustomerPerformance) {
-    const direction = customerRankingDirectionFromText(input.question);
-    const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
-    const orderFocused = /\border|orders|order count|ordered\b/.test(lower)
-      && !/\b(spend|revenue|sales|amount|lifetime spend|value)\b/.test(lower);
-    const customers = findSchemaTable(schemaContext, ['customers', 'customer']);
-    if (customers) {
-      const customerName = findSchemaColumn(customers, ['customer_name', 'name', 'full_name']);
-      const orderCount = findSchemaColumn(customers, ['count_lifetime_orders', 'lifetime_orders', 'order_count', 'orders_count', 'orders']);
-      const spend = findSchemaColumn(customers, ['lifetime_spend', 'total_lifetime_spend', 'customer_lifetime_value', 'total_revenue', 'revenue']);
-      if (customerName && orderCount && spend) {
-        const primarySort = orderFocused ? orderCount : spend;
-        const secondarySort = orderFocused ? spend : orderCount;
-        const rankingLabel = direction === 'bottom'
-          ? orderFocused ? 'Customers with the fewest orders' : 'Lowest performing customers'
-          : orderFocused ? 'Top customers by order count' : 'Top performing customers';
-        return {
-          text: `${rankingLabel}, with ${businessMeasurePhrase(orderCount)} and ${businessMeasurePhrase(spend)} for context. This is AI-generated and needs analyst review before certification.`,
-          sql: [
-            'SELECT',
-            `  ${sqlIdentifier(customerName)} AS customer_name,`,
-            `  ${sqlIdentifier(orderCount)} AS orders,`,
-            `  ROUND(${sqlIdentifier(spend)}, 2) AS lifetime_spend`,
-            `FROM ${sqlRelation(customers.relation)}`,
-            `ORDER BY ${sqlIdentifier(primarySort)} ${orderDirection}, ${sqlIdentifier(secondarySort)} ${orderDirection}`,
-            'LIMIT 10',
-          ].join('\n'),
-          viz: 'table',
-        };
-      }
-
-      const customerId = findSchemaColumn(customers, ['customer_id', 'id']);
-      const orders = findSchemaTable(schemaContext, ['orders', 'order']);
-      const orderCustomerId = orders ? findSchemaColumn(orders, ['customer_id', 'customer']) : undefined;
-      const orderTotal = orders ? findSchemaColumn(orders, ['order_total', 'total_order_amount', 'total_amount', 'amount', 'subtotal']) : undefined;
-      const orderId = orders ? findSchemaColumn(orders, ['order_id', 'id']) : undefined;
-      if (orders && customerName && customerId && orderCustomerId && orderTotal) {
-        const countExpression = orderId ? `COUNT(DISTINCT o.${sqlIdentifier(orderId)})` : 'COUNT(*)';
-        const primarySort = orderFocused ? 'orders' : 'lifetime_spend';
-        const secondarySort = orderFocused ? 'lifetime_spend' : 'orders';
-        const rankingLabel = direction === 'bottom'
-          ? orderFocused ? 'Customers with the fewest orders' : 'Lowest performing customers'
-          : orderFocused ? 'Top customers by order count' : 'Top performing customers';
-        return {
-          text: `${rankingLabel} from order totals, with order count for context. This is AI-generated and needs analyst review before certification.`,
-          sql: [
-            'SELECT',
-            `  c.${sqlIdentifier(customerName)} AS customer_name,`,
-            `  ${countExpression} AS orders,`,
-            `  ROUND(SUM(o.${sqlIdentifier(orderTotal)}), 2) AS lifetime_spend`,
-            `FROM ${sqlRelation(orders.relation)} AS o`,
-            `JOIN ${sqlRelation(customers.relation)} AS c ON o.${sqlIdentifier(orderCustomerId)} = c.${sqlIdentifier(customerId)}`,
-            `GROUP BY c.${sqlIdentifier(customerName)}`,
-            `ORDER BY ${sqlIdentifier(primarySort)} ${orderDirection}, ${sqlIdentifier(secondarySort)} ${orderDirection}`,
-            'LIMIT 10',
-          ].join('\n'),
-          viz: 'table',
-        };
-      }
+function parseStructuredProposal(raw: string): ParsedProposal | undefined {
+  const trimmed = raw.trim();
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1]?.trim();
+  const candidates = [
+    fenced,
+    trimmed.startsWith('{') && trimmed.endsWith('}') ? trimmed : undefined,
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      const proposal = parsedProposalFromJson(parsed);
+      if (proposal) return proposal;
+    } catch {
+      // Invalid structured output falls through to the legacy SQL-fence parser.
     }
   }
-
-  const productCategoryRevenueProposal = buildProductCategoryRevenueFromSourceSqlProposal({ ...input, schemaContext });
-  if (productCategoryRevenueProposal) return productCategoryRevenueProposal;
-
-  const genericJoinProposal = buildGenericJoinProposal({ ...input, schemaContext });
-  if (genericJoinProposal) return genericJoinProposal;
-  const genericProposal = buildGenericSingleTableProposal({ ...input, schemaContext });
-  if (genericProposal) return genericProposal;
   return undefined;
 }
 
-function buildProductCustomerRevenueProposal(input: {
-  question: string;
-  schemaContext: AgentSchemaTable[];
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-  followUp?: AgentFollowUpContext;
-}): ParsedProposal | undefined {
-  if (
-    input.followUp?.kind === 'drilldown'
-    && /\bcat(?:egor|agor|ogor)(?:y|ies)\b/i.test(input.question)
-    && /\bcustomers?\b/i.test(input.question)
-  ) {
-    return undefined;
+function parsedProposalFromJson(value: unknown): ParsedProposal | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const sql = firstJsonString(record.sql, record.query)?.trim();
+  const text = firstJsonString(record.summary, record.text, record.answer, record.description)?.trim() ?? '';
+  const viz = firstJsonString(record.viz, record.visualization, record.chartType)
+    ?.trim()
+    .toLowerCase()
+    .replace(/[^a-z_]/g, '');
+  const dql = jsonRecord(record.dql);
+  const outputs = firstJsonStringList(record.outputs, dql?.outputs);
+  const proposedEntity = firstJsonString(
+    dql?.entity,
+    dql?.proposedEntity,
+    dql?.proposed_entity,
+    record.proposedEntity,
+    record.proposed_entity,
+    record.entity,
+  )?.replace(/\s+/g, ' ').trim().slice(0, 160);
+  const requestedFilters = firstJsonStringList(
+    dql?.filters,
+    dql?.requestedFilters,
+    dql?.requested_filters,
+    record.requestedFilters,
+    record.requested_filters,
+    record.filters,
+  );
+  const requestedDimensions = firstJsonStringList(
+    dql?.dimensions,
+    dql?.requestedDimensions,
+    dql?.requested_dimensions,
+    record.requestedDimensions,
+    record.requested_dimensions,
+    record.dimensions,
+  );
+  if (!sql && !text) return undefined;
+  return {
+    text,
+    ...(sql ? { sql } : {}),
+    ...(viz ? { viz } : {}),
+    ...(outputs?.length ? { outputs } : {}),
+    ...(proposedEntity ? { proposedEntity } : {}),
+    ...(requestedFilters?.length ? { requestedFilters } : {}),
+    ...(requestedDimensions?.length ? { requestedDimensions } : {}),
+  };
+}
+
+function firstJsonString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function firstJsonStringList(...values: unknown[]): string[] | undefined {
+  for (const value of values) {
+    const list = normalizeProposalStringList(value);
+    if (list.length > 0) return list;
   }
-  if (!hasProductCustomerRevenueIntent(input.question, input.questionPlan)) return undefined;
+  return undefined;
+}
 
-  const candidates = input.schemaContext
-    .map((table) => {
-      const productColumn = findPhysicalSchemaColumn(table, ['product_name', 'product', 'product_title', 'sku', 'product_id']);
-      const category = categoryExpressionForTable(table, input.contextPack, 'f');
-      const metric = inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
-      const customerPath = findCustomerJoinPath(input.schemaContext, table);
-      if (!productColumn || !category || !metric || !customerPath) return undefined;
-      return {
-        table,
-        productColumn,
-        category,
-        metric,
-        customerPath,
-        score:
-          genericTableScore(table, input.question, metric, [productColumn, category.label]) +
-          (customerPath.sameTable ? 14 : 8),
-      };
-    })
-    .filter((candidate): candidate is {
-      table: AgentSchemaTable;
-      productColumn: string;
-      category: CategoryExpression;
-      metric: GenericMetricSelection;
-      customerPath: CustomerJoinPath;
-      score: number;
-    } => Boolean(candidate))
-    .sort((a, b) => b.score - a.score);
-  const selected = candidates[0];
-  if (!selected) return undefined;
+function normalizeProposalStringList(value: unknown): string[] {
+  const rawValues = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? [value]
+      : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of rawValues) {
+    if (typeof raw !== 'string') continue;
+    const cleaned = raw.replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
 
-  const metricAlias = requestedMetricAlias(selected.metric.alias, input.question, input.questionPlan, input.followUp, selected.metric);
-  const limit = requestedGenericLimit(input.question, input.questionPlan);
-  const customerRef = customerReference(selected.customerPath);
-  const productRef = `f.${sqlIdentifier(selected.productColumn)}`;
-  const metricExpression = qualifiedMetricExpression(selected.metric, 'f');
-  const joinLines = customerJoinLines(selected.customerPath);
+function mergeProposalStringLists(...lists: Array<string[] | undefined>): string[] | undefined {
+  const merged = normalizeProposalStringList(lists.flatMap((list) => list ?? []));
+  return merged.length > 0 ? merged : undefined;
+}
 
+function applyParsedProposalMetadata(target: ParsedProposal, source: ParsedProposal): void {
+  target.outputs = source.outputs ?? target.outputs;
+  target.proposedEntity = source.proposedEntity ?? target.proposedEntity;
+  target.requestedFilters = source.requestedFilters ?? target.requestedFilters;
+  target.requestedDimensions = source.requestedDimensions ?? target.requestedDimensions;
+}
+
+function buildCertifiedBlockDqlArtifact(
+  block: KGNode,
+  result?: AgentResultPayload,
+): NonNullable<AgentAnswer['dqlArtifact']> | undefined {
+  if (block.kind !== 'block') return undefined;
+  const sql = block.sql?.trim() ?? result?.sql?.trim() ?? block.examples?.find((example) => example.sql?.trim())?.sql?.trim();
+  if (!sql) return undefined;
+  const domain = block.domain ?? 'misc';
+  const description = block.description ?? `Certified DQL block ${block.name}`;
+  const sourcePathComment = block.sourcePath ? `\n    // source: ${block.sourcePath}` : '';
+  const source = `block "${escapeDqlArtifactString(block.name)}" {
+    domain = "${escapeDqlArtifactString(domain)}"
+    type = "custom"
+    status = "certified"${block.owner ? `\n    owner = "${escapeDqlArtifactString(block.owner)}"` : ''}
+    description = """${escapeDqlArtifactTripleString(description)}"""${sourcePathComment}
+
+    query = """
+        ${sql.replace(/"""/g, '\\"\\"\\"').split('\n').join('\n        ')}
+    """
+}
+`;
   return {
-    text: [
-      `Prepared a review-required product/customer revenue view from ${selected.table.relation}.`,
-      'The result keeps product name, category, buyer, revenue, and units together at the product-customer grain.',
-      'This result is uncertified until reviewed and promoted.',
-    ].join(' '),
-    sql: [
-      'SELECT',
-      `  ${productRef} AS product_name,`,
-      `  ${selected.category.expression} AS category,`,
-      `  ${customerRef} AS customer_name,`,
-      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)},`,
-      '  COUNT(*) AS units',
-      `FROM ${sqlRelation(selected.table.relation)} AS f`,
-      ...joinLines,
-      `GROUP BY ${productRef}, ${selected.category.expression}, ${customerRef}`,
-      `ORDER BY ${sqlIdentifier(metricAlias)} DESC`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: 'table',
+    kind: 'certified_block',
+    name: block.name,
+    sourcePath: block.sourcePath,
+    source,
   };
 }
 
-function buildCustomerProductCategoryBuyerProposal(input: {
+function buildGeneratedSqlDqlArtifact(input: {
   question: string;
-  schemaContext: AgentSchemaTable[];
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-  followUp?: AgentFollowUpContext;
-}): ParsedProposal | undefined {
-  const categoryFilters = requestedProductCategoryFilterValues(input.question);
-  if (categoryFilters.length === 0 || !hasCustomerProductCategoryBuyerIntent(input.question, input.questionPlan)) return undefined;
-
-  const candidates = input.schemaContext
-    .map((table) => {
-      const category = categoryExpressionForTable(table, input.contextPack, 'f');
-      const metric = inferRevenueLikeMetric(table) ?? inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
-      const customerPath = findCustomerJoinPath(input.schemaContext, table);
-      if (!category || !metric || !customerPath) return undefined;
-      const productColumn = findPhysicalSchemaColumn(table, ['product_name', 'product', 'product_title', 'sku', 'product_id']);
-      const mappedFilters = mapProductCategoryFilterValues(categoryFilters, table, category, input.contextPack);
-      if (mappedFilters.length === 0) return undefined;
-      return {
-        table,
-        category,
-        metric,
-        customerPath,
-        productColumn,
-        filterValues: mappedFilters,
-        score:
-          genericTableScore(table, input.question, metric, [category.label, productColumn].filter((value): value is string => Boolean(value))) +
-          (customerPath.sameTable ? 14 : 8) +
-          (productColumn ? 6 : 0),
-      };
-    })
-    .filter((candidate): candidate is {
-      table: AgentSchemaTable;
-      category: CategoryExpression;
-      metric: GenericMetricSelection;
-      customerPath: CustomerJoinPath;
-      productColumn: string | undefined;
-      filterValues: string[];
-      score: number;
-    } => Boolean(candidate))
-    .sort((a, b) => b.score - a.score);
-  const selected = candidates[0];
-  if (!selected) return undefined;
-
-  const customerRef = customerReference(selected.customerPath);
-  const metricAlias = requestedMetricAlias(selected.metric.alias, input.question, input.questionPlan, input.followUp, selected.metric);
-  const metricExpression = qualifiedMetricExpression(selected.metric, 'f');
-  const joinLines = customerJoinLines(selected.customerPath);
-  const wherePredicate = selected.filterValues.length === 1
-    ? `${selected.category.expression} = ${sqlStringLiteral(selected.filterValues[0]!)}`
-    : `${selected.category.expression} IN (${selected.filterValues.map(sqlStringLiteral).join(', ')})`;
-  const limit = requestedGenericLimit(input.question, input.questionPlan);
-
-  return {
-    text: [
-      `Prepared a review-required customer ranking for ${selected.filterValues.join(', ')} products from ${selected.table.relation}.`,
-      'The result joins product order items to customers and ranks customers by product revenue at the customer/category grain.',
-      'This result is uncertified until reviewed and promoted.',
-    ].join(' '),
-    sql: [
-      'SELECT',
-      `  ${customerRef} AS customer_name,`,
-      `  ${selected.category.expression} AS category,`,
-      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)},`,
-      '  COUNT(*) AS units',
-      `FROM ${sqlRelation(selected.table.relation)} AS f`,
-      ...joinLines,
-      `WHERE ${wherePredicate}`,
-      `GROUP BY ${customerRef}, ${selected.category.expression}`,
-      `ORDER BY ${sqlIdentifier(metricAlias)} DESC, units DESC`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: 'bar',
-  };
-}
-
-function buildProductCategoryByCustomerProposal(input: {
-  question: string;
+  sql?: string;
   intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
+  domain?: string;
   followUp?: AgentFollowUpContext;
   contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-}): ParsedProposal | undefined {
-  if (input.followUp?.kind !== 'drilldown') return undefined;
-  const lower = input.question.toLowerCase();
-  const dimensions = new Set((input.followUp.dimensions ?? []).map(normalizeFilterDimension));
-  const priorKeys = new Set(Object.keys(input.followUp.priorResultValues ?? {}).map(normalizeFilterDimension));
-  const wantsCategory = /\bcat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower) || dimensions.has('category');
-  const wantsProduct = /\bproducts?\b|\bproduct\b|\bproduct_name\b/.test(lower) || dimensions.has('product');
-  const referencesPriorRows = /\b(?:above|previous|prior|these|those|same)\s+(?:orders?|results?|rows?|customers?)\b/.test(lower);
-  if ((!wantsCategory && !wantsProduct) || (!/\bcustomers?\b/.test(lower) && !referencesPriorRows && !dimensions.has('customer') && !priorKeys.has('customer'))) {
-    return undefined;
-  }
-  if (!dimensions.has('customer') && !priorKeys.has('customer')) return undefined;
-  const filterValues = uniqueDrilldownStrings((input.followUp.filters ?? []).filter(isConcreteDimensionFilter));
-  if (filterValues.length === 0) return undefined;
-
-  const candidates = input.schemaContext
-    .map((table) => {
-      const category = categoryExpressionForTable(table, input.contextPack, 'f');
-      const productColumn = findPhysicalSchemaColumn(table, ['product_name', 'product', 'product_title', 'sku', 'product_id']);
-      const metricQuestion = referencesPriorRows
-        ? input.question.replace(/\borders?\b/gi, 'purchases') + ' revenue'
-        : input.question;
-      const metric = inferRevenueLikeMetric(table) ?? inferGenericMetric(table, metricQuestion, input.followUp, input.questionPlan);
-      const customerPath = findCustomerJoinPath(input.schemaContext, table);
-      if ((wantsCategory && !category) || (wantsProduct && !productColumn) || !metric || !customerPath) return undefined;
-      return {
-        table,
-        category: category ?? undefined,
-        productColumn: productColumn ?? undefined,
-        metric,
-        customerPath,
-        score: genericTableScore(table, input.question, metric, [category?.label, productColumn].filter((value): value is string => Boolean(value))) + (customerPath.sameTable ? 14 : 8),
-      };
-    })
-    .filter((candidate): candidate is {
-      table: AgentSchemaTable;
-      category: CategoryExpression | undefined;
-      productColumn: string | undefined;
-      metric: GenericMetricSelection;
-      customerPath: CustomerJoinPath;
-      score: number;
-    } => Boolean(candidate))
-    .sort((a, b) => b.score - a.score);
-  const selected = candidates[0];
-  if (!selected) return undefined;
-
-  const customerRef = customerReference(selected.customerPath);
-  const metricAlias = requestedMetricAlias(selected.metric.alias, input.question, input.questionPlan, input.followUp, selected.metric);
-  const metricExpression = qualifiedMetricExpression(selected.metric, 'f');
-  const mappedValues = mapCustomerFilterValues(filterValues, selected.customerPath);
-  if (mappedValues.length === 0) return undefined;
-  const wherePredicate = mappedValues.length === 1
-    ? `${customerRef} = ${sqlStringLiteral(mappedValues[0]!)}`
-    : `${customerRef} IN (${mappedValues.map(sqlStringLiteral).join(', ')})`;
-  const joinLines = customerJoinLines(selected.customerPath);
-  const limit = requestedGenericLimit(input.question, input.questionPlan);
-  const dimensionSelects = [
-    wantsProduct && selected.productColumn ? `  f.${sqlIdentifier(selected.productColumn)} AS product_name,` : undefined,
-    wantsCategory && selected.category ? `  ${selected.category.expression} AS category,` : undefined,
-  ].filter((line): line is string => Boolean(line));
-  const groupByExpressions = [
-    customerRef,
-    wantsProduct && selected.productColumn ? `f.${sqlIdentifier(selected.productColumn)}` : undefined,
-    wantsCategory && selected.category ? selected.category.expression : undefined,
-  ].filter((line): line is string => Boolean(line));
-
+  sourceBlock?: KGNode;
+  sourceDqlArtifact?: GeneratedDraftSourceDqlArtifact;
+  proposedEntity?: string;
+  requestedFilters?: string[];
+  requestedDimensions?: string[];
+  validationWarnings: string[];
+  outputs?: string[];
+}): NonNullable<AgentAnswer['dqlArtifact']> | undefined {
+  const sql = input.sql?.trim();
+  if (!sql) return undefined;
+  const slug = deriveGeneratedDraftSlug(input.question);
+  const proposedDomain = input.sourceBlock?.domain
+    ?? input.contextPack?.objects.find((object) => object.domain)?.domain
+    ?? input.domain
+    ?? 'misc';
   return {
-    text: `Prepared a review-required product category view for the prior customers from ${selected.table.relation}. This result is uncertified until reviewed and promoted.`,
-    sql: [
-      'SELECT',
-      `  ${customerRef} AS customer_name,`,
-      ...dimensionSelects,
-      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)},`,
-      '  COUNT(*) AS units',
-      `FROM ${sqlRelation(selected.table.relation)} AS f`,
-      ...joinLines,
-      `WHERE ${wherePredicate}`,
-      `GROUP BY ${groupByExpressions.join(', ')}`,
-      `ORDER BY customer_name ASC, ${sqlIdentifier(metricAlias)} DESC`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: 'table',
+    kind: 'sql_block',
+    name: slug,
+    source: renderGeneratedSqlDqlArtifact({
+      slug,
+      question: input.question,
+      proposedSql: sql,
+      proposedContractId: `${proposedDomain}.Unknown.${slug}`,
+      proposedDomain,
+      sourceQuestion: input.followUp?.sourceQuestion,
+      sourceBlock: input.followUp?.sourceBlockName ?? input.sourceBlock?.name,
+      sourceDqlArtifact: input.sourceDqlArtifact,
+      followupKind: input.followUp?.kind,
+      proposedEntity: input.proposedEntity,
+      requestedFilters: input.requestedFilters,
+      requestedDimensions: input.requestedDimensions,
+      outputs: input.outputs,
+      contextPackId: input.contextPack?.id,
+      routeIntent: String(input.intent),
+      validationWarnings: input.validationWarnings,
+    }),
   };
+}
+
+function escapeDqlArtifactString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function escapeDqlArtifactTripleString(value: string): string {
+  return value.replace(/"""/g, '\\"\\"\\"');
 }
 
 function hasProductCustomerRevenueIntent(question: string, questionPlan?: AnalysisQuestionPlan): boolean {
@@ -2189,19 +2519,6 @@ function hasProductCustomerRevenueIntent(question: string, questionPlan?: Analys
     && /\brevenu|\bsales\b|\bamount\b|\bspend\b/i.test(requestedText);
 }
 
-function hasCustomerProductCategoryBuyerIntent(question: string, questionPlan?: AnalysisQuestionPlan): boolean {
-  const requestedText = [
-    question,
-    ...(questionPlan?.requestedShape.requiredOutputs ?? []),
-    ...(questionPlan?.requestedShape.dimensions ?? []),
-    ...(questionPlan?.requestedShape.filters ?? []),
-    ...(questionPlan?.dimensionTerms ?? []),
-  ].join(' ');
-  return mentionsCustomerConcept(requestedText)
-    && (mentionsProductConcept(requestedText) || requestedProductCategoryFilterValues(requestedText).length > 0)
-    && /\b(who|which|show|list|top|best|highest|rank|ranking|buyers?|buying|bought|purchased?|orders?|revenue|spend)\b/i.test(question);
-}
-
 function requiresProductCustomerRevenueCompositeAnswer(question: string): boolean {
   return mentionsProductConcept(question)
     && mentionsCustomerConcept(question)
@@ -2216,14 +2533,6 @@ function mentionsProductConcept(text: string): boolean {
   return /\b(?:products?|product_name|items?|skus?|bought|buying|purchased?)\b/i.test(text);
 }
 
-function requestedProductCategoryFilterValues(text: string): string[] {
-  const lower = text.toLowerCase();
-  const values: string[] = [];
-  if (/\b(?:beverages?|drinks?)\b/i.test(lower)) values.push('beverage');
-  if (/\b(?:food|foods|jaffles?)\b/i.test(lower)) values.push('jaffle');
-  return uniqueDrilldownStrings(values);
-}
-
 function generatedResultShapeIsHardMismatch(
   question: string,
   questionPlan: AnalysisQuestionPlan,
@@ -2236,765 +2545,12 @@ function generatedResultShapeIsHardMismatch(
   ) || resultShape.missingOutputs.length >= 2;
 }
 
-interface CategoryExpression {
-  expression: string;
-  label: string;
-}
-
-function categoryExpressionForTable(
-  table: AgentSchemaTable,
-  contextPack: LocalContextPack | undefined,
-  tableAlias?: string,
-): CategoryExpression | undefined {
-  const categoryColumn = findPhysicalSchemaColumn(table, ['category', 'category_name', 'product_category', 'product_type', 'type']);
-  if (categoryColumn) {
-    return {
-      expression: tableAlias ? `${tableAlias}.${sqlIdentifier(categoryColumn)}` : sqlIdentifier(categoryColumn),
-      label: categoryColumn,
-    };
-  }
-
-  const sourcePattern = productCategoryRevenuePatternFromSourceSql(contextPack);
-  if (sourcePattern && sourceRelationsCompatible(sourcePattern.relation, table.relation)) {
-    return {
-      expression: tableAlias
-        ? qualifyExpressionForTableAlias(sourcePattern.categoryExpression, table, tableAlias)
-        : sourcePattern.categoryExpression,
-      label: 'category',
-    };
-  }
-
-  const foodFlag = findPhysicalSchemaColumn(table, ['is_food_item', 'is_food', 'food_item']);
-  if (foodFlag) {
-    const flagRef = tableAlias ? `${tableAlias}.${sqlIdentifier(foodFlag)}` : sqlIdentifier(foodFlag);
-    return {
-      expression: `CASE WHEN ${flagRef} THEN 'Food' ELSE 'Drink' END`,
-      label: 'category',
-    };
-  }
-  return undefined;
-}
-
-function findPhysicalSchemaColumn(table: AgentSchemaTable, names: string[]): string | undefined {
-  const byLower = new Map(table.columns.map((column) => [column.name.toLowerCase(), column]));
-  for (const name of names) {
-    const exact = byLower.get(name.toLowerCase());
-    if (exact && !isCertifiedSourceShapeColumn(exact)) return exact.name;
-    const alias = table.columns.find((column) =>
-      !isCertifiedSourceShapeColumn(column) && columnHasGovernedAlias(column, name)
-    );
-    if (alias) return alias.name;
-  }
-  return undefined;
-}
-
-function qualifyExpressionForTableAlias(expression: string, table: AgentSchemaTable, alias: string): string {
-  let qualified = expression;
-  const physicalColumns = table.columns
-    .filter((column) => !isCertifiedSourceShapeColumn(column))
-    .map((column) => column.name)
-    .sort((a, b) => b.length - a.length);
-  for (const column of physicalColumns) {
-    const pattern = new RegExp(`(^|[^\\w.])(${sqlIdentifierPattern(column)})(?=[^\\w]|$)`, 'gi');
-    qualified = qualified.replace(pattern, (_match, prefix: string, identifier: string) =>
-      `${prefix}${alias}.${sqlIdentifier(cleanSqlIdentifier(identifier))}`,
-    );
-  }
-  return qualified;
-}
-
-function customerJoinLines(customerPath: CustomerJoinPath): string[] {
-  if (customerPath.sameTable) return [];
-  if (customerPath.bridgeTable) {
-    return [
-      `JOIN ${sqlRelation(customerPath.bridgeTable.relation)} AS b ON f.${sqlIdentifier(customerPath.factToBridge.leftColumn)} = b.${sqlIdentifier(customerPath.factToBridge.rightColumn)}`,
-      `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON b.${sqlIdentifier(customerPath.bridgeToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.bridgeToCustomer.rightColumn)}`,
-    ];
-  }
-  return [
-    `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON f.${sqlIdentifier(customerPath.factToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.factToCustomer.rightColumn)}`,
-  ];
-}
-
-function mapCustomerFilterValues(values: string[], customerPath: CustomerJoinPath): string[] {
-  return mapFollowUpFilterValues(values, customerPath.customerTable, customerPath.customerNameColumn);
-}
-
-function mapProductCategoryFilterValues(
-  values: string[],
-  table: AgentSchemaTable,
-  category: CategoryExpression,
-  contextPack: LocalContextPack | undefined,
-): string[] {
-  const mapped = mapFollowUpFilterValues(values, table, category.label, contextPack);
-  if (!/\bCASE\b/i.test(category.expression)) return mapped;
-  return uniqueDrilldownStrings(mapped.map((value) => {
-    const normalized = value.trim().toLowerCase();
-    if (/\b(beverage|drink|coffee|tea)\b/i.test(normalized)) return 'Drink';
-    if (/\b(food|jaffle|meal|sandwich)\b/i.test(normalized)) return 'Food';
-    return value;
-  }));
-}
-
 function trustedFollowUpFilterValues(followUp: AgentFollowUpContext | undefined): string[] | undefined {
   const filters = new Set((followUp?.filters ?? []).map((value) => value.trim()).filter(Boolean));
   if (!filters.size || !followUp?.priorResultValues) return undefined;
   const priorValues = Object.values(followUp.priorResultValues).flat().map((value) => value.trim()).filter(Boolean);
   const trusted = priorValues.filter((value) => filters.has(value));
   return trusted.length > 0 ? uniqueDrilldownStrings(trusted) : undefined;
-}
-
-function buildProductCategoryRevenueFromSourceSqlProposal(input: {
-  question: string;
-  schemaContext: AgentSchemaTable[];
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-}): ParsedProposal | undefined {
-  const requestedText = [
-    input.question,
-    ...(input.questionPlan?.requestedShape.requiredOutputs ?? []),
-    ...(input.questionPlan?.requestedShape.dimensions ?? []),
-    ...(input.questionPlan?.requestedShape.measures ?? []),
-    ...(input.questionPlan?.dimensionTerms ?? []),
-    ...(input.questionPlan?.metricTerms ?? []),
-  ].join(' ').toLowerCase();
-  const wantsProduct = /\bproducts?\b|\bproduct_name\b/.test(requestedText);
-  const wantsCategory = /\bcategor(?:y|ies)\b|\bcategory_name\b/.test(requestedText);
-  const wantsRevenue = /\brevenu|\bsales\b|\bamount\b|\bspend\b/.test(requestedText);
-  if (!wantsProduct || !wantsCategory || !wantsRevenue) return undefined;
-
-  const pattern = productCategoryRevenuePatternFromSourceSql(input.contextPack);
-  if (!pattern) return undefined;
-
-  const limit = requestedGenericLimit(input.question, input.questionPlan);
-  const orderDirection = rankingDirectionFromText(input.question) === 'bottom' ? 'ASC' : 'DESC';
-  const sourceNames = pattern.sourceNames.length ? ` using ${pattern.sourceNames.join(' and ')}` : '';
-  return {
-    text: `Prepared a review-required product revenue ranking with category${sourceNames} as governed SQL context. This result is uncertified until reviewed and promoted.`,
-    sql: [
-      'SELECT',
-      `  ${pattern.productExpression} AS product_name,`,
-      `  ${pattern.categoryExpression} AS category,`,
-      `  ${pattern.metricExpression} AS revenue`,
-      `FROM ${pattern.relation}`,
-      'GROUP BY 1, 2',
-      `ORDER BY revenue ${orderDirection}`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: 'bar',
-  };
-}
-
-interface ProductCategoryRevenuePattern {
-  relation: string;
-  productExpression: string;
-  categoryExpression: string;
-  metricExpression: string;
-  sourceNames: string[];
-}
-
-interface SourceSqlShapeHints {
-  relation: string;
-  sourceName: string;
-  productExpression?: string;
-  categoryExpression?: string;
-  metricExpression?: string;
-}
-
-function productCategoryRevenuePatternFromSourceSql(
-  contextPack: LocalContextPack | undefined,
-): ProductCategoryRevenuePattern | undefined {
-  const sources = contextPack?.allowedSqlContext?.sourceBlockSql ?? [];
-  if (sources.length === 0) return undefined;
-
-  const hints = sources
-    .map((source): SourceSqlShapeHints | undefined => {
-      const shape = extractSimpleSelectShape(source.sql);
-      if (!shape || !safeSourceRelation(shape.relation)) return undefined;
-      const hint: SourceSqlShapeHints = {
-        relation: shape.relation,
-        sourceName: source.name,
-      };
-      for (const expression of shape.selectExpressions) {
-        const outputName = selectExpressionOutputName(expression);
-        const body = reusableSelectExpressionBody(expression);
-        if (!outputName || !body) continue;
-        if (!hint.productExpression && isProductOutputName(outputName)) {
-          hint.productExpression = body;
-        }
-        if (!hint.categoryExpression && isCategoryOutputName(outputName)) {
-          hint.categoryExpression = body;
-        }
-        if (!hint.metricExpression && isRevenueOutputExpression(outputName, body)) {
-          hint.metricExpression = body;
-        }
-      }
-      return hint;
-    })
-    .filter((hint): hint is SourceSqlShapeHints => Boolean(hint));
-
-  for (const productMetric of hints) {
-    if (!productMetric.productExpression || !productMetric.metricExpression) continue;
-    const category = hints.find((candidate) =>
-      candidate.categoryExpression && sourceRelationsCompatible(productMetric.relation, candidate.relation)
-    );
-    if (!category?.categoryExpression) continue;
-    return {
-      relation: productMetric.relation,
-      productExpression: productMetric.productExpression,
-      categoryExpression: category.categoryExpression,
-      metricExpression: productMetric.metricExpression,
-      sourceNames: uniqueDrilldownStrings([productMetric.sourceName, category.sourceName]),
-    };
-  }
-  return undefined;
-}
-
-function reusableSelectExpressionBody(expression: string): string | undefined {
-  const stripped = stripSqlAliasQualifiers(stripSelectAlias(expression).replace(/\s+/g, ' ').trim());
-  if (!isReusableGeneratedSelectExpression(stripped)) return undefined;
-  return stripped;
-}
-
-function stripSelectAlias(expression: string): string {
-  const explicit = expression.replace(/\s+AS\s+(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w]*)\s*$/i, '').trim();
-  if (explicit !== expression.trim()) return explicit;
-  const implicit = expression.match(/^([\s\S]*\S)\s+(?:"[^"]+"|`[^`]+`|[A-Za-z_][\w]*)\s*$/);
-  if (implicit?.[1] && /[()\s+\-*\/]|\bCASE\b/i.test(implicit[1])) return implicit[1].trim();
-  return expression.trim();
-}
-
-function isReusableGeneratedSelectExpression(expression: string): boolean {
-  if (!expression || expression.length > 500) return false;
-  if (/[;]/.test(expression) || /--|\/\*/.test(expression)) return false;
-  return !/\b(SELECT|FROM|JOIN|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|PRAGMA|SET)\b/i.test(expression);
-}
-
-function safeSourceRelation(relation: string): boolean {
-  return Boolean(relation.trim())
-    && relation.length <= 160
-    && !/[;()]/.test(relation)
-    && !/\b(SELECT|JOIN|WHERE|GROUP\s+BY|ORDER\s+BY|LIMIT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|PRAGMA|SET)\b/i.test(relation);
-}
-
-function isProductOutputName(outputName: string): boolean {
-  const normalized = outputName.toLowerCase();
-  return normalized === 'product'
-    || normalized === 'product_name'
-    || normalized === 'product_title'
-    || normalized === 'sku';
-}
-
-function isCategoryOutputName(outputName: string): boolean {
-  const normalized = outputName.toLowerCase();
-  return normalized === 'category'
-    || normalized === 'category_name'
-    || normalized === 'product_category'
-    || normalized === 'product_type';
-}
-
-function isRevenueOutputExpression(outputName: string, expression: string): boolean {
-  const output = outputName.toLowerCase();
-  const body = expression.toLowerCase().replace(/_/g, ' ');
-  return /\b(revenue|sales|amount|spend|value)\b/.test(output.replace(/_/g, ' '))
-    && /\b(SUM|AVG|COUNT|MIN|MAX)\s*\(/i.test(expression)
-    && /\b(revenue|sales|amount|price|spend|value|total)\b/.test(body);
-}
-
-function sourceRelationsCompatible(left: string, right: string): boolean {
-  const leftKeys = new Set(relationLookupKeys(left));
-  return relationLookupKeys(right).some((key) => leftKeys.has(key));
-}
-
-function buildCustomerCategoryDrilldownProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
-  followUp?: AgentFollowUpContext;
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-}): ParsedProposal | undefined {
-  if (input.followUp?.kind !== 'drilldown') return undefined;
-  if (!/\bcustomers?\b/i.test(input.question)) return undefined;
-  const filterTarget = customerDrilldownFilterTarget(input.question, input.followUp);
-  if (!filterTarget) return undefined;
-  const filterValues = uniqueDrilldownStrings((input.followUp.filters ?? []).filter(isConcreteDimensionFilter));
-  if (filterValues.length === 0) return undefined;
-
-  const metricTableCandidates = input.schemaContext
-    .map((table) => {
-      const filterColumn = findSchemaColumn(table, filterTarget.columnCandidates);
-      const metric = inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
-      const orderKey = findSchemaColumn(table, ['order_id', 'order_key', 'order_uuid']);
-      const customerKey = findSchemaColumn(table, ['customer_id', 'customer_key', 'customer_uuid']);
-      const customerName = findSchemaColumn(table, ['customer_name', 'customer', 'full_name', 'name']);
-      if (!filterColumn || !metric || (!orderKey && !customerKey && !customerName)) return undefined;
-      return {
-        table,
-        filterColumn,
-        metric,
-        score: genericTableScore(table, input.question, metric, [filterColumn]) + (orderKey ? 10 : 0) + (customerKey ? 14 : 0) + (customerName ? 12 : 0),
-      };
-    })
-    .filter((candidate): candidate is {
-      table: AgentSchemaTable;
-      filterColumn: string;
-      metric: GenericMetricSelection;
-      score: number;
-    } => Boolean(candidate))
-    .sort((a, b) => b.score - a.score);
-  const metricCandidate = metricTableCandidates[0];
-  if (!metricCandidate) return undefined;
-
-  const customerPath = findCustomerJoinPath(input.schemaContext, metricCandidate.table);
-  if (!customerPath) return undefined;
-  const mappedValues = mapFollowUpFilterValues(
-    filterValues,
-    metricCandidate.table,
-    metricCandidate.filterColumn,
-    input.contextPack,
-    input.followUp.sourceBlockName,
-  );
-  if (mappedValues.length === 0) return undefined;
-
-  const metricAlias = requestedMetricAlias(metricCandidate.metric.alias, input.question, input.questionPlan, input.followUp, metricCandidate.metric);
-  const metricExpression = qualifiedMetricExpression(metricCandidate.metric, 'f');
-  const wherePredicate = mappedValues.length === 1
-    ? `f.${sqlIdentifier(metricCandidate.filterColumn)} = ${sqlStringLiteral(mappedValues[0]!)}`
-    : `f.${sqlIdentifier(metricCandidate.filterColumn)} IN (${mappedValues.map(sqlStringLiteral).join(', ')})`;
-  const joinLines = customerPath.sameTable
-    ? []
-    : customerPath.bridgeTable
-    ? [
-        `JOIN ${sqlRelation(customerPath.bridgeTable.relation)} AS b ON f.${sqlIdentifier(customerPath.factToBridge.leftColumn)} = b.${sqlIdentifier(customerPath.factToBridge.rightColumn)}`,
-        `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON b.${sqlIdentifier(customerPath.bridgeToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.bridgeToCustomer.rightColumn)}`,
-      ]
-    : [
-        `JOIN ${sqlRelation(customerPath.customerTable.relation)} AS c ON f.${sqlIdentifier(customerPath.factToCustomer.leftColumn)} = c.${sqlIdentifier(customerPath.factToCustomer.rightColumn)}`,
-      ];
-  const limit = requestedGenericLimit(input.question, input.questionPlan);
-
-  return {
-    text: `Prepared a review-required customer revenue ranking for the prior ${filterTarget.pluralLabel} from ${metricCandidate.table.relation}. This result is uncertified until reviewed and promoted.`,
-    sql: [
-      'SELECT',
-      `  ${customerReference(customerPath)} AS customer_name,`,
-      `  f.${sqlIdentifier(metricCandidate.filterColumn)} AS ${sqlIdentifier(filterTarget.outputAlias)},`,
-      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)}`,
-      `FROM ${sqlRelation(metricCandidate.table.relation)} AS f`,
-      ...joinLines,
-      `WHERE ${wherePredicate}`,
-      `GROUP BY ${customerReference(customerPath)}, f.${sqlIdentifier(metricCandidate.filterColumn)}`,
-      `ORDER BY ${sqlIdentifier(metricAlias)} DESC`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: 'table',
-  };
-}
-
-type CustomerJoinPath =
-  | {
-      customerTable: AgentSchemaTable;
-      customerNameColumn: string;
-      sameTable: true;
-      factToCustomer?: undefined;
-      bridgeTable?: undefined;
-      factToBridge?: undefined;
-      bridgeToCustomer?: undefined;
-    }
-  | {
-      customerTable: AgentSchemaTable;
-      customerNameColumn: string;
-      sameTable?: undefined;
-      factToCustomer: JoinColumnSelection;
-      bridgeTable?: undefined;
-      factToBridge?: undefined;
-      bridgeToCustomer?: undefined;
-    }
-  | {
-      customerTable: AgentSchemaTable;
-      customerNameColumn: string;
-      sameTable?: undefined;
-      bridgeTable: AgentSchemaTable;
-      factToBridge: JoinColumnSelection;
-      bridgeToCustomer: JoinColumnSelection;
-      factToCustomer?: undefined;
-    };
-
-function findCustomerJoinPath(schemaContext: AgentSchemaTable[], factTable: AgentSchemaTable): CustomerJoinPath | undefined {
-  const factCustomerName = findSchemaColumn(factTable, ['customer_name', 'customer', 'full_name', 'name']);
-  if (factCustomerName) {
-    return {
-      customerTable: factTable,
-      customerNameColumn: factCustomerName,
-      sameTable: true,
-    };
-  }
-
-  const customerTables = schemaContext
-    .map((table) => {
-      const customerNameColumn = findSchemaColumn(table, ['customer_name', 'customer', 'full_name', 'name']);
-      const customerKey = findSchemaColumn(table, ['customer_id', 'customer_key', 'customer_uuid', 'id']);
-      if (!customerNameColumn || !customerKey) return undefined;
-      return { table, customerNameColumn };
-    })
-    .filter((candidate): candidate is { table: AgentSchemaTable; customerNameColumn: string } => Boolean(candidate))
-    .sort((a, b) => selectedRelationWeight(b.table) - selectedRelationWeight(a.table));
-
-  for (const customer of customerTables) {
-    const direct = pickJoinColumns(factTable, customer.table);
-    if (direct) {
-      return {
-        customerTable: customer.table,
-        customerNameColumn: customer.customerNameColumn,
-        factToCustomer: direct,
-      };
-    }
-  }
-
-  for (const customer of customerTables) {
-    for (const bridgeTable of schemaContext) {
-      if (normalizeRelationKey(bridgeTable.relation) === normalizeRelationKey(factTable.relation)) continue;
-      if (normalizeRelationKey(bridgeTable.relation) === normalizeRelationKey(customer.table.relation)) continue;
-      const factToBridge = pickJoinColumns(factTable, bridgeTable);
-      if (!factToBridge) continue;
-      const bridgeToCustomer = pickJoinColumns(bridgeTable, customer.table);
-      if (!bridgeToCustomer) continue;
-      return {
-        customerTable: customer.table,
-        customerNameColumn: customer.customerNameColumn,
-        bridgeTable,
-        factToBridge,
-        bridgeToCustomer,
-      };
-    }
-  }
-
-  return undefined;
-}
-
-interface CustomerDrilldownFilterTarget {
-  dimension: 'category' | 'product';
-  outputAlias: 'category' | 'product_name';
-  pluralLabel: string;
-  columnCandidates: string[];
-}
-
-function customerDrilldownFilterTarget(
-  question: string,
-  followUp: AgentFollowUpContext,
-): CustomerDrilldownFilterTarget | undefined {
-  const lower = question.toLowerCase();
-  const dimensions = new Set((followUp.dimensions ?? []).map(normalizeFilterDimension));
-  const priorKeys = new Set(Object.keys(followUp.priorResultValues ?? {}).map(normalizeFilterDimension));
-  const wantsProduct = /\bproducts?\b/.test(lower) || dimensions.has('product') || priorKeys.has('product');
-  const wantsCategory = /\bcat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower) || dimensions.has('category') || priorKeys.has('category');
-  if (wantsProduct) {
-    return {
-      dimension: 'product',
-      outputAlias: 'product_name',
-      pluralLabel: 'products',
-      columnCandidates: ['product_name', 'product', 'product_title', 'sku', 'product_id'],
-    };
-  }
-  if (wantsCategory) {
-    return {
-      dimension: 'category',
-      outputAlias: 'category',
-      pluralLabel: 'categories',
-      columnCandidates: ['category', 'category_name', 'product_category', 'product_type', 'type'],
-    };
-  }
-  return undefined;
-}
-
-function customerReference(path: CustomerJoinPath): string {
-  return path.sameTable
-    ? `f.${sqlIdentifier(path.customerNameColumn)}`
-    : `c.${sqlIdentifier(path.customerNameColumn)}`;
-}
-
-function customerRankingDirectionFromText(text: string): RankingDirection {
-  const lower = text.toLowerCase();
-  if (/\b(less|lesser)\s+(?:order|orders|ordering)\b/.test(lower) || /\borders?\s+(?:less|least|fewest|lowest)\b/.test(lower)) {
-    return 'bottom';
-  }
-  return rankingDirectionFromText(text) ?? 'top';
-}
-
-function buildGenericJoinProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
-  followUp?: AgentFollowUpContext;
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-}): ParsedProposal | undefined {
-  const planMode = input.contextPack?.questionPlan?.mode;
-  if (planMode === 'entity_profile' || planMode === 'diagnose_change' || planMode === 'anomaly' || planMode === 'trust_review') {
-    return undefined;
-  }
-  const lower = input.question.toLowerCase();
-  if (/\b(why|root cause|diagnos|changed?|drop|decline|increase|decrease|repair|fix|bad|details?|detail rows?|line items?|raw rows?)\b/i.test(lower)) {
-    return undefined;
-  }
-  if (!/\b(by\s+[a-z]|per\s+[a-z]|for each|group(?:ed)? by|split|segment|break\s*down|breakdown|compare)\b/i.test(lower)) {
-    return undefined;
-  }
-
-  const candidate = pickGenericJoinCandidate(input.schemaContext, input.question);
-  if (!candidate) return undefined;
-
-  const direction = rankingDirectionFromText(input.question);
-  const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
-  const limit = /\b(all|complete|full)\b/i.test(input.question) ? 50 : 10;
-  const chart = isTimeLikeGenericColumn(candidate.dimensionColumn) ? 'line' : 'bar';
-  const metricExpression = qualifiedMetricExpression(candidate.metric, 'f');
-  const metricAlias = candidate.metric.alias;
-  const dimensionAlias = candidate.dimensionColumn;
-
-  return {
-    text: `Prepared a review-required ${businessMeasurePhrase(candidate.metric.column)} breakdown by ${humanizeIdentifier(candidate.dimensionColumn)} by joining ${candidate.metricTable.relation} to ${candidate.dimensionTable.relation}. This result is uncertified until reviewed and promoted.`,
-    sql: [
-      'SELECT',
-      `  d.${sqlIdentifier(candidate.dimensionColumn)} AS ${sqlIdentifier(dimensionAlias)},`,
-      `  ${metricExpression} AS ${sqlIdentifier(metricAlias)}`,
-      `FROM ${sqlRelation(candidate.metricTable.relation)} AS f`,
-      `JOIN ${sqlRelation(candidate.dimensionTable.relation)} AS d ON f.${sqlIdentifier(candidate.metricJoinColumn)} = d.${sqlIdentifier(candidate.dimensionJoinColumn)}`,
-      `GROUP BY d.${sqlIdentifier(candidate.dimensionColumn)}`,
-      `ORDER BY ${sqlIdentifier(metricAlias)} ${orderDirection}`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: chart,
-  };
-}
-
-function buildGenericSingleTableProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
-  followUp?: AgentFollowUpContext;
-  contextPack?: LocalContextPack;
-  questionPlan?: AnalysisQuestionPlan;
-}): ParsedProposal | undefined {
-  const planMode = input.contextPack?.questionPlan?.mode;
-  if (planMode === 'entity_profile' || planMode === 'diagnose_change' || planMode === 'anomaly' || planMode === 'trust_review') {
-    return undefined;
-  }
-  const lower = input.question.toLowerCase();
-  if (/\b(why|root cause|diagnos|changed?|drop|decline|increase|decrease|repair|fix|bad|details?|detail rows?|line items?|raw rows?)\b/i.test(lower)) {
-    return undefined;
-  }
-  if (!/\b(show|list|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking|compare|trend|by\s+[a-z]|how many|number of|revenue|sales|orders?|points?|score|count|total|average|avg|sum)\b/i.test(lower)) {
-    return undefined;
-  }
-  const table = pickGenericAnalysisTable(input.schemaContext, input.question, input.followUp, input.questionPlan);
-  if (!table) return undefined;
-  const metric = inferGenericMetric(table, input.question, input.followUp, input.questionPlan);
-  if (!metric) return undefined;
-  const dimensionSelections = selectGenericDimensionSelections(table, input.question, metric, input.questionPlan).slice(0, 3);
-  if (customerQuestionRequiresCustomerDimension(input.question) && !dimensionSelections.some((dimension) => isCustomerDimensionSelection(dimension))) {
-    return undefined;
-  }
-  const direction = rankingDirectionFromText(input.question);
-  const limit = requestedGenericLimit(input.question, input.questionPlan);
-  const metricAlias = requestedMetricAlias(metric.alias, input.question, input.questionPlan, input.followUp, metric);
-  const whereClause = genericFollowUpWhereClause(table, dimensionSelections, input.followUp);
-  const whereLines = whereClause ? [`WHERE ${whereClause}`] : [];
-
-  if (dimensionSelections.length === 0) {
-    return {
-      text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} summary from ${table.relation}. This result is uncertified until reviewed and promoted.`,
-      sql: [
-        'SELECT',
-        `  ${metric.expression} AS ${sqlIdentifier(metricAlias)}`,
-        `FROM ${sqlRelation(table.relation)}`,
-        ...whereLines,
-      ].join('\n'),
-      viz: 'single_value',
-    };
-  }
-
-  if (direction && metric.preAggregated) {
-    return {
-      text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} ranking by ${dimensionSelections.map((dimension) => humanizeIdentifier(dimension.alias)).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
-      sql: [
-        'SELECT',
-        ...dimensionSelections.map((dimension) => `  ${sqlIdentifier(dimension.column)} AS ${sqlIdentifier(dimension.alias)},`),
-        `  ${sqlIdentifier(metric.column)} AS ${sqlIdentifier(metricAlias)}`,
-        `FROM ${sqlRelation(table.relation)}`,
-        ...whereLines,
-        `ORDER BY ${sqlIdentifier(metricAlias)} ${direction === 'bottom' ? 'ASC' : 'DESC'}`,
-        `LIMIT ${limit}`,
-      ].join('\n'),
-      viz: 'table',
-    };
-  }
-
-  const selectDimensions = dimensionSelections.map((dimension) => `  ${sqlIdentifier(dimension.column)} AS ${sqlIdentifier(dimension.alias)},`);
-  const groupBy = dimensionSelections.map((dimension) => sqlIdentifier(dimension.column)).join(', ');
-  const orderDirection = direction === 'bottom' ? 'ASC' : 'DESC';
-  const chart = dimensionSelections.some((dimension) => isTimeLikeGenericColumn(dimension.column)) ? 'line' : 'bar';
-  return {
-    text: `Prepared a review-required ${businessMeasurePhrase(metric.column)} breakdown by ${dimensionSelections.map((dimension) => humanizeIdentifier(dimension.alias)).join(' and ')} from ${table.relation}. This result is uncertified until reviewed and promoted.`,
-    sql: [
-      'SELECT',
-      ...selectDimensions,
-      `  ${metric.expression} AS ${sqlIdentifier(metricAlias)}`,
-      `FROM ${sqlRelation(table.relation)}`,
-      ...whereLines,
-      `GROUP BY ${groupBy}`,
-      `ORDER BY ${sqlIdentifier(metricAlias)} ${orderDirection}`,
-      `LIMIT ${limit}`,
-    ].join('\n'),
-    viz: chart,
-  };
-}
-
-interface GenericMetricSelection {
-  column: string;
-  expression: string;
-  alias: string;
-  score: number;
-  preAggregated: boolean;
-}
-
-function inferRevenueLikeMetric(table: AgentSchemaTable): GenericMetricSelection | undefined {
-  const column = findPhysicalSchemaColumn(table, [
-    'revenue',
-    'sales',
-    'amount',
-    'product_revenue',
-    'product_sales',
-    'product_amount',
-    'product_price',
-    'price',
-    'subtotal',
-    'order_total',
-    'total_amount',
-    'lifetime_spend',
-  ]);
-  if (!column) return undefined;
-  const preAggregated = isPreAggregatedMetricColumn(column);
-  return {
-    column,
-    expression: preAggregated ? sqlIdentifier(column) : `SUM(${sqlIdentifier(column)})`,
-    alias: /revenue/i.test(column) ? column : 'revenue',
-    score: 96,
-    preAggregated,
-  };
-}
-
-function pickGenericAnalysisTable(
-  schemaContext: AgentSchemaTable[],
-  question: string,
-  followUp?: AgentFollowUpContext,
-  questionPlan?: AnalysisQuestionPlan,
-): AgentSchemaTable | undefined {
-  return schemaContext
-    .filter((table) => table.columns.length > 0)
-    .map((table, index) => ({
-      table,
-      metric: inferGenericMetric(table, question, followUp, questionPlan),
-      dimensions: inferGenericDimensions(table, question),
-      index,
-    }))
-    .filter((candidate) => candidate.metric)
-    .sort((a, b) =>
-      genericTableScore(b.table, question, b.metric, b.dimensions) -
-      genericTableScore(a.table, question, a.metric, a.dimensions) ||
-      a.index - b.index
-    )[0]?.table;
-}
-
-function genericTableScore(
-  table: AgentSchemaTable,
-  question: string,
-  metric: GenericMetricSelection | undefined,
-  dimensions: string[],
-): number {
-  const questionTokens = meaningfulTokens(question);
-  const tableTokens = meaningfulTokens([table.relation, table.name, table.description ?? ''].join(' '));
-  const columnTokens = meaningfulTokens(table.columns.map((column) => column.name).join(' '));
-  const overlap = [...questionTokens].filter((token) => tableTokens.has(token) || columnTokens.has(token)).length;
-  const selectedRelationBoost = table.selectionRank
-    ? Math.max(0, 56 - table.selectionRank * 3) + Math.min(table.selectionScore ?? 0, 24)
-    : 0;
-  return selectedRelationBoost + overlap * 8 + (metric?.score ?? 0) + dimensions.length * 8 + Math.min(table.columns.length, 20) * 0.3;
-}
-
-interface GenericJoinCandidate {
-  metricTable: AgentSchemaTable;
-  dimensionTable: AgentSchemaTable;
-  metric: GenericMetricSelection;
-  dimensionColumn: string;
-  metricJoinColumn: string;
-  dimensionJoinColumn: string;
-  score: number;
-}
-
-function pickGenericJoinCandidate(
-  schemaContext: AgentSchemaTable[],
-  question: string,
-): GenericJoinCandidate | undefined {
-  const requestedDimensions = requestedDimensionPhrases(question);
-  if (requestedDimensions.length === 0) return undefined;
-  const metricCandidates = schemaContext
-    .filter((table) => table.columns.length > 0)
-    .map((table, index) => ({
-      table,
-      metric: inferGenericMetric(table, question),
-      localDimensions: inferGenericDimensions(table, question),
-      index,
-    }))
-    .filter((candidate): candidate is {
-      table: AgentSchemaTable;
-      metric: GenericMetricSelection;
-      localDimensions: string[];
-      index: number;
-    } => Boolean(candidate.metric))
-    .filter((candidate) =>
-      !candidate.localDimensions.some((dimension) =>
-        !isJoinKeyColumn(dimension) && requestedDimensionMatchesColumn(requestedDimensions, dimension)
-      )
-    );
-
-  const candidates: GenericJoinCandidate[] = [];
-  for (const metricCandidate of metricCandidates) {
-    for (const dimensionTable of schemaContext) {
-      if (normalizeRelationKey(dimensionTable.relation) === normalizeRelationKey(metricCandidate.table.relation)) continue;
-      const dimensionColumn = pickRequestedDimensionColumn(dimensionTable, question, requestedDimensions);
-      if (!dimensionColumn || namesEqualLoose(dimensionColumn, metricCandidate.metric.column)) continue;
-      const join = pickJoinColumns(metricCandidate.table, dimensionTable);
-      if (!join) continue;
-      const dimensionScore = genericDimensionScore(
-        { name: dimensionColumn, type: findColumnType(dimensionTable, dimensionColumn) },
-        question,
-        Math.max(0, dimensionTable.columns.findIndex((column) => namesEqualLoose(column.name, dimensionColumn))),
-        metricCandidate.metric.column,
-      );
-      candidates.push({
-        metricTable: metricCandidate.table,
-        dimensionTable,
-        metric: metricCandidate.metric,
-        dimensionColumn,
-        metricJoinColumn: join.leftColumn,
-        dimensionJoinColumn: join.rightColumn,
-        score:
-          genericTableScore(metricCandidate.table, question, metricCandidate.metric, metricCandidate.localDimensions) +
-          dimensionScore +
-          join.score +
-          selectedRelationWeight(dimensionTable),
-      });
-    }
-  }
-
-  return candidates
-    .sort((a, b) =>
-      b.score - a.score ||
-      (a.metricTable.selectionRank ?? Number.MAX_SAFE_INTEGER) - (b.metricTable.selectionRank ?? Number.MAX_SAFE_INTEGER) ||
-      a.metricTable.relation.localeCompare(b.metricTable.relation)
-    )[0];
 }
 
 function buildCandidateJoinPaths(schemaContext: AgentSchemaTable[]): AgentJoinPath[] {
@@ -3040,73 +2596,6 @@ function joinReason(leftColumn: string, rightColumn: string, score: number): str
   if (leftSubject && rightSubject && leftSubject === rightSubject) return `matching ${leftSubject} key`;
   if (score >= 55) return 'foreign-key style id match';
   return 'join-key style column match';
-}
-
-function requestedDimensionPhrases(question: string): string[] {
-  const lower = question.toLowerCase();
-  const phrases = [
-    ...Array.from(lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,50})/g)).map((match) => match[1] ?? ''),
-    ...Array.from(lower.matchAll(/\bper\s+([a-z][a-z0-9_ -]{1,50})/g)).map((match) => match[1] ?? ''),
-    ...Array.from(lower.matchAll(/\bfor each\s+([a-z][a-z0-9_ -]{1,50})/g)).map((match) => match[1] ?? ''),
-  ];
-  return uniqueDrilldownStrings(phrases
-    .flatMap((phrase) => phrase.split(/\band\b|,|\//i))
-    .map((phrase) => phrase
-      .replace(/\b(desc|asc|top|bottom|highest|lowest|least|most|over time|where|for|with|from|in|during|last|this|next)\b.*$/gi, '')
-      .replace(/[^a-z0-9_ -]+/gi, ' ')
-      .replace(/\s+/g, ' ')
-      .trim())
-    .filter((phrase) => phrase.length > 0));
-}
-
-function pickRequestedDimensionColumn(
-  table: AgentSchemaTable,
-  question: string,
-  requestedDimensions: string[],
-): string | undefined {
-  for (const phrase of requestedDimensions) {
-    const direct = findSchemaColumn(table, dimensionColumnCandidatesForPhrase(phrase));
-    if (direct && !isJoinKeyColumn(direct) && !isNumericLikeColumn({ name: direct, type: findColumnType(table, direct) })) {
-      return direct;
-    }
-  }
-  const inferred = inferGenericDimensions(table, question)
-    .find((dimension) => !isJoinKeyColumn(dimension) && requestedDimensionMatchesColumn(requestedDimensions, dimension));
-  return inferred;
-}
-
-function dimensionColumnCandidatesForPhrase(phrase: string): string[] {
-  const tokens = (phrase.toLowerCase().match(/[a-z0-9_]+/g) ?? [])
-    .flatMap((token) => token.split('_'))
-    .map(normalizeToken)
-    .filter((token) => token.length > 0);
-  if (tokens.length === 0) return [];
-  const joined = tokens.join('_');
-  const tail = tokens.slice(1).join('_');
-  return uniqueDrilldownStrings([
-    joined,
-    phrase.replace(/\s+/g, '_').toLowerCase(),
-    tail,
-    tokens.at(-1) ?? '',
-    ...tokens,
-  ].filter(Boolean));
-}
-
-function requestedDimensionMatchesColumn(requestedDimensions: string[], column: string): boolean {
-  const columnTokens = exactMatchTokens(column);
-  return requestedDimensions.some((phrase) => {
-    const phraseTokens = (phrase.toLowerCase().match(/[a-z0-9_]+/g) ?? [])
-      .flatMap((token) => token.split('_'))
-      .map(normalizeToken)
-      .filter((token) => token.length > 0);
-    return phraseTokens.some((token) => columnTokens.has(token));
-  });
-}
-
-function selectedRelationWeight(table: AgentSchemaTable): number {
-  return table.selectionRank
-    ? Math.max(0, 30 - table.selectionRank * 2) + Math.min(table.selectionScore ?? 0, 16)
-    : 0;
 }
 
 interface JoinColumnSelection {
@@ -3171,770 +2660,6 @@ function tableEntityTokens(table: AgentSchemaTable): Set<string> {
   const tokens = exactMatchTokens([table.name, table.relation.split('.').at(-1) ?? table.relation].join(' '));
   for (const generic of ['dim', 'fct', 'fact', 'stg', 'stage', 'model', 'table']) tokens.delete(generic);
   return tokens;
-}
-
-function findColumnType(table: AgentSchemaTable, columnName: string): string | undefined {
-  return table.columns.find((column) => namesEqualLoose(column.name, columnName))?.type;
-}
-
-function qualifiedMetricExpression(metric: GenericMetricSelection, tableAlias: string): string {
-  const column = `${tableAlias}.${sqlIdentifier(metric.column)}`;
-  if (metric.column === 'rows') return 'COUNT(*)';
-  if (/^COUNT\s*\(\s*DISTINCT\b/i.test(metric.expression)) return `COUNT(DISTINCT ${column})`;
-  if (metric.preAggregated) return column;
-  const aggregate = metric.expression.match(/^(SUM|AVG|MIN|MAX|MEDIAN)\s*\(/i)?.[1]?.toUpperCase()
-    ?? (/avg|average|mean/i.test(metric.alias) ? 'AVG' : 'SUM');
-  return `${aggregate}(${column})`;
-}
-
-function inferGenericMetric(
-  table: AgentSchemaTable,
-  question: string,
-  followUp?: AgentFollowUpContext,
-  questionPlan?: AnalysisQuestionPlan,
-): GenericMetricSelection | undefined {
-  const lower = question.toLowerCase();
-  const wantsCount = /\b(count|how many|number of|volume)\b/i.test(lower);
-  const metricHints = genericMetricHints(question, followUp, questionPlan);
-  const candidates = table.columns
-    .map((column) => {
-      const name = column.name.toLowerCase();
-      const tokens = meaningfulTokens(column.name);
-      let score = isNumericLikeColumn(column) ? 20 : 0;
-      for (const token of meaningfulTokens(question)) {
-        if (tokens.has(token)) score += 18;
-      }
-      if (/\b(revenue|sales|amount|total|spend|cost|margin|profit|value|points?|score|orders?|count|quantity|duration|minutes?|rate|average|avg)\b/i.test(name.replace(/_/g, ' '))) {
-        score += 18;
-      }
-      for (const hint of metricHints) {
-        if (metricHintMatchesColumn(hint, column.name)) score += 42;
-      }
-      if (isCertifiedSourceShapeColumn(column)) score -= 24;
-      if (/\b(id|key|code|zip|postal|phone|season|year|month|week|day|date|time)\b/i.test(name.replace(/_/g, ' '))) {
-        score -= 14;
-      }
-      return { column: column.name, score };
-    })
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  const countSubject = wantsCount ? inferCountSubject(question) : undefined;
-  if (wantsCount) {
-    const precomputed = candidates.find((candidate) => isPrecomputedCountMetric(candidate.column, countSubject));
-    if (precomputed) {
-      return {
-        column: precomputed.column,
-        expression: isPreAggregatedMetricColumn(precomputed.column) ? sqlIdentifier(precomputed.column) : `SUM(${sqlIdentifier(precomputed.column)})`,
-        alias: isPreAggregatedMetricColumn(precomputed.column) ? precomputed.column : `${precomputed.column}_sum`,
-        score: precomputed.score + 8,
-        preAggregated: isPreAggregatedMetricColumn(precomputed.column),
-      };
-    }
-    const distinctColumn = countSubject ? findDistinctCountColumn(table, countSubject) : undefined;
-    if (distinctColumn) {
-      return {
-        column: distinctColumn,
-        expression: `COUNT(DISTINCT ${sqlIdentifier(distinctColumn)})`,
-        alias: `${countSubject}_count`,
-        score: 34,
-        preAggregated: false,
-      };
-    }
-  }
-
-  const selected = candidates[0];
-  if (!selected && !wantsCount) return undefined;
-  if (!selected || wantsCount && selected.score < 26) {
-    return {
-      column: 'rows',
-      expression: 'COUNT(*)',
-      alias: 'row_count',
-      score: 18,
-      preAggregated: true,
-    };
-  }
-  const aggregate = /\b(avg|average|mean)\b/i.test(lower) ? 'AVG' : 'SUM';
-  const aliasBase = `${selected.column}_${aggregate.toLowerCase()}`;
-  const preAggregated = isPreAggregatedMetricColumn(selected.column);
-  return {
-    column: selected.column,
-    expression: preAggregated ? sqlIdentifier(selected.column) : `${aggregate}(${sqlIdentifier(selected.column)})`,
-    alias: preAggregated ? selected.column : aliasBase,
-    score: selected.score,
-    preAggregated,
-  };
-}
-
-function genericMetricHints(
-  question: string,
-  followUp?: AgentFollowUpContext,
-  questionPlan?: AnalysisQuestionPlan,
-): string[] {
-  return uniqueDrilldownStrings([
-    ...(questionPlan?.requestedShape?.measures ?? []),
-    ...(questionPlan?.metricTerms ?? []),
-    ...(followUp?.priorMeasures ?? []),
-    ...(followUp?.priorResultColumns ?? []).filter(requestedOutputLooksMeasure),
-    ...extractMetricWordsFromText(question),
-  ]).slice(0, 10);
-}
-
-function extractMetricWordsFromText(text: string): string[] {
-  const lower = text.toLowerCase();
-  const out: string[] = [];
-  for (const metric of ['revenue', 'sales', 'amount', 'spend', 'cost', 'margin', 'profit', 'value', 'orders', 'count', 'quantity', 'score', 'points']) {
-    if (new RegExp(`\\b${metric}\\b`, 'i').test(lower)) out.push(metric);
-  }
-  return out;
-}
-
-function metricHintMatchesColumn(hint: string, columnName: string): boolean {
-  const normalizedHint = normalizeToken(hint);
-  const normalizedColumn = normalizeToken(columnName);
-  const columnText = columnName.toLowerCase().replace(/_/g, ' ');
-  if (!normalizedHint || !normalizedColumn) return false;
-  if (namesEqualLoose(normalizedHint, normalizedColumn)) return true;
-  if (meaningfulTokens(columnName).has(normalizedHint)) return true;
-  if (normalizedHint === 'revenue') return /\b(revenue|sales|amount|total|price|spend|value)\b/i.test(columnText);
-  if (normalizedHint === 'sales') return /\b(sales|revenue|amount|total|price|value)\b/i.test(columnText);
-  if (normalizedHint === 'orders' || normalizedHint === 'order') {
-    return /\b(order_count|orders_count|count_lifetime_orders|orders|order total|total orders)\b/i.test(columnText)
-      && !/\b(id|key|uuid|code)\b/i.test(columnText);
-  }
-  if (normalizedHint === 'count') return /\b(count|total|number|num)\b/i.test(columnText) && !/\b(id|key|uuid|code)\b/i.test(columnText);
-  return columnText.includes(normalizedHint.replace(/_/g, ' '));
-}
-
-function inferCountSubject(question: string): string | undefined {
-  const lower = question.toLowerCase();
-  const match = lower.match(/\b(?:how many|number of|count of|count|total)\s+(?:distinct\s+|unique\s+)?([a-z][a-z0-9_-]*)/);
-  const raw = match?.[1] ?? lower.match(/\b(customers?|accounts?|users?|members?|orders?|products?|players?|teams?|transactions?|sessions?|events?|records?|rows?)\b/)?.[1];
-  if (!raw) return undefined;
-  const normalized = normalizeToken(raw.replace(/[^a-z0-9_]/g, ''));
-  if (!normalized || normalized === 'row' || normalized === 'record') return undefined;
-  return normalized;
-}
-
-function findDistinctCountColumn(table: AgentSchemaTable, subject: string): string | undefined {
-  const preferred = [
-    `${subject}_id`,
-    `${subject}_key`,
-    `${subject}_uuid`,
-    `${subject}_sk`,
-    `${subject}_name`,
-    subject,
-  ];
-  const direct = findSchemaColumn(table, preferred);
-  if (direct) return direct;
-  const tableTokens = meaningfulTokens([table.name, table.relation].join(' '));
-  if (!tableTokens.has(subject)) return undefined;
-  return findSchemaColumn(table, ['id', 'key', 'uuid']);
-}
-
-function isPrecomputedCountMetric(column: string, subject?: string): boolean {
-  const normalized = column.toLowerCase();
-  const text = normalized.replace(/_/g, ' ');
-  if (/\b(id|key|uuid|code)\b/i.test(text)) return false;
-  if (/\b(count|cnt|number|num)\b/i.test(text)) {
-    return !subject || text.includes(subject) || text.includes(pluralizeSimple(subject));
-  }
-  return Boolean(subject && (
-    normalized === `total_${subject}` ||
-    normalized === `total_${pluralizeSimple(subject)}`
-  ));
-}
-
-function pluralizeSimple(value: string): string {
-  if (value.endsWith('y')) return `${value.slice(0, -1)}ies`;
-  if (value.endsWith('s')) return value;
-  return `${value}s`;
-}
-
-function augmentGenericRankingDimensions(
-  table: AgentSchemaTable,
-  dimensions: string[],
-  metric: GenericMetricSelection,
-  question: string,
-): string[] {
-  const direction = rankingDirectionFromText(question);
-  if (!direction || !metric.preAggregated || /\bby\s+/i.test(question)) return dimensions;
-  const timeColumn = table.columns
-    .map((column) => column.name)
-    .find((name) => isTimeLikeGenericColumn(name) && !dimensions.some((dimension) => namesEqualLoose(dimension, name)));
-  return timeColumn ? [...dimensions, timeColumn] : dimensions;
-}
-
-interface GenericDimensionSelection {
-  column: string;
-  alias: string;
-}
-
-function selectGenericDimensionSelections(
-  table: AgentSchemaTable,
-  question: string,
-  metric: GenericMetricSelection,
-  questionPlan?: AnalysisQuestionPlan,
-): GenericDimensionSelection[] {
-  const baseDimensions = augmentGenericRankingDimensions(
-    table,
-    inferGenericDimensions(table, question, metric.column),
-    metric,
-    question,
-  ).map((column) => ({ column, alias: column }));
-  const requestedDimensions = requestedDimensionSelections(table, questionPlan?.requestedShape, metric.column);
-  return mergeDimensionSelections([...baseDimensions, ...requestedDimensions]);
-}
-
-function requestedDimensionSelections(
-  table: AgentSchemaTable,
-  requested: RequestedAnswerShape | undefined,
-  metricColumn: string,
-): GenericDimensionSelection[] {
-  if (!requested) return [];
-  const requestedOutputs = uniqueDrilldownStrings([
-    ...requested.requiredOutputs,
-    ...requested.dimensions,
-  ]);
-  const selections: GenericDimensionSelection[] = [];
-  for (const output of requestedOutputs) {
-    const alias = genericDimensionAlias(output);
-    if (!alias || requestedOutputLooksMeasure(output)) continue;
-    const column = findSchemaColumn(table, dimensionColumnCandidatesForOutput(output));
-    if (!column || namesEqualLoose(column, metricColumn)) continue;
-    if (isNumericLikeColumn({ name: column, type: findColumnType(table, column) })) continue;
-    selections.push({ column, alias });
-  }
-  return selections;
-}
-
-function mergeDimensionSelections(selections: GenericDimensionSelection[]): GenericDimensionSelection[] {
-  const merged: GenericDimensionSelection[] = [];
-  for (const selection of selections) {
-    const existing = merged.find((item) => namesEqualLoose(item.column, selection.column));
-    if (existing) {
-      if (selection.alias !== selection.column && existing.alias === existing.column) existing.alias = selection.alias;
-      continue;
-    }
-    merged.push(selection);
-  }
-  return merged;
-}
-
-function isCustomerDimensionSelection(selection: GenericDimensionSelection): boolean {
-  return /\bcustomer\b/i.test([selection.column, selection.alias].join(' ').replace(/_/g, ' '));
-}
-
-function customerQuestionRequiresCustomerDimension(question: string): boolean {
-  return /\bcustomers?\b/i.test(question)
-    && /\b(who|which|list|show|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking)\b/i.test(question)
-    && !/\b(how many|number of|count of|count|total)\b/i.test(question);
-}
-
-function dimensionColumnCandidatesForOutput(output: string): string[] {
-  const normalized = output.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-  if (normalized === 'category' || normalized === 'category_name') {
-    return ['category', 'category_name', 'product_category', 'product_type', 'type'];
-  }
-  if (normalized === 'product' || normalized === 'product_name') {
-    return ['product_name', 'product', 'product_title', 'sku', 'product_id'];
-  }
-  if (normalized === 'customer' || normalized === 'customer_name') {
-    return ['customer_name', 'customer', 'full_name', 'name', 'customer_id'];
-  }
-  if (normalized === 'region' || normalized === 'market') {
-    return [normalized, 'region', 'market', 'geo'];
-  }
-  if (normalized === 'segment') {
-    return ['segment', 'customer_segment', 'type'];
-  }
-  return uniqueDrilldownStrings([
-    normalized,
-    normalized.replace(/_name$/, ''),
-    `${normalized}_name`,
-  ]);
-}
-
-function genericDimensionAlias(output: string): string | undefined {
-  const normalized = output.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
-  if (!normalized) return undefined;
-  if (normalized === 'product') return 'product_name';
-  if (normalized === 'customer') return 'customer_name';
-  if (normalized === 'category_name') return 'category';
-  return normalized;
-}
-
-function requestedOutputLooksMeasure(output: string): boolean {
-  return /\b(revenue|sales|amount|total|count|average|avg|sum|min|max|spend|cost|margin|profit|value|points?|score|quantity|rate|volume)\b/i.test(
-    output.replace(/_/g, ' '),
-  );
-}
-
-function requestedMetricAlias(
-  defaultAlias: string,
-  question: string,
-  questionPlan?: AnalysisQuestionPlan,
-  followUp?: AgentFollowUpContext,
-  metric?: GenericMetricSelection,
-): string {
-  const inheritedMeasures = uniqueDrilldownStrings([
-    ...(followUp?.priorMeasures ?? []),
-    ...(followUp?.priorResultColumns ?? []).filter(requestedOutputLooksMeasure),
-  ]);
-  if (
-    inheritedMeasures.some((measure) => namesEqualLoose(measure, 'revenue'))
-    && (!metric || metricHintMatchesColumn('revenue', metric.column))
-  ) return 'revenue';
-  if (
-    inheritedMeasures.some((measure) => namesEqualLoose(measure, 'sales'))
-    && (!metric || metricHintMatchesColumn('sales', metric.column))
-  ) return 'sales';
-  if (!mentionsExplicitOutputColumns(question)) return defaultAlias;
-  const requestedMeasures = uniqueDrilldownStrings([
-    ...(questionPlan?.requestedShape?.measures ?? []),
-    ...extractMetricWordsFromText(question),
-  ]);
-  if (
-    requestedMeasures.some((measure) => namesEqualLoose(measure, 'revenue'))
-    && (!metric || metricHintMatchesColumn('revenue', metric.column))
-  ) return 'revenue';
-  if (
-    requestedMeasures.some((measure) => namesEqualLoose(measure, 'sales'))
-    && (!metric || metricHintMatchesColumn('sales', metric.column))
-  ) return 'sales';
-  return defaultAlias;
-}
-
-function mentionsExplicitOutputColumns(question: string): boolean {
-  return /\b(?:with|including|include|return|show|list|give|provide|columns?|fields?|results?)\b[^.?!]{0,120}\b(?:name|id|email|category|segment|region|revenue|sales|amount|total|count|score|points?)\b/i.test(question);
-}
-
-function requestedGenericLimit(question: string, questionPlan?: AnalysisQuestionPlan): number {
-  const topN = questionPlan?.requestedShape?.topN;
-  if (topN && topN.scope === 'overall') return topN.n;
-  return /\b(all|complete|full)\b/i.test(question) ? 50 : 10;
-}
-
-function genericFollowUpWhereClause(
-  table: AgentSchemaTable,
-  dimensionSelections: GenericDimensionSelection[],
-  followUp?: AgentFollowUpContext,
-): string | undefined {
-  if (followUp?.kind !== 'drilldown') return undefined;
-  const values = uniqueDrilldownStrings((followUp.filters ?? []).filter(isConcreteDimensionFilter));
-  if (values.length === 0) return undefined;
-  const dimensions = new Set((followUp.dimensions ?? []).map(normalizeFilterDimension));
-  const selected = dimensionSelections.find((dimension) =>
-    dimensions.size === 0
-    || dimensions.has(normalizeFilterDimension(dimension.alias))
-    || dimensions.has(normalizeFilterDimension(dimension.column))
-    || (dimensions.has('category') && /\b(category|type)\b/i.test(dimension.alias.replace(/_/g, ' ')))
-    || (dimensions.has('category') && /\b(category|type)\b/i.test(dimension.column.replace(/_/g, ' ')))
-  );
-  if (!selected) return undefined;
-  const column = table.columns.find((candidate) => namesEqualLoose(candidate.name, selected.column));
-  const matchedValues = mapFollowUpFilterValues(values, table, selected.column);
-  if (matchedValues.length === 0) return undefined;
-  const predicate = matchedValues.length === 1
-    ? `${sqlIdentifier(selected.column)} = ${sqlStringLiteral(matchedValues[0]!)}`
-    : `${sqlIdentifier(selected.column)} IN (${matchedValues.map(sqlStringLiteral).join(', ')})`;
-  return predicate;
-}
-
-function mapFollowUpFilterValues(
-  values: string[],
-  table: AgentSchemaTable,
-  columnName: string,
-  contextPack?: LocalContextPack,
-  sourceBlockName?: string,
-): string[] {
-  const column = table.columns.find((candidate) => namesEqualLoose(candidate.name, columnName));
-  const sampleValues = uniqueDrilldownStrings(column?.sampleValues ?? []);
-  const sourceMappings = sourceBlockValueMappings(contextPack, sourceBlockName, columnName);
-  if (sampleValues.length === 0 && sourceMappings.size === 0) return values;
-  const sampleLookup = new Map(sampleValues.map((value) => [value.toLowerCase(), value]));
-  const mapped = values
-    .map((value) =>
-      sourceMappings.get(value.toLowerCase())
-      ?? sampleLookup.get(value.toLowerCase())
-      ?? businessCategoryValueMapping(value, sampleValues)
-    )
-    .filter((value): value is string => Boolean(value));
-  return uniqueDrilldownStrings(mapped);
-}
-
-function sourceBlockValueMappings(
-  contextPack: LocalContextPack | undefined,
-  sourceBlockName: string | undefined,
-  columnName: string,
-): Map<string, string> {
-  const mappings = new Map<string, string>();
-  const normalizedColumn = normalizeToken(columnName);
-  if (!contextPack || !sourceBlockName || !normalizedColumn) return mappings;
-  const source = contextPack.allowedSqlContext.sourceBlockSql.find((candidate) =>
-    namesEqualLoose(candidate.name, sourceBlockName)
-    || namesEqualLoose(candidate.objectKey.split(':').at(-1) ?? '', sourceBlockName)
-  );
-  if (!source) return mappings;
-  const whenThen = /\bwhen\s+((?:"[^"]+"|`[^`]+`|[a-z_][\w]*)(?:\s*\.\s*(?:"[^"]+"|`[^`]+`|[a-z_][\w]*))?)\s*=\s*'([^']+)'\s+then\s+'([^']+)'/gi;
-  for (const match of source.sql.matchAll(whenThen)) {
-    const rawColumn = cleanSqlColumnName(match[1] ?? '');
-    const physicalValue = match[2]?.trim();
-    const displayValue = match[3]?.trim();
-    if (!physicalValue || !displayValue) continue;
-    if (!namesEqualLoose(rawColumn, columnName) && normalizeToken(rawColumn) !== normalizedColumn) continue;
-    mappings.set(displayValue.toLowerCase(), physicalValue);
-  }
-  return mappings;
-}
-
-function cleanSqlColumnName(value: string): string {
-  return value
-    .split('.')
-    .at(-1)
-    ?.replace(/["`]/g, '')
-    .trim() ?? value.trim();
-}
-
-function businessCategoryValueMapping(value: string, sampleValues: string[]): string | undefined {
-  const normalized = value.trim().toLowerCase();
-  const samples = sampleValues.map((sample) => ({ raw: sample, normalized: sample.trim().toLowerCase() }));
-  if (normalized === 'food') {
-    return samples.find((sample) => /\b(food|jaffle|meal|sandwich)\b/i.test(sample.normalized))?.raw;
-  }
-  if (normalized === 'drink' || normalized === 'drinks' || normalized === 'beverage' || normalized === 'beverages') {
-    return samples.find((sample) => /\b(drink|beverage|coffee|tea)\b/i.test(sample.normalized))?.raw;
-  }
-  return undefined;
-}
-
-function isConcreteDimensionFilter(value: string): boolean {
-  if (!value.trim()) return false;
-  return !/\b(today|yesterday|tomorrow|last|this|next|previous|prior|current|week|month|quarter|year|day|date|ytd|mtd|qtd|wtd)\b/i.test(value);
-}
-
-function normalizeFilterDimension(value: string): string {
-  const normalized = normalizeToken(value.replace(/_name$/i, '').replace(/^product_type$/i, 'category'));
-  if (normalized === 'type') return 'category';
-  return normalized;
-}
-
-function inferGenericDimensions(
-  table: AgentSchemaTable,
-  question: string,
-  metricColumn?: string,
-): string[] {
-  const lower = question.toLowerCase();
-  const requested = Array.from(lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/g))
-    .map((match) => match[1] ?? '')
-    .flatMap((value) => value.split(/\band\b|,|\//i))
-    .map((value) => value.replace(/\b(desc|asc|top|bottom|highest|lowest|least|most|over time)\b/gi, '').trim())
-    .filter(Boolean);
-  const direct = requested
-    .map((value) => findSchemaColumn(table, [value, value.replace(/\s+/g, '_')]))
-    .filter((value): value is string => Boolean(value));
-  if (direct.length > 0) return uniqueDrilldownStrings(direct);
-
-  const domainHints = [
-    /\bcustomers?\b/.test(lower) ? ['customer_name', 'customer', 'customer_id'] : [],
-    /\bproducts?\b/.test(lower) ? ['product_name', 'product', 'sku', 'product_id'] : [],
-    /\bplayers?\b/.test(lower) ? ['player_name', 'player', 'player_id'] : [],
-    /\bteams?\b/.test(lower) ? ['team_name', 'team', 'team_id'] : [],
-    /\bregions?\b|\bmarkets?\b/.test(lower) ? ['region', 'market', 'geo'] : [],
-    /\bsegments?\b/.test(lower) ? ['segment', 'customer_segment', 'type'] : [],
-    /\bchannels?\b/.test(lower) ? ['channel', 'source_channel'] : [],
-    /\b(month|monthly)\b/.test(lower) ? ['month', 'order_month', 'created_month'] : [],
-    /\b(week|weekly)\b/.test(lower) ? ['week', 'order_week', 'created_week'] : [],
-    /\b(year|season|yearly)\b/.test(lower) ? ['season', 'year', 'order_year'] : [],
-  ].flat();
-  const hinted = findSchemaColumn(table, domainHints);
-  if (hinted) return [hinted];
-
-  const fallback = table.columns
-    .map((column, index) => ({
-      column: column.name,
-      score: genericDimensionScore(column, question, index, metricColumn),
-    }))
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((candidate) => candidate.column);
-  return uniqueDrilldownStrings(fallback).slice(0, 1);
-}
-
-function genericDimensionScore(
-  column: AgentSchemaColumn,
-  question: string,
-  index: number,
-  metricColumn?: string,
-): number {
-  if (metricColumn && namesEqualLoose(column.name, metricColumn)) return -100;
-  const name = column.name.toLowerCase();
-  const text = name.replace(/_/g, ' ');
-  let score = Math.max(0, 10 - index * 0.05);
-  if (/\b(name|category|type|segment|region|market|channel|status|team|player|customer|product|vendor|account|month|week|year|season|date)\b/i.test(text)) {
-    score += 24;
-  }
-  if (isNumericLikeColumn(column) && !isTimeLikeGenericColumn(column.name)) score -= 18;
-  for (const token of meaningfulTokens(question)) {
-    if (meaningfulTokens(column.name).has(token)) score += 10;
-  }
-  return score;
-}
-
-function isNumericLikeColumn(column: AgentSchemaColumn): boolean {
-  const type = column.type ?? '';
-  const name = column.name.toLowerCase();
-  return /\b(INT|INTEGER|BIGINT|DECIMAL|DOUBLE|FLOAT|NUMBER|NUMERIC|REAL)\b/i.test(type)
-    || /\b(total|count|amount|revenue|sales|spend|cost|margin|profit|value|points?|score|quantity|duration|minutes?|rate|avg|average)\b/i.test(name.replace(/_/g, ' '));
-}
-
-function isPreAggregatedMetricColumn(name: string): boolean {
-  return /^(total|count|avg|average|median|min|max)_/i.test(name)
-    || /_(total|count|avg|average|median|min|max)$/i.test(name);
-}
-
-function isTimeLikeGenericColumn(name: string): boolean {
-  return /\b(date|time|day|week|month|quarter|year|season|period)\b/i.test(name);
-}
-
-function buildEntityProfileProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
-  followUp?: AgentFollowUpContext;
-  contextPack?: LocalContextPack;
-}): ParsedProposal | undefined {
-  const entityTexts = entityMentionsForProfile(input.question, input.contextPack);
-  if (entityTexts.length === 0 || !isEntityProfileQuestion(input.question, input.contextPack)) return undefined;
-
-  const candidates = input.schemaContext
-    .map((table) => profileTableCandidate(table, input.question, input.followUp, entityTexts))
-    .filter((candidate): candidate is ProfileTableCandidate => Boolean(candidate))
-    .sort((a, b) => b.score - a.score);
-  const selected = candidates[0];
-  if (!selected) return undefined;
-
-  const where = selected.filterValue
-    ? [`WHERE ${sqlIdentifier(selected.entityColumn)} = ${sqlStringLiteral(selected.filterValue)}`]
-    : [];
-  const columns = selected.selectColumns.map((column) => `  ${sqlIdentifier(column)}`).join(',\n');
-  const text = [
-    `Prepared a review-required profile query for ${selected.filterValue ?? entityTexts[0]} from ${selected.table.relation}.`,
-    selected.usedSampleValue
-      ? `The entity filter uses an inspected value match on ${selected.entityColumn}.`
-      : `The entity filter uses the likely entity column ${selected.entityColumn} from inspected schema metadata.`,
-    'This result is uncertified until reviewed and promoted.',
-  ].join(' ');
-
-  return {
-    text,
-    sql: [
-      'SELECT',
-      columns,
-      `FROM ${sqlRelation(selected.table.relation)}`,
-      ...where,
-      'LIMIT 50',
-    ].join('\n'),
-    viz: 'table',
-  };
-}
-
-interface ProfileTableCandidate {
-  table: AgentSchemaTable;
-  entityColumn: string;
-  filterValue: string;
-  selectColumns: string[];
-  usedSampleValue: boolean;
-  score: number;
-}
-
-function profileTableCandidate(
-  table: AgentSchemaTable,
-  question: string,
-  followUp: AgentFollowUpContext | undefined,
-  entityTexts: string[],
-): ProfileTableCandidate | undefined {
-  if (table.columns.length === 0) return undefined;
-  const matchedFilters = matchedEntityFiltersForQuestion(table, question, followUp);
-  const sampled = matchedFilters.find((filter) =>
-    entityTexts.some((entity) => normalizeForEntityMatch(entity) === normalizeForEntityMatch(filter.value)),
-  ) ?? matchedFilters[0];
-  const entityColumn = sampled?.column ?? pickEntityProfileColumn(table, question);
-  if (!entityColumn) return undefined;
-  const filterValue = sampled?.value ?? entityTexts[0];
-  if (!filterValue) return undefined;
-  const selectColumns = orderedProfileColumns(table, entityColumn, question);
-  if (selectColumns.length === 0) return undefined;
-
-  const questionTokens = meaningfulTokens(question);
-  const tableTokens = meaningfulTokens([table.relation, table.name, table.description ?? ''].join(' '));
-  const columnTokens = meaningfulTokens(table.columns.map((column) => column.name).join(' '));
-  const overlap = [...questionTokens].filter((token) => tableTokens.has(token) || columnTokens.has(token)).length;
-  const profileSignal = selectColumns.filter((column) => isProfileMeasureColumn(column, table)).length;
-  const score =
-    (sampled ? 80 : 42) +
-    overlap * 6 +
-    profileSignal * 3 +
-    (/\b(player|customer|account|user|member|person|entity)\b/i.test(table.name) ? 8 : 0);
-
-  return {
-    table,
-    entityColumn,
-    filterValue,
-    selectColumns,
-    usedSampleValue: Boolean(sampled),
-    score,
-  };
-}
-
-function isEntityProfileQuestion(question: string, contextPack: LocalContextPack | undefined): boolean {
-  const mode = contextPack?.questionPlan?.mode;
-  if (mode === 'entity_profile') return true;
-  return /\b(profile|overview|360|complete\s+(?:stats|statistics|view)|full\s+(?:stats|statistics|view)|all\s+(?:stats|statistics|metrics)|research|reserach)\b/i.test(question);
-}
-
-function entityMentionsForProfile(question: string, contextPack: LocalContextPack | undefined): string[] {
-  const values = [
-    ...(contextPack?.questionPlan?.entities ?? []).map((entity) => entity.text),
-    ...Array.from(question.matchAll(/\b(?:for|on|profile\s+for|research\s+on|reserach\s+on)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,5})/g))
-      .map((match) => match[1] ?? ''),
-  ];
-  if (isEntityProfileQuestion(question, contextPack)) {
-    values.push(...Array.from(question.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,5})\b/g)).map((match) => match[1] ?? ''));
-  }
-  return uniqueDrilldownStrings(values
-    .map((value) => value.replace(/\b(profile|stats|statistics|details|summary)\b.*$/i, '').trim())
-    .filter((value) => value.length > 1 && !/^(Can You|Could You|Tell Me|Show Me)$/i.test(value)))
-    .slice(0, 6);
-}
-
-function pickEntityProfileColumn(table: AgentSchemaTable, question: string): string | undefined {
-  const lower = question.toLowerCase();
-  const domainHints = [
-    /\bplayers?\b/.test(lower) ? 'player' : '',
-    /\bcustomers?\b/.test(lower) ? 'customer' : '',
-    /\baccounts?\b/.test(lower) ? 'account' : '',
-    /\busers?\b/.test(lower) ? 'user' : '',
-    /\bmembers?\b/.test(lower) ? 'member' : '',
-    /\bteams?\b/.test(lower) ? 'team' : '',
-    /\bproducts?\b/.test(lower) ? 'product' : '',
-  ].filter(Boolean);
-  const preferred = [
-    ...domainHints.flatMap((hint) => [`${hint}_name`, `${hint}_full_name`, hint]),
-    'name',
-    'full_name',
-    'display_name',
-    'title',
-  ];
-  const direct = findSchemaColumn(table, preferred);
-  if (direct) return direct;
-
-  const scored = table.columns
-    .map((column) => {
-      const name = column.name.toLowerCase();
-      let score = 0;
-      if (name.endsWith('_name') || name === 'name') score += 30;
-      if (/\b(name|title|email)\b/i.test(name.replace(/_/g, ' '))) score += 20;
-      if (domainHints.some((hint) => name.includes(hint))) score += 16;
-      if (/\b(id|key|code|date|time|amount|total|count|score|points|revenue)\b/i.test(name.replace(/_/g, ' '))) score -= 12;
-      return { column: column.name, score };
-    })
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
-  return scored[0]?.column;
-}
-
-function orderedProfileColumns(table: AgentSchemaTable, entityColumn: string, question: string): string[] {
-  const scored = table.columns
-    .map((column, index) => ({
-      column: column.name,
-      score: profileColumnScore(column, question, index),
-      index,
-    }))
-    .sort((a, b) => b.score - a.score || a.index - b.index);
-  const selected = uniqueDrilldownStrings([
-    entityColumn,
-    ...scored.map((item) => item.column),
-  ]).slice(0, 24);
-  return selected.length > 0 ? selected : [entityColumn];
-}
-
-function profileColumnScore(column: AgentSchemaColumn, question: string, index: number): number {
-  const name = column.name.toLowerCase();
-  const text = name.replace(/_/g, ' ');
-  const lowerQuestion = question.toLowerCase();
-  let score = Math.max(0, 12 - index * 0.1);
-  if (isProfileMeasureColumn(column.name, { relation: '', name: '', columns: [column] })) score += 35;
-  if (/\b(name|title|team|season|year|date|type|category|segment|status)\b/i.test(text)) score += 18;
-  if (/\b(id|key|code)\b/i.test(text)) score += 2;
-  for (const token of meaningfulTokens(lowerQuestion)) {
-    if (meaningfulTokens(column.name).has(token)) score += 12;
-  }
-  if (column.description && meaningfulTokens(column.description).size > 0) score += 4;
-  return score;
-}
-
-function isProfileMeasureColumn(columnName: string, table: AgentSchemaTable): boolean {
-  const column = table.columns.find((item) => namesEqualLoose(item.name, columnName));
-  const name = columnName.toLowerCase();
-  const text = name.replace(/_/g, ' ');
-  return /\b(total|count|avg|average|sum|rate|score|points|pts|rebounds?|assists?|steals?|blocks?|turnovers?|minutes?|games?|wins?|losses?|revenue|amount|spend|orders?|quantity|margin|cost|value|stat)\b/i.test(text)
-    || /\b(INT|INTEGER|BIGINT|DECIMAL|DOUBLE|FLOAT|NUMBER|NUMERIC|REAL)\b/i.test(column?.type ?? '');
-}
-
-function buildMatchedEntityDrilldownProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  schemaContext: AgentSchemaTable[];
-  followUp?: AgentFollowUpContext;
-  contextPack?: LocalContextPack;
-}): ParsedProposal | undefined {
-  if (input.intent !== 'entity_drilldown' && input.followUp?.kind !== 'drilldown') return undefined;
-  const table = pickDrilldownTable(input.schemaContext, input.question, input.followUp);
-  if (!table) return undefined;
-
-  const dimension = inferDrilldownDimension(table, input.question, input.followUp);
-  if (!dimension) return undefined;
-
-  const entityFilters = matchedEntityFiltersForQuestion(table, input.question, input.followUp);
-  if (entityFilters.length === 0) return undefined;
-  if (entityFilters.some((filter) => namesEqualLoose(filter.column, dimension))) return undefined;
-
-  const sourceSql = selectSourceBlockSql(input.contextPack, input.followUp?.sourceBlockName);
-  const metric = inferDrilldownMetric(table, input.question, sourceSql);
-  if (!metric) return undefined;
-
-  const timePredicates = drilldownTimePredicates({
-    question: input.question,
-    followUp: input.followUp,
-    table,
-    sourceSql,
-  });
-  if (mentionsRelativeTime(input.question, input.followUp) && timePredicates.length === 0) return undefined;
-
-  const predicates = [
-    ...entityFilters.map((filter) => `${sqlIdentifier(filter.column)} = ${sqlStringLiteral(filter.value)}`),
-    ...timePredicates,
-  ];
-  const where = predicates.length ? [`WHERE ${predicates.join(' AND ')}`] : [];
-  return {
-    text: [
-      `Prepared a review-required ${humanizeIdentifier(dimension)} drilldown from inspected metadata.`,
-      `The entity filter uses ${entityFilters.map((filter) => `${filter.column} = ${filter.value}`).join(', ')} from matched sample values.`,
-      'This result is uncertified until reviewed and promoted.',
-    ].join(' '),
-    sql: [
-      'SELECT',
-      `  ${sqlIdentifier(dimension)} AS ${sqlIdentifier(dimension)},`,
-      `  ${metric.expression} AS ${sqlIdentifier(metric.alias)}`,
-      `FROM ${sqlRelation(table.relation)}`,
-      ...where,
-      `GROUP BY ${sqlIdentifier(dimension)}`,
-      `ORDER BY ${sqlIdentifier(metric.alias)} DESC`,
-      'LIMIT 50',
-    ].join('\n'),
-    viz: 'bar',
-  };
 }
 
 function schemaContextWithAllowedSqlContext(
@@ -4023,204 +2748,6 @@ function relationSelectionFor(
   return undefined;
 }
 
-interface MatchedEntityFilter {
-  column: string;
-  value: string;
-}
-
-interface DrilldownMetric {
-  expression: string;
-  alias: string;
-}
-
-function pickDrilldownTable(
-  schemaContext: AgentSchemaTable[],
-  question: string,
-  followUp: AgentFollowUpContext | undefined,
-): AgentSchemaTable | undefined {
-  const scored = schemaContext
-    .map((table) => ({
-      table,
-      filters: matchedEntityFiltersForQuestion(table, question, followUp).length,
-      dimension: inferDrilldownDimension(table, question, followUp) ? 1 : 0,
-      measure: inferDrilldownMetric(table, question, undefined) ? 1 : 0,
-    }))
-    .filter((candidate) => candidate.filters > 0 && candidate.dimension > 0 && candidate.measure > 0)
-    .sort((a, b) => (b.filters + b.dimension + b.measure) - (a.filters + a.dimension + a.measure));
-  return scored[0]?.table;
-}
-
-function inferDrilldownDimension(
-  table: AgentSchemaTable,
-  question: string,
-  followUp: AgentFollowUpContext | undefined,
-): string | undefined {
-  const lower = question.toLowerCase();
-  const requested = [
-    ...(followUp?.dimensions ?? []),
-    ...Array.from(lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/g)).map((match) => match[1] ?? ''),
-  ]
-    .flatMap((value) => value.split(/\band\b|,|\//i))
-    .map((value) => value.replace(/\b(last|this|next|previous|prior|current)\s+(day|week|month|quarter|year)\b/gi, '').trim())
-    .filter(Boolean);
-
-  const direct = findSchemaColumn(table, requested);
-  if (direct) return direct;
-
-  if (/\bcustomers?\b/.test(lower)) {
-    const customer = findSchemaColumn(table, ['customer', 'customer_name', 'account', 'account_name']);
-    if (customer) return customer;
-  }
-  if (/\bsegments?\b/.test(lower)) {
-    const segment = findSchemaColumn(table, ['segment', 'customer_segment', 'market_segment']);
-    if (segment) return segment;
-  }
-  if (/\bproducts?\b/.test(lower)) {
-    const product = findSchemaColumn(table, ['product', 'product_name', 'sku']);
-    if (product) return product;
-  }
-  if (/\bregions?\b/.test(lower)) {
-    const region = findSchemaColumn(table, ['region', 'market', 'geo']);
-    if (region) return region;
-  }
-  return undefined;
-}
-
-function matchedEntityFiltersForQuestion(
-  table: AgentSchemaTable,
-  question: string,
-  followUp: AgentFollowUpContext | undefined,
-): MatchedEntityFilter[] {
-  const text = normalizeForEntityMatch([
-    question,
-    ...(followUp?.filters ?? []),
-  ].join(' '));
-  const filters: MatchedEntityFilter[] = [];
-  for (const column of table.columns) {
-    for (const sampleValue of column.sampleValues ?? []) {
-      if (isTemporalDrilldownValue(sampleValue)) continue;
-      const needle = normalizeForEntityMatch(sampleValue);
-      if (!needle || !text.includes(needle)) continue;
-      filters.push({ column: column.name, value: sampleValue });
-    }
-  }
-  return uniqueMatchedEntityFilters(filters);
-}
-
-function inferDrilldownMetric(
-  table: AgentSchemaTable,
-  question: string,
-  sourceSql: string | undefined,
-): DrilldownMetric | undefined {
-  const sourceMetric = sourceSql ? aggregateMetricFromSourceSql(table, sourceSql) : undefined;
-  if (sourceMetric) return sourceMetric;
-
-  const lower = question.toLowerCase();
-  const candidates = /\brevenue|arr|mrr|sales\b/.test(lower)
-    ? ['revenue', 'net_revenue', 'gross_revenue', 'amount', 'order_total', 'total_amount', 'sales', 'arr', 'mrr']
-    : ['amount', 'revenue', 'order_total', 'total_amount', 'value', 'spend'];
-  const column = findSchemaColumn(table, candidates);
-  if (!column) return undefined;
-  const alias = /\brevenue|arr|mrr|sales\b/.test(lower) ? 'revenue_total' : `${column}_total`;
-  return {
-    expression: `SUM(${sqlIdentifier(column)})`,
-    alias,
-  };
-}
-
-function aggregateMetricFromSourceSql(table: AgentSchemaTable, sourceSql: string): DrilldownMetric | undefined {
-  for (const column of table.columns) {
-    const columnPattern = sqlIdentifierPattern(column.name);
-    const aggregatePattern = new RegExp(
-      `\\b(SUM|COUNT|AVG|MIN|MAX)\\s*\\(\\s*(?:["\`]?\\w+["\`]?\\s*\\.\\s*)?(${columnPattern}|\\*)\\s*\\)\\s*(?:AS\\s+(["\`]?\\w+["\`]?))?`,
-      'i',
-    );
-    const match = sourceSql.match(aggregatePattern);
-    if (!match) continue;
-    const fn = (match[1] ?? 'SUM').toUpperCase();
-    const target = match[2] === '*' ? '*' : sqlIdentifier(column.name);
-    const alias = cleanSqlIdentifier(match[3] ?? defaultMetricAlias(fn, column.name));
-    return {
-      expression: `${fn}(${target})`,
-      alias,
-    };
-  }
-  return undefined;
-}
-
-function drilldownTimePredicates(input: {
-  question: string;
-  followUp?: AgentFollowUpContext;
-  table: AgentSchemaTable;
-  sourceSql?: string;
-}): string[] {
-  if (!mentionsRelativeTime(input.question, input.followUp)) return [];
-  if (!input.sourceSql) return [];
-  const timeColumns = input.table.columns.map((column) => column.name).filter(isTimeLikeDrilldownColumn);
-  if (timeColumns.length === 0) return [];
-  return extractWherePredicates(input.sourceSql)
-    .map(stripSqlAliasQualifiers)
-    .filter((predicate) => isReusableSqlPredicate(predicate))
-    .filter((predicate) => timeColumns.some((column) => predicateReferencesColumn(predicate, column)))
-    .slice(0, 3);
-}
-
-function selectSourceBlockSql(contextPack: LocalContextPack | undefined, sourceBlockName: string | undefined): string | undefined {
-  const sourceSql = contextPack?.allowedSqlContext?.sourceBlockSql ?? [];
-  if (sourceSql.length === 0) return undefined;
-  const preferred = sourceBlockName
-    ? sourceSql.find((source) => namesEqualLoose(source.name, sourceBlockName))
-    : undefined;
-  return (preferred ?? sourceSql.find((source) => source.status === 'certified') ?? sourceSql[0])?.sql;
-}
-
-function extractWherePredicates(sql: string): string[] {
-  const match = sql.match(/\bWHERE\b([\s\S]*?)(\bGROUP\s+BY\b|\bHAVING\b|\bORDER\s+BY\b|\bLIMIT\b|$)/i);
-  if (!match) return [];
-  return (match[1] ?? '')
-    .split(/\s+AND\s+/i)
-    .map((part) => part.trim().replace(/^\(+|\)+$/g, '').replace(/\s+/g, ' '))
-    .filter(Boolean);
-}
-
-function mentionsRelativeTime(question: string, followUp: AgentFollowUpContext | undefined): boolean {
-  const text = [question, ...(followUp?.filters ?? [])].join(' ');
-  return /\b(last|this|next|previous|prior|current)\s+(day|week|month|quarter|year)\b/i.test(text)
-    || /\b(today|yesterday|tomorrow|ytd|mtd|qtd|wtd)\b/i.test(text);
-}
-
-function isTimeLikeDrilldownColumn(name: string): boolean {
-  return /\b(date|time|day|week|month|quarter|year|period|created_at|updated_at)\b/i.test(name);
-}
-
-function stripSqlAliasQualifiers(predicate: string): string {
-  return predicate.replace(/\b["`]?\w+["`]?\s*\.\s*(["`]?\w+["`]?)/g, '$1');
-}
-
-function isReusableSqlPredicate(predicate: string): boolean {
-  if (!predicate || predicate.length > 240) return false;
-  if (/[;]/.test(predicate) || /--|\/\*/.test(predicate)) return false;
-  return !/\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|COPY|PRAGMA|SET)\b/i.test(predicate);
-}
-
-function predicateReferencesColumn(predicate: string, column: string): boolean {
-  return new RegExp(`(^|[^\\w])${sqlIdentifierPattern(column)}([^\\w]|$)`, 'i').test(predicate);
-}
-
-function sqlIdentifierPattern(identifier: string): string {
-  const escaped = escapeRegExp(identifier);
-  return `(?:"${escaped}"|\`${escaped}\`|${escaped})`;
-}
-
-function sqlStringLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function defaultMetricAlias(fn: string, column: string): string {
-  if (fn === 'SUM' && /revenue|amount|sales|arr|mrr/i.test(column)) return 'revenue_total';
-  return `${column}_${fn.toLowerCase()}`;
-}
-
 function cleanSqlIdentifier(identifier: string): string {
   return identifier.replace(/^["`]|["`]$/g, '').trim();
 }
@@ -4243,222 +2770,12 @@ function relationLookupKeys(relation: string): string[] {
   return Array.from(keys);
 }
 
-function normalizeForEntityMatch(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9.%+-]+/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function uniqueMatchedEntityFilters(filters: MatchedEntityFilter[]): MatchedEntityFilter[] {
-  const seen = new Set<string>();
-  const unique: MatchedEntityFilter[] = [];
-  for (const filter of filters) {
-    const key = `${filter.column.toLowerCase()}\0${filter.value.toLowerCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(filter);
-  }
-  return unique;
-}
-
 function uniqueDrilldownStrings(values: string[]): string[] {
   return Array.from(new Set(values));
 }
 
-function isTemporalDrilldownValue(value: string): boolean {
-  return mentionsRelativeTime(value, undefined) || /^\d{4}-\d{2}-\d{2}/.test(value);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function buildContextPackAwareProposal(input: {
-  question: string;
-  intent: AgentIntent;
-  contextPack?: LocalContextPack;
-}): ParsedProposal | undefined {
-  if (!isGeneratedAgentIntent(input.intent)) return undefined;
-  if (!input.contextPack) return undefined;
-  const profileProposal = buildContextPackProfileProposal(input.question, input.contextPack);
-  if (profileProposal) return profileProposal;
-  const lower = input.question.toLowerCase();
-  if (!/\b(least|lowest|fewest|bottom|min(?:imum)?)\b/.test(lower)) return undefined;
-
-  for (const object of input.contextPack.objects) {
-    if (object.objectType !== 'dql_block' || object.status !== 'certified') continue;
-    const sql = typeof object.payload?.sql === 'string' ? object.payload.sql.trim() : '';
-    if (!sql || !/\border\s+by\b/i.test(sql) || !/\bdesc\b/i.test(sql)) continue;
-    const inverted = invertRankingSql(sql);
-    if (!inverted || inverted === sql) continue;
-    return {
-      text: `Generated a review-required least-ranking query by using certified block "${object.name}" as context and reversing its ranking direction. This result is uncertified until reviewed and promoted.`,
-      sql: ensurePreviewLimit(inverted, 10),
-      viz: 'table',
-    };
-  }
-  return undefined;
-}
-
-function buildContextPackProfileProposal(
-  question: string,
-  contextPack: LocalContextPack,
-): ParsedProposal | undefined {
-  const entityTexts = entityMentionsForProfile(question, contextPack);
-  if (entityTexts.length === 0 || !isEntityProfileQuestion(question, contextPack)) return undefined;
-
-  const sources = [...(contextPack.allowedSqlContext?.sourceBlockSql ?? [])]
-    .sort((a, b) => {
-      const preferred = contextPack.routeDecision.certifiedApplicability?.objectKey;
-      if (preferred && a.objectKey === preferred) return -1;
-      if (preferred && b.objectKey === preferred) return 1;
-      return 0;
-    });
-  for (const source of sources) {
-    const shape = extractSimpleSelectShape(source.sql);
-    if (!shape) continue;
-    const entityColumn = pickEntityColumnFromSelectExpressions(shape.selectExpressions, question);
-    if (!entityColumn) continue;
-    const selectExpressions = uniqueSqlSelectExpressions(shape.selectExpressions).slice(0, 24);
-    if (selectExpressions.length === 0) continue;
-    const orderColumn = selectExpressions
-      .map(selectExpressionOutputName)
-      .find((column) => column && /\b(season|year|date|month|week|game_date|created_at)\b/i.test(column));
-    const sql = [
-      'SELECT',
-      selectExpressions.map((expression) => `  ${expression}`).join(',\n'),
-      `FROM ${shape.relation}`,
-      `WHERE ${sqlIdentifier(entityColumn)} = ${sqlStringLiteral(entityTexts[0]!)}`,
-      orderColumn ? `ORDER BY ${sqlIdentifier(orderColumn)} DESC` : '',
-      'LIMIT 50',
-    ].filter(Boolean).join('\n');
-    return {
-      text: `Prepared a review-required profile query for ${entityTexts[0]} by using certified block "${source.name}" as SQL-shape context. This result is uncertified until reviewed and promoted.`,
-      sql,
-      viz: 'table',
-    };
-  }
-  return undefined;
-}
-
-function pickEntityColumnFromSelectExpressions(expressions: string[], question: string): string | undefined {
-  const outputNames = expressions
-    .map(selectExpressionOutputName)
-    .filter((value): value is string => Boolean(value));
-  const lower = question.toLowerCase();
-  const hints = [
-    /\bplayers?\b/.test(lower) ? 'player' : '',
-    /\bcustomers?\b/.test(lower) ? 'customer' : '',
-    /\baccounts?\b/.test(lower) ? 'account' : '',
-    /\busers?\b/.test(lower) ? 'user' : '',
-    /\bteams?\b/.test(lower) ? 'team' : '',
-    /\bproducts?\b/.test(lower) ? 'product' : '',
-  ].filter(Boolean);
-  const preferred = [
-    ...hints.flatMap((hint) => [`${hint}_name`, `${hint}_full_name`, hint]),
-    'name',
-    'full_name',
-    'display_name',
-  ];
-  for (const wanted of preferred) {
-    const match = outputNames.find((name) => namesEqualLoose(name, wanted));
-    if (match) return match;
-  }
-  return outputNames.find((name) => /(^|_)(name|title|email)$/.test(name.toLowerCase()));
-}
-
-function uniqueSqlSelectExpressions(expressions: string[]): string[] {
-  const seen = new Set<string>();
-  const unique: string[] = [];
-  for (const expression of expressions) {
-    const normalized = expression.replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    unique.push(expression.replace(/\s+/g, ' ').trim());
-  }
-  return unique;
-}
-
-function invertRankingSql(sql: string): string | undefined {
-  const withoutTrailingSemicolon = sql.replace(/;\s*$/, '').trim();
-  const inverted = withoutTrailingSemicolon.replace(
-    /\border\s+by\s+([\s\S]*?)(\blimit\b|$)/i,
-    (match: string, orderExpr: string, limitKeyword: string) => {
-      if (!/\bdesc\b/i.test(orderExpr)) return match;
-      const nextExpr = orderExpr
-        .replace(/\bDESC\b/gi, 'ASC')
-        .replace(/\bNULLS\s+FIRST\b/gi, 'NULLS LAST');
-      return `ORDER BY ${nextExpr}${limitKeyword}`;
-    },
-  );
-  return inverted !== withoutTrailingSemicolon ? inverted : undefined;
-}
-
-function ensurePreviewLimit(sql: string, limit: number): string {
-  if (/\blimit\s+\d+\b/i.test(sql)) return sql;
-  return `${sql.replace(/;\s*$/, '').trim()}\nLIMIT ${limit}`;
-}
-
-function findSchemaTable(schemaContext: AgentSchemaTable[], names: string[]): AgentSchemaTable | undefined {
-  return schemaContext.find((table) => {
-    const tableNames = new Set([table.name, table.relation.split('.').at(-1) ?? table.relation].map((name) => name.toLowerCase()));
-    return names.some((name) => tableNames.has(name.toLowerCase()));
-  });
-}
-
-function findSchemaColumn(table: AgentSchemaTable, names: string[]): string | undefined {
-  const byLower = new Map(table.columns.map((column) => [column.name.toLowerCase(), column]));
-  let sourceShapeFallback: string | undefined;
-  let lineageAliasFallback: string | undefined;
-  for (const name of names) {
-    const exact = byLower.get(name.toLowerCase());
-    if (exact) {
-      if (isCertifiedSourceShapeColumn(exact)) {
-        sourceShapeFallback ??= exact.name;
-      } else {
-        return exact.name;
-      }
-    }
-    lineageAliasFallback ??= table.columns.find((column) =>
-      !isCertifiedSourceShapeColumn(column) && columnHasGovernedAlias(column, name)
-    )?.name;
-    if (lineageAliasFallback) {
-      return lineageAliasFallback;
-    }
-  }
-  return lineageAliasFallback ?? sourceShapeFallback;
-}
-
-function isCertifiedSourceShapeColumn(column: Pick<AgentSchemaColumn, 'description'>): boolean {
-  return /projected by certified source sql shape/i.test(column.description ?? '');
-}
-
-function columnHasGovernedAlias(column: Pick<AgentSchemaColumn, 'description'>, name: string): boolean {
-  const match = /governed aliases from lineage:\s*([^.]*)/i.exec(column.description ?? '');
-  if (!match?.[1]) return false;
-  const normalizedName = normalizeToken(name);
-  return match[1].split(',').some((alias) => normalizeToken(alias) === normalizedName);
-}
-
-function sqlRelation(relation: string): string {
-  return relation.split('.').map(sqlIdentifier).join('.');
-}
-
-function sqlIdentifier(identifier: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)
-    ? identifier
-    : `"${identifier.replace(/"/g, '""')}"`;
-}
-
 function humanizeIdentifier(identifier: string): string {
   return identifier.replace(/[_-]+/g, ' ');
-}
-
-function businessMeasurePhrase(identifier: string): string {
-  const lower = identifier.toLowerCase();
-  if (lower.includes('lifetime_spend')) return 'lifetime spend';
-  if (lower.includes('count_lifetime_orders') || lower.includes('lifetime_orders') || lower.includes('order_count')) {
-    return 'lifetime order count';
-  }
-  return humanizeIdentifier(identifier);
 }
 
 function pickCertifiedArtifact(input: {
@@ -5094,10 +3411,10 @@ async function requestSqlRepair(input: {
     {
       role: 'user',
       content: [
-        'The generated SQL failed during bounded preview execution.',
+        'The SQL preview for the review-required DQL artifact failed during bounded preview execution.',
         `Question: ${input.question}`,
         `Execution error: ${input.executionError}`,
-        'Return one corrected read-only SQL query using only the runtime schema below.',
+        'Return one corrected read-only SQL query using only the runtime schema below, as a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
         schema,
       ].join('\n\n'),
     },
@@ -5109,6 +3426,285 @@ async function requestSqlRepair(input: {
     // repairs bump-then-clamp in the host (resolveRunReasoningEffort).
     reasoningEffort: input.reasoningEffort,
   });
+}
+
+async function generateProposalWithOptionalTools(input: {
+  provider: AgentProvider;
+  messages: AgentMessage[];
+  tools?: AgentToolDefinition[];
+  questionPlan: AnalysisQuestionPlan;
+  intent: AgentIntent;
+  signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
+  analysisDepth?: AnalysisDepth;
+  toolCalls?: AgentEvidenceToolCall[];
+}): Promise<string> {
+  const tools = input.tools?.filter((tool) => tool.name && tool.description) ?? [];
+  const options = {
+    signal: input.signal,
+    reasoningEffort: input.reasoningEffort,
+  };
+  if (!input.provider.generateWithTools || tools.length === 0) {
+    return input.provider.generate(input.messages, options);
+  }
+  const toolBudget = proposalToolBudgetForQuestion(input.questionPlan, input.intent, {
+    analysisDepth: input.analysisDepth,
+    reasoningEffort: input.reasoningEffort,
+  });
+  const toolPolicy: AgentMessage = {
+    role: 'system',
+    content: [
+      'You may use the supplied DQL tools to inspect semantic members, certified context, metadata context, and bounded repair options.',
+      `Tool budget for this question: ${toolBudget.maxToolCalls} call(s) (${toolBudget.effortClass}: ${toolBudget.reason}). Stop as soon as a lane can answer.`,
+      'Prefer semantic compile before deep warehouse search when the semantic layer contains the requested metric/dimensions/time grain.',
+      'Use context expansion only to repair a named, known relation/column gap; do not loop on the same failed context.',
+      'Final response must be a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
+    ].join('\n'),
+  };
+  return input.provider.generateWithTools([...input.messages, toolPolicy], tools, {
+    ...options,
+    maxToolCalls: toolBudget.maxToolCalls,
+    onToolCall: (event) => {
+      const sink = input.toolCalls;
+      if (sink) sink.push(evidenceToolCallFromEvent(event, sink.length + 1));
+    },
+  });
+}
+
+interface DeepGeneratedProposalCandidate {
+  raw: string;
+  parsed: ParsedProposal;
+  index: number;
+  validationOk: boolean;
+  validationError?: string;
+  result?: AgentResultPayload;
+  executionError?: string;
+  resultSignature?: string;
+  score: number;
+}
+
+async function selectDeepGeneratedProposalCandidate(input: {
+  provider: AgentProvider;
+  messages: AgentMessage[];
+  question: string;
+  questionPlan: AnalysisQuestionPlan;
+  intent: AgentIntent;
+  initial: { raw: string; parsed: ParsedProposal };
+  contextLedger: ContextLedger;
+  executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
+  signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
+}): Promise<{ selected?: DeepGeneratedProposalCandidate; notes: string[] }> {
+  const initial = await scoreDeepGeneratedProposalCandidate(input, {
+    raw: input.initial.raw,
+    parsed: input.initial.parsed,
+    index: 1,
+  });
+  if (initial.validationOk && (!input.executeGeneratedSql || (initial.result && !initial.executionError))) {
+    return { selected: initial, notes: [] };
+  }
+
+  const candidates: DeepGeneratedProposalCandidate[] = [initial];
+  const alternatives = await generateDeepAlternativeProposals(input);
+  for (const [offset, raw] of alternatives.entries()) {
+    if (!raw.trim()) continue;
+    candidates.push(await scoreDeepGeneratedProposalCandidate(input, {
+      raw,
+      parsed: parseProposal(raw),
+      index: offset + 2,
+    }));
+    if (candidates.length >= 3) break;
+  }
+
+  const signatureCounts = new Map<string, number>();
+  for (const candidate of candidates) {
+    if (!candidate.resultSignature) continue;
+    signatureCounts.set(candidate.resultSignature, (signatureCounts.get(candidate.resultSignature) ?? 0) + 1);
+  }
+  for (const candidate of candidates) {
+    const equivalenceCount = candidate.resultSignature ? signatureCounts.get(candidate.resultSignature) ?? 0 : 0;
+    if (equivalenceCount > 1) candidate.score += equivalenceCount * 10;
+  }
+
+  const selected = candidates
+    .slice()
+    .sort((a, b) =>
+      b.score - a.score ||
+      Number(b.validationOk) - Number(a.validationOk) ||
+      Number(Boolean(b.result && !b.executionError)) - Number(Boolean(a.result && !a.executionError)) ||
+      a.index - b.index,
+    )[0];
+  if (!selected) return { notes: [] };
+
+  const status = selected.validationOk
+    ? selected.executionError
+      ? `validated but preview failed: ${selected.executionError}`
+      : selected.result
+        ? `validated and previewed ${selected.result.rowCount.toLocaleString()} row(s)`
+        : 'validated'
+    : `failed validation: ${selected.validationError ?? 'unknown validation issue'}`;
+  return {
+    selected,
+    notes: [
+      `Deep candidate selection reviewed ${candidates.length} candidate${candidates.length === 1 ? '' : 's'} and selected candidate ${selected.index} (${status}).`,
+    ],
+  };
+}
+
+async function scoreDeepGeneratedProposalCandidate(
+  input: {
+    question: string;
+    questionPlan: AnalysisQuestionPlan;
+    intent: AgentIntent;
+    contextLedger: ContextLedger;
+    executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
+  },
+  candidate: { raw: string; parsed: ParsedProposal; index: number },
+): Promise<DeepGeneratedProposalCandidate> {
+  const parsed = cloneParsedProposal(candidate.parsed);
+  if (parsed.sql) parsed.sql = input.contextLedger.qualifySql(parsed.sql).sql;
+  let validationOk = false;
+  let validationError: string | undefined;
+  let result: AgentResultPayload | undefined;
+  let executionError: string | undefined;
+  let score = parsed.sql ? 10 : -200;
+
+  if (parsed.sql) {
+    const validation = input.contextLedger.validateSql(parsed.sql, {
+      question: input.question,
+      intent: input.intent,
+    });
+    validationOk = validation.ok;
+    if (validation.ok) {
+      score += 100;
+      if (input.executeGeneratedSql) {
+        try {
+          result = await input.executeGeneratedSql(parsed.sql);
+          score += 40;
+          if (result.rowCount > 0) score += 8;
+          const resultShape = validateAnswerResultShape(input.questionPlan, result);
+          score -= resultShape.warnings.length * 6;
+          if (generatedResultShapeIsHardMismatch(input.question, input.questionPlan, resultShape)) score -= 120;
+        } catch (error) {
+          executionError = error instanceof Error ? error.message : String(error);
+          score -= 20;
+        }
+      }
+    } else {
+      validationError = validation.error;
+      score -= 100;
+    }
+    if (parsed.outputs?.length) score += Math.min(6, parsed.outputs.length);
+  }
+
+  return {
+    raw: candidate.raw,
+    parsed,
+    index: candidate.index,
+    validationOk,
+    validationError,
+    result,
+    executionError,
+    resultSignature: result && !executionError ? resultEquivalenceSignature(result) : undefined,
+    score,
+  };
+}
+
+async function generateDeepAlternativeProposals(input: {
+  provider: AgentProvider;
+  messages: AgentMessage[];
+  question: string;
+  initial: { raw: string; parsed: ParsedProposal };
+  signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
+}): Promise<string[]> {
+  const previousSql = input.initial.parsed.sql
+    ? `\nInitial SQL candidate:\n\`\`\`sql\n${input.initial.parsed.sql}\n\`\`\``
+    : '';
+  const variants = [
+    'Create a second candidate that favors the most direct inspected relations and explicit joins.',
+    'Create a third candidate that favors result-shape completeness and avoids assumptions hidden in the first candidate.',
+  ];
+  const out: string[] = [];
+  for (const [index, instruction] of variants.entries()) {
+    try {
+      const raw = await input.provider.generate([
+        ...input.messages,
+        { role: 'assistant', content: input.initial.raw },
+        {
+          role: 'user',
+          content: [
+            'Deep mode is allowed to compare multiple review-required SQL candidates before choosing one.',
+            `Question: ${input.question}`,
+            instruction,
+            previousSql,
+            'Return only one ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
+          ].filter(Boolean).join('\n\n'),
+        },
+      ], {
+        signal: input.signal,
+        reasoningEffort: input.reasoningEffort,
+        temperature: index === 0 ? 0.2 : 0.35,
+      });
+      if (raw.trim()) out.push(raw);
+    } catch {
+      // Alternative candidates are opportunistic; the initial candidate remains.
+    }
+  }
+  return out;
+}
+
+function cloneParsedProposal(proposal: ParsedProposal): ParsedProposal {
+  return {
+    text: proposal.text,
+    ...(proposal.sql ? { sql: proposal.sql } : {}),
+    ...(proposal.viz ? { viz: proposal.viz } : {}),
+    ...(proposal.outputs?.length ? { outputs: proposal.outputs.slice() } : {}),
+    ...(proposal.proposedEntity ? { proposedEntity: proposal.proposedEntity } : {}),
+    ...(proposal.requestedFilters?.length ? { requestedFilters: proposal.requestedFilters.slice() } : {}),
+    ...(proposal.requestedDimensions?.length ? { requestedDimensions: proposal.requestedDimensions.slice() } : {}),
+  };
+}
+
+function resultEquivalenceSignature(result: AgentResultPayload): string {
+  const columns = result.columns.map((column) => String(column)).join('|');
+  const rows = result.rows.slice(0, 25).map((row) => stableResultRow(row)).join('\n');
+  return `${columns}\n${rows}`;
+}
+
+function stableResultRow(row: unknown): string {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    return JSON.stringify(row);
+  }
+  const record = row as Record<string, unknown>;
+  return JSON.stringify(Object.keys(record).sort().map((key) => [key, record[key]]));
+}
+
+function evidenceToolCallFromEvent(
+  event: { name: string; input: unknown; output?: unknown; isError?: boolean },
+  order: number,
+): AgentEvidenceToolCall {
+  return {
+    name: event.name,
+    status: event.isError ? 'failed' : 'checked',
+    inputSummary: summarizeEvidencePayload(event.input),
+    outputSummary: summarizeEvidencePayload(event.output),
+    order,
+  };
+}
+
+function summarizeEvidencePayload(value: unknown, maxLength = 700): string | undefined {
+  if (value === undefined) return undefined;
+  let raw: string | undefined;
+  try {
+    raw = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch {
+    raw = String(value);
+  }
+  if (!raw) return undefined;
+  const compact = raw.replace(/\s+/g, ' ').trim();
+  if (!compact) return undefined;
+  return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength - 3)}...`;
 }
 
 function isRetryableGeneratedSqlError(error: string): boolean {
@@ -5280,6 +3876,21 @@ function buildCertifiedEvidence(input: {
     .slice(0, 4);
   return {
     route: [
+      ...cascadeTraceToEvidenceRouteSteps(createCascadeTrace({
+        terminalLane: 'certified',
+        lanes: {
+          certified: {
+            label: `Lane 1 answered from certified ${input.artifact.kind.replace('_', ' ')}`,
+            detail: input.artifact.name,
+          },
+          semantic: {
+            label: 'Lane 2 semantic compile skipped because certified context already answered',
+          },
+          generated: {
+            label: 'Lane 3 generated DQL artifact skipped because certified context already answered',
+          },
+        },
+      })),
       {
         tool: 'search_certified_artifacts',
         status: 'selected',
@@ -5348,7 +3959,7 @@ function buildCertifiedEvidence(input: {
         ? 'The certified artifact matched, but execution returned an error.'
         : input.resultShapeWarnings?.length
           ? `Certified artifact executed, but the result shape needs review: ${input.resultShapeWarnings.join(' ')}`
-        : 'Certified artifact routing passed; no generated SQL was promoted.',
+        : 'Certified artifact routing passed; no review-required DQL artifact was promoted.',
     },
     execution: executionEvidence(input.artifact, input.result, input.executionError, input.executorWasAvailable),
     citations: input.citations,
@@ -5359,6 +3970,8 @@ function buildCertifiedEvidence(input: {
 function buildGeneratedEvidence(input: {
   question: string;
   activeTier: AnswerSourceTier;
+  terminalLane: Extract<CascadeLane, 'semantic' | 'generated'>;
+  terminalDetail?: string;
   intent: AgentIntent;
   contextNodes: KGNode[];
   schemaContext: AgentSchemaTable[];
@@ -5374,6 +3987,8 @@ function buildGeneratedEvidence(input: {
   executionError?: string;
   executorWasAvailable: boolean;
   analysisPlan?: AgentAnalysisPlan;
+  toolCalls?: AgentEvidenceToolCall[];
+  budgetTrace?: CascadeBudgetTrace;
 }): AgentEvidence {
   const selectedNodes = input.contextNodes.slice(0, 4);
   const businessAssets = uniqueAssets(
@@ -5400,6 +4015,31 @@ function buildGeneratedEvidence(input: {
   const certifiedCandidateFitSteps = certifiedCandidateFitEvidenceSteps(input.contextPack);
   return {
     route: [
+      ...cascadeTraceToEvidenceRouteSteps(createCascadeTrace({
+        terminalLane: input.terminalLane,
+        lanes: {
+          certified: {
+            label: input.followUp?.kind === 'drilldown'
+              ? 'Lane 1 checked for a distinct certified drilldown block'
+              : 'Lane 1 checked certified blocks for exact answer fit',
+          },
+          semantic: {
+            label: input.terminalLane === 'semantic'
+              ? 'Lane 2 answered through semantic metric compile'
+              : input.semanticHits.length > 0
+                ? 'Lane 2 semantic context was checked but did not fully answer'
+                : 'Lane 2 semantic context had no strong match',
+            ...(input.terminalLane === 'semantic' && input.terminalDetail ? { detail: input.terminalDetail } : {}),
+          },
+          generated: {
+            label: input.terminalLane === 'generated'
+              ? 'Lane 3 prepared review-required DQL artifact with SQL preview'
+              : 'Lane 3 generated SQL skipped because semantic compile answered',
+            ...(input.terminalLane === 'generated' && input.terminalDetail ? { detail: input.terminalDetail } : {}),
+          },
+        },
+      })),
+      ...cascadeBudgetEvidenceRouteSteps(input.budgetTrace),
       {
         tool: 'search_certified_artifacts',
         status: 'checked',
@@ -5422,6 +4062,7 @@ function buildGeneratedEvidence(input: {
           ? [...(input.followUp.filters ?? []), ...(input.followUp.dimensions ?? [])].join(', ')
           : undefined,
       },
+      ...providerToolEvidenceRouteSteps(input.toolCalls),
       {
         tool: 'search_business_context',
         status: businessAssets.length > 0 ? 'checked' : 'skipped',
@@ -5450,7 +4091,7 @@ function buildGeneratedEvidence(input: {
       {
         tool: 'validate_sql',
         status: 'checked',
-        label: 'SQL is generated and requires host validation before certification',
+        label: 'SQL preview for DQL artifact requires host validation before certification',
       },
       {
         tool: 'execute_generated_sql',
@@ -5462,10 +4103,10 @@ function buildGeneratedEvidence(input: {
               ? 'skipped'
               : 'skipped',
         label: input.executionError
-          ? 'Generated SQL preview failed'
+          ? 'SQL preview failed'
           : input.result
-            ? 'Executed generated SQL as bounded preview'
-            : 'Generated SQL preview not requested',
+            ? 'Executed SQL preview for DQL artifact'
+            : 'SQL preview not requested',
         detail: input.executionError ?? (input.result ? `${input.result.rowCount} rows` : undefined),
       },
       {
@@ -5499,19 +4140,20 @@ function buildGeneratedEvidence(input: {
     selectedAssets,
     sourceTables,
     semanticObjects,
+    ...(input.toolCalls?.length ? { toolCalls: input.toolCalls } : {}),
     validation: {
       status: 'warning',
       message: input.followUp?.kind === 'drilldown'
-        ? 'Generated drilldown SQL is not certified. It should be validated, reviewed, and promoted only after analyst approval.'
-        : 'Generated SQL is not certified. It should be validated, reviewed, and promoted only after analyst approval.',
+        ? 'Review-required drilldown DQL artifact is not certified. Its SQL preview should be validated, reviewed, and promoted only after analyst approval.'
+        : 'Review-required DQL artifact is not certified. Its SQL preview should be validated, reviewed, and promoted only after analyst approval.',
     },
     execution: {
       status: input.executionError ? 'failed' : input.result ? 'executed' : 'not_requested',
       message: input.executionError
         ? input.executionError
         : input.result
-          ? 'Executed generated SQL as an uncertified bounded preview.'
-          : 'Generated SQL was returned for review; execution is handled by the host after validation.',
+          ? 'Executed SQL preview as an uncertified bounded preview for the DQL artifact.'
+          : 'Review-required DQL artifact was returned for review; SQL preview execution is handled by the host after validation.',
       rowCount: input.result?.rowCount,
       executionTime: input.result?.executionTime,
     },
@@ -5570,6 +4212,37 @@ function certifiedCandidateFitLabel(name: string, action: NonNullable<LocalConte
   }
 }
 
+function providerToolEvidenceRouteSteps(toolCalls: AgentEvidenceToolCall[] | undefined): AgentEvidenceRouteStep[] {
+  return (toolCalls ?? []).slice(0, 8).map((call) => ({
+    tool: call.name,
+    status: call.status,
+    label: call.status === 'failed'
+      ? `Provider tool failed: ${call.name}`
+      : `Provider tool observed: ${call.name}`,
+    detail: [
+      call.inputSummary ? `input=${truncateEvidenceDetail(call.inputSummary)}` : '',
+      call.outputSummary ? `output=${truncateEvidenceDetail(call.outputSummary)}` : '',
+    ].filter(Boolean).join(' | ') || undefined,
+  }));
+}
+
+function cascadeBudgetEvidenceRouteSteps(trace: CascadeBudgetTrace | undefined): AgentEvidenceRouteStep[] {
+  if (!trace) return [];
+  const { usage, limits } = trace;
+  const used = usage.laneRegroundAttemptsUsed + usage.laneExecutionAttemptsUsed + usage.engineEscalationsUsed;
+  if (used === 0) return [];
+  return [{
+    tool: 'cascade_budget',
+    status: 'checked',
+    label: `Repair budget used: re-ground ${usage.laneRegroundAttemptsUsed}/${limits.lane.reground}, execution ${usage.laneExecutionAttemptsUsed}/${limits.lane.execution}`,
+    detail: `engine escalations ${usage.engineEscalationsUsed}/${limits.engineEscalations}`,
+  }];
+}
+
+function truncateEvidenceDetail(value: string, maxLength = 240): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
+}
+
 function buildNoAnswerEvidence(input: {
   question: string;
   reason: string;
@@ -5580,9 +4253,34 @@ function buildNoAnswerEvidence(input: {
   considered: KGSearchHit[];
   memoryContext: AgentMemory[];
   analysisPlan?: AgentAnalysisPlan;
+  toolCalls?: AgentEvidenceToolCall[];
+  budgetTrace?: CascadeBudgetTrace;
 }): AgentEvidence {
   return {
     route: [
+      ...cascadeTraceToEvidenceRouteSteps(createCascadeTrace({
+        terminalLane: 'refusal',
+        lanes: {
+          certified: {
+            label: input.artifactHits.length > 0
+              ? 'Lane 1 certified blocks were checked but not selected'
+              : 'Lane 1 found no certified block match',
+          },
+          semantic: {
+            label: input.semanticHits.length > 0
+              ? 'Lane 2 semantic context was checked but did not answer'
+              : 'Lane 2 found no semantic match',
+          },
+          generated: {
+            label: 'Lane 3 could not produce a validated review-required DQL artifact',
+          },
+          refusal: {
+            label: 'Lane 4 returned an honest refusal or clarification',
+            detail: input.reason,
+          },
+        },
+      })),
+      ...cascadeBudgetEvidenceRouteSteps(input.budgetTrace),
       {
         tool: 'search_certified_artifacts',
         status: input.artifactHits.length > 0 ? 'checked' : 'skipped',
@@ -5603,6 +4301,7 @@ function buildNoAnswerEvidence(input: {
         status: input.manifestHits.length > 0 ? 'checked' : 'skipped',
         label: input.manifestHits.length > 0 ? 'dbt context considered' : 'No dbt match',
       },
+      ...providerToolEvidenceRouteSteps(input.toolCalls),
       {
         tool: 'validate_sql',
         status: 'failed',
@@ -5624,6 +4323,7 @@ function buildNoAnswerEvidence(input: {
     selectedAssets: [],
     sourceTables: uniqueAssets(input.manifestHits.map((hit) => assetFromNode(hit.node))).slice(0, 6),
     semanticObjects: uniqueAssets(input.semanticHits.map((hit) => assetFromNode(hit.node))).slice(0, 6),
+    ...(input.toolCalls?.length ? { toolCalls: input.toolCalls } : {}),
     validation: {
       status: 'failed',
       message: input.reason,
@@ -5674,7 +4374,7 @@ function schemaContextAssets(schemaContext: AgentSchemaTable[]): AgentEvidenceAs
     nodeId: `runtime_schema:${table.relation}`,
     kind: 'runtime_schema',
     name: table.relation,
-    description: table.description ?? `${table.columns.length} runtime column${table.columns.length === 1 ? '' : 's'} available for generated SQL.`,
+    description: table.description ?? `${table.columns.length} runtime column${table.columns.length === 1 ? '' : 's'} available for DQL artifact SQL previews.`,
     sourceTier: 'project',
     certification: 'ai_generated',
     provenance: table.source ?? 'runtime information_schema',
@@ -5694,9 +4394,13 @@ function schemaCitations(schemaContext: AgentSchemaTable[], limit: number): Agen
 }
 
 function certificationForNode(node: KGNode): AgentEvidenceAsset['certification'] {
-  if (node.status === 'certified' || node.certification === 'certified') return 'certified';
-  if (node.certification === 'analyst_review_required') return 'analyst_review_required';
-  if (node.certification === 'ai_generated' || node.certification === 'uncertified') return 'ai_generated';
+  const certification = node.certification as string | undefined;
+  if (node.status === 'certified' || certification === 'certified') return 'certified';
+  if (certification === 'reviewed' || node.status === 'review' || node.status === 'reviewed') return 'reviewed';
+  if (certification === 'conflict') return 'conflict';
+  if (certification === 'insufficient_context') return 'insufficient_context';
+  if (certification === 'analyst_review_required') return 'analyst_review_required';
+  if (certification === 'ai_generated' || certification === 'uncertified') return 'ai_generated';
   return undefined;
 }
 

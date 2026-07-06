@@ -81,6 +81,35 @@ jobs:
             node apps/cli/dist/index.js fmt --check "$f"
           done
 
+  # --- Golden answer-routing eval ---
+  # CI-safe W4.1 gate: deterministic router eval over certified, generated, and
+  # safe-refusal cases. Deeper `dql agent eval --execute` suites can run in
+  # credentialed/project CI, but this keeps every PR honest without live AI keys.
+  golden-eval:
+    name: golden eval (router)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: dql eval golden fixtures
+        run: |
+          node apps/cli/dist/index.js eval apps/cli/test/fixtures/lineage-app \
+            --format json \
+            --min-route-accuracy 1 \
+            --min-refusal 1 \
+            --min-answer-rate 1
+          node apps/cli/dist/index.js eval apps/cli/test/fixtures/jaffle-supply-chain \
+            --format json \
+            --min-route-accuracy 1 \
+            --min-refusal 1 \
+            --min-answer-rate 1
+
   # --- 4,000-model stress test (perf gate) ---
   # Gates: cold <30s, warm <2s. See docs/contribute/testing.md.
   stress-test:
@@ -127,6 +156,6 @@ jobs:
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-latest
-    needs: [build-and-test, scaffold-smoke, docs, format-check]
+    needs: [build-and-test, scaffold-smoke, docs, format-check, golden-eval]
     steps:
       - run: echo "All required CI gates passed."

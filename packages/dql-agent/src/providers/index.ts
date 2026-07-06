@@ -12,7 +12,14 @@ import { OpenAIProvider } from './openai.js';
 import { GeminiProvider, normalizeGeminiBaseUrl } from './gemini.js';
 import { OllamaProvider } from './ollama.js';
 
-export type { AgentProvider, AgentMessage, ProviderName, ProviderRunOptions } from './types.js';
+export type {
+  AgentProvider,
+  AgentMessage,
+  AgentToolDefinition,
+  ProviderName,
+  ProviderRunOptions,
+  ProviderToolLoopOptions,
+} from './types.js';
 export { streamOrGenerate } from './types.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
 export type { ReasoningEffort, GeminiReasoningStyle } from './reasoning-effort.js';

@@ -10,6 +10,7 @@
 
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { DQLManifest } from "@duckcodeailabs/dql-core";
 import {
   buildManifest,
@@ -61,6 +62,11 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
+export {
+  stampTrustLabel,
+  trustLabelIdForAnswer,
+  type TrustStampableAnswer,
+} from "./trust/stamp.js";
 export {
   decideAgentAction,
   classifyConversationalTurn,
@@ -173,18 +179,120 @@ export type {
   AgentAnalysisPlan,
   AgentAnswer,
   AgentCitation,
+  AgentDqlArtifactReference,
+  AgentEvidence,
+  AgentEvidenceAsset,
+  AgentEvidenceContextItem,
+  AgentEvidenceLineageNode,
+  AgentEvidenceLineageRole,
+  AgentEvidenceOutcome,
+  AgentEvidenceRouteStatus,
+  AgentEvidenceRouteStep,
+  AgentEvidenceToolCall,
   AgentFollowUpContext,
   AgentJoinPath,
   AgentIntent,
+  AgentPriorResultReference,
   AgentResultPayload,
   AgentSchemaColumn,
   AgentSchemaTable,
+  AnalysisDepth,
   AnswerKind,
   AnswerLoopInput,
   AiRoute,
   AiRouteTier,
 } from "./answer-loop.js";
 export { matchSemanticMetric } from "./metadata/metric-match.js";
+export {
+  composeSemanticQueryForQuestion,
+  renderSemanticDqlArtifact,
+  semanticDqlArtifactName,
+  type ComposeSemanticQueryInput,
+  type SemanticBridgeFilter,
+  type SemanticBridgeOrderBy,
+  type SemanticBridgeQueryResult,
+  type SemanticDqlArtifactInput,
+} from "./semantic-bridge/compose.js";
+export {
+  DQL_TOOL_REGISTRY,
+  dqlMcpToolNamesForSurface,
+  dqlToolDefinitionsForSurface,
+  dqlToolNamesForSurface,
+  getDqlToolDefinition,
+} from "./tools/registry.js";
+export type {
+  DqlToolDefinition,
+  DqlToolName,
+  DqlToolSurface,
+  JsonSchema,
+} from "./tools/registry.js";
+export {
+  cascadeTraceToEvidenceRouteSteps,
+  createCascadeAnswerResult,
+  createCascadeTrace,
+  terminalLaneForRouteTier,
+  type CascadeAnswerResult,
+  type CascadeAnswerResultInput,
+  type CascadeAnswerTier,
+  type CascadeCertifiedOutcome,
+  type CascadeEvidenceRouteStep,
+  type CascadeGeneratedOutcome,
+  type CascadeLane,
+  type CascadeLaneOutcome,
+  type CascadeLaneStatus,
+  type CascadeLaneTrace,
+  type CascadeLaneTraceInput,
+  type CascadeRefusalOutcome,
+  type CascadeSemanticOutcome,
+  type CascadeTraceInput,
+} from "./cascade/cascade.js";
+export {
+  shouldClarifyBeforeGeneration,
+  type CascadeClarifyInput,
+  type CascadeMissingContext,
+  type CascadeRouteDecisionLike,
+} from "./cascade/triage.js";
+export {
+  routeForCascadeAnswerTier,
+  selectCascadeRunRoute,
+  type CascadeAction,
+  type CascadeAnswerRouteTier,
+  type CascadeRequestedMode,
+  type CascadeRouteDecision,
+  type CascadeRouteRequest,
+  type CascadeRunRoute,
+} from "./cascade/route-policy.js";
+export {
+  DEFAULT_CASCADE_BUDGET_MODEL,
+  canUseEngineEscalation,
+  canUseLaneRepair,
+  contextRetrievalBudgetForQuestion,
+  analysisDepthForQuestion,
+  cascadeBudgetTrace,
+  cascadeBudgetUsage,
+  createCascadeBudgetState,
+  mcpTier2RegroundRepairBudget,
+  mergeCascadeBudgetModel,
+  promptContextBudgetForQuestion,
+  proposalToolBudgetForQuestion,
+  recordEngineEscalation,
+  recordLaneRepair,
+  type CascadeAnalysisDepth,
+  type CascadeBudgetModel,
+  type CascadeBudgetState,
+  type CascadeBudgetTrace,
+  type CascadeBudgetUsage,
+  type CascadeLaneBudgetLimits,
+  type CascadeLaneRepairKind,
+  type ContextRetrievalBudget,
+  type ContextRetrievalStrictness,
+  type McpTier2RepairBudget,
+  type PartialCascadeBudgetModel,
+  type PromptContextBudget,
+  type ProposalToolBudget,
+  type ProposalToolBudgetClass,
+  type ProposalToolBudgetOptions,
+} from "./cascade/budgets.js";
 export type { MetricMatch, MatchSemanticMetricOptions } from "./metadata/metric-match.js";
 export {
   APP_BUILDER_SKILLS,
@@ -258,6 +366,7 @@ export {
   buildMetadataSnapshot,
   defaultMetadataPath,
   ensureMetadataCatalogFresh,
+  metadataObjectToAllowedSqlRelation,
   openMetadataCatalog,
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
@@ -304,6 +413,25 @@ export {
   validateSqlAgainstLocalContext,
 } from "./metadata/sql-context-validation.js";
 export {
+  applyGroundingExpansion,
+  expandGroundingFromCatalog,
+} from "./grounding/regrounding.js";
+export {
+  ContextLedger,
+  createContextLedger,
+} from "./grounding/context-ledger.js";
+export type {
+  GroundingContextExpander,
+  GroundingExpansionRequest,
+  GroundingExpansionResult,
+  MergedGroundingContext,
+} from "./grounding/regrounding.js";
+export type {
+  ContextLedgerExpansionResult,
+  ContextLedgerInput,
+  ContextLedgerSqlValidationOptions,
+} from "./grounding/context-ledger.js";
+export {
   buildSchemaGrounding,
   buildGroundingFromRuntimeRelations,
   renderGroundingForPrompt,
@@ -327,9 +455,11 @@ export type { SelectRelevantModelsOptions } from "./metadata/sql-retrieval.js";
 export {
   deriveGeneratedDraftSlug,
   deriveSemanticDraftName,
+  renderGeneratedSqlDqlArtifact,
+  upsertGeneratedDqlArtifactDraft,
   upsertGeneratedDraft,
 } from "./metadata/drafts.js";
-export type { SemanticDraftNameInput } from "./metadata/drafts.js";
+export type { GeneratedDqlArtifactDraftRecord, SemanticDraftNameInput } from "./metadata/drafts.js";
 export {
   persistOwner,
   readPersistedOwner,
@@ -424,6 +554,7 @@ export type {
 } from "./metadata/catalog.js";
 export type {
   SqlContextValidationCode,
+  SqlContextValidationOffending,
   SqlContextValidationOptions,
   SqlContextValidationResult,
 } from "./metadata/sql-context-validation.js";
@@ -493,7 +624,16 @@ export type {
 } from "./embeddings/provider.js";
 export type {
   AppliedContextHint,
+  RuntimeValueMatch,
 } from "./metadata/catalog.js";
+export {
+  buildRuntimeValueIndex,
+  normalizeValueIndexText,
+} from "./grounding/value-index.js";
+export type {
+  RuntimeValueIndexEntry,
+  ValueIndexSnapshot,
+} from "./grounding/value-index.js";
 export {
   ClaudeProvider,
   OpenAIProvider,
@@ -516,8 +656,10 @@ export {
 export type {
   AgentProvider,
   AgentMessage,
+  AgentToolDefinition,
   ProviderName,
   ProviderRunOptions,
+  ProviderToolLoopOptions,
   ReasoningEffort,
   GeminiReasoningStyle,
 } from "./providers/index.js";
@@ -536,6 +678,20 @@ export interface ReindexOptions {
   kgPath?: string;
   /** Set to false to skip re-loading Skills. */
   loadSkills?: boolean;
+  /** Force the KG rebuild even when its graph fingerprint is unchanged. */
+  forceKgIndex?: boolean;
+  /** Force the metadata catalog rebuild even when its fingerprint is unchanged. */
+  forceMetadataCatalog?: boolean;
+}
+
+export interface ReindexProjectResult {
+  nodes: number;
+  edges: number;
+  skills: number;
+  kgRebuilt: boolean;
+  metadataRefreshed: boolean;
+  kgFingerprint: string;
+  metadataFingerprint: string;
 }
 
 /**
@@ -546,7 +702,7 @@ export interface ReindexOptions {
 export async function reindexProject(
   projectRoot: string,
   opts: ReindexOptions = {},
-): Promise<{ nodes: number; edges: number; skills: number }> {
+): Promise<ReindexProjectResult> {
   const manifest = opts.manifest ?? loadManifest(projectRoot);
   const manifestGraph = buildKGFromManifest(manifest);
   const semanticLayer = loadAgentSemanticLayer(projectRoot);
@@ -572,17 +728,22 @@ export async function reindexProject(
   }
 
   ({ nodes, edges } = dedupeGraph(nodes, edges));
+  const kgFingerprint = fingerprintKgGraph(nodes, edges);
 
   const kg = new KGStore(opts.kgPath ?? defaultKgPath(projectRoot));
+  let kgRebuilt = false;
   try {
-    kg.rebuild(nodes, edges);
+    if (opts.forceKgIndex || kg.meta("fingerprint") !== kgFingerprint) {
+      kg.rebuild(nodes, edges, { fingerprint: kgFingerprint });
+      kgRebuilt = true;
+    }
   } finally {
     kg.close();
   }
-  await ensureMetadataCatalogFresh(projectRoot, {
+  const metadataRefresh = await ensureMetadataCatalogFresh(projectRoot, {
     manifest,
     semanticLayer,
-    force: true,
+    force: opts.forceMetadataCatalog,
   });
   // Rebuild the approved-hint index (Git authoritative; SQLite is a view). Safe
   // when no hints exist — yields an empty index.
@@ -591,7 +752,15 @@ export async function reindexProject(
   } catch {
     // Hint indexing is advisory; never fail a reindex over it.
   }
-  return { nodes: nodes.length, edges: edges.length, skills: skills.length };
+  return {
+    nodes: nodes.length,
+    edges: edges.length,
+    skills: skills.length,
+    kgRebuilt,
+    metadataRefreshed: metadataRefresh.refreshed,
+    kgFingerprint,
+    metadataFingerprint: metadataRefresh.fingerprint,
+  };
 }
 
 /**
@@ -630,7 +799,7 @@ function loadManifest(projectRoot: string): DQLManifest {
   });
 }
 
-function loadAgentSemanticLayer(projectRoot: string) {
+export function loadAgentSemanticLayer(projectRoot: string) {
   const config = loadProjectConfig(projectRoot);
   const semanticConfig = config.semanticLayer?.provider
     ? (config.semanticLayer as Parameters<
@@ -702,4 +871,54 @@ function mergeNode(a: KGNode, b: KGNode): KGNode {
     sourcePath: b.sourcePath ?? a.sourcePath,
     gitSha: b.gitSha ?? a.gitSha,
   };
+}
+
+function fingerprintKgGraph(nodes: KGNode[], edges: KGEdge[]): string {
+  const stableNodes = nodes
+    .map((node) => stripUndefinedDeep(node) as Record<string, unknown>)
+    .sort((a, b) => String(a.nodeId).localeCompare(String(b.nodeId)));
+  const stableEdges = edges
+    .map((edge) => stripUndefinedDeep(edge) as Record<string, unknown>)
+    .sort((a, b) => [
+      String(a.src).localeCompare(String(b.src)),
+      String(a.dst).localeCompare(String(b.dst)),
+      String(a.kind).localeCompare(String(b.kind)),
+    ].find((cmp) => cmp !== 0) ?? 0);
+  return createHash("sha256")
+    .update(stableStringify({ nodes: stableNodes, edges: stableEdges }))
+    .digest("hex");
+}
+
+function stableStringify(value: unknown, seen = new WeakSet<object>()): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (seen.has(value)) return "\"[Circular]\"";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const out = `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
+    seen.delete(value);
+    return out;
+  }
+  const record = value as Record<string, unknown>;
+  const out = `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key], seen)}`)
+    .join(",")}}`;
+  seen.delete(value);
+  return out;
+}
+
+function stripUndefinedDeep(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefinedDeep(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (raw === undefined) continue;
+    out[key] = stripUndefinedDeep(raw);
+  }
+  return out;
 }

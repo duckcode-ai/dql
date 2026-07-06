@@ -21,7 +21,11 @@ export {
 export { lineageImpact, lineageImpactInput } from './tools/lineage-impact.js';
 export { certify, certifyInput } from './tools/certify.js';
 export { suggestBlock, suggestBlockInput } from './tools/suggest-block.js';
+export { querySemanticModel, querySemanticModelInput } from './tools/query-semantic-model.js';
+export { expandContext, expandContextInput } from './tools/expand-context.js';
 export { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './tools/kg.js';
+export { inspectMetadataContext, inspectMetadataContextInput } from './tools/kg.js';
+export { queryViaMetadata, queryViaMetadataInput } from './tools/query-via-metadata.js';
 export {
   askDql,
   askDqlInput,

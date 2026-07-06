@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,43 @@ function writeManifest(dir: string): void {
       domains: ['finance'],
       crossDomainFlows: [],
       domainTrust: { finance: { total: 2, certified: 2, score: 1 } },
+    },
+  };
+  writeFileSync(join(dir, 'dql-manifest.json'), JSON.stringify(manifest));
+}
+
+function writeSemanticMetricManifest(dir: string): void {
+  mkdirSync(join(dir, 'semantic-layer', 'metrics'), { recursive: true });
+  writeFileSync(join(dir, 'semantic-layer', 'metrics', 'revenue.yaml'), [
+    'name: total_revenue',
+    'label: Total Revenue',
+    'description: Certified revenue metric',
+    'domain: finance',
+    'status: certified',
+    'owner: finance@example.com',
+    'sql: SUM(amount)',
+    'type: sum',
+    'table: mart.orders',
+    '',
+  ].join('\n'));
+  const manifest = {
+    lineage: {
+      nodes: [
+        { id: 'block:base', type: 'block', name: 'base', domain: 'finance', status: 'certified' },
+        {
+          id: 'metric:total_revenue',
+          type: 'metric',
+          name: 'total_revenue',
+          domain: 'finance',
+          status: 'certified',
+          owner: 'finance@example.com',
+          metadata: { filePath: 'semantic-layer/metrics/revenue.yaml' },
+        },
+      ],
+      edges: [{ source: 'block:base', target: 'metric:total_revenue', type: 'feeds_into' }],
+      domains: ['finance'],
+      crossDomainFlows: [],
+      domainTrust: { finance: { total: 1, certified: 1, score: 1 } },
     },
   };
   writeFileSync(join(dir, 'dql-manifest.json'), JSON.stringify(manifest));
@@ -160,5 +197,33 @@ describe('dql diff --impact gate', () => {
     }
     expect(caught).toBeUndefined();
     expect(log.mock.calls.flat().join('\n')).toContain('No changes.');
+  });
+
+  it('writes pending recertification changesets for impacted semantic definitions', async () => {
+    const dir = makeProject();
+    writeSemanticMetricManifest(dir);
+    const before = join(dir, 'blocks', 'base.before.dql');
+    const after = join(dir, 'blocks', 'base.dql');
+    writeFileSync(before, BASE);
+    writeFileSync(after, BASE.replace('SELECT 1 AS x', 'SELECT 2 AS x'));
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    mockExit();
+
+    let caught: unknown;
+    try {
+      await runDiff(before, [after], flags({ format: 'json', writeRecertification: true }));
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeUndefined();
+    const payload = JSON.parse(log.mock.calls.map((c) => c[0]).join('\n'));
+    expect(payload.recertificationChangeset).toMatchObject({
+      written: 1,
+      skipped: 0,
+      paths: ['semantic-layer/metrics/revenue.yaml'],
+    });
+    expect(readFileSync(join(dir, 'semantic-layer', 'metrics', 'revenue.yaml'), 'utf-8')).toContain('status: pending_recertification');
   });
 });

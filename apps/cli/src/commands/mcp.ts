@@ -79,7 +79,7 @@ async function runMcpTest(targetPath: string | null, flags: CLIFlags): Promise<v
     checks.push({
       name: 'Agent index',
       ok: true,
-      detail: `${result.nodes} node(s), ${result.edges} edge(s), ${result.skills} skill(s)`,
+      detail: `${result.nodes} node(s), ${result.edges} edge(s), ${result.skills} skill(s); KG ${result.kgRebuilt ? 'rebuilt' : 'fresh'}, metadata ${result.metadataRefreshed ? 'refreshed' : 'fresh'}`,
     });
   } catch (error) {
     checks.push({

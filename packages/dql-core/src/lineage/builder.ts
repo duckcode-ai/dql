@@ -53,13 +53,27 @@ export interface LineageBlockInput {
 export interface LineageMetricInput {
   name: string;
   table: string;
-  domain: string;
+  domain?: string;
   type: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
+  owner?: string;
+  filePath?: string;
+  description?: string;
+  sql?: string;
+  tags?: string[];
 }
 
 export interface LineageDimensionInput {
   name: string;
   table: string;
+  domain?: string;
+  type?: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated' | 'pending_recertification';
+  owner?: string;
+  filePath?: string;
+  description?: string;
+  sql?: string;
+  tags?: string[];
 }
 
 export interface LineageBuilderOptions {
@@ -328,8 +342,18 @@ export function buildLineageGraph(
       layer: 'answer',
       name: metric.name,
       domain,
-      metadata: { type: metric.type },
+      owner: metric.owner,
+      status: metric.status,
+      metadata: {
+        type: metric.type,
+        table: metric.table,
+        sql: metric.sql,
+        filePath: metric.filePath,
+        description: metric.description,
+        tags: metric.tags,
+      },
     });
+    addDomainContainmentEdge(graph, domain, `metric:${metric.name}`);
 
     // Metric → source table edge
     const tableNodeId = ensureTableNode(graph, metric.table, dbtNodeMap);
@@ -342,12 +366,25 @@ export function buildLineageGraph(
 
   // 4. Add dimension nodes
   for (const dim of dimensions) {
+    const domain = resolveDomain(dim.domain);
     graph.addNode({
       id: `dimension:${dim.name}`,
       type: 'dimension',
       layer: 'answer',
       name: dim.name,
+      domain,
+      owner: dim.owner,
+      status: dim.status,
+      metadata: {
+        type: dim.type,
+        table: dim.table,
+        sql: dim.sql,
+        filePath: dim.filePath,
+        description: dim.description,
+        tags: dim.tags,
+      },
     });
+    addDomainContainmentEdge(graph, domain, `dimension:${dim.name}`);
 
     const tableNodeId = ensureTableNode(graph, dim.table, dbtNodeMap);
     graph.addEdge({

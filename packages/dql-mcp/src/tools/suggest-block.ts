@@ -1,19 +1,11 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { z } from 'zod';
 import { Certifier } from '@duckcodeailabs/dql-governance';
 import type { BlockRecord, BlockStatus } from '@duckcodeailabs/dql-project';
 import type { DQLContext } from '../context.js';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const suggestBlockInput = {
-  name: z.string().describe('Proposed block name (kebab_case).'),
-  domain: z.string().describe('Business domain (finance, product, …).'),
-  owner: z.string().describe('Block owner identity (email or team handle).'),
-  description: z.string().describe('One-line description of what the block answers.'),
-  sql: z.string().describe('The block body SQL.'),
-  tags: z.array(z.string()).optional(),
-  chartType: z.string().optional().describe('Optional visualization type.'),
-};
+export const suggestBlockInput = zodInputShapeForTool('suggest_block');
 
 /**
  * Write a proposed block to the local draft queue and return the governance

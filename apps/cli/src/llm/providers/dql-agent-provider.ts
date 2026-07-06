@@ -5,22 +5,30 @@ import {
   defaultKgPath,
   defaultMemoryPath,
   GeminiProvider,
+  loadAgentSemanticLayer,
   OllamaProvider,
   OpenAIProvider,
   answer,
+  buildAnalysisQuestionPlan,
   buildLocalContextPack,
+  contextRetrievalBudgetForQuestion,
   loadSkills,
   reindexProject,
   type AgentAnswer,
+  type AgentDqlArtifactReference,
   type CertifiedFitConfirmation,
   type CertifiedFitConfirmationRequest,
   type AgentFollowUpContext,
+  type AgentPriorResultReference,
   type AgentProvider,
   type AgentResultPayload,
   type ConversationSnapshot,
 } from '@duckcodeailabs/dql-agent';
+import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
+import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
+import { blockProposalDqlMetadata } from '../proposal-metadata.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
 import { ClaudeCodeCliProvider, CodexCliProvider } from '../../providers/subscription-cli.js';
 import { ClaudeOAuthProvider, claudeOAuthConnected } from '../../providers/oauth/claude-oauth.js';
@@ -222,6 +230,7 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
         owner: String(raw.owner ?? ''),
         description: String(raw.description ?? ''),
         sql: String(raw.sql),
+        ...blockProposalDqlMetadata(raw),
         tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
         chartType: typeof raw.chartType === 'string' ? raw.chartType : undefined,
       },
@@ -251,8 +260,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         }
         await reindexProject(req.projectRoot, { kgPath });
 
-        const question = resolveEffectiveQuestion(req);
-        if (!question) {
+        const rawQuestion = resolveEffectiveQuestion(req);
+        if (!rawQuestion) {
           emit({ kind: 'error', message: 'No user question found.' });
           return;
         }
@@ -260,6 +269,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         const memory = new MemoryStore(defaultMemoryPath(req.projectRoot));
         const kg = new KGStore(kgPath);
         try {
+          const conversationSnapshot = conversationSnapshotFromContext(req.conversationContext);
+          const rawFollowUp = followUpFromConversationContext(req, rawQuestion) ?? inferFollowUpContext(req, rawQuestion);
+          const followUp = applyTopicShiftGuard(rawFollowUp, conversationSnapshot);
+          const question = rewriteFollowUpQuestion(rawQuestion, followUp);
           // Retrieve durable learnings only — notebook/project/user/artifact scope.
           // `thread` (per-conversation) memory is intentionally excluded: it is
           // raw-chat residue, not a governed learning, and bloats the prompt.
@@ -273,17 +286,21 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             ? await req.getSchemaContext(question).catch(() => [])
             : [];
           const skills = loadSkills(req.projectRoot).skills;
-          const conversationSnapshot = conversationSnapshotFromContext(req.conversationContext);
-          const followUp = applyTopicShiftGuard(
-            followUpFromConversationContext(req, question) ?? inferFollowUpContext(req, question),
-            conversationSnapshot,
-          );
+          const semanticLayer = loadAgentSemanticLayer(req.projectRoot);
+          const questionPlan = buildAnalysisQuestionPlan(question, followUp);
+          const contextBudget = contextRetrievalBudgetForQuestion({
+            questionPlan,
+            requestedDepth: req.analysisDepth,
+            reasoningEffort: req.reasoningEffort,
+          });
           const selectedContext = selectedContextForMetadata(req, question);
           const contextPack = await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
             followUp,
             selectedContext,
+            strictness: contextBudget.strictness,
+            limit: contextBudget.limit,
             confirmCertifiedFit: createCertifiedFitConfirmation(provider, signal),
             // Conversation-aware reuse: same-topic follow-ups seed (or, for
             // filter-only refinements, re-stamp) the prior turn's context pack.
@@ -322,11 +339,15 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             conversationSnapshot,
             memoryContext,
             schemaContext,
+            semanticLayer,
             contextPack,
             signal,
             reasoningEffort: req.reasoningEffort,
+            analysisDepth: contextBudget.analysisDepth,
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,
+            expandGroundingContext: createGroundingContextExpander(req.projectRoot),
+            answerLoopTools: buildAnswerLoopTools(req.projectRoot),
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
@@ -401,6 +422,65 @@ export function resolveEffectiveQuestion(req: AgentRunRequest): string {
   return `${original} — clarification: ${current}`;
 }
 
+export function rewriteFollowUpQuestion(question: string, followUp?: AgentFollowUpContext): string {
+  if (!followUp || followUp.kind === 'contextual') return question;
+  const pieces = [
+    `Follow-up request: ${question}`,
+    followUp.sourceQuestion ? `Prior question: ${followUp.sourceQuestion}` : '',
+    followUp.sourceBlockName ? `Prior certified block: ${followUp.sourceBlockName}` : '',
+    followUp.priorResultRef ? formatPriorResultRefForQuestion(followUp.priorResultRef) : '',
+    followUp.priorDqlArtifact ? formatPriorDqlArtifactForQuestion(followUp.priorDqlArtifact) : '',
+    followUp.priorResultValues ? `Resolved prior result values: ${formatResultDimensionValues(followUp.priorResultValues)}` : '',
+    followUp.filters?.length ? `Apply referenced filters: ${formatFollowUpFilters(followUp)}` : '',
+    followUp.dimensions?.length ? `Referenced dimensions: ${followUp.dimensions.join(', ')}` : '',
+    followUp.priorMeasures?.length ? `Prior measures: ${followUp.priorMeasures.join(', ')}` : '',
+  ].filter(Boolean);
+  return pieces.length > 1 ? pieces.join('\n') : question;
+}
+
+function formatPriorResultRefForQuestion(ref: AgentPriorResultReference): string {
+  const parts = [
+    `Prior result ref: result:${ref.id}`,
+    ref.columns.length ? `schema=[${ref.columns.slice(0, 24).join(', ')}]` : '',
+    typeof ref.rowCount === 'number' ? `row_count=${ref.rowCount}` : '',
+    ref.sourceSql ? `source_sql=${compactInline(ref.sourceSql, 500)}` : '',
+  ].filter(Boolean);
+  return parts.join('; ');
+}
+
+function formatPriorDqlArtifactForQuestion(artifact: AgentDqlArtifactReference): string {
+  const parts = [
+    `Prior DQL artifact: kind=${artifact.kind}`,
+    artifact.name ? `name=${artifact.name}` : '',
+    artifact.sourcePath ? `path=${artifact.sourcePath}` : '',
+    artifact.metrics?.length ? `metrics=[${artifact.metrics.slice(0, 12).join(', ')}]` : '',
+    artifact.dimensions?.length ? `dimensions=[${artifact.dimensions.slice(0, 12).join(', ')}]` : '',
+    artifact.filters?.length ? `filters=[${artifact.filters.slice(0, 8).map(formatDqlArtifactFilterInline).join('; ')}]` : '',
+    artifact.timeDimension ? `time=${artifact.timeDimension.name}/${artifact.timeDimension.granularity}` : '',
+    artifact.orderBy?.length ? `order_by=[${artifact.orderBy.slice(0, 8).map((order) => `${order.name} ${order.direction}`).join(', ')}]` : '',
+    typeof artifact.limit === 'number' ? `limit=${artifact.limit}` : '',
+    artifact.source ? `source=${compactInline(artifact.source, 900)}` : '',
+  ].filter(Boolean);
+  return parts.join('; ');
+}
+
+function formatDqlArtifactFilterInline(filter: { dimension: string; operator: string; values: string[] }): string {
+  return `${filter.dimension} ${filter.operator} ${filter.values.slice(0, 8).join(', ')}`;
+}
+
+function formatFollowUpFilters(followUp: AgentFollowUpContext): string {
+  if (!followUp.filters?.length) return '';
+  if (followUp.dimensions?.length === 1) {
+    return `${followUp.dimensions[0]} in [${followUp.filters.join(', ')}]`;
+  }
+  return followUp.filters.join(', ');
+}
+
+function compactInline(value: string, max: number): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  return compact.length > max ? `${compact.slice(0, max - 3).trimEnd()}...` : compact;
+}
+
 function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {
   const parts: string[] = [];
   const upstream = req.upstream?.sql?.trim();
@@ -429,6 +509,7 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
       context.trustLabel ? `trust label: ${context.trustLabel}` : '',
       context.reviewStatus ? `review status: ${context.reviewStatus}` : '',
       context.draftBlockPath ? `draft block: ${context.draftBlockPath}` : '',
+      context.dqlArtifact ? `prior DQL artifact:\n${formatPriorDqlArtifactForQuestion(context.dqlArtifact)}` : '',
       context.requestedFilters?.length ? `remembered filters: ${clampList(context.requestedFilters)}` : '',
       context.requestedDimensions?.length ? `remembered dimensions: ${clampList(context.requestedDimensions)}` : '',
       context.outputColumns?.length ? `prior output columns: ${clampList(context.outputColumns)}` : '',
@@ -455,6 +536,12 @@ function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContex
   }
   if (followUp?.dimensions?.length) {
     parts.push(`Requested follow-up dimensions: ${followUp.dimensions.join(', ')}`);
+  }
+  if (followUp?.priorResultRef) {
+    parts.push(`Prior result reference:\n${formatPriorResultRefForQuestion(followUp.priorResultRef)}`);
+  }
+  if (followUp?.priorDqlArtifact) {
+    parts.push(`Prior DQL artifact reference:\n${formatPriorDqlArtifactForQuestion(followUp.priorDqlArtifact)}`);
   }
   return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
@@ -577,6 +664,7 @@ function applyTopicShiftGuard(
   if (followUp.kind !== 'drilldown') return followUp;
   return {
     ...followUp,
+    kind: 'contextual',
     filters: undefined,
     dimensions: undefined,
     priorResultValues: undefined,
@@ -589,7 +677,7 @@ function followUpFromConversationContext(req: AgentRunRequest, question: string)
   const context = req.conversationContext;
   if (!context) return undefined;
   const turns = conversationTurnsFromContext(context);
-  const activeTurn = activeConversationTurn(context, turns);
+  const activeTurn = activeConversationTurn(context, turns, question);
   const activeResult = activeTurn?.result && typeof activeTurn.result === 'object' && !Array.isArray(activeTurn.result)
     ? activeTurn.result as Record<string, unknown>
     : undefined;
@@ -600,8 +688,10 @@ function followUpFromConversationContext(req: AgentRunRequest, question: string)
     context.resultColumns,
     context.outputColumns,
   );
+  const priorResultRef = priorResultRefFromTurn(activeTurn, activeResult, priorResultColumns);
+  const priorDqlArtifact = cleanDqlArtifactReference(activeTurn?.dqlArtifact) ?? cleanDqlArtifactReference(context.dqlArtifact);
   const resolvedReferences = resolveConversationReferences(question, turns, priorResultValues);
-  const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || priorResultValues);
+  const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || priorResultValues || priorDqlArtifact);
   if (!hasUsefulContext) return undefined;
   const inferredKind = isGenericFollowUp(question)
     ? 'generic'
@@ -639,6 +729,8 @@ function followUpFromConversationContext(req: AgentRunRequest, question: string)
       : undefined,
     priorResultColumns,
     priorResultValues,
+    priorResultRef,
+    priorDqlArtifact,
     priorLimit: activeTurnNumber(activeTurn, 'topN') ?? (typeof context.priorLimit === 'number' ? context.priorLimit : undefined),
     priorMeasures: mergeStrings(
       activeTurnStringArray(activeTurn, 'requestedMeasures'),
@@ -656,7 +748,13 @@ function conversationTurnsFromContext(context: AgentRunRequest['conversationCont
   const explicit = Array.isArray(context?.turns)
     ? context.turns.map(cleanRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn))
     : [];
-  if (explicit.length > 0) return explicit.slice(-8);
+  const snapshot = conversationSnapshotFromContext(context);
+  const snapshotTurns = [
+    ...(snapshot?.recalledTurns ?? []).map((turn) => snapshotTurnToConversationRecord(turn, 'recalled')),
+    ...(snapshot?.recentTurns ?? []).map((turn) => snapshotTurnToConversationRecord(turn, 'recent')),
+  ].filter((turn): turn is Record<string, unknown> => Boolean(turn));
+  const merged = mergeConversationTurnRecords([...snapshotTurns, ...explicit]);
+  if (merged.length > 0) return merged.slice(-12);
   const legacy = cleanRecord({
     id: context?.sourceAnswerId,
     question: context?.sourceQuestion,
@@ -677,26 +775,147 @@ function conversationTurnsFromContext(context: AgentRunRequest['conversationCont
     reviewStatus: context?.reviewStatus,
     certification: context?.certification,
     contextPackId: context?.contextPackId,
+    sourceSql: (context as Record<string, unknown> | undefined)?.sourceSql,
+    dqlArtifact: context?.dqlArtifact,
+    cascade: context?.cascade,
   });
   return legacy ? [legacy] : [];
+}
+
+function snapshotTurnToConversationRecord(
+  turn: ConversationSnapshot['recentTurns'][number],
+  snapshotSource: 'recent' | 'recalled',
+): Record<string, unknown> | undefined {
+  return compactConversationRecord({
+    id: turn.id,
+    question: turn.question,
+    answerSummary: turn.answerSummary,
+    sourceCertifiedBlock: turn.sourceCertifiedBlock,
+    route: turn.route,
+    contextPackId: turn.contextPackId,
+    sourceSql: turn.sourceSql,
+    dqlArtifact: turn.dqlArtifact,
+    cascade: turn.cascade,
+    snapshotSource,
+    result: compactConversationRecord({
+      columns: turn.resultColumns,
+      dimensionValues: turn.resultDimensionValues,
+      rowCount: turn.resultRowCount,
+    }),
+  });
+}
+
+function mergeConversationTurnRecords(turns: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const byId = new Map<string, Record<string, unknown>>();
+  const anonymous: Array<Record<string, unknown>> = [];
+  for (const turn of turns) {
+    const id = cleanOptionalString(turn.id);
+    if (!id) {
+      anonymous.push(turn);
+      continue;
+    }
+    const current = byId.get(id);
+    byId.set(id, current ? { ...current, ...turn } : turn);
+  }
+  return [...anonymous, ...byId.values()];
 }
 
 function activeConversationTurn(
   context: AgentRunRequest['conversationContext'],
   turns: Array<Record<string, unknown>>,
+  question: string,
 ): Record<string, unknown> | undefined {
   if (turns.length === 0) return undefined;
   const activeId = cleanOptionalString(context?.activeTurnId);
+  const activeMatch = activeId
+    ? turns.find((turn) => cleanOptionalString(turn.id) === activeId)
+    : undefined;
+  const recalled = turns.filter((turn) => cleanOptionalString(turn.snapshotSource) === 'recalled' && turnHasUsefulResult(turn));
+  if (recalled.length > 0) {
+    const bestRecalled = recalled
+      .map((turn) => ({ turn, score: scoreTurnForQuestion(turn, question) }))
+      .sort((a, b) => b.score - a.score)[0];
+    const activeScore = activeMatch ? scoreTurnForQuestion(activeMatch, question) : 0;
+    if (bestRecalled && shouldPreferRecalledPriorResult(question, bestRecalled.score, activeScore)) {
+      return bestRecalled.turn;
+    }
+  }
   if (activeId) {
-    const match = turns.find((turn) => cleanOptionalString(turn.id) === activeId);
-    if (match) return match;
+    if (activeMatch) return activeMatch;
   }
   return [...turns].reverse().find((turn) => {
-    const result = cleanRecord(turn.result);
-    const columns = arrayValue(result?.columns);
-    const rows = arrayValue(result?.rowsSample);
-    return Boolean(columns?.length || rows?.length);
+    return turnHasUsefulResult(turn);
   }) ?? turns[turns.length - 1];
+}
+
+function turnHasUsefulResult(turn: Record<string, unknown>): boolean {
+  const result = cleanRecord(turn.result);
+  const columns = arrayValue(result?.columns);
+  const rows = arrayValue(result?.rowsSample);
+  const values = cleanStringRecordArray(result?.dimensionValues);
+  return Boolean(columns?.length || rows?.length || values);
+}
+
+function scoreTurnForQuestion(turn: Record<string, unknown>, question: string): number {
+  const queryTokens = tokenSet(question);
+  if (queryTokens.size === 0) return 0;
+  const result = cleanRecord(turn.result);
+  const values = cleanStringRecordArray(result?.dimensionValues);
+  const text = [
+    cleanOptionalString(turn.question),
+    cleanOptionalString(turn.answerSummary),
+    ...(arrayValue(result?.columns) ?? []).map((value) => cleanOptionalString(value)).filter((value): value is string => Boolean(value)),
+    ...Object.entries(values ?? {}).flatMap(([key, list]) => [key, ...list.slice(0, 8)]),
+  ].filter(Boolean).join(' ');
+  let score = 0;
+  const turnTokens = tokenSet(text);
+  for (const token of queryTokens) {
+    if (turnTokens.has(token)) score += 1;
+  }
+  return score;
+}
+
+function shouldPreferRecalledPriorResult(question: string, recalledScore: number, activeScore: number): boolean {
+  if (recalledScore >= Math.max(activeScore + 2, 2)) return true;
+  if (!wantsPriorResultReference(question)) return false;
+  return recalledScore > 0 && recalledScore > activeScore;
+}
+
+function wantsPriorResultReference(question: string): boolean {
+  return /\b(?:previous|prior|earlier|above)\s+(?:results?|outputs?|rows?|turns?)\b/i.test(question)
+    || /\b(?:with|from|using|include)\s+(?:the\s+)?(?:previous|prior|earlier|above)\b/i.test(question);
+}
+
+function tokenSet(value: string): Set<string> {
+  const tokens = value
+    .toLowerCase()
+    .match(/[a-z0-9_]+/g) ?? [];
+  return new Set(tokens
+    .map((token) => token.replace(/s$/, ''))
+    .filter((token) => token.length > 2 && !GENERIC_FOLLOW_UP_WORDS.has(token)));
+}
+
+function priorResultRefFromTurn(
+  activeTurn: Record<string, unknown> | undefined,
+  activeResult: Record<string, unknown> | undefined,
+  priorResultColumns: string[] | undefined,
+): AgentPriorResultReference | undefined {
+  const columns = priorResultColumns?.slice(0, 32) ?? [];
+  if (columns.length === 0) return undefined;
+  const id = cleanOptionalString(activeTurn?.id) ?? 'previous';
+  const rowCount = typeof activeResult?.rowCount === 'number' && Number.isFinite(activeResult.rowCount)
+    ? activeResult.rowCount
+    : Array.isArray(activeResult?.rowsSample)
+      ? activeResult.rowsSample.length
+      : undefined;
+  const sourceSql = cleanOptionalString(activeTurn?.sourceSql);
+  return {
+    id,
+    question: cleanOptionalString(activeTurn?.question),
+    columns,
+    rowCount,
+    sourceSql: sourceSql ? sourceSql.slice(0, 1200) : undefined,
+  };
 }
 
 function resolveConversationReferences(
@@ -734,6 +953,33 @@ function cleanRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function compactConversationRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(record).filter(([, value]) => value !== undefined && value !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function cleanDqlArtifactReference(value: unknown): AgentDqlArtifactReference | undefined {
+  const artifact = normalizeDqlArtifactReference(value);
+  if (!artifact) return undefined;
+  return {
+    ...artifact,
+    source: artifact.source.slice(0, 3000),
+    metrics: uniqueStringList(artifact.metrics),
+    dimensions: uniqueStringList(artifact.dimensions),
+    filters: artifact.filters
+      ?.filter((filter) => filter.values.length > 0)
+      .slice(0, 12)
+      .map((filter) => ({ ...filter, values: uniqueStringList(filter.values)?.slice(0, 12) ?? [] })),
+    orderBy: artifact.orderBy?.slice(0, 12),
+  };
+}
+
+function uniqueStringList(value: string[] | undefined): string[] | undefined {
+  if (!value?.length) return undefined;
+  const unique = Array.from(new Set(value)).slice(0, 24);
+  return unique.length > 0 ? unique : undefined;
 }
 
 function activeTurnStringArray(turn: Record<string, unknown> | undefined, key: string): unknown[] | undefined {
@@ -884,8 +1130,14 @@ function formatConversationTurnsForPrompt(turns: unknown[]): string {
       const columns = arrayValue(result?.columns)?.map(cleanOptionalString).filter(Boolean).slice(0, 6) ?? [];
       const values = cleanStringRecordArray(result?.dimensionValues);
       const valueText = values ? formatResultDimensionValues(values) : '';
+      const cascade = cleanRecord(turn.cascade);
+      const cascadeText = [
+        cleanOptionalString(cascade?.terminalLane),
+        cleanOptionalString(cascade?.routeTier),
+      ].filter(Boolean).join('/');
       return [
         `${index + 1}. ${cleanOptionalString(turn.question) ?? 'prior turn'}`,
+        cascadeText ? `cascade=${cascadeText}` : '',
         cleanOptionalString(turn.answerSummary) ? `summary=${cleanOptionalString(turn.answerSummary)}` : '',
         columns.length ? `columns=${columns.join(', ')}` : '',
         valueText ? `values=${valueText}` : '',
@@ -913,10 +1165,14 @@ function normalizePriorValueDimension(value: string): string {
 }
 
 export const __test__ = {
+  applyTopicShiftGuard,
+  buildAnswerLoopTools,
   createCertifiedFitConfirmation,
   followUpFromConversationContext,
   inferFollowUpContext,
+  formatCascadeOutcome,
   parseCertifiedFitConfirmation,
+  rewriteFollowUpQuestion,
 };
 
 const GENERIC_FOLLOW_UP_WORDS = new Set([
@@ -988,9 +1244,61 @@ function formatAgentAnswer(result: AgentAnswer): string {
   const citations = result.citations.length > 0
     ? '\n\nCitations:\n' + result.citations.map((c) => `- ${c.kind}: ${c.name}${c.provenance ? ` (${c.provenance})` : ''}`).join('\n')
     : '';
+  const cascade = formatCascadeOutcome(result.cascade);
+  const cascadeLine = cascade ? `\nCascade: ${cascade}` : '';
   const resultPreview = formatResultPreview(result.result);
-  const sql = result.proposedSql ? `\n\nProposed SQL:\n\`\`\`sql\n${result.proposedSql}\n\`\`\`` : '';
-  return `[${badge}]\n\n${result.text}${resultPreview}${citations}${sql}`;
+  const dql = result.dqlArtifact?.source?.trim()
+    ? `\n\nDQL Artifact (${result.dqlArtifact.kind}):\n\`\`\`dql\n${result.dqlArtifact.source.trim()}\n\`\`\``
+    : '';
+  const sql = result.proposedSql ? `\n\nCompiled SQL preview:\n\`\`\`sql\n${result.proposedSql}\n\`\`\`` : '';
+  return `[${badge}]${cascadeLine}\n\n${result.text}${resultPreview}${citations}${dql}${sql}`;
+}
+
+function formatCascadeOutcome(cascade: AgentAnswer['cascade']): string | undefined {
+  if (!cascade?.terminalLane && !cascade?.routeTier) return undefined;
+  const lane = formatCascadeLane(cascade.terminalLane);
+  const tier = formatCascadeTier(cascade.routeTier);
+  return [lane, tier].filter(Boolean).join(' · ') || undefined;
+}
+
+function formatCascadeLane(value?: string): string | undefined {
+  switch (value) {
+    case 'certified':
+      return 'Lane 1 certified';
+    case 'semantic':
+      return 'Lane 2 semantic';
+    case 'generated':
+      return 'Lane 3 generated';
+    case 'refusal':
+      return 'Lane 4 refusal';
+    default:
+      return value ? formatLabel(value) : undefined;
+  }
+}
+
+function formatCascadeTier(value?: string): string | undefined {
+  switch (value) {
+    case 'certified_block':
+      return 'Certified block';
+    case 'semantic_metric':
+      return 'Semantic metric';
+    case 'generated_sql':
+      return 'Generated SQL';
+    case 'business_context':
+      return 'Business context';
+    case 'no_answer':
+      return 'No answer';
+    default:
+      return value ? formatLabel(value) : undefined;
+  }
+}
+
+function formatLabel(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function formatResultPreview(result?: AgentResultPayload): string {
@@ -1039,13 +1347,34 @@ function escapeMarkdownTable(value: string): string {
 
 function emitDraftProposal(result: AgentAnswer, question: string, emit: (turn: AgentTurn) => void): void {
   const isDrilldown = result.evidence?.route.some((step) => step.tool === 'propose_drilldown' && step.status === 'checked') ?? false;
+  const dqlArtifact = result.dqlArtifact;
+  const semanticArtifact = dqlArtifact?.kind === 'semantic_block' ? dqlArtifact : undefined;
   const proposal: BlockProposal = {
     name: slugify(question).slice(0, 56) || 'ai_generated_analysis',
     domain: inferProposalDomain(result) ?? '',
     owner: `${process.env.USER ?? 'analyst'}@local`,
     description: result.text.slice(0, 240),
     sql: result.proposedSql!,
-    tags: ['ai-generated', 'needs-review', result.sourceTier ?? 'dbt_manifest', ...(isDrilldown ? ['drilldown'] : [])],
+    blockType: semanticArtifact ? 'semantic' : 'custom',
+    ...(dqlArtifact
+      ? {
+          dqlSource: dqlArtifact.source,
+        }
+      : {}),
+    ...(semanticArtifact
+      ? {
+          metrics: semanticArtifact.metrics,
+          dimensions: semanticArtifact.dimensions,
+          ...(semanticArtifact.filters ? { filters: semanticArtifact.filters } : {}),
+          ...(semanticArtifact.timeDimension ? { timeDimension: semanticArtifact.timeDimension } : {}),
+        }
+      : {}),
+    tags: [
+      'ai-generated',
+      'needs-review',
+      semanticArtifact ? 'semantic' : result.sourceTier ?? 'dbt_manifest',
+      ...(isDrilldown ? ['drilldown'] : []),
+    ],
     chartType: result.suggestedViz,
   };
   emit({

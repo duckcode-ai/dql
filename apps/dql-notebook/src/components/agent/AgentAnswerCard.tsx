@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { AgentTurn } from '../../llm/types';
+import type { AgentAnswerCascade, AgentTurn } from '../../llm/types';
 import type { AiRoute, CellChartConfig, QueryResult } from '../../store/types';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -10,7 +10,7 @@ import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } fr
 import { useNotebook } from '../../store/NotebookStore';
 import { GuidedBySkills, RouteBadge } from './AiBuildResult';
 
-type AnswerTab = 'answer' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
+type AnswerTab = 'answer' | 'dql' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
 type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
 
 export interface AgentAnswerInvestigationRequest {
@@ -95,6 +95,32 @@ interface AgentAnalysisPlan {
   repairAttempts?: number;
 }
 
+interface AgentDqlArtifact {
+  kind?: 'certified_block' | 'semantic_block' | 'sql_block' | string;
+  source?: string;
+  name?: string;
+  sourcePath?: string;
+  metrics?: string[];
+  dimensions?: string[];
+  filters?: Array<{ dimension?: string; operator?: string; values?: string[] }>;
+  timeDimension?: { name?: string; granularity?: string };
+  orderBy?: Array<{ name?: string; direction?: 'asc' | 'desc' | string }>;
+  limit?: number;
+}
+
+export interface AgentDqlArtifactMeta {
+  kind?: string;
+  source: string;
+  name?: string;
+  sourcePath?: string;
+  metrics: string[];
+  dimensions: string[];
+  filters: string[];
+  timeDimension?: string;
+  orderBy: string[];
+  limit?: number;
+}
+
 export interface AgentAnswerEnvelope {
   kind: 'certified' | 'uncertified' | 'no_answer';
   sourceTier?: string;
@@ -129,10 +155,46 @@ export interface AgentAnswerEnvelope {
   draftBlockId?: string;
   draftBlock?: { path?: string; name?: string };
   promoteCommand?: string;
+  dqlArtifact?: AgentDqlArtifact;
   // Spec 16 — business-context skills that guided this answer (backend-populated).
   appliedSkills?: Array<{ id: string; description?: string }>;
   // Spec 17 (part C) — how this answer was reached (backend-populated).
   route?: AiRoute;
+  cascade?: AgentAnswerCascade;
+}
+
+export function resolveDqlArtifactMeta(answer: AgentAnswerEnvelope): AgentDqlArtifactMeta | null {
+  const artifact = answer.dqlArtifact;
+  const source = artifact?.source?.trim();
+  if (!source) return null;
+  return {
+    source,
+    kind: artifact?.kind,
+    name: artifact?.name,
+    sourcePath: artifact?.sourcePath,
+    metrics: cleanStringList(artifact?.metrics),
+    dimensions: cleanStringList(artifact?.dimensions),
+    filters: (artifact?.filters ?? [])
+      .map((filter) => {
+        const dimension = filter.dimension?.trim();
+        const operator = filter.operator?.trim() || 'equals';
+        const values = cleanStringList(filter.values);
+        if (!dimension || values.length === 0) return '';
+        return `${dimension} ${operator} ${values.join(', ')}`;
+      })
+      .filter(Boolean),
+    timeDimension: artifact?.timeDimension?.name
+      ? [artifact.timeDimension.name, artifact.timeDimension.granularity].filter(Boolean).join(' / ')
+      : undefined,
+    orderBy: (artifact?.orderBy ?? [])
+      .map((order) => {
+        const name = order.name?.trim();
+        const direction = order.direction?.trim();
+        return name && direction ? `${name} ${direction}` : '';
+      })
+      .filter(Boolean),
+    limit: typeof artifact?.limit === 'number' && Number.isFinite(artifact.limit) ? artifact.limit : undefined,
+  };
 }
 
 export function extractGovernedAnswer(events: AgentTurn[]): AgentAnswerEnvelope | null {
@@ -143,6 +205,12 @@ export function extractGovernedAnswer(events: AgentTurn[]): AgentAnswerEnvelope 
     if (output && typeof output === 'object' && 'kind' in output) return output as AgentAnswerEnvelope;
   }
   return null;
+}
+
+function cleanStringList(values: unknown): string[] {
+  return Array.isArray(values)
+    ? values.map((value) => typeof value === 'string' ? value.trim() : '').filter(Boolean)
+    : [];
 }
 
 function normalizeAgentResult(answer: AgentAnswerEnvelope): QueryResult | null {
@@ -306,6 +374,7 @@ export function AgentAnswerCard({
   const hasChart = Boolean(result && resolveChartType(result, chartConfig) !== 'table');
   const analysisPlan = answer.analysisPlan ?? answer.evidence?.analysisPlan;
   const sql = showSql ? answer.sql ?? answer.result?.sql ?? answer.proposedSql ?? analysisPlan?.sql : undefined;
+  const dqlArtifact = resolveDqlArtifactMeta(answer);
   const executionError = answer.executionError
     ?? (answer.evidence?.execution?.status === 'failed' ? answer.evidence.execution.message : undefined);
   const blockPath = answer.result?.blockPath ?? answer.block?.sourcePath;
@@ -341,14 +410,14 @@ export function AgentAnswerCard({
   });
   const insertSql = () => {
     if (!onInsertSql || !sql) return;
-    onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL draft');
-    setInsertMessage('Inserted SQL cell for review.');
+    onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL preview');
+    setInsertMessage('Inserted SQL preview cell for review.');
   };
   const createBlock = () => {
     if (!onCreateBlock || !sql) return;
     onCreateBlock(sql, {
-      title: blockName ?? analysisPlan?.question ?? 'AI SQL draft',
-      description: summary || analysisPlan?.routeReason || 'AI generated SQL draft.',
+      title: dqlArtifact?.name ?? blockName ?? analysisPlan?.question ?? 'AI DQL draft',
+      description: summary || analysisPlan?.routeReason || 'AI generated DQL draft.',
       tags: ['ai-generated', 'review-required'],
     });
   };
@@ -451,6 +520,7 @@ export function AgentAnswerCard({
   };
   const tabItems: Array<{ id: AnswerTab; label: string; visible: boolean }> = [
     { id: 'answer', label: compact ? 'Summary' : 'Answer', visible: true },
+    { id: 'dql', label: 'DQL', visible: Boolean(dqlArtifact) },
     { id: 'visual', label: compact ? 'Chart' : 'Visualization', visible: hasChart },
     { id: 'data', label: 'Data', visible: Boolean(result) },
     { id: 'sql', label: 'SQL / Block', visible: showSql && hasSqlPanel },
@@ -478,6 +548,7 @@ export function AgentAnswerCard({
         />
       );
     }
+    if (targetTab === 'dql' && dqlArtifact) return <DqlArtifactPanel artifact={dqlArtifact} t={t} />;
     if (targetTab === 'visual' && result && hasChart) {
       return (
         <div style={{ padding: compact ? '8px 10px' : '10px 12px', minHeight: compact ? 180 : 220, display: 'grid', gap: 10 }}>
@@ -510,6 +581,21 @@ export function AgentAnswerCard({
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <TrustBadge state={trustState} />
         <RouteBadge t={t} route={answer.route} />
+        {formatCascadeOutcome(answer.cascade) && (
+          <span
+            style={{
+              border: `1px solid ${t.cellBorder}`,
+              borderRadius: 999,
+              padding: '3px 8px',
+              fontSize: 11,
+              fontWeight: 700,
+              color: t.textSecondary,
+              background: t.tableHeaderBg,
+            }}
+          >
+            {formatCascadeOutcome(answer.cascade)}
+          </span>
+        )}
         {!compact && blockName && (
           <span style={{ fontSize: 12, fontFamily: t.fontMono, color: t.textSecondary }}>
             block: {blockName}
@@ -552,25 +638,6 @@ export function AgentAnswerCard({
             {compact ? 'Investigate' : 'Investigate deeper'}
           </button>
         )}
-        {canInsertSql && (
-          <button
-            type="button"
-            onClick={insertSql}
-            style={{
-              border: `1px solid ${t.accent}`,
-              borderRadius: 6,
-              background: `${t.accent}18`,
-              color: t.accent,
-              cursor: 'pointer',
-              padding: compact ? '4px 8px' : '5px 10px',
-              fontSize: 11,
-              fontFamily: t.font,
-              fontWeight: 700,
-            }}
-          >
-            {compact ? 'Insert SQL' : 'Insert SQL cell'}
-          </button>
-        )}
         {canCreateBlock && (
           <button
             type="button"
@@ -587,7 +654,26 @@ export function AgentAnswerCard({
               fontWeight: 700,
             }}
           >
-            {compact ? 'Block' : 'Create block'}
+            {compact ? 'DQL draft' : dqlArtifact ? 'Review DQL draft' : 'Create DQL draft'}
+          </button>
+        )}
+        {canInsertSql && (
+          <button
+            type="button"
+            onClick={insertSql}
+            style={{
+              border: `1px solid ${t.accent}`,
+              borderRadius: 6,
+              background: `${t.accent}18`,
+              color: t.accent,
+              cursor: 'pointer',
+              padding: compact ? '4px 8px' : '5px 10px',
+              fontSize: 11,
+              fontFamily: t.font,
+              fontWeight: 700,
+            }}
+          >
+            {compact ? 'SQL preview' : 'Insert SQL preview'}
           </button>
         )}
       </div>
@@ -671,7 +757,7 @@ interface AgentOutcome {
   tone: 'success' | 'accent' | 'warning' | 'error' | 'muted';
 }
 
-function resolveAgentOutcome(
+export function resolveAgentOutcome(
   answer: AgentAnswerEnvelope,
   context: {
     sql?: string;
@@ -718,15 +804,24 @@ function resolveAgentOutcome(
       tone: 'accent',
     };
   }
+  if (answer.dqlArtifact?.source?.trim()) {
+    return {
+      kind: 'create_dql_draft',
+      label: 'Review DQL draft',
+      detail: 'A review-required DQL artifact is available for analyst review.',
+      nextAction: 'Review DQL metadata, query logic, lineage, and result preview before certification.',
+      tone: 'warning',
+    };
+  }
   if (context.sql) {
     return {
       kind: context.result ? 'generate_sql_cell' : 'create_dql_draft',
-      label: context.result ? 'Generate SQL cell' : 'Create DQL draft',
+      label: context.result ? 'Review SQL preview' : 'Create DQL draft',
       detail: context.result
         ? `Review-required SQL preview returned ${(context.result.rowCount ?? context.result.rows.length).toLocaleString()} row${(context.result.rowCount ?? context.result.rows.length) === 1 ? '' : 's'}.`
         : 'Review-required SQL is available but still needs preview and DQL metadata review.',
       nextAction: context.result
-        ? 'Insert the SQL cell or create a draft block after reviewing parameters and lineage.'
+        ? 'Create a DQL draft after reviewing parameters and lineage; insert SQL only as a notebook preview.'
         : 'Run preview, inspect parameters, then create a draft block.',
       tone: 'warning',
     };
@@ -1594,6 +1689,7 @@ function ReviewPanel({ answer, t }: { answer: AgentAnswerEnvelope; t: Theme }) {
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'grid', gap: 6 }}>
         <KeyValue label="Certification" value={formatLabel(answer.certification ?? answer.kind)} t={t} />
+        {formatCascadeOutcome(answer.cascade) && <KeyValue label="Cascade" value={formatCascadeOutcome(answer.cascade) ?? ''} t={t} />}
         {answer.reviewStatus && <KeyValue label="Review Status" value={formatLabel(answer.reviewStatus)} t={t} />}
         {typeof answer.confidence === 'number' && <KeyValue label="Confidence" value={`${Math.round(answer.confidence * 100)}%`} t={t} />}
         {evidence?.validation?.message && (
@@ -1673,6 +1769,32 @@ function AssetList({ title, assets, t }: { title: string; assets: EvidenceAsset[
   );
 }
 
+function DqlArtifactPanel({ artifact, t }: { artifact: AgentDqlArtifactMeta; t: Theme }) {
+  const metadata = [
+    artifact.kind ? { label: 'Kind', value: formatLabel(artifact.kind) } : null,
+    artifact.name ? { label: 'Name', value: artifact.name } : null,
+    artifact.sourcePath ? { label: 'Source Path', value: artifact.sourcePath } : null,
+    artifact.metrics.length > 0 ? { label: 'Metrics', value: artifact.metrics.join(', ') } : null,
+    artifact.dimensions.length > 0 ? { label: 'Dimensions', value: artifact.dimensions.join(', ') } : null,
+    artifact.timeDimension ? { label: 'Time', value: artifact.timeDimension } : null,
+    artifact.filters.length > 0 ? { label: 'Filters', value: artifact.filters.join('; ') } : null,
+  ].filter((item): item is { label: string; value: string } => Boolean(item));
+  return (
+    <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {metadata.length > 0 && (
+        <div style={{ display: 'grid', gap: 6 }}>
+          {metadata.map((item) => (
+            <KeyValue key={item.label} label={item.label} value={item.value} t={t} />
+          ))}
+        </div>
+      )}
+      <pre style={codePanelStyle(t, 340)}>
+        {artifact.source}
+      </pre>
+    </div>
+  );
+}
+
 function SqlPanel({ sql, blockPath, executionError, t }: { sql?: string; blockPath?: string; executionError?: string; t: Theme }) {
   return (
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1696,19 +1818,7 @@ function SqlPanel({ sql, blockPath, executionError, t }: { sql?: string; blockPa
         </div>
       )}
       {sql ? (
-        <pre style={{
-          margin: 0,
-          padding: 10,
-          overflow: 'auto',
-          maxHeight: 260,
-          borderRadius: 4,
-          background: t.editorBg,
-          color: t.textPrimary,
-          border: `1px solid ${t.cellBorder}`,
-          fontSize: 12,
-          fontFamily: t.fontMono,
-          whiteSpace: 'pre',
-        }}>
+        <pre style={codePanelStyle(t, 260)}>
           {sql}
         </pre>
       ) : (
@@ -1716,6 +1826,22 @@ function SqlPanel({ sql, blockPath, executionError, t }: { sql?: string; blockPa
       )}
     </div>
   );
+}
+
+function codePanelStyle(t: Theme, maxHeight: number): React.CSSProperties {
+  return {
+    margin: 0,
+    padding: 10,
+    overflow: 'auto',
+    maxHeight,
+    borderRadius: 4,
+    background: t.editorBg,
+    color: t.textPrimary,
+    border: `1px solid ${t.cellBorder}`,
+    fontSize: 12,
+    fontFamily: t.fontMono,
+    whiteSpace: 'pre',
+  };
 }
 
 function KeyValue({ label, value, source, t }: { label: string; value: string; source?: string; t: Theme }) {
@@ -2089,6 +2215,7 @@ function buildAnswerProvenance(
   if (firstAsset?.owner ?? answer.evidence?.outcome?.owner) items.push({ label: 'owner', value: firstAsset?.owner ?? answer.evidence?.outcome?.owner ?? '' });
   if (sourcePath) items.push({ label: 'path', value: sourcePath });
   if (answer.sourceTier) items.push({ label: 'tier', value: formatLabel(answer.sourceTier) });
+  if (formatCascadeOutcome(answer.cascade)) items.push({ label: 'cascade', value: formatCascadeOutcome(answer.cascade) ?? '' });
   if (result) {
     const rows = result.rowCount ?? result.rows.length;
     const timing = result.executionTime !== undefined ? ` - ${Math.round(result.executionTime)}ms` : '';
@@ -2097,6 +2224,45 @@ function buildAnswerProvenance(
   if (answer.reviewStatus && answer.reviewStatus !== 'certified') items.push({ label: 'next', value: formatLabel(answer.reviewStatus) });
 
   return dedupeProvenanceItems(items).slice(0, 5);
+}
+
+export function formatCascadeOutcome(cascade?: AgentAnswerCascade): string | undefined {
+  if (!cascade?.terminalLane && !cascade?.routeTier) return undefined;
+  const lane = formatCascadeLane(cascade.terminalLane);
+  const tier = formatCascadeTier(cascade.routeTier);
+  return [lane, tier].filter(Boolean).join(' · ') || undefined;
+}
+
+function formatCascadeLane(value?: string): string | undefined {
+  switch (value) {
+    case 'certified':
+      return 'Lane 1 certified';
+    case 'semantic':
+      return 'Lane 2 semantic';
+    case 'generated':
+      return 'Lane 3 generated';
+    case 'refusal':
+      return 'Lane 4 refusal';
+    default:
+      return value ? formatLabel(value) : undefined;
+  }
+}
+
+function formatCascadeTier(value?: string): string | undefined {
+  switch (value) {
+    case 'certified_block':
+      return 'Certified block';
+    case 'semantic_metric':
+      return 'Semantic metric';
+    case 'generated_sql':
+      return 'Generated SQL';
+    case 'business_context':
+      return 'Business context';
+    case 'no_answer':
+      return 'No answer';
+    default:
+      return value ? formatLabel(value) : undefined;
+  }
 }
 
 function resolveInvestigationBlockName(answer: AgentAnswerEnvelope, fallback?: string): string | undefined {

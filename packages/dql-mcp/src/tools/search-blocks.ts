@@ -1,16 +1,8 @@
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
 import type { ManifestBlock } from '@duckcodeailabs/dql-core';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-export const searchBlocksInput = {
-  query: z.string().optional().describe('Substring matched against name, description, or tags.'),
-  domain: z.string().optional().describe('Filter to a single business domain.'),
-  status: z
-    .enum(['draft', 'review', 'certified', 'deprecated', 'pending_recertification'])
-    .optional()
-    .describe('Filter by certification status.'),
-  limit: z.number().int().min(1).max(200).optional().describe('Max results (default 50).'),
-};
+export const searchBlocksInput = zodInputShapeForTool('search_blocks');
 
 export function searchBlocks(
   ctx: DQLContext,

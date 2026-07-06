@@ -36,6 +36,8 @@ export type {
 export {
   loadSemanticLayerFromDir,
   loadSemanticLayerFromConfig,
+  serializeMetricDefinitionToYaml,
+  serializeDimensionDefinitionToYaml,
 } from './yaml-loader.js';
 export { resolveSemanticLayer, resolveSemanticLayerWithDiagnostics, resolveSemanticLayerAsync, pullCachedRepo, resolveRepoSource } from './providers/index.js';
 export type { SemanticLayerProviderConfig, SemanticLayerResult, RepoResolveResult } from './providers/index.js';

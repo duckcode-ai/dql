@@ -1,0 +1,562 @@
+import type {
+  ComposeQueryResult,
+  DimensionDefinition,
+  DqlArtifactReference,
+  MetricDefinition,
+  SemanticLayer,
+} from '@duckcodeailabs/dql-core';
+import type { KGNode } from '../kg/types.js';
+import type { AnalysisQuestionPlan } from '../metadata/analysis-planner.js';
+
+export interface SemanticBridgeFilter {
+  dimension: string;
+  operator: string;
+  values: string[];
+}
+
+export interface SemanticBridgeOrderBy {
+  name: string;
+  direction: 'asc' | 'desc';
+}
+
+export interface SemanticDqlArtifactInput {
+  question: string;
+  name?: string;
+  metrics: string[];
+  domain?: string;
+  titleFallback?: string;
+  dimensions: string[];
+  filters: SemanticBridgeFilter[];
+  timeDimension?: { name: string; granularity: string };
+  orderBy?: SemanticBridgeOrderBy[];
+  limit?: number;
+}
+
+export interface SemanticBridgeQueryResult {
+  sql: string;
+  /** Primary metric kept for backward-compatible route labels and citations. */
+  metric: string;
+  metrics: string[];
+  dimensions: string[];
+  filters: SemanticBridgeFilter[];
+  timeDimension?: { name: string; granularity: string };
+  orderBy?: SemanticBridgeOrderBy[];
+  limit?: number;
+  dqlArtifact: DqlArtifactReference & { kind: 'semantic_block' };
+  composeResult: ComposeQueryResult;
+}
+
+export interface ComposeSemanticQueryInput {
+  semanticLayer: SemanticLayer;
+  question: string;
+  questionPlan: AnalysisQuestionPlan;
+  matchedMetric?: KGNode;
+  driver?: string;
+  tableMapping?: Record<string, string>;
+}
+
+export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput): SemanticBridgeQueryResult | undefined {
+  if (input.questionPlan.requestedShape.topN?.scope === 'per_group') return undefined;
+
+  const metrics = selectMetrics(input.semanticLayer.listMetrics(), input);
+  const primaryMetric = metrics[0];
+  if (!primaryMetric) return undefined;
+
+  const timeDimension = selectTimeDimension(input.semanticLayer, input.question, input.questionPlan);
+  const allDimensions = input.semanticLayer.listDimensions();
+  const dimensionSelection = selectDimensions(allDimensions, input.questionPlan, timeDimension?.name);
+  if (dimensionSelection.unresolved.length > 0) return undefined;
+  const dimensions = dimensionSelection.dimensions;
+  const filters = selectFilters(allDimensions, dimensions, input.question, input.questionPlan, timeDimension?.name);
+  if (input.questionPlan.requestedShape.filters.length > 0 && filters.length === 0) return undefined;
+  const orderBy = input.questionPlan.requestedShape.topN
+    ? [{ name: primaryMetric.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
+    : undefined;
+  const limit = input.questionPlan.requestedShape.topN?.n;
+  const composed = input.semanticLayer.composeQuery({
+    metrics: metrics.map((metric) => metric.name),
+    dimensions,
+    ...(filters.length > 0 ? { filters } : {}),
+    ...(timeDimension ? { timeDimension } : {}),
+    ...(orderBy ? { orderBy } : {}),
+    ...(limit ? { limit } : {}),
+    ...(input.driver ? { driver: input.driver } : {}),
+    ...(input.tableMapping ? { tableMapping: input.tableMapping } : {}),
+  });
+  if (!composed) return undefined;
+  const artifactName = semanticDqlArtifactName({
+    question: input.question,
+    metrics: metrics.map((metric) => metric.name),
+    dimensions,
+    filters,
+    timeDimension,
+    orderBy,
+    limit,
+  });
+  return {
+    sql: composed.sql,
+    metric: primaryMetric.name,
+    metrics: metrics.map((metric) => metric.name),
+    dimensions,
+    filters,
+    ...(timeDimension ? { timeDimension } : {}),
+    ...(orderBy ? { orderBy } : {}),
+    ...(limit ? { limit } : {}),
+    dqlArtifact: {
+      kind: 'semantic_block',
+      name: artifactName,
+      source: renderSemanticDqlArtifact({
+        name: artifactName,
+        question: input.question,
+        metrics: metrics.map((metric) => metric.name),
+        domain: sharedMetricDomain(metrics),
+        titleFallback: primaryMetric.label || primaryMetric.name,
+        dimensions,
+        filters,
+        timeDimension,
+        orderBy,
+        limit,
+      }),
+      metrics: metrics.map((metric) => metric.name),
+      dimensions,
+      ...(filters.length > 0 ? { filters } : {}),
+      ...(timeDimension ? { timeDimension } : {}),
+      ...(orderBy ? { orderBy } : {}),
+      ...(limit ? { limit } : {}),
+    },
+    composeResult: composed,
+  };
+}
+
+function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryInput): MetricDefinition[] {
+  if (metrics.length === 0) return [];
+  const selected: MetricDefinition[] = [];
+  const hintedNames = input.matchedMetric
+    ? [input.matchedMetric.name, leafName(input.matchedMetric.name)]
+    : [];
+  for (const hint of hintedNames) {
+    const hit = metrics.find((metric) => semanticNameMatches(metric, hint));
+    if (hit) {
+      selected.push(hit);
+      break;
+    }
+  }
+
+  const concepts = metricSelectionConcepts(input.questionPlan);
+  for (const concept of concepts) {
+    const tokens = new Set(tokenize(concept));
+    if (tokens.size === 0 || selected.some((metric) => scoreMetric(metric, tokens) > 0)) {
+      continue;
+    }
+    const hit = bestMetricForConcept(metrics, tokens, selected);
+    if (hit) selected.push(hit);
+  }
+
+  if (selected.length > 0) return selected.slice(0, 4);
+
+  const fallbackTerms = new Set([...input.questionPlan.metricTerms, ...input.questionPlan.requestedShape.measures].flatMap(tokenize));
+  if (fallbackTerms.size === 0) return [];
+  return metrics
+    .map((metric) => ({ metric, score: scoreMetric(metric, fallbackTerms) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))
+    .slice(0, 1)
+    .map((candidate) => candidate.metric);
+}
+
+function bestMetricForConcept(
+  metrics: MetricDefinition[],
+  tokens: Set<string>,
+  selected: MetricDefinition[],
+): MetricDefinition | undefined {
+  const selectedNames = new Set(selected.map((metric) => metric.name));
+  return metrics
+    .filter((metric) => !selectedNames.has(metric.name))
+    .map((metric) => ({ metric, score: scoreMetric(metric, tokens) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))[0]?.metric;
+}
+
+function scoreMetric(metric: MetricDefinition, terms: Set<string>): number {
+  return scoreSemanticText([
+    metric.name,
+    metric.label,
+    metric.description,
+    metric.domain,
+    ...(metric.tags ?? []),
+  ].join(' '), terms);
+}
+
+function metricSelectionConcepts(questionPlan: AnalysisQuestionPlan): string[] {
+  const raw = uniqueStrings([
+    ...questionPlan.requestedShape.measures,
+    ...questionPlan.metricTerms,
+  ].map((term) => normalizeSemanticText(term)).filter(Boolean));
+  const meaningful = raw.filter((term) => !GENERIC_METRIC_CONCEPTS.has(term));
+  return (meaningful.length > 0 ? meaningful : raw).slice(0, 4);
+}
+
+function sharedMetricDomain(metrics: MetricDefinition[]): string | undefined {
+  const first = metrics[0]?.domain;
+  if (!first) return undefined;
+  return metrics.every((metric) => metric.domain === first) ? first : undefined;
+}
+
+function selectDimensions(
+  dimensions: DimensionDefinition[],
+  questionPlan: AnalysisQuestionPlan,
+  timeDimensionName: string | undefined,
+): { dimensions: string[]; unresolved: string[] } {
+  const metricTerms = new Set([
+    ...questionPlan.requestedShape.measures,
+    ...questionPlan.metricTerms,
+  ].map((term) => normalizeSemanticText(term)).filter(Boolean));
+  const terms = uniqueStrings([
+    ...questionPlan.requestedShape.dimensions,
+    ...questionPlan.dimensionTerms,
+  ])
+    .filter((term) => !isTimeGrainTerm(term))
+    .filter((term) => !metricTerms.has(normalizeSemanticText(term)));
+  const selected: string[] = [];
+  const unresolved: string[] = [];
+  for (const term of terms) {
+    const tokens = new Set(tokenize(term));
+    const hit = dimensions
+      .filter((dimension) => dimension.name !== timeDimensionName)
+      .map((dimension) => ({
+        dimension,
+        score: scoreSemanticText([
+          dimension.name,
+          dimension.label,
+          dimension.description,
+          dimension.domain ?? '',
+          ...(dimension.tags ?? []),
+        ].join(' '), tokens),
+      }))
+      .filter((candidate) => candidate.score > 0)
+      .sort((a, b) => b.score - a.score || a.dimension.name.localeCompare(b.dimension.name))[0]?.dimension;
+    if (hit && !selected.includes(hit.name)) selected.push(hit.name);
+    if (!hit) unresolved.push(term);
+  }
+  return { dimensions: selected, unresolved };
+}
+
+function selectFilters(
+  dimensions: DimensionDefinition[],
+  selectedDimensions: string[],
+  question: string,
+  questionPlan: AnalysisQuestionPlan,
+  timeDimensionName: string | undefined,
+): SemanticBridgeFilter[] {
+  const available = dimensions.filter((dimension) => dimension.name !== timeDimensionName);
+  const selected = new Map<string, SemanticBridgeFilter>();
+  for (const candidate of extractInlineFilterCandidates(question, available)) {
+    selected.set(candidate.dimension, {
+      dimension: candidate.dimension,
+      operator: 'equals',
+      values: uniqueStrings([...(selected.get(candidate.dimension)?.values ?? []), candidate.value]),
+    });
+  }
+
+  for (const raw of questionPlan.requestedShape.filters) {
+    const value = cleanFilterValue(raw);
+    if (!value || [...selected.values()].some((filter) => filter.values.some((existing) => sameFilterValue(existing, value)))) {
+      continue;
+    }
+    const dimension = selectFilterDimension(value, available, selectedDimensions);
+    if (!dimension) continue;
+    selected.set(dimension.name, {
+      dimension: dimension.name,
+      operator: 'equals',
+      values: uniqueStrings([...(selected.get(dimension.name)?.values ?? []), value]),
+    });
+  }
+
+  return [...selected.values()]
+    .filter((filter) => filter.values.length > 0)
+    .sort((a, b) => a.dimension.localeCompare(b.dimension));
+}
+
+function extractInlineFilterCandidates(
+  question: string,
+  dimensions: DimensionDefinition[],
+): Array<{ dimension: string; value: string }> {
+  const candidates: Array<{ dimension: string; value: string }> = [];
+  for (const dimension of dimensions) {
+    for (const alias of semanticDimensionAliases(dimension)) {
+      const aliasPattern = alias.split(/\s+/).map(escapeRegExp).join('\\s+');
+      const valueBeforeDimension = new RegExp(
+        `\\b(?:for|where|only|with|in)\\s+([A-Za-z0-9&.'_-]+(?:\\s+[A-Za-z0-9&.'_-]+){0,3})\\s+${aliasPattern}\\b`,
+        'gi',
+      );
+      for (const match of question.matchAll(valueBeforeDimension)) {
+        const value = cleanFilterValue(match[1]);
+        if (value) candidates.push({ dimension: dimension.name, value });
+      }
+
+      const dimensionBeforeValue = new RegExp(
+        `\\b${aliasPattern}\\s*(?:=|:|is|equals|of)\\s+["']?([A-Za-z0-9&.'_-]+(?:\\s+[A-Za-z0-9&.'_-]+){0,3})["']?`,
+        'gi',
+      );
+      for (const match of question.matchAll(dimensionBeforeValue)) {
+        const value = cleanFilterValue(match[1]);
+        if (value) candidates.push({ dimension: dimension.name, value });
+      }
+    }
+  }
+  return candidates;
+}
+
+function selectFilterDimension(
+  value: string,
+  dimensions: DimensionDefinition[],
+  selectedDimensions: string[],
+): DimensionDefinition | undefined {
+  const selectedSet = new Set(selectedDimensions);
+  const businessHint = businessFilterDimensionHint(value);
+  if (businessHint) {
+    const hinted = dimensions.find((dimension) => {
+      const text = normalizeSemanticText([
+        dimension.name,
+        dimension.label,
+        dimension.description,
+        ...(dimension.tags ?? []),
+      ].join(' '));
+      return businessHint.some((term) => text.includes(term));
+    });
+    if (hinted) return hinted;
+  }
+
+  const selected = dimensions.filter((dimension) => selectedSet.has(dimension.name));
+  if (selected.length === 1) return selected[0];
+  return undefined;
+}
+
+function businessFilterDimensionHint(value: string): string[] | undefined {
+  const normalized = normalizeSemanticText(value);
+  if (/\b(beverage|beverages|drink|drinks|food|foods|jaffle|jaffles)\b/.test(normalized)) {
+    return ['category', 'product type', 'type'];
+  }
+  return undefined;
+}
+
+function semanticDimensionAliases(dimension: DimensionDefinition): string[] {
+  return uniqueStrings([
+    dimension.name,
+    dimension.label,
+    leafName(dimension.name),
+    dimension.name.replace(/[_-]+/g, ' '),
+    dimension.label?.replace(/[_-]+/g, ' '),
+  ].filter((value): value is string => Boolean(value?.trim()))
+    .map((value) => normalizeSemanticText(value))
+    .filter((value) => value.length > 1 && !SEMANTIC_STOPWORDS.has(value)));
+}
+
+function selectTimeDimension(
+  layer: SemanticLayer,
+  question: string,
+  questionPlan: AnalysisQuestionPlan,
+): { name: string; granularity: string } | undefined {
+  const granularity = inferTimeGranularity(question, questionPlan);
+  if (!granularity) return undefined;
+  const timeDimensions = layer.listTimeDimensions();
+  if (timeDimensions.length === 0) return undefined;
+  const timeTerms = new Set([...questionPlan.timeTerms, ...questionPlan.dimensionTerms].flatMap(tokenize));
+  const hit = timeDimensions
+    .map((dimension) => ({
+      dimension,
+      score: scoreSemanticText([
+        dimension.name,
+        dimension.label,
+        dimension.description,
+        dimension.domain ?? '',
+        ...(dimension.tags ?? []),
+      ].join(' '), timeTerms),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.dimension.name.localeCompare(b.dimension.name))[0]?.dimension
+    ?? (timeDimensions.length === 1 ? timeDimensions[0] : undefined);
+  return hit ? { name: hit.name, granularity } : undefined;
+}
+
+function inferTimeGranularity(question: string, questionPlan: AnalysisQuestionPlan): string | undefined {
+  const text = `${question} ${questionPlan.timeTerms.join(' ')} ${questionPlan.dimensionTerms.join(' ')}`.toLowerCase();
+  if (/\b(daily|day|date)\b/.test(text)) return 'day';
+  if (/\b(weekly|week)\b/.test(text)) return 'week';
+  if (/\b(monthly|month)\b/.test(text)) return 'month';
+  if (/\b(quarterly|quarter|q[1-4])\b/.test(text)) return 'quarter';
+  if (/\b(yearly|annual|year)\b/.test(text)) return 'year';
+  return undefined;
+}
+
+export function renderSemanticDqlArtifact(input: SemanticDqlArtifactInput): string {
+  const lines = [
+    `block "${escapeDqlString(input.name ?? titleFromQuestion(input.question, input.titleFallback ?? input.metrics[0] ?? 'semantic_query'))}" {`,
+    '  status = "draft"',
+    `  domain = "${escapeDqlString(input.domain || 'uncategorized')}"`,
+    '  type = "semantic"',
+    `  description = "${escapeDqlString(input.question)}"`,
+    input.metrics.length === 1
+      ? `  metric = "${escapeDqlString(input.metrics[0] ?? '')}"`
+      : `  metrics = [${input.metrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`,
+    `  dimensions = [${input.dimensions.map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`,
+  ];
+  if (input.timeDimension) {
+    lines.push(`  time_dimension = "${escapeDqlString(input.timeDimension.name)}"`);
+    lines.push(`  granularity = "${escapeDqlString(input.timeDimension.granularity)}"`);
+  }
+  if (input.filters.length > 0) {
+    lines.push(`  requested_filters = [${input.filters.flatMap(filterToRequestedFilterStrings).map((filter) => `"${escapeDqlString(filter)}"`).join(', ')}]`);
+  }
+  if (input.orderBy?.length) {
+    lines.push(`  order_by = [${input.orderBy.map((order) => `"${escapeDqlString(`${order.name} ${order.direction}`)}"`).join(', ')}]`);
+  }
+  if (typeof input.limit === 'number' && Number.isFinite(input.limit) && input.limit > 0) {
+    lines.push(`  limit = ${Math.floor(input.limit)}`);
+  }
+  lines.push('}');
+  return `${lines.join('\n')}\n`;
+}
+
+export function semanticDqlArtifactName(input: SemanticDqlArtifactInput): string {
+  const metricPart = input.metrics.length === 1
+    ? leafName(input.metrics[0] ?? 'semantic_metric').replace(/^total[_-]+/i, '')
+    : 'semantic_metrics';
+  const grainPart = input.timeDimension ? grainName(input.timeDimension.granularity) : undefined;
+  const dimensionPart = input.dimensions.length > 0
+    ? ['by', ...input.dimensions.map((dimension) => leafName(dimension))]
+    : [];
+  const filterPart = input.filters.length > 0
+    ? ['for', ...input.filters.flatMap((filter) => [leafName(filter.dimension), ...filter.values.slice(0, 2)])]
+    : [];
+  const raw = [
+    grainPart,
+    metricPart,
+    ...dimensionPart,
+    ...filterPart,
+  ].filter((part): part is string => Boolean(part?.trim())).join(' ');
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/_+/g, '_')
+    .slice(0, 80)
+    .replace(/_+$/g, '');
+  return slug || 'semantic_query';
+}
+
+function grainName(granularity: string): string {
+  switch (granularity.toLowerCase()) {
+    case 'day':
+      return 'daily';
+    case 'week':
+      return 'weekly';
+    case 'month':
+      return 'monthly';
+    case 'quarter':
+      return 'quarterly';
+    case 'year':
+      return 'yearly';
+    default:
+      return granularity;
+  }
+}
+
+function filterToRequestedFilterStrings(filter: SemanticBridgeFilter): string[] {
+  return filter.values.map((value) =>
+    filter.operator === 'equals'
+      ? `${filter.dimension}=${value}`
+      : `${filter.dimension} ${filter.operator} ${value}`
+  );
+}
+
+function semanticNameMatches(metric: MetricDefinition, raw: string): boolean {
+  const target = normalizeSemanticName(raw);
+  return normalizeSemanticName(metric.name) === target
+    || normalizeSemanticName(`${metric.cube ?? ''}.${metric.name}`) === target
+    || normalizeSemanticName(metric.label) === target;
+}
+
+function scoreSemanticText(text: string, terms: Set<string>): number {
+  if (terms.size === 0) return 0;
+  const haystack = new Set(tokenize(text));
+  let score = 0;
+  for (const term of terms) {
+    if (haystack.has(term)) score += 3;
+    else if ([...haystack].some((token) => token.includes(term) || term.includes(token))) score += 1;
+  }
+  return score;
+}
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length > 1 && !SEMANTIC_STOPWORDS.has(token));
+}
+
+function normalizeSemanticName(value: string | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '');
+}
+
+function normalizeSemanticText(value: string | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9\s]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function leafName(value: string): string {
+  return value.split('.').pop() ?? value;
+}
+
+function isTimeGrainTerm(term: string): boolean {
+  return /\b(day|date|week|month|quarter|year|daily|weekly|monthly|quarterly|yearly|annual)\b/i.test(term);
+}
+
+function titleFromQuestion(question: string, fallback: string): string {
+  const clean = question.replace(/\s+/g, ' ').trim();
+  if (!clean) return fallback;
+  return clean.length <= 80 ? clean : `${clean.slice(0, 77)}...`;
+}
+
+function escapeDqlString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function cleanFilterValue(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/^["']|["']$/g, '')
+    .replace(/\b(?:channel|category|segment|region|market|product|customer|account|user|team|type)\b$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sameFilterValue(left: string, right: string): boolean {
+  return normalizeSemanticText(left) === normalizeSemanticText(right);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+const SEMANTIC_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'by', 'for', 'from', 'with', 'show', 'give',
+  'me', 'what', 'is', 'are', 'our', 'total', 'all', 'per', 'each',
+]);
+
+const GENERIC_METRIC_CONCEPTS = new Set([
+  'amount',
+  'average',
+  'avg',
+  'count',
+  'kpi',
+  'metric',
+  'number',
+  'sum',
+  'total',
+  'value',
+]);

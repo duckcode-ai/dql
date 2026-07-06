@@ -16,6 +16,7 @@ function nodes(): KGNode[] {
       description: 'Total revenue across all customer segments.',
       llmContext: 'Use this for top-level revenue trends. ARR + new logo revenue.',
       tags: ['revenue', 'growth'],
+      sql: 'SELECT SUM(amount) AS total_revenue FROM orders',
       examples: [{ question: 'What was revenue last week?', sql: 'SELECT SUM(amount) FROM orders' }],
     },
     {
@@ -58,6 +59,7 @@ describe('KGStore', () => {
     const node = kg.getNode('block:revenue_total');
     expect(node?.status).toBe('certified');
     expect(node?.tags).toEqual(['revenue', 'growth']);
+    expect(node?.sql).toBe('SELECT SUM(amount) AS total_revenue FROM orders');
     kg.close();
   });
 
@@ -67,6 +69,7 @@ describe('KGStore', () => {
     const hits = kg.search({ query: 'revenue last week' });
     expect(hits.length).toBeGreaterThan(0);
     expect(hits[0].node.nodeId).toBe('block:revenue_total');
+    expect(hits[0].node.sql).toBe('SELECT SUM(amount) AS total_revenue FROM orders');
     kg.close();
   });
 
@@ -126,11 +129,36 @@ describe('KGStore', () => {
     kg.close();
   });
 
+  it('records rebuild metadata used by fingerprint-gated reindexing', () => {
+    const kg = new KGStore(dbPath);
+    kg.rebuild(nodes(), [], { fingerprint: 'kg-v1' });
+    expect(kg.meta('built_at')).toBeTruthy();
+    expect(kg.meta('fingerprint')).toBe('kg-v1');
+    expect(kg.meta('node_count')).toBe('3');
+    expect(kg.meta('edge_count')).toBe('0');
+
+    kg.rebuild([nodes()[0]], [], { fingerprint: 'kg-v2' });
+    expect(kg.meta('fingerprint')).toBe('kg-v2');
+    expect(kg.meta('node_count')).toBe('1');
+
+    kg.rebuild(nodes(), []);
+    expect(kg.meta('fingerprint')).toBeNull();
+    kg.close();
+  });
+
   it('handles wildcard injection without errors', () => {
     const kg = new KGStore(dbPath);
     kg.rebuild(nodes(), []);
     // FTS5 wildcards/operators stripped — should still find revenue.
     const hits = kg.search({ query: 'revenue*' });
+    expect(hits.some((h) => h.node.name === 'revenue_total')).toBe(true);
+    kg.close();
+  });
+
+  it('supports safe prefix recall for partial business terms', () => {
+    const kg = new KGStore(dbPath);
+    kg.rebuild(nodes(), []);
+    const hits = kg.search({ query: 'reven' });
     expect(hits.some((h) => h.node.name === 'revenue_total')).toBe(true);
     kg.close();
   });

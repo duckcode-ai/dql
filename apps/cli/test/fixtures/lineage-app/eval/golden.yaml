@@ -1,0 +1,27 @@
+cases:
+  - name: card approval scalar routes to certified KPI
+    question: "What is our card approval rate?"
+    expectRoute: certified
+    expectBlock: card_approval_rate
+
+  - name: card approval definition routes to certified KPI
+    question: "Explain card approval rate definition"
+    expectRoute: certified
+    expectBlock: card_approval_rate
+
+  - name: card approval lineage routes to certified KPI context
+    question: "Show card approval rate lineage"
+    expectRoute: certified
+    expectBlock: card_approval_rate
+
+  - name: card transaction list needs generated SQL
+    question: "List card transaction records by status"
+    expectRoute: generated
+
+  - name: card transaction status region list needs generated SQL
+    question: "List card transactions by status and region"
+    expectRoute: generated
+
+  - name: off-topic weather question refuses safely
+    question: "What is the weather in Chicago?"
+    expectRefuse: true

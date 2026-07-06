@@ -78,6 +78,10 @@ describe('parseArgs', () => {
       'http://127.0.0.1:3474',
       '--user',
       'analyst@local',
+      '--reasoning-effort',
+      'high',
+      '--analysis-depth',
+      'deep',
     ]);
 
     expect(parsed.command).toBe('agent');
@@ -86,5 +90,49 @@ describe('parseArgs', () => {
     expect(parsed.flags.provider).toBe('ollama');
     expect(parsed.flags.runtimeUrl).toBe('http://127.0.0.1:3474');
     expect(parsed.flags.user).toBe('analyst@local');
+    expect(parsed.flags.reasoningEffort).toBe('high');
+    expect(parsed.flags.analysisDepth).toBe('deep');
+  });
+
+  it('parses agent eval tool-observation threshold', () => {
+    const parsed = parseArgs([
+      'agent',
+      'eval',
+      'agent-evals.yml',
+      '--min-tool-requirement',
+      '0.75',
+    ]);
+
+    expect(parsed.command).toBe('agent');
+    expect(parsed.file).toBe('eval');
+    expect(parsed.rest).toEqual(['agent-evals.yml']);
+    expect(parsed.flags.minToolRequirement).toBe(0.75);
+  });
+
+  it('parses router eval answer-rate threshold', () => {
+    const parsed = parseArgs([
+      'eval',
+      'apps/cli/test/fixtures/jaffle-supply-chain',
+      '--min-answer-rate',
+      '0.9',
+    ]);
+
+    expect(parsed.command).toBe('eval');
+    expect(parsed.file).toBe('apps/cli/test/fixtures/jaffle-supply-chain');
+    expect(parsed.flags.minAnswerRate).toBe(0.9);
+  });
+
+  it('parses diff recertification changeset flags', () => {
+    const parsed = parseArgs([
+      'diff',
+      'blocks/revenue.dql',
+      '--impact',
+      '--write-recertification',
+    ]);
+
+    expect(parsed.command).toBe('diff');
+    expect(parsed.file).toBe('blocks/revenue.dql');
+    expect(parsed.flags.impact).toBe(true);
+    expect(parsed.flags.writeRecertification).toBe(true);
   });
 });

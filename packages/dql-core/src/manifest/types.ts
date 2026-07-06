@@ -273,9 +273,25 @@ export interface ManifestBlock {
   draftMetadata?: {
     sourceQuestion?: string;
     sourceBlock?: string;
+    sourceDqlKind?: string;
+    sourceDqlName?: string;
+    sourceDqlPath?: string;
+    sourceDqlHash?: string;
+    sourceDqlMetrics?: string[];
+    sourceDqlDimensions?: string[];
+    sourceDqlFilters?: string[];
+    sourceDqlTimeDimension?: string;
+    sourceDqlGranularity?: string;
+    sourceDqlOrderBy?: string[];
+    sourceDqlLimit?: number;
     followupKind?: string;
     requestedFilters?: string[];
     requestedDimensions?: string[];
+    orderBy?: string[];
+    limit?: number;
+    timeDimension?: string;
+    granularity?: string;
+    draftPath?: string;
     contextPackId?: string;
     routeIntent?: string;
     askedTimes?: number;
@@ -455,20 +471,30 @@ export interface ManifestNotebookCell {
 
 export interface ManifestMetric {
   name: string;
+  label?: string;
   type: string;
   table: string;
   domain?: string;
+  status?: string;
   description?: string;
   sql?: string;
+  owner?: string;
+  tags?: string[];
   /** Relative path to the YAML file */
   filePath?: string;
 }
 
 export interface ManifestDimension {
   name: string;
+  label?: string;
   table: string;
   type?: string;
+  domain?: string;
+  status?: string;
   description?: string;
+  sql?: string;
+  owner?: string;
+  tags?: string[];
   filePath?: string;
 }
 

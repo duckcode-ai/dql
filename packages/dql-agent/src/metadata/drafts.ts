@@ -1,6 +1,27 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
+import type { DqlArtifactFilter, DqlArtifactOrderBy, DqlArtifactReference } from '@duckcodeailabs/dql-core';
 import { resolveLocalOwner } from './identity.js';
+
+export type GeneratedDraftSourceDqlArtifact = DqlArtifactReference;
+
+export interface GeneratedDqlArtifactDraftRecord {
+  slug: string;
+  question: string;
+  proposedContractId: string;
+  /** Accountable owner; defaults to the resolved local owner so a draft is never owner-less. */
+  owner?: string;
+  proposedDomain?: string;
+  dqlArtifact: GeneratedDraftSourceDqlArtifact;
+  sourceQuestion?: string;
+  sourceBlock?: string;
+  followupKind?: string;
+  contextPackId?: string;
+  routeIntent?: string;
+  validationWarnings?: string[];
+  outputs?: string[];
+}
 
 export interface GeneratedDraftRecord {
   slug: string;
@@ -12,11 +33,13 @@ export interface GeneratedDraftRecord {
   proposedDomain?: string;
   proposedEntity?: string;
   upstreamRefs?: string[];
+  sourceDqlArtifact?: GeneratedDraftSourceDqlArtifact;
   sourceQuestion?: string;
   sourceBlock?: string;
   followupKind?: string;
   requestedFilters?: string[];
   requestedDimensions?: string[];
+  outputs?: string[];
   contextPackId?: string;
   routeIntent?: string;
   validationWarnings?: string[];
@@ -26,6 +49,10 @@ export interface GeneratedDraftBlock {
   path: string;
   askedTimes: number;
   proposedContractId: string;
+}
+
+export interface GeneratedSqlDqlArtifactInput extends GeneratedDraftRecord {
+  draftPath?: string;
 }
 
 const STOPWORDS = new Set([
@@ -216,7 +243,50 @@ export function upsertGeneratedDraft(
   };
 }
 
-function resolveGeneratedDraftPath(projectRoot: string, rec: GeneratedDraftRecord): { filePath: string; relativePath: string } {
+export function upsertGeneratedDqlArtifactDraft(
+  projectRoot: string,
+  rec: GeneratedDqlArtifactDraftRecord,
+): GeneratedDraftBlock {
+  const { filePath, relativePath } = resolveGeneratedDraftPath(projectRoot, rec);
+  const owner = rec.owner?.trim() || resolveLocalOwner(projectRoot);
+
+  if (existsSync(filePath)) {
+    const existing = readFileSync(filePath, 'utf-8');
+    const m = existing.match(/asked_times\s*=\s*(\d+)/);
+    const prev = m ? Number.parseInt(m[1], 10) : 1;
+    const next = Number.isFinite(prev) ? prev + 1 : 2;
+    let updated = m
+      ? existing.replace(/asked_times\s*=\s*\d+/, `asked_times = ${next}`)
+      : insertBeforeFinalBrace(existing, `\n  asked_times = ${next}`);
+    if (!/\n\s*owner\s*=/.test(updated)) {
+      updated = insertOwner(updated, owner);
+    }
+    writeFileSync(filePath, stampLastAsked(updated));
+    return {
+      path: relativePath,
+      askedTimes: next,
+      proposedContractId: rec.proposedContractId,
+    };
+  }
+
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, stampGeneratedDqlArtifactDraft(rec, relativePath, owner));
+  return {
+    path: relativePath,
+    askedTimes: 1,
+    proposedContractId: rec.proposedContractId,
+  };
+}
+
+export function renderGeneratedSqlDqlArtifact(rec: GeneratedSqlDqlArtifactInput): string {
+  const draftPath = rec.draftPath ?? `blocks/_drafts/${rec.slug}.dql`;
+  return renderGeneratedDraft(rec, draftPath);
+}
+
+function resolveGeneratedDraftPath(
+  projectRoot: string,
+  rec: Pick<GeneratedDraftRecord, 'slug' | 'proposedDomain'>,
+): { filePath: string; relativePath: string } {
   const safeDomain = (rec.proposedDomain ?? '')
     .trim()
     .toLowerCase()
@@ -234,8 +304,10 @@ function resolveGeneratedDraftPath(projectRoot: string, rec: GeneratedDraftRecor
 function renderGeneratedDraft(rec: GeneratedDraftRecord, draftPath: string): string {
   const now = new Date().toISOString();
   const upstream = arrayField('upstream_refs', rec.upstreamRefs ?? []);
+  const sourceDql = renderSourceDqlMetadata(rec.sourceDqlArtifact);
   const requestedFilters = arrayField('requested_filters', rec.requestedFilters ?? []);
   const requestedDimensions = arrayField('requested_dimensions', rec.requestedDimensions ?? []);
+  const outputs = arrayField('outputs', rec.outputs ?? []);
   const warnings = arrayField('validation_warnings', rec.validationWarnings ?? []);
   const safeSql = rec.proposedSql.replace(/"""/g, '\\"\\"\\"');
   return `block "${escapeDqlString(rec.slug)}" {
@@ -243,7 +315,7 @@ function renderGeneratedDraft(rec: GeneratedDraftRecord, draftPath: string): str
     type = "custom"
     status = "draft"
     owner = "${escapeDqlString(rec.owner ?? '')}"
-    description = """${rec.question.replace(/"""/g, '\\"\\"\\"')}"""
+    description = """${rec.question.replace(/"""/g, '\\"\\"\\"')}"""${outputs}
 
     // Tier-2 generated proposal. This block is NOT certified.
     // Reviewer must validate filters, joins, grain, metric definition, lineage,
@@ -268,13 +340,97 @@ function renderGeneratedDraft(rec: GeneratedDraftRecord, draftPath: string): str
     source_block = "${escapeDqlString(rec.sourceBlock ?? '')}"
     followup_kind = "${escapeDqlString(rec.followupKind ?? '')}"
     context_pack_id = "${escapeDqlString(rec.contextPackId ?? '')}"
-    route_intent = "${escapeDqlString(rec.routeIntent ?? '')}"${upstream}${requestedFilters}${requestedDimensions}${warnings}
+    route_intent = "${escapeDqlString(rec.routeIntent ?? '')}"${upstream}${sourceDql}${requestedFilters}${requestedDimensions}${warnings}
 
     query = """
         ${safeSql.split('\n').join('\n        ')}
     """
 }
 `;
+}
+
+function stampGeneratedDqlArtifactDraft(
+  rec: GeneratedDqlArtifactDraftRecord,
+  draftPath: string,
+  owner: string,
+): string {
+  const now = new Date().toISOString();
+  const sourceWithOwner = insertOwner(rec.dqlArtifact.source.trimEnd(), owner);
+  const metadata = [
+    '',
+    '  // Generated DQL artifact metadata. This artifact was assembled before execution;',
+    '  // promotion should persist this reviewed block rather than translating SQL.',
+    `  asked_times = 1`,
+    `  first_asked = "${now}"`,
+    `  last_asked = "${now}"`,
+    `  proposed_contract_id = "${escapeDqlString(rec.proposedContractId)}"`,
+    `  proposed_domain = "${escapeDqlString(rec.proposedDomain ?? '')}"`,
+    `  source_question = "${escapeDqlString(rec.sourceQuestion ?? '')}"`,
+    `  source_block = "${escapeDqlString(rec.sourceBlock ?? '')}"`,
+    `  followup_kind = "${escapeDqlString(rec.followupKind ?? '')}"`,
+    `  context_pack_id = "${escapeDqlString(rec.contextPackId ?? '')}"`,
+    `  route_intent = "${escapeDqlString(rec.routeIntent ?? '')}"`,
+    `  draft_path = "${escapeDqlString(draftPath)}"`,
+    arrayField('outputs', rec.outputs ?? []).trimEnd(),
+    arrayField('validation_warnings', rec.validationWarnings ?? []).trimEnd(),
+  ].filter(Boolean).join('\n');
+  return `${insertBeforeFinalBrace(sourceWithOwner, `\n${metadata}`)}\n`;
+}
+
+function insertOwner(source: string, owner: string): string {
+  if (!owner || /\n\s*owner\s*=/.test(source)) return source;
+  if (/\n\s*status\s*=/.test(source)) {
+    return source.replace(/(\n\s*status\s*=\s*"[^"]*")/, `$1\n  owner = "${escapeDqlString(owner)}"`);
+  }
+  return source.replace(/(\bblock\s+"[^"]+"\s*\{)/, `$1\n  owner = "${escapeDqlString(owner)}"`);
+}
+
+function insertBeforeFinalBrace(source: string, insertion: string): string {
+  const trimmed = source.trimEnd();
+  const index = trimmed.lastIndexOf('}');
+  if (index < 0) return `${trimmed}${insertion}`;
+  return `${trimmed.slice(0, index).trimEnd()}${insertion}\n${trimmed.slice(index)}`;
+}
+
+function renderSourceDqlMetadata(artifact: GeneratedDraftSourceDqlArtifact | undefined): string {
+  if (!artifact?.source?.trim()) return '';
+  const metrics = arrayField('source_dql_metrics', artifact.metrics ?? []);
+  const dimensions = arrayField('source_dql_dimensions', artifact.dimensions ?? []);
+  const filters = arrayField('source_dql_filters', flattenDqlFilters(artifact.filters));
+  const timeDimension = artifact.timeDimension
+    ? `
+    source_dql_time_dimension = "${escapeDqlString(artifact.timeDimension.name)}"
+    source_dql_granularity = "${escapeDqlString(artifact.timeDimension.granularity)}"`
+    : '';
+  const orderBy = arrayField('source_dql_order_by', flattenDqlOrderBy(artifact.orderBy));
+  const limit = typeof artifact.limit === 'number' && Number.isFinite(artifact.limit) && artifact.limit > 0
+    ? `
+    source_dql_limit = ${Math.floor(artifact.limit)}`
+    : '';
+  return `
+    source_dql_kind = "${escapeDqlString(artifact.kind)}"
+    source_dql_name = "${escapeDqlString(artifact.name ?? '')}"
+    source_dql_path = "${escapeDqlString(artifact.sourcePath ?? '')}"
+    source_dql_hash = "${hashSourceDql(artifact.source)}"${metrics}${dimensions}${filters}${timeDimension}${orderBy}${limit}`;
+}
+
+function flattenDqlFilters(filters: DqlArtifactFilter[] | undefined): string[] {
+  return (filters ?? []).flatMap((filter) => {
+    const values = filter.values.length ? filter.values : [''];
+    return values.map((value) =>
+      filter.operator === 'equals'
+        ? `${filter.dimension}=${value}`.trim()
+        : `${filter.dimension} ${filter.operator} ${value}`.trim(),
+    );
+  });
+}
+
+function flattenDqlOrderBy(orderBy: DqlArtifactOrderBy[] | undefined): string[] {
+  return (orderBy ?? []).map((order) => `${order.name} ${order.direction}`);
+}
+
+function hashSourceDql(source: string): string {
+  return createHash('sha256').update(source.trim()).digest('hex');
 }
 
 function arrayField(name: string, values: string[]): string {

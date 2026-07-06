@@ -119,10 +119,19 @@ jobs:
 
       - name: Verify manifest is reproducible
         run: npx dql verify
+
+      - name: Golden answer-routing eval
+        run: npx dql eval . --min-route-accuracy 0.9 --min-refusal 0.8 --min-answer-rate 0.9
 ```
 
 Commit the workflow. The first PR you open runs all the steps and
 fails fast on the first red light.
+
+Seed `eval/*.yaml` with certified, generated, and safe-refusal questions. `dql
+eval` is deterministic and CI-safe; it reports route accuracy, refusal recall,
+and answer rate for answerable cases. Use `dql agent eval --execute` in a
+credentialed environment when you also want generated SQL previews compared
+against expected rows.
 
 > **Certify in CI too?** If your default connection is reachable from CI
 > (local DuckDB always is), add a step that re-certifies changed blocks:

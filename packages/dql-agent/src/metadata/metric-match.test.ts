@@ -56,7 +56,7 @@ describe('matchSemanticMetric (spec 17, part C)', () => {
     expect(match).toBeNull();
   });
 
-  it('is deterministic across runs (offline alpha=0)', async () => {
+  it('is deterministic across runs with the offline default embedding blend', async () => {
     const a = await matchSemanticMetric('total revenue this quarter', jaffleMetrics);
     const b = await matchSemanticMetric('total revenue this quarter', jaffleMetrics);
     expect(a?.metric.name).toBe(b?.metric.name);

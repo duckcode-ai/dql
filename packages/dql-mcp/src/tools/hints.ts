@@ -11,7 +11,6 @@
  * (`.dql/cache/agent-kg.sqlite`) is reindexed automatically on every write.
  */
 
-import { z } from 'zod';
 import type { DQLContext } from '../context.js';
 import {
   getHintFromGit,
@@ -20,29 +19,9 @@ import {
   reviewHint,
   type Hint,
 } from '@duckcodeailabs/dql-agent';
+import { zodInputShapeForTool } from '../tool-schema.js';
 
-const scopeSchema = {
-  metric: z.string().optional().describe('Metric / KPI the hint is about, e.g. "revenue".'),
-  dbtModel: z.string().optional().describe('dbt model the hint is about, e.g. "fct_orders".'),
-  domain: z.string().optional().describe('Business domain, e.g. "growth".'),
-  dialect: z.string().optional().describe('Warehouse SQL dialect, e.g. "duckdb", "snowflake".'),
-  term: z.string().optional().describe('Business term the hint refines.'),
-  block: z.string().optional().describe('Certified block the hint relates to.'),
-};
-
-export const recordCorrectionInput = {
-  question: z.string().describe('The analyst question the Tier-2 answer was for.'),
-  wrongAnswer: z.string().describe('The generated answer/SQL that was wrong.'),
-  correction: z.string().describe('The analyst correction: corrected SQL, rule, or guidance.'),
-  scope: z.object(scopeSchema).describe('Scope the correction applies within. A hint only applies inside its scope.'),
-  rationale: z.string().optional().describe('Why the original answer was wrong.'),
-  author: z.string().optional().describe('Who recorded the correction.'),
-  correctedSql: z.string().optional().describe('Optional canonical corrected SQL to endorse.'),
-  hintTitle: z.string().optional().describe('Override the derived hint title.'),
-  hintGuidance: z.string().optional().describe('Override the hint guidance (defaults to the correction).'),
-  tags: z.array(z.string()).optional().describe('Searchable keywords.'),
-  anchorObjectKey: z.string().optional().describe('contextPackId / blockId the correction anchored to.'),
-};
+export const recordCorrectionInput = zodInputShapeForTool('record_correction');
 
 export function recordCorrection(
   ctx: DQLContext,
@@ -92,12 +71,7 @@ export function recordCorrection(
   };
 }
 
-export const approveHintInput = {
-  hintId: z.string().describe('Id of the candidate hint to review.'),
-  decision: z.enum(['approved', 'rejected']).describe('Approve (usable in retrieval) or reject.'),
-  reviewer: z.string().describe('Who is reviewing.'),
-  note: z.string().optional().describe('Optional review note.'),
-};
+export const approveHintInput = zodInputShapeForTool('approve_hint');
 
 export function approveHint(
   ctx: DQLContext,
@@ -129,11 +103,7 @@ export function approveHint(
   };
 }
 
-export const listHintsInput = {
-  status: z.enum(['candidate', 'approved', 'rejected']).optional().describe('Filter by lifecycle status.'),
-  domain: z.string().optional().describe('Filter to a single domain scope.'),
-  metric: z.string().optional().describe('Filter to a single metric scope.'),
-};
+export const listHintsInput = zodInputShapeForTool('list_hints');
 
 export function listHints(
   ctx: DQLContext,

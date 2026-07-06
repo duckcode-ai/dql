@@ -36,6 +36,20 @@ export interface ProviderRunOptions {
   signal?: AbortSignal;
 }
 
+export interface AgentToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  run(args: unknown): Promise<unknown>;
+}
+
+export interface ProviderToolLoopOptions extends ProviderRunOptions {
+  /** Hard cap for provider-visible tool calls in this turn. Default 8. */
+  maxToolCalls?: number;
+  /** Optional trace hook for tests/UI instrumentation. */
+  onToolCall?: (event: { name: string; input: unknown; output?: unknown; isError?: boolean }) => void;
+}
+
 export interface AgentProvider {
   readonly name: ProviderName;
   /**
@@ -43,6 +57,16 @@ export interface AgentProvider {
    * Throws on transport / API errors.
    */
   generate(messages: AgentMessage[], options?: ProviderRunOptions): Promise<string>;
+  /**
+   * Optional bounded tool loop. Providers that implement native tool use should
+   * call supplied tools, append their observations, and resolve with the final
+   * assistant text. Callers must keep a one-shot generate() fallback.
+   */
+  generateWithTools?(
+    messages: AgentMessage[],
+    tools: AgentToolDefinition[],
+    options?: ProviderToolLoopOptions,
+  ): Promise<string>;
   /**
    * Optional token streaming. Calls `onDelta` with each text chunk as it arrives
    * and resolves with the full concatenated text. Providers that omit this fall
