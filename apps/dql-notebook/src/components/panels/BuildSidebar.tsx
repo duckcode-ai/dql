@@ -30,26 +30,34 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile }: { defaultTab?: BuildTab; onOpenFile: (file: NotebookFile) => void }) {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText }: {
+  defaultTab?: BuildTab;
+  onOpenFile?: (file: NotebookFile) => void;
+  /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
+  tabs?: BuildTab[];
+  /** Override the insert action (e.g. Block Studio appends to the block draft). */
+  onInsertText?: (text: string) => void;
+}) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const [tab, setTab] = useState<BuildTab>(defaultTab ?? 'notebooks');
+  const visibleTabs = tabs ? TABS.filter((x) => tabs.includes(x.id)) : TABS;
+  const [tab, setTab] = useState<BuildTab>(defaultTab ?? visibleTabs[0]?.id ?? 'notebooks');
   const [search, setSearch] = useState('');
 
   useEffect(() => { if (defaultTab) setTab(defaultTab); }, [defaultTab]);
 
-  // Insert into the focused editor when there is one, else drop a new SQL cell.
-  const insertText = (text: string) => {
+  // Host-provided insert wins; otherwise insert into the focused editor, else a new SQL cell.
+  const insertText = onInsertText ?? ((text: string) => {
     if (!insertSemanticReference(text)) {
       dispatch({ type: 'ADD_CELL', cell: makeCell('sql', text) });
     }
-  };
+  });
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, background: t.cellBg, fontFamily: t.font }}>
       {/* Tab bar */}
       <div style={{ display: 'flex', gap: 2, padding: '6px 6px 0', borderBottom: `1px solid ${t.headerBorder}` }}>
-        {TABS.map(({ id, label, icon: Icon }) => {
+        {visibleTabs.map(({ id, label, icon: Icon }) => {
           const active = tab === id;
           return (
             <button
@@ -89,7 +97,7 @@ export function BuildSidebar({ defaultTab, onOpenFile }: { defaultTab?: BuildTab
       )}
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        {tab === 'notebooks' && <NotebooksList t={t} onOpenFile={onOpenFile} />}
+        {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} />}
