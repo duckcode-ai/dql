@@ -333,10 +333,14 @@ describe('agentic analytics tools', () => {
     seedOrderSupplyProject(tmpProject);
     const ctx = makeCtx({}, { projectRoot: tmpProject } as never);
 
+    // 'balanced' (ranked, top-k) keeps the pack narrow so `supplies` is genuinely
+    // absent and the reject -> expand_context -> retry flow is exercised. Note:
+    // 'exploratory' would hand the model the whole small catalog (full_catalog
+    // mode), which intentionally makes this rejection path moot.
     const inspected = await inspectMetadataContext(ctx, {
       question: 'Show order totals by order date',
       limit: 1,
-      strictness: 'exploratory',
+      strictness: 'balanced',
     });
     const contextPackId = inspected.contextPack.id;
 
