@@ -439,7 +439,7 @@ export interface LocalContextPack {
   /** Conflicting approved hints surfaced for review (advisory). */
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
-    strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context';
+    strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context' | 'full_catalog';
     /** How many times this pack lineage has been widened by expand_context. */
     regroundAttempts?: number;
     selectedObjects: number;
@@ -766,7 +766,16 @@ export async function buildLocalContextPack(
       mergeObjects([...graphObjects, ...runtimeObjects]),
       questionPlan,
     );
-    const objects = mergeObjects([...rankedObjects, ...sqlParentObjects]);
+    // Deep-research over a SMALL catalog: skip top-k pruning and hand the model the
+    // entire relation set ("send everything, let the agent decide"). Only when the
+    // whole catalog fits comfortably in context — otherwise we keep ranked selection.
+    const fullCatalogObjects = request.strictness === 'exploratory'
+      ? collectFullCatalogObjects(catalog)
+      : undefined;
+    const usedFullCatalog = Boolean(fullCatalogObjects);
+    const objects = fullCatalogObjects
+      ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects])
+      : mergeObjects([...rankedObjects, ...sqlParentObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
     const contextEdges = mergeMetadataEdges([
       ...edgeWalk,
@@ -851,7 +860,7 @@ export async function buildLocalContextPack(
       appliedHints: hintResult.applied,
       hintConflicts: hintResult.conflicts,
       retrievalDiagnostics: {
-        strategy: 'sqlite_fts',
+        strategy: usedFullCatalog ? 'full_catalog' : 'sqlite_fts',
         selectedObjects: objects.length,
         selectedEvidence: reranked.ranked.slice(0, 20).map((item) => ({
           objectKey: item.row.objectKey,
@@ -3877,6 +3886,32 @@ function isSqlParentObject(object: MetadataObject): boolean {
     object.objectType === 'dbt_source' ||
     object.objectType === 'warehouse_table' ||
     object.objectType === 'runtime_table';
+}
+
+const FULL_CATALOG_RELATION_TYPES = ['dbt_model', 'dbt_source', 'warehouse_table', 'runtime_table'];
+const FULL_CATALOG_COLUMN_TYPES = ['dbt_column', 'warehouse_column', 'runtime_column'];
+/** Deep mode over a catalog this small hands the model everything instead of top-k. */
+const FULL_CATALOG_MAX_RELATIONS = 40;
+const FULL_CATALOG_MAX_COLUMNS = 2000;
+
+/**
+ * When the whole catalog is small enough to fit in context, return every relation
+ * and column object so deep-research mode can reason over the complete schema.
+ * Returns undefined when the catalog exceeds the small-catalog budget, so ranked
+ * top-k selection stays in force for large warehouses.
+ */
+function collectFullCatalogObjects(catalog: MetadataCatalog): MetadataObject[] | undefined {
+  const relations = catalog.listObjects({
+    objectTypes: FULL_CATALOG_RELATION_TYPES,
+    limit: FULL_CATALOG_MAX_RELATIONS + 1,
+  });
+  if (relations.length === 0 || relations.length > FULL_CATALOG_MAX_RELATIONS) return undefined;
+  const columns = catalog.listObjects({
+    objectTypes: FULL_CATALOG_COLUMN_TYPES,
+    limit: FULL_CATALOG_MAX_COLUMNS + 1,
+  });
+  if (columns.length > FULL_CATALOG_MAX_COLUMNS) return undefined;
+  return mergeObjects([...relations, ...columns]);
 }
 
 function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]): MetadataAllowedSqlContext {

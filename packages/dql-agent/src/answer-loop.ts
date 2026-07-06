@@ -2451,7 +2451,21 @@ function buildCertifiedBlockDqlArtifact(
 ): NonNullable<AgentAnswer['dqlArtifact']> | undefined {
   if (block.kind !== 'block') return undefined;
   const sql = block.sql?.trim() ?? result?.sql?.trim() ?? block.examples?.find((example) => example.sql?.trim())?.sql?.trim();
-  if (!sql) return undefined;
+  if (!sql) {
+    // The block answered but its SQL was not inlined in the index (navigation /
+    // reference artifacts). Still hand back a reference artifact pointing at the
+    // governed source file so every certified-block answer carries a DQL artifact
+    // the UI can open or save, rather than dropping it silently.
+    if (!block.name) return undefined;
+    return {
+      kind: 'certified_block',
+      name: block.name,
+      sourcePath: block.sourcePath,
+      source: `// Certified DQL block "${escapeDqlArtifactString(block.name)}"`
+        + `${block.sourcePath ? `\n// source: ${block.sourcePath}` : ''}`
+        + `\n// SQL is not inlined in the index — open the source file to view or edit the query.`,
+    };
+  }
   const domain = block.domain ?? 'misc';
   const description = block.description ?? `Certified DQL block ${block.name}`;
   const sourcePathComment = block.sourcePath ? `\n    // source: ${block.sourcePath}` : '';

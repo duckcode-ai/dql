@@ -153,6 +153,26 @@ describe('local metadata catalog', () => {
     );
   });
 
+  it('hands the whole small catalog to deep research and keeps ranked selection otherwise', async () => {
+    // Deep mode (strictness: exploratory) over a tiny catalog: skip top-k pruning
+    // and include every relation, even for a question that would not lexically
+    // select it.
+    const deep = await buildLocalContextPack(projectRoot, {
+      question: 'give me an overview of everything available',
+      strictness: 'exploratory',
+    });
+    expect(deep.retrievalDiagnostics.strategy).toBe('full_catalog');
+    expect(deep.allowedSqlContext.relations.map((relation) => relation.relation)).toEqual(
+      expect.arrayContaining(['NBA_DB.ANALYTICS.fct_player_performance']),
+    );
+
+    // Quick mode keeps ranked (sqlite_fts) selection — no full-catalog dump.
+    const quick = await buildLocalContextPack(projectRoot, {
+      question: 'give me an overview of everything available',
+    });
+    expect(quick.retrievalDiagnostics.strategy).not.toBe('full_catalog');
+  });
+
   it('lets reindexProject skip unchanged metadata catalog rebuilds by fingerprint', async () => {
     const firstStats = await reindexProject(projectRoot, { loadSkills: false });
     const first = openMetadataCatalog(projectRoot);
