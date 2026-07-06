@@ -364,13 +364,38 @@ Findings that revise the remaining plan (sizes were optimistic):
 - **R2.7** — the host has `activeConnection.driver`/`tableMapping`, but threading them to the loop
   spans the runner-request interface; medium, low user-visible value (non-DuckDB only).
 
-Next-up (safe, testable, no decision needed): R2.5 coverage, R2.6 (retire llmContext regex
-parser), R2.3 (event-based cascade trace + engine short-circuit), R3.1 (small-catalog
-full-context), R3.4 (always-on deep candidates), R3.5 (LLM member-selection fallback).
+**2026-07-05 (later) — safe backend batch landed** (commits d8daff0, 13ca41e, bee1d2e).
+Full workspace suite green: 40/40 turbo tasks.
 
-Needs a decision or preview verification: R2.1/R2.2 (trust-label + review-dashboard UI),
-R2.4 (trust invariant), R3.2 (LLM judge + credentialed CI), R3.3 (embedding provider choice),
-R3.6 (lane-extraction refactor — large).
+- **R3.1** ✅ Small-catalog full-context mode. Deep (`strictness: exploratory`) over ≤40
+  relations / ≤2000 columns hands the model the whole relation set;
+  `retrievalDiagnostics.strategy = 'full_catalog'`. Test added.
+- **R2.5-coverage** ✅ (scoped) Certified blocks without inline SQL now return a reference
+  artifact. Business-context term definitions intentionally remain artifact-less (a term is not
+  a savable query block; would need a `DqlArtifactKind` extension).
+- **R3.5** ✅ LLM member-selection fallback for Lane 2 — one call picks members via the
+  `query_semantic_model` contract when deterministic selection misses but a metric matched;
+  compiles through `composeQuery`. Coverage guard rejects a selection that drops a requested
+  breakdown (governed-but-wrong). Refactored a shared `composeSemanticQueryFromMembers`. Tests added.
+- **R3.4** ✅ Always-on diverse deep candidates *when an executor is available* (so results can be
+  compared) — added query-plan-CoT + decomposition styles, cap 5, disagreement rate in notes.
+  Gated on executor presence to bound cost. Tests added.
+- **R2.3** ⏸️ DEFERRED — the trace is already substantially event-labeled; the engine
+  short-circuit (`isTerminalSuccess`) risks regressing multi-step research plans (non-certified
+  steps intentionally fall through). Needs scoped design or pairing with R3.6.
+
+**Still open — needs a decision or preview verification:**
+- R2.1/R2.2 — trust-label + review-dashboard UI (needs preview verification).
+- R2.4 — trust invariant: may a certified-metric answer carry the `certified` badge, or must AI
+  answers cap below it? Gates the trust-vocabulary consolidation.
+- R2.6 — retire the `llmContext` regex parser: full delete (plan) vs prefer-structured-keep-fallback
+  (safer for manifest-native metrics). A risk-tolerance call.
+- R2.7 — semantic dialect plumbing (non-DuckDB only; multi-hop runner-interface threading).
+- R2.8 — DataLex join guidance into the pack (needs a DataLex fixture).
+- R2.9 — tier-distribution aggregation surface.
+- R3.2 — LLM judge + credentialed execution-match CI (eval design + secrets).
+- R3.3 — real embedding provider + paraphrase certified matching (provider choice/config).
+- R3.6 — lane-extraction refactor (large; do after R2.3 trace is event-based).
 
 ## Definition of done for RFC 0001
 
