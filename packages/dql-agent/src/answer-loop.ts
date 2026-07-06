@@ -1545,62 +1545,25 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       repairAttempts,
     });
     const resultShape = result ? validateAnswerResultShape(questionPlan, result) : undefined;
-    if (resultShape && generatedResultShapeIsHardMismatch(question, questionPlan, resultShape)) {
-      const shapeWarnings = resultShape.warnings;
-      const text = [
-        'I could not produce a safe combined product/customer answer from the SQL preview for the review-required DQL artifact.',
-        shapeWarnings.join(' '),
-        'The result was rejected instead of returning a partial customer-only or product-only table.',
-      ].filter(Boolean).join(' ');
-      const validationWarnings = [
-        ...(input.contextPack?.warnings ?? []),
-        ...contextValidation.warnings,
-        ...shapeWarnings,
-        'SQL preview result shape did not satisfy the requested product/customer answer contract.',
-      ];
-      return {
-        kind: 'no_answer',
-        sourceTier: 'no_answer',
-        certification: 'analyst_review_required',
-        reviewStatus: 'none',
-        confidence: 0.2,
-        text,
-        answer: text,
-        proposedSql: parsed.sql,
-        sql: parsed.sql,
-        result,
-        executionError,
-        suggestedViz: parsed.viz ?? 'table',
-        trustLabel: input.contextPack?.trustLabel,
-        sourceCertifiedBlock: followUpSourceBlock?.name ?? input.followUp?.sourceBlockName,
-        contextPackId: input.contextPack?.id,
-        validationWarnings,
-        selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
-        citations: generatedCitations,
-        memoryContext: input.memoryContext,
-        analysisPlan,
-        evidence: buildNoAnswerEvidence({
-          question,
-          reason: text,
-          artifactHits,
-          businessHits,
-          semanticHits,
-          manifestHits,
-          considered,
-          memoryContext: input.memoryContext ?? [],
-          analysisPlan,
-          budgetTrace: cascadeBudgetTrace(repairBudgetState),
-        }),
-        contextPack: input.contextPack,
-        considered,
-        providerUsed: provider.name,
-      };
-    }
+    // A composite product/customer question whose SQL executed but doesn't cover the
+    // full requested shape used to REFUSE outright ("no governed answer"), throwing
+    // away a result that actually ran. Instead, SURFACE the partial result
+    // (review-required) with a clear warning naming the missing columns — a partial
+    // table the user can see and refine beats a blank clarify. The shape gate now
+    // downgrades trust rather than blocking the answer.
+    const partialShapeMismatch = Boolean(resultShape && result && result.rowCount > 0
+      && generatedResultShapeIsHardMismatch(question, questionPlan, resultShape));
+    const partialShapeWarning = partialShapeMismatch && resultShape
+      ? `Partial answer: the requested combined shape could not be fully satisfied`
+        + `${resultShape.missingOutputs.length ? ` (missing ${resultShape.missingOutputs.join(', ')})` : ''}`
+        + `. Showing the closest table that executed — review before reuse, or ask for a product-only or customer-only view.`
+      : undefined;
     const validationWarnings = [
       ...(input.contextPack?.warnings ?? []),
       ...contextValidation.warnings,
       ...deepCandidateNotes,
       ...(resultShape?.warnings ?? []),
+      ...(partialShapeWarning ? [partialShapeWarning] : []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ];
     const generatedOutputs = parsed.outputs?.length ? parsed.outputs : resultColumnNames(result);
@@ -1655,9 +1618,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       draftBlock,
     });
     const cleanedSummary = cleanGeneratedSummary(parsed.text);
-    const generatedText = trustExplanation
-      ? [trustExplanation, cleanedSummary].filter(Boolean).join('\n\n')
-      : cleanedSummary;
+    const generatedText = [partialShapeWarning, trustExplanation, cleanedSummary]
+      .filter(Boolean)
+      .join('\n\n');
     const semanticMetricCertification = governedMetricAnswer && activeTier === 'semantic_layer'
       ? semanticMetricMatch?.metric.certification
       : undefined;

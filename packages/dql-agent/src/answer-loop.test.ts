@@ -1739,7 +1739,7 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.columns).toEqual(["product_name", "category", "customer_name", "revenue", "units"]);
   });
 
-  it("rejects customer-only generated rows for combined product and buyer requests", async () => {
+  it("surfaces a partial (customer-only) table with a warning instead of refusing a combined product/buyer request", async () => {
     const question = "Can you give me the most revenue numbers products who does the most impacted? Give me the complete results with product name, category and revenue and also give the complete view of customers who bought these product";
     const provider = new StubProvider([
       "Customer-only result.\n\n",
@@ -1790,15 +1790,18 @@ describe("answer (block-first loop)", () => {
     });
 
     expect(provider.calls).toHaveLength(1);
-    expect(result.kind).toBe("no_answer");
-    expect(result.text).toContain("rejected instead of returning a partial customer-only or product-only table");
+    // The result executed — surface it (review-required) with a partial-shape
+    // warning instead of refusing outright.
+    expect(result.kind).toBe("uncertified");
+    expect(result.text).toContain("Partial answer");
     expect(result.validationWarnings).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("missing requested output column"),
-        "SQL preview result shape did not satisfy the requested product/customer answer contract.",
+        expect.stringContaining("the requested combined shape could not be fully satisfied"),
       ]),
     );
+    // The executed rows and a DQL artifact are returned, not thrown away.
     expect(result.result?.columns).toEqual(["customer_name", "orders", "lifetime_spend"]);
+    expect(result.dqlArtifact?.source).toBeTruthy();
   });
 
   it("generates product categories for a prior customer set even when category is derived", async () => {
