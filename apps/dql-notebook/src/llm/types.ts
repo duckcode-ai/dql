@@ -1,4 +1,4 @@
-import type { DqlArtifactReference } from '@duckcodeailabs/dql-core';
+import type { DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 
 export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 

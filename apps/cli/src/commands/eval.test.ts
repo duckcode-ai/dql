@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+
+// Resolve fixtures relative to this test file, not process.cwd(), so the suite
+// passes whether vitest runs from the repo root or the apps/cli package dir.
+const FIXTURES_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../test/fixtures');
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import type { PlanAgentAnswerResult } from '@duckcodeailabs/dql-agent';
 import {
@@ -492,7 +497,7 @@ function seedProject(): string {
 
 describe('runEval (end-to-end against the real router)', () => {
   it('passes the checked-in lineage-app golden eval fixture at strict thresholds', async () => {
-    const report = await runEvalHarness(join(process.cwd(), 'apps/cli/test/fixtures/lineage-app'), {
+    const report = await runEvalHarness(join(FIXTURES_ROOT, 'lineage-app'), {
       includeBlockExamples: true,
       minRouteAccuracy: 1,
       minRefusal: 1,
@@ -507,7 +512,7 @@ describe('runEval (end-to-end against the real router)', () => {
   });
 
   it('passes the checked-in jaffle supply-chain golden eval fixture at strict thresholds', async () => {
-    const report = await runEvalHarness(join(process.cwd(), 'apps/cli/test/fixtures/jaffle-supply-chain'), {
+    const report = await runEvalHarness(join(FIXTURES_ROOT, 'jaffle-supply-chain'), {
       includeBlockExamples: true,
       minRouteAccuracy: 1,
       minRefusal: 1,

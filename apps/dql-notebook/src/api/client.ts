@@ -1,5 +1,6 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
-import { normalizeDqlArtifactReference, type Business360ResultV2 } from '@duckcodeailabs/dql-core';
+import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
+import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
 import type { AgentAnswerCascade, AgentConversationContext, AgentConversationDqlArtifact } from '../llm/types';
 import type {
   Cell,

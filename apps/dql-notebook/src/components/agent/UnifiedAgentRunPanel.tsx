@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core';
+import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import {
   ArrowRight,
   Blocks,
