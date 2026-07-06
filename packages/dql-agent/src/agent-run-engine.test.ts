@@ -435,6 +435,56 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     });
   });
 
+  it("short-circuits after a governed semantic answer but continues after a generated answer (R2.3)", async () => {
+    const twoStepPlanner: AgentRunPlanner = {
+      plan: ({ request }) => ({
+        source: "deterministic",
+        rationale: "two-step plan",
+        steps: [
+          { id: "s1", route: "generated_answer", goal: request.question, successCriteria: [] },
+          { id: "s2", route: "research", goal: "dig deeper", successCriteria: [] },
+        ],
+      }),
+      replan: () => ({ decision: "accept" }),
+    };
+    const cleanAnswer = (answerTier: string) => ({
+      answerTier,
+      status: "completed" as const,
+      trustState: "review_required" as const,
+      summary: `${answerTier} answer`,
+      artifacts: [{ id: "a", kind: "answer" as const, title: "A", trustState: "review_required" as const, payload: {} }],
+    });
+
+    // Governed semantic answer → research step is skipped.
+    let semanticResearch = 0;
+    const semanticEngine = new AgentRunEngine({
+      idGenerator: () => "run-semantic-terminal",
+      now: fixedClock(),
+      planner: twoStepPlanner,
+      executors: {
+        generated_answer: () => cleanAnswer("semantic_metric"),
+        research: () => { semanticResearch += 1; return { summary: "research" }; },
+      },
+    });
+    await semanticEngine.run({ question: "revenue by region", requestedMode: "auto" }, () => {});
+    expect(semanticResearch).toBe(0);
+
+    // Generated SQL answer (same status) → research step DOES run. The tier, not
+    // the route or status, is the discriminator.
+    let generatedResearch = 0;
+    const generatedEngine = new AgentRunEngine({
+      idGenerator: () => "run-generated-continues",
+      now: fixedClock(),
+      planner: twoStepPlanner,
+      executors: {
+        generated_answer: () => cleanAnswer("generated_sql"),
+        research: () => { generatedResearch += 1; return { summary: "research" }; },
+      },
+    });
+    await generatedEngine.run({ question: "why did margin drop", requestedMode: "auto" }, () => {});
+    expect(generatedResearch).toBe(1);
+  });
+
   it("escalates a generated answer with no grounding to research", async () => {
     const events: AgentRunEvent[] = [];
     const engine = new AgentRunEngine({

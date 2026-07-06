@@ -273,6 +273,12 @@ export interface AgentRouteExecutorResult {
    * the result came from a certified block.
    */
   resolvedRoute?: AgentRunRoute;
+  /**
+   * Cascade tier that actually produced the answer (certified_block /
+   * semantic_metric / generated_sql / business_context / no_answer). Lets the
+   * engine short-circuit on a governed tier even when the route was generated_answer.
+   */
+  answerTier?: string;
   /** How to read `answer` for trust; defaults to "governed". */
   answerKind?: AgentRunAnswerKind;
   status?: AgentRunStatus;
@@ -556,6 +562,8 @@ interface StepOutcome {
   artifacts: AgentRunArtifact[];
   stopReason: AgentRunStopReason;
   summary: string;
+  /** Cascade tier that produced the answer (drives governed short-circuit). */
+  terminalTier?: string;
 }
 
 export class AgentRunEngine {
@@ -1125,6 +1133,7 @@ function computeStepOutcome(
     artifacts,
     stopReason,
     summary: result.summary ?? fallback.summary,
+    ...(result.answerTier ? { terminalTier: result.answerTier } : {}),
   };
 }
 
@@ -1134,7 +1143,13 @@ function isTerminalSuccess(route: AgentRunRoute, outcome: StepOutcome): boolean 
   // Every other accepted step falls through so a multi-step plan can keep going; the
   // run loop ends naturally when the planned queue empties or maxSteps is hit.
   if (route === "conversation" && outcome.status === "completed") return true;
-  return route === "certified_answer" && outcome.status === "completed";
+  if (route === "certified_answer" && outcome.status === "completed") return true;
+  // A governed SEMANTIC answer (deterministically compiled from the semantic layer)
+  // is as terminal as a certified block for a metric question — no further step adds
+  // trust. Generated SQL (generated_sql / business_context) stays NON-terminal so a
+  // multi-step plan can still chain a research step.
+  if (outcome.status === "completed" && outcome.terminalTier === "semantic_metric") return true;
+  return false;
 }
 
 function describeReplan(decision: AgentRunReplanDecision): string {
