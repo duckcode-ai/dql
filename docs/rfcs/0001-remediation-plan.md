@@ -384,18 +384,36 @@ Full workspace suite green: 40/40 turbo tasks.
   short-circuit (`isTerminalSuccess`) risks regressing multi-step research plans (non-certified
   steps intentionally fall through). Needs scoped design or pairing with R3.6.
 
-**Still open — needs a decision or preview verification:**
-- R2.1/R2.2 — trust-label + review-dashboard UI (needs preview verification).
-- R2.4 — trust invariant: may a certified-metric answer carry the `certified` badge, or must AI
-  answers cap below it? Gates the trust-vocabulary consolidation.
-- R2.6 — retire the `llmContext` regex parser: full delete (plan) vs prefer-structured-keep-fallback
-  (safer for manifest-native metrics). A risk-tolerance call.
-- R2.7 — semantic dialect plumbing (non-DuckDB only; multi-hop runner-interface threading).
-- R2.8 — DataLex join guidance into the pack (needs a DataLex fixture).
-- R2.9 — tier-distribution aggregation surface.
-- R3.2 — LLM judge + credentialed execution-match CI (eval design + secrets).
-- R3.3 — real embedding provider + paraphrase certified matching (provider choice/config).
-- R3.6 — lane-extraction refactor (large; do after R2.3 trace is event-based).
+**2026-07-05 (final) — decision + feature batch landed** (commits d42364b, 6ebd015, eab0422,
+c69c8d7, 1988cf1). Two pending decisions were made conservatively: R2.4 caps AI answers at
+`reviewed` (never auto-`certified`); R2.6 prefers structured defs but keeps the regex fallback.
+Full workspace suite green: 40/40 turbo tasks.
+
+- **R2.4** ✅ Certified/reviewed-metric answers stamp canonical `reviewed` trust (never
+  `certified`); confidence 0.8. Trust-stamp rule + answer field + tests.
+- **R2.6** ✅ Metric resolvers prefer the structured `MetricDefinition` from the injected semantic
+  layer; llmContext regex kept as fallback for manifest-native metrics. Tests.
+- **R2.7** ✅ `semanticDriver` threaded host→runner→`composeQuery`, best-effort.
+- **R2.9** ✅ `ConversationStore.tierDistribution` + `GET /api/agent-runs/tier-distribution`. Tests.
+- **R3.3** ✅ (infra) `OpenAIEmbeddingProvider` + `CachingEmbeddingProvider` +
+  `resolveEmbeddingProvider`; paraphrase-outranks-distractor proven by test. Live wiring into the
+  certified/metric path is a config-gated follow-on.
+- **R3.2** ✅ Injectable `judgeAnswer` (0–1 + pass/fail) wired into `dql agent eval --judge`;
+  `.github/workflows/eval-judged.yml` manual+weekly credentialed job (never blocks a PR). Tests.
+- **R2.1** ✅ Notebook trust badge renders from canonical `trustLabelInfo.id`; legacy fallback
+  kept. Exported + tested.
+
+**Deferred with complete technical reasoning (each needs a different mode of work):**
+- **R2.2** — review-dashboard *panel* UI + `resultSample` execution wiring. Backend largely exists
+  (certify endpoint, review payload, nearest-certified diff). Needs live-preview-driven UI work.
+- **R2.3** — engine short-circuit: `semantic_metric` and `generated_sql` share the
+  `generated_answer` route and `StepOutcome` carries no tier, so terminating semantic without
+  regressing multi-step research needs the tier threaded through the outcome — a narrow payoff.
+  Best folded into R3.6.
+- **R2.8** — DataLex joins: relationship semantics live in the dql-mcp registry, not the catalog;
+  needs DataLex relationship-edge ingestion + fixture.
+- **R3.6** — lane-extraction refactor of the 4,500-line `runAnswerLoop`; shared closure state
+  makes it a large, risk-sensitive refactor deserving its own focused session.
 
 ## Definition of done for RFC 0001
 
