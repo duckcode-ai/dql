@@ -329,6 +329,49 @@ Every PR: existing suite green, jaffle regressions green, golden eval at strict 
 the relevant new Accept checks encoded as tests. After PR 5 the implementation plan's Phases 1–2
 are 100%; after PR 8, Phases 3–4 are 100% minus explicitly-accepted deviations.
 
+## Progress log
+
+**2026-07-05 — Waves R0 + R1 landed** (branch `feat/governed-answer-cascade`).
+
+Committed and verified (build 22/22, dql-agent 577/577, dql-mcp 100/100, cli 110/110):
+
+- **R0.1** ✅ Split `semantic/yaml-loader.ts` (browser-safe) from `yaml-loader.node.ts` (fs);
+  added a pure `@duckcodeailabs/dql-core/artifacts` subpath export and routed the notebook's
+  `normalizeDqlArtifactReference`/`DqlArtifactReference` imports through it. Notebook browser
+  bundle builds again (22/22, was 19/20).
+- **R0.2** ✅ Removed the invalid `allowBuilds` placeholder block from `pnpm-workspace.yaml`.
+- **R0.3** ✅ `eval.test.ts` resolves golden fixtures from the test-file location; passes from
+  any cwd.
+- **R1.1** ✅ Replaced the hardcoded `beverage|jaffle|food → category` map with a generic
+  sample-value matcher (`resolveFilterValueColumns` over `schemaContext`, threaded as
+  `filterValueColumns`). No fixture vocabulary in the engine.
+- **R1.2** ✅ `provider_error` refusal code set + mapped to `blocked` (retryable), not
+  `needs_clarification`. Test added.
+- **R1.3** ✅ Re-grounding completeness merge only marks `complete` on an explicit side; unknown
+  stays advisory. Test added.
+- **R1.4** ✅ `expand_context` reports a real incremented reground count (threaded via
+  `retrievalDiagnostics.regroundAttempts`) and preserves real retrieval scores. Test asserts 1→2.
+- **R1.5** ✅ Shared `compactToolOutput` truncates to valid JSON with a marker; used by both
+  provider tool loops. Test added.
+
+Findings that revise the remaining plan (sizes were optimistic):
+
+- **R2.5** — the *core* ("executed SQL == artifact query body") is **already satisfied**: both are
+  the same `parsed.sql` value embedded verbatim by `buildGeneratedSqlDqlArtifact`. Only artifact
+  *coverage* for `business_context` and SQL-less certified answers remains (real, small).
+- **R2.4** — couples to the trust-vocabulary/`AI-never-auto-certifies` invariant (whether a
+  certified-metric answer may stamp `certified`); needs a decision, do alongside R2.5/W2.5.
+- **R2.7** — the host has `activeConnection.driver`/`tableMapping`, but threading them to the loop
+  spans the runner-request interface; medium, low user-visible value (non-DuckDB only).
+
+Next-up (safe, testable, no decision needed): R2.5 coverage, R2.6 (retire llmContext regex
+parser), R2.3 (event-based cascade trace + engine short-circuit), R3.1 (small-catalog
+full-context), R3.4 (always-on deep candidates), R3.5 (LLM member-selection fallback).
+
+Needs a decision or preview verification: R2.1/R2.2 (trust-label + review-dashboard UI),
+R2.4 (trust invariant), R3.2 (LLM judge + credentialed CI), R3.3 (embedding provider choice),
+R3.6 (lane-extraction refactor — large).
+
 ## Definition of done for RFC 0001
 
 - `pnpm build` 20/20; full test suite green from any cwd; golden eval required-in-CI at strict
