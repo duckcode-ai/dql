@@ -1191,7 +1191,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     conversation: conversationRunExecutor,
     certified_answer: answerRunExecutor,
     generated_answer: answerRunExecutor,
-    research: async ({ runId, request, routeDecision, emit }) => {
+    research: async (researchContext) => {
+      const { runId, request, routeDecision, emit } = researchContext;
       const metrics = loadSemanticMetrics(projectRoot);
       let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
       const usedCertifiedOnly = blocks.length > 0;
@@ -1211,6 +1212,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // When the user explicitly picked research, investigate — don't collapse to one step.
         forceInvestigate: request.requestedMode === 'research',
       });
+      // Direct governed answer ("the metric answers this directly"): don't wrap it in
+      // a review-required research dossier — run the query through the answer loop and
+      // return the executed result table + DQL artifact. A dossier is only for genuine
+      // multi-step investigation (plan.done === false) or explicit research mode.
+      if (plan.done && !plan.followUp && request.requestedMode !== 'research') {
+        return answerRunExecutor(researchContext);
+      }
       const needsClarification = Boolean(plan.followUp);
       const notebookPath = agentRunNotebookPath(request, runId);
       const researchIntent = agentRunResearchIntent(request);
