@@ -128,10 +128,9 @@ function columnTypeIcon(type: string): React.ComponentType<any> {
 
 function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: NotebookFile) => void }) {
   const { state, dispatch } = useNotebook();
-  const notebooks = state.files
-    .filter((f) => f.type === 'notebook')
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const notebooks = Array.from(
+    new Map(state.files.filter((f) => f.type === 'notebook').map((f) => [f.path, f])).values(),
+  ).sort((a, b) => a.name.localeCompare(b.name));
   return (
     <div>
       <button
@@ -269,7 +268,8 @@ function BlocksList({ t, search }: { t: Theme; search: string }) {
   }, [blockFileKey]);
 
   const q = search.trim().toLowerCase();
-  const filtered = blocks.filter((b) => !q || b.name.toLowerCase().includes(q) || (b.description ?? '').toLowerCase().includes(q));
+  const uniqueBlocks = Array.from(new Map(blocks.map((b) => [b.path, b])).values());
+  const filtered = uniqueBlocks.filter((b) => !q || b.name.toLowerCase().includes(q) || (b.description ?? '').toLowerCase().includes(q));
 
   const open = (block: BlockEntry) => {
     const file = { name: block.path.split('/').pop() ?? block.name, path: block.path, type: 'block' as const, folder: 'blocks' };
