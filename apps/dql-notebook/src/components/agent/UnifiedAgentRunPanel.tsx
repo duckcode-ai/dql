@@ -86,12 +86,27 @@ interface UnifiedAgentRunPanelProps {
   audience?: AgentRunAudience;
   autoRun?: { text: string; mode?: AgentRunRequestedMode; nonce: number };
   onInsertSql?: (sql: string, title?: string) => void;
+  /**
+   * DQL-first insertion: the whole governed artifact (compiled SQL body + DQL
+   * provenance + executed result + chart config) so the host can create a
+   * self-contained, ready-rendered query cell. Preferred over onInsertSql when set.
+   */
+  onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   /** Navigate into an app/dashboard (used by the "Added to app" success link). */
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
   onRunningChange?: (running: boolean) => void;
+}
+
+/** Payload for DQL-first cell insertion from a governed answer artifact. */
+export interface InsertDqlPayload {
+  sql?: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
+  result?: QueryResult;
+  chartConfig?: CellChartConfig;
+  title?: string;
 }
 
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
@@ -124,6 +139,7 @@ export function UnifiedAgentRunPanel({
   audience = 'analyst',
   autoRun,
   onInsertSql,
+  onInsertDql,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -396,6 +412,7 @@ export function UnifiedAgentRunPanel({
             appContext={appContext}
             onOpenApp={onOpenApp}
             onInsertSql={onInsertSql}
+            onInsertDql={onInsertDql}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
             onNextAction={(action) => handleNextAction(item.run, action)}
@@ -799,6 +816,7 @@ function RunCard({
   appContext,
   onOpenApp,
   onInsertSql,
+  onInsertDql,
   onOpenBlock,
   onOpenResearch,
   onNextAction,
@@ -810,6 +828,7 @@ function RunCard({
   appContext?: { appId?: string; dashboardId?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onInsertSql?: (sql: string, title?: string) => void;
+  onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
@@ -915,6 +934,7 @@ function RunCard({
               t={t}
               themeMode={themeMode}
               onInsertSql={onInsertSql}
+              onInsertDql={onInsertDql}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
               onOpenApp={onOpenApp}
@@ -1284,6 +1304,7 @@ function ArtifactView({
   t,
   themeMode,
   onInsertSql,
+  onInsertDql,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -1293,6 +1314,7 @@ function ArtifactView({
   t: Theme;
   themeMode: ThemeMode;
   onInsertSql?: (sql: string, title?: string) => void;
+  onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
@@ -1434,7 +1456,21 @@ function ArtifactView({
         {researchRunId && onOpenResearch ? (
           <button type="button" onClick={() => onOpenResearch(researchRunId, notebookPath)} style={smallButtonStyle(t)}>Open research</button>
         ) : null}
-        {sql && onInsertSql ? (
+        {sql && onInsertDql ? (
+          <button
+            type="button"
+            onClick={() => onInsertDql({
+              sql,
+              dqlArtifact,
+              result: resultData,
+              chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
+              title: name,
+            })}
+            style={smallButtonStyle(t)}
+          >
+            Insert as DQL cell
+          </button>
+        ) : sql && onInsertSql ? (
           <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
         ) : null}
         {dqlPath && onOpenBlock ? (
