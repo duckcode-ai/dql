@@ -49,6 +49,7 @@ import {
   selectExpressionOutputName,
 } from './metadata/sql-shape.js';
 import { composeSemanticQueryForQuestion, type SemanticBridgeQueryResult } from './semantic-bridge/compose.js';
+import { normalizeValueIndexText } from './grounding/value-index.js';
 import {
   cascadeTraceToEvidenceRouteSteps,
   createCascadeAnswerResult,
@@ -183,6 +184,25 @@ export interface AgentSchemaColumn {
   description?: string;
   /** Bounded runtime values that matched the user's question, used only as SQL-generation hints. */
   sampleValues?: string[];
+}
+
+/**
+ * Physical column names whose sampled runtime values include `value`. Used by the
+ * semantic bridge to bind a filter literal to the dimension that actually carries
+ * it — a generic, project-agnostic replacement for hard-coded value→dimension maps.
+ */
+function resolveFilterValueColumns(value: string, schemaContext: AgentSchemaTable[]): string[] {
+  const needle = normalizeValueIndexText(value);
+  if (!needle) return [];
+  const columns: string[] = [];
+  for (const table of schemaContext) {
+    for (const column of table.columns) {
+      if (column.sampleValues?.some((sample) => normalizeValueIndexText(sample) === needle)) {
+        columns.push(column.name);
+      }
+    }
+  }
+  return columns;
 }
 
 export interface AgentSchemaTable {
@@ -947,6 +967,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       question,
       questionPlan,
       matchedMetric: semanticMetricMatch.metric,
+      filterValueColumns: (value) => resolveFilterValueColumns(value, schemaContext),
       ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
       ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
     });
@@ -1009,6 +1030,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         confidence: 0,
         text,
         answer: text,
+        refusalCode: 'provider_error',
+        refusalDetails: { code: 'provider_error', message: text },
         citations: [],
         memoryContext: input.memoryContext,
         evidence: buildNoAnswerEvidence({

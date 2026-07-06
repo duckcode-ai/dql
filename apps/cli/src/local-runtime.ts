@@ -1011,8 +1011,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const resolvedRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
+    const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
     const groundingRepairHint = isGroundingGap ? groundingGapRepairHint(governedAnswer) : undefined;
-    const needsClarification = governedAnswer.kind === 'no_answer' && !isGroundingGap;
+    // A provider outage is a retryable infrastructure failure, not a question the
+    // user needs to clarify — surface it as blocked so the UI offers a retry.
+    const needsClarification = governedAnswer.kind === 'no_answer' && !isGroundingGap && !isProviderError;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
     const runnableSql = governedAnswer.kind === 'no_answer' ? undefined : sql;
     // Synthesis is a legacy polish pass. Certified/no-answer paths and lanes
@@ -1052,9 +1055,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         synthesizedAnswer = undefined;
       }
     }
-    const status: AgentRunStatus = needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
-    const trustState: AgentRunTrustState = needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
-    const stopReason: AgentRunStopReason = needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
+    const status: AgentRunStatus = isProviderError ? 'blocked' : needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
+    const trustState: AgentRunTrustState = isProviderError ? 'blocked' : needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
+    const stopReason: AgentRunStopReason = isProviderError ? 'blocked' : needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
       : [

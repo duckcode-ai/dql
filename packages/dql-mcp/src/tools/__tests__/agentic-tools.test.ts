@@ -389,6 +389,19 @@ describe('agentic analytics tools', () => {
 
     expect((retried as { reviewStatus: string }).reviewStatus).toBe('draft_ready');
     expect((retried as { proposedSql: string }).proposedSql).toContain('SHOP.ANALYTICS.supplies');
+
+    // A second expansion on the widened pack reports a real, incremented attempt
+    // count (1 → 2), not a hardcoded 1.
+    const expandedAgain = await expandContext(ctx, {
+      contextPackId: (expanded as { contextPackId: string }).contextPackId,
+      relations: ['SHOP.ANALYTICS.products'],
+      question: 'Also include product details',
+    });
+    expect(expandedAgain).toMatchObject({
+      ok: true,
+      regroundAttemptsUsed: 2,
+      repairBudget: { attemptsUsed: 2, attemptsRemaining: 0 },
+    });
   });
 });
 
@@ -426,6 +439,20 @@ function seedOrderSupplyProject(root: string): void {
             supply_id: { name: 'supply_id', data_type: 'text', description: 'Supply identifier.' },
             supply_name: { name: 'supply_name', data_type: 'text', description: 'Supply name.' },
             supply_cost: { name: 'supply_cost', data_type: 'number', description: 'Unit supply cost.' },
+          },
+        },
+        'model.jaffle_shop.products': {
+          resource_type: 'model',
+          name: 'products',
+          alias: 'products',
+          database: 'SHOP',
+          schema: 'ANALYTICS',
+          description: 'Product lookup table with product names and prices.',
+          depends_on: { nodes: [] },
+          columns: {
+            product_id: { name: 'product_id', data_type: 'text', description: 'Product identifier.' },
+            product_name: { name: 'product_name', data_type: 'text', description: 'Product name.' },
+            product_price: { name: 'product_price', data_type: 'number', description: 'Unit product price.' },
           },
         },
       },

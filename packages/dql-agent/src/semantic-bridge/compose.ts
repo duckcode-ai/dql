@@ -53,6 +53,13 @@ export interface ComposeSemanticQueryInput {
   matchedMetric?: KGNode;
   driver?: string;
   tableMapping?: Record<string, string>;
+  /**
+   * Resolve a filter literal to the physical column name(s) whose sampled values
+   * contain it (from the runtime value index / schema sample values). Lets us bind
+   * a value like "beverage" to whichever dimension actually carries it, instead of
+   * hard-coding project-specific value→dimension guesses.
+   */
+  filterValueColumns?: (value: string) => string[];
 }
 
 export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput): SemanticBridgeQueryResult | undefined {
@@ -67,7 +74,7 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   const dimensionSelection = selectDimensions(allDimensions, input.questionPlan, timeDimension?.name);
   if (dimensionSelection.unresolved.length > 0) return undefined;
   const dimensions = dimensionSelection.dimensions;
-  const filters = selectFilters(allDimensions, dimensions, input.question, input.questionPlan, timeDimension?.name);
+  const filters = selectFilters(allDimensions, dimensions, input.question, input.questionPlan, timeDimension?.name, input.filterValueColumns);
   if (input.questionPlan.requestedShape.filters.length > 0 && filters.length === 0) return undefined;
   const orderBy = input.questionPlan.requestedShape.topN
     ? [{ name: primaryMetric.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
@@ -247,6 +254,7 @@ function selectFilters(
   question: string,
   questionPlan: AnalysisQuestionPlan,
   timeDimensionName: string | undefined,
+  filterValueColumns: ((value: string) => string[]) | undefined,
 ): SemanticBridgeFilter[] {
   const available = dimensions.filter((dimension) => dimension.name !== timeDimensionName);
   const selected = new Map<string, SemanticBridgeFilter>();
@@ -263,7 +271,7 @@ function selectFilters(
     if (!value || [...selected.values()].some((filter) => filter.values.some((existing) => sameFilterValue(existing, value)))) {
       continue;
     }
-    const dimension = selectFilterDimension(value, available, selectedDimensions);
+    const dimension = selectFilterDimension(value, available, selectedDimensions, filterValueColumns);
     if (!dimension) continue;
     selected.set(dimension.name, {
       dimension: dimension.name,
@@ -311,20 +319,21 @@ function selectFilterDimension(
   value: string,
   dimensions: DimensionDefinition[],
   selectedDimensions: string[],
+  filterValueColumns: ((value: string) => string[]) | undefined,
 ): DimensionDefinition | undefined {
   const selectedSet = new Set(selectedDimensions);
-  const businessHint = businessFilterDimensionHint(value);
-  if (businessHint) {
-    const hinted = dimensions.find((dimension) => {
-      const text = normalizeSemanticText([
-        dimension.name,
-        dimension.label,
-        dimension.description,
-        ...(dimension.tags ?? []),
-      ].join(' '));
-      return businessHint.some((term) => text.includes(term));
-    });
-    if (hinted) return hinted;
+
+  // Bind the literal to the dimension that actually carries it: ask the value
+  // index which physical column(s) sampled this value, then match a dimension
+  // whose expression/name references one of those columns. This is generic —
+  // driven by real warehouse values, not a hard-coded value→dimension table.
+  const valueColumns = filterValueColumns?.(value) ?? [];
+  if (valueColumns.length > 0) {
+    const normalizedColumns = new Set(valueColumns.map((column) => normalizeColumnToken(column)));
+    const matched = dimensions.find((dimension) =>
+      dimensionColumnTokens(dimension).some((token) => normalizedColumns.has(token)),
+    );
+    if (matched) return matched;
   }
 
   const selected = dimensions.filter((dimension) => selectedSet.has(dimension.name));
@@ -332,12 +341,21 @@ function selectFilterDimension(
   return undefined;
 }
 
-function businessFilterDimensionHint(value: string): string[] | undefined {
-  const normalized = normalizeSemanticText(value);
-  if (/\b(beverage|beverages|drink|drinks|food|foods|jaffle|jaffles)\b/.test(normalized)) {
-    return ['category', 'product type', 'type'];
-  }
-  return undefined;
+/** Physical column tokens a dimension might reference (leaf of name/expr/sql). */
+function dimensionColumnTokens(dimension: DimensionDefinition): string[] {
+  return uniqueStrings([
+    dimension.name,
+    leafName(dimension.name),
+    dimension.expr,
+    dimension.sql,
+  ].filter((value): value is string => Boolean(value?.trim()))
+    .flatMap((value) => value.split(/[^A-Za-z0-9_]+/))
+    .map((token) => normalizeColumnToken(token))
+    .filter((token) => token.length > 1 && !SEMANTIC_STOPWORDS.has(token)));
+}
+
+function normalizeColumnToken(value: string): string {
+  return value.replace(/["'`]/g, '').trim().toLowerCase();
 }
 
 function semanticDimensionAliases(dimension: DimensionDefinition): string[] {

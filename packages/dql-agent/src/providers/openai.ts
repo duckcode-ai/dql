@@ -7,6 +7,7 @@ import type {
 } from './types.js';
 import { consumeSse } from './claude.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
+import { compactToolOutput } from './tool-output.js';
 
 /**
  * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
@@ -309,7 +310,3 @@ function parseToolArguments(raw: string): unknown {
   }
 }
 
-function compactToolOutput(output: unknown): string {
-  const text = typeof output === 'string' ? output : JSON.stringify(output);
-  return text.length > 12000 ? `${text.slice(0, 12000)}...` : text;
-}

@@ -440,6 +440,8 @@ export interface LocalContextPack {
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
     strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context';
+    /** How many times this pack lineage has been widened by expand_context. */
+    regroundAttempts?: number;
     selectedObjects: number;
     selectedEvidence: Array<{
       objectKey: string;

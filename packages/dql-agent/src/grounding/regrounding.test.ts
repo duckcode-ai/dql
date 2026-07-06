@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MetadataCatalog } from '../metadata/catalog.js';
-import { expandGroundingFromCatalog } from './regrounding.js';
+import type { LocalContextPack } from '../metadata/catalog.js';
+import { applyGroundingExpansion, expandGroundingFromCatalog } from './regrounding.js';
 
 describe('expandGroundingFromCatalog', () => {
   let dir: string;
@@ -78,5 +79,30 @@ describe('expandGroundingFromCatalog', () => {
         expect.objectContaining({ name: 'product_price' }),
       ]),
     });
+  });
+
+  it('keeps merged completeness advisory when neither side is explicitly complete', () => {
+    // Both the existing relation and the expansion have unknown completeness with
+    // partial column lists. The merge must NOT stamp the result 'complete', or a
+    // guessed column list would re-enable strict validation and produce a false
+    // unknown_column after an otherwise-successful re-grounding.
+    const pack = {
+      allowedSqlContext: {
+        relations: [
+          { relation: 'dev.order_items', name: 'order_items', source: 'inspected', columns: [{ name: 'product_id' }] },
+        ],
+        sourceBlockSql: [],
+      },
+    } as unknown as LocalContextPack;
+
+    const merged = applyGroundingExpansion(pack, [], {
+      relations: [
+        { relation: 'dev.order_items', name: 'order_items', source: 'expanded metadata context', columns: [{ name: 'product_price' }] },
+      ],
+      notes: ['dev.order_items expanded'],
+    });
+
+    const relation = merged.contextPack?.allowedSqlContext.relations.find((r) => r.relation === 'dev.order_items');
+    expect(relation?.columnCompleteness).not.toBe('complete');
   });
 });

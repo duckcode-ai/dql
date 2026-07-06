@@ -198,7 +198,10 @@ function mergeRelationCompleteness(
   left: MetadataAllowedSqlRelation['columnCompleteness'],
   right: MetadataAllowedSqlRelation['columnCompleteness'],
 ): MetadataAllowedSqlRelation['columnCompleteness'] {
-  if ((left ?? 'complete') === 'complete' || (right ?? 'complete') === 'complete') return 'complete';
+  // Only an EXPLICIT 'complete' marks the merged relation complete. Unknown
+  // (undefined) stays advisory ('partial') so a freshly-expanded relation with a
+  // guessed column list can't trigger a false unknown_column after re-grounding.
+  if (left === 'complete' || right === 'complete') return 'complete';
   return 'partial';
 }
 

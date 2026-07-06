@@ -4913,6 +4913,43 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(2);
   });
 
+  it("tags a provider outage with the provider_error refusal code (not a clarify)", async () => {
+    class ThrowingProvider extends StubProvider {
+      async generate(): Promise<string> {
+        throw new Error("upstream 503");
+      }
+    }
+    const provider = new ThrowingProvider("unused");
+    const question = "Revenue by segment ranked";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "analytics.fct_orders",
+          name: "fct_orders",
+          source: "dbt manifest",
+          columns: [
+            { name: "segment", type: "VARCHAR" },
+            { name: "amount", type: "DECIMAL" },
+          ],
+          rank: 1,
+          score: 80,
+          reason: "selected revenue fact table",
+        },
+      ], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["segment"],
+        mode: "ad_hoc_ranking",
+        routeIntent: "ad_hoc_ranking",
+      }),
+    });
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("provider_error");
+    expect(result.refusalDetails).toMatchObject({ code: "provider_error" });
+  });
+
   it("asks for clarification when no metadata can ground an analytical question", async () => {
     kg.rebuild([], []);
     const provider = new StubProvider("should not be called");

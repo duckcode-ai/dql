@@ -6,6 +6,7 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
+import { compactToolOutput } from './tool-output.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -312,7 +313,3 @@ export async function consumeSse(
   }
 }
 
-function compactToolOutput(output: unknown): string {
-  const text = typeof output === 'string' ? output : JSON.stringify(output);
-  return text.length > 12000 ? `${text.slice(0, 12000)}...` : text;
-}

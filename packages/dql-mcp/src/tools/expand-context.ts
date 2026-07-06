@@ -59,13 +59,16 @@ export async function expandContext(
       };
     }
 
+    const regroundAttempts = (existing.retrievalDiagnostics?.regroundAttempts ?? 0) + 1;
+    const addedRelationKeys = new Set(combined.relations.map((relation) => relation.relation.toLowerCase()));
     const payload = contextPackWithoutId({
       ...merged.contextPack,
       question,
       retrievalDiagnostics: {
         ...merged.contextPack.retrievalDiagnostics,
         strategy: 'expanded_context',
-        selectedRelations: summarizeSelectedRelations(merged.contextPack),
+        regroundAttempts,
+        selectedRelations: summarizeSelectedRelations(merged.contextPack, existing, addedRelationKeys),
       },
     });
     const expandedId = catalog.insertContextPack(payload);
@@ -85,8 +88,8 @@ export async function expandContext(
       ok: true,
       previousContextPackId: existing.id,
       contextPackId: expandedId,
-      regroundAttemptsUsed: 1,
-      repairBudget: mcpTier2RegroundRepairBudget(1),
+      regroundAttemptsUsed: regroundAttempts,
+      repairBudget: mcpTier2RegroundRepairBudget(regroundAttempts),
       addedRelations,
       missed,
       notes: combined.notes,
@@ -121,16 +124,31 @@ function contextPackWithoutId(pack: LocalContextPack): Omit<LocalContextPack, 'i
   return payload;
 }
 
-function summarizeSelectedRelations(pack: LocalContextPack): NonNullable<LocalContextPack['retrievalDiagnostics']['selectedRelations']> {
-  return pack.allowedSqlContext.relations.slice(0, 24).map((relation, index) => ({
-    relation: relation.relation,
-    name: relation.name,
-    source: relation.source,
-    score: index === 0 ? 1 : Math.max(0.1, 1 - index / 24),
-    reason: 'relation retained in expanded context pack',
-    columns: relation.columns.slice(0, 24).map((column) => column.name),
-    rank: index + 1,
-  }));
+function summarizeSelectedRelations(
+  pack: LocalContextPack,
+  existing: LocalContextPack,
+  addedRelationKeys: Set<string>,
+): NonNullable<LocalContextPack['retrievalDiagnostics']['selectedRelations']> {
+  // Preserve the real retrieval scores/ranks from the prior pack where we have
+  // them; only synthesize a diagnostics row for relations newly added by this
+  // expansion, and mark them explicitly (score 0, "not ranked") rather than
+  // fabricating a rank-derived score.
+  const priorByRelation = new Map(
+    (existing.retrievalDiagnostics?.selectedRelations ?? []).map((entry) => [entry.relation.toLowerCase(), entry]),
+  );
+  return pack.allowedSqlContext.relations.slice(0, 24).map((relation, index) => {
+    const prior = priorByRelation.get(relation.relation.toLowerCase());
+    if (prior && !addedRelationKeys.has(relation.relation.toLowerCase())) return prior;
+    return {
+      relation: relation.relation,
+      name: relation.name,
+      source: relation.source,
+      score: 0,
+      reason: 'added by expand_context (not ranked)',
+      columns: relation.columns.slice(0, 24).map((column) => column.name),
+      rank: index + 1,
+    };
+  });
 }
 
 function uniqueStrings(values: string[]): string[] {
