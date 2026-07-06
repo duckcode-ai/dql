@@ -74,13 +74,20 @@ function columnCoversRequestedOutput(column: string, requiredOutput: string): bo
   if (required === 'count') {
     return columnTokens.some((token) => ['count', 'total', 'number', 'num'].includes(token));
   }
+  const NAME_TOKENS = ['name', 'title', 'label', 'nm', 'description', 'desc'];
   if (required.endsWith('_name')) {
     const entity = requiredTokens[0];
-    return Boolean(entity && columnTokens.includes(entity) && (
-      columnTokens.includes('name') ||
-      columnTokens.includes('title') ||
-      column === entity
+    const hasNameToken = columnTokens.some((token) => NAME_TOKENS.includes(token));
+    // Entity match tolerates common abbreviations (product↔prod, customer↔cust)
+    // via a shared 4-char stem, so aliases like prod_name / cust_name / p_name
+    // don't false-miss.
+    const stem = (token: string) => token.slice(0, 4);
+    const hasEntityToken = Boolean(entity && columnTokens.some((token) =>
+      token === entity || token.startsWith(stem(entity)) || entity.startsWith(stem(token)),
     ));
+    // A bare `name`/`label` column (single token) covers any *_name requirement.
+    const bareNameColumn = columnTokens.length === 1 && hasNameToken;
+    return (hasEntityToken && hasNameToken) || column === entity || bareNameColumn;
   }
   return requiredTokens.every((token) => columnTokens.includes(token));
 }

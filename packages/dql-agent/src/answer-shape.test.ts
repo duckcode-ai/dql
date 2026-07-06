@@ -34,6 +34,27 @@ describe('validateAnswerResultShape', () => {
     expect(validation.warnings[0]).toContain('customer_name');
   });
 
+  it('accepts an abbreviated name-column alias (prod_name) as covering product_name', () => {
+    const validation = validateAnswerResultShape(
+      buildAnalysisQuestionPlan('list the top products with product name and revenue'),
+      {
+        columns: ['prod_name', 'revenue'],
+        rows: [{ prod_name: 'Widget', revenue: 100 }],
+        rowCount: 1,
+      },
+    );
+    // prod_name (abbrev stem of product) covers product_name — no false "missing".
+    expect(validation.missingOutputs).not.toContain('product_name');
+  });
+
+  it('accepts a bare name column as covering any *_name requirement', () => {
+    const validation = validateAnswerResultShape(
+      buildAnalysisQuestionPlan('list vendors with vendor name and total spend'),
+      { columns: ['name', 'total_spend'], rows: [{ name: 'Acme', total_spend: 5 }], rowCount: 1 },
+    );
+    expect(validation.missingOutputs).not.toContain('vendor_name');
+  });
+
   it('warns when a global top-N answer returns too many rows', () => {
     const validation = validateAnswerResultShape(
       buildAnalysisQuestionPlan('Show the top 2 customers by revenue'),

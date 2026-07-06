@@ -13292,13 +13292,7 @@ function buildConversationContextRecap(context: Record<string, unknown> | undefi
     : [];
   const firstRow = rows[0];
 
-  const leadParts: string[] = [];
-  const product = firstPriorValue(values, ['product_name', 'product', 'sku']);
-  const category = firstPriorValue(values, ['category', 'category_name', 'product_type']);
-  const customer = firstPriorValue(values, ['customer_name', 'customer']);
-  if (product) leadParts.push(`top product "${product}"`);
-  if (category) leadParts.push(`category "${category}"`);
-  if (customer) leadParts.push(`customer "${customer}"`);
+  const leadParts = buildPriorValueLeadParts(values);
 
   const rowFacts = firstRow
     ? columns
@@ -13339,14 +13333,7 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
     ? result.rowsSample.map(agentRunRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 1)
     : [];
   const firstRow = rows[0];
-  const product = firstPriorValue(values, ['product_name', 'product', 'sku']);
-  const category = firstPriorValue(values, ['category', 'category_name', 'product_type']);
-  const customer = firstPriorValue(values, ['customer_name', 'customer']);
-  const leadParts = [
-    product ? `top product "${product}"` : '',
-    category ? `category "${category}"` : '',
-    customer ? `customer "${customer}"` : '',
-  ].filter(Boolean);
+  const leadParts = buildPriorValueLeadParts(values);
   const rowFacts = firstRow
     ? columns
         .slice(0, 5)
@@ -13385,6 +13372,32 @@ function firstPriorValue(values: Record<string, unknown> | undefined, keys: stri
     if (first) return first;
   }
   return undefined;
+}
+
+/**
+ * Build human-readable "notable prior values" for conversation recap from whatever
+ * dimension columns the prior result actually had. Domain-agnostic: name/label-ish
+ * columns are surfaced first, then any other dimension — no hard-coded jaffle entity
+ * columns — so follow-up questions get meaningful context on ANY repo.
+ */
+function buildPriorValueLeadParts(values: Record<string, unknown> | undefined): string[] {
+  if (!values) return [];
+  const keys = Object.keys(values);
+  const nameLike = keys.filter((key) => /(?:^|_)(?:name|label|title|nm)$/i.test(key));
+  const ordered = [...nameLike, ...keys.filter((key) => !nameLike.includes(key))];
+  const parts: string[] = [];
+  const seenLabels = new Set<string>();
+  for (const key of ordered) {
+    if (parts.length >= 3) break;
+    const value = firstPriorValue(values, [key]);
+    if (!value) continue;
+    const label = (key.replace(/_?(?:name|id|key|label|title|nm)$/i, '').replace(/[_-]+/g, ' ').trim()
+      || key.replace(/[_-]+/g, ' ').trim()).toLowerCase();
+    if (seenLabels.has(label)) continue;
+    seenLabels.add(label);
+    parts.push(label ? `${label} "${value}"` : `"${value}"`);
+  }
+  return parts;
 }
 
 /** Deterministic, warm reply when no AI provider is configured — never governance-speak. */
@@ -16553,22 +16566,29 @@ function mergeAgentSchemaSampleValues(snapshot: AgentSchemaTable[], enriched: Ag
   }));
 }
 
+// Common English plurals that are NOT entity nouns, so a multi-entity heuristic
+// doesn't count them. Domain-agnostic (no project-specific vocabulary).
+const NON_ENTITY_PLURALS = new Set([
+  'details', 'values', 'results', 'rows', 'numbers', 'records', 'items', 'things',
+  'totals', 'amounts', 'metrics', 'columns', 'fields', 'names', 'ids',
+]);
+
+/**
+ * Decide whether to run the (advisory, best-effort) runtime value-scan + schema
+ * enrichment for a question. Generic multi-entity / detail intent — no hard-coded
+ * project vocabulary — so it fires for ANY repo's join-shaped questions, not just
+ * jaffle. Over-triggering only costs a few extra bounded probes (all in try/catch).
+ */
 function shouldAugmentAgentRuntimeSchema(question: string): boolean {
   const lower = question.toLowerCase();
-  const wantsProduct = /\bproducts?\b|\bproduct[_ ]name\b|\bsku\b/.test(lower);
-  const wantsCustomer = /\bcustomers?\b|\bbuyers?\b|\bbought\b|\bpurchased?\b/.test(lower);
-  const wantsMetric = /\brevenu|\bsales\b|\bamount\b|\bspend\b|\border/.test(lower);
-  const wantsCategory = /\bcat(?:egor|agor)(?:y|ies)\b|\bsub[- ]?cat(?:egor|agor)(?:y|ies)\b/.test(lower);
-  const wantsSupply = /\bsuppl(?:y|ies|ier|iers)\b|\bsupply[- ]?chain\b|\bingredients?\b|\bmaterials?\b/.test(lower);
-  const wantsOrderDetail = /\borders?\b|\border[_ -]?items?\b|\border[_ -]?details?\b|\border[_ -]?id\b/.test(lower);
-  const wantsDetail = /\bdetails?\b|\bcomplete\b|\bbreakdown\b|\ball\s+values?\b/.test(lower);
-  const referencesPriorRows = /\b(?:above|previous|prior|these|those|same)\s+(?:orders?|results?|rows?|customers?|products?)\b/.test(lower);
-  return (
-    (wantsProduct && wantsCustomer && wantsMetric)
-    || (wantsProduct && wantsSupply && (wantsOrderDetail || wantsMetric || wantsDetail))
-    || (wantsSupply && wantsOrderDetail && (wantsMetric || wantsDetail))
-    || (referencesPriorRows && (wantsProduct || wantsCategory || wantsSupply || wantsOrderDetail))
-  );
+  const wantsMetric = /\brevenu|\bsales\b|\bamount\b|\bspend\b|\bcost\b|\bcount\b|\btotal\b|\bsum\b|\bavg\b|\baverage\b|\bvalue\b|\bprice\b/.test(lower);
+  const wantsDetail = /\bdetails?\b|\bcomplete\b|\bbreakdown\b|\ball\s+values?\b|\beach\b|\bevery\b/.test(lower);
+  const referencesPriorRows = /\b(?:above|previous|prior|these|those|same)\s+\w+/.test(lower);
+  const explicitJoin = /\bjoin(?:ed|ing)?\b|\bcombine[ds]?\b|\bcross[- ]?reference\b|\balong\s+with\b|\btogether\s+with\b/.test(lower);
+  // Multi-entity intent: a linking word + >= 2 distinct plural content nouns.
+  const nouns = new Set((lower.match(/\b[a-z]{4,}s\b/g) ?? []).filter((word) => !NON_ENTITY_PLURALS.has(word)));
+  const multiEntity = /\b(?:and|with|plus|per|for\s+each|by)\b/.test(lower) && nouns.size >= 2;
+  return explicitJoin || referencesPriorRows || (multiEntity && (wantsMetric || wantsDetail));
 }
 
 async function enrichAgentSchemaContextWithValueMatches(
@@ -16629,26 +16649,55 @@ function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): nu
     }
   }
   score += scoreCompositeAgentSchemaTable(table, tokens);
-  if (/(customer|order|revenue|product|location|date|month)/i.test(table.name)) score += 1;
+  // Small tiebreaker toward modeled analytics tables (fct_/dim_/fact_/mart_ …),
+  // a warehouse-modeling convention that generalizes across repos — not a fixed
+  // list of jaffle entity names.
+  if (/^(?:fct|fact|dim|dimension|mart|rpt|report|agg|f|d)[_-]/i.test(table.name)
+    || /(?:^|[_-])(?:fact|dim|mart|summary|report)(?:$|[_-])/i.test(table.name)) {
+    score += 1;
+  }
   return score;
 }
 
+const COMPOSITE_METRIC_TOKENS = new Set([
+  'revenue', 'sales', 'amount', 'spend', 'price', 'cost', 'total', 'sum',
+  'count', 'quantity', 'qty', 'value', 'subtotal', 'order', 'orders',
+]);
+const COMPOSITE_STOPWORD_TOKENS = new Set([
+  'the', 'and', 'with', 'for', 'each', 'per', 'all', 'top', 'show', 'list',
+  'give', 'get', 'find', 'plus', 'along', 'together', 'combined', 'combine',
+  'detail', 'details', 'complete', 'breakdown', 'values', 'name', 'names',
+  ...COMPOSITE_METRIC_TOKENS,
+]);
+
+/**
+ * Boost the fact/junction table for a multi-entity ("composite") question. Fully
+ * domain-agnostic: the ask is detected from >= 2 distinct entity tokens + a metric,
+ * and the winning table is identified STRUCTURALLY (>= 2 foreign-key-style id columns
+ * plus a numeric measure column) rather than by hard-coded jaffle table names — so it
+ * ranks the right join table for any repo, while jaffle's fct_orders still qualifies.
+ */
 function scoreCompositeAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): number {
-  const hasCompositeAsk = tokens.has('product')
-    && (tokens.has('customer') || tokens.has('buyer') || tokens.has('bought') || tokens.has('purchased'))
-    && (tokens.has('revenue') || tokens.has('sales') || tokens.has('amount') || tokens.has('spend') || tokens.has('order'));
-  const hasPriorRowsAsk = ['above', 'previous', 'prior'].some((token) => tokens.has(token))
-    && (tokens.has('product') || tokens.has('category'));
+  const entityTokens = [...tokens].filter((token) => token.length >= 3 && !COMPOSITE_STOPWORD_TOKENS.has(token));
+  const hasMetric = [...tokens].some((token) => COMPOSITE_METRIC_TOKENS.has(token));
+  const hasCompositeAsk = entityTokens.length >= 2 && hasMetric;
+  const hasPriorRowsAsk = ['above', 'previous', 'prior', 'these', 'those', 'same'].some((token) => tokens.has(token))
+    && entityTokens.length >= 1;
   if (!hasCompositeAsk && !hasPriorRowsAsk) return 0;
-  const relationText = `${table.schema ?? ''} ${table.name} ${table.relation}`.toLowerCase().replace(/[_-]+/g, ' ');
+
   const columns = table.columns.map((column) => column.name.toLowerCase());
   let score = 0;
-  if (/\b(order items?|line items?|fct orders?|fact orders?)\b/.test(relationText)) score += 18;
-  if (columns.some((name) => /\bproduct|sku/.test(name))) score += 8;
-  if (columns.some((name) => /\bcustomer/.test(name))) score += 8;
-  if (columns.some((name) => /\border/.test(name))) score += 6;
-  if (columns.some((name) => /\brevenue|sales|amount|price|spend|subtotal|total/.test(name))) score += 8;
-  if (columns.some((name) => /\bcategory|type/.test(name))) score += 5;
+  // Structural fact/junction-table signal: multiple FK-style id columns + a measure.
+  const idColumnCount = columns.filter((name) => /(?:^id$|_id$|_key$|_sk$|_uuid$|_fk$)/.test(name)).length;
+  const hasMeasureColumn = columns.some((name) =>
+    /revenue|sales|amount|price|spend|cost|subtotal|total|quantity|\bqty\b|count|value/.test(name));
+  if (idColumnCount >= 2 && hasMeasureColumn) score += 18;
+  else if (idColumnCount >= 2) score += 8;
+  if (hasMeasureColumn) score += 8;
+  // Reward columns whose names overlap the question's actual entity tokens (any domain).
+  for (const token of entityTokens) {
+    if (columns.some((name) => name.includes(token))) score += 4;
+  }
   return score;
 }
 

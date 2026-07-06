@@ -709,10 +709,6 @@ function extractDimensionTerms(question: string): string[] {
   const lower = question.toLowerCase();
   const terms = new Set<string>();
   if (/\b(?:cusomers?|custmers?|costomers?|clients?|buyers?)\b/i.test(lower)) terms.add('customer');
-  if (/\b(?:beverages?|drinks?)\b/i.test(lower)) {
-    terms.add('category');
-    terms.add('product');
-  }
   for (const word of DIMENSION_WORDS) {
     if (new RegExp(`\\b(?:${escapeRegExp(word)}|${escapeRegExp(pluralizeDimensionWord(word))})\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
@@ -729,13 +725,11 @@ function pluralizeDimensionWord(word: string): string {
 }
 
 function extractFilterTerms(question: string, entities: AnalysisEntityMention[]): string[] {
-  const lower = question.toLowerCase();
-  const businessFilters: string[] = [];
-  if (/\b(?:beverages?|drinks?)\b/i.test(lower)) businessFilters.push('beverage');
-  if (/\b(?:food|foods|jaffles?)\b/i.test(lower)) businessFilters.push('jaffle');
+  // Filter VALUES come from the question's own entities and time phrases only.
+  // (Real value binding happens later against the runtime value index / sampled
+  // column values — never from a hard-coded project-specific vocabulary.)
   return uniqueStrings([
     ...entities.flatMap((entity) => tokenize(entity.text)),
-    ...businessFilters,
     ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
 }
@@ -1212,7 +1206,6 @@ function normalizeSearchText(value: string): string {
 function normalizeTerm(value: string): string {
   const clean = normalizeSearchText(value);
   if (/^(cusomer|custmer|costomer|client|buyer)s?$/.test(clean)) return 'customer';
-  if (/^(beverage|drink)s?$/.test(clean)) return 'beverage';
   if (clean.endsWith('ies') && clean.length > 4) return `${clean.slice(0, -3)}y`;
   if (clean.endsWith('s') && clean.length > 4) return clean.slice(0, -1);
   return clean;
