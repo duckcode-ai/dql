@@ -3692,7 +3692,13 @@ async function selectDeepGeneratedProposalCandidate(input: {
     parsed: input.initial.parsed,
     index: 1,
   });
-  if (initial.validationOk && (!input.executeGeneratedSql || (initial.result && !initial.executionError))) {
+  // Deep mode diversifies whenever we can COMPARE candidate results (an executor
+  // is available) — so a valid-but-subtly-wrong first candidate can be out-voted
+  // by execution-result agreement — or when the first candidate failed and needs a
+  // repair alternative. Without an executor, a validated first candidate is the
+  // most we can assess, so return it and skip the extra generations.
+  const shouldDiversify = Boolean(input.executeGeneratedSql) || !initial.validationOk;
+  if (!shouldDiversify) {
     return { selected: initial, notes: [] };
   }
 
@@ -3705,7 +3711,7 @@ async function selectDeepGeneratedProposalCandidate(input: {
       parsed: parseProposal(raw),
       index: offset + 2,
     }));
-    if (candidates.length >= 3) break;
+    if (candidates.length >= 5) break;
   }
 
   const signatureCounts = new Map<string, number>();
@@ -3735,10 +3741,19 @@ async function selectDeepGeneratedProposalCandidate(input: {
         ? `validated and previewed ${selected.result.rowCount.toLocaleString()} row(s)`
         : 'validated'
     : `failed validation: ${selected.validationError ?? 'unknown validation issue'}`;
+  // Surface how much the candidates disagreed: distinct execution-result
+  // signatures among the candidates that executed cleanly.
+  const executedCandidates = candidates.filter((candidate) => candidate.resultSignature);
+  const distinctResults = new Set(executedCandidates.map((candidate) => candidate.resultSignature)).size;
+  const agreementNote = executedCandidates.length > 1
+    ? distinctResults === 1
+      ? ` All ${executedCandidates.length} executed candidates agreed on the result.`
+      : ` Candidates disagreed: ${distinctResults} distinct results across ${executedCandidates.length} executed candidates — selected the highest-scoring.`
+    : '';
   return {
     selected,
     notes: [
-      `Deep candidate selection reviewed ${candidates.length} candidate${candidates.length === 1 ? '' : 's'} and selected candidate ${selected.index} (${status}).`,
+      `Deep candidate selection reviewed ${candidates.length} candidate${candidates.length === 1 ? '' : 's'} and selected candidate ${selected.index} (${status}).${agreementNote}`,
     ],
   };
 }
@@ -3813,10 +3828,14 @@ async function generateDeepAlternativeProposals(input: {
   const previousSql = input.initial.parsed.sql
     ? `\nInitial SQL candidate:\n\`\`\`sql\n${input.initial.parsed.sql}\n\`\`\``
     : '';
+  // Diverse candidate styles (CHASE-SQL-style): each explores the solution space
+  // differently so execution-result agreement between styles is a strong signal.
   const variants = [
     'Create a second candidate that favors the most direct inspected relations and explicit joins.',
-    'Create a third candidate that favors result-shape completeness and avoids assumptions hidden in the first candidate.',
+    'Create a third candidate using QUERY-PLAN reasoning: first outline the grain, measures, dimensions, and join path as steps, then write SQL that follows that plan exactly.',
+    'Create a fourth candidate by DECOMPOSITION: break the question into sub-questions, solve each as a CTE, then compose the final SELECT — avoiding assumptions hidden in the first candidate.',
   ];
+  const temperatures = [0.2, 0.35, 0.5];
   const out: string[] = [];
   for (const [index, instruction] of variants.entries()) {
     try {
@@ -3836,7 +3855,7 @@ async function generateDeepAlternativeProposals(input: {
       ], {
         signal: input.signal,
         reasoningEffort: input.reasoningEffort,
-        temperature: index === 0 ? 0.2 : 0.35,
+        temperature: temperatures[index] ?? 0.4,
       });
       if (raw.trim()) out.push(raw);
     } catch {

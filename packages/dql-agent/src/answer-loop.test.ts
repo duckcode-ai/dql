@@ -775,7 +775,9 @@ describe("answer (block-first loop)", () => {
       },
     });
 
-    expect(provider.calls).toHaveLength(3);
+    // Initial (invalid) + three diverse alternatives (direct / query-plan /
+    // decomposition) = 4 candidates generated.
+    expect(provider.calls).toHaveLength(4);
     expect(executedSql).toEqual([
       "SELECT region, COUNT(*) AS order_count FROM analytics.orders GROUP BY region",
     ]);
@@ -784,9 +786,49 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.rowCount).toBe(1);
     expect(result.validationWarnings).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("Deep candidate selection reviewed 3 candidates and selected candidate 2"),
+        expect.stringContaining("Deep candidate selection reviewed 4 candidates and selected candidate 2"),
       ]),
     );
+  });
+
+  it("deep mode diversifies even when the first candidate is clean, and reports agreement", async () => {
+    // All candidates return the same valid SQL, so they all execute and AGREE —
+    // but the point is that deep mode + an executor generates alternatives at all
+    // (a valid-but-wrong first candidate could otherwise never be out-voted).
+    const provider = new StubProvider(
+      [
+        "```json",
+        JSON.stringify({
+          summary: "Order count by region.",
+          sql: "SELECT region, COUNT(*) AS order_count FROM analytics.orders GROUP BY region",
+          viz: "bar",
+          outputs: ["region", "order_count"],
+        }),
+        "```",
+      ].join("\n"),
+    );
+    const result = await answer({
+      question: "Deep research order count by region",
+      provider,
+      kg,
+      analysisDepth: "deep",
+      schemaContext: [{
+        relation: "analytics.orders",
+        name: "orders",
+        columns: [{ name: "order_id" }, { name: "region" }],
+      }],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "order_count"],
+        rows: [{ region: "West", order_count: 3 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    // Initial + 3 diverse alternatives — diversified despite a clean first candidate.
+    expect(provider.calls.length).toBeGreaterThan(1);
+    expect(result.kind).toBe("uncertified");
+    expect(result.validationWarnings.join(" ")).toContain("executed candidates agreed on the result");
   });
 
   it("renders rich prior result refs from the conversation snapshot into generated-answer prompts", async () => {
