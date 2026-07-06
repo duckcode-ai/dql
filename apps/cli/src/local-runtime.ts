@@ -923,6 +923,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       ].join(' '),
     };
     const controller = new AbortController();
+    // Best-effort active warehouse dialect so Lane-2 semantic compiles emit
+    // dialect-correct SQL (e.g. DATE_TRUNC / identifier quoting). Absent when no
+    // connection is configured — the compiler then uses its default dialect.
+    let semanticDriver: string | undefined;
+    try {
+      semanticDriver = requireActiveConnection().driver;
+    } catch {
+      semanticDriver = undefined;
+    }
     await runner.run(
       {
         provider: resolvedProvider,
@@ -938,6 +947,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
         projectRoot,
+        ...(semanticDriver ? { semanticDriver } : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
         getSchemaContext: getSchemaContextForAgent,
@@ -3176,6 +3186,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // DRAFT proposals (each with its stored Certifier verdict) so the notebook
     // "Get Started" surface can route them into human review. dryRun preview —
     // nothing is written or certified by this call.
+    if (req.method === 'GET' && path === '/api/agent-runs/tier-distribution') {
+      try {
+        const store = getConversationStore();
+        const limitParam = Number(url.searchParams.get('limit'));
+        const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
+        const distribution = store
+          ? store.tierDistribution({ ...(limit ? { limit } : {}) })
+          : { total: 0, byRouteTier: {}, byTerminalLane: {} };
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(distribution));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if ((req.method === 'GET' || req.method === 'POST') && path === '/api/propose') {
       try {
         let owner: string | undefined;

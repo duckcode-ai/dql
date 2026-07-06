@@ -130,6 +130,10 @@ export interface AgentRunRequest {
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string) => Promise<AgentSchemaTable[]>;
+  /** Active warehouse dialect so Lane-2 semantic compiles emit dialect-correct SQL. */
+  semanticDriver?: string;
+  /** Logical->physical table mapping for the semantic compiler, when resolved. */
+  semanticTableMapping?: Record<string, string>;
 }
 
 export interface AgentRunner {

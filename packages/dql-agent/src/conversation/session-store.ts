@@ -290,6 +290,35 @@ export class ConversationStore {
     return rows.map(rowToTurn).reverse();
   }
 
+  /**
+   * Which cascade tiers have answered recently, across all threads. Powers a
+   * tier-distribution surface so you can see the governance ladder shift upward
+   * (more certified/semantic answers) as usage compounds.
+   */
+  tierDistribution(options: { limit?: number } = {}): {
+    total: number;
+    byRouteTier: Record<string, number>;
+    byTerminalLane: Record<string, number>;
+  } {
+    const limit = options.limit ?? 500;
+    const rows = this.db.prepare(`
+      SELECT * FROM conversation_turns ORDER BY created_at DESC LIMIT ?
+    `).all(limit) as TurnRow[];
+    const byRouteTier: Record<string, number> = {};
+    const byTerminalLane: Record<string, number> = {};
+    let total = 0;
+    for (const turn of rows.map(rowToTurn)) {
+      const routeTier = turn.cascade?.routeTier;
+      const terminalLane = turn.cascade?.terminalLane;
+      if (routeTier) {
+        byRouteTier[routeTier] = (byRouteTier[routeTier] ?? 0) + 1;
+        total += 1;
+      }
+      if (terminalLane) byTerminalLane[terminalLane] = (byTerminalLane[terminalLane] ?? 0) + 1;
+    }
+    return { total, byRouteTier, byTerminalLane };
+  }
+
   /** Turns older than the compaction cursor and outside the recent window (for rolling summary). */
   turnsForCompaction(threadId: string, afterSeq: number, beforeSeq: number): ConversationTurn[] {
     const rows = this.db.prepare(`

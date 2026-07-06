@@ -99,6 +99,20 @@ describe('ConversationStore', () => {
     });
   });
 
+  it('aggregates tier distribution across threads', () => {
+    const t1 = store.createThread();
+    const t2 = store.createThread();
+    store.appendTurn(t1.id, { question: 'a', cascade: { terminalLane: 'certified', routeTier: 'certified_block', label: 'x', outcome: { lane: 'certified', routeTier: 'certified_block', executionStatus: 'executed' } } });
+    store.appendTurn(t1.id, { question: 'b', cascade: { terminalLane: 'semantic', routeTier: 'semantic_metric', label: 'x', outcome: { lane: 'semantic', routeTier: 'semantic_metric' } } });
+    store.appendTurn(t2.id, { question: 'c', cascade: { terminalLane: 'semantic', routeTier: 'semantic_metric', label: 'x', outcome: { lane: 'semantic', routeTier: 'semantic_metric' } } });
+    store.appendTurn(t2.id, { question: 'd', cascade: { terminalLane: 'generated', routeTier: 'generated_sql', label: 'x', outcome: { lane: 'generated', routeTier: 'generated_sql', hasSqlPreview: true, executionStatus: 'executed' } } });
+
+    const dist = store.tierDistribution();
+    expect(dist.total).toBe(4);
+    expect(dist.byRouteTier).toMatchObject({ certified_block: 1, semantic_metric: 2, generated_sql: 1 });
+    expect(dist.byTerminalLane).toMatchObject({ certified: 1, semantic: 2, generated: 1 });
+  });
+
   it('searches turns by keyword, scoped to a thread', () => {
     const revenueThread = store.createThread();
     const signupThread = store.createThread();

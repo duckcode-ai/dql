@@ -344,6 +344,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             signal,
             reasoningEffort: req.reasoningEffort,
             analysisDepth: contextBudget.analysisDepth,
+            ...(req.semanticDriver ? { semanticDriver: req.semanticDriver } : {}),
+            ...(req.semanticTableMapping ? { semanticTableMapping: req.semanticTableMapping } : {}),
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot),
