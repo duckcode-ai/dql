@@ -120,6 +120,22 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
     })
   ), [notebookFilesByPath, researchWorkspaceStats.missingNotebooks, summaries]);
 
+  // The one notebook (if any) whose saved AI history we open from the compact
+  // "Open history" affordance — the first research run that still has its file.
+  const primaryResearchFile = useMemo(() => {
+    for (const summary of summaries) {
+      if (summary.total <= 0) continue;
+      const file = notebookFilesByPath.get(summary.path);
+      if (file) return file;
+    }
+    return undefined;
+  }, [summaries, notebookFilesByPath]);
+  const openHistory = () => {
+    if (!primaryResearchFile) return;
+    if (onOpenResearchFile) onOpenResearchFile(primaryResearchFile);
+    else onOpenFile(primaryResearchFile);
+  };
+
   return (
     <div
       style={{
@@ -150,7 +166,8 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
               Notebook workspace
             </h1>
             <p style={{ margin: '8px 0 0', color: t.textSecondary, fontSize: 13, lineHeight: 1.55, maxWidth: 520 }}>
-              Open an existing notebook or start a focused analysis.
+              Open a notebook to explore data — write SQL/DQL, chart the results, and
+              promote governed blocks. Create a new one to start a focused analysis.
             </p>
           </div>
           <span
@@ -192,24 +209,10 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
           />
         </div>
 
-        {activeResearchCount > 0 && (
-          <ResearchQueueOverview
-            items={researchQueueItems}
-            totals={researchQueueTotals}
-            ownerSummaries={ownerSummaries}
-            onOpenFile={onOpenFile}
-            onOpenResearchFile={onOpenResearchFile}
-            t={t}
-          />
-        )}
-
+        {/* Recent notebooks — the primary content: open one to keep working. */}
         <div style={{ borderTop: `1px solid ${t.cellBorder}`, paddingTop: 16 }}>
           <div
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 12,
               color: t.textMuted,
               fontSize: 11,
               fontWeight: 800,
@@ -217,22 +220,10 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
               marginBottom: 10,
             }}
           >
-            <span>Recent notebooks</span>
-            {activeResearchCount > 0 && (
-              <span
-                style={{
-                  color: t.accent,
-                  fontSize: 11,
-                  fontWeight: 800,
-                  textTransform: 'none',
-                }}
-              >
-                {recentResearchLabel}
-              </span>
-            )}
+            Recent notebooks
           </div>
           {recentFiles.length === 0 ? (
-            <div style={{ color: t.textMuted, fontSize: 13 }}>No notebooks yet.</div>
+            <div style={{ color: t.textMuted, fontSize: 13 }}>No notebooks yet — create one to get started.</div>
           ) : (
             <div style={{ display: 'grid', gap: 8 }}>
               {recentFiles.map(({ file, researchSummary }) => (
@@ -247,6 +238,34 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
             </div>
           )}
         </div>
+
+        {/* Saved AI history — a quiet, secondary pointer. Reopen only for audit /
+            review / DQL promotion. Orphaned runs (deleted notebooks) are hidden here
+            and live behind "Open history". */}
+        {researchWorkspaceStats.openResearch > 0 && primaryResearchFile && (
+          <button
+            type="button"
+            onClick={openHistory}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+              border: `1px solid ${t.cellBorder}`, borderRadius: 8, background: t.inputBg,
+              color: t.textSecondary, padding: '10px 12px', cursor: 'pointer', fontFamily: t.font,
+            }}
+          >
+            <ListChecks size={16} strokeWidth={2} color={t.accent} aria-hidden="true" />
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block', fontSize: 12.5, fontWeight: 750, color: t.textPrimary }}>Saved AI history</span>
+              <span style={{ display: 'block', fontSize: 11, color: t.textMuted, marginTop: 1, lineHeight: 1.4 }}>
+                {researchWorkspaceStats.openResearch.toLocaleString()} saved run{researchWorkspaceStats.openResearch === 1 ? '' : 's'} across{' '}
+                {researchWorkspaceStats.openNotebooks.toLocaleString()} notebook{researchWorkspaceStats.openNotebooks === 1 ? '' : 's'} — reopen for audit, review, or DQL promotion.
+              </span>
+            </span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.accent, fontSize: 12, fontWeight: 850, flexShrink: 0 }}>
+              Open history
+              <ArrowRight size={14} strokeWidth={2.1} aria-hidden="true" />
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );
