@@ -42,7 +42,7 @@ import {
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
-import { ChartOutput } from '../output/ChartOutput';
+import { ChartOutput, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import type { QueryResult, AppSummary, CellChartConfig } from '../../store/types';
 import { buildConversationContext } from './agentConversationContext';
@@ -1783,7 +1783,7 @@ export function deriveResultChartConfig(result: QueryResult, base?: CellChartCon
 
 function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult; themeMode: ThemeMode; t: Theme; chartConfig?: CellChartConfig }) {
   const isEmpty = result.rows.length === 0;
-  // User overrides from the chart-settings gear (type / X / Y / palette …).
+  // User overrides from the chart-type picker / settings gear (type / X / Y / palette …).
   const [override, setOverride] = useState<CellChartConfig | undefined>();
   const base = useMemo<CellChartConfig>(() => ({ ...(chartConfig ?? {}), ...(override ?? {}) }), [chartConfig, override]);
   const { config: effectiveChart, chartable } = deriveResultChartConfig(result, base);
@@ -1793,14 +1793,35 @@ function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult
     fontSize: 11, fontWeight: 700, padding: '2px 4px', color: active ? t.accent : t.textMuted,
     borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
   });
+  // Reflect the active chart type in the picker; fall back to bar if the resolved
+  // type isn't one of the standard options.
+  const currentChartType = CHART_TYPE_OPTIONS.some((option) => option.value === effectiveChart.chart)
+    ? effectiveChart.chart
+    : 'bar';
   return (
     <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        {/* Chart tab shows whenever the data can be plotted; the gear inside the
-            chart lets the user change type / axes. */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        {/* Chart tab shows whenever the data can be plotted; the picker + gear let
+            the user pick the chart type and axes manually. */}
         {chartable && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>}
         {chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>}
         {!chartable && !isEmpty && <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>Table</span>}
+        {chartable && view === 'chart' ? (
+          <select
+            value={currentChartType}
+            onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), chart: event.target.value }))}
+            title="Chart type"
+            style={{
+              fontFamily: t.font, fontSize: 10.5, fontWeight: 600, color: t.textSecondary,
+              background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5,
+              padding: '1px 4px', cursor: 'pointer',
+            }}
+          >
+            {CHART_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        ) : null}
         <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
       <div style={{ padding: 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
