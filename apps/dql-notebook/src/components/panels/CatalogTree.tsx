@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Bookmark, Box, Boxes, ChevronDown, ChevronRight, Clock, Filter, Folder,
-  Gauge, GitBranch, Layers, Sigma, Tag,
+  Gauge, GitBranch, Layers, Sigma, Sparkles, Tag,
 } from 'lucide-react';
 import type { SemanticTreeNode } from '../../store/types';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
@@ -97,11 +97,14 @@ export function SemanticTreeView({
   themeMode,
   search = '',
   onInsert,
+  onSeedBlock,
 }: {
   tree: SemanticTreeNode;
   themeMode: ThemeMode;
   search?: string;
   onInsert: (ref: string) => void;
+  /** When set, insertable leaves show a "Build block" action (AI, governed). */
+  onSeedBlock?: (ref: string, label: string) => void;
 }) {
   const t = themes[themeMode];
   const q = search.trim().toLowerCase();
@@ -109,10 +112,10 @@ export function SemanticTreeView({
   if (roots.length === 0) {
     return <div style={{ padding: '16px 12px', fontSize: 11.5, color: t.textMuted, textAlign: 'center' }}>{q ? 'No matches.' : 'No semantic objects.'}</div>;
   }
-  return <>{roots.map((node) => <TreeNodeRow key={node.id} node={node} t={t} q={q} onInsert={onInsert} depth={0} />)}</>;
+  return <>{roots.map((node) => <TreeNodeRow key={node.id} node={node} t={t} q={q} onInsert={onInsert} onSeedBlock={onSeedBlock} depth={0} />)}</>;
 }
 
-function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; t: Theme; q: string; onInsert: (ref: string) => void; depth: number }) {
+function TreeNodeRow({ node, t, q, onInsert, onSeedBlock, depth }: { node: SemanticTreeNode; t: Theme; q: string; onInsert: (ref: string) => void; onSeedBlock?: (ref: string, label: string) => void; depth: number }) {
   const hasChildren = (node.children?.length ?? 0) > 0;
   const [open, setOpen] = useState(depth < 1 || Boolean(q));
   const insertable = INSERTABLE.has(node.kind);
@@ -121,20 +124,35 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
   const pad = 10 + depth * 13;
 
   if (!hasChildren) {
+    // A flex row (not a nested button) so an optional "Build block" action can sit
+    // beside the insert action without invalid button-in-button markup.
     return (
-      <button
-        type="button"
-        onClick={() => insertable && onInsert(nodeRef(node))}
-        title={insertable ? `Insert ${nodeRef(node)}` : node.label}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 7, width: '100%', minWidth: 0, boxSizing: 'border-box',
-          padding: `5px 10px 5px ${pad + 15}px`, border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
-          background: 'transparent', cursor: insertable ? 'pointer' : 'default', textAlign: 'left', fontFamily: t.font, color: t.textPrimary,
-        }}
-      >
-        {Icon && <Icon size={13} color={icon.tone(t)} style={{ flexShrink: 0 }} />}
-        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{node.label}</span>
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0, borderBottom: `1px solid ${t.cellBorder}` }}>
+        <button
+          type="button"
+          onClick={() => insertable && onInsert(nodeRef(node))}
+          title={insertable ? `Insert ${nodeRef(node)}` : node.label}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 7, flex: 1, minWidth: 0, boxSizing: 'border-box',
+            padding: `5px 6px 5px ${pad + 15}px`, border: 'none', background: 'transparent',
+            cursor: insertable ? 'pointer' : 'default', textAlign: 'left', fontFamily: t.font, color: t.textPrimary,
+          }}
+        >
+          {Icon && <Icon size={13} color={icon.tone(t)} style={{ flexShrink: 0 }} />}
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{node.label}</span>
+        </button>
+        {onSeedBlock && insertable ? (
+          <button
+            type="button"
+            title={`Build a governed block from ${node.label}`}
+            onClick={() => onSeedBlock(nodeRef(node), node.label)}
+            className="dql-hover"
+            style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.accent, display: 'flex', padding: '4px 8px', flexShrink: 0 }}
+          >
+            <Sparkles size={12} strokeWidth={2.2} />
+          </button>
+        ) : null}
+      </div>
     );
   }
   const children = (node.children ?? []).filter((child) => matchesTree(child, q));
@@ -154,7 +172,7 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{node.label}</span>
         <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{node.count ?? children.length}</span>
       </button>
-      {open && children.map((child) => <TreeNodeRow key={child.id} node={child} t={t} q={q} onInsert={onInsert} depth={depth + 1} />)}
+      {open && children.map((child) => <TreeNodeRow key={child.id} node={child} t={t} q={q} onInsert={onInsert} onSeedBlock={onSeedBlock} depth={depth + 1} />)}
     </div>
   );
 }

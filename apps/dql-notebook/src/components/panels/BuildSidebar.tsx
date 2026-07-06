@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, KeyRound, Layers, Link2, Plus, Search, Type } from 'lucide-react';
+import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, KeyRound, Layers, Link2, Plus, Search, Sparkles, Type } from 'lucide-react';
 import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
@@ -30,13 +30,15 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
   tabs?: BuildTab[];
   /** Override the insert action (e.g. Block Studio appends to the block draft). */
   onInsertText?: (text: string) => void;
+  /** When set, catalog rows show a "Build block" action (governed AI). Block Studio only. */
+  onSeedBlock?: (ref: string, label: string) => void;
 }) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -99,8 +101,8 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText }: {
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
-        {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} />}
-        {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
+        {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} onSeedBlock={onSeedBlock} />}
+        {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} onSeedBlock={onSeedBlock} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} />}
       </div>
     </div>
@@ -180,7 +182,7 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
   );
 }
 
-function SemanticList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {
+function SemanticList({ t, search, onInsert, onSeedBlock }: { t: Theme; search: string; onInsert: (text: string) => void; onSeedBlock?: (ref: string, label: string) => void }) {
   const { state } = useNotebook();
   const [tree, setTree] = useState<SemanticTreeNode | null>(null);
   const [loading, setLoading] = useState(true);
@@ -199,10 +201,10 @@ function SemanticList({ t, search, onInsert }: { t: Theme; search: string; onIns
 
   if (loading && !tree) return <EmptyNote text="Loading semantic layer…" t={t} />;
   if (!tree || (tree.children?.length ?? 0) === 0) return <EmptyNote text="No semantic layer imported yet." t={t} />;
-  return <SemanticTreeView tree={tree} themeMode={state.themeMode} search={search} onInsert={onInsert} />;
+  return <SemanticTreeView tree={tree} themeMode={state.themeMode} search={search} onInsert={onInsert} onSeedBlock={onSeedBlock} />;
 }
 
-function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {
+function DatabaseList({ t, search, onInsert, onSeedBlock }: { t: Theme; search: string; onInsert: (text: string) => void; onSeedBlock?: (ref: string, label: string) => void }) {
   const { state } = useNotebook();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const q = search.trim().toLowerCase();
@@ -242,6 +244,17 @@ function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onIns
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontFamily: t.fontMono }}>{tb.name}</span>
                 <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{tb.columns.length}</span>
               </button>
+              {onSeedBlock ? (
+                <button
+                  type="button"
+                  title={`Build a governed block from ${tb.name}`}
+                  onClick={() => onSeedBlock(tb.path || tb.name, tb.name)}
+                  className="dql-hover"
+                  style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.accent, display: 'flex', padding: '2px 6px', flexShrink: 0 }}
+                >
+                  <Sparkles size={12} strokeWidth={2.2} />
+                </button>
+              ) : null}
             </div>
             {open && tb.columns.map((col) => {
               const relation = columnRelation(col.name, tb.name);
