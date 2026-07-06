@@ -403,17 +403,26 @@ Full workspace suite green: 40/40 turbo tasks.
 - **R2.1** ✅ Notebook trust badge renders from canonical `trustLabelInfo.id`; legacy fallback
   kept. Exported + tested.
 
-**Deferred with complete technical reasoning (each needs a different mode of work):**
-- **R2.2** — review-dashboard *panel* UI + `resultSample` execution wiring. Backend largely exists
-  (certify endpoint, review payload, nearest-certified diff). Needs live-preview-driven UI work.
-- **R2.3** — engine short-circuit: `semantic_metric` and `generated_sql` share the
-  `generated_answer` route and `StepOutcome` carries no tier, so terminating semantic without
-  regressing multi-step research needs the tier threaded through the outcome — a narrow payoff.
-  Best folded into R3.6.
-- **R2.8** — DataLex joins: relationship semantics live in the dql-mcp registry, not the catalog;
-  needs DataLex relationship-edge ingestion + fixture.
-- **R3.6** — lane-extraction refactor of the 4,500-line `runAnswerLoop`; shared closure state
-  makes it a large, risk-sensitive refactor deserving its own focused session.
+**2026-07-05 (final batch) — remaining items completed / advanced** (commits 52bdcce, 0a79861,
+573de3e). Full workspace suite green: 40/40 turbo tasks.
+
+- **R2.8** ✅ DataLex manifest relationships ingested as `datalex_join` edges (entity→binding
+  object key); `buildSelectedJoinPaths` emits `source: 'datalex'` join paths on the declared
+  canonical columns, ranked above name heuristics. End-to-end pack test.
+- **R2.2** ✅ (surfaced) `reviewTelemetry` added to the client type and rendered as a review-queue
+  metrics strip on the Readiness page (drafts-ready %, median draft age, est. review time). The
+  certify backend + review-queue routing already existed. `resultSample` execution-population
+  remains a small follow-on.
+- **R3.6** ◑ (incremental) Extracted the Lane-2 member-selection helper into
+  `semantic-bridge/member-select.ts` with 5 dedicated unit tests (zero behavior change);
+  answer-loop.ts 4,690 → 4,583. The full reduction to <1,500 lines needs the deeply-stateful lane
+  bodies extracted — a large, risk-sensitive refactor best done incrementally in a focused session.
+- **R2.3** ⏸️ Still coupled to the full R3.6 — the short-circuit needs the answer tier threaded
+  through `StepOutcome`, cleanest once the lanes are first-class. Narrow payoff standalone.
+
+**Net remaining after this marathon:** the full `runAnswerLoop` lane-body extraction (R3.6) and
+the R2.3 short-circuit that depends on it — one focused refactoring session — plus the small
+`resultSample` execution wiring. Everything else in the remediation plan is implemented and tested.
 
 ## Definition of done for RFC 0001
 
