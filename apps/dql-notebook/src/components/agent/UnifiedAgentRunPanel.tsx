@@ -39,9 +39,9 @@ import {
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
-import { ChartOutput } from '../output/ChartOutput';
+import { ChartOutput, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
-import type { QueryResult, AppSummary } from '../../store/types';
+import type { QueryResult, AppSummary, CellChartConfig } from '../../store/types';
 import { buildConversationContext } from './agentConversationContext';
 import { emitNotebookResearchChanged } from '../../utils/notebook-research';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
@@ -1375,7 +1375,7 @@ function ArtifactView({
           <span style={{ color: t.accent }}>→</span><span>{recommendation}</span>
         </div>
       ) : null}
-      {resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} /> : null}
+      {resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={extractChartConfig(payload, resultData)} /> : null}
       {dqlArtifact ? (
         <details>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -1621,14 +1621,55 @@ function extractResult(payload: Record<string, unknown>): QueryResult | undefine
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') continue;
     const record = candidate as Record<string, unknown>;
+    // A result-shaped object has a rows array and/or a columns array. Anything
+    // else isn't a query result.
+    if (!Array.isArray(record.rows) && !Array.isArray(record.columns)) continue;
     const rows = Array.isArray(record.rows) ? record.rows.filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object')) : [];
-    if (rows.length === 0) continue;
     const columns = Array.isArray(record.columns) && record.columns.length > 0
       ? record.columns.map((c) => (typeof c === 'string' ? c : (c as { name?: string })?.name ?? String(c)))
-      : Object.keys(rows[0]);
+      : (rows.length > 0 ? Object.keys(rows[0]) : []);
+    // Return a legitimately-empty result (0 rows, known columns/rowCount) so it
+    // renders as "0 rows matched" instead of vanishing — a run that executed and
+    // matched nothing must be distinguishable from one that produced no result.
+    if (rows.length === 0 && columns.length === 0 && typeof record.rowCount !== 'number') continue;
     return { columns, rows, rowCount: typeof record.rowCount === 'number' ? record.rowCount : rows.length } as QueryResult;
   }
   return undefined;
+}
+
+/**
+ * Recover the agent's intended chart configuration (type + x/y/color/palette) from
+ * an answer artifact so the live result view honors it instead of auto-guessing —
+ * parity with AgentAnswerCard. Falls back to `suggestedViz` for the chart type and
+ * fills in sensible x/y from the columns when the agent didn't specify them.
+ */
+function extractChartConfig(payload: Record<string, unknown>, result: QueryResult): CellChartConfig | undefined {
+  const resultRecord = payload.result && typeof payload.result === 'object' ? payload.result as Record<string, unknown> : undefined;
+  const raw = (resultRecord?.chartConfig && typeof resultRecord.chartConfig === 'object'
+    ? resultRecord.chartConfig
+    : payload.chartConfig && typeof payload.chartConfig === 'object'
+      ? payload.chartConfig
+      : {}) as Record<string, unknown>;
+  const suggested = typeof payload.suggestedViz === 'string' ? payload.suggestedViz
+    : typeof resultRecord?.suggestedViz === 'string' ? resultRecord.suggestedViz
+    : undefined;
+  const chartRaw = typeof raw.chart === 'string' ? raw.chart : suggested;
+  const chart = chartRaw
+    ? (chartRaw.toLowerCase().replace(/_/g, '-') === 'single-value' ? 'kpi' : chartRaw)
+    : undefined;
+  const columns = result.columns;
+  const pick = (key: string): string | undefined =>
+    typeof raw[key] === 'string' && columns.includes(raw[key] as string) ? raw[key] as string : undefined;
+  const config: CellChartConfig = {
+    ...(chart ? { chart } : {}),
+    ...(pick('x') ? { x: pick('x') } : {}),
+    ...(pick('y') ? { y: pick('y') } : {}),
+    ...(pick('color') ? { color: pick('color') } : {}),
+    ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
+    ...(typeof raw.colorPalette === 'string' ? { colorPalette: raw.colorPalette as CellChartConfig['colorPalette'] } : {}),
+    ...(typeof raw.maxItems === 'number' ? { maxItems: raw.maxItems } : {}),
+  };
+  return Object.keys(config).length > 0 ? config : undefined;
 }
 
 export function resolveArtifactDqlView(payload: Record<string, unknown>): AgentConversationDqlArtifact | undefined {
@@ -1645,8 +1686,12 @@ export function artifactSqlDisclosureLabel(hasDqlArtifact: boolean): string {
 }
 
 /** Notebook-cell-style result view: chart + table toggle, reusing the same renderers. */
-function ResultView({ result, themeMode, t }: { result: QueryResult; themeMode: ThemeMode; t: Theme }) {
-  const [view, setView] = useState<'chart' | 'table'>('chart');
+function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult; themeMode: ThemeMode; t: Theme; chartConfig?: CellChartConfig }) {
+  const isEmpty = result.rows.length === 0;
+  // Honor the agent's chosen visualization; only default to table when it resolves
+  // to a table (or there's nothing to chart).
+  const chartable = !isEmpty && resolveChartType(result, chartConfig) !== 'table';
+  const [view, setView] = useState<'chart' | 'table'>(chartable ? 'chart' : 'table');
   const tabStyle = (active: boolean): React.CSSProperties => ({
     border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: t.font,
     fontSize: 11, fontWeight: 700, padding: '2px 4px', color: active ? t.accent : t.textMuted,
@@ -1655,14 +1700,18 @@ function ResultView({ result, themeMode, t }: { result: QueryResult; themeMode: 
   return (
     <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, overflow: 'hidden' }}>
       <div style={{ display: 'flex', gap: 8, padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>
-        <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>
+        {!isEmpty && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>}
+        {!isEmpty && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>}
         <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
-      <div style={{ padding: 8, minHeight: view === 'chart' ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
-        {view === 'chart'
-          ? <ChartOutput result={result} themeMode={themeMode} />
-          : <TableOutput result={result} themeMode={themeMode} />}
+      <div style={{ padding: 8, minHeight: view === 'chart' && !isEmpty ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
+        {isEmpty
+          ? <div style={{ padding: '18px 8px', textAlign: 'center', color: t.textMuted, fontSize: 12 }}>
+              The query ran successfully and matched 0 rows{result.columns.length > 0 ? ` (columns: ${result.columns.join(', ')})` : ''}.
+            </div>
+          : view === 'chart'
+            ? <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
+            : <TableOutput result={result} themeMode={themeMode} />}
       </div>
     </div>
   );

@@ -395,19 +395,27 @@ export function constrainRouteForAudience(route: AgentRunRoute, audience: AgentR
 }
 
 /**
- * "Answer anyway, labeled" — a stakeholder should get a best-effort governed answer
- * rather than a dead-end clarify, UNLESS the catalog explicitly flagged missing
- * context. The answer loop does its own grounding/retrieval and can still return a
- * needs-clarification result if it genuinely can't proceed.
+ * "Answer anyway, labeled" — get a best-effort governed answer rather than a
+ * dead-end clarify. The answer loop does its own grounding/retrieval and can still
+ * return a needs-clarification result if it genuinely can't proceed.
+ *
+ * - A SOFT clarify ("nothing governed matched") is answered anyway for EVERY
+ *   audience — analysts included — so a real analytical question never dead-ends.
+ * - A genuine clarify (explicit missing context, explicit clarify intent, or a
+ *   trust-gap review) stays a clarify for analysts; stakeholders keep the legacy
+ *   answer-anyway affordance unless the catalog explicitly flagged missing context.
  */
 export function answerAnywayRoute(
   route: AgentRunRoute,
   request: AgentRunRequest,
   audience: AgentRunAudience,
+  decision?: IntentDecision,
 ): AgentRunRoute {
-  if (audience !== "stakeholder" || route !== "clarify") return route;
+  if (route !== "clarify") return route;
   const explicitMissing = (request.signals?.missingContext?.length ?? 0) > 0;
-  return explicitMissing ? "clarify" : "generated_answer";
+  if (decision?.clarifySoft === true && !explicitMissing) return "generated_answer";
+  if (audience === "stakeholder" && !explicitMissing) return "generated_answer";
+  return "clarify";
 }
 
 /**
@@ -649,6 +657,7 @@ export class AgentRunEngine {
       constrainRouteForAudience(selectRoute(request, routeDecision), audience),
       request,
       audience,
+      routeDecision,
     );
 
     try {
@@ -672,7 +681,7 @@ export class AgentRunEngine {
       // without explicit missing context.
       const queue: AgentRunPlannedStep[] = plan.steps.map((step) => ({
         ...step,
-        route: answerAnywayRoute(constrainRouteForAudience(step.route, audience), request, audience),
+        route: answerAnywayRoute(constrainRouteForAudience(step.route, audience), request, audience, routeDecision),
       }));
       const budgets = createCascadeBudgetState(this.budgetModel);
       let stepCount = 0;
@@ -680,6 +689,10 @@ export class AgentRunEngine {
       let finalResult: AgentRouteExecutorResult | undefined;
       let finalOutcome: StepOutcome | undefined;
       let clarifyOutcome: { step: AgentRunStep; question?: string } | undefined;
+      // The last step that actually produced a user-facing answer. A later
+      // non-answer step (e.g. a research/draft step that emits only an artifact)
+      // must not drop the data answer an earlier step already computed.
+      let bestAnswerResult: AgentRouteExecutorResult | undefined;
 
       while (queue.length > 0 && stepCount < this.maxSteps) {
         const planned = queue.shift()!;
@@ -922,6 +935,9 @@ export class AgentRunEngine {
         finalStep = step;
         finalResult = result;
         finalOutcome = outcome;
+        if (outcome.status !== "blocked" && typeof result.answer === "string" && result.answer.trim().length > 0) {
+          bestAnswerResult = result;
+        }
 
         if (outcome.status === "blocked") break;
         if (isTerminalSuccess(route, outcome)) break;
@@ -940,6 +956,7 @@ export class AgentRunEngine {
         finalResult,
         finalOutcome,
         clarifyOutcome,
+        bestAnswerResult,
         budgetUsage: cascadeBudgetTrace(budgets),
         events,
       });
@@ -1008,6 +1025,7 @@ export class AgentRunEngine {
     finalResult?: AgentRouteExecutorResult;
     finalOutcome?: StepOutcome;
     clarifyOutcome?: { step: AgentRunStep; question?: string };
+    bestAnswerResult?: AgentRouteExecutorResult;
     budgetUsage: CascadeBudgetTrace;
     events: AgentRunEvent[];
   }): AgentRun {
@@ -1054,6 +1072,11 @@ export class AgentRunEngine {
     // (e.g. research → block draft) surfaces all of its durable work, while the
     // status/trust/answer reflect the final step.
     const artifacts = input.steps.flatMap((step) => step.artifacts);
+    // If the final step produced no user-facing answer (e.g. it only drafted an
+    // artifact), fall back to the last step that DID answer so the run never
+    // drops a data answer an earlier step already computed.
+    const finalHasAnswer = typeof finalResult.answer === "string" && finalResult.answer.trim().length > 0;
+    const answerSource = finalHasAnswer ? finalResult : (input.bestAnswerResult ?? finalResult);
     return {
       id: input.runId,
       question: input.request.question,
@@ -1069,8 +1092,8 @@ export class AgentRunEngine {
       plan: input.plan,
       steps: input.steps,
       summary: finalOutcome.summary,
-      answer: input.clarifyOutcome?.question ?? finalResult.answer,
-      answerKind: finalResult.answerKind ?? "governed",
+      answer: input.clarifyOutcome?.question ?? answerSource.answer,
+      answerKind: answerSource.answerKind ?? "governed",
       artifacts,
       evaluations: finalStep.evaluations,
       events: input.events,

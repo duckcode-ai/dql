@@ -57,6 +57,13 @@ export interface IntentDecision {
   reason: string;
   /** Present when action is clarify: the single question to ask. */
   clarifyingQuestion?: string;
+  /**
+   * True when this clarify is a SOFT fallback ("nothing governed matched") rather
+   * than a genuine missing-context / explicit-clarify / trust-review ask. A soft
+   * clarify may be answered anyway (best-effort, labeled) for any audience instead
+   * of dead-ending; the answer loop can still clarify if it truly can't proceed.
+   */
+  clarifySoft?: boolean;
   /** True when the turn references prior context ("it", "that", "why", "more"). */
   followsUp: boolean;
   /** For converse: which conversational kind was detected. */
@@ -271,10 +278,13 @@ export function decideAgentAction(input: IntentDecisionInput): IntentDecision {
   }
 
   // 6) Default: nothing governed matched and it is not clearly analytical → clarify
-  //    honestly rather than guess.
+  //    honestly rather than guess. Marked SOFT so an analyst/stakeholder still gets a
+  //    best-effort grounded answer instead of a dead-end (the answer loop re-grounds
+  //    and can clarify itself if it genuinely can't proceed).
   return {
     action: 'clarify',
     confidence: 0.5,
+    clarifySoft: true,
     reason: 'I could not match this to a certified block, governed metric, or clear analysis, so I will ask for the missing detail.',
     clarifyingQuestion: buildClarifyingQuestion(question, signals),
     followsUp,

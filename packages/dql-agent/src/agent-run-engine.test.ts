@@ -632,6 +632,38 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     expect(run.route).toBe("dql_block_draft");
     expect(run.artifacts.map((artifact) => artifact.kind)).toEqual(["research_run", "dql_block_draft"]);
   });
+
+  it("preserves an earlier step's answer when the final step only drafts an artifact", async () => {
+    const planner: AgentRunPlanner = {
+      plan: () => ({
+        source: "llm",
+        rationale: "Answer, then draft a governed block.",
+        steps: [
+          { id: "s1", route: "generated_answer", goal: "Answer the question", successCriteria: [] },
+          { id: "s2", route: "dql_block_draft", goal: "Draft the metric block", successCriteria: [] },
+        ],
+      }),
+      replan: () => ({ decision: "accept" }),
+    };
+    const executors = {
+      generated_answer: (): AgentRouteExecutorResult => ({
+        summary: "Answered.",
+        answer: "Total revenue is $1.2M across 3 regions.",
+        artifacts: [{ id: "a1", kind: "answer" as const, title: "Answer", trustState: "review_required" as const, payload: {} }],
+      }),
+      dql_block_draft: (): AgentRouteExecutorResult => ({
+        summary: "Draft done.",
+        // A later step that only drafts an artifact must not drop the earlier answer.
+        artifacts: [{ id: "b1", kind: "dql_block_draft" as const, title: "Block", trustState: "review_required" as const, payload: { certifierVerdict: { ready: true } } }],
+      }),
+    };
+    const engine = new AgentRunEngine({ idGenerator: () => "run-preserve", now: fixedClock(), planner, gates: defaultAgentRunGates, executors });
+
+    const run = await engine.run({ question: "what is total revenue, then make a block" });
+
+    expect(run.steps.map((step) => step.route)).toEqual(["generated_answer", "dql_block_draft"]);
+    expect(run.answer).toBe("Total revenue is $1.2M across 3 regions.");
+  });
 });
 
 describe("AgentRunEngine audience", () => {
@@ -689,9 +721,20 @@ describe("AgentRunEngine audience", () => {
     expect(run.route).toBe("clarify");
   });
 
-  it("keeps the analyst default (clarify) untouched", async () => {
-    const engine = new AgentRunEngine({ idGenerator: () => "run-analyst-clarify", now: fixedClock() });
+  it("answers anyway for an analyst soft clarify (nothing governed matched) instead of dead-ending", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-analyst-anyway", now: fixedClock() });
     const run = await engine.run({ question: "what is total revenue?", intent: "ad_hoc_ranking", audience: "analyst" });
+    expect(run.route).toBe("generated_answer");
+  });
+
+  it("keeps a genuine analyst clarify (explicit missing context) as clarify", async () => {
+    const engine = new AgentRunEngine({ idGenerator: () => "run-analyst-missing", now: fixedClock() });
+    const run = await engine.run({
+      question: "show me the thing",
+      intent: "ad_hoc_ranking",
+      audience: "analyst",
+      signals: { missingContext: ["Which measure should I use?"] },
+    });
     expect(run.route).toBe("clarify");
   });
 
