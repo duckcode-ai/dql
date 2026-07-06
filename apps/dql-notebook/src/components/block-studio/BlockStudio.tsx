@@ -23,6 +23,7 @@ import { LineagePathSection, LayerSummary } from '../lineage/LineagePathBreadcru
 import type { CompletePathResult } from '../lineage/lineage-constants';
 import { TableOutput } from '../output/TableOutput';
 import { BlockLibraryPanel } from '../panels/BlockLibraryPanel';
+import { BuildSidebar } from '../panels/BuildSidebar';
 import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
@@ -750,121 +751,16 @@ export function BlockStudio() {
           </button>
         </div>
 
-        {/* v1.3.3 Hex cleanup — Semantic/Database as compact segmented
-            pair with inline underline (no bordered button boxes). */}
-        <div style={{ display: 'flex', padding: '0 14px', gap: 16, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <SegmentedTab active={explorerTab === 'blocks'} onClick={() => setExplorerTab('blocks')} label="Blocks" t={t} />
-          <SegmentedTab active={explorerTab === 'semantic'} onClick={() => setExplorerTab('semantic')} label="Semantic" t={t} />
-          <SegmentedTab active={explorerTab === 'database'} onClick={() => setExplorerTab('database')} label="Database" t={t} />
-        </div>
-
-        {explorerTab === 'blocks' ? (
-          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-            <BlockLibraryPanel />
-          </div>
-        ) : explorerTab === 'semantic' ? (
-          <>
-            <div style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}`, background: `${t.cellBg}66` }}>
-              <SemanticSearchBar
-                query={query}
-                provider={providerFilter}
-                cube={cubeFilter}
-                owner={ownerFilter}
-                domain={domainFilter}
-                tag={tagFilter}
-                type={typeFilter}
-                providers={providerOptions}
-                cubes={cubeOptions}
-                owners={ownerOptions}
-                domains={state.semanticLayer.domains}
-                tags={state.semanticLayer.tags}
-                onQueryChange={setQuery}
-                onProviderChange={setProviderFilter}
-                onCubeChange={setCubeFilter}
-                onOwnerChange={setOwnerFilter}
-                onDomainChange={setDomainFilter}
-                onTagChange={setTagFilter}
-                onTypeChange={setTypeFilter}
-                t={t}
-              />
-            </div>
-            <div
-              ref={semanticTreeRef}
-              onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-              style={{ flex: 1, overflowY: 'auto', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}
-            >
-              {catalogError ? (
-                <div style={{ padding: 16, display: 'grid', gap: 8, textAlign: 'center' }}>
-                  <div style={{ fontSize: 12, color: '#f85149', fontFamily: t.font }}>{catalogError}</div>
-                  <button
-                    onClick={() => { setCatalogError(null); void refreshDatabaseTree(); }}
-                    style={{ fontSize: 11, color: t.accent, background: `${t.accent}18`, border: 'none', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontFamily: t.font }}
-                  >
-                    Retry
-                  </button>
-                </div>
-              ) : state.blockStudioCatalogLoading ? (
-                <EmptyPanel message="Loading semantic catalog…" />
-              ) : flatSemanticRows.length === 0 ? (
-                <EmptyPanel message="No semantic objects match the current filters." />
-              ) : (
-                <div style={{ height: totalTreeHeight, position: 'relative' }}>
-                  <div style={{ position: 'absolute', top: visibleRows.offsetTop, left: 0, right: 0 }}>
-                    {visibleRows.rows.map((row) => (
-                      <SemanticRow
-                        key={row.node.id}
-                        row={row}
-                        selectedId={selectedSemanticId}
-                        setSelectedId={setSelectedSemanticId}
-                        expanded={expanded}
-                        setExpanded={setExpanded}
-                        onInsert={handleSemanticInsert}
-                        favorites={new Set(state.semanticLayer.favorites)}
-                        dispatch={dispatch}
-                        t={t}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <MetricDetailPanel
-              item={selectedSemanticObject}
-              favorite={Boolean(selectedSemanticObject && state.semanticLayer.favorites.includes(selectedSemanticObject.name))}
-              onInsert={() => selectedSemanticObject && handleSemanticInsert(selectedSemanticObject)}
-              onPreview={() => {
-                if (selectedSemanticObject?.sql) {
-                  handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, selectedSemanticObject.sql));
-                }
-              }}
-              onCopySql={() => {
-                if (selectedSemanticObject?.sql) void navigator.clipboard.writeText(selectedSemanticObject.sql);
-              }}
-              onToggleFavorite={() => {
-                if (!selectedSemanticObject || (selectedSemanticObject.kind !== 'metric' && selectedSemanticObject.kind !== 'dimension')) return;
-                void api.toggleFavorite(selectedSemanticObject.name)
-                  .then((favorites) => dispatch({ type: 'SET_SEMANTIC_FAVORITES', favorites }));
-              }}
-              t={t}
-            />
-          </>
-        ) : (
-          <DatabaseExplorer
-            tree={filteredDatabaseTree}
-            totalTree={databaseTree}
-            expanded={expandedDbNodes}
-            setExpanded={setExpandedDbNodes}
-            onEnsureColumns={ensureDbColumns}
-            onInsert={handleDatabaseInsert}
-            query={databaseQuery}
-            onQueryChange={setDatabaseQuery}
-            stats={databaseStats}
-            connectionName={state.blockStudioCatalog?.connection.current ?? 'default'}
-            loadingNodes={loadingDbNodes}
-            onRefresh={refreshDatabaseTree}
-            t={t}
+        {/* Unified catalog — the same clean object-display as the notebook Build
+            sidebar (metrics/dimensions/time expand under a parent; blocks expand to
+            their description). Selected refs append to the block draft. */}
+        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <BuildSidebar
+            tabs={['blocks', 'semantic', 'database']}
+            defaultTab={explorerTab}
+            onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
           />
-        )}
+        </div>
       </div>
 
       <div
