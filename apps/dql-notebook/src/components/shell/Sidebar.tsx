@@ -1,11 +1,10 @@
 import React, { useRef, useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import { FilesPanel } from '../panels/FilesPanel';
+import { BuildSidebar } from '../panels/BuildSidebar';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { LineagePanel } from '../panels/LineagePanel';
-import { BlockLibraryPanel } from '../panels/BlockLibraryPanel';
 import { GitPanel } from '../panels/GitPanel';
 import { AppsPanel } from '../panels/AppsPanel';
 import type { NotebookFile } from '../../store/types';
@@ -15,8 +14,8 @@ interface SidebarProps {
 }
 
 const PANEL_TITLES: Record<string, string> = {
-  files: 'Explorer',
-  block_library: 'Block Library',
+  files: 'Build',
+  block_library: 'Build',
   lineage: 'Lineage',
   connection: 'Connection',
   reference: 'Quick Reference',
@@ -115,8 +114,8 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
 
       {/* Panel content */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {panel === 'files' && <FilesPanel onOpenFile={onOpenFile} />}
-        {panel === 'block_library' && <BlockLibraryPanel />}
+        {panel === 'files' && <BuildSidebar defaultTab="notebooks" onOpenFile={onOpenFile} />}
+        {panel === 'block_library' && <BuildSidebar defaultTab="blocks" onOpenFile={onOpenFile} />}
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}
         {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}
