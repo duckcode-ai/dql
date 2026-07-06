@@ -67,13 +67,9 @@ function AppInner() {
     api.listNotebooks().then((files) => {
       dispatch({ type: 'SET_FILES', files });
       dispatch({ type: 'SET_FILES_LOADING', loading: false });
-      // A set-up project stays on the default Apps view; a project with no
-      // governed blocks yet is routed into the onboarding flow.
-      if (!didLand.current) {
-        didLand.current = true;
-        const hasBlocks = files.some((file) => file.type === 'block');
-        if (!hasBlocks) dispatch({ type: 'SET_MAIN_VIEW', view: 'home' });
-      }
+      // Apps is the home view (store default). Setup lives under its own nav item,
+      // so we never force the setup page as the landing.
+      didLand.current = true;
     });
   }, [dispatch]);
 

@@ -204,7 +204,7 @@ export function WelcomeScreen({ onOpenFile, onOpenResearchFile }: WelcomeScreenP
           <ActionButton
             label="Home"
             Icon={Home}
-            onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'home' })}
+            onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'apps' })}
             t={t}
           />
         </div>
