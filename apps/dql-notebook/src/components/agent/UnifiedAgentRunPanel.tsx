@@ -43,6 +43,7 @@ import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme'
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
 import { ResultView } from '../output/ResultView';
+import { DraftReviewCard } from '../blocks/DraftReviewCard';
 export { deriveResultChartConfig } from '../output/ResultView';
 import type { QueryResult, AppSummary, CellChartConfig } from '../../store/types';
 import { buildConversationContext } from './agentConversationContext';
@@ -1363,6 +1364,43 @@ function ArtifactView({
     ? narration.keyFindings.filter((item): item is string => typeof item === 'string')
     : [];
   const recommendation = typeof narration?.recommendation === 'string' ? narration.recommendation : undefined;
+
+  // A governed DQL block draft renders through the shared draft-review card:
+  // DQL-first, grounding + enriched metadata + verdict, draft-first status.
+  if (artifact.kind === 'dql_block_draft') {
+    const strList = (v: unknown): string[] | undefined =>
+      Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined;
+    const verdict = payload.certifierVerdict && typeof payload.certifierVerdict === 'object'
+      ? payload.certifierVerdict as { blocking?: unknown; warnings?: unknown; ready?: unknown }
+      : undefined;
+    return (
+      <DraftReviewCard
+        t={t}
+        name={typeof payload.name === 'string' ? payload.name : name}
+        status="draft"
+        description={typeof payload.description === 'string' ? payload.description : undefined}
+        dql={dqlArtifact?.source ?? (typeof payload.dqlSource === 'string' ? payload.dqlSource : undefined)}
+        sqlPreview={sql}
+        grain={typeof payload.grain === 'string' ? payload.grain : undefined}
+        outputs={strList(payload.outputs)}
+        dimensions={strList(payload.dimensions) ?? dqlArtifact?.dimensions}
+        entities={strList(payload.entities)}
+        certifierVerdict={verdict ? { blocking: strList(verdict.blocking) ?? [], warnings: strList(verdict.warnings) ?? [], ready: Boolean(verdict.ready) } : undefined}
+        actions={
+          <>
+            {sql && onInsertDql ? (
+              <button type="button" onClick={() => onInsertDql({ sql, dqlArtifact, result: resultData, chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined, title: name })} style={smallButtonStyle(t)}>Insert as DQL cell</button>
+            ) : sql && onInsertSql ? (
+              <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
+            ) : null}
+            {dqlPath && onOpenBlock ? (
+              <button type="button" onClick={() => onOpenBlock(dqlPath, dqlName)} style={smallButtonStyle(t)}>{dqlOpenLabel}</button>
+            ) : null}
+          </>
+        }
+      />
+    );
+  }
 
   return (
     <div style={artifactStyle(t)}>

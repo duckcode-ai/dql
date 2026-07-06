@@ -28,6 +28,7 @@ import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import type { AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
+import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 import {
   appendSemanticRefToQuery,
@@ -835,18 +836,7 @@ export function BlockStudio() {
             {isSemanticBlock ? 'metric block' : 'sql block'}
           </span>
           {state.blockStudioMetadata?.reviewStatus && (
-            <span style={{
-              fontSize: 10,
-              fontWeight: 700,
-              color: STATUS_COLORS[state.blockStudioMetadata.reviewStatus] ?? t.textMuted,
-              background: `${STATUS_COLORS[state.blockStudioMetadata.reviewStatus] ?? t.textMuted}18`,
-              borderRadius: 999,
-              padding: '3px 8px',
-              textTransform: 'uppercase',
-              letterSpacing: '0.04em',
-            }}>
-              {state.blockStudioMetadata.reviewStatus}
-            </span>
+            <BlockStatusBadge status={state.blockStudioMetadata.reviewStatus} t={t} />
           )}
           <div style={{ flex: 1 }} />
           {hasActiveDraft && (
@@ -871,7 +861,7 @@ export function BlockStudio() {
             </>
           )}
           {hasActiveDraft && state.activeBlockPath && (
-            <TemplateButton label="Certify" onClick={() => void handleCertify()} busy={certifying} />
+            <TemplateButton label="Request certification" onClick={() => void handleCertify()} busy={certifying} />
           )}
           {saveError && (
             <span style={{ fontSize: 11, color: '#f85149', fontFamily: t.font, padding: '4px 8px', background: '#f8514918', borderRadius: 6 }}>
@@ -2841,7 +2831,7 @@ function ImportCandidateDetail({
           {contextOpen ? 'Hide context' : `Show context${contextCount > 0 ? ` (${contextCount})` : ''}`}
         </button>
         <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Edit full DQL</button>
-        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved' || reuseRecommended} style={primaryImportButtonStyle(t)}>{reuseRecommended ? 'Reuse existing' : candidate.reviewStatus === 'saved' ? 'Certified' : generatedDraft ? 'Certify' : 'Save'}</button>
+        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved' || reuseRecommended} style={primaryImportButtonStyle(t)}>{reuseRecommended ? 'Reuse existing' : candidate.reviewStatus === 'saved' ? 'Certified' : generatedDraft ? 'Request certification' : 'Save'}</button>
       </div>
 
       {editError && <div role="alert" style={{ fontSize: 12, color: '#f85149', background: '#f8514914', borderRadius: 8, padding: 10 }}>{editError}</div>}

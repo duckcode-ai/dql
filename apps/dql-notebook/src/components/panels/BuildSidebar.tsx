@@ -7,6 +7,7 @@ import type { NotebookFile, SchemaTable, SemanticTreeNode } from '../../store/ty
 import type { Theme } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
 import type { BlockEntry } from '../blocks/block-types';
+import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
 
 export type BuildTab = 'notebooks' | 'semantic' | 'database' | 'blocks';
@@ -338,9 +339,9 @@ function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: (
       {open && (
         <div style={{ padding: '6px 12px 10px 30px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}30`, display: 'grid', gap: 6 }}>
           {block.description && <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>{block.description}</div>}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 10.5, color: t.textMuted }}>
-            <span style={{ textTransform: 'capitalize', color: STATUS_COLOR[block.status] ?? t.textMuted, fontWeight: 700 }}>{block.status}</span>
-            {block.owner && <span>· {block.owner}</span>}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', fontSize: 10.5, color: t.textMuted }}>
+            <BlockStatusBadge status={String(block.status)} t={t} />
+            {block.owner && <span>{block.owner}</span>}
             {block.lastModified && <span>· {new Date(block.lastModified).toLocaleDateString()}</span>}
           </div>
           <button
