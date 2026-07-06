@@ -27,9 +27,8 @@ import { BuildSidebar } from '../panels/BuildSidebar';
 import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
-import { AiSqlDraftDialog, type AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
-import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
-import { openAiBuild } from '../../utils/ai-build-bus';
+import type { AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
@@ -114,8 +113,12 @@ export function BlockStudio() {
   const [importSessionsLoading, setImportSessionsLoading] = useState(false);
   const [semanticInsertChoice, setSemanticInsertChoice] = useState<SemanticObjectDetail | null>(null);
   const [databaseInsertWarning, setDatabaseInsertWarning] = useState<string | null>(null);
-  const [aiSqlOpen, setAiSqlOpen] = useState(false);
   const [aiAskOpen, setAiAskOpen] = useState(false);
+  // How the governed Ask-AI overlay was opened: 'ask' = freeform, 'build' = draft a
+  // new block, 'edit' = modify the current block. Drives requested mode + edit context.
+  const [askAiKind, setAskAiKind] = useState<'ask' | 'build' | 'edit'>('ask');
+  const [askAiInitialInput, setAskAiInitialInput] = useState('');
+  const [askAiSeed, setAskAiSeed] = useState<{ text: string; mode: 'auto' | 'block'; nonce: number } | undefined>(undefined);
   const [certifying, setCertifying] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
@@ -614,7 +617,32 @@ export function BlockStudio() {
       },
     });
     setResultTab('results');
-    setAiSqlOpen(false);
+  };
+
+  // DQL-first: land a governed answer's DQL artifact as the block draft (its source
+  // becomes the block; compiled SQL is the fallback). Reuses handleAiSqlInsert so
+  // metadata/validation are parsed the same way, then closes the overlay.
+  const insertGeneratedDqlIntoDraft = (payload: InsertDqlPayload) => {
+    const blockSource = payload.dqlArtifact?.source?.trim();
+    const sql = (payload.sql ?? '').trim();
+    if (!blockSource && !sql) return;
+    handleAiSqlInsert(sql, {
+      question: payload.title ?? activeBlockName ?? 'analysis',
+      title: payload.title ?? payload.dqlArtifact?.name,
+      blockSource,
+    });
+    setAiAskOpen(false);
+  };
+
+  // Open the governed Ask-AI overlay in a given mode. 'build'/'edit' route to block
+  // generation (requestedMode='block'); 'edit' adds edit context via workspaceContext.
+  const openAskAi = (opts?: { kind?: 'ask' | 'build' | 'edit'; initialInput?: string; autoRun?: string }) => {
+    const kind = opts?.kind ?? 'ask';
+    setResultTab('results');
+    setAskAiKind(kind);
+    setAskAiInitialInput(opts?.initialInput ?? '');
+    setAskAiSeed(opts?.autoRun ? { text: opts.autoRun, mode: kind === 'ask' ? 'auto' : 'block', nonce: Date.now() } : undefined);
+    setAiAskOpen(true);
   };
 
   const ensureDbColumns = async (node: DatabaseSchemaNode) => {
@@ -823,27 +851,15 @@ export function BlockStudio() {
                 label="Ask AI"
                 Icon={Sparkles}
                 variant="primary"
-                onClick={() => openAiBuild({
-                  target: 'block',
-                  lockTarget: true,
-                  context: state.blockStudioDraft.trim() ? { cellSql: state.blockStudioDraft } : undefined,
-                  sourceLabel: activeBlockName ? `Building from ${activeBlockName}` : 'Describe the reusable block you need.',
-                })}
+                onClick={() => openAskAi({ kind: 'ask' })}
               />
-              {/* Spec 17 (part A) — open AI Build straight into "Modify existing"
-                  for the block currently in the editor. */}
+              {/* Modify the block currently in the editor — the governed cascade in
+                  edit mode (workspaceContext.mode='edit' + blockPath). */}
               {state.activeBlockPath && (
                 <TemplateButton
                   label="Modify with AI"
                   Icon={Sparkles}
-                  onClick={() => openAiBuild({
-                    target: 'block',
-                    lockTarget: true,
-                    mode: 'edit',
-                    blockPath: state.activeBlockPath ?? undefined,
-                    context: state.blockStudioDraft.trim() ? { cellSql: state.blockStudioDraft } : undefined,
-                    sourceLabel: activeBlockName ? `Modifying ${activeBlockName}` : 'Describe the change you want.',
-                  })}
+                  onClick={() => openAskAi({ kind: 'edit', initialInput: `Modify this block${activeBlockName ? ` (${activeBlockName})` : ''}: ` })}
                 />
               )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
@@ -869,15 +885,8 @@ export function BlockStudio() {
               onCreateSql={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'custom' })}
               onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
               onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
-              onBuildDql={() => openAiBuild({
-                target: 'block',
-                lockTarget: true,
-                sourceLabel: 'Describe the reusable block you need.',
-              })}
-              onAskAi={() => {
-                setResultTab('results');
-                setAiAskOpen(true);
-              }}
+              onBuildDql={() => openAskAi({ kind: 'build', initialInput: 'Draft a reusable DQL block that ' })}
+              onAskAi={() => openAskAi({ kind: 'ask' })}
               t={t}
             />
           ) : isSemanticBlock ? (
@@ -1066,17 +1075,6 @@ export function BlockStudio() {
         </div>
       )}
 
-      {aiSqlOpen && (
-        <AiSqlDraftDialog
-          mode="block"
-          themeMode={state.themeMode}
-          contextLabel={activeBlockName ?? state.activeBlockPath ?? 'Block Studio'}
-          upstreamSql={state.blockStudioDraft}
-          onClose={() => setAiSqlOpen(false)}
-          onInsertSql={(sql, meta) => handleAiSqlInsert(sql, meta)}
-        />
-      )}
-
       {aiAskOpen && (
         <BlockStudioAskOverlay t={t}>
           <div style={askOverlayHeaderStyle(t)}>
@@ -1096,11 +1094,18 @@ export function BlockStudio() {
               themeMode={state.themeMode}
               title="Ask AI"
               scopeHint={activeBlockName ? `Current block: ${activeBlockName}` : 'Block Studio project context'}
-              workspaceContext={{ blockStudioDraft: state.blockStudioDraft, activeBlockPath: state.activeBlockPath }}
-              initialMode="auto"
+              workspaceContext={{
+                blockStudioDraft: state.blockStudioDraft,
+                activeBlockPath: state.activeBlockPath,
+                ...(askAiKind === 'edit' ? { mode: 'edit', blockPath: state.activeBlockPath } : {}),
+              }}
+              initialMode={askAiKind === 'ask' ? 'auto' : 'block'}
+              initialInput={askAiInitialInput}
+              autoRun={askAiSeed}
               threadId={agentThread.threadId}
               onThreadIdChange={agentThread.onThreadIdChange}
               onInsertSql={(sql, title) => handleAiSqlInsert(sql, { question: title ?? activeBlockName ?? 'analysis', title })}
+              onInsertDql={insertGeneratedDqlIntoDraft}
               emptyHint="Ask whether a block already exists, what domain it belongs in, which parameters should stay dynamic, or what evidence is missing before certification."
               examplePrompts={[
                 { label: 'Find reusable blocks', prompt: 'Which certified DQL blocks already answer this kind of analysis, and what should be reused instead of duplicated?' },
