@@ -57,6 +57,7 @@ import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core'
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../llm/answer-loop-tools.js';
+import { judgeAnswer, type JudgeCompletion } from './eval-judge.js';
 import { startProjectRuntime } from './notebook.js';
 
 /**
@@ -651,6 +652,8 @@ interface AgentEvalResult {
   validationCode?: string;
   trace: AgentEvalTraceStage[];
   toolCalls: number;
+  judgeScore?: number;
+  judgePass?: boolean;
 }
 
 type AgentEvalTraceStageName =
@@ -691,6 +694,11 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   const memory = new MemoryStore(defaultMemoryPath(projectRoot));
   const { skills } = loadSkills(projectRoot);
   const execute = Boolean((flags as { execute?: boolean }).execute);
+  // R3.2: optional LLM-as-judge. Uses the same provider's completion; skipped
+  // gracefully when no provider is available so offline eval stays deterministic.
+  const judge = Boolean((flags as { judge?: boolean }).judge);
+  const judgeComplete: JudgeCompletion = async ({ system, user }) =>
+    provider.generate([{ role: 'system', content: system }, { role: 'user', content: user }], {});
   const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
     ?? (flags as { runtime?: string }).runtime
     ?? process.env.DQL_RUNTIME_URL
@@ -812,6 +820,15 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       const evaluation = evaluateCase(testCase, result);
       const durationMs = Date.now() - startedAt;
       const draftSaved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
+      const judgeVerdict = judge
+        ? await judgeAnswer({
+            question: testCase.question,
+            sql: result.proposedSql ?? result.sql,
+            answerText: result.text,
+            trustLabel: result.trustLabelInfo?.display ?? result.certification,
+            resultSample: result.result?.rows,
+          }, judgeComplete)
+        : undefined;
       results.push({
         name: testCase.name ?? testCase.question,
         passed: evaluation.failures.length === 0,
@@ -819,6 +836,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         durationMs,
         executionMs: result.result?.executionTime,
         executionMatched: evaluation.executionMatched,
+        ...(judgeVerdict ? { judgeScore: judgeVerdict.score, judgePass: judgeVerdict.pass } : {}),
         kind: result.kind,
         route: result.contextPack?.routeDecision.route,
         intent: result.contextPack?.routeDecision.intent,
@@ -962,8 +980,11 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
   const executionMatchCases = results.filter((result) => result.executionMatched !== undefined);
   const toolRequiredCases = results.filter((result) => typeof result.expected?.minToolCalls === 'number');
   const toolCallCounts = results.map((result) => result.toolCalls);
+  const judged = results.filter((result) => typeof result.judgeScore === 'number');
   return {
     certified_hit_rate: ratio(certifiedCases.filter((result) => result.passed && result.kind === 'certified').length, certifiedCases.length),
+    judge_mean_score: judged.length ? average(judged.map((result) => result.judgeScore ?? 0)) : null,
+    judge_pass_rate: judged.length ? ratio(judged.filter((result) => result.judgePass).length, judged.length) : null,
     generated_followup_pass_rate: ratio(generatedFollowUpCases.filter((result) => result.passed).length, generatedFollowUpCases.length),
     safe_refusal_rate: ratio(refusalCases.filter((result) => result.passed && result.kind === 'no_answer').length, refusalCases.length),
     execution_match_rate: ratio(executionMatchCases.filter((result) => result.executionMatched).length, executionMatchCases.length),
