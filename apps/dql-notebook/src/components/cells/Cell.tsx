@@ -1,6 +1,6 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, ShieldCheck } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
@@ -17,7 +17,7 @@ import { TableCell } from './TableCell';
 import { ChatCell } from './ChatCell';
 import { SnippetPicker } from './SnippetPicker';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
-import { deriveBlockSource } from '../../utils/derive-block-source';
+import { deriveBlockSource, type DerivedBlockSource } from '../../utils/derive-block-source';
 import { TableOutput } from '../output/TableOutput';
 import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 import type { ChartType } from '../output/ChartOutput';
@@ -739,8 +739,19 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
   const [chartRecommendNote, setChartRecommendNote] = useState<string | null>(null);
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
 
-  const derivedBlock = useMemo(
-    () => (saveAsBlockOpen ? deriveBlockSource(cell, state.cells) : null),
+  const derivedBlock = useMemo<DerivedBlockSource | null>(
+    () => {
+      if (!saveAsBlockOpen) return null;
+      // A governed-DQL cell saves its DQL source (not the compiled SQL).
+      if (cell.dqlArtifact?.source) {
+        return {
+          content: cell.dqlArtifact.source,
+          suggestedName: cell.dqlArtifact.name,
+          derivedFromUpstream: true,
+        };
+      }
+      return deriveBlockSource(cell, state.cells);
+    },
     [saveAsBlockOpen, cell, state.cells]
   );
   const canSaveAsBlock =
@@ -1330,6 +1341,31 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
             errorMessage={cell.status === 'error' ? cell.error : undefined}
             editorRef={editorRef}
           />
+        )}
+
+        {/* Governed DQL provenance: AI/Explore-generated query cells carry the DQL
+            they were built from. Shown as the primary artifact (DQL-first), with a
+            one-click save to a reusable block when not already backed by one. */}
+        {cell.dqlArtifact && (cell.type === 'sql' || cell.type === 'dql') && (
+          <details style={{ borderTop: `1px solid ${t.cellBorder}`, padding: '6px 12px', background: `${t.tableHeaderBg}40` }}>
+            <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, color: t.textSecondary }}>
+              <ShieldCheck size={12} color={t.accent} />
+              Governed DQL
+              {cell.dqlArtifact.sourcePath ? (
+                <span style={{ fontWeight: 400, color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cell.dqlArtifact.sourcePath}</span>
+              ) : (
+                <button
+                  type="button"
+                  title="Save this governed DQL as a reusable block"
+                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); setSaveAsBlockOpen(true); }}
+                  style={{ marginLeft: 'auto', border: 'none', background: 'transparent', cursor: 'pointer', color: t.accent, fontFamily: t.font, fontSize: 10.5, fontWeight: 700, padding: '1px 4px' }}
+                >
+                  Save as DQL block
+                </button>
+              )}
+            </summary>
+            <pre style={{ margin: '6px 0 0', fontFamily: t.fontMono, fontSize: 11, whiteSpace: 'pre-wrap', color: t.textSecondary, maxHeight: 200, overflow: 'auto' }}>{cell.dqlArtifact.source}</pre>
+          </details>
         )}
 
         {/* Output area */}
