@@ -38,6 +38,24 @@ describe('trust stamp', () => {
     });
   });
 
+  it('maps a certified-metric semantic answer to Reviewed, not Certified', () => {
+    expect(stampTrustLabel({
+      kind: 'uncertified',
+      sourceTier: 'semantic_layer',
+      certification: 'ai_generated',
+      reviewStatus: 'draft_ready',
+      semanticMetricCertification: 'certified',
+    })).toMatchObject({ id: 'reviewed', display: 'Reviewed' });
+    // A draft/uncertified metric stays AI-Generated.
+    expect(trustLabelIdForAnswer({
+      kind: 'uncertified',
+      sourceTier: 'semantic_layer',
+      certification: 'ai_generated',
+      reviewStatus: 'draft_ready',
+      semanticMetricCertification: 'ai_generated',
+    })).toBe('ai_generated');
+  });
+
   it('maps refusals and unknown states to Insufficient-Context', () => {
     expect(stampTrustLabel({ kind: 'no_answer' })).toMatchObject({
       id: 'insufficient_context',

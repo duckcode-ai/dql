@@ -10,6 +10,14 @@ export interface TrustStampableAnswer {
   sourceTier?: string;
   certification?: string;
   reviewStatus?: string;
+  /**
+   * Certification of the governed semantic metric behind a Lane-2 answer, when
+   * that answer was compiled deterministically from the metric. A certified
+   * metric elevates the ANSWER to 'reviewed' (verified) — never 'certified',
+   * because certification of an answer is a human act (the metric was certified
+   * by a human; the answer is a fresh compile of it).
+   */
+  semanticMetricCertification?: string;
   block?: {
     dataState?: DataStateLike;
   };
@@ -24,6 +32,14 @@ export function trustLabelIdForAnswer(result: TrustStampableAnswer): TrustLabelI
   if (result.kind === 'no_answer') return 'insufficient_context';
   if (result.sourceTier === 'business_context' && result.reviewStatus === 'certified') return 'reviewed';
   if (result.certification === 'certified' || result.kind === 'certified') return 'certified';
+  // A deterministic compile from a certified/reviewed governed metric is verified
+  // ('reviewed'), above plain generated SQL but below human-certified.
+  if (
+    result.sourceTier === 'semantic_layer' &&
+    (result.semanticMetricCertification === 'certified' || result.semanticMetricCertification === 'reviewed')
+  ) {
+    return 'reviewed';
+  }
   if (
     result.certification === 'ai_generated' ||
     result.certification === 'analyst_review_required' ||

@@ -314,6 +314,8 @@ export interface AgentAnswer {
   sourceTier?: AnswerSourceTier;
   certification?: AnswerCertification;
   reviewStatus?: AnswerReviewStatus;
+  /** Certification of the governed metric behind a Lane-2 answer (drives 'reviewed' trust). */
+  semanticMetricCertification?: string;
   confidence?: number;
   /**
    * P0 intent controller — the high-level action the agent decided this turn
@@ -1026,6 +1028,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           name: table.name,
           columns: table.columns.map((column) => ({ name: column.name })),
         })),
+        semanticLayer: input.semanticLayer,
       })
     : undefined;
 
@@ -1135,7 +1138,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // (`order_item.revenue`). resolveGovernedMetricSql resolves a thin metric to
     // that synthesizable sibling so the route lands on a real number, not refusal.
     const resolved = activeTier === 'semantic_layer' && semanticMetricMatch
-      ? resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes)
+      ? resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes, input.semanticLayer)
       : undefined;
     if (resolved) {
       // Point the match at the metric we actually answered from so the route
@@ -1237,7 +1240,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     if (grounded?.ok) {
       contextValidation = { ok: true, warnings: grounded.warnings };
     } else if (scalarGovernedMetricRecoveryAllowed) {
-      const recovered = resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes);
+      const recovered = resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes, input.semanticLayer);
       if (recovered) {
         semanticMetricMatch = { ...semanticMetricMatch, metric: recovered.metric };
         parsed.sql = contextLedger.qualifySql(recovered.sql).sql;
@@ -1654,12 +1657,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const generatedText = trustExplanation
       ? [trustExplanation, cleanedSummary].filter(Boolean).join('\n\n')
       : cleanedSummary;
+    const semanticMetricCertification = governedMetricAnswer && activeTier === 'semantic_layer'
+      ? semanticMetricMatch?.metric.certification
+      : undefined;
+    const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
     return {
       kind: 'uncertified',
       sourceTier: activeTier,
       certification: 'ai_generated',
       reviewStatus: 'draft_ready',
-      confidence: governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
+      semanticMetricCertification,
+      confidence: certifiedMetricAnswer ? 0.8 : governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
       text: generatedText,
       answer: generatedText,
       proposedSql: parsed.sql,

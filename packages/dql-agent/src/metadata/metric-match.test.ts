@@ -1,6 +1,35 @@
 import { describe, it, expect } from 'vitest';
-import { matchSemanticMetric } from './metric-match.js';
+import { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { matchSemanticMetric, parseMetricDefinition } from './metric-match.js';
 import type { KGNode } from '../kg/types.js';
+
+describe('parseMetricDefinition (R2.6: structured-first, regex fallback)', () => {
+  const node: KGNode = {
+    nodeId: 'metric:total_revenue',
+    kind: 'metric',
+    name: 'total_revenue',
+    description: '',
+    tags: [],
+    // Deliberately WRONG/stale llmContext to prove the structured def wins.
+    llmContext: 'sql: SUM(stale_col)\ntable: dev.stale_table',
+    sourceTier: 'semantic_layer',
+  };
+
+  it('prefers the structured semantic-layer definition over the llmContext blob', () => {
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'total_revenue', label: 'Total Revenue', description: '', domain: 'finance', sql: 'SUM(amount)', type: 'sum', table: 'orders' }],
+      dimensions: [],
+    });
+    expect(parseMetricDefinition(node, layer)).toEqual({ expr: 'SUM(amount)', table: 'orders' });
+  });
+
+  it('falls back to the llmContext blob when the semantic layer lacks the metric', () => {
+    const layer = new SemanticLayer({ metrics: [], dimensions: [] });
+    expect(parseMetricDefinition(node, layer)).toEqual({ expr: 'SUM(stale_col)', table: 'dev.stale_table' });
+    // And with no layer at all.
+    expect(parseMetricDefinition(node)).toEqual({ expr: 'SUM(stale_col)', table: 'dev.stale_table' });
+  });
+});
 
 function metric(name: string, description = '', tags: string[] = []): KGNode {
   return {

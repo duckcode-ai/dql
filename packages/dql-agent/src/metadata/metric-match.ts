@@ -28,6 +28,7 @@
 
 import { defaultEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
 import type { KGNode } from '../kg/types.js';
+import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 
 const TOKEN_RE = /[\p{L}\p{N}_]+/gu;
 
@@ -235,12 +236,37 @@ function clamp01(value: number): number {
  * `sql:` is not an aggregate expression (a bare metric-name reference) or there is
  * no table — those are not directly executable.
  */
-export function parseMetricDefinition(metric: KGNode): { expr: string; table: string } | undefined {
+export function parseMetricDefinition(
+  metric: KGNode,
+  semanticLayer?: SemanticLayer,
+): { expr: string; table: string } | undefined {
+  // Prefer the STRUCTURED metric definition from the semantic layer when
+  // available — no fragile text parsing. Fall back to reading the KG node's
+  // llmContext blob for manifest-native metrics that carry no structured def.
+  if (semanticLayer) {
+    const structured = structuredMetricDefinition(metric, semanticLayer);
+    if (structured) return structured;
+  }
   const context = metric.llmContext ?? '';
   const expr = context.match(/(?:^|\n)\s*sql:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
   const table = context.match(/(?:^|\n)\s*table:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
   if (!expr || !table || !/[()]/.test(expr)) return undefined;
   return { expr, table };
+}
+
+/** Look up a metric's structured {expr, table} from the semantic layer by name/leaf. */
+function structuredMetricDefinition(
+  metric: KGNode,
+  semanticLayer: SemanticLayer,
+): { expr: string; table: string } | undefined {
+  const candidates = [metric.name, metric.name.split('.').pop() ?? metric.name];
+  for (const name of candidates) {
+    const def = semanticLayer.getMetric(name);
+    if (def?.sql && def?.table && /[()]/.test(def.sql)) {
+      return { expr: def.sql, table: def.table };
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -249,8 +275,8 @@ export function parseMetricDefinition(metric: KGNode): { expr: string; table: st
  * metric's governed definition. Returns undefined when the definition is too thin
  * to execute, preserving honest refusal.
  */
-export function metricToGovernedSql(metric: KGNode): string | undefined {
-  const def = parseMetricDefinition(metric);
+export function metricToGovernedSql(metric: KGNode, semanticLayer?: SemanticLayer): string | undefined {
+  const def = parseMetricDefinition(metric, semanticLayer);
   if (!def) return undefined;
   const alias = metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
   return `SELECT ${def.expr} AS ${alias}\nFROM ${def.table}`;
@@ -268,26 +294,28 @@ export function metricToGovernedSql(metric: KGNode): string | undefined {
 export function resolveGovernedMetricSql(
   metric: KGNode,
   pool: KGNode[],
+  semanticLayer?: SemanticLayer,
 ): { sql: string; metric: KGNode } | undefined {
-  const resolved = resolveGovernedMetricDefinition(metric, pool);
-  return resolved ? { sql: metricToGovernedSql(resolved.metric)!, metric: resolved.metric } : undefined;
+  const resolved = resolveGovernedMetricDefinition(metric, pool, semanticLayer);
+  return resolved ? { sql: metricToGovernedSql(resolved.metric, semanticLayer)!, metric: resolved.metric } : undefined;
 }
 
 /** Resolve a metric (or its leaf-named sibling measure) to an executable definition. */
 export function resolveGovernedMetricDefinition(
   metric: KGNode,
   pool: KGNode[],
+  semanticLayer?: SemanticLayer,
 ): { def: { expr: string; table: string }; metric: KGNode } | undefined {
-  const direct = parseMetricDefinition(metric);
+  const direct = parseMetricDefinition(metric, semanticLayer);
   if (direct) return { def: direct, metric };
   const leaf = metric.name.split('.').pop()?.toLowerCase();
   if (!leaf) return undefined;
   const leafSibling = pool
     .filter((node) => node.nodeId !== metric.nodeId && node.name.split('.').pop()?.toLowerCase() === leaf)
     .sort((a, b) => a.name.length - b.name.length)
-    .find((node) => parseMetricDefinition(node));
+    .find((node) => parseMetricDefinition(node, semanticLayer));
   if (!leafSibling) return undefined;
-  return { def: parseMetricDefinition(leafSibling)!, metric: leafSibling };
+  return { def: parseMetricDefinition(leafSibling, semanticLayer)!, metric: leafSibling };
 }
 
 export interface GovernedMetricFirstResult {
@@ -318,6 +346,7 @@ export function buildGovernedMetricFirstSql(input: {
     rankingDirection?: 'top' | 'bottom';
   };
   schemaTables: Array<{ relation: string; name?: string; columns: Array<{ name: string }> }>;
+  semanticLayer?: SemanticLayer;
 }): GovernedMetricFirstResult | undefined {
   const { requestedShape } = input;
   // Conservative gates: ONE measure family (the planner expands a single ask
@@ -332,7 +361,7 @@ export function buildGovernedMetricFirstSql(input: {
   if (families.size > 1) return undefined;
   if (requestedShape.filters.length > 0) return undefined;
   if (requestedShape.topN?.scope === 'per_group') return undefined;
-  const resolved = resolveGovernedMetricDefinition(input.metric, input.pool);
+  const resolved = resolveGovernedMetricDefinition(input.metric, input.pool, input.semanticLayer);
   if (!resolved) return undefined;
   const alias = resolved.metric.name.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'metric_value';
 

@@ -5584,6 +5584,44 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.dqlArtifact?.kind).toBe("semantic_block");
   });
 
+  it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {
+    const certifiedMetric: KGNode = {
+      ...revenueMetric("total_revenue", "Total recognized revenue"),
+      certification: "certified",
+    };
+    kg.rebuild([certifiedMetric], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+          status: "certified",
+        },
+      ],
+      dimensions: [],
+    });
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What is total revenue?",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({ columns: ["total_revenue"], rows: [{ total_revenue: 42 }], rowCount: 1, sql }),
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    // Verified — above generated SQL, below human-certified. The invariant holds:
+    // AI never stamps its own answer 'certified'.
+    expect(result.trustLabelInfo?.id).toBe("reviewed");
+    expect(result.kind).not.toBe("certified");
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("compiles multiple semantic metrics through SemanticLayer.composeQuery", async () => {
     kg.rebuild(
       [
