@@ -48,7 +48,7 @@ import {
   extractSimpleSelectShape,
   selectExpressionOutputName,
 } from './metadata/sql-shape.js';
-import { composeSemanticQueryForQuestion, type SemanticBridgeQueryResult } from './semantic-bridge/compose.js';
+import { composeSemanticQueryForQuestion, composeSemanticQueryFromMembers, type SemanticBridgeQueryResult, type SemanticBridgeFilter, type SemanticMemberSelection } from './semantic-bridge/compose.js';
 import { normalizeValueIndexText } from './grounding/value-index.js';
 import {
   cascadeTraceToEvidenceRouteSteps,
@@ -960,6 +960,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // deterministically. Only when no metric fits does the question fall through
   // to SQL generation, where the metric still grounds the prompt as context.
   let governedMetricAnswer = false;
+  const semanticBridgeToolCalls: AgentEvidenceToolCall[] = [];
   let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
   if (input.semanticLayer && semanticMetricMatch) {
     semanticBridgeAnswer = composeSemanticQueryForQuestion({
@@ -971,6 +972,49 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
       ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
     });
+    // Lane-2 LLM fallback: the deterministic token matcher missed, but a metric
+    // matched so the semantic layer IS relevant. Spend ONE call to have the model
+    // pick members (the query_semantic_model contract); the compiler still owns the
+    // SQL, so a paraphrased metric question stays governed instead of dropping to
+    // Lane-3 generation.
+    if (!semanticBridgeAnswer) {
+      const selection = await selectSemanticMembersViaLlm({
+        provider,
+        semanticLayer: input.semanticLayer,
+        question,
+        signal: input.signal,
+        reasoningEffort: input.reasoningEffort,
+      });
+      if (selection) {
+        const composed = composeSemanticQueryFromMembers({
+          semanticLayer: input.semanticLayer,
+          question,
+          selection,
+          ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
+          ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
+        });
+        // Coverage guard: if the question asked for a breakdown but the LLM
+        // selection produced none, the governed answer would silently DROP the
+        // requested grouping (governed-but-wrong). Fall through to Lane-3
+        // generation, which can express the breakdown.
+        const wantedBreakdown = questionPlan.requestedShape.dimensions.length > 0
+          || questionPlan.dimensionTerms.length > 0;
+        const dropsBreakdown = Boolean(composed)
+          && wantedBreakdown
+          && composed!.dimensions.length === 0
+          && !composed!.timeDimension;
+        if (composed && !dropsBreakdown) {
+          semanticBridgeAnswer = composed;
+          semanticBridgeToolCalls.push({
+            name: 'query_semantic_model',
+            status: 'checked',
+            inputSummary: `metrics: ${selection.metrics.join(', ')}${selection.dimensions?.length ? `; by ${selection.dimensions.join(', ')}` : ''}`,
+            outputSummary: 'LLM-selected semantic members compiled via composeQuery',
+            order: semanticBridgeToolCalls.length + 1,
+          });
+        }
+      }
+    }
   }
   const metricFirst = semanticMetricMatch
     ? buildGovernedMetricFirstSql({
@@ -991,7 +1035,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   });
   let proposed = '';
   let parsed: ParsedProposal;
-  const proposalToolCalls: AgentEvidenceToolCall[] = [];
+  const proposalToolCalls: AgentEvidenceToolCall[] = [...semanticBridgeToolCalls];
   if (semanticBridgeAnswer) {
     governedMetricAnswer = true;
     parsed = {
@@ -3506,6 +3550,117 @@ async function generateProposalWithOptionalTools(input: {
       if (sink) sink.push(evidenceToolCallFromEvent(event, sink.length + 1));
     },
   });
+}
+
+/**
+ * Lane-2 fallback member selection: one LLM call that picks semantic members
+ * (metrics/dimensions/grain/filters) as JSON — the `query_semantic_model`
+ * contract. The compiler still owns the SQL, so this keeps paraphrased metric
+ * questions on the governed tier. Returns undefined on any parse/shape failure so
+ * the caller falls through to metric-first / generation.
+ */
+async function selectSemanticMembersViaLlm(input: {
+  provider: AgentProvider;
+  semanticLayer: SemanticLayer;
+  question: string;
+  signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
+}): Promise<SemanticMemberSelection | undefined> {
+  const metrics = input.semanticLayer.listMetrics();
+  if (metrics.length === 0) return undefined;
+  const dimensions = input.semanticLayer.listDimensions();
+  const timeDimensions = input.semanticLayer.listTimeDimensions?.() ?? dimensions.filter((dimension) => dimension.isTimeDimension);
+
+  const catalog = [
+    'METRICS:',
+    ...metrics.slice(0, 60).map((metric) => `- ${metric.name}${metric.label && metric.label !== metric.name ? ` (${metric.label})` : ''}${metric.description ? `: ${metric.description}` : ''}`),
+    'DIMENSIONS:',
+    ...dimensions.slice(0, 80).map((dimension) => `- ${dimension.name}${dimension.label && dimension.label !== dimension.name ? ` (${dimension.label})` : ''}`),
+    ...(timeDimensions.length > 0 ? ['TIME DIMENSIONS (use for grain):', ...timeDimensions.slice(0, 20).map((dimension) => `- ${dimension.name}`)] : []),
+  ].join('\n');
+
+  const messages: AgentMessage[] = [
+    {
+      role: 'system',
+      content: [
+        'You select governed semantic members to answer an analytics question. Choose ONLY from the metrics and dimensions listed — never invent names.',
+        'Respond with a SINGLE json object, no prose, no code fences other than one ```json block:',
+        '{"metrics": string[], "dimensions"?: string[], "timeDimension"?: {"name": string, "granularity": "day"|"week"|"month"|"quarter"|"year"}, "filters"?: [{"dimension": string, "operator": "equals"|"in", "values": string[]}], "limit"?: number}',
+        'If no listed metric can answer the question, return {"metrics": []}.',
+      ].join('\n'),
+    },
+    { role: 'user', content: `Question: ${input.question}\n\nAvailable governed members:\n${catalog}\n\nReturn the member selection as JSON.` },
+  ];
+
+  let raw: string;
+  try {
+    raw = await input.provider.generate(messages, { signal: input.signal, reasoningEffort: input.reasoningEffort });
+  } catch {
+    return undefined;
+  }
+  const parsed = extractFirstJsonObject(raw);
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const record = parsed as Record<string, unknown>;
+  const selectedMetrics = Array.isArray(record.metrics)
+    ? record.metrics.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+  if (selectedMetrics.length === 0) return undefined;
+  const selection: SemanticMemberSelection = { metrics: selectedMetrics };
+  if (Array.isArray(record.dimensions)) {
+    selection.dimensions = record.dimensions.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  }
+  const timeDim = record.timeDimension;
+  if (timeDim && typeof timeDim === 'object' && typeof (timeDim as Record<string, unknown>).name === 'string' && typeof (timeDim as Record<string, unknown>).granularity === 'string') {
+    selection.timeDimension = { name: (timeDim as { name: string }).name, granularity: (timeDim as { granularity: string }).granularity };
+  }
+  if (Array.isArray(record.filters)) {
+    const filters = record.filters
+      .map((entry) => entry as Record<string, unknown>)
+      .filter((entry) => entry && typeof entry.dimension === 'string' && Array.isArray(entry.values))
+      .map((entry) => ({
+        dimension: entry.dimension as string,
+        operator: (entry.operator === 'in' ? 'in' : 'equals') as SemanticBridgeFilter['operator'],
+        values: (entry.values as unknown[]).filter((value): value is string => typeof value === 'string'),
+      }))
+      .filter((filter) => filter.values.length > 0);
+    if (filters.length > 0) selection.filters = filters;
+  }
+  if (typeof record.limit === 'number' && Number.isFinite(record.limit) && record.limit > 0) {
+    selection.limit = Math.floor(record.limit);
+  }
+  return selection;
+}
+
+/** Extract the first balanced JSON object from model text (tolerant of fences/prose). */
+function extractFirstJsonObject(raw: string): unknown {
+  const trimmed = raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+  const start = trimmed.indexOf('{');
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < trimmed.length; i += 1) {
+    const char = trimmed[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(trimmed.slice(start, i + 1));
+        } catch {
+          return undefined;
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 interface DeepGeneratedProposalCandidate {

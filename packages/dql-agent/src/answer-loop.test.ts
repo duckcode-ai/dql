@@ -5488,6 +5488,60 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     });
   });
 
+  it("falls back to ONE LLM member selection when deterministic selection misses (Lane 2, not Lane 3)", async () => {
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        {
+          name: "total_revenue",
+          label: "Total Revenue",
+          description: "Total recognized revenue.",
+          domain: "finance",
+          sql: "amount",
+          type: "sum",
+          table: "orders",
+        },
+      ],
+      dimensions: [
+        {
+          name: "channel",
+          label: "Channel",
+          description: "Sales channel.",
+          domain: "finance",
+          sql: "channel",
+          type: "string",
+          table: "orders",
+        },
+      ],
+    });
+    // "acquisition medium" is a paraphrase of `channel` that the deterministic
+    // token matcher cannot resolve, so composeSemanticQueryForQuestion misses —
+    // but the metric still matches, so the LLM member fallback fires.
+    const provider = new StubProvider(
+      '```json\n{"metrics":["total_revenue"],"dimensions":["channel"]}\n```',
+    );
+
+    const result = await answer({
+      question: "revenue by acquisition medium",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["channel", "total_revenue"],
+        rows: [{ channel: "Direct", total_revenue: 100 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    // Exactly ONE provider call — the member selection — and the compiler produced the SQL.
+    expect(provider.calls).toHaveLength(1);
+    expect(result.proposedSql).toContain("SUM(amount) AS total_revenue");
+    expect(result.proposedSql).toContain("channel AS channel");
+    expect(result.dqlArtifact?.kind).toBe("semantic_block");
+  });
+
   it("compiles multiple semantic metrics through SemanticLayer.composeQuery", async () => {
     kg.rebuild(
       [
@@ -5631,7 +5685,10 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       }),
     });
 
-    expect(provider.calls).toHaveLength(1);
+    // Two calls: one governed member-selection attempt (declines — product is not
+    // a semantic dimension) then Lane-3 generation. R3.5 spends one cheap call to
+    // try the governed tier before falling through.
+    expect(provider.calls).toHaveLength(2);
     expect(result.route?.tier).toBe("generated_sql");
     expect(result.dqlArtifact?.kind).toBe("sql_block");
     expect(result.dqlArtifact?.source).toContain('type = "custom"');

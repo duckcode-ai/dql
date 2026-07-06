@@ -80,6 +80,87 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
     ? [{ name: primaryMetric.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
     : undefined;
   const limit = input.questionPlan.requestedShape.topN?.n;
+  return buildSemanticBridgeResult({
+    semanticLayer: input.semanticLayer,
+    question: input.question,
+    metrics,
+    dimensions,
+    filters,
+    timeDimension,
+    orderBy,
+    limit,
+    driver: input.driver,
+    tableMapping: input.tableMapping,
+  });
+}
+
+/** A validated member selection, e.g. from an LLM emitting the query_semantic_model contract. */
+export interface SemanticMemberSelection {
+  metrics: string[];
+  dimensions?: string[];
+  timeDimension?: { name: string; granularity: string };
+  filters?: SemanticBridgeFilter[];
+  orderBy?: SemanticBridgeOrderBy[];
+  limit?: number;
+}
+
+/**
+ * Compose from an EXPLICIT member selection (metrics/dimensions/grain/filters),
+ * validating each member against the layer before compiling. This is the Lane-2
+ * fallback when deterministic token-overlap selection misses but the semantic
+ * layer still covers the question — an LLM picks members, the compiler owns SQL.
+ */
+export function composeSemanticQueryFromMembers(input: {
+  semanticLayer: SemanticLayer;
+  question: string;
+  selection: SemanticMemberSelection;
+  driver?: string;
+  tableMapping?: Record<string, string>;
+}): SemanticBridgeQueryResult | undefined {
+  const metricByName = new Map(input.semanticLayer.listMetrics().map((metric) => [metric.name.toLowerCase(), metric]));
+  const metrics = uniqueStrings(input.selection.metrics ?? [])
+    .map((name) => metricByName.get(name.toLowerCase()))
+    .filter((metric): metric is NonNullable<typeof metric> => Boolean(metric));
+  if (metrics.length === 0) return undefined;
+
+  const dimensionNames = new Set(input.semanticLayer.listDimensions().map((dimension) => dimension.name.toLowerCase()));
+  const dimensions = uniqueStrings(input.selection.dimensions ?? [])
+    .map((name) => input.semanticLayer.listDimensions().find((dimension) => dimension.name.toLowerCase() === name.toLowerCase())?.name)
+    .filter((name): name is string => Boolean(name));
+  // A hallucinated dimension is a hard miss — refuse rather than silently drop it.
+  if ((input.selection.dimensions ?? []).some((name) => !dimensionNames.has(name.toLowerCase()))) return undefined;
+  const filters = (input.selection.filters ?? []).filter((filter) => dimensionNames.has(filter.dimension.toLowerCase()));
+  if ((input.selection.filters ?? []).length > 0 && filters.length === 0) return undefined;
+
+  return buildSemanticBridgeResult({
+    semanticLayer: input.semanticLayer,
+    question: input.question,
+    metrics,
+    dimensions,
+    filters,
+    timeDimension: input.selection.timeDimension,
+    orderBy: input.selection.orderBy,
+    limit: input.selection.limit,
+    driver: input.driver,
+    tableMapping: input.tableMapping,
+  });
+}
+
+function buildSemanticBridgeResult(input: {
+  semanticLayer: SemanticLayer;
+  question: string;
+  metrics: MetricDefinition[];
+  dimensions: string[];
+  filters: SemanticBridgeFilter[];
+  timeDimension?: { name: string; granularity: string };
+  orderBy?: SemanticBridgeOrderBy[];
+  limit?: number;
+  driver?: string;
+  tableMapping?: Record<string, string>;
+}): SemanticBridgeQueryResult | undefined {
+  const { metrics, dimensions, filters, timeDimension, orderBy, limit } = input;
+  const primaryMetric = metrics[0];
+  if (!primaryMetric) return undefined;
   const composed = input.semanticLayer.composeQuery({
     metrics: metrics.map((metric) => metric.name),
     dimensions,
