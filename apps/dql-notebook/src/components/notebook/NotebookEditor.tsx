@@ -8,7 +8,6 @@ import { WelcomeScreen } from './WelcomeScreen';
 import { CellList } from './CellList';
 import { DashboardView } from './DashboardView';
 import { DocumentMetadataRow } from './DocumentMetadataRow';
-import { NotebookCatalogRail } from './NotebookCatalogRail';
 import { useOpenBlockInStudio } from '../agent/AiBuildResult';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 import {
@@ -240,9 +239,6 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           overflow: 'hidden',
         }}
       >
-        {/* Persistent catalog rail: browse & build from governed semantic metrics,
-            database objects, and blocks — the same catalog as the Blocks page. */}
-        <NotebookCatalogRail />
         {/* Scrollable cell area */}
         <div
           style={{
