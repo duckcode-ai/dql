@@ -1077,6 +1077,40 @@ describe("answer (block-first loop)", () => {
     );
   });
 
+  it("trims a global top-N generated result to N rows and notes the trim", async () => {
+    const question = "Show the top 3 customers by revenue";
+    const provider = new StubProvider(
+      "Top customers by revenue.\n\n" +
+        "```sql\nSELECT customer_name, revenue FROM customers ORDER BY revenue DESC\n```\n\n" +
+        "Viz: table",
+    );
+
+    const result = await answerBase({
+      question,
+      provider,
+      kg,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "revenue"],
+        rows: [
+          { customer_name: "A", revenue: 100 },
+          { customer_name: "B", revenue: 90 },
+          { customer_name: "C", revenue: 80 },
+          { customer_name: "D", revenue: 70 },
+          { customer_name: "E", revenue: 60 },
+        ],
+        rowCount: 5,
+        sql,
+      }),
+    });
+
+    // Global top-3 ask: the 5-row result is trimmed to 3, with a transparent note.
+    expect(result.result?.rowCount).toBe(3);
+    expect(result.result?.rows).toHaveLength(3);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Showed the top 3 of 5 rows")]),
+    );
+  });
+
   it("uses a certified count block for a direct customer KPI question", async () => {
     kg.rebuild(
       [

@@ -1084,7 +1084,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       trustState,
       stopReason,
       artifacts: governedAnswer.kind === 'no_answer'
-        ? []
+        // A refusal still keeps the DQL draft the answer loop produced (when any),
+        // so the "Review DQL draft" next-action isn't a dead link and the user can
+        // see the SQL that was about to run. Provider outages carry no draft.
+        ? (governedAnswer.dqlArtifact && !isProviderError
+            ? [agentRunArtifact(
+                'dql_block_draft',
+                'DQL draft (review required)',
+                governedAnswer.dqlArtifact,
+                undefined,
+                'review_required',
+              )]
+            : [])
         : [agentRunArtifact(
             'answer',
             isCertified ? 'Certified answer' : 'Review-required answer',
@@ -1282,9 +1293,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           researchWorkspaceError = formatNotebookResearchStorageError(error);
         }
       }
-      const researchResultData = coerceNarrateResultData((researchRun as { resultPreview?: unknown })?.resultPreview);
-      // Executed cleanly against real data (rows present, no workspace/exec error) → grounded, not review-required.
-      const researchExecutedCleanly = Boolean(researchResultData) && !researchWorkspaceError && researchRun?.status !== 'error';
+      const researchResultPreview = (researchRun as { resultPreview?: unknown })?.resultPreview;
+      const researchResultData = coerceNarrateResultData(researchResultPreview);
+      const researchResultRecord = agentRunRecord(researchResultPreview);
+      // A query that ran and matched 0 rows STILL executed — treat it as a clean,
+      // grounded execution (not "no result"), so an empty answer is surfaced as
+      // "0 rows matched" rather than silently downgraded to review-required.
+      const researchDidExecute = Boolean(researchResultData) || Boolean(researchResultRecord && Array.isArray(researchResultRecord.rows));
+      const researchZeroRows = !researchResultData && researchDidExecute;
+      const researchExecutedCleanly = researchDidExecute && !researchWorkspaceError && researchRun?.status !== 'error';
       const narration = !needsClarification && researchResultData
         ? await narrateForAgentRun({
             question: request.question,
@@ -1297,7 +1314,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
         : narration?.summary
-          ?? (researchRun?.status === 'ready'
+          ?? (researchZeroRows
+          ? 'The query executed cleanly against real data and matched 0 rows.'
+          : researchRun?.status === 'ready'
           ? 'Saved a grounded research dossier with context evidence and next review actions.'
           : researchRun?.status === 'error'
             ? 'Saved a research dossier, but the preview needs review before promotion.'
@@ -1308,7 +1327,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               : 'Prepared a grounded research plan over real DQL assets.');
       return {
         summary,
-        answer: plan.followUp?.question ?? narration?.summary ?? researchRun?.summary,
+        answer: plan.followUp?.question ?? narration?.summary
+          ?? (researchZeroRows ? 'The query executed cleanly and matched 0 rows.' : undefined)
+          ?? researchRun?.summary,
         status: needsClarification ? 'needs_clarification' : 'needs_review',
         trustState: needsClarification ? 'not_applicable' : (researchExecutedCleanly ? 'grounded' : 'review_required'),
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
@@ -1357,9 +1378,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             researchExecutedCleanly,
             researchExecutedCleanly ? 'info' : 'warning',
             researchExecutedCleanly
-              ? 'The query executed cleanly against real data and returned rows.'
-              : 'No executed result rows were available; the output stays exploratory pending review.',
-            { rowCount: researchResultData && typeof researchResultData === 'object' && Array.isArray((researchResultData as { rows?: unknown[] }).rows) ? (researchResultData as { rows: unknown[] }).rows.length : 0 },
+              ? (researchZeroRows
+                  ? 'The query executed cleanly against real data and matched 0 rows.'
+                  : 'The query executed cleanly against real data and returned rows.')
+              : 'No executed result was available; the output stays exploratory pending review.',
+            { rowCount: Array.isArray(researchResultRecord?.rows) ? researchResultRecord.rows.length : 0 },
           ),
         ],
         nextActions: needsClarification
@@ -12526,7 +12549,13 @@ function inferDqlGenerationPattern(sql: string): string {
   if (hasDqlGenerationRankingLimit(sql)) return 'ranking';
   if (groupFields.some((field) => /\b(date|day|week|month|quarter|year|period|time)\b/i.test(field))) return 'trend';
   if (groupFields.length === 1 && /_id$|_key$/i.test(groupFields[0])) return 'entity_rollup';
-  if (!/\b(sum|count|avg|min|max|median|percentile|rank)\s*\(/i.test(sql) && /\b(dim|profile|customer|account|player|product|user|entity)\b/i.test(sql)) {
+  // Entity profile = a non-aggregated, un-grouped row lookup filtered by an
+  // identifier (…WHERE <something>_id = / IN …). Structural + domain-agnostic —
+  // no hard-coded entity vocabulary.
+  const hasAggregate = /\b(sum|count|avg|min|max|median|percentile|rank)\s*\(/i.test(sql);
+  const hasGroupBy = /\bgroup\s+by\b/i.test(sql);
+  const filtersByIdentifier = /\bwhere\b[\s\S]*?\b[A-Za-z_][A-Za-z0-9_]*(?:_id|_key|id)\b\s*(?:=|in\b)/i.test(sql);
+  if (!hasAggregate && !hasGroupBy && filtersByIdentifier) {
     return 'entity_profile';
   }
   return 'custom';

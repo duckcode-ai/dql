@@ -1544,6 +1544,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ],
       repairAttempts,
     });
+    // Global top-N asks must return exactly N rows even when the generated SQL
+    // returned more (missing/oversized LIMIT) — mirrors the certified path so a
+    // "top 10" question never shows 200 rows. per_group scope is left intact by
+    // trimResultToRequestedTopN. Domain-agnostic.
+    let topNTrimNote: string | undefined;
+    if (result) {
+      const beforeRows = Array.isArray(result.rows) ? result.rows.length : result.rowCount;
+      result = trimResultToRequestedTopN(result, questionPlan);
+      const afterRows = Array.isArray(result.rows) ? result.rows.length : result.rowCount;
+      if (afterRows < beforeRows) {
+        topNTrimNote = `Showed the top ${questionPlan.requestedShape.topN?.n ?? afterRows} of ${beforeRows} rows the query returned.`;
+      }
+    }
     const resultShape = result ? validateAnswerResultShape(questionPlan, result) : undefined;
     // ANY question whose SQL executed but dropped multiple requested columns used to
     // REFUSE outright ("no governed answer"), throwing away a result that actually
@@ -1563,6 +1576,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ...deepCandidateNotes,
       ...(resultShape?.warnings ?? []),
       ...(partialShapeWarning ? [partialShapeWarning] : []),
+      ...(topNTrimNote ? [topNTrimNote] : []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ];
     const generatedOutputs = parsed.outputs?.length ? parsed.outputs : resultColumnNames(result);
