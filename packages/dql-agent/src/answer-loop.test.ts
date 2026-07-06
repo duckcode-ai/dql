@@ -1796,7 +1796,7 @@ describe("answer (block-first loop)", () => {
     expect(result.text).toContain("Partial answer");
     expect(result.validationWarnings).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("the requested combined shape could not be fully satisfied"),
+        expect.stringContaining("the result is missing"),
       ]),
     );
     // The executed rows and a DQL artifact are returned, not thrown away.

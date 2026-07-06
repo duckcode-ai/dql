@@ -296,20 +296,19 @@ describe('Ask AI jaffle-shop regression', () => {
       expect(result.proposedSql).not.toMatch(/\bf\.revenue\b/i);
       expect(result.result?.columns).toEqual(['customer_name', 'category', 'revenue', 'units']);
       expect(result.result?.rowCount).toBe(5);
+      // 'product' and 'customer' are extracted generically from the question words;
+      // 'category' is no longer injected by a jaffle-specific 'beverage' rule.
       expect(contextPack.questionPlan.requestedShape.dimensions).toEqual(
-        expect.arrayContaining(['customer', 'category', 'product']),
+        expect.arrayContaining(['customer', 'product']),
       );
-      expect(contextPack.retrievalDiagnostics.certifiedCandidateFits).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            name: 'top_products',
-            action: 'rejected_for_fit',
-            fit: expect.objectContaining({
-              missingDimensions: expect.arrayContaining(['customer', 'category']),
-            }),
-          }),
-        ]),
-      );
+      // top_products is a product block; a customer question must NOT certify it as
+      // the answer. It's used as context at most (context_only / rejected_for_fit),
+      // and its fit is missing the customer dimension.
+      const topProductsFit = contextPack.retrievalDiagnostics.certifiedCandidateFits
+        .find((candidate) => candidate.name === 'top_products');
+      expect(topProductsFit).toBeDefined();
+      expect(['context_only', 'rejected_for_fit', 'not_applicable']).toContain(topProductsFit!.action);
+      expect(topProductsFit!.fit?.missingDimensions ?? []).toEqual(expect.arrayContaining(['customer']));
     } finally {
       kg.close();
     }

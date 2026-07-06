@@ -1545,18 +1545,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       repairAttempts,
     });
     const resultShape = result ? validateAnswerResultShape(questionPlan, result) : undefined;
-    // A composite product/customer question whose SQL executed but doesn't cover the
-    // full requested shape used to REFUSE outright ("no governed answer"), throwing
-    // away a result that actually ran. Instead, SURFACE the partial result
-    // (review-required) with a clear warning naming the missing columns — a partial
-    // table the user can see and refine beats a blank clarify. The shape gate now
-    // downgrades trust rather than blocking the answer.
+    // ANY question whose SQL executed but dropped multiple requested columns used to
+    // REFUSE outright ("no governed answer"), throwing away a result that actually
+    // ran. Instead, SURFACE the partial result (review-required) with a warning that
+    // names the missing columns — a partial table the user can see and refine beats a
+    // blank clarify. Domain-agnostic: works for every project, not just jaffle. The
+    // shape gate downgrades trust rather than blocking the answer.
     const partialShapeMismatch = Boolean(resultShape && result && result.rowCount > 0
-      && generatedResultShapeIsHardMismatch(question, questionPlan, resultShape));
+      && generatedResultShapeIsPartial(resultShape));
     const partialShapeWarning = partialShapeMismatch && resultShape
-      ? `Partial answer: the requested combined shape could not be fully satisfied`
-        + `${resultShape.missingOutputs.length ? ` (missing ${resultShape.missingOutputs.join(', ')})` : ''}`
-        + `. Showing the closest table that executed — review before reuse, or ask for a product-only or customer-only view.`
+      ? `Partial answer: the result is missing ${resultShape.missingOutputs.join(', ')}`
+        + `. Showing the closest table that executed — review before reuse, or narrow the question to the columns shown.`
       : undefined;
     const validationWarnings = [
       ...(input.contextPack?.warnings ?? []),
@@ -2558,44 +2557,17 @@ function escapeDqlArtifactTripleString(value: string): string {
   return value.replace(/"""/g, '\\"\\"\\"');
 }
 
-function hasProductCustomerRevenueIntent(question: string, questionPlan?: AnalysisQuestionPlan): boolean {
-  const requestedText = [
-    question,
-    ...(questionPlan?.requestedShape.requiredOutputs ?? []),
-    ...(questionPlan?.requestedShape.dimensions ?? []),
-    ...(questionPlan?.requestedShape.measures ?? []),
-    ...(questionPlan?.dimensionTerms ?? []),
-    ...(questionPlan?.metricTerms ?? []),
-  ].join(' ');
-  return mentionsProductConcept(requestedText)
-    && mentionsCustomerConcept(requestedText)
-    && /\brevenu|\bsales\b|\bamount\b|\bspend\b/i.test(requestedText);
-}
-
-function requiresProductCustomerRevenueCompositeAnswer(question: string): boolean {
-  return mentionsProductConcept(question)
-    && mentionsCustomerConcept(question)
-    && /\brevenu|\bsales\b|\bamount\b|\bspend\b/i.test(question);
-}
-
-function mentionsCustomerConcept(text: string): boolean {
-  return /\b(?:customers?|cusomers?|custmers?|costomers?|clients?|buyers?)\b/i.test(text);
-}
-
-function mentionsProductConcept(text: string): boolean {
-  return /\b(?:products?|product_name|items?|skus?|bought|buying|purchased?)\b/i.test(text);
-}
-
-function generatedResultShapeIsHardMismatch(
-  question: string,
-  questionPlan: AnalysisQuestionPlan,
+/**
+ * Generic partial-shape signal: the SQL executed but dropped MULTIPLE explicitly
+ * requested output columns. Domain-agnostic — this downgrades trust and attaches a
+ * "partial answer, missing <cols>" warning (and biases deep-candidate selection
+ * toward the complete-shape candidate) for ANY project, not just product/customer/
+ * revenue. It never refuses; the executed rows are always returned.
+ */
+function generatedResultShapeIsPartial(
   resultShape: ReturnType<typeof validateAnswerResultShape>,
 ): boolean {
-  if (!requiresProductCustomerRevenueCompositeAnswer(question) && !hasProductCustomerRevenueIntent(question, questionPlan)) return false;
-  if (resultShape.missingOutputs.length === 0) return false;
-  return resultShape.missingOutputs.some((output) =>
-    /\b(product|category|customer|revenue|sales|amount|spend)\b/i.test(output.replace(/_/g, ' '))
-  ) || resultShape.missingOutputs.length >= 2;
+  return resultShape.missingOutputs.length >= 2;
 }
 
 function trustedFollowUpFilterValues(followUp: AgentFollowUpContext | undefined): string[] | undefined {
@@ -3652,7 +3624,7 @@ async function scoreDeepGeneratedProposalCandidate(
           if (result.rowCount > 0) score += 8;
           const resultShape = validateAnswerResultShape(input.questionPlan, result);
           score -= resultShape.warnings.length * 6;
-          if (generatedResultShapeIsHardMismatch(input.question, input.questionPlan, resultShape)) score -= 120;
+          if (generatedResultShapeIsPartial(resultShape)) score -= 120;
         } catch (error) {
           executionError = error instanceof Error ? error.message : String(error);
           score -= 20;
