@@ -417,12 +417,15 @@ Full workspace suite green: 40/40 turbo tasks.
   `semantic-bridge/member-select.ts` with 5 dedicated unit tests (zero behavior change);
   answer-loop.ts 4,690 → 4,583. The full reduction to <1,500 lines needs the deeply-stateful lane
   bodies extracted — a large, risk-sensitive refactor best done incrementally in a focused session.
-- **R2.3** ⏸️ Still coupled to the full R3.6 — the short-circuit needs the answer tier threaded
-  through `StepOutcome`, cleanest once the lanes are first-class. Narrow payoff standalone.
+- **R2.3** ✅ Done independently (did not require the full R3.6). Threaded the cascade answer
+  tier through `AgentRouteExecutorResult.answerTier` → `StepOutcome.terminalTier`;
+  `isTerminalSuccess` now ends the run on a completed `semantic_metric` answer (as terminal as a
+  certified block) while `generated_sql` / `business_context` stay non-terminal for multi-step
+  research. The tier — not the route or status — is the discriminator. Tested. Merged to `main`.
 
-**Net remaining after this marathon:** the full `runAnswerLoop` lane-body extraction (R3.6) and
-the R2.3 short-circuit that depends on it — one focused refactoring session — plus the small
-`resultSample` execution wiring. Everything else in the remediation plan is implemented and tested.
+**Net remaining:** only the full `runAnswerLoop` lane-body extraction (R3.6 to <1,500 lines — a
+focused refactoring session) and the small `resultSample` execution wiring. Everything else in
+the remediation plan is implemented, tested, and merged to `main`.
 
 ## Definition of done for RFC 0001
 
