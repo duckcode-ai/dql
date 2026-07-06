@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Blocks, ChevronDown, ChevronRight, Database, FileText, Layers, Plus, Search } from 'lucide-react';
+import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, Layers, Plus, Search, Type } from 'lucide-react';
 import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
@@ -66,13 +66,14 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText }: {
               onClick={() => setTab(id)}
               title={label}
               style={{
-                flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                flex: 1, minWidth: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
                 border: 'none', borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
                 background: 'transparent', color: active ? t.accent : t.textMuted, cursor: 'pointer',
-                fontSize: 11, fontWeight: 700, padding: '6px 4px 7px',
+                fontSize: 11, fontWeight: 700, padding: '6px 3px 7px',
               }}
             >
-              <Icon size={13} />{label}
+              <Icon size={13} style={{ flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
             </button>
           );
         })}
@@ -107,7 +108,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText }: {
 }
 
 const rowStyle = (t: Theme, active = false): React.CSSProperties => ({
-  display: 'flex', alignItems: 'center', gap: 6, width: '100%', boxSizing: 'border-box',
+  display: 'flex', alignItems: 'center', gap: 7, width: '100%', minWidth: 0, boxSizing: 'border-box',
   padding: '6px 10px', border: 'none', borderBottom: `1px solid ${t.cellBorder}`,
   background: active ? `${t.accent}14` : 'transparent', cursor: 'pointer', textAlign: 'left',
   fontFamily: t.font, color: t.textPrimary,
@@ -115,6 +116,14 @@ const rowStyle = (t: Theme, active = false): React.CSSProperties => ({
 
 function EmptyNote({ text, t }: { text: string; t: Theme }) {
   return <div style={{ padding: '16px 12px', fontSize: 11.5, color: t.textMuted, textAlign: 'center' }}>{text}</div>;
+}
+
+/** A data-type-aware icon for a database column, database-studio style. */
+function columnTypeIcon(type: string): React.ComponentType<any> {
+  const s = (type ?? '').toLowerCase();
+  if (/int|float|numeric|decimal|double|real|number|bigint|money|serial/.test(s)) return Hash;
+  if (/date|time|timestamp|interval/.test(s)) return Calendar;
+  return Type;
 }
 
 function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: NotebookFile) => void }) {
@@ -147,8 +156,8 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
             style={rowStyle(t, state.activeFile?.path === file.path)}
             title={file.path}
           >
-            <FileText size={13} color={t.textMuted} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
+            <FileText size={13} color={t.textMuted} style={{ flexShrink: 0 }} />
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
               {file.name.replace(/\.dqln?$|\.ipynb$/i, '')}
             </span>
           </button>
@@ -214,25 +223,29 @@ function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onIns
                 type="button"
                 onClick={() => onInsert(`SELECT * FROM ${tb.path || tb.name} LIMIT 100`)}
                 title="Insert a SELECT for this table"
-                style={{ flex: 1, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6, padding: 0, fontFamily: t.font }}
+                style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 7, padding: 0, fontFamily: t.font }}
               >
-                <Database size={12} color={t.textMuted} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontFamily: t.fontMono }}>{tb.name}</span>
-                <span style={{ marginLeft: 'auto', fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{tb.columns.length}</span>
+                <Database size={13} color={t.accent} style={{ flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontFamily: t.fontMono }}>{tb.name}</span>
+                <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{tb.columns.length}</span>
               </button>
             </div>
-            {open && tb.columns.map((col) => (
-              <button
-                key={col.name}
-                type="button"
-                onClick={() => onInsert(col.name)}
-                title={`Insert column ${col.name}`}
-                style={{ ...rowStyle(t), paddingLeft: 30 }}
-              >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono, color: t.textSecondary }}>{col.name}</span>
-                <span style={{ marginLeft: 'auto', fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{col.type}</span>
-              </button>
-            ))}
+            {open && tb.columns.map((col) => {
+              const ColIcon = columnTypeIcon(col.type);
+              return (
+                <button
+                  key={col.name}
+                  type="button"
+                  onClick={() => onInsert(col.name)}
+                  title={`Insert column ${col.name}`}
+                  style={{ ...rowStyle(t), paddingLeft: 32, gap: 7 }}
+                >
+                  <ColIcon size={12} color={t.textMuted} style={{ flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono, color: t.textSecondary }}>{col.name}</span>
+                  <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{col.type}</span>
+                </button>
+              );
+            })}
           </div>
         );
       })}
@@ -286,11 +299,11 @@ function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: (
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          style={{ flex: 1, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 6, padding: 0, fontFamily: t.font }}
+          style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 7, padding: 0, fontFamily: t.font }}
         >
-          <span style={{ width: 6, height: 6, borderRadius: '50%', background: STATUS_COLOR[block.status] ?? t.textMuted, flexShrink: 0 }} />
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{block.name}</span>
-          <span style={{ marginLeft: 'auto', fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{block.domain}</span>
+          <Box size={13} color={STATUS_COLOR[block.status] ?? t.textMuted} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{block.name}</span>
+          <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{block.domain}</span>
         </button>
       </div>
       {open && (
