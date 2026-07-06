@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, Layers, Plus, Search, Type } from 'lucide-react';
+import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, KeyRound, Layers, Link2, Plus, Search, Type } from 'lucide-react';
 import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
@@ -126,6 +126,20 @@ function columnTypeIcon(type: string): React.ComponentType<any> {
   return Type;
 }
 
+/**
+ * Best-effort relational role for a column from its name (the schema only carries
+ * name + type). `<table>_id` / `id` reads as a primary key; any other `*_id`/`*_key`
+ * reads as a foreign key — so relations surface with a key/link icon when present.
+ */
+function columnRelation(colName: string, tableName: string): 'pk' | 'fk' | undefined {
+  const c = colName.toLowerCase();
+  if (!(/(?:_id|_key|_uuid|_fk|_pk)$/.test(c) || c === 'id' || c === 'pk')) return undefined;
+  const table = tableName.toLowerCase().replace(/^(?:dim|fct|fact|stg|staging|raw|base)_/, '');
+  const singular = table.replace(/s$/, '');
+  if (c === 'id' || c === 'pk' || c === `${table}_id` || c === `${singular}_id` || c === `${table}id` || c === `${singular}id`) return 'pk';
+  return 'fk';
+}
+
 function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: NotebookFile) => void }) {
   const { state, dispatch } = useNotebook();
   const notebooks = Array.from(
@@ -230,16 +244,18 @@ function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onIns
               </button>
             </div>
             {open && tb.columns.map((col) => {
-              const ColIcon = columnTypeIcon(col.type);
+              const relation = columnRelation(col.name, tb.name);
+              const ColIcon = relation === 'pk' ? KeyRound : relation === 'fk' ? Link2 : columnTypeIcon(col.type);
+              const iconColor = relation === 'pk' ? t.warning : relation === 'fk' ? t.accent : t.textMuted;
               return (
                 <button
                   key={col.name}
                   type="button"
                   onClick={() => onInsert(col.name)}
-                  title={`Insert column ${col.name}`}
+                  title={relation === 'pk' ? `Primary key · insert ${col.name}` : relation === 'fk' ? `Foreign key · insert ${col.name}` : `Insert column ${col.name}`}
                   style={{ ...rowStyle(t), paddingLeft: 32, gap: 7 }}
                 >
-                  <ColIcon size={12} color={t.textMuted} style={{ flexShrink: 0 }} />
+                  <ColIcon size={12} color={iconColor} style={{ flexShrink: 0 }} />
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono, color: t.textSecondary }}>{col.name}</span>
                   <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{col.type}</span>
                 </button>

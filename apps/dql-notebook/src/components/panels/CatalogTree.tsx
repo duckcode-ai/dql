@@ -82,6 +82,16 @@ const KIND_ICON: Record<string, { Icon: React.ComponentType<any>; tone: (t: Them
   group: { Icon: Folder, tone: (t) => t.textMuted },
 };
 
+// A group node ("Measures", "Dimensions", …) carries its content type in
+// meta.objectKind — icon it by that so the group header matches its leaves.
+function resolveNodeIcon(node: SemanticTreeNode): { Icon: React.ComponentType<any>; tone: (t: Theme) => string } | undefined {
+  if (node.kind === 'group') {
+    const objectKind = typeof node.meta?.objectKind === 'string' ? node.meta.objectKind : '';
+    return KIND_ICON[objectKind] ?? KIND_ICON.group;
+  }
+  return KIND_ICON[node.kind];
+}
+
 export function SemanticTreeView({
   tree,
   themeMode,
@@ -106,7 +116,7 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
   const hasChildren = (node.children?.length ?? 0) > 0;
   const [open, setOpen] = useState(depth < 1 || Boolean(q));
   const insertable = INSERTABLE.has(node.kind);
-  const icon = KIND_ICON[node.kind];
+  const icon = resolveNodeIcon(node);
   const Icon = icon?.Icon;
   const pad = 10 + depth * 13;
 
