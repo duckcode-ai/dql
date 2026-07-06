@@ -1077,6 +1077,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ];
     return {
       resolvedRoute,
+      answerTier: governedAnswer.route?.tier,
       summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
