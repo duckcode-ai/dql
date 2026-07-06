@@ -1044,6 +1044,78 @@ describe("answer (block-first loop)", () => {
     );
   });
 
+  it("retries with a forced-join instruction when the model falsely refuses a joinable composite question", async () => {
+    // The composite "top customers who bought the top products with revenue"
+    // trips the model into "there's no combined dataset — show them separately",
+    // even though customers→orders→order_items→products is a normal join. When
+    // the grounded tables are supplied, the loop must re-ask ONCE with an explicit
+    // instruction to compose the join instead of dead-ending on the refusal.
+    const declineReply =
+      "There's no combined dataset linking specific products to the customers who bought them — " +
+      "would you like top_products and top_customers shown separately instead?";
+    const joinReply = [
+      "```json",
+      JSON.stringify({
+        summary:
+          "Grain: one row per customer. Join customers→orders→order_items on customer_id/order_id, sum revenue.",
+        sql: [
+          "SELECT c.customer_name, SUM(oi.revenue) AS revenue",
+          "FROM analytics.customers c",
+          "JOIN analytics.orders o ON o.customer_id = c.customer_id",
+          "JOIN analytics.order_items oi ON oi.order_id = o.order_id",
+          "GROUP BY c.customer_name",
+          "ORDER BY revenue DESC",
+          "LIMIT 10",
+        ].join("\n"),
+        viz: "bar",
+        outputs: ["customer_name", "revenue"],
+      }),
+      "```",
+    ].join("\n");
+    const provider = new StubProvider([declineReply, joinReply]);
+    const result = await answerBase({
+      question: "Can you give me the top customers who bought the top most products with revenue",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "analytics.customers",
+          schema: "analytics",
+          name: "customers",
+          columns: [{ name: "customer_id" }, { name: "customer_name" }],
+        },
+        {
+          relation: "analytics.orders",
+          schema: "analytics",
+          name: "orders",
+          columns: [{ name: "order_id" }, { name: "customer_id" }],
+        },
+        {
+          relation: "analytics.order_items",
+          schema: "analytics",
+          name: "order_items",
+          columns: [{ name: "order_id" }, { name: "product_id" }, { name: "revenue" }],
+        },
+      ],
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "revenue"],
+        rows: [{ customer_name: "Matthew Meyer", revenue: 512 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    // The refusal was retried, not surfaced: two provider calls, the second one
+    // carrying the forced-join instruction, and a real generated join answer.
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]!.map((message) => message.content).join("\n")).toContain(
+      "compose ONE read-only SELECT",
+    );
+    expect(result.kind).toBe("uncertified");
+    expect(result.proposedSql).toContain("JOIN analytics.orders");
+    expect(result.result?.rowCount).toBe(1);
+  });
+
   it("warns when generated preview results miss requested columns or top-N shape", async () => {
     const question = "Who are the top 2 customers with customer name and revenue?";
     const provider = new StubProvider(

@@ -222,6 +222,22 @@ export function decideAgentAction(input: IntentDecisionInput): IntentDecision {
     };
   }
 
+  // 1b) A turn that ANSWERS a prior clarifying question must proceed to a real
+  //     answer — never clarify again. Short replies ("top 5", "yes") aren't deictic
+  //     follow-ups, so without this the router re-clarifies every time and loops
+  //     forever. The user gave the detail we asked for; the answer loop cascades
+  //     (certified → semantic → generated) and can still clarify itself only if it
+  //     genuinely cannot proceed.
+  const priorAssistant = [...(input.history ?? [])].reverse().find((turn) => turn.role === 'assistant');
+  if (priorAssistant && priorAssistant.text.trim().endsWith('?')) {
+    return {
+      action: 'answer',
+      confidence: 0.6,
+      reason: 'This answers a clarifying question, so I will produce a best-effort governed answer now instead of asking again.',
+      followsUp: true,
+    };
+  }
+
   // 2) EXPLICIT investigation ("why / root cause / what happened") wins even over a
   //    metric match — returning a single number would miss the point of the ask.
   if (STRONG_INVESTIGATE_RE.test(question) || DIAGNOSTIC_INTENTS.has(intent)) {

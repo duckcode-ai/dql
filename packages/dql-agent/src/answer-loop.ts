@@ -1155,6 +1155,42 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       };
     }
   }
+  // Forced-join retry. The model declined SQL (rule 8 escape) — but a composite
+  // "top X who did top Y" that spans several concepts often trips the model into
+  // "there's no combined dataset — show them separately", which is a FALSE refusal
+  // when the grounded tables and KG join routes to connect them are right there in
+  // context. If the question genuinely wants generated data and we DO have usable
+  // relations/schema to build the join, re-issue ONCE with an explicit instruction
+  // to compose the join rather than refuse. A truly absent table/column/join key
+  // still falls through to the honest no_answer below.
+  const wantsGeneratedData =
+    questionPlan.requestedShape.measures.length > 0
+    || questionPlan.requestedShape.dimensions.length > 0
+    || questionPlan.requestedShape.requiredOutputs.length > 0
+    || Boolean(questionPlan.requestedShape.topN);
+  const hasGeneratableContext =
+    schemaContext.length > 0
+    || (input.contextPack?.allowedSqlContext?.relations.length ?? 0) > 0
+    || (input.contextPack?.allowedSqlContext?.sourceBlockSql.length ?? 0) > 0
+    || contextBlocks.length > 0;
+  if (!parsed.sql && !governedMetricAnswer && wantsGeneratedData && hasGeneratableContext) {
+    try {
+      proposed = await generateProposalWithOptionalTools({
+        provider,
+        messages: [...messages, { role: 'system', content: FORCE_JOIN_INSTRUCTION }],
+        tools: input.answerLoopTools,
+        questionPlan,
+        intent,
+        signal: input.signal,
+        reasoningEffort: input.reasoningEffort,
+        analysisDepth: input.analysisDepth,
+        toolCalls: proposalToolCalls,
+      });
+      parsed = parseProposal(proposed);
+    } catch {
+      // keep the original decline; fall through to the honest no_answer.
+    }
+  }
   if (!parsed.sql) {
     const text = parsed.text || 'No answer (the model declined to propose SQL).';
     return {
@@ -1755,7 +1791,14 @@ Rules:
    proposed SQL. Do not emit INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, COPY,
    PRAGMA, SET, or multiple statements.
 8. If the schema is insufficient to answer, say so explicitly and ask a
-   clarifying question instead of guessing.
+   clarifying question instead of guessing. But a MULTI-ENTITY question ("top
+   customers who bought the top products", "accounts with the most overdue
+   invoices") is NOT insufficient context when the grounded tables and a join
+   route between them are supplied (see any "Knowledge graph join routes"
+   section). In that case you MUST compose the joined SELECT that answers it
+   directly — never refuse it or offer to show the parts as separate datasets.
+   Reserve the clarifying question for a genuinely absent table, column, or join
+   key.
 9. Write directly to the analyst. Do not say "the user is asking", "the user
    requested", "I will generate", or describe internal routing. State the
    answer, the certified context used, the DQL artifact expectation, and the
@@ -1764,6 +1807,12 @@ Rules:
    checks, start with one line in this form: "Outcome: <decision>". Use one of
    these decisions: Reuse certified block, Use existing draft, Review SQL preview,
    Fix SQL, Create DQL draft, Needs review, Cannot answer yet.`;
+
+// Appended on a single retry when the model declined SQL for a question that the
+// grounded schema + KG join routes can actually answer. Turns a false "no
+// combined dataset — show them separately" refusal into the join the user asked
+// for, while still allowing an honest refusal if context is truly missing.
+const FORCE_JOIN_INSTRUCTION = `Your previous attempt declined to produce SQL. Re-read the supplied schema, metadata, and any "Knowledge graph join routes": this question CAN be answered by joining the grounded tables along their documented keys. Do NOT refuse, and do NOT suggest showing the datasets separately — compose ONE read-only SELECT/WITH that joins the relevant tables to answer it directly, following the JSON contract from rule 3. State the grain and the exact join path in the summary. Only if a required table, column, or join key is truly absent from the supplied context may you still ask a clarifying question.`;
 
 function renderContextPrompt(
   blocks: KGNode[],
