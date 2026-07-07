@@ -1695,15 +1695,43 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? semanticMetricMatch?.metric.certification
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
+    // Central honesty gate. A governed/generated DATA answer must have PRODUCED
+    // ROWS. When an executor WAS available but the query yielded nothing — 0 rows,
+    // no result, or an execution error — never surface confident "Answered from
+    // governed semantic metrics…" prose over an empty result. Downgrade to an
+    // honest, review-required no-data state that still shows the SQL to inspect and
+    // fix. This is the general guard (covers the semantic-bridge, governed-metric,
+    // and generated lanes that share this exit) that keeps a hollow answer — the
+    // real failure mode behind the cross-surface inconsistency — from ever reading
+    // as a trustworthy answer. When no executor is wired (offline SQL preview), the
+    // gate does not fire — that is a legitimate un-executed preview, not a hollow
+    // answer.
+    const executorWasAvailableForAnswer = Boolean(input.executeGeneratedSql);
+    const producedRows = Boolean(result && typeof result.rowCount === 'number' && result.rowCount > 0);
+    const hollowNoData = executorWasAvailableForAnswer && !producedRows;
+    if (hollowNoData) {
+      validationWarnings.push(executionError
+        ? 'The governed query failed to execute and returned no data — review before reuse.'
+        : 'The governed query executed but returned no rows — review the SQL, filters, and joins before reuse.');
+    }
+    const honestAnswerText = hollowNoData
+      ? [
+          executionError
+            ? `The governed query could not be executed (${executionError}).`
+            : 'The governed query executed but returned no rows.',
+          'This usually means a filter, grain, or join is off — review the SQL preview and refine before reuse.',
+          cleanedSummary,
+        ].filter(Boolean).join('\n\n')
+      : generatedText;
     return {
       kind: 'uncertified',
       sourceTier: activeTier,
       certification: 'ai_generated',
-      reviewStatus: 'draft_ready',
+      reviewStatus: hollowNoData ? 'analyst_review_required' : 'draft_ready',
       semanticMetricCertification,
-      confidence: certifiedMetricAnswer ? 0.8 : governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
-      text: generatedText,
-      answer: generatedText,
+      confidence: hollowNoData ? 0.2 : certifiedMetricAnswer ? 0.8 : governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
+      text: honestAnswerText,
+      answer: honestAnswerText,
       proposedSql: parsed.sql,
       sql: parsed.sql,
       result,

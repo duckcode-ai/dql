@@ -88,6 +88,26 @@ describe('SemanticLayer', () => {
     expect(result?.sql).toContain('GROUP BY status');
   });
 
+  it('refuses to compose (returns null) when a dimension has no join path to the metric table', () => {
+    // Prevents degenerate SQL: a metric on `orders` sliced by a dimension on
+    // `products` with no join between them would otherwise emit SELECT products.name
+    // with NO JOIN for products — a query that errors or returns wrong/zero rows.
+    // Refusing lets the caller fall through to a generated join instead.
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders' }],
+      dimensions: [{ name: 'product_name', label: 'Product', description: '', sql: 'name', type: 'string', table: 'products' }],
+    });
+    expect(layer.composeQuery({ metrics: ['revenue'], dimensions: ['product_name'], driver: 'duckdb' })).toBeNull();
+  });
+
+  it('still composes when the metric and dimension share a table', () => {
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders' }],
+      dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+    });
+    expect(layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' })?.sql).toContain('SUM(amount) AS revenue');
+  });
+
   it('supports hierarchy registration and drill-path resolution', () => {
     const layer = new SemanticLayer({
       metrics: [],
