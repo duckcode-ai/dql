@@ -1316,6 +1316,35 @@ describe("answer (block-first loop)", () => {
     );
   });
 
+  it("downgrades a generated answer to honest no-data when execution returns 0 rows (central honesty gate)", async () => {
+    // The hollow-answer failure mode: an executor was available but the query
+    // produced nothing. The loop must NOT surface confident prose over an empty
+    // result — it downgrades to a low-confidence, review-required no-data state
+    // that still shows the SQL to inspect.
+    const provider = new StubProvider(
+      "Customer revenue ranking.\n\n" +
+        "```sql\nSELECT customer_name, SUM(revenue) AS revenue FROM analytics.customers GROUP BY customer_name\n```\n\n" +
+        "Viz: table",
+    );
+    const result = await answerBase({
+      question: "Show revenue by customer",
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "analytics.customers",
+        name: "customers",
+        columns: [{ name: "customer_name" }, { name: "revenue" }],
+      }],
+      executeGeneratedSql: async (sql) => ({ columns: ["customer_name", "revenue"], rows: [], rowCount: 0, sql }),
+    });
+
+    expect(result.confidence).toBeLessThan(0.5);
+    expect(result.reviewStatus).toBe("analyst_review_required");
+    expect(result.text).toMatch(/no rows|could not be executed/i);
+    // The SQL is still surfaced so the user can inspect and fix it.
+    expect(result.proposedSql).toContain("analytics.customers");
+  });
+
   it("uses a certified count block for a direct customer KPI question", async () => {
     kg.rebuild(
       [

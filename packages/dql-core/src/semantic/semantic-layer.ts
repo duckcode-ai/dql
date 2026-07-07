@@ -609,6 +609,7 @@ export class SemanticLayer {
     const primaryCube = cubeByTable(primaryTable);
     const joinsUsed: JoinDefinition[] = [];
     const joinedTables = new Set<string>([primaryTable]);
+    const unjoinedTables = new Set<string>();
 
     for (const table of allTables) {
       if (table === primaryTable) continue;
@@ -621,11 +622,17 @@ export class SemanticLayer {
           joinedTables.add(join.right);
         }
       }
-      // If no path found, still include the table with a simple reference
+      // No join path to a required table: emitting SELECT `table.col` with no JOIN
+      // for `table` produces DEGENERATE SQL that errors or returns wrong/zero rows
+      // (e.g. a cumulative revenue metric sliced by an unjoined product dimension).
+      // Refuse to compose rather than hand back a query that can't answer — the
+      // caller then falls through to a generated join instead of surfacing a hollow
+      // "governed metric" answer with no rows.
       if (!joinedTables.has(table)) {
-        joinedTables.add(table);
+        unjoinedTables.add(table);
       }
     }
+    if (unjoinedTables.size > 0) return null;
 
     // Build SELECT
     const selectParts: string[] = [];
