@@ -515,6 +515,11 @@ export interface AnswerLoopInput {
 const CERTIFIED_HIT_THRESHOLD = 0.18;
 const HARD_NEGATIVE_RATIO = 0.5;
 const EXECUTABLE_ARTIFACT_KINDS: KGNodeKind[] = ['block', 'dashboard', 'app', 'notebook'];
+// Dashboards, apps, and notebooks are governed NAVIGATION targets — collections
+// of tiles / a standing surface, not an executable data query. They can ground or
+// be cited, but they never produce the row-level answer to an analytical question,
+// so they must not terminate a data ask as a "certified answer" with no data.
+const NAVIGATION_ARTIFACT_KINDS: KGNodeKind[] = ['dashboard', 'app', 'notebook'];
 const BUSINESS_CONTEXT_KINDS: KGNodeKind[] = ['term', 'business_view'];
 const ARTIFACT_KINDS: KGNodeKind[] = [...EXECUTABLE_ARTIFACT_KINDS, ...BUSINESS_CONTEXT_KINDS];
 const SEMANTIC_KINDS: KGNodeKind[] = ['metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query'];
@@ -728,6 +733,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // must be answered with data even when the phrasing looks definitional
     // ("so Matthew is the top — what is his 360 profile view?").
     if (input.followUp?.priorResultValues || input.followUp?.priorResultColumns?.length) return false;
+    // A dashboard / app / notebook is a NAVIGATION target, not executable data.
+    // It can only terminate a question that explicitly asks to open/see THAT
+    // artifact by name ("open the Jaffle Growth Command Center"); any analytical
+    // ask ("top customers who bought the top products with revenue") must fall
+    // through to the executable + generated tiers and use the artifact only as
+    // grounding — never returned as a no-data "certified answer".
+    if (NAVIGATION_ARTIFACT_KINDS.includes(artifactHit.node.kind)) {
+      return objectNameInQuestion(question, artifactHit.node);
+    }
     // Cold questions fall through only on STRONG data-shape signals — bare
     // measure/dimension words are normal in definition asks ("what is revenue
     // health?") and must keep answering from the certified business context.
