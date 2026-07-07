@@ -865,6 +865,9 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   const metrics = computeEvalMetrics(results);
   const thresholds = {
     minToolRequirement: (flags as { minToolRequirement?: number }).minToolRequirement ?? null,
+    minExecutionMatch: (flags as { minExecutionMatch?: number }).minExecutionMatch ?? null,
+    minJudgePass: (flags as { minJudgePass?: number }).minJudgePass ?? null,
+    maxWrongCertified: (flags as { maxWrongCertified?: number }).maxWrongCertified ?? null,
   };
   const thresholdsPassed = agentEvalThresholdsPass(metrics, thresholds);
   const ok = passed === results.length && thresholdsPassed;
@@ -889,6 +892,15 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Draft saved count: ${metrics.draft_saved_count}`);
   if (thresholds.minToolRequirement !== null) {
     console.log(`Tool requirement threshold: ${thresholds.minToolRequirement} (actual ${formatRate(metrics.tool_requirement_pass_rate)})`);
+  }
+  if (thresholds.minExecutionMatch !== null) {
+    console.log(`Execution-match threshold: ${thresholds.minExecutionMatch} (actual ${formatRate(metrics.execution_match_rate)})`);
+  }
+  if (thresholds.minJudgePass !== null) {
+    console.log(`Judge-pass threshold: ${thresholds.minJudgePass} (actual ${formatRate(metrics.judge_pass_rate)})`);
+  }
+  if (thresholds.maxWrongCertified !== null) {
+    console.log(`Wrong-certified ceiling: ${thresholds.maxWrongCertified} (actual ${metrics.wrong_certified_count})`);
   }
   if (!ok) process.exitCode = 1;
 }
@@ -1009,11 +1021,23 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
 
 function agentEvalThresholdsPass(
   metrics: ReturnType<typeof computeEvalMetrics>,
-  thresholds: { minToolRequirement: number | null },
+  thresholds: {
+    minToolRequirement: number | null;
+    minExecutionMatch?: number | null;
+    minJudgePass?: number | null;
+    maxWrongCertified?: number | null;
+  },
 ): boolean {
-  return thresholds.minToolRequirement === null
-    || metrics.tool_requirement_pass_rate === null
-    || metrics.tool_requirement_pass_rate >= thresholds.minToolRequirement;
+  // A rate threshold with no applicable cases (metric === null) is vacuously
+  // satisfied — you only fail when the metric exists and falls below the bar.
+  const rateOk = (metric: number | null, min: number | null | undefined): boolean =>
+    min === null || min === undefined || metric === null || metric >= min;
+  return rateOk(metrics.tool_requirement_pass_rate, thresholds.minToolRequirement)
+    && rateOk(metrics.execution_match_rate, thresholds.minExecutionMatch)
+    && rateOk(metrics.judge_pass_rate, thresholds.minJudgePass)
+    && (thresholds.maxWrongCertified === null
+      || thresholds.maxWrongCertified === undefined
+      || metrics.wrong_certified_count <= thresholds.maxWrongCertified);
 }
 
 function buildEvalTrace(input: {

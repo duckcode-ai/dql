@@ -65,6 +65,12 @@ export interface CLIFlags {
   minAnswerRate?: number;
   /** `dql agent eval --min-tool-requirement <0..1>` — fail below this tool-observed requirement pass rate. */
   minToolRequirement?: number;
+  /** `dql agent eval --min-execution-match <0..1>` — fail below this execution_match_rate (catches class-B wrong-number regressions on `expected.rows` cases). */
+  minExecutionMatch?: number;
+  /** `dql agent eval --min-judge-pass <0..1>` — fail below this LLM-judge pass rate (semantic accuracy). */
+  minJudgePass?: number;
+  /** `dql agent eval --max-wrong-certified <n>` — fail if more than n answers were wrongly stamped certified. */
+  maxWrongCertified?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
   noExamples?: boolean;
   /** `dql diff --impact` — compute downstream impact + re-cert gate for changed blocks. */
@@ -210,6 +216,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--min-tool-requirement' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minToolRequirement = value;
+    } else if (arg === '--min-execution-match' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minExecutionMatch = value;
+    } else if (arg === '--min-judge-pass' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minJudgePass = value;
+    } else if (arg === '--max-wrong-certified' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0) flags.maxWrongCertified = value;
     } else if (arg === '--no-examples') {
       flags.noExamples = true;
     } else if (arg === '--impact') {
