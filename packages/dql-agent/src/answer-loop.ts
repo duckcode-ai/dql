@@ -753,7 +753,14 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       }
     }
     const resultShapeWarnings = result ? validateAnswerResultShape(questionPlan, result).warnings : [];
-    const certifiedShapePassed = resultShapeWarnings.length === 0;
+    // When a certified block's execution was ATTEMPTED and FAILED, the answer
+    // cannot wear the certified badge — a failed run has no data to stand behind.
+    // Downgrade to analyst_review_required (the error is surfaced in the text).
+    // Note: a matched-but-unexecuted block (no executor / dry-run) legitimately
+    // stays a certified *citation* — non-execution is a separate axis surfaced via
+    // cascade.executionStatus ('not_requested') and freshness dataState, not a
+    // reason to strip source trust.
+    const certifiedShapePassed = executionError === undefined && resultShapeWarnings.length === 0;
     const certifiedText = composeCertifiedAnswer(artifactHit.node, question, result, executionError);
     const text = resultShapeWarnings.length > 0
       ? `${certifiedText}\n\nReview required: ${resultShapeWarnings.join(' ')}`

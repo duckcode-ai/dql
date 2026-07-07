@@ -553,6 +553,27 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.validation?.status).toBe("passed");
   });
 
+  it("does NOT stamp a certified block as certified when its execution fails", async () => {
+    // A certified block whose execution was ATTEMPTED and threw has no data to
+    // stand behind — it must downgrade to analyst_review_required, not ride its
+    // certification badge on a failed run. (A matched-but-unexecuted block with no
+    // executor is a separate, legitimate certified-citation case.)
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What was revenue this quarter?",
+      provider,
+      kg,
+      executeCertifiedBlock: async () => {
+        throw new Error("upstream warehouse connection refused");
+      },
+    });
+    expect(result.kind).not.toBe("certified");
+    expect(result.certification).toBe("analyst_review_required");
+    expect(result.reviewStatus).toBe("analyst_review_required");
+    expect(result.confidence).toBeLessThan(0.95);
+    expect(result.executionError).toContain("connection refused");
+  });
+
   it("returns Uncertified when no certified block matches and SQL is proposed", async () => {
     const llmReply =
       "Median order value by region — joins fct_orders with dim_customers.\n\n" +
