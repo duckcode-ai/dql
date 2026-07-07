@@ -1898,7 +1898,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const result = await executor.executeQuery(
         `SELECT table_schema, table_name, column_name, data_type
          FROM information_schema.columns
-         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+         WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
          ORDER BY table_schema, table_name, ordinal_position
          LIMIT 2000`,
         [],
@@ -2763,7 +2763,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const tablesResult = await executor.executeQuery(
           `SELECT table_schema, table_name
            FROM information_schema.tables
-           WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+           WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`,
           [], {}, activeConnection,
         );
         tableMapping = buildSemanticTableMapping(semanticLayer, tablesResult.rows);
@@ -7252,7 +7252,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         let tableMapping: Record<string, string> | undefined;
         try {
           const tablesResult = await executor.executeQuery(
-            `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+            `SELECT table_schema, table_name FROM information_schema.tables WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`,
             [], {}, targetConnection,
           );
           const dbTableNames = new Set<string>();
@@ -7351,7 +7351,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         let tableMapping: Record<string, string> | undefined;
         try {
           const tablesResult = await executor.executeQuery(
-            `SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('information_schema', 'pg_catalog')`,
+            `SELECT table_schema, table_name FROM information_schema.tables WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`,
             [], {}, targetConnection,
           );
           const schemaQualified = new Map<string, string>();
@@ -10631,7 +10631,7 @@ async function introspectSchema(
     const catalogRows = await executor.executeQuery(
       `SELECT table_schema, table_name, table_type
        FROM information_schema.tables
-       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+       WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
        ORDER BY table_schema, table_name`,
       [], {}, connection,
     );
@@ -10646,7 +10646,7 @@ async function introspectSchema(
     const columnRows = await executor.executeQuery(
       `SELECT table_schema, table_name, column_name, data_type
        FROM information_schema.columns
-       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+       WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
        ORDER BY table_schema, table_name, ordinal_position`,
       [], {}, connection,
     );
@@ -10924,7 +10924,7 @@ export async function resolveSemanticTableMapping(
     const tablesResult = await executor.executeQuery(
       `SELECT table_schema, table_name
        FROM information_schema.tables
-       WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+       WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
        ORDER BY table_schema, table_name
        LIMIT 2000`,
       [], {}, connection,
