@@ -353,6 +353,118 @@ describe("answer (block-first loop)", () => {
     expect(result.sourceTier === "business_context" && !result.result).toBe(false);
   });
 
+  it("does not terminate a data question with a certified DASHBOARD (navigation artifact, not executable data)", async () => {
+    // Regression: "top customers who bought the top products with revenue" matched
+    // the certified dashboard "Jaffle Growth Command Center" and returned it as a
+    // no-data "Certified answer". A dashboard/app/notebook is a navigation target,
+    // never executable data — it must fall through to the generated tier and only
+    // ground the answer, never BE it.
+    const question = "Can you give me the top customers who bought the top most products with revenue";
+    kg.rebuild(
+      [
+        {
+          nodeId: "dashboard:growth_command_center",
+          kind: "dashboard",
+          name: "Jaffle Growth Command Center",
+          domain: "growth",
+          status: "certified",
+          description: "One executive surface for certified revenue, customer value, and product-mix answers.",
+          llmContext: "revenue, customer value, product mix, top customers, top products",
+          sourceTier: "certified_artifact",
+          certification: "certified",
+          provenance: "DQL dashboard",
+        },
+        {
+          nodeId: "dbt_model:order_items",
+          kind: "dbt_model",
+          name: "order_items",
+          domain: "orders",
+          description: "Order item rows with customer_name, product_name, product_price.",
+          sourceTier: "dbt_manifest",
+          certification: "ai_generated",
+          provenance: "dbt manifest",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Top customers by revenue with their top products, generated from order items.",
+        sql: "SELECT customer_name, product_name, SUM(product_price) AS revenue FROM analytics.order_items GROUP BY customer_name, product_name ORDER BY revenue DESC LIMIT 10",
+        viz: "bar",
+        outputs: ["customer_name", "product_name", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answerBase({
+      question,
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "analytics.order_items",
+        name: "order_items",
+        columns: [{ name: "customer_name" }, { name: "product_name" }, { name: "product_price" }],
+      }],
+      contextPack: {
+        id: "ctx_dashboard",
+        question,
+        mode: "question",
+        trustLabel: "certified",
+        objects: [{
+          objectKey: "dql:dashboard:growth_command_center",
+          objectType: "dashboard",
+          name: "Jaffle Growth Command Center",
+          status: "certified",
+          sourceSystem: "DQL dashboard",
+          snippet: "One executive surface for certified revenue, customer value, and product-mix answers.",
+        }],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "certified",
+          intent: "exact_certified_lookup",
+          reason: "matched certified dashboard context",
+          trustLabel: "certified",
+          reviewStatus: "certified",
+          exactObjectKey: "dql:dashboard:growth_command_center",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: { relations: [], sourceBlockSql: [] },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          certifiedCandidateFits: [],
+          candidateConflicts: [],
+        },
+        freshness: { catalogPath: ".dql/cache/metadata.sqlite", builtAt: null, fingerprint: null },
+      } as any,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["customer_name", "product_name", "revenue"],
+        rows: [{ customer_name: "Matthew Meyer", product_name: "Nutellaphone Who Dis", revenue: 512 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    // The dashboard must NOT be the terminal certified answer; the question is
+    // answered with generated data instead.
+    expect(result.kind).not.toBe("certified");
+    expect(result.sourceCertifiedBlock).not.toBe("Jaffle Growth Command Center");
+    expect(result.proposedSql).toContain("order_items");
+    expect(result.result?.rowCount).toBe(1);
+  });
+
   it("uses certified business context for definition questions", async () => {
     const provider = new StubProvider("should not be called");
     const result = await answer({
