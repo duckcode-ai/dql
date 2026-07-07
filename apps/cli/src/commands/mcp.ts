@@ -35,7 +35,10 @@ export async function runMcp(arg: string | null, rest: string[], flags: McpFlags
 
 async function runMcpTest(targetPath: string | null, flags: CLIFlags): Promise<void> {
   const projectRoot = findProjectRoot(resolve(targetPath ?? process.cwd()));
-  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+  // `optional` checks are informational and do not fail overall readiness — the
+  // runtime is only needed for governed generation (answer_question /
+  // build_block_from_prompt) and bounded execution, not for routing/BYOSQL planning.
+  const checks: Array<{ name: string; ok: boolean; detail: string; optional?: boolean }> = [];
 
   checks.push({
     name: 'DQL project',
@@ -92,10 +95,30 @@ async function runMcpTest(targetPath: string | null, flags: CLIFlags): Promise<v
   checks.push({
     name: 'MCP tool surface',
     ok: true,
-    detail: 'ask_dql, build_dql_block, build_dql_app, inspect_dql_project, certified, metadata, lineage, and governance tools are available',
+    detail: 'ask_dql, answer_question, query_via_metadata, build_block_from_prompt, build_dql_app, inspect_dql_project, certify, lineage, and metadata tools are available',
   });
 
-  const ok = checks.every((check) => check.ok);
+  // Advisory: is the DQL runtime up? Governed answer/build + bounded execution
+  // proxy to it. stdio routing/BYOSQL planning works without it.
+  const runtimeBase = (process.env.DQL_RUNTIME_URL ?? 'http://127.0.0.1:3474').replace(/\/$/, '');
+  let runtimeOk = false;
+  let runtimeDetail = `not reachable at ${runtimeBase} — start it with \`dql serve\` for answer_question / build_block_from_prompt / query execution`;
+  try {
+    const resp = await fetch(`${runtimeBase}/api/schema`, { signal: AbortSignal.timeout(1500) });
+    // Any HTTP response (even 404) means the runtime is up.
+    runtimeOk = resp.status < 500;
+    if (runtimeOk) runtimeDetail = `reachable at ${runtimeBase}`;
+  } catch {
+    // not reachable — leave runtimeOk false with the actionable detail
+  }
+  checks.push({
+    name: 'DQL runtime (governed generation + execution)',
+    ok: runtimeOk,
+    detail: runtimeDetail,
+    optional: true,
+  });
+
+  const ok = checks.filter((check) => !check.optional).every((check) => check.ok);
   if (flags.format === 'json') {
     console.log(JSON.stringify({ ok, projectRoot, checks }, null, 2));
     return;

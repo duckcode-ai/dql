@@ -16,23 +16,27 @@ they use:
 | Tier | Tools | Behavior |
 |---|---|---|
 | **front door** | `inspect_dql_project`, `ask_dql` | Verifies the project, refreshes local metadata/indexes, and returns the safe route: certified block, generated SQL preview, research, or clarify. |
+| **governed generation** | `answer_question`, `build_block_from_prompt` | DQL generates for you. `answer_question` runs DQL's own governed cascade end-to-end and returns the executed answer + rows + canonical trust label + a reviewable draft — the same engine and trust guards as the DQL web UI. `build_block_from_prompt` drafts a reusable block from a natural-language prompt (never auto-certified). Both need the runtime (`dql serve`). |
 | **1 — certified** | `query_via_block`, `search_blocks`, `get_block` | Serves only `status = "certified"` blocks when the block grain exactly answers the question. Safe to ship. |
-| **2 — proposed** | `query_via_metadata`, `list_proposals`, `suggest_block`, `build_dql_block` | For named customers/users/accounts, custom filters, rankings, breakdowns, comparisons, drill-throughs, or missing exact blocks, the agent's read-only SQL runs as a bounded preview, returns `uncertified: true`, and is saved as a draft under `domains/<domain>/blocks/_drafts/` when using the domain-first layout, otherwise `blocks/_drafts/`, for human review. |
+| **2 — proposed (BYOSQL)** | `query_via_metadata`, `list_proposals`, `suggest_block`, `build_dql_block` | You author the read-only SQL; DQL grounds, validates, runs a bounded preview, returns `uncertified: true`, and saves a draft under `domains/<domain>/blocks/_drafts/` (domain-first layout) or `blocks/_drafts/` for human review. |
 | **Apps** | `build_dql_app` | Creates or plans an app draft using certified tiles first and review-only placeholders for missing evidence. |
 | **support** | `certify`, `lineage_impact`, `list_metrics`, `list_dimensions`, `kg_search`, `feedback_record` | Governance checks, lineage tracing, the semantic layer, and feedback. |
 
-The server's instructions tell the agent to search certified context first,
-execute a certified block only for an exact direct KPI or saved-block match,
-flag Tier‑2 answers verbatim, and refuse when metadata is insufficient — so
+**Two ways to answer.** `answer_question` / `build_block_from_prompt` let DQL
+generate for you with full UI parity (use these by default). The BYOSQL path
+(`ask_dql` → inspect → `query_via_metadata` with your own `SELECT`) is for when
+the agent wants to author the SQL itself. Either way, the server's instructions
+tell the agent to search certified context first, flag generated/Tier‑2 answers
+verbatim as review-required, and refuse when metadata is insufficient — so
 generated SQL never silently becomes a "trusted" number.
 
 For external agents, the preferred call order is:
 
 1. `inspect_dql_project`
-2. `ask_dql`
+2. `answer_question` for "just answer it", **or** `ask_dql` to route a BYOSQL flow
 3. `query_via_block` when `ask_dql.route = "certified"`
-4. `query_via_metadata` when `ask_dql.route = "generated_sql"`
-5. `build_dql_block` or `build_dql_app` only after the user asks to save a reusable asset
+4. `query_via_metadata` (author the SQL) when `ask_dql.route = "generated_sql"`
+5. `build_block_from_prompt` (governed) or `build_dql_block`/`build_dql_app` when the user asks to save a reusable asset
 
 ## App chat with SDK providers
 
@@ -88,6 +92,21 @@ Most desktop clients use **stdio** and launch the command for you — you just
 add the config below. Use `--http` only for clients that connect to a URL
 instead of spawning a process (it prints `http://127.0.0.1:<port>/mcp` and an
 `Authorization: Bearer <token>` to stderr; loopback-only).
+
+> **Governed generation needs the runtime.** Routing and BYOSQL planning work
+> from the MCP server alone, but `answer_question`, `build_block_from_prompt`,
+> and any bounded query execution proxy to the local DQL runtime. Run it
+> alongside the MCP server:
+>
+> ```bash
+> dql serve               # in your project folder (defaults to http://127.0.0.1:3474)
+> ```
+>
+> `dql mcp test` reports whether the runtime is reachable (an advisory check —
+> stdio routing still works without it). If a governed tool can't reach the
+> runtime it returns a clear "start `dql serve`" error instead of failing
+> silently. Point tools at a non-default runtime with the `serverUrl` argument
+> or the `DQL_RUNTIME_URL` env var.
 
 > **Project path matters.** `dql mcp` resolves the project from its working
 > directory. Clients that don't launch from your project folder (Claude
