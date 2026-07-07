@@ -4493,7 +4493,7 @@ describe("answer (block-first loop)", () => {
 
   it("passes extra context to the model without using it for certified routing", async () => {
     const provider = new StubProvider(
-      "Explanation draft.\n```sql\nSELECT 1\n```\nViz: table",
+      "Explanation draft.\n```sql\nSELECT SUM(amount) AS revenue FROM orders\n```\nViz: table",
     );
     const result = await answer({
       question: "Explain this current query",
@@ -4521,7 +4521,7 @@ describe("answer (block-first loop)", () => {
         rating: "down",
       });
     }
-    const llmReply = "fallback text\n```sql\nSELECT 1\n```\nViz: table";
+    const llmReply = "fallback text\n```sql\nSELECT SUM(amount) AS revenue FROM orders\n```\nViz: table";
     const provider = new StubProvider(llmReply);
     const result = await answer({
       question: "Revenue trend",

@@ -99,6 +99,20 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
+  // A DATA answer must read at least one relation. A constant-only / tableless
+  // SELECT (`SELECT NULL`, `SELECT 1`) references no relation and cannot answer a
+  // data question — the model is dodging a hard ask with a grounded-looking
+  // non-answer. Reject so the loop repairs or refuses honestly. (Runs before the
+  // advisory early-returns below so it holds even with no context pack.)
+  if (referencedRelations.length === 0) {
+    return {
+      ok: false,
+      code: 'insufficient_context',
+      error: 'The generated SQL does not read any relation (constant-only/tableless SELECT), so it cannot answer a data question. Query an inspected relation.',
+      ...base,
+    };
+  }
+
   const allowed = buildAllowedRelationLookup(contextPack, options.runtimeSchema);
 
   if (!contextPack && allowed.size === 0) return { ok: true, ...base };
