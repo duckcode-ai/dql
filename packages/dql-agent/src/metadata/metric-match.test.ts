@@ -29,6 +29,25 @@ describe('parseMetricDefinition (R2.6: structured-first, regex fallback)', () =>
     // And with no layer at all.
     expect(parseMetricDefinition(node)).toEqual({ expr: 'SUM(stale_col)', table: 'dev.stale_table' });
   });
+
+  it('rejects a degenerate metric expression (empty parens) instead of synthesizing hollow SQL', () => {
+    // `COUNT()` used to pass the bare /[()]/ gate and produce `SELECT COUNT() AS x`.
+    const degenerate: KGNode = { ...node, llmContext: 'sql: COUNT()\ntable: dev.orders' };
+    expect(parseMetricDefinition(degenerate)).toBeUndefined();
+    // Structured path: a real aggregate is accepted, and a whitespace-only table
+    // no longer survives to synthesize `FROM   `.
+    const okLayer = new SemanticLayer({
+      metrics: [{ name: 'total_revenue', label: '', description: '', domain: 'finance', sql: 'COUNT(*)', type: 'count', table: '  orders  ' }],
+      dimensions: [],
+    });
+    expect(parseMetricDefinition(node, okLayer)).toEqual({ expr: 'COUNT(*)', table: 'orders' });
+    const badLayer = new SemanticLayer({
+      metrics: [{ name: 'total_revenue', label: '', description: '', domain: 'finance', sql: 'SUM()', type: 'sum', table: 'orders' }],
+      dimensions: [],
+    });
+    // Degenerate structured expr falls through to the (stale-but-valid) blob.
+    expect(parseMetricDefinition(node, badLayer)).toEqual({ expr: 'SUM(stale_col)', table: 'dev.stale_table' });
+  });
 });
 
 function metric(name: string, description = '', tags: string[] = []): KGNode {
