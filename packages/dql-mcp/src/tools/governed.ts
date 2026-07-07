@@ -1,0 +1,205 @@
+import type { DQLContext } from '../context.js';
+
+/**
+ * Governed-generation MCP tools. Unlike the BYOSQL Tier-2 tool
+ * (`query_via_metadata`, where the CALLING agent authors the SQL), these run
+ * DQL's OWN governed engines end-to-end and return the executed answer / block
+ * draft — the SAME cascade the web UI uses, so every trust guard (honesty gate,
+ * hollow-answer handling, forced-join retry, deterministic refusal) applies
+ * automatically. They are thin proxies to the local runtime's governed HTTP
+ * endpoints (`/api/agent-runs`, `/api/ai/build`), which already own the LLM
+ * provider + warehouse executors, so there is no second provider to configure.
+ *
+ * Both require the DQL runtime to be running (`dql serve`) because governed
+ * answering/building executes SQL against the warehouse.
+ */
+
+const DEFAULT_RUNTIME_URL = 'http://127.0.0.1:3474';
+
+function runtimeBase(serverUrl?: string): string {
+  return (serverUrl ?? process.env.DQL_RUNTIME_URL ?? DEFAULT_RUNTIME_URL).replace(/\/$/, '');
+}
+
+function runtimeUnavailable(base: string, projectRoot: string, err: unknown) {
+  return {
+    ok: false as const,
+    runtimeUnavailable: true as const,
+    error:
+      `Could not reach the DQL runtime at ${base}. Governed answering/building needs it running — ` +
+      `start it with \`dql serve\` in ${projectRoot} (or pass serverUrl), then retry. ` +
+      `(${err instanceof Error ? err.message : String(err)})`,
+  };
+}
+
+interface AgentAnswerPayload {
+  answer?: string;
+  text?: string;
+  proposedSql?: string;
+  sql?: string;
+  result?: { columns?: unknown[]; rows?: unknown[]; rowCount?: number };
+  executionError?: string;
+  dqlArtifact?: unknown;
+  draftBlockId?: string;
+  draftBlock?: { path?: string };
+  promoteCommand?: string;
+  citations?: unknown[];
+  validationWarnings?: string[];
+  trustLabel?: string;
+}
+
+interface AgentRunLike {
+  id?: string;
+  question?: string;
+  route?: string;
+  status?: string;
+  trustState?: string;
+  answerKind?: string;
+  answer?: string;
+  summary?: string;
+  artifacts?: Array<{ id?: string; kind?: string; title?: string; trustState?: string; ref?: string; payload?: unknown }>;
+  nextActions?: unknown[];
+}
+
+/** Reshape a runtime AgentRun into a compact, agent-friendly governed result. */
+function mapRun(run: AgentRunLike) {
+  const primary = (run.artifacts ?? [])[0];
+  const p = (primary?.kind === 'answer' ? primary.payload : undefined) as AgentAnswerPayload | undefined;
+  return {
+    ok: true as const,
+    question: run.question,
+    route: run.route,
+    status: run.status,
+    // Canonical trust — report VERBATIM. Generated/semantic answers are
+    // review-required, never certified.
+    trustState: run.trustState,
+    answerKind: run.answerKind,
+    answer: run.answer ?? run.summary,
+    summary: run.summary,
+    ...(p
+      ? {
+          sql: p.proposedSql ?? p.sql,
+          result: p.result,
+          rowCount: p.result?.rowCount,
+          dqlArtifact: p.dqlArtifact,
+          draftBlockPath: p.draftBlockId ?? p.draftBlock?.path,
+          promote: p.promoteCommand,
+          citations: p.citations,
+          validationWarnings: p.validationWarnings,
+          executionError: p.executionError,
+        }
+      : {}),
+    artifacts: run.artifacts,
+    nextActions: run.nextActions,
+    trustNote:
+      'Report trustState verbatim and never upgrade it. A review-required answer is generated/semantic-layer backed and must be reviewed before it is trusted as certified.',
+  };
+}
+
+export async function answerQuestion(
+  ctx: DQLContext,
+  args: {
+    question: string;
+    audience?: 'analyst' | 'stakeholder';
+    requestedMode?: 'auto' | 'ask' | 'research';
+    reasoningEffort?: 'low' | 'medium' | 'high';
+    analysisDepth?: 'quick' | 'deep';
+    threadId?: string;
+    serverUrl?: string;
+  },
+) {
+  const question = args.question?.trim();
+  if (!question) return { ok: false as const, error: 'Provide a non-empty { question }.' };
+  const base = runtimeBase(args.serverUrl);
+  let response: Response;
+  try {
+    response = await fetch(`${base}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question,
+        requestedMode: args.requestedMode ?? 'auto',
+        ...(args.audience ? { audience: args.audience } : {}),
+        ...(args.reasoningEffort ? { reasoningEffort: args.reasoningEffort } : {}),
+        ...(args.analysisDepth ? { analysisDepth: args.analysisDepth } : {}),
+        ...(args.threadId ? { threadId: args.threadId } : {}),
+      }),
+    });
+  } catch (err) {
+    return runtimeUnavailable(base, ctx.projectRoot, err);
+  }
+  if (!response.ok) {
+    return { ok: false as const, error: `DQL runtime returned ${response.status}: ${await response.text()}` };
+  }
+  const payload = (await response.json().catch(() => ({}))) as { run?: AgentRunLike; error?: string };
+  if (payload.error || !payload.run) return { ok: false as const, error: payload.error ?? 'No run returned by the runtime.' };
+  return mapRun(payload.run);
+}
+
+interface BuildFromPromptResultLike {
+  status?: string;
+  route?: unknown;
+  draftBlock?: { path?: string; slug?: string; name?: string; domain?: string; status?: string; askedTimes?: number };
+  dqlArtifact?: unknown;
+  verdict?: unknown;
+  appliedSkills?: unknown[];
+  citations?: unknown[];
+  sql?: string;
+  explanation?: string;
+  error?: string;
+}
+
+export async function buildBlockFromPrompt(
+  ctx: DQLContext,
+  args: {
+    prompt: string;
+    mode?: 'create' | 'edit';
+    blockPath?: string;
+    owner?: string;
+    serverUrl?: string;
+  },
+) {
+  const prompt = args.prompt?.trim();
+  if (!prompt) return { ok: false as const, error: 'Provide a non-empty { prompt } describing the block to build.' };
+  const mode = args.mode === 'edit' ? 'edit' : 'create';
+  if (mode === 'edit' && !args.blockPath?.trim()) {
+    return { ok: false as const, error: 'Edit mode requires { blockPath } (the block to modify in place).' };
+  }
+  const base = runtimeBase(args.serverUrl);
+  let response: Response;
+  try {
+    response = await fetch(`${base}/api/ai/build`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        target: 'block',
+        mode,
+        ...(args.blockPath ? { blockPath: args.blockPath.trim() } : {}),
+        ...(args.owner ? { owner: args.owner } : {}),
+      }),
+    });
+  } catch (err) {
+    return runtimeUnavailable(base, ctx.projectRoot, err);
+  }
+  if (!response.ok) {
+    return { ok: false as const, error: `DQL runtime returned ${response.status}: ${await response.text()}` };
+  }
+  const result = (await response.json().catch(() => ({}))) as BuildFromPromptResultLike;
+  if (result.error) return { ok: false as const, error: result.error };
+  // Refresh the in-process context so subsequent tool calls see the new draft.
+  ctx.refresh();
+  return {
+    ok: true as const,
+    status: result.status,
+    route: result.route,
+    draftBlock: result.draftBlock,
+    draftBlockPath: result.draftBlock?.path,
+    dqlArtifact: result.dqlArtifact,
+    verdict: result.verdict,
+    appliedSkills: result.appliedSkills,
+    citations: result.citations,
+    promote: result.draftBlock?.path ? `dql certify --from-draft ${result.draftBlock.path}` : undefined,
+    trustNote:
+      'AI drafts, humans certify. This is a review-required DRAFT — never present it as certified. Review the verdict, then certify explicitly.',
+  };
+}
