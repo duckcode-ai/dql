@@ -635,14 +635,20 @@ export function BlockStudio() {
     setAiAskOpen(false);
   };
 
-  // Open the governed Ask-AI overlay in a given mode. 'build'/'edit' route to block
-  // generation (requestedMode='block'); 'edit' adds edit context via workspaceContext.
+  // Open the governed Ask-AI overlay in a given mode. Only the explicit 'edit'
+  // (Modify this block) door uses the block-authoring route (requestedMode='block'
+  // + edit workspaceContext). 'ask' AND 'build' route through the governed ANSWER
+  // path (requestedMode='auto') so they EXECUTE and surface the same SQL preview +
+  // rows as Ask AI — the block-draft route emits a draft artifact without running
+  // the SQL, which is why Block Studio used to show an empty SQL preview. The
+  // executed answer still carries an insertable dqlArtifact, so "save as block"
+  // works from the answer (onInsertDql) — you see the data first, then promote.
   const openAskAi = (opts?: { kind?: 'ask' | 'build' | 'edit'; initialInput?: string; autoRun?: string }) => {
     const kind = opts?.kind ?? 'ask';
     setResultTab('results');
     setAskAiKind(kind);
     setAskAiInitialInput(opts?.initialInput ?? '');
-    setAskAiSeed(opts?.autoRun ? { text: opts.autoRun, mode: kind === 'ask' ? 'auto' : 'block', nonce: Date.now() } : undefined);
+    setAskAiSeed(opts?.autoRun ? { text: opts.autoRun, mode: kind === 'edit' ? 'block' : 'auto', nonce: Date.now() } : undefined);
     setAiAskOpen(true);
   };
 
@@ -1093,7 +1099,7 @@ export function BlockStudio() {
                 activeBlockPath: state.activeBlockPath,
                 ...(askAiKind === 'edit' ? { mode: 'edit', blockPath: state.activeBlockPath } : {}),
               }}
-              initialMode={askAiKind === 'ask' ? 'auto' : 'block'}
+              initialMode={askAiKind === 'edit' ? 'block' : 'auto'}
               initialInput={askAiInitialInput}
               autoRun={askAiSeed}
               threadId={agentThread.threadId}
