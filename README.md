@@ -5,12 +5,27 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-20%20%7C%2022%20%7C%2024%20LTS-green)](https://nodejs.org)
 
-**DQL, Domain Query Language, is a Git-versioned analytics layer for dbt teams.**
+**DQL — Domain Query Language — is a Git-versioned, governed analytics layer for
+dbt teams, with an AI agent that answers from reviewed context instead of
+guessing.**
 
 It turns dbt models, semantic metrics, SQL, notebooks, and Apps into reviewable
-files. The goal is simple: keep dbt as the source of truth, then make the
-analytics layer trustworthy too with certified blocks, lineage, tests, source
-control, and AI answers that cite reviewed context.
+files, then answers business questions through a governed cascade — certified
+blocks first, semantic metrics next, generated SQL last — with every answer
+carrying a trust label. dbt stays the source of truth; the analytics layer on
+top becomes trustworthy too, with certified blocks, lineage, tests, and source
+control.
+
+**Why DQL is different**
+
+- **Grounded, not hallucinated.** Generated SQL is grounded in your schema,
+  validated, and executed. A query that returns no rows or can't be grounded is
+  flagged **review-required** — never dressed up as a confident, "trusted" number.
+- **Works with your coding agent.** A built-in MCP server lets Claude Code,
+  Codex, Cursor, and Claude Desktop ask questions and build governed blocks with
+  the same trust guards as the UI → [Connect an AI agent](./docs/guides/mcp.md).
+- **Runs on your terms.** Use your Claude or ChatGPT subscription, an API key,
+  or a fully local model via Ollama.
 
 ## Architecture flow
 
