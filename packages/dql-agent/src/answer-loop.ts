@@ -1264,7 +1264,18 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
   if (!parsed.sql) {
-    const text = parsed.text || 'No answer (the model declined to propose SQL).';
+    // Deterministic honest refusal. The model's own decline prose is STOCHASTIC
+    // ("there's no combined dataset — show them separately" one run, a different
+    // phrasing the next), which reads as flaky and inconsistent across surfaces.
+    // When the question wanted data AND usable context existed (a groundable ask
+    // the model still declined even after the forced-join retry), surface ONE
+    // consistent, actionable message so the same question yields the same outcome
+    // every run and every surface — instead of passing through the model's varying
+    // text. A genuinely context-less ask keeps the plain honest message.
+    const declinedDespiteContext = wantsGeneratedData && hasGeneratableContext;
+    const text = declinedDespiteContext
+      ? 'I could not compose a governed query for this from the available tables and metrics. This usually needs a clearer join path or an explicit metric and grouping — name the specific measure and how to break it down, and I can generate a review-required draft.'
+      : parsed.text || 'No answer (the model declined to propose SQL).';
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
