@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DQLContext } from '../../context.js';
 import { answerQuestion, buildBlockFromPrompt } from '../governed.js';
+import { __test__ } from '../../server.js';
 
 function ctxStub(): DQLContext {
   return { projectRoot: '/tmp/proj', refresh: () => {} } as unknown as DQLContext;
@@ -95,5 +96,26 @@ describe('buildBlockFromPrompt (governed NL→block via runtime proxy)', () => {
     const out = await buildBlockFromPrompt(ctxStub(), { prompt: 'fix it', mode: 'edit' });
     expect(out.ok).toBe(false);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('governed tools are wired end-to-end through the MCP server registration', () => {
+  it('dispatches answer_question via the agentic registration → handler → runtime proxy', async () => {
+    mockFetchOnce(201, {
+      run: {
+        question: 'q',
+        route: 'certified_answer',
+        status: 'completed',
+        trustState: 'certified',
+        answer: 'Answered from a certified block.',
+        artifacts: [{ kind: 'answer', trustState: 'certified', payload: { result: { rowCount: 1 } } }],
+      },
+    });
+    const registrations = __test__.buildMcpToolRegistrations(ctxStub());
+    const reg = registrations.find((t) => t.name === 'answer_question');
+    expect(reg).toBeDefined();
+    const out = (await reg!.run({ question: 'q' })) as { ok: boolean; trustState?: string };
+    expect(out.ok).toBe(true);
+    expect(out.trustState).toBe('certified');
   });
 });

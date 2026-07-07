@@ -237,17 +237,35 @@ If your DQL CLI is installed locally in the project, you can also use
 
 ## Try it
 
-After wiring any client, ask:
-
-> *"What was our revenue last month?"*
-
-A certified block match → the agent answers from it and cites it. No match →
-or a deeper/custom-grain question → it proposes SQL flagged **Uncertified** and files a draft you can review with
-`dql certify --from-draft`. Build the knowledge graph first if you haven't:
+Build the knowledge graph and start the runtime first (governed generation +
+execution proxy to it):
 
 ```bash
-dql agent reindex
+dql agent reindex       # once, to build .dql/cache indexes
+dql serve               # leave running; governed tools call it
 ```
+
+Then, after wiring any client:
+
+**Ask a governed question** — *"What was our revenue last month?"* A certified
+block match → the agent answers from it and cites it (trust label
+**Certified**). No exact match, or a deeper/custom-grain question → DQL's
+governed cascade generates and executes SQL, returns the rows flagged
+**Review-required**, and files a reviewable draft. With `answer_question` DQL
+does this for you end-to-end; with the BYOSQL path the agent authors the SQL and
+runs it through `query_via_metadata`.
+
+**Build a reusable block from a description** — *"Make a reusable block for
+weekly revenue by region."* `build_block_from_prompt` drafts it (grain,
+outputs, SQL) as a **review-required** draft under `blocks/_drafts/` — never
+auto-certified — and returns the Certifier verdict. Review it, then:
+
+```bash
+dql certify --from-draft blocks/_drafts/<slug>.dql
+```
+
+Same governed engine, same trust labels as the DQL web UI — the answer you get
+from an agent is the answer you'd get from the app.
 
 See [tutorial 04 — Agentic analytics](../tutorials/04-agentic-analytics.md) for
 the full loop, and [the agentic architecture](../architecture/graduated-trust.md)
