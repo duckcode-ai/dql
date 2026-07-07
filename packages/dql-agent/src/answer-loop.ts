@@ -547,8 +547,59 @@ function formatValidationWarningsForPrompt(warnings: string[]): string {
   return useful.length > 0 ? `Additional inspected-context notes:\n${useful.map((warning) => `- ${warning}`).join('\n')}` : '';
 }
 
+/**
+ * Central honesty gate — applied once at the single answer() exit so EVERY return
+ * site (certified, semantic-metric, generated) is covered by construction. A DATA
+ * answer must have PRODUCED ROWS: when execution was attempted (a result or an
+ * execution error came back) but no rows resulted, it may never read as a confident
+ * answer.
+ *  - A generated / governed-metric (uncertified) answer downgrades to a low-
+ *    confidence, review-required no-data state with an honest message — the SQL is
+ *    still surfaced so the user can inspect and fix it.
+ *  - A CERTIFIED block keeps its badge (an empty certified result can be a correct
+ *    "none matched" answer) but gains a non-blocking note to verify data currency.
+ * An UN-executed answer (offline SQL preview / certified citation with no executor)
+ * is left untouched — that is a legitimate preview, not a hollow answer.
+ */
+function applyHollowAnswerGate(result: AgentAnswer): AgentAnswer {
+  if (result.kind === 'no_answer') return result;
+  const attempted = result.result !== undefined || result.executionError !== undefined;
+  const producedRows = Boolean(result.result && typeof result.result.rowCount === 'number' && result.result.rowCount > 0);
+  if (!attempted || producedRows) return result;
+
+  if (result.kind === 'certified') {
+    const note = result.executionError
+      ? 'This certified block failed to execute — review the source data before relying on it.'
+      : 'This certified block returned 0 rows — verify the source data is current before relying on it.';
+    return {
+      ...result,
+      text: [result.text, note].filter(Boolean).join('\n\n'),
+      answer: [result.answer ?? result.text, note].filter(Boolean).join('\n\n'),
+      validationWarnings: [...(result.validationWarnings ?? []), note],
+    };
+  }
+
+  const honestText = [
+    result.executionError
+      ? `The governed query could not be executed (${result.executionError}).`
+      : 'The governed query executed but returned no rows.',
+    'This usually means a filter, grain, or join is off — review the SQL preview and refine before reuse.',
+  ].join('\n\n');
+  const warning = result.executionError
+    ? 'The governed query failed to execute and returned no data — review before reuse.'
+    : 'The governed query executed but returned no rows — review the SQL, filters, and joins before reuse.';
+  return {
+    ...result,
+    reviewStatus: 'analyst_review_required',
+    confidence: Math.min(result.confidence ?? 0.2, 0.2),
+    text: honestText,
+    answer: honestText,
+    validationWarnings: [...(result.validationWarnings ?? []), warning],
+  };
+}
+
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
-  const result = await runAnswerLoop(input);
+  const result = applyHollowAnswerGate(await runAnswerLoop(input));
   // Attach the canonical trust label once, at the single exit point, so every
   // return site inside runAnswerLoop stays untouched and backward compatible.
   // Freshness-aware trust: for a certified answer, fold the source block's data
@@ -1213,7 +1264,18 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
   if (!parsed.sql) {
-    const text = parsed.text || 'No answer (the model declined to propose SQL).';
+    // Deterministic honest refusal. The model's own decline prose is STOCHASTIC
+    // ("there's no combined dataset — show them separately" one run, a different
+    // phrasing the next), which reads as flaky and inconsistent across surfaces.
+    // When the question wanted data AND usable context existed (a groundable ask
+    // the model still declined even after the forced-join retry), surface ONE
+    // consistent, actionable message so the same question yields the same outcome
+    // every run and every surface — instead of passing through the model's varying
+    // text. A genuinely context-less ask keeps the plain honest message.
+    const declinedDespiteContext = wantsGeneratedData && hasGeneratableContext;
+    const text = declinedDespiteContext
+      ? 'I could not compose a governed query for this from the available tables and metrics. This usually needs a clearer join path or an explicit metric and grouping — name the specific measure and how to break it down, and I can generate a review-required draft.'
+      : parsed.text || 'No answer (the model declined to propose SQL).';
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -1695,43 +1757,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? semanticMetricMatch?.metric.certification
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
-    // Central honesty gate. A governed/generated DATA answer must have PRODUCED
-    // ROWS. When an executor WAS available but the query yielded nothing — 0 rows,
-    // no result, or an execution error — never surface confident "Answered from
-    // governed semantic metrics…" prose over an empty result. Downgrade to an
-    // honest, review-required no-data state that still shows the SQL to inspect and
-    // fix. This is the general guard (covers the semantic-bridge, governed-metric,
-    // and generated lanes that share this exit) that keeps a hollow answer — the
-    // real failure mode behind the cross-surface inconsistency — from ever reading
-    // as a trustworthy answer. When no executor is wired (offline SQL preview), the
-    // gate does not fire — that is a legitimate un-executed preview, not a hollow
-    // answer.
-    const executorWasAvailableForAnswer = Boolean(input.executeGeneratedSql);
-    const producedRows = Boolean(result && typeof result.rowCount === 'number' && result.rowCount > 0);
-    const hollowNoData = executorWasAvailableForAnswer && !producedRows;
-    if (hollowNoData) {
-      validationWarnings.push(executionError
-        ? 'The governed query failed to execute and returned no data — review before reuse.'
-        : 'The governed query executed but returned no rows — review the SQL, filters, and joins before reuse.');
-    }
-    const honestAnswerText = hollowNoData
-      ? [
-          executionError
-            ? `The governed query could not be executed (${executionError}).`
-            : 'The governed query executed but returned no rows.',
-          'This usually means a filter, grain, or join is off — review the SQL preview and refine before reuse.',
-          cleanedSummary,
-        ].filter(Boolean).join('\n\n')
-      : generatedText;
     return {
       kind: 'uncertified',
       sourceTier: activeTier,
       certification: 'ai_generated',
-      reviewStatus: hollowNoData ? 'analyst_review_required' : 'draft_ready',
+      reviewStatus: 'draft_ready',
       semanticMetricCertification,
-      confidence: hollowNoData ? 0.2 : certifiedMetricAnswer ? 0.8 : governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
-      text: honestAnswerText,
-      answer: honestAnswerText,
+      confidence: certifiedMetricAnswer ? 0.8 : governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
+      text: generatedText,
+      answer: generatedText,
       proposedSql: parsed.sql,
       sql: parsed.sql,
       result,

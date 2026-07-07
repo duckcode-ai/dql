@@ -157,6 +157,17 @@ describe('validateSqlAgainstLocalContext', () => {
     );
   });
 
+  it('rejects a constant-only / tableless SELECT that reads no relation', () => {
+    // A data answer must read a relation; `SELECT NULL` / `SELECT 1` dodges the
+    // question with a grounded-looking non-answer. Holds even without a pack.
+    const withPack = validateSqlAgainstLocalContext('SELECT NULL', pack());
+    expect(withPack.ok).toBe(false);
+    expect(withPack.code).toBe('insufficient_context');
+    const bare = validateSqlAgainstLocalContext('SELECT 1 AS x', undefined);
+    expect(bare.ok).toBe(false);
+    expect(bare.code).toBe('insufficient_context');
+  });
+
   it('accepts output aliases used in ORDER BY when source columns are inspected', () => {
     const result = validateSqlAgainstLocalContext(
       `SELECT o.region, SUM(o.amount) AS revenue_total

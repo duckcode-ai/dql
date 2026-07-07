@@ -665,6 +665,25 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.validation?.status).toBe("passed");
   });
 
+  it("keeps the certified badge but flags a certified block that returns 0 rows", async () => {
+    // The central honesty gate covers the CERTIFIED branch too. An empty certified
+    // result can be a correct "none matched" answer, so the badge stays — but a
+    // non-blocking note tells the user to verify data currency (closes the
+    // certified-0-row-wearing-the-strongest-badge hole).
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What was revenue this quarter?",
+      provider,
+      kg,
+      executeCertifiedBlock: async () => ({ columns: ["revenue"], rows: [], rowCount: 0 }),
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.text).toMatch(/0 rows|verify the source data/i);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("0 rows")]),
+    );
+  });
+
   it("does NOT stamp a certified block as certified when its execution fails", async () => {
     // A certified block whose execution was ATTEMPTED and threw has no data to
     // stand behind — it must downgrade to analyst_review_required, not ride its
@@ -1175,6 +1194,39 @@ describe("answer (block-first loop)", () => {
         }),
       ]),
     );
+  });
+
+  it("returns a DETERMINISTIC honest refusal (not the model's stochastic prose) when a groundable ask is declined twice", async () => {
+    // The model declines on BOTH the initial attempt and the forced-join retry,
+    // with different wording each time. With usable context, the surfaced outcome
+    // must be one consistent message — same question, same result every run.
+    kg.rebuild(
+      [{
+        nodeId: "dbt_model:order_items", kind: "dbt_model", name: "order_items", domain: "orders",
+        description: "Order items with customer_name, product_name, revenue.",
+        sourceTier: "dbt_manifest", certification: "ai_generated", provenance: "dbt manifest",
+      }],
+      [],
+    );
+    const provider = new StubProvider([
+      "There's no combined dataset linking products to customers — show them separately.",
+      "I can't link those — maybe use two separate blocks instead?",
+    ]);
+    const result = await answerBase({
+      question: "top customers who bought the top products with revenue",
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "analytics.order_items",
+        name: "order_items",
+        columns: [{ name: "customer_name" }, { name: "product_name" }, { name: "revenue" }],
+      }],
+    });
+    expect(result.kind).toBe("no_answer");
+    expect(result.text).not.toContain("show them separately");
+    expect(result.text).not.toContain("two separate blocks");
+    expect(result.text).toContain("could not compose a governed query");
+    expect(provider.calls).toHaveLength(2); // initial + forced-join retry
   });
 
   it("retries with a forced-join instruction when the model falsely refuses a joinable composite question", async () => {
@@ -4474,7 +4526,7 @@ describe("answer (block-first loop)", () => {
 
   it("passes extra context to the model without using it for certified routing", async () => {
     const provider = new StubProvider(
-      "Explanation draft.\n```sql\nSELECT 1\n```\nViz: table",
+      "Explanation draft.\n```sql\nSELECT SUM(amount) AS revenue FROM orders\n```\nViz: table",
     );
     const result = await answer({
       question: "Explain this current query",
@@ -4502,7 +4554,7 @@ describe("answer (block-first loop)", () => {
         rating: "down",
       });
     }
-    const llmReply = "fallback text\n```sql\nSELECT 1\n```\nViz: table";
+    const llmReply = "fallback text\n```sql\nSELECT SUM(amount) AS revenue FROM orders\n```\nViz: table";
     const provider = new StubProvider(llmReply);
     const result = await answer({
       question: "Revenue trend",

@@ -250,8 +250,20 @@ export function parseMetricDefinition(
   const context = metric.llmContext ?? '';
   const expr = context.match(/(?:^|\n)\s*sql:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
   const table = context.match(/(?:^|\n)\s*table:\s*(.+?)\s*(?:\n|$)/i)?.[1]?.trim();
-  if (!expr || !table || !/[()]/.test(expr)) return undefined;
+  if (!expr || !table || !looksLikeExecutableMetricExpr(expr)) return undefined;
   return { expr, table };
+}
+
+/**
+ * A metric expression is only executable when it is a real aggregate/function call
+ * with a NON-EMPTY argument — SUM(x), COUNT(*), AVG(order_total). The old bare
+ * `/[()]/` presence test accepted degenerate exprs like `COUNT()` / `()`, which
+ * synthesize a hollow `SELECT COUNT() AS x` that errors or returns a meaningless
+ * value. Require an identifier head, `(`, then at least one non-`)` argument char
+ * (or `*`), so degenerate exprs fall through to honest refusal / generation instead.
+ */
+function looksLikeExecutableMetricExpr(expr: string): boolean {
+  return /[A-Za-z_][A-Za-z0-9_]*\s*\(\s*(?:\*|[^)\s])/.test(expr);
 }
 
 /** Look up a metric's structured {expr, table} from the semantic layer by name/leaf. */
@@ -262,8 +274,13 @@ function structuredMetricDefinition(
   const candidates = [metric.name, metric.name.split('.').pop() ?? metric.name];
   for (const name of candidates) {
     const def = semanticLayer.getMetric(name);
-    if (def?.sql && def?.table && /[()]/.test(def.sql)) {
-      return { expr: def.sql, table: def.table };
+    // Trim the structured definition (the blob path already trims); an untrimmed
+    // `table: '  '` would synthesize a broken `FROM   `. Require a real executable
+    // aggregate expression, same gate as the blob path.
+    const sql = def?.sql?.trim();
+    const table = def?.table?.trim();
+    if (sql && table && looksLikeExecutableMetricExpr(sql)) {
+      return { expr: sql, table };
     }
   }
   return undefined;
