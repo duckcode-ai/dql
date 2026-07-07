@@ -139,7 +139,7 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
 
     const out = await queryViaMetadata(ctxFor(tmpProject), {
       question: 'What was monthly revenue last quarter?',
-      proposedSql: 'SELECT 1',
+      proposedSql: 'SELECT month, revenue FROM fct_orders',
       proposedDomain: 'finance',
       proposedEntity: 'Order',
       outputs: ['month', 'revenue'],
@@ -166,11 +166,11 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
     const ctx = ctxFor(tmpProject);
     const first = await queryViaMetadata(ctx, {
       question: 'how many active customers?',
-      proposedSql: 'SELECT 1',
+      proposedSql: 'SELECT month, revenue FROM fct_orders',
     });
     const second = await queryViaMetadata(ctx, {
       question: 'how many active customers?',
-      proposedSql: 'SELECT 1',
+      proposedSql: 'SELECT month, revenue FROM fct_orders',
     });
     expect(first.draftBlock?.askedTimes).toBe(1);
     expect(second.draftBlock?.askedTimes).toBe(2);
@@ -187,7 +187,7 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
 
     const out = await queryViaMetadata(ctxFor(tmpProject), {
       question: 'just curious',
-      proposedSql: 'SELECT 1',
+      proposedSql: 'SELECT month, revenue FROM fct_orders',
       saveDraft: false,
     });
     expect(out.draftBlock).toBeUndefined();
@@ -202,12 +202,12 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
 
     const out = await queryViaMetadata(ctxFor(tmpProject), {
       question: 'how many?',
-      proposedSql: 'SELECT 99',
+      proposedSql: 'SELECT month, revenue FROM fct_orders',
       dryRun: true,
     });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(out.uncertified).toBe(true);
-    expect((out as { proposedSql: string }).proposedSql).toBe('SELECT 99');
+    expect((out as { proposedSql: string }).proposedSql).toBe('SELECT month, revenue FROM fct_orders');
     expect((out as { trustStatus: { label: string; reviewStatus: string } }).trustStatus.label).toBe('AI-generated metadata research');
     expect((out as { evidence: { execution: { status: string } } }).evidence.execution.status).toBe('dry_run');
     expect(out.draftBlock).toBeDefined();
@@ -215,7 +215,25 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
       kind: 'sql_block',
       sourcePath: out.draftBlock?.path,
     });
-    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('SELECT 99');
+    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('SELECT month, revenue FROM fct_orders');
+  });
+
+  it('flags a no-rows result as review-required (0-row honesty parity with the answer loop)', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [{ name: 'month' }, { name: 'revenue' }], rows: [], executionTime: 3 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'revenue for a filter that matches nothing',
+      proposedSql: 'SELECT month, revenue FROM fct_orders WHERE 1=0',
+    });
+
+    expect((out as { noRows: boolean }).noRows).toBe(true);
+    expect((out as { reason: string }).reason).toMatch(/no rows/i);
+    expect((out as { validationWarnings: string[] }).validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('returned no rows')]),
+    );
   });
 
   it('returns selected relation reasoning when planning from metadata', async () => {
@@ -566,11 +584,11 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
 
     const out = await queryViaMetadata(ctxFor(tmpProject), {
       question: 'how many active customers?',
-      proposedSql: 'SELECT 1',
+      proposedSql: 'SELECT month, revenue FROM fct_orders',
     });
     expect((out as { error: string }).error).toMatch(/Could not reach DQL runtime/);
     expect(out.draftBlock).toBeDefined();
-    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('SELECT 1');
+    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('SELECT month, revenue FROM fct_orders');
   });
 
   it('honors the limit parameter on returned rows', async () => {

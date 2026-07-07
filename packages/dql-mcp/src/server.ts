@@ -18,6 +18,7 @@ import { suggestBlock } from './tools/suggest-block.js';
 import { expandContext } from './tools/expand-context.js';
 import { querySemanticModel } from './tools/query-semantic-model.js';
 import { queryViaMetadata } from './tools/query-via-metadata.js';
+import { answerQuestion, buildBlockFromPrompt } from './tools/governed.js';
 import { listProposals } from './tools/list-proposals.js';
 import {
   feedbackRecord,
@@ -64,6 +65,14 @@ const DQL_MCP_AGENTIC_INSTRUCTIONS =
   '`inspect_dql_project`; route every analytics question through `ask_dql` ' +
   'before writing SQL. It returns the safe route, trust label, certified ' +
   'candidate when available, allowed SQL context, and next tool.\n' +
+  'Two ways to answer: `answer_question` runs DQL\'s FULL governed cascade and ' +
+  'returns the executed answer + rows + canonical trust label + a reviewable ' +
+  'draft — use it when you want DQL to generate for you (same engine + trust ' +
+  'guards as the DQL UI). The BYOSQL path (`ask_dql` → inspect → ' +
+  '`query_via_metadata` with your own SELECT) is for when you want to author the ' +
+  'SQL yourself. To create a reusable block from a description, use ' +
+  '`build_block_from_prompt` (governed, no SQL authoring); it returns a ' +
+  'review-required draft + Certifier verdict and never auto-certifies.\n' +
   'Semantic compile: when the semantic layer contains the requested metric, ' +
   'dimension, or time grain, use `query_semantic_model` before deep dbt or ' +
   'warehouse search. Return the DQL semantic artifact, draft path when present, and generated SQL as ' +
@@ -194,6 +203,12 @@ function mcpToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, Pick<McpT
     },
     query_via_metadata: {
       run: (args) => queryViaMetadata(ctx, args as Parameters<typeof queryViaMetadata>[1]),
+    },
+    answer_question: {
+      run: (args) => answerQuestion(ctx, args as Parameters<typeof answerQuestion>[1]),
+    },
+    build_block_from_prompt: {
+      run: (args) => buildBlockFromPrompt(ctx, args as Parameters<typeof buildBlockFromPrompt>[1]),
     },
     list_metrics: {
       run: (args) => listMetrics(ctx, args as Parameters<typeof listMetrics>[1]),

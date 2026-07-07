@@ -46,12 +46,15 @@ describe('DQL tool registry', () => {
       'inspect_metadata_context',
       'query_via_metadata',
       'expand_context',
+      // Governed-generation tools (DQL generates end-to-end; UI parity).
+      'answer_question',
+      'build_block_from_prompt',
       'lineage_impact',
       'certify',
       'suggest_block',
       'inspect_dql_project',
     ]);
-    expect(mcpAgenticTools).toHaveLength(13);
+    expect(mcpAgenticTools).toHaveLength(15);
     expect(mcpAgenticTools.length).toBeLessThanOrEqual(15);
   });
 

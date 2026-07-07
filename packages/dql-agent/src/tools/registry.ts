@@ -12,6 +12,8 @@ export type DqlToolName =
   | 'inspect_metadata_context'
   | 'expand_context'
   | 'query_via_metadata'
+  | 'answer_question'
+  | 'build_block_from_prompt'
   | 'list_metrics'
   | 'list_dimensions'
   | 'lineage_impact'
@@ -440,6 +442,44 @@ const CORE_TOOL_DEFINITIONS = [
       },
     },
     surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+  },
+  {
+    name: 'answer_question',
+    description:
+      "Governed one-shot answer. Runs DQL's OWN governed cascade (certified block → semantic metric → generated SQL) end-to-end and returns the executed answer with rows, SQL preview, canonical trust label, citations, and a reviewable draft — the SAME engine and trust guards as the DQL UI. Use this when you want DQL to generate AND answer for you. Prefer query_via_metadata when you want to author the SQL yourself. Requires the DQL runtime (`dql serve`).",
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['question'],
+      properties: {
+        question: { type: 'string', description: 'Business or analytics question to answer.' },
+        audience: { type: 'string', enum: ['analyst', 'stakeholder'], description: 'Answer audience. Default analyst.' },
+        requestedMode: { type: 'string', enum: ['auto', 'ask', 'research'], description: 'Routing mode. Default auto (let the cascade decide).' },
+        reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'Optional model effort (host ceilings still apply).' },
+        analysisDepth: { type: 'string', enum: ['quick', 'deep'], description: 'Optional retrieval/analysis depth.' },
+        threadId: { type: 'string', description: 'Continue a persisted conversation thread.' },
+        serverUrl: { type: 'string', description: 'Base URL of the local DQL runtime. Default http://127.0.0.1:3474.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic'],
+  },
+  {
+    name: 'build_block_from_prompt',
+    description:
+      "Governed block builder from a natural-language prompt. Runs DQL's buildFromPrompt (the same governed engine the UI uses) to draft a reusable, review-required DQL block — you do NOT author SQL. Symmetric with build_dql_app. Returns the draft path, dqlArtifact source, and the Certifier verdict; NEVER auto-certifies. Requires the DQL runtime (`dql serve`).",
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['prompt'],
+      properties: {
+        prompt: { type: 'string', description: 'What the block should compute, e.g. "weekly revenue by region".' },
+        mode: { type: 'string', enum: ['create', 'edit'], description: 'Create a new draft, or edit an existing block in place. Default create.' },
+        blockPath: { type: 'string', description: 'Required for mode=edit: the block file to modify.' },
+        owner: { type: 'string', description: 'Owner identity to stamp on the draft.' },
+        serverUrl: { type: 'string', description: 'Base URL of the local DQL runtime. Default http://127.0.0.1:3474.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic'],
   },
   {
     name: 'list_metrics',
