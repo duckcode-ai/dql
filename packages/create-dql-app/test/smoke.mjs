@@ -30,7 +30,10 @@ function assert(cond, msg) {
   console.log(`  ✓ ${msg}`);
 }
 
-const EXPECTED_CLI_RANGE = '^1.6.21';
+// Must pin a CLI >= 1.6.30 so a fresh scaffold installs on Node 23/24 (a global
+// install of an older CLI fails there and never links the `dql` binary). Keep in
+// sync with templates/starter/package.json.
+const EXPECTED_CLI_RANGE = '^1.6.30';
 
 function collectFiles(dir, predicate, out = []) {
   for (const entry of readdirSync(dir)) {
