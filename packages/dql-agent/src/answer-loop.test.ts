@@ -665,6 +665,25 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.validation?.status).toBe("passed");
   });
 
+  it("keeps the certified badge but flags a certified block that returns 0 rows", async () => {
+    // The central honesty gate covers the CERTIFIED branch too. An empty certified
+    // result can be a correct "none matched" answer, so the badge stays — but a
+    // non-blocking note tells the user to verify data currency (closes the
+    // certified-0-row-wearing-the-strongest-badge hole).
+    const provider = new StubProvider("should not be called");
+    const result = await answer({
+      question: "What was revenue this quarter?",
+      provider,
+      kg,
+      executeCertifiedBlock: async () => ({ columns: ["revenue"], rows: [], rowCount: 0 }),
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.text).toMatch(/0 rows|verify the source data/i);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("0 rows")]),
+    );
+  });
+
   it("does NOT stamp a certified block as certified when its execution fails", async () => {
     // A certified block whose execution was ATTEMPTED and threw has no data to
     // stand behind — it must downgrade to analyst_review_required, not ride its
