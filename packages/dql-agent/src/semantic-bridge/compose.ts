@@ -172,6 +172,14 @@ function buildSemanticBridgeResult(input: {
     ...(input.tableMapping ? { tableMapping: input.tableMapping } : {}),
   });
   if (!composed) return undefined;
+  // A degenerate compile — empty/blank SQL — is NOT a governed answer. It happens
+  // when the (LLM- or token-) selected metric×dimension combo can't be expressed
+  // by the layer (e.g. a cumulative metric sliced by an unjoined product dimension:
+  // `cumulative_revenue by product_description`). Returning it would surface a
+  // confident "Answered from governed semantic metrics…" with an EMPTY SQL preview
+  // and no rows — a hollow answer. Reject it so the answer loop falls through to
+  // Lane-3 generation, which can express the join and actually execute.
+  if (typeof composed.sql !== 'string' || composed.sql.trim().length === 0) return undefined;
   const artifactName = semanticDqlArtifactName({
     question: input.question,
     metrics: metrics.map((metric) => metric.name),
