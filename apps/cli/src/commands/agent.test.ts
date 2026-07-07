@@ -184,6 +184,18 @@ describe('agent eval answer harness', () => {
     expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: 0.5 })).toBe(true);
     expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: 0.75 })).toBe(false);
     expect(__test__.agentEvalThresholdsPass({ ...metrics, tool_requirement_pass_rate: null }, { minToolRequirement: 1 })).toBe(true);
+
+    // Class-B wrong-number gate: execution_match_rate is 0.5 here, so a 0.5 bar
+    // passes and a 1.0 bar fails — this is the gate that guards a speed lever from
+    // shipping a fan-out/grain regression.
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, minExecutionMatch: 0.5 })).toBe(true);
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, minExecutionMatch: 1 })).toBe(false);
+    // A rate gate with no applicable cases (judge_pass_rate is null here) is
+    // vacuously satisfied — you never fail on a metric you did not measure.
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, minJudgePass: 1 })).toBe(true);
+    // Trust-mislabel ceiling: 0 wrong-certified passes a ceiling of 0; 1 would fail it.
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, maxWrongCertified: 0 })).toBe(true);
+    expect(__test__.agentEvalThresholdsPass({ ...metrics, wrong_certified_count: 1 }, { minToolRequirement: null, maxWrongCertified: 0 })).toBe(false);
   });
 
   it('builds structured trace stages for offline analysis', () => {

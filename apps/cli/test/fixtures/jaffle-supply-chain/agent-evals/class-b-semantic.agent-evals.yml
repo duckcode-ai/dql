@@ -1,0 +1,97 @@
+# Class-B (semantic-wrong-logic) eval cases — the wrong-NUMBER traps that the
+# adaptive-depth fast path can ship because validateSql only proves identifiers
+# EXIST and validateAnswerResultShape only checks column presence + top-N count.
+# Neither inspects join cardinality, aggregate grain, or the actual values, so a
+# valid query over real columns that computes the wrong number passes both gates.
+# The deep self-consistency vote (execute N diverse candidates, require agreement)
+# is the only structural defense — these cases exist to prove a speed lever did
+# not remove it silently.
+#
+# HOW TO RUN (credentialed / scheduled — needs a provider + a live runtime whose
+# warehouse is seeded with the jaffle-supply-chain data):
+#   dql agent eval apps/cli/test/fixtures/jaffle-supply-chain/agent-evals/class-b-semantic.agent-evals.yml \
+#     --execute --judge --format json \
+#     --min-execution-match 1 --min-judge-pass 1 --max-wrong-certified 0
+#
+# The `--min-execution-match 1` gate compares the executed rows to `expected.rows`
+# (agent.ts rowsEqual) and fails CI on any wrong-number regression. Run it against
+# BOTH the current path and a proposed fast-path lever; the lever ships only if
+# execution_match_rate stays 1.0.
+#
+# DATA REQUIREMENT (honest note): this fixture ships dbt metadata only (no bundled
+# warehouse), so the `expected.rows` below are placeholders marked TODO — capture
+# the true rows once against the seeded dataset and commit them. Until then these
+# cases still exercise the routing + grounding gates (route, allowedRelationsOnly,
+# allowedColumnsOnly, sqlContains) offline-with-a-provider; they just don't yet
+# contribute to execution_match_rate (which only counts cases carrying `rows`).
+#
+# Grains in this project (why each trap works):
+#   order_items  — one row per ORDER LINE (order_item_id): product_id, product_name,
+#                  product_type, product_price, order_id, ordered_at
+#   fct_orders   — one row per ORDER (order_id): customer_id, order_total, subtotal, ...
+#   dim_customers— one row per CUSTOMER (customer_id): customer_name, lifetime_spend
+#   supplies     — MANY rows per product (product_id → supply_id): supply_cost,
+#                  is_perishable_supply   ← the fan-out source
+
+cases:
+  # ── TRAP 1: fan-out double-count ─────────────────────────────────────────────
+  # "revenue per customer" lives at ORDER grain (fct_orders.order_total). Joining
+  # fct_orders → order_items to reach product detail multiplies order_total across
+  # every line in the order, so SUM(order_total) after that join double-counts.
+  # A correct answer aggregates order_total at order grain BEFORE (or without)
+  # fanning out to lines. Right columns, right row count, WRONG (inflated) number —
+  # invisible to validateSql + shape; only execution-agreement catches it.
+  - name: "class-b fan-out: revenue per customer must not multiply order_total across order lines"
+    question: "What is total order revenue for each customer?"
+    expected:
+      route: generated_sql
+      allowedRelationsOnly: true
+      allowedColumnsOnly: true
+      sqlContains:
+        - "customer"
+      # A grain-safe answer sums order_total at order grain, never SUM(order_total)
+      # after a 1-to-many join to order_items.
+      sqlNotContains:
+        - "SUM(oi.order_total)"
+      # rows: TODO — capture SUM(order_total) grouped by customer against the seeded
+      # dataset; the fan-out variant will over-report and fail rowsEqual.
+
+  # ── TRAP 2: join-grain that looks single-table ───────────────────────────────
+  # "revenue by product category" reads like a single-table group-by, but revenue
+  # is order_items.product_price and category is order_items.product_type — same
+  # table here, BUT the tempting certified block food_vs_drink_revenue answers a
+  # DIFFERENT (food/drink) category grain. A fast route that reuses it, or that
+  # aggregates at the wrong grain, returns a plausible-but-wrong split.
+  - name: "class-b join-grain: product-type revenue must aggregate at product_type grain, not the certified food/drink block"
+    question: "Show revenue by product category"
+    expected:
+      route: generated_sql
+      allowedRelationsOnly: true
+      allowedColumnsOnly: true
+      sqlContains:
+        - "product_type"
+      sqlNotContains:
+        - "food_vs_drink_revenue"
+      # rows: TODO — capture SUM(product_price) grouped by product_type against the
+      # seeded dataset.
+
+  # ── TRAP 3: filter binding + fan-out on a 1-to-many table ────────────────────
+  # "revenue from perishable supplies" binds is_perishable_supply (on `supplies`,
+  # MANY rows per product) to product revenue (order_items.product_price). Joining
+  # order_items → supplies on product_id fans out each line across every supply row
+  # for that product, inflating SUM(product_price); and the perishable filter can
+  # bind to the wrong side. ambiguous_filter only fires for entity_drilldown, so an
+  # ordinary lookup is unguarded. Correct: reduce supplies to a per-product
+  # perishable flag (EXISTS / DISTINCT) before joining.
+  - name: "class-b filter+fan-out: perishable-supply revenue must not fan out order lines across supply rows"
+    question: "How much product revenue comes from perishable supplies?"
+    expected:
+      route: generated_sql
+      allowedRelationsOnly: true
+      allowedColumnsOnly: true
+      sqlContains:
+        - "is_perishable_supply"
+      # A grain-safe answer collapses supplies to one perishable flag per product
+      # (EXISTS / DISTINCT / a pre-aggregated join) rather than a raw 1-to-many join.
+      # rows: TODO — capture the grain-safe perishable revenue total against the
+      # seeded dataset; the naive fan-out join will over-report.
