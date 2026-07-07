@@ -274,6 +274,15 @@ export async function queryViaMetadata(
   }
   const rows = payload.result?.rows ?? [];
   const returnedRows = rows.slice(0, rowLimit);
+  // Honesty gate (parity with the answer-loop's applyHollowAnswerGate): the SQL
+  // executed but produced NO ROWS. Surface it as a review note instead of a bare
+  // rowCount:0 — an empty result usually means a filter, grain, or join is off, so
+  // the agent (and the user) should review before trusting/reusing it.
+  const noRows = rows.length === 0;
+  const noRowsWarning = 'The generated SQL executed but returned no rows — review the SQL, filters, and joins before reuse.';
+  const executedWarnings = noRows
+    ? [...contextValidation.warnings, noRowsWarning]
+    : contextValidation.warnings;
   recordTier2QueryRun(ctx.projectRoot, {
     slug,
     question: args.question,
@@ -287,17 +296,20 @@ export async function queryViaMetadata(
     uncertified: true,
     intent,
     reviewStatus: 'draft_ready',
-    trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, undefined, contextValidation.warnings),
+    noRows,
+    trustStatus: metadataTrustStatus('draft_ready', intent, draftBlock, undefined, executedWarnings),
     evidence: metadataEvidence(intent, args, {
       status: 'executed',
       draftBlock,
       rowCount: rows.length,
       durationMs: payload.result?.executionTime ?? null,
-      validationWarnings: contextValidation.warnings,
+      validationWarnings: executedWarnings,
     }, contextPack),
     ...contextPackResponseFields(contextPack),
     datalexJoinGuidance,
-    reason: 'no certified block matched the question; result derived from manifest + dbt schema',
+    reason: noRows
+      ? 'The generated SQL executed but returned NO ROWS — this usually means a filter, grain, or join is off. Review before reuse.'
+      : 'no certified block matched the question; result derived from manifest + dbt schema',
     question: args.question,
     rowCount: rows.length,
     returnedRowCount: returnedRows.length,
@@ -309,7 +321,7 @@ export async function queryViaMetadata(
     proposedSql,
     draftBlock,
     dqlArtifact,
-    validationWarnings: contextValidation.warnings,
+    validationWarnings: executedWarnings,
     promote: draftBlock
       ? `if you want this question certified, run: dql certify --from-draft ${draftBlock.path}`
       : undefined,

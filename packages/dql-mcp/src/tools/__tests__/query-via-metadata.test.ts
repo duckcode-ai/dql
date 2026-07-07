@@ -218,6 +218,24 @@ describe('queryViaMetadata — Tier-2 promotion loop entry point', () => {
     expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('SELECT month, revenue FROM fct_orders');
   });
 
+  it('flags a no-rows result as review-required (0-row honesty parity with the answer loop)', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: { columns: [{ name: 'month' }, { name: 'revenue' }], rows: [], executionTime: 3 } }),
+    } as unknown as Response)) as unknown as typeof fetch;
+
+    const out = await queryViaMetadata(ctxFor(tmpProject), {
+      question: 'revenue for a filter that matches nothing',
+      proposedSql: 'SELECT month, revenue FROM fct_orders WHERE 1=0',
+    });
+
+    expect((out as { noRows: boolean }).noRows).toBe(true);
+    expect((out as { reason: string }).reason).toMatch(/no rows/i);
+    expect((out as { validationWarnings: string[] }).validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('returned no rows')]),
+    );
+  });
+
   it('returns selected relation reasoning when planning from metadata', async () => {
     seedNbaMetadataProject(tmpProject);
 
