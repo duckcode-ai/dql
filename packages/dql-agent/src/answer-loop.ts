@@ -45,6 +45,7 @@ import type { GroundingContextExpander } from './grounding/regrounding.js';
 import { createContextLedger, type ContextLedger } from './grounding/context-ledger.js';
 import { validateAnswerResultShape } from './answer-shape.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
+import { planCertifiedAdaptation, type CertifiedAdaptation } from './metadata/block-adapt.js';
 import {
   compactSqlSnippet,
   extractSimpleSelectShape,
@@ -364,6 +365,13 @@ export interface AgentAnswer {
    * contract and the UI badge.
    */
   trustLabelInfo?: ResolvedTrustLabel;
+  /**
+   * One-line provenance footer (Anthropic pattern): where the answer came from
+   * (source tier), how much to trust it, who owns the source, and whether the
+   * data is current. Rendered by every surface so a stakeholder can judge an
+   * answer at a glance. Undefined for no-answer outcomes.
+   */
+  provenanceFooter?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   validationWarnings?: string[];
@@ -625,10 +633,12 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     },
     isFollowUp: Boolean(input.followUp),
   });
+  const trustLabelInfo = stampTrustLabel(result);
   return {
     ...publicResult,
     intentDecision,
-    trustLabelInfo: stampTrustLabel(result),
+    trustLabelInfo,
+    provenanceFooter: buildProvenanceFooter(result, trustLabelInfo),
     cascade: publicResult.cascade ?? createCascadeAnswerResult({
       routeTier: chosenRoute.tier,
       label: chosenRoute.label,
@@ -1112,6 +1122,31 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     contextPack: input.contextPack,
     schemaContext,
   });
+  // W2.2 — certified-block adaptation lane. When a certified block is context-only
+  // ONLY because the question adds exactly one filter whose value maps to a column
+  // the block already outputs, adapt the certified SQL (wrap + filter its result)
+  // instead of regenerating from scratch. It executes through the governed path
+  // (pre-validated, since the wrapper only restricts an already-certified result)
+  // and is labeled BELOW certified. Falls through to generation on any miss.
+  let certifiedAdaptation: CertifiedAdaptation | undefined;
+  if (!semanticBridgeAnswer && !metricFirst && input.executeGeneratedSql) {
+    const fit = input.contextPack?.routeDecision?.blockFit;
+    const sourceBlock = input.contextPack?.allowedSqlContext?.sourceBlockSql?.[0];
+    if (fit && sourceBlock?.sql) {
+      const shape = extractSimpleSelectShape(sourceBlock.sql);
+      const blockOutputs = shape
+        ? shape.selectExpressions.map((expression) => selectExpressionOutputName(expression)).filter((name): name is string => Boolean(name))
+        : [];
+      certifiedAdaptation = planCertifiedAdaptation({
+        blockFit: fit,
+        certifiedSql: sourceBlock.sql,
+        blockName: sourceBlock.name,
+        blockOutputs,
+        resolveFilterColumn: (value) => resolveFilterValueColumns(value, schemaContext),
+      }) ?? undefined;
+    }
+  }
+
   let proposed = '';
   let parsed: ParsedProposal;
   const proposalToolCalls: AgentEvidenceToolCall[] = [...semanticBridgeToolCalls];
@@ -1129,6 +1164,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       sql: metricFirst.sql,
       text: `Answered from the governed metric ${metricFirst.metric.name}${metricFirst.dimensions.length > 0 ? ` by ${metricFirst.dimensions.join(', ')}` : ''}. This result is uncertified until reviewed and promoted.`,
       viz: metricFirst.dimensions.length === 0 ? 'single_value' : undefined,
+    };
+  } else if (certifiedAdaptation) {
+    // Pre-validated governed path (the wrapper only restricts a certified result).
+    governedMetricAnswer = true;
+    parsed = {
+      sql: certifiedAdaptation.sql,
+      text: certifiedAdaptation.provenance,
     };
   } else {
     try {
@@ -4013,6 +4055,37 @@ function certifiedFreshnessCaveat(artifact: KGNode): string | undefined {
     default:
       return undefined;
   }
+}
+
+function provenanceSourceTierLabel(tier: AnswerSourceTier | undefined): string | undefined {
+  switch (tier) {
+    case 'certified_artifact': return 'Certified block';
+    case 'semantic_layer': return 'Governed semantic metric';
+    case 'business_context': return 'Business context';
+    case 'dbt_manifest': return 'Generated SQL';
+    default: return undefined;
+  }
+}
+
+/**
+ * Anthropic-style provenance footer: one line telling a stakeholder WHERE the
+ * answer came from (source tier), how much to trust it, who owns the source, and
+ * whether the underlying data is current. Built once at the single exit from the
+ * finished answer; omitted for no-answer outcomes.
+ */
+export function buildProvenanceFooter(result: AgentAnswer, trust: ResolvedTrustLabel | undefined): string | undefined {
+  if (result.kind === 'no_answer') return undefined;
+  const parts: string[] = [];
+  const tierLabel = provenanceSourceTierLabel(result.sourceTier);
+  if (tierLabel) parts.push(`Source: ${tierLabel}`);
+  if (trust?.display) parts.push(`Trust: ${trust.display}`);
+  if (result.block?.owner) parts.push(`Owner: ${result.block.owner}`);
+  const freshness = result.block?.dataState === 'stale' ? 'stale — verify currency'
+    : result.block?.dataState === 'failed' ? 'upstream run failed'
+    : result.block?.dataState === 'fresh' ? 'current'
+    : undefined;
+  if (freshness) parts.push(`Data: ${freshness}`);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
 
 function mergeHits(...groups: KGSearchHit[][]): KGSearchHit[] {

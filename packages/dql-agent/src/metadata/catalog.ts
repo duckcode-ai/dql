@@ -63,6 +63,8 @@ import {
 import { retrieveScopedHints } from '../hints/retrieval.js';
 import type { QuestionScope } from '../hints/types.js';
 import { sanitizeFtsQuery } from '../memory/fts-query.js';
+import { resolveEmbeddingProvider } from '../embeddings/provider.js';
+import { matchExampleParaphrase } from './example-match.js';
 
 /** An approved scoped hint folded into a context pack (after certified routing). */
 export interface AppliedContextHint {
@@ -2911,15 +2913,30 @@ async function planContextPackRoute(input: {
   const exactByApplicability = [...applicabilityByKey.values()]
     .filter((item) => item.kind === 'exact_answer' || item.kind === 'safe_parameterized')
     .sort((a, b) => b.score - a.score)[0];
-  const exact = exactByApplicability
+  let exact = exactByApplicability
     ? input.objects.find((object) => object.objectKey === exactByApplicability.objectKey)
     : findExactCertifiedObject(input.request.question, intent, input.objects);
-  const certifiedApplicability = exact
-    ? applicabilityByKey.get(exact.objectKey) ?? certifiedApplicabilityForObject(exact, input.questionPlan)
-    : undefined;
   const contextApplicability = [...applicabilityByKey.values()]
     .filter((item) => item.kind === 'context_only')
     .sort((a, b) => b.score - a.score)[0];
+  // W2.1 — paraphrase promotion. When no block string/lexically matched, promote a
+  // top context-only certified candidate whose example QUESTION the user paraphrased
+  // (semantic cosine + direction) to the certified candidate. It still runs the full
+  // shape/grain fit below (paraphraseExampleMatch is kept OUT of directCertifiedBypass,
+  // the fit's exactExampleMatch, and the grain-gate skip) — so paraphrase never bypasses
+  // grain the way a user naming the block directly does.
+  let paraphraseExampleMatch = false;
+  if (!exact && contextApplicability) {
+    const candidate = input.objects.find((object) => object.objectKey === contextApplicability.objectKey);
+    if (candidate && isCertifiedMetadataObject(candidate)
+      && await matchExampleParaphrase(input.request.question, candidate, resolveEmbeddingProvider())) {
+      exact = candidate;
+      paraphraseExampleMatch = true;
+    }
+  }
+  const certifiedApplicability = exact
+    ? applicabilityByKey.get(exact.objectKey) ?? certifiedApplicabilityForObject(exact, input.questionPlan)
+    : undefined;
   const exactExampleMatch = exact ? hasExactExampleQuestion(input.request.question, exact) : false;
   const directCertifiedBypass = Boolean(exact && (
     exactExampleMatch
@@ -2988,6 +3005,7 @@ async function planContextPackRoute(input: {
     || intent === 'exact_certified_lookup'
     || intent === 'definition_lookup'
     || exactExampleMatch
+    || paraphraseExampleMatch
     || (intent === 'ad_hoc_ranking' && objectNameInQuestion(input.request.question, exact))
   )) {
     return {
