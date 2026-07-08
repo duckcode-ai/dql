@@ -599,6 +599,39 @@ describe('local metadata catalog', () => {
     );
   });
 
+  it('ingests DataLex conformance as searchable concept objects (W5.1)', async () => {
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { nodes: Record<string, Record<string, unknown>> };
+    manifest.nodes['model.nba_analysis.dim_players_w51'] = {
+      resource_type: 'model', name: 'dim_players_w51', alias: 'dim_players_w51', database: 'NBA_DB', schema: 'ANALYTICS',
+      description: 'Player dimension.', depends_on: { nodes: [] }, original_file_path: 'models/dim_players_w51.sql',
+      columns: { player_id: { name: 'player_id', data_type: 'text' } },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+    writeFileSync(
+      join(projectRoot, 'datalex-manifest.json'),
+      JSON.stringify({
+        manifestSpecVersion: '1.0.0', datalexVersion: 'test', generatedAt: '2026-06-20T00:00:00.000Z',
+        project: { name: 'nba_contracts' },
+        domains: [{ name: 'nba', entities: [] }],
+        conformance: [{
+          concept: 'PlayerProfile', domain: 'nba', canonical_key: ['player_id'],
+          physical: [{ entity: 'DimPlayers', binding: { kind: 'dbt_model', ref: 'dim_players_w51' } }],
+        }],
+      }),
+      'utf-8',
+    );
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'PlayerProfile concept',
+      limit: 40,
+    });
+    const concept = pack.objects.find((o) => o.objectType === 'datalex_concept' && o.name === 'PlayerProfile');
+    expect(concept).toBeDefined();
+    expect(concept?.payload?.canonicalKey).toEqual(['player_id']);
+    expect(concept?.payload?.physicalRefs).toEqual(['dbt:model:dim_players_w51']);
+  });
+
   it('routes exact certified example questions to certified execution', async () => {
     const plan = await planAgentAnswer(projectRoot, {
       question: 'Who were the top scorers?',
