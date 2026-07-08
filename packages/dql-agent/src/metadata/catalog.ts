@@ -569,6 +569,36 @@ interface RawDbtCatalogEntry {
   database?: string;
   schema?: string;
   catalogColumns?: RuntimeSchemaColumn[];
+  /** Single-column `unique` dbt tests on this model → grain-ledger keys (W5.3). */
+  uniqueColumns?: string[];
+}
+
+/**
+ * Extract single-column `unique` dbt tests, keyed by model name (W5.3). A column
+ * a `unique` test guards is a grain key, which feeds the grain ledger's fan-out
+ * detection — the common way real dbt repos declare keys. Handles both the
+ * `attached_node` (newer dbt) and `depends_on` shapes, and top-level or kwargs
+ * column names.
+ */
+export function extractDbtUniqueColumns(nodes: Record<string, Record<string, unknown>>): Map<string, string[]> {
+  const byModel = new Map<string, string[]>();
+  for (const node of Object.values(nodes)) {
+    if (node.resource_type !== 'test') continue;
+    const testMetadata = node.test_metadata as { name?: unknown; kwargs?: Record<string, unknown> } | undefined;
+    if (stringValue(testMetadata?.name) !== 'unique') continue;
+    const column = stringValue(node.column_name) ?? stringValue(testMetadata?.kwargs?.column_name);
+    if (!column) continue;
+    const dependsOn = (node.depends_on as { nodes?: unknown } | undefined)?.nodes;
+    const attached = stringValue(node.attached_node)
+      ?? (Array.isArray(dependsOn) ? dependsOn.map(String).find((ref) => ref.startsWith('model.')) : undefined);
+    if (!attached) continue;
+    const modelName = attached.split('.').at(-1);
+    if (!modelName) continue;
+    const existing = byModel.get(modelName) ?? [];
+    if (!existing.includes(column)) existing.push(column);
+    byModel.set(modelName, existing);
+  }
+  return byModel;
 }
 
 const OBJECT_PRIORITY: Record<string, number> = {
@@ -1988,6 +2018,7 @@ function addRawDbtManifestCatalogObjects(
   }
 
   const catalogColumns = loadRawDbtCatalogColumns(join(dirname(manifestPath), 'catalog.json'));
+  const uniqueColumnsByModel = extractDbtUniqueColumns(raw.nodes ?? {});
   const entries: RawDbtCatalogEntry[] = [];
   for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
     if (node.resource_type !== 'model') continue;
@@ -2005,6 +2036,7 @@ function addRawDbtManifestCatalogObjects(
       database,
       schema,
       catalogColumns: catalogColumns.get(uniqueId),
+      uniqueColumns: uniqueColumnsByModel.get(name),
     };
     entries.push(entry);
     addRawDbtCatalogObject({
@@ -2078,6 +2110,8 @@ function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
       catalogOnly: existing ? undefined : true,
       columnCompleteness,
       columns,
+      // W5.3 — single-column `unique` dbt tests become grain-ledger keys.
+      uniqueColumns: input.uniqueColumns && input.uniqueColumns.length > 0 ? input.uniqueColumns : undefined,
     }),
   }));
 
