@@ -2594,6 +2594,58 @@ function addDataLexManifestObjects(
     });
   }
 
+  // Concept-to-physical conformance (W5.1) → searchable `datalex_concept` nodes
+  // carrying the canonical key + the physical relations that realize the concept,
+  // plus `datalex_conforms` edges so retrieval can collapse several physical tables
+  // into one business concept ("Customer" → dim_customer, stg_customers) and reason
+  // at the concept grain. Modeling metadata only — no certification coupling.
+  for (const conformance of raw.conformance ?? []) {
+    if (!conformance?.concept) continue;
+    const conceptDomain = conformance.domain ?? '';
+    const conceptKey = `datalex:concept:${conceptDomain}.${conformance.concept}`;
+    const physicalRefs = (conformance.physical ?? [])
+      .map((physical) => (physical.binding ? objectKeyForDataLexBinding(physical.binding) : undefined))
+      .filter((key): key is string => Boolean(key));
+    const canonicalKey = conformance.canonical_key ?? [];
+    objects.set(conceptKey, mergeObject(objects.get(conceptKey), {
+      objectKey: conceptKey,
+      objectType: 'datalex_concept',
+      name: conformance.concept,
+      fullName: `${conceptDomain}.${conformance.concept}`,
+      domain: conceptDomain || undefined,
+      status: 'contract_evidence',
+      description: `Business concept ${conformance.concept}`
+        + (canonicalKey.length ? ` (canonical key: ${canonicalKey.join(', ')})` : '')
+        + (physicalRefs.length ? `, realized by ${physicalRefs.length} physical relation(s).` : '.'),
+      sourcePath: manifestPath,
+      sourceSystem: 'DataLex manifest',
+      payload: compactObject({
+        canonicalKey,
+        businessKey: conformance.business_key ?? [],
+        implements: conformance.implements ?? [],
+        physicalRefs,
+      }),
+    }));
+    if (conceptDomain) {
+      putEdge(edges, {
+        edgeType: 'contains',
+        fromKey: `datalex:domain:${conceptDomain}`,
+        toKey: conceptKey,
+        confidence: 1,
+        payload: { source: 'datalex conformance' },
+      });
+    }
+    for (const ref of physicalRefs) {
+      putEdge(edges, {
+        edgeType: 'datalex_conforms',
+        fromKey: conceptKey,
+        toKey: ref,
+        confidence: 0.95,
+        payload: compactObject({ source: 'datalex conformance', concept: conformance.concept, canonicalKey }),
+      });
+    }
+  }
+
   for (const block of Object.values(manifest.blocks ?? {})) {
     if (!block.datalexContract) continue;
     const parsed = parseContractRef(block.datalexContract);
