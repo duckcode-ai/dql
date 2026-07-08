@@ -145,6 +145,8 @@ import {
   routeForCascadeAnswerTier,
   clampReasoningEffort,
   bumpReasoningEffort,
+  resolveThinkingMode,
+  coerceThinkingMode,
   upsertGeneratedDqlArtifactDraft,
   type AgentRun,
   type AgentRunArtifact,
@@ -437,6 +439,7 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       runId: agentRunString(record.runId),
       reasoningEffort: parseAgentRunReasoningEffort(record.reasoningEffort),
       analysisDepth: parseAgentRunAnalysisDepth(record.analysisDepth) ?? parseAgentRunAnalysisDepth(record.depth),
+      thinkingMode: coerceThinkingMode(record.thinkingMode),
     },
   };
 }
@@ -909,10 +912,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
     const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
-    const reasoningEffort = request.reasoningEffort
-      ? resolveRequestedRunReasoningEffort(projectRoot, resolvedProvider, request.reasoningEffort, isRepair)
+    // The chat composer sends a `thinkingMode` (auto/low/medium/high); resolve it
+    // into the effort+depth bundle it stands for. An explicit `reasoningEffort` /
+    // `analysisDepth` on the request (e.g. a CLI flag) still wins over the mode.
+    const thinkingResolved = request.thinkingMode ? resolveThinkingMode(request.thinkingMode) : {};
+    const requestedEffort = request.reasoningEffort ?? thinkingResolved.reasoningEffort;
+    const requestedDepth = request.analysisDepth ?? thinkingResolved.analysisDepth;
+    const reasoningEffort = requestedEffort
+      ? resolveRequestedRunReasoningEffort(projectRoot, resolvedProvider, requestedEffort, isRepair)
       : resolveRunReasoningEffort(projectRoot, resolvedProvider, route, isRepair);
-    const analysisDepth = request.analysisDepth ?? (route === 'research' ? 'deep' as const : undefined);
+    const analysisDepth = requestedDepth ?? (route === 'research' ? 'deep' as const : undefined);
     const contextEnvelope = {
       mode: 'agent_run',
       selectedObject: request.selectedObject,

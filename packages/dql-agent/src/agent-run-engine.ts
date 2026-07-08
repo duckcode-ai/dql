@@ -20,7 +20,7 @@ import {
   type PartialCascadeBudgetModel,
 } from "./cascade/budgets.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
-import type { ReasoningEffort } from "./providers/reasoning-effort.js";
+import type { ReasoningEffort, ThinkingMode } from "./providers/reasoning-effort.js";
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app";
 
@@ -145,6 +145,13 @@ export interface AgentRunRequest {
   reasoningEffort?: ReasoningEffort;
   /** Optional run-specific context depth for governed answer retrieval and prompting. */
   analysisDepth?: CascadeAnalysisDepth;
+  /**
+   * The user's chat-composer "thinking" selection for this thread. `auto` (or
+   * unset) defers to shape-adaptive routing; `low`/`medium`/`high` resolve to an
+   * effort+depth bundle via `resolveThinkingMode`. Explicit `reasoningEffort` /
+   * `analysisDepth` above (e.g. CLI flags) take precedence over this.
+   */
+  thinkingMode?: ThinkingMode;
 }
 
 export interface AgentRunEvent {
@@ -421,10 +428,14 @@ export function answerAnywayRoute(
 /**
  * Task-adaptive reasoning effort per route — the DQL differentiator. Cheap,
  * mechanical routes (chat, clarify, blocked, a pre-written certified lookup) run
- * `low`; correctness-critical routes that generate/validate SQL or investigate
- * run `high`; app assembly sits at `medium` (its gap-fill sub-answers route
- * through `generated_answer` and pick up `high` on their own). The host clamps
- * this by the provider's Settings ceiling before sending it to the model.
+ * `low`; a plain generated answer runs `medium` (the "Auto" default — S1); the
+ * heavy authoring/investigation routes that genuinely reason over a whole
+ * research workspace or draft a block run `high`. This is the reasoning-effort
+ * half of the S1 decouple: it sets how hard the model THINKS per call and is no
+ * longer welded to how many verification passes run (that follows the question
+ * shape — see `questionShapeClass`/`analysisDepthForQuestion`). A user's explicit
+ * thinking selection overrides this default; the host also clamps by the
+ * provider's Settings ceiling before sending it to the model.
  */
 export function routeReasoningEffort(route: AgentRunRoute): ReasoningEffort {
   switch (route) {
@@ -433,9 +444,9 @@ export function routeReasoningEffort(route: AgentRunRoute): ReasoningEffort {
     case "certified_answer":
     case "blocked":
       return "low";
+    case "generated_answer":
     case "app_build":
       return "medium";
-    case "generated_answer":
     case "research":
     case "sql_cell":
     case "dql_block_draft":

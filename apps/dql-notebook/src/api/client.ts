@@ -567,6 +567,13 @@ export interface AgentRun {
 
 export type AgentRunAudience = 'stakeholder' | 'analyst';
 
+/**
+ * The chat-composer "thinking" selection. `auto` (default) lets the engine adapt
+ * effort + verification depth to the question shape; the manual modes trade speed
+ * against rigor for the whole thread. Sent per run as `thinkingMode`.
+ */
+export type AgentThinkingMode = 'auto' | 'low' | 'medium' | 'high';
+
 export interface CreateAgentRunInput {
   question: string;
   requestedMode?: AgentRunRequestedMode;
@@ -586,6 +593,8 @@ export interface CreateAgentRunInput {
    */
   threadId?: string;
   runId?: string;
+  /** The composer's thinking selection for this run (auto/low/medium/high). */
+  thinkingMode?: AgentThinkingMode;
 }
 
 export interface RequestCertificationInput {

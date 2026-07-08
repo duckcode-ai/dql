@@ -929,21 +929,23 @@ describe("answer (block-first loop)", () => {
     expect(result.kind).toBe("uncertified");
   });
 
-  it("expands the provider tool budget for deep analysis requests", async () => {
+  it("expands the provider tool budget for a multi-entity breakdown shape", async () => {
+    // Tool budget follows the question SHAPE, not an effort/depth flag (S1
+    // decouple): a two-dimension breakdown earns the mid-tier multi_entity budget.
+    // The full shape→budget mapping (incl. deep_research→15) is covered in budgets.test.ts.
     const provider = new ToolStubProvider("fallback should not be called");
     const result = await answer({
-      question: "What is the order count by region?",
+      question: "What is the order count by region and product category?",
       provider,
       kg,
-      analysisDepth: "deep",
       answerLoopTools: [inspectMetadataTool()],
     });
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 15 },
+      { toolNames: ["inspect_metadata_context"], maxToolCalls: 8 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("15 call(s) (deep_research");
+    expect(provider.messages.at(-1)?.content).toContain("8 call(s) (multi_entity");
     expect(result.kind).toBe("uncertified");
   });
 

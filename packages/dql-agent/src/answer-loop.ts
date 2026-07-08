@@ -68,6 +68,7 @@ import {
   canUseLaneRepair,
   cascadeBudgetTrace,
   createCascadeBudgetState,
+  deepAlternativeCountForQuestion,
   promptContextBudgetForQuestion,
   proposalToolBudgetForQuestion,
   recordLaneRepair,
@@ -1233,6 +1234,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       executeGeneratedSql: input.executeGeneratedSql,
       signal: input.signal,
       reasoningEffort: input.reasoningEffort,
+      maxAlternatives: deepAlternativeCountForQuestion(questionPlan, intent),
     });
     if (selection.selected) {
       proposed = selection.selected.raw;
@@ -3732,6 +3734,7 @@ async function selectDeepGeneratedProposalCandidate(input: {
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
+  maxAlternatives?: number;
 }): Promise<{ selected?: DeepGeneratedProposalCandidate; notes: string[] }> {
   const initial = await scoreDeepGeneratedProposalCandidate(input, {
     raw: input.initial.raw,
@@ -3870,6 +3873,7 @@ async function generateDeepAlternativeProposals(input: {
   initial: { raw: string; parsed: ParsedProposal };
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
+  maxAlternatives?: number;
 }): Promise<string[]> {
   const previousSql = input.initial.parsed.sql
     ? `\nInitial SQL candidate:\n\`\`\`sql\n${input.initial.parsed.sql}\n\`\`\``
@@ -3882,8 +3886,14 @@ async function generateDeepAlternativeProposals(input: {
     'Create a fourth candidate by DECOMPOSITION: break the question into sub-questions, solve each as a CTE, then compose the final SELECT — avoiding assumptions hidden in the first candidate.',
   ];
   const temperatures = [0.2, 0.35, 0.5];
-  const out: string[] = [];
-  for (const [index, instruction] of variants.entries()) {
+  // How many diverse alternatives to generate is set by the question SHAPE (S1):
+  // a lightweight 1-candidate agreement check for join/breakdown shapes, the full
+  // 3-candidate vote for deep-research, none for a single-table lookup. The
+  // generations are independent, so they run in PARALLEL — the deep vote's
+  // wall-clock cost is one generation, not the serial sum of all of them.
+  const count = Math.max(0, Math.min(input.maxAlternatives ?? variants.length, variants.length));
+  const selected = variants.slice(0, count);
+  const results = await Promise.all(selected.map(async (instruction, index) => {
     try {
       const raw = await input.provider.generate([
         ...input.messages,
@@ -3903,12 +3913,13 @@ async function generateDeepAlternativeProposals(input: {
         reasoningEffort: input.reasoningEffort,
         temperature: temperatures[index] ?? 0.4,
       });
-      if (raw.trim()) out.push(raw);
+      return raw.trim() ? raw : '';
     } catch {
       // Alternative candidates are opportunistic; the initial candidate remains.
+      return '';
     }
-  }
-  return out;
+  }));
+  return results.filter((raw) => raw.trim());
 }
 
 function cloneParsedProposal(proposal: ParsedProposal): ParsedProposal {

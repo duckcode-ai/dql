@@ -674,6 +674,10 @@ export {
   supportsReasoningEffort,
   geminiReasoningStyle,
   effortToThinkingBudget,
+  THINKING_MODES,
+  isThinkingMode,
+  coerceThinkingMode,
+  resolveThinkingMode,
 } from "./providers/index.js";
 export type {
   AgentProvider,
@@ -684,6 +688,7 @@ export type {
   ProviderToolLoopOptions,
   ReasoningEffort,
   GeminiReasoningStyle,
+  ThinkingMode,
 } from "./providers/index.js";
 
 /**

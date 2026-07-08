@@ -25,11 +25,17 @@ describe("routeReasoningEffort", () => {
     expect(routeReasoningEffort("blocked")).toBe("low");
   });
 
-  it("runs correctness-critical generation/investigation routes at high effort", () => {
-    expect(routeReasoningEffort("generated_answer")).toBe("high");
+  it("runs the heavy authoring/investigation routes at high effort", () => {
     expect(routeReasoningEffort("research")).toBe("high");
     expect(routeReasoningEffort("sql_cell")).toBe("high");
     expect(routeReasoningEffort("dql_block_draft")).toBe("high");
+  });
+
+  it("runs a plain generated answer at medium effort — the Auto default (S1 decouple)", () => {
+    // A generated answer no longer forces `high`: how hard the model thinks is
+    // decoupled from how many verification passes run (that follows the question
+    // shape). A user's explicit thinking selection can still raise this to high.
+    expect(routeReasoningEffort("generated_answer")).toBe("medium");
   });
 
   it("runs app assembly at medium effort (gap-fill sub-answers escalate on their own)", () => {

@@ -104,11 +104,13 @@ describe('agent run runtime API', () => {
       },
       reasoningEffort: 'high',
       analysisDepth: 'deep',
+      thinkingMode: 'low',
     });
 
     expect(parsed.error).toBeUndefined();
     expect(parsed.request?.reasoningEffort).toBe('high');
     expect(parsed.request?.analysisDepth).toBe('deep');
+    expect(parsed.request?.thinkingMode).toBe('low');
     expect(parsed.request?.conversationContext).toEqual({
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       resultColumns: ['category', 'revenue'],
@@ -122,11 +124,13 @@ describe('agent run runtime API', () => {
       question: 'orders',
       reasoningEffort: 'maximum',
       analysisDepth: 'wide',
+      thinkingMode: 'turbo',
     });
 
     expect(parsed.error).toBeUndefined();
     expect(parsed.request?.reasoningEffort).toBeUndefined();
     expect(parsed.request?.analysisDepth).toBeUndefined();
+    expect(parsed.request?.thinkingMode).toBeUndefined();
   });
 
   it('skips synthesis for DQL-first answers that already carry final prose', () => {

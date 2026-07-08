@@ -116,13 +116,15 @@ describe('agent eval answer harness', () => {
     expect(failing.failures).toEqual(['toolCalls expected at least 2, got 1']);
   });
 
-  it('maps CLI depth and effort flags into exploratory context budgets', () => {
+  it('maps the CLI depth flag into an exploratory budget; effort no longer forces depth (S1)', () => {
     const plan = buildAnalysisQuestionPlan('show order count');
 
     expect(__test__.cliAnalysisDepth({ analysisDepth: 'deep' } as any)).toBe('deep');
     expect(__test__.cliAnalysisDepth({ analysisDepth: 'wide' } as any)).toBeUndefined();
     expect(__test__.cliReasoningEffort({ reasoningEffort: 'HIGH' } as any)).toBe('high');
     expect(__test__.cliReasoningEffort({ reasoningEffort: 'max' } as any)).toBeUndefined();
+
+    // An explicit --analysis-depth deep still widens the retrieval budget.
     expect(contextRetrievalBudgetForQuestion({
       questionPlan: plan,
       requestedDepth: __test__.cliAnalysisDepth({ analysisDepth: 'deep' } as any),
@@ -131,13 +133,16 @@ describe('agent eval answer harness', () => {
       strictness: 'exploratory',
       limit: 160,
     });
+
+    // But --reasoning-effort high ALONE no longer widens it (the S1 decouple):
+    // a simple lookup keeps the quick/balanced budget even at high effort.
     expect(contextRetrievalBudgetForQuestion({
       questionPlan: plan,
       reasoningEffort: __test__.cliReasoningEffort({ reasoningEffort: 'high' } as any),
     })).toMatchObject({
-      analysisDepth: 'deep',
-      strictness: 'exploratory',
-      limit: 160,
+      analysisDepth: 'quick',
+      strictness: 'balanced',
+      limit: 100,
     });
   });
 
