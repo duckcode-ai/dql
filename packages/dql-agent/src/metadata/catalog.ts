@@ -2505,6 +2505,10 @@ function addDataLexManifestObjects(
         payload: compactObject({
           tags: entity.tags ?? [],
           binding: entity.binding,
+          // Entity-level grain + keys (W5.2) feed the grain ledger for fan-out safety.
+          grain: entity.grain,
+          candidateKeys: entity.candidate_keys,
+          businessKeys: entity.business_keys,
           fields: (entity.fields ?? []).slice(0, 100).map((field) => compactObject({
             name: field.name,
             type: field.type,

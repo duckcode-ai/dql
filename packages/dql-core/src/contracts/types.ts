@@ -63,6 +63,12 @@ export interface DataLexEntity {
   fields?: DataLexField[];
   contracts?: DataLexContract[];
   binding?: DataLexBinding;
+  /** Declared grain (D2/W5.2) — modeling metadata for GROUP-BY / fan-out safety. */
+  grain?: string;
+  /** Single- or multi-column candidate keys (D2/W5.2). */
+  candidate_keys?: string[];
+  /** Business (natural) keys (D2/W5.2). */
+  business_keys?: string[];
 }
 
 export interface DataLexGlossaryTerm {

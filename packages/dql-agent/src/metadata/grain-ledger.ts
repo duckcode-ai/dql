@@ -77,6 +77,18 @@ export function buildGrainLedger(objects: MetadataObject[]): GrainLedger {
       if (primaryKeys.length === 1) {
         addUniqueKey(ledger, relation, String(primaryKeys[0].name), 'datalex primary key');
       }
+      // Entity-level candidate/business keys (W5.2). Conservatively use only entries
+      // that are a SINGLE simple column token — a composite key (e.g. "a, b") is not
+      // a single-column unique key, and over-claiming uniqueness would MISS a real
+      // fan-out (a silent wrong number), so we skip anything non-atomic.
+      for (const keyList of [object.payload?.candidateKeys, object.payload?.businessKeys]) {
+        if (!Array.isArray(keyList)) continue;
+        for (const key of keyList) {
+          if (typeof key === 'string' && /^[A-Za-z_][\w]*$/.test(key.trim())) {
+            addUniqueKey(ledger, relation, key.trim(), 'datalex candidate/business key');
+          }
+        }
+      }
       continue;
     }
     // Generic hook: an object may declare its own key columns (dbt constraints /
