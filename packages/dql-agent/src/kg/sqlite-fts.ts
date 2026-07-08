@@ -393,6 +393,20 @@ export class KGStore {
     return rows.map((r) => ({ blockId: r.block_id, question: r.question, ups: r.ups }));
   }
 
+  /** Blocks with >= minDownvotes down-votes, for failure analysis (W4.2). */
+  downvotedBlocks(minDownvotes = 2): Array<{ blockId: string; question: string; downs: number }> {
+    const rows = this.db.prepare(`
+      SELECT block_id, question, COUNT(*) AS downs
+      FROM kg_feedback
+      WHERE rating = 'down' AND block_id IS NOT NULL
+      GROUP BY block_id
+      HAVING downs >= ?
+      ORDER BY downs DESC
+      LIMIT 50
+    `).all(minDownvotes) as Array<{ block_id: string; question: string; downs: number }>;
+    return rows.map((r) => ({ blockId: r.block_id, question: r.question, downs: r.downs }));
+  }
+
   meta(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM kg_meta WHERE key = ?').get(key) as
       | { value: string } | undefined;

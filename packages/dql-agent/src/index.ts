@@ -524,6 +524,12 @@ export type {
 } from "./propose/index.js";
 export { reflectAndReviseBlock } from "./propose/index.js";
 export { mineJoinPatterns, type JoinPatternCandidate } from "./propose/join-mining.js";
+export {
+  analyzeFailureClusters,
+  improvementProposalsFromKg,
+  type FailureSignal,
+  type ImprovementProposal,
+} from "./propose/failure-analysis.js";
 export type {
   BuildLocalContextPackRequest,
   CertifiedFitConfirmation,
