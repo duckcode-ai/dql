@@ -6,9 +6,11 @@ import {
   cascadeBudgetTrace,
   contextRetrievalBudgetForQuestion,
   createCascadeBudgetState,
+  deepAlternativeCountForQuestion,
   mcpTier2RegroundRepairBudget,
   promptContextBudgetForQuestion,
   proposalToolBudgetForQuestion,
+  questionShapeClass,
   recordEngineEscalation,
   recordLaneRepair,
 } from './budgets.js';
@@ -60,10 +62,11 @@ describe('cascade budgets', () => {
       effortClass: 'multi_entity',
     });
 
+    // Tool budget follows the question SHAPE, not effort/depth (S1 decouple) — a
+    // diagnosis earns the deep_research budget with no effort/depth option at all.
     expect(proposalToolBudgetForQuestion(
       buildAnalysisQuestionPlan('Research why margin dropped in Q2'),
       'diagnose_change',
-      { analysisDepth: 'deep' },
     )).toMatchObject({
       maxToolCalls: 15,
       effortClass: 'deep_research',
@@ -91,18 +94,51 @@ describe('cascade budgets', () => {
   it('widens prompt rendering and metadata retrieval from the same deep policy', () => {
     const questionPlan = buildAnalysisQuestionPlan('Research why margin dropped in Q2 by product and region');
 
-    expect(analysisDepthForQuestion(questionPlan, 'high')).toBe('deep');
-    expect(contextRetrievalBudgetForQuestion({ questionPlan, reasoningEffort: 'high' })).toEqual({
+    // Depth follows shape, so a diagnosis widens to the deep policy even at LOW
+    // effort — proving the widening is driven by the question, not the effort knob.
+    expect(analysisDepthForQuestion(questionPlan, 'low')).toBe('deep');
+    expect(contextRetrievalBudgetForQuestion({ questionPlan, reasoningEffort: 'low' })).toEqual({
       analysisDepth: 'deep',
       strictness: 'exploratory',
       limit: 160,
     });
-    expect(promptContextBudgetForQuestion({ questionPlan, reasoningEffort: 'high' })).toMatchObject({
+    expect(promptContextBudgetForQuestion({ questionPlan, reasoningEffort: 'low' })).toMatchObject({
       label: 'deep',
       relationCardLimit: 40,
       relationColumnLimit: 120,
       otherRelationStart: 40,
       edgeLimit: 80,
+    });
+  });
+
+  describe('effort/depth decouple (S1)', () => {
+    const lookup = buildAnalysisQuestionPlan('What is the median order value?');
+    const multiEntity = buildAnalysisQuestionPlan('What is the order count by region and product category?');
+    const deepResearch = buildAnalysisQuestionPlan('Research why margin dropped in Q2 by product and region');
+
+    it('classifies questions by analytical shape', () => {
+      expect(questionShapeClass(lookup, 'ad_hoc_analysis')).toBe('lookup');
+      expect(questionShapeClass(multiEntity, 'ad_hoc_analysis')).toBe('multi_entity');
+      expect(questionShapeClass(deepResearch, 'diagnose_change')).toBe('deep_research');
+    });
+
+    it('drives depth by shape, NOT by reasoning effort', () => {
+      // A single-table lookup stays on the fast path even when the model is asked
+      // to think hard; a join/breakdown/diagnosis runs verification even at low effort.
+      expect(analysisDepthForQuestion(lookup, 'high')).toBe('quick');
+      expect(analysisDepthForQuestion(multiEntity, 'low')).toBe('deep');
+      expect(analysisDepthForQuestion(deepResearch, 'low')).toBe('deep');
+    });
+
+    it('lets an explicit requested depth override the shape default', () => {
+      expect(analysisDepthForQuestion(lookup, 'low', 'deep')).toBe('deep');
+      expect(analysisDepthForQuestion(deepResearch, 'high', 'quick')).toBe('quick');
+    });
+
+    it('scales verification candidates to the shape (skip / light / full)', () => {
+      expect(deepAlternativeCountForQuestion(lookup, 'ad_hoc_analysis')).toBe(0);
+      expect(deepAlternativeCountForQuestion(multiEntity, 'ad_hoc_analysis')).toBe(1);
+      expect(deepAlternativeCountForQuestion(deepResearch, 'diagnose_change')).toBe(3);
     });
   });
 });

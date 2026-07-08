@@ -27,6 +27,51 @@ export function coerceReasoningEffort(value: unknown): ReasoningEffort | undefin
   return isReasoningEffort(normalized) ? normalized : undefined;
 }
 
+/**
+ * The user-facing "thinking" selection surfaced in the chat composer. `auto` is
+ * the default: it applies no override, so the engine's shape-adaptive routing
+ * decides effort and verification depth per question (S1). The three manual modes
+ * are escape hatches that let a user force speed or rigor for a thread.
+ */
+export type ThinkingMode = 'auto' | 'low' | 'medium' | 'high';
+
+export const THINKING_MODES: readonly ThinkingMode[] = ['auto', 'low', 'medium', 'high'] as const;
+
+/** Narrowing type-guard for untrusted input (settings JSON, request bodies). */
+export function isThinkingMode(value: unknown): value is ThinkingMode {
+  return value === 'auto' || value === 'low' || value === 'medium' || value === 'high';
+}
+
+/** Coerce untrusted input to a valid thinking mode, or `undefined` when unset/invalid. */
+export function coerceThinkingMode(value: unknown): ThinkingMode | undefined {
+  if (value == null || value === '') return undefined;
+  const normalized = String(value).trim().toLowerCase();
+  return isThinkingMode(normalized) ? normalized : undefined;
+}
+
+/**
+ * Resolve the user-facing thinking selection into the two internal knobs it maps
+ * to. `auto` returns neither override, so the engine's shape-adaptive routing
+ * applies. Each manual mode bundles a reasoning-effort budget with a verification
+ * depth:
+ *   - low    — fewest thinking tokens, skip the verification pass (fastest)
+ *   - medium — more thinking, still skip the heavy verification pass
+ *   - high   — most thinking, always run the verification pass (most thorough)
+ * The grain ledger + SQL validation guard every path, so `low` stays safe against
+ * wrong-number (fan-out) bugs even though it skips the self-consistency vote.
+ */
+export function resolveThinkingMode(
+  mode: ThinkingMode,
+): { reasoningEffort?: ReasoningEffort; analysisDepth?: 'quick' | 'deep' } {
+  switch (mode) {
+    case 'low': return { reasoningEffort: 'low', analysisDepth: 'quick' };
+    case 'medium': return { reasoningEffort: 'medium', analysisDepth: 'quick' };
+    case 'high': return { reasoningEffort: 'high', analysisDepth: 'deep' };
+    case 'auto':
+    default: return {};
+  }
+}
+
 const RANK: Record<ReasoningEffort, number> = { low: 0, medium: 1, high: 2 };
 
 /**

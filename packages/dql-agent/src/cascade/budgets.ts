@@ -214,22 +214,68 @@ export function mcpTier2RegroundRepairBudget(
   };
 }
 
+/**
+ * Classify a question by analytical shape (S1). This is the ONE signal that drives
+ * depth, tool budget, and the number of verification candidates — decoupled from
+ * `reasoningEffort` so that "think harder on a call" and "run the heavy verification
+ * pipeline N times" are no longer welded to the same knob:
+ *   - `deep_research` — diagnosis / driver / anomaly / research workspace / trust gap
+ *   - `multi_entity`  — joins, >1 dimension, filtered breakdowns, ranked, comparisons
+ *   - `lookup`        — a single metric / single-table question (no joins → no fan-out)
+ */
+export function questionShapeClass(plan: AnalysisQuestionPlan, intent?: string): ProposalToolBudgetClass {
+  if (
+    plan.needsResearchWorkspace
+    || plan.mode === 'diagnose_change'
+    || plan.mode === 'driver_breakdown'
+    || plan.mode === 'anomaly'
+    || intent === 'diagnose_change'
+    || intent === 'driver_breakdown'
+    || intent === 'anomaly_investigation'
+    || intent === 'trust_gap_review'
+  ) {
+    return 'deep_research';
+  }
+  const shape = plan.requestedShape;
+  const entityOrJoinShape = plan.entities.length > 0
+    || shape.dimensions.length > 1
+    || shape.requiredOutputs.length > 2
+    || (shape.filters.length > 0 && shape.dimensions.length > 0)
+    || Boolean(shape.topN)
+    || plan.mode === 'comparison'
+    || plan.mode === 'entity_profile'
+    || plan.mode === 'entity_drilldown';
+  return entityOrJoinShape ? 'multi_entity' : 'lookup';
+}
+
+/**
+ * How many diverse alternative candidates the self-consistency vote generates.
+ * `lookup` skips the vote entirely (0 — quick path, guarded by the grain ledger +
+ * validateSql); `multi_entity` does a lightweight 1-alternative agreement check;
+ * `deep_research` does the full 3-alternative vote. This is the class-B tradeoff:
+ * verification scales to the question's actual join/analysis complexity.
+ */
+export function deepAlternativeCountForQuestion(plan: AnalysisQuestionPlan, intent?: string): number {
+  switch (questionShapeClass(plan, intent)) {
+    case 'deep_research': return 3;
+    case 'multi_entity': return 1;
+    default: return 0;
+  }
+}
+
 export function analysisDepthForQuestion(
   plan: AnalysisQuestionPlan,
   reasoningEffort?: ReasoningEffort,
   requestedDepth?: CascadeAnalysisDepth,
+  intent?: string,
 ): CascadeAnalysisDepth {
+  // A user-selected depth (e.g. the "thinking" chip) always wins. Otherwise depth
+  // is decided by the question's SHAPE, not its reasoning effort — a single-table
+  // lookup runs the fast path even at high effort; a join/breakdown/diagnosis runs
+  // the verification path even at low effort. `reasoningEffort` is intentionally NOT
+  // consulted here (that is the S1 decouple).
   if (requestedDepth) return requestedDepth;
-  if (
-    reasoningEffort === 'high'
-    || plan.needsResearchWorkspace
-    || plan.mode === 'diagnose_change'
-    || plan.mode === 'driver_breakdown'
-    || plan.mode === 'anomaly'
-  ) {
-    return 'deep';
-  }
-  return 'quick';
+  return questionShapeClass(plan, intent) === 'lookup' ? 'quick' : 'deep';
 }
 
 export function promptContextBudgetForQuestion(input: {
@@ -256,49 +302,32 @@ export function contextRetrievalBudgetForQuestion(input: {
 export function proposalToolBudgetForQuestion(
   plan: AnalysisQuestionPlan,
   intent: string,
-  options: ProposalToolBudgetOptions = {},
+  _options: ProposalToolBudgetOptions = {},
 ): ProposalToolBudget {
-  if (
-    options.analysisDepth === 'deep'
-    || options.reasoningEffort === 'high'
-    || plan.needsResearchWorkspace
-    || plan.mode === 'diagnose_change'
-    || plan.mode === 'driver_breakdown'
-    || plan.mode === 'anomaly'
-    || intent === 'diagnose_change'
-    || intent === 'driver_breakdown'
-    || intent === 'anomaly_investigation'
-    || intent === 'trust_gap_review'
-  ) {
-    return {
-      maxToolCalls: 15,
-      effortClass: 'deep_research',
-      reason: 'deep analysis, diagnosis, anomaly, trust review, or research workspace request',
-    };
+  // Tool budget follows the question's SHAPE, not its reasoning effort / analysis
+  // depth (the S1 decouple). Previously a high-effort or deep-depth signal forced
+  // the 15-call deep_research budget on every generated answer — which, combined
+  // with generated_answer defaulting to `high`, is what made simple questions slow.
+  switch (questionShapeClass(plan, intent)) {
+    case 'deep_research':
+      return {
+        maxToolCalls: 15,
+        effortClass: 'deep_research',
+        reason: 'deep analysis, diagnosis, anomaly, trust review, or research workspace request',
+      };
+    case 'multi_entity':
+      return {
+        maxToolCalls: 8,
+        effortClass: 'multi_entity',
+        reason: 'multi-entity, ranked, filtered, comparison, profile, or drilldown shape',
+      };
+    default:
+      return {
+        maxToolCalls: 3,
+        effortClass: 'lookup',
+        reason: 'single metric or simple generated lookup',
+      };
   }
-
-  const shape = plan.requestedShape;
-  const entityOrJoinShape = plan.entities.length > 0
-    || shape.dimensions.length > 1
-    || shape.requiredOutputs.length > 2
-    || (shape.filters.length > 0 && shape.dimensions.length > 0)
-    || Boolean(shape.topN)
-    || plan.mode === 'comparison'
-    || plan.mode === 'entity_profile'
-    || plan.mode === 'entity_drilldown';
-  if (entityOrJoinShape) {
-    return {
-      maxToolCalls: 8,
-      effortClass: 'multi_entity',
-      reason: 'multi-entity, ranked, filtered, comparison, profile, or drilldown shape',
-    };
-  }
-
-  return {
-    maxToolCalls: 3,
-    effortClass: 'lookup',
-    reason: 'single metric or simple generated lookup',
-  };
 }
 
 function laneRepairAttemptsUsed(state: CascadeBudgetState, kind: CascadeLaneRepairKind): number {

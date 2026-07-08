@@ -7,6 +7,9 @@ import {
   geminiReasoningStyle,
   effortToThinkingBudget,
   isReasoningEffort,
+  coerceThinkingMode,
+  isThinkingMode,
+  resolveThinkingMode,
 } from './reasoning-effort.js';
 
 describe('reasoning-effort helpers', () => {
@@ -84,5 +87,34 @@ describe('reasoning-effort helpers', () => {
     // Kept strictly below maxTokens with headroom, and never under the 1024 floor.
     expect(effortToThinkingBudget('high', 4000)).toBe(3200);
     expect(effortToThinkingBudget('high', 1000)).toBe(1024);
+  });
+});
+
+describe('thinking mode (chat composer selection)', () => {
+  it('recognizes and coerces untrusted input', () => {
+    expect(isThinkingMode('auto')).toBe(true);
+    expect(isThinkingMode('high')).toBe(true);
+    expect(isThinkingMode('max')).toBe(false);
+    expect(coerceThinkingMode('  HIGH ')).toBe('high');
+    expect(coerceThinkingMode('Auto')).toBe('auto');
+    expect(coerceThinkingMode('')).toBeUndefined();
+    expect(coerceThinkingMode(null)).toBeUndefined();
+    expect(coerceThinkingMode('turbo')).toBeUndefined();
+  });
+
+  it('auto applies no override, so shape-adaptive routing decides', () => {
+    expect(resolveThinkingMode('auto')).toEqual({});
+  });
+
+  it('bundles each manual mode into an effort + verification-depth pair', () => {
+    expect(resolveThinkingMode('low')).toEqual({ reasoningEffort: 'low', analysisDepth: 'quick' });
+    expect(resolveThinkingMode('medium')).toEqual({ reasoningEffort: 'medium', analysisDepth: 'quick' });
+    expect(resolveThinkingMode('high')).toEqual({ reasoningEffort: 'high', analysisDepth: 'deep' });
+  });
+
+  it('only high opts into the verification pass; low/medium stay on the fast path', () => {
+    expect(resolveThinkingMode('low').analysisDepth).toBe('quick');
+    expect(resolveThinkingMode('medium').analysisDepth).toBe('quick');
+    expect(resolveThinkingMode('high').analysisDepth).toBe('deep');
   });
 });

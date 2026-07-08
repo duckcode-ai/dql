@@ -37,9 +37,11 @@ import {
   type AgentRunStep,
   type AgentRunStepStatus,
   type AgentRunTrustState,
+  type AgentThinkingMode,
   type AppBuildProposal,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
+import { ThinkingModeControl } from './ThinkingModeControl';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
 import { ResultView } from '../output/ResultView';
@@ -161,6 +163,13 @@ export function UnifiedAgentRunPanel({
   const [streamingAnswer, setStreamingAnswer] = useState('');
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The composer "thinking" selection, sticky across refreshes. `auto` defers to
+  // the engine's shape-adaptive routing; the user can change it mid-conversation.
+  const [thinkingMode, setThinkingMode] = useState<AgentThinkingMode>(() => readStoredThinkingMode());
+  const changeThinkingMode = useCallback((mode: AgentThinkingMode) => {
+    setThinkingMode(mode);
+    try { window.localStorage.setItem(THINKING_MODE_STORAGE_KEY, mode); } catch { /* best-effort */ }
+  }, []);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lastInitialInputRef = useRef(initialInput);
   const lastAutoRunNonceRef = useRef<number | null>(null);
@@ -268,6 +277,7 @@ export function UnifiedAgentRunPanel({
         },
         conversationContext: buildConversationContext(items),
         history,
+        thinkingMode,
         ...(threadIdRef.current ? { threadId: threadIdRef.current } : {}),
       };
       const run = await api.createAgentRunStream(runInput, (message) => {
@@ -420,14 +430,17 @@ export function UnifiedAgentRunPanel({
           />
         ))}
 
-        {running && <RunProgress events={runningEvents} t={t} streamingAnswer={streamingAnswer} />}
+        {running && <RunProgress events={runningEvents} t={t} streamingAnswer={streamingAnswer} thinkingMode={thinkingMode} />}
       </div>
 
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
 
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-        <div style={{ fontSize: 11, color: t.textMuted }}>
-          Auto-routes to the best answer for your question. Use Research deeper on an answer when you want a slower investigation.
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 11, color: t.textMuted, flex: 1, minWidth: 180 }}>
+            Auto-routes to the best answer for your question. Use Research deeper on an answer when you want a slower investigation.
+          </div>
+          <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
@@ -502,6 +515,17 @@ function readStoredThreadId(storageKey: string): string | undefined {
     return window.localStorage.getItem(storageKey) ?? undefined;
   } catch {
     return undefined;
+  }
+}
+
+const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
+
+function readStoredThinkingMode(): AgentThinkingMode {
+  try {
+    const stored = window.localStorage.getItem(THINKING_MODE_STORAGE_KEY);
+    return stored === 'low' || stored === 'medium' || stored === 'high' || stored === 'auto' ? stored : 'auto';
+  } catch {
+    return 'auto';
   }
 }
 
@@ -631,6 +655,18 @@ function currentActionLabel(events: AgentRunEvent[]): string {
   return 'Working';
 }
 
+/**
+ * An honest one-liner explaining why a run is deliberately slower, so the wait
+ * reads as intent rather than lag. Derived from the route and the user's thinking
+ * selection — a research route or High mode trades speed for a cross-checked
+ * number. Returns null on the fast paths, where no explanation is needed.
+ */
+function slowReasonFor(thinkingMode: AgentThinkingMode | undefined, events: AgentRunEvent[]): string | null {
+  if (latestRoute(events) === 'research') return 'Deep investigation — slower by design.';
+  if (thinkingMode === 'high') return 'Thorough mode — cross-checking the number takes a little longer.';
+  return null;
+}
+
 const ACTIVITY_STAGES: Array<{ key: 'plan' | 'work' | 'verify'; label: string }> = [
   { key: 'plan', label: 'Plan' },
   { key: 'work', label: 'Work' },
@@ -690,11 +726,15 @@ function phaseIconFor(events: AgentRunEvent[]): typeof Sparkles {
  * action headline, a Plan→Work→Verify tracker, and the latest step line.
  * Expresses *what the agent is doing* rather than a generic progress bar.
  */
-function RunProgress({ events, t, streamingAnswer }: { events: AgentRunEvent[]; t: Theme; streamingAnswer?: string }) {
+function RunProgress({ events, t, streamingAnswer, thinkingMode }: { events: AgentRunEvent[]; t: Theme; streamingAnswer?: string; thinkingMode?: AgentThinkingMode }) {
   const action = currentActionLabel(events);
   const stage = deriveStage(events);
   const Icon = phaseIconFor(events);
   const latest = events.length ? events[events.length - 1].message : '';
+  // Honest "why is this taking a moment" line — set expectations when the run is
+  // deliberately on a slower, more thorough path (a deep investigation, or the
+  // user's High thinking selection cross-checking the number).
+  const slowReason = slowReasonFor(thinkingMode, events);
   // A conversational turn has no Plan/Work/Verify work to show — just a light
   // "Replying…" line, and the streamed text as it arrives.
   const isConversation = latestRoute(events) === 'conversation';
@@ -771,6 +811,10 @@ function RunProgress({ events, t, streamingAnswer }: { events: AgentRunEvent[]; 
             );
           })}
         </div>
+
+        {slowReason && !streamingAnswer ? (
+          <span style={{ fontSize: 11, color: t.textMuted, fontStyle: 'italic', lineHeight: 1.4 }}>{slowReason}</span>
+        ) : null}
 
         {streamingAnswer ? (
           <div style={{ fontSize: 13, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap', marginTop: 2 }}>{streamingAnswer}</div>

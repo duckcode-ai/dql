@@ -22,7 +22,7 @@ export type {
 } from './types.js';
 export { streamOrGenerate } from './types.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
-export type { ReasoningEffort, GeminiReasoningStyle } from './reasoning-effort.js';
+export type { ReasoningEffort, GeminiReasoningStyle, ThinkingMode } from './reasoning-effort.js';
 export {
   REASONING_EFFORTS,
   isReasoningEffort,
@@ -32,6 +32,10 @@ export {
   supportsReasoningEffort,
   geminiReasoningStyle,
   effortToThinkingBudget,
+  THINKING_MODES,
+  isThinkingMode,
+  coerceThinkingMode,
+  resolveThinkingMode,
 } from './reasoning-effort.js';
 
 const FALLBACK_ORDER: ProviderName[] = ['claude', 'openai', 'gemini', 'ollama'];
