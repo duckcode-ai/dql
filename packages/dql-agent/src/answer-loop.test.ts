@@ -465,6 +465,85 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.rowCount).toBe(1);
   });
 
+  it("W2.2 adapts a context-only certified block with a single filter delta instead of regenerating", async () => {
+    const provider = new StubProvider("should not be called");
+    const question = "What is food revenue by product type?";
+    const result = await answerBase({
+      question,
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "analytics.order_items",
+        name: "order_items",
+        columns: [{ name: "product_type", sampleValues: ["food", "drink"] }, { name: "product_price" }],
+      }],
+      contextPack: {
+        id: "ctx_adapt",
+        question,
+        mode: "question",
+        trustLabel: "mixed",
+        objects: [],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated_sql",
+          intent: "ad_hoc_ranking",
+          reason: "certified block is context only (one extra filter)",
+          trustLabel: "mixed",
+          reviewStatus: "draft_ready",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+          blockFit: {
+            kind: "context_only",
+            confidence: "high",
+            reasons: ["unsupported requested filters: food"],
+            missingOutputs: [],
+            missingDimensions: [],
+            unsupportedFilters: ["food"],
+            inferredContract: false,
+          },
+        },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: [],
+          sourceBlockSql: [{
+            objectKey: "dql:block:revenue_by_product_type",
+            name: "revenue_by_product_type",
+            status: "certified",
+            sql: "SELECT product_type, SUM(product_price) AS revenue FROM order_items GROUP BY product_type",
+          }],
+        },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts", selectedObjects: 0, selectedEvidence: [],
+          topRejected: [], certifiedCandidateFits: [], candidateConflicts: [],
+        },
+        freshness: { catalogPath: ".dql/cache/metadata.sqlite", builtAt: null, fingerprint: null },
+      } as any,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_type", "revenue"],
+        rows: [{ product_type: "food", revenue: 34 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    const adaptedSql = result.proposedSql ?? result.sql ?? "";
+    expect(adaptedSql).toContain("certified_derived");
+    expect(adaptedSql).toContain("WHERE product_type = 'food'");
+    expect(result.result?.rowCount).toBe(1);
+    // The LLM generation path must have been skipped (adaptation took over).
+    expect(provider.calls.length).toBe(0);
+    // Safety: an adapted answer is NEVER certified (the adaptation was not reviewed).
+    expect(result.trustLabelInfo?.id).not.toBe("certified");
+    expect(result.text).toContain("Derived from certified block");
+  });
+
   it("uses certified business context for definition questions", async () => {
     const provider = new StubProvider("should not be called");
     const result = await answer({

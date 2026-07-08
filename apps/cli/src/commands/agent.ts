@@ -426,7 +426,8 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
     const cite = result.citations.length > 0
       ? '\n\nCitations:\n' + result.citations.map((c) => `  - ${c.kind} \`${c.name}\`${c.gitSha ? ` · ${c.gitSha.slice(0, 8)}` : ''}`).join('\n')
       : '';
-    console.log(`${badge}\n\n${result.text}${cite}`);
+    const footer = result.provenanceFooter ? `\n\n— ${result.provenanceFooter}` : '';
+    console.log(`${badge}\n\n${result.text}${footer}${cite}`);
     if (result.result) {
       console.log(`\nRows: ${result.result.rowCount}`);
       console.log(JSON.stringify(result.result.rows.slice(0, 5), null, 2));
