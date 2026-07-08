@@ -149,6 +149,49 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+export interface OllamaEmbeddingOptions {
+  endpoint?: string;
+  model?: string;
+  dimensions?: number;
+  fetchImpl?: EmbeddingFetch;
+}
+
+/**
+ * Local-first embeddings via an Ollama server (raw fetch to `/api/embed`, no SDK).
+ * Opt-in: only constructed when an Ollama endpoint is configured. Keeps DQL fully
+ * local — a stakeholder can run a real embedder on their own machine with no data
+ * leaving it. Falls back to the hashed provider at the resolver level when absent.
+ */
+export class OllamaEmbeddingProvider implements EmbeddingProvider {
+  readonly id: string;
+  readonly dimensions: number;
+  private readonly endpoint: string;
+  private readonly model: string;
+  private readonly fetchImpl: EmbeddingFetch;
+
+  constructor(options: OllamaEmbeddingOptions = {}) {
+    this.endpoint = (options.endpoint ?? 'http://127.0.0.1:11434').replace(/\/$/, '');
+    this.model = options.model ?? 'nomic-embed-text';
+    this.dimensions = options.dimensions ?? 768;
+    this.id = `ollama:${this.model}`;
+    this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init) as ReturnType<EmbeddingFetch>);
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const response = await this.fetchImpl(`${this.endpoint}/api/embed`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: this.model, input: texts }),
+    });
+    if (!response.ok) throw new Error(`Ollama embedding request failed (${response.status})`);
+    const payload = await response.json() as { embeddings?: number[][] };
+    const embeddings = payload.embeddings ?? [];
+    // Ollama returns embeddings in request order.
+    return texts.map((_, i) => embeddings[i] ?? []);
+  }
+}
+
 /**
  * Content-hash cache around any provider so repeated texts (block example
  * questions, metric labels) are embedded once. Bounded LRU-ish by insertion order.
@@ -190,7 +233,42 @@ export class CachingEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+/**
+ * Wrap a real provider so a transient failure (Ollama down, API error) degrades to
+ * the deterministic hashed provider instead of breaking retrieval. A single embed()
+ * batch is all-real or all-fallback, so dimensions stay consistent within a call.
+ */
+export class ResilientEmbeddingProvider implements EmbeddingProvider {
+  readonly id: string;
+  readonly dimensions: number;
+  private readonly inner: EmbeddingProvider;
+  private readonly fallback: EmbeddingProvider;
+  private warned = false;
+
+  constructor(inner: EmbeddingProvider, fallback: EmbeddingProvider = defaultEmbeddingProvider()) {
+    this.inner = inner;
+    this.fallback = fallback;
+    this.id = `resilient:${inner.id}`;
+    this.dimensions = inner.dimensions;
+  }
+
+  async embed(texts: string[]): Promise<number[][]> {
+    try {
+      return await this.inner.embed(texts);
+    } catch (err) {
+      if (!this.warned) {
+        this.warned = true;
+        console.warn(`Embedding provider ${this.inner.id} failed; falling back to hashed embeddings. ${(err as Error).message}`);
+      }
+      return this.fallback.embed(texts);
+    }
+  }
+}
+
 export interface EmbeddingResolveOptions {
+  /** Local Ollama endpoint (preferred for local-first OSS), e.g. http://127.0.0.1:11434. */
+  ollamaEndpoint?: string;
+  ollamaModel?: string;
   /** API key for an OpenAI-compatible embeddings endpoint. */
   openaiApiKey?: string;
   model?: string;
@@ -199,21 +277,58 @@ export interface EmbeddingResolveOptions {
 }
 
 /**
- * Pick the best available embedding provider: a real OpenAI-compatible embedder
- * when an API key is configured (wrapped in a content-hash cache), else the safe
- * deterministic hashed-token provider. This is the single place config chooses an
- * embedder, so retrieval/matching call sites just call resolveEmbeddingProvider().
+ * Pick the best available embedding provider: a LOCAL Ollama embedder when an
+ * endpoint is configured (preferred — keeps data on-machine), else a real
+ * OpenAI-compatible embedder when an API key is set, else the safe deterministic
+ * hashed-token provider. All real providers are wrapped in a content-hash cache.
+ * This is the single place config chooses an embedder, so retrieval/matching call
+ * sites just call resolveEmbeddingProvider().
  */
 export function resolveEmbeddingProvider(options: EmbeddingResolveOptions = {}): EmbeddingProvider {
+  if (options.ollamaEndpoint) {
+    return new CachingEmbeddingProvider(new ResilientEmbeddingProvider(new OllamaEmbeddingProvider({
+      endpoint: options.ollamaEndpoint,
+      ...(options.ollamaModel ? { model: options.ollamaModel } : {}),
+      ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    })));
+  }
   if (options.openaiApiKey) {
-    return new CachingEmbeddingProvider(new OpenAIEmbeddingProvider({
+    return new CachingEmbeddingProvider(new ResilientEmbeddingProvider(new OpenAIEmbeddingProvider({
       apiKey: options.openaiApiKey,
       ...(options.model ? { model: options.model } : {}),
       ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
-    }));
+    })));
   }
   return defaultEmbeddingProvider();
+}
+
+/**
+ * Read embedding config from environment (local-first). Lets retrieval/matching
+ * light up a real embedder without threading config through every call site.
+ * `DQL_OLLAMA_EMBED_URL` / `DQL_OLLAMA_EMBED_MODEL` for Ollama; `DQL_OPENAI_API_KEY`
+ * (or `OPENAI_API_KEY`) for an OpenAI-compatible endpoint. Absent ⇒ hashed default.
+ */
+export function embeddingOptionsFromEnv(env: Record<string, string | undefined> = process.env): EmbeddingResolveOptions {
+  const options: EmbeddingResolveOptions = {};
+  if (env.DQL_OLLAMA_EMBED_URL) {
+    options.ollamaEndpoint = env.DQL_OLLAMA_EMBED_URL;
+    if (env.DQL_OLLAMA_EMBED_MODEL) options.ollamaModel = env.DQL_OLLAMA_EMBED_MODEL;
+  } else if (env.DQL_OPENAI_API_KEY || env.OPENAI_API_KEY) {
+    options.openaiApiKey = env.DQL_OPENAI_API_KEY ?? env.OPENAI_API_KEY;
+    if (env.DQL_OPENAI_EMBED_MODEL) options.model = env.DQL_OPENAI_EMBED_MODEL;
+  }
+  return options;
+}
+
+/**
+ * The embedding provider configured via environment (Ollama → OpenAI → hashed).
+ * Retrieval/matching call sites use this so a project that configures a real local
+ * embedder gets true semantic recall, while offline/unconfigured projects stay on
+ * the deterministic hashed provider with byte-identical behavior.
+ */
+export function envEmbeddingProvider(): EmbeddingProvider {
+  return resolveEmbeddingProvider(embeddingOptionsFromEnv());
 }
 
 export interface HybridRankItem<T> {

@@ -21,6 +21,7 @@ import {
 } from './types.js';
 import {
   defaultEmbeddingProvider,
+  envEmbeddingProvider,
   hybridRank,
   type EmbeddingProvider,
 } from '../embeddings/provider.js';
@@ -233,7 +234,7 @@ export class HintStore {
       })),
       {
         alpha: options.alpha ?? 0,
-        provider: options.embeddingProvider ?? defaultEmbeddingProvider(),
+        provider: options.embeddingProvider ?? envEmbeddingProvider(),
       },
     );
 
