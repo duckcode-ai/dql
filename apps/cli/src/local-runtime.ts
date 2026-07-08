@@ -90,6 +90,7 @@ import {
   propose,
   proposePlan,
   recordCorrectionTrace,
+  emitCorrectionEvalCase,
   reviewHint,
   AgentRunEngine,
   FileAgentRunStore,
@@ -4088,6 +4089,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (body.approve !== false) {
           reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: author ?? 'local', note: 'Self-approved (OSS single-user).' });
           approvedHint = { ...hint, status: 'approved' as const };
+        }
+        // W4.3 — turn the correction into a durable regression eval case so the wrong
+        // answer can never silently return. Best-effort; never blocks the correction.
+        try {
+          emitCorrectionEvalCase(projectRoot, { question, correctedSql });
+        } catch {
+          /* best-effort */
         }
         // Plain-language advisory memory mirroring the lesson, for transparency + recall.
         try {
