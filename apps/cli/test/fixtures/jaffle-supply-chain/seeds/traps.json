@@ -1,0 +1,35 @@
+{
+  "_comment": "Ground truth for the class-B (wrong-number) traps over seed.json. `grainSafeSql` is the correct query; `naiveSql` is the tempting fan-out/wrong-grain query that OVER-reports. class-b-ground-truth.test.ts executes both against a real SQL engine seeded from seed.json and asserts grainSafe === expectedRows and naive !== grainSafe. SQL is SQLite-dialect (booleans as 1) for the offline proof; the credentialed --execute eval uses LLM-generated SQL against the same data on any warehouse. expectedRows mirror the `expected.rows` in class-b-semantic.agent-evals.yml.",
+  "traps": [
+    {
+      "name": "revenue_per_customer_order_grain",
+      "question": "What is total order revenue for each customer?",
+      "grainSafeSql": "SELECT c.customer_name, SUM(o.order_total) AS revenue FROM fct_orders o JOIN dim_customers c ON o.customer_id = c.customer_id GROUP BY c.customer_name ORDER BY c.customer_name",
+      "naiveSql": "SELECT c.customer_name, SUM(o.order_total) AS revenue FROM fct_orders o JOIN dim_customers c ON o.customer_id = c.customer_id JOIN order_items oi ON oi.order_id = o.order_id GROUP BY c.customer_name ORDER BY c.customer_name",
+      "expectedRows": [
+        { "customer_name": "Alice", "revenue": 150 },
+        { "customer_name": "Bob", "revenue": 200 },
+        { "customer_name": "Carol", "revenue": 30 }
+      ]
+    },
+    {
+      "name": "revenue_by_product_type",
+      "question": "Show revenue by product category",
+      "grainSafeSql": "SELECT product_type, SUM(product_price) AS revenue FROM order_items GROUP BY product_type ORDER BY product_type",
+      "naiveSql": "SELECT oi.product_type, SUM(oi.product_price) AS revenue FROM order_items oi JOIN supplies s ON s.product_id = oi.product_id GROUP BY oi.product_type ORDER BY oi.product_type",
+      "expectedRows": [
+        { "product_type": "drink", "revenue": 6 },
+        { "product_type": "food", "revenue": 34 }
+      ]
+    },
+    {
+      "name": "perishable_supply_revenue",
+      "question": "How much product revenue comes from perishable supplies?",
+      "grainSafeSql": "SELECT SUM(oi.product_price) AS revenue FROM order_items oi WHERE EXISTS (SELECT 1 FROM supplies s WHERE s.product_id = oi.product_id AND s.is_perishable_supply = 1)",
+      "naiveSql": "SELECT SUM(oi.product_price) AS revenue FROM order_items oi JOIN supplies s ON s.product_id = oi.product_id WHERE s.is_perishable_supply = 1",
+      "expectedRows": [
+        { "revenue": 34 }
+      ]
+    }
+  ]
+}

@@ -47,5 +47,5 @@ export type { SemanticLayerProviderConfig, SemanticLayerResult, RepoResolveResul
 export { DbtProvider, CubejsProvider, SnowflakeSemanticProvider } from './providers/index.js';
 export type { SnowflakeQueryExecutor, SnowflakeQueryResult } from './providers/index.js';
 export type { ImportPreview, ImportValidationResult } from './providers/provider.js';
-export { getDialect, listDialectDrivers } from './sql-dialect.js';
+export { getDialect, listDialectDrivers, describeDialectForPrompt } from './sql-dialect.js';
 export type { SQLDialect } from './sql-dialect.js';

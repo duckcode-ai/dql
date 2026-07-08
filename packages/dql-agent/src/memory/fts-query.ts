@@ -1,7 +1,8 @@
 /**
- * Shared FTS5 query sanitization for the local SQLite stores (memory,
- * conversation). Tokenizes free text, drops stop words, and quotes each term
- * so user input can never break the MATCH expression.
+ * Shared FTS5 query sanitization for every local SQLite store (memory,
+ * conversation, KG, hints, metadata catalog). Tokenizes free text, drops stop
+ * words, and quotes each term so user input can never break the MATCH expression.
+ * Pass `{ prefix: true }` for prefix-match stores (KG / metadata catalog).
  */
 
 const STOP_WORDS = new Set([
@@ -26,12 +27,23 @@ const STOP_WORDS = new Set([
   'you', 'your', 'yours', 'yourself', 'yourselves',
 ]);
 
-export function sanitizeFtsQuery(raw: string): string {
-  return raw
+export function sanitizeFtsQuery(
+  raw: string,
+  options: { prefix?: boolean; fallbackToRawTokens?: boolean } = {},
+): string {
+  const defanged = raw
     .split(/\s+/)
     .map((t) => t.replace(/[^\p{L}\p{N}_]/gu, ''))
-    .filter((t) => t.length > 1 && !STOP_WORDS.has(t.toLowerCase()))
-    .slice(0, 48)
-    .map((t) => `"${t}"`)
-    .join(' OR ');
+    .filter((t) => t.length > 1);
+  const meaningful = defanged.filter((t) => !STOP_WORDS.has(t.toLowerCase()));
+  // `fallbackToRawTokens` is for VALUE lookups (filter literals), where a data
+  // value that happens to be a stop word (e.g. a category literally named
+  // "current") must still match rather than be dropped to an empty MATCH. It is
+  // intentionally OFF for natural-language question search, where an all-stop-word
+  // query (e.g. "explain this current query") is content-free and should return
+  // nothing rather than noise-match every artifact that mentions those words.
+  const source = meaningful.length > 0 || !options.fallbackToRawTokens ? meaningful : defanged;
+  const tokens = source.slice(0, 48);
+  const suffix = options.prefix ? '*' : '';
+  return tokens.map((t) => `"${t}"${suffix}`).join(' OR ');
 }

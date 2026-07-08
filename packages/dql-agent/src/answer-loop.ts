@@ -16,6 +16,7 @@
  */
 
 import {
+  describeDialectForPrompt,
   type SemanticLayer,
   type ResolvedTrustLabel,
   type TrustLabelId,
@@ -43,6 +44,7 @@ import type {
 import type { GroundingContextExpander } from './grounding/regrounding.js';
 import { createContextLedger, type ContextLedger } from './grounding/context-ledger.js';
 import { validateAnswerResultShape } from './answer-shape.js';
+import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
 import {
   compactSqlSnippet,
   extractSimpleSelectShape,
@@ -1023,6 +1025,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       input.conversationSnapshot,
       kgJoinPathHints,
       promptBudget,
+      input.semanticDriver,
     ),
   });
   messages.push({ role: 'user', content: question });
@@ -1470,6 +1473,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       // Repair is best-effort — the refusal below stays the honest fallback.
     }
   }
+  // W1.3 — deterministic, warn-only fan-out check. When the generated SQL aggregates
+  // an additive measure across a one-to-many join (grain ledger knows the keys), the
+  // number can silently double-count. Surface a caution so it is reviewed. This never
+  // blocks: it only appends to warnings, and it is conservative (no key data ⇒ no flag).
+  if (contextValidation.ok && parsed.sql && input.contextPack?.objects?.length) {
+    try {
+      const fanoutWarnings = fanoutWarningsForSql(parsed.sql, input.contextPack.objects);
+      if (fanoutWarnings.length > 0) {
+        contextValidation = { ok: true, warnings: [...contextValidation.warnings, ...fanoutWarnings] };
+      }
+    } catch {
+      // Fan-out detection is advisory; any failure must not affect the answer.
+    }
+  }
+
   if (!contextValidation.ok) {
     const text = `I could not safely prepare this review-required DQL artifact from the inspected context. The SQL preview failed validation: ${contextValidation.error}`;
     const analysisPlan = buildAnalysisPlan({
@@ -1911,7 +1929,14 @@ function renderContextPrompt(
   conversationSnapshot?: ConversationSnapshot,
   kgJoinPathHints: string[] = [],
   budget: PromptContextBudget = QUICK_PROMPT_CONTEXT_BUDGET,
+  driver?: string,
 ): string {
+  // W1.5 — dialect conventions so the model writes warehouse-correct SQL
+  // (quoting, row-limiting, date functions) instead of a DuckDB/Postgres default
+  // that fails on Snowflake/BigQuery/etc. Only emitted when a driver is known.
+  const dialectSection = driver
+    ? `\n\n## SQL dialect\n\n${describeDialectForPrompt(driver)}`
+    : '';
   const intentSection = `## Routing intent\n\nintent: ${intent}\n${intent === 'exact_certified_lookup'
     ? 'Use a certified artifact only if it exactly answers the question.'
     : 'Prepare a review-required DQL artifact with a SQL preview for this question. Certified blocks are trusted context, not a reason to answer the wrong grain.'}`;
@@ -1980,7 +2005,7 @@ function renderContextPrompt(
   const contextPackSection = contextPack
     ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack, budget)}`
     : '';
-  return `${intentSection}${budgetSection}\n\n${blockSection}${businessSection}${otherSection}${kgJoinSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${conversationSection}${extraSection}${followUpSection}`;
+  return `${intentSection}${budgetSection}${dialectSection}\n\n${blockSection}${businessSection}${otherSection}${kgJoinSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${conversationSection}${extraSection}${followUpSection}`;
 }
 
 function buildKgJoinPathHints(kg: KGStore, nodes: KGNode[], questionPlan: AnalysisQuestionPlan): string[] {

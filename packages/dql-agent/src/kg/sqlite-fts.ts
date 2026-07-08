@@ -13,6 +13,7 @@ import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import type Database from 'better-sqlite3';
+import { sanitizeFtsQuery } from '../memory/fts-query.js';
 import type {
   KGNode,
   KGEdge,
@@ -176,7 +177,7 @@ export class KGStore {
     const { query, kinds, domain, limit = 20 } = options;
     if (!query.trim()) return [];
 
-    const sanitized = sanitizeFtsQuery(query);
+    const sanitized = sanitizeFtsQuery(query, { prefix: true });
     if (!sanitized) return [];
 
     const filters: string[] = [];
@@ -470,42 +471,3 @@ function safeJSON<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-const STOP_WORDS = new Set([
-  'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', 'as', 'at',
-  'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
-  'can', 'could', 'current', 'did', 'do', 'does', 'doing', 'down', 'during',
-  'each', 'explain', 'few', 'find', 'for', 'from', 'further',
-  'get', 'give',
-  'had', 'has', 'have', 'having', 'he', 'her', 'here', 'hers', 'herself', 'him', 'himself', 'his', 'how',
-  'i', 'if', 'in', 'into', 'is', 'it', 'its', 'itself',
-  'just',
-  'me', 'more', 'most', 'my', 'myself',
-  'no', 'nor', 'not', 'now',
-  'of', 'off', 'on', 'once', 'only', 'or', 'other', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
-  'please',
-  'query',
-  'same', 'she', 'should', 'show', 'so', 'some', 'sql', 'such',
-  'than', 'that', 'the', 'their', 'theirs', 'them', 'themselves', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to', 'too',
-  'under', 'until', 'up', 'using',
-  'very',
-  'was', 'we', 'were', 'what', 'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'will', 'with', 'would',
-  'you', 'your', 'yours', 'yourself', 'yourselves',
-]);
-
-/**
- * Defang FTS5 query syntax from arbitrary user/chat input.
- *
- * FTS5 treats `foo:bar` as a column-scoped query. That is useful for hand
- * written searches, but it is unsafe for notebook chat because upstream
- * context often includes labels like `Current upstream SQL:`. Tokenize to
- * quoted terms so SQL snippets, punctuation, and boolean words are plain text.
- */
-function sanitizeFtsQuery(raw: string): string {
-  return raw
-    .split(/\s+/)
-    .map((t) => t.replace(/[^\p{L}\p{N}_]/gu, ''))
-    .filter((t) => t.length > 1 && !STOP_WORDS.has(t.toLowerCase()))
-    .slice(0, 48)
-    .map((t) => `"${t}"*`)
-    .join(' OR ');
-}

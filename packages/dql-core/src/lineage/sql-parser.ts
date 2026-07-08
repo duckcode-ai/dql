@@ -31,12 +31,33 @@ export interface SqlColumnReference {
   unqualified: boolean;
 }
 
+/** An equality join condition `left.col = right.col`, aliases resolved to relations. */
+export interface SqlJoinCondition {
+  leftRelation?: string;
+  leftColumn: string;
+  rightRelation?: string;
+  rightColumn: string;
+  joinType?: string;
+}
+
+/** An aggregate function reference in the SELECT list, e.g. `SUM(o.amount)`. */
+export interface SqlAggregateReference {
+  func: string;
+  distinct: boolean;
+  column?: string;
+  relation?: string;
+}
+
 export interface SqlReferenceAnalysis {
   parsed: boolean;
   statementTypes: string[];
   tables: string[];
   ctes: string[];
   columns: SqlColumnReference[];
+  /** Equality join conditions (for grain / fan-out analysis). Empty when unparsed. */
+  joins: SqlJoinCondition[];
+  /** Aggregate function references in the SELECT list. Empty when unparsed. */
+  aggregates: SqlAggregateReference[];
   aliasToRelation: Record<string, string>;
   error?: string;
 }
@@ -138,6 +159,8 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
       tables: fallback.tables,
       ctes: fallback.ctes,
       columns: [],
+      joins: [],
+      aggregates: [],
       aliasToRelation: {},
       error: err instanceof Error ? err.message : String(err),
     };
@@ -169,14 +192,118 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
     });
   }
 
+  const singleRelation = tableRefs.size === 1 ? Array.from(tableRefs.values())[0] : undefined;
+  const joins: SqlJoinCondition[] = [];
+  const aggregates: SqlAggregateReference[] = [];
+  for (const statement of statements) {
+    collectSqlJoins(statement, { ctes, aliasToRelation, joins });
+    collectSqlAggregates(statement, { ctes, aliasToRelation, singleRelation, aggregates });
+  }
+
   return {
     parsed: true,
     statementTypes: Array.from(statementTypes),
     tables: Array.from(tableRefs.values()),
     ctes: Array.from(ctes),
     columns: dedupeColumnReferences(columns),
+    joins,
+    aggregates,
     aliasToRelation: Object.fromEntries(aliasToRelation),
   };
+}
+
+/** Resolve a column_ref node's `table` alias to a relation (or undefined). */
+function resolveColumnRefRelation(
+  ref: Record<string, unknown>,
+  aliasToRelation: Map<string, string>,
+  singleRelation?: string,
+): string | undefined {
+  const rawTable = stringField(ref, 'table');
+  if (!rawTable) return singleRelation;
+  const alias = normalizeSqlIdentifier(rawTable);
+  return aliasToRelation.get(alias) ?? rawTable;
+}
+
+/** Walk the AST collecting equality join conditions from ON clauses. */
+function collectSqlJoins(
+  node: unknown,
+  state: { ctes: Set<string>; aliasToRelation: Map<string, string>; joins: SqlJoinCondition[] },
+): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectSqlJoins(item, state);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  // A joined FROM entry carries both `join` (type) and `on` (condition tree).
+  if (typeof obj.join === 'string' && obj.on && typeof obj.on === 'object') {
+    collectEquiJoinColumns(obj.on, obj.join, state);
+  }
+  for (const value of Object.values(obj)) collectSqlJoins(value, state);
+}
+
+/** Extract every `col = col` equality (recursing through AND/OR) from an ON tree. */
+function collectEquiJoinColumns(
+  onNode: unknown,
+  joinType: string,
+  state: { aliasToRelation: Map<string, string>; joins: SqlJoinCondition[] },
+): void {
+  if (!onNode || typeof onNode !== 'object') return;
+  const node = onNode as Record<string, unknown>;
+  if (node.type === 'binary_expr') {
+    const op = typeof node.operator === 'string' ? node.operator : '';
+    const left = node.left as Record<string, unknown> | undefined;
+    const right = node.right as Record<string, unknown> | undefined;
+    if (op === '=' && left?.type === 'column_ref' && right?.type === 'column_ref') {
+      const leftColumn = readColumnRefName(left);
+      const rightColumn = readColumnRefName(right);
+      if (leftColumn && rightColumn) {
+        state.joins.push({
+          leftRelation: resolveColumnRefRelation(left, state.aliasToRelation),
+          leftColumn,
+          rightRelation: resolveColumnRefRelation(right, state.aliasToRelation),
+          rightColumn,
+          joinType,
+        });
+      }
+      return;
+    }
+    // AND / OR / other composite conditions: recurse into both sides.
+    collectEquiJoinColumns(left, joinType, state);
+    collectEquiJoinColumns(right, joinType, state);
+  }
+}
+
+/** Walk the AST collecting aggregate function references. */
+function collectSqlAggregates(
+  node: unknown,
+  state: {
+    ctes: Set<string>;
+    aliasToRelation: Map<string, string>;
+    singleRelation?: string;
+    aggregates: SqlAggregateReference[];
+  },
+): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectSqlAggregates(item, state);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  if (obj.type === 'aggr_func' && typeof obj.name === 'string') {
+    const args = obj.args as Record<string, unknown> | undefined;
+    const argExpr = args?.expr as Record<string, unknown> | undefined;
+    const distinct = typeof args?.distinct === 'string' && args.distinct.toUpperCase() === 'DISTINCT';
+    let column: string | undefined;
+    let relation: string | undefined;
+    if (argExpr?.type === 'column_ref') {
+      const name = readColumnRefName(argExpr);
+      column = name === '*' ? undefined : name;
+      relation = resolveColumnRefRelation(argExpr, state.aliasToRelation, state.singleRelation);
+    }
+    state.aggregates.push({ func: obj.name.toUpperCase(), distinct, column, relation });
+  }
+  for (const value of Object.values(obj)) collectSqlAggregates(value, state);
 }
 
 /** Extract CTE names from WITH ... AS (...) patterns */

@@ -1,0 +1,73 @@
+{
+  "_comment": "Deterministic seed for the jaffle-supply-chain execution-match evals (W1.2). Small hand-designed dataset chosen so each class-B trap produces a visibly WRONG number under the naive query. Column types are dialect-neutral tokens resolved per target by scripts/seed-eval-warehouse.mjs and the ground-truth test. Do not edit values without re-running class-b-ground-truth.test.ts (it recomputes expected rows).",
+  "tables": {
+    "dim_customers": {
+      "columns": [
+        { "name": "customer_id", "type": "text" },
+        { "name": "customer_name", "type": "text" },
+        { "name": "count_lifetime_orders", "type": "int" },
+        { "name": "lifetime_spend", "type": "decimal" }
+      ],
+      "rows": [
+        { "customer_id": "C1", "customer_name": "Alice", "count_lifetime_orders": 2, "lifetime_spend": 150 },
+        { "customer_id": "C2", "customer_name": "Bob", "count_lifetime_orders": 1, "lifetime_spend": 200 },
+        { "customer_id": "C3", "customer_name": "Carol", "count_lifetime_orders": 1, "lifetime_spend": 30 }
+      ]
+    },
+    "fct_orders": {
+      "columns": [
+        { "name": "order_id", "type": "text" },
+        { "name": "customer_id", "type": "text" },
+        { "name": "order_total", "type": "decimal" },
+        { "name": "count_food_items", "type": "int" },
+        { "name": "count_drink_items", "type": "int" },
+        { "name": "subtotal_food_items", "type": "decimal" },
+        { "name": "subtotal_drink_items", "type": "decimal" },
+        { "name": "subtotal", "type": "decimal" }
+      ],
+      "rows": [
+        { "order_id": "O1", "customer_id": "C1", "order_total": 100, "count_food_items": 2, "count_drink_items": 1, "subtotal_food_items": 12, "subtotal_drink_items": 3, "subtotal": 15 },
+        { "order_id": "O2", "customer_id": "C1", "order_total": 50, "count_food_items": 1, "count_drink_items": 1, "subtotal_food_items": 8, "subtotal_drink_items": 3, "subtotal": 11 },
+        { "order_id": "O3", "customer_id": "C2", "order_total": 200, "count_food_items": 1, "count_drink_items": 0, "subtotal_food_items": 8, "subtotal_drink_items": 0, "subtotal": 8 },
+        { "order_id": "O4", "customer_id": "C3", "order_total": 30, "count_food_items": 1, "count_drink_items": 0, "subtotal_food_items": 6, "subtotal_drink_items": 0, "subtotal": 6 }
+      ]
+    },
+    "order_items": {
+      "columns": [
+        { "name": "order_item_id", "type": "text" },
+        { "name": "order_id", "type": "text" },
+        { "name": "product_id", "type": "text" },
+        { "name": "product_name", "type": "text" },
+        { "name": "product_type", "type": "text" },
+        { "name": "product_price", "type": "decimal" },
+        { "name": "ordered_at", "type": "timestamp" }
+      ],
+      "rows": [
+        { "order_item_id": "I1", "order_id": "O1", "product_id": "P1", "product_name": "Burger", "product_type": "food", "product_price": 8, "ordered_at": "2024-01-01" },
+        { "order_item_id": "I2", "order_id": "O1", "product_id": "P2", "product_name": "Fries", "product_type": "food", "product_price": 4, "ordered_at": "2024-01-01" },
+        { "order_item_id": "I3", "order_id": "O1", "product_id": "P3", "product_name": "Cola", "product_type": "drink", "product_price": 3, "ordered_at": "2024-01-01" },
+        { "order_item_id": "I4", "order_id": "O2", "product_id": "P1", "product_name": "Burger", "product_type": "food", "product_price": 8, "ordered_at": "2024-01-02" },
+        { "order_item_id": "I5", "order_id": "O2", "product_id": "P3", "product_name": "Cola", "product_type": "drink", "product_price": 3, "ordered_at": "2024-01-02" },
+        { "order_item_id": "I6", "order_id": "O3", "product_id": "P1", "product_name": "Burger", "product_type": "food", "product_price": 8, "ordered_at": "2024-01-03" },
+        { "order_item_id": "I7", "order_id": "O4", "product_id": "P4", "product_name": "Salad", "product_type": "food", "product_price": 6, "ordered_at": "2024-01-04" }
+      ]
+    },
+    "supplies": {
+      "columns": [
+        { "name": "supply_id", "type": "text" },
+        { "name": "product_id", "type": "text" },
+        { "name": "supply_name", "type": "text" },
+        { "name": "supply_cost", "type": "decimal" },
+        { "name": "is_perishable_supply", "type": "bool" }
+      ],
+      "rows": [
+        { "supply_id": "S1", "product_id": "P1", "supply_name": "Beef Patty", "supply_cost": 2.0, "is_perishable_supply": true },
+        { "supply_id": "S2", "product_id": "P1", "supply_name": "Bun", "supply_cost": 0.5, "is_perishable_supply": false },
+        { "supply_id": "S3", "product_id": "P2", "supply_name": "Potato", "supply_cost": 0.3, "is_perishable_supply": true },
+        { "supply_id": "S4", "product_id": "P3", "supply_name": "Syrup", "supply_cost": 0.2, "is_perishable_supply": false },
+        { "supply_id": "S5", "product_id": "P4", "supply_name": "Lettuce", "supply_cost": 0.4, "is_perishable_supply": true },
+        { "supply_id": "S6", "product_id": "P1", "supply_name": "Cheese", "supply_cost": 0.6, "is_perishable_supply": true }
+      ]
+    }
+  }
+}
