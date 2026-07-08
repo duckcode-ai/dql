@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   CachingEmbeddingProvider,
   HashedTokenEmbeddingProvider,
+  OllamaEmbeddingProvider,
   OpenAIEmbeddingProvider,
+  ResilientEmbeddingProvider,
   cosineSimilarity,
   defaultEmbeddingProvider,
+  embeddingOptionsFromEnv,
   hybridRank,
   resolveEmbeddingProvider,
   type EmbeddingFetch,
@@ -117,5 +120,51 @@ describe('OpenAI embedding provider (R3.3)', () => {
       { alpha: 0.8, provider },
     );
     expect(ranked[0].item).toBe('best_customers_block');
+  });
+});
+
+describe('local-first embeddings (W3.1)', () => {
+  const ollamaFetch: EmbeddingFetch = async (url, init) => {
+    expect(url).toContain('/api/embed');
+    const body = JSON.parse(init.body) as { input: string[] };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ embeddings: body.input.map((_, i) => [i, 1, 0]) }),
+    };
+  };
+
+  it('Ollama provider embeds via /api/embed and preserves order', async () => {
+    const provider = new OllamaEmbeddingProvider({ endpoint: 'http://localhost:11434', fetchImpl: ollamaFetch });
+    const vectors = await provider.embed(['a', 'b']);
+    expect(vectors).toEqual([[0, 1, 0], [1, 1, 0]]);
+    expect(provider.id).toContain('ollama');
+  });
+
+  it('resolver prefers a local Ollama endpoint over hashed', () => {
+    const provider = resolveEmbeddingProvider({ ollamaEndpoint: 'http://localhost:11434', fetchImpl: ollamaFetch });
+    expect(provider.id).toContain('ollama');
+  });
+
+  it('resilient wrapper falls back to hashed vectors when the real provider fails', async () => {
+    const failing: EmbeddingProvider = {
+      id: 'boom', dimensions: 3,
+      embed: async () => { throw new Error('connection refused'); },
+    };
+    const resilient = new ResilientEmbeddingProvider(failing, new HashedTokenEmbeddingProvider());
+    const [vector] = await resilient.embed(['hello world']);
+    // Fell back to a real (hashed) vector rather than throwing.
+    expect(vector.length).toBeGreaterThan(0);
+  });
+
+  it('embeddingOptionsFromEnv reads Ollama and OpenAI config (Ollama wins)', () => {
+    expect(embeddingOptionsFromEnv({ DQL_OLLAMA_EMBED_URL: 'http://x:11434', DQL_OLLAMA_EMBED_MODEL: 'nomic' }))
+      .toEqual({ ollamaEndpoint: 'http://x:11434', ollamaModel: 'nomic' });
+    expect(embeddingOptionsFromEnv({ OPENAI_API_KEY: 'sk-x' })).toEqual({ openaiApiKey: 'sk-x' });
+    expect(embeddingOptionsFromEnv({})).toEqual({});
+  });
+
+  it('offline (no config) stays on the deterministic hashed provider', () => {
+    expect(resolveEmbeddingProvider(embeddingOptionsFromEnv({})).id).toBe('hashed-token-v1');
   });
 });

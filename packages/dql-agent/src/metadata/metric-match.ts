@@ -26,7 +26,7 @@
  * still refuse honestly.
  */
 
-import { defaultEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
+import { defaultEmbeddingProvider, envEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
 import type { KGNode } from '../kg/types.js';
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 
@@ -216,7 +216,7 @@ export async function matchSemanticMetric(
     items.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),
     {
       alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA : 0,
-      provider: options.provider ?? defaultEmbeddingProvider(),
+      provider: options.provider ?? envEmbeddingProvider(),
     },
   );
 

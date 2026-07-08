@@ -63,7 +63,7 @@ import {
 import { retrieveScopedHints } from '../hints/retrieval.js';
 import type { QuestionScope } from '../hints/types.js';
 import { sanitizeFtsQuery } from '../memory/fts-query.js';
-import { resolveEmbeddingProvider } from '../embeddings/provider.js';
+import { envEmbeddingProvider } from '../embeddings/provider.js';
 import { matchExampleParaphrase } from './example-match.js';
 
 /** An approved scoped hint folded into a context pack (after certified routing). */
@@ -790,7 +790,7 @@ export async function buildLocalContextPack(
     const trustLabel = deriveTrust(objects);
     const citations = buildCitations(objects, contextEdges);
     const evidenceSummaries = buildEvidenceSummaries(objects, contextEdges, queryRuns, diagnostics);
-    const allowedSqlContext = sortAllowedSqlContextForAnalysisPlan(buildAllowedSqlContext(objects, contextEdges), questionPlan);
+    const allowedSqlContext = sortAllowedSqlContextForAnalysisPlan(buildAllowedSqlContext(objects, contextEdges, tokenizeQuestionForColumns(request.question)), questionPlan);
     const selectedRelations = allowedSqlContext.relations.slice(0, 24).map((relation, index) => {
       const scored = scoreAllowedSqlRelationWithAnalysisPlan(relation, questionPlan);
       return {
@@ -2929,7 +2929,7 @@ async function planContextPackRoute(input: {
   if (!exact && contextApplicability) {
     const candidate = input.objects.find((object) => object.objectKey === contextApplicability.objectKey);
     if (candidate && isCertifiedMetadataObject(candidate)
-      && await matchExampleParaphrase(input.request.question, candidate, resolveEmbeddingProvider())) {
+      && await matchExampleParaphrase(input.request.question, candidate, envEmbeddingProvider())) {
       exact = candidate;
       paraphraseExampleMatch = true;
     }
@@ -3948,18 +3948,52 @@ function isSqlParentObject(object: MetadataObject): boolean {
 const MAX_ALLOWED_SQL_COLUMNS = 120;
 
 /**
+ * Relevance score for keeping a column when a wide relation must be truncated (W3.3).
+ * Structural columns (join keys, time/grain) always score so joins and grain survive;
+ * a column whose name overlaps the question scores highest so the needed column on a
+ * 300-column table is not dropped just because it sits past the budget cut.
+ */
+function columnBudgetScore(name: string, questionTokens?: string[]): number {
+  const lower = name.toLowerCase();
+  let score = 0;
+  if (/(^|_)(id|key)$/.test(lower) || lower === 'id') score += 3;
+  if (/(date|time|_at$|_ts$|day|month|year|week|quarter)/.test(lower)) score += 2;
+  if (questionTokens) {
+    for (const token of questionTokens) {
+      if (token.length > 2 && lower.includes(token)) { score += 5; break; }
+    }
+  }
+  return score;
+}
+
+/**
  * Cap a relation's column list to the prompt budget and downgrade completeness to
  * 'partial' when columns are dropped. Keeping a truncated relation 'complete' would
  * let column validation false-positive a valid column past the cut as unknown_column
- * (the >120-column latent bug, W1.4). Applied at every place columns are truncated.
+ * (the >120-column latent bug, W1.4). When truncating, keep the columns most relevant
+ * to the question + structural keys (W3.3) rather than the arbitrary first-N, then
+ * restore original order among the survivors so prompt ordering is unchanged.
  */
 function capAllowedSqlColumns(
   columns: MetadataAllowedSqlRelation['columns'],
   completeness: MetadataAllowedSqlRelation['columnCompleteness'],
+  questionTokens?: string[],
 ): { columns: MetadataAllowedSqlRelation['columns']; columnCompleteness: MetadataAllowedSqlRelation['columnCompleteness'] } {
-  return columns.length > MAX_ALLOWED_SQL_COLUMNS
-    ? { columns: columns.slice(0, MAX_ALLOWED_SQL_COLUMNS), columnCompleteness: 'partial' }
-    : { columns, columnCompleteness: completeness };
+  if (columns.length <= MAX_ALLOWED_SQL_COLUMNS) {
+    return { columns, columnCompleteness: completeness };
+  }
+  const kept = columns
+    .map((column, index) => ({ column, index, score: columnBudgetScore(column.name, questionTokens) }))
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+    .slice(0, MAX_ALLOWED_SQL_COLUMNS)
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.column);
+  return { columns: kept, columnCompleteness: 'partial' };
+}
+
+/** Lowercased word tokens from the question, for column-relevance ranking. */
+function tokenizeQuestionForColumns(question: string): string[] {
+  return (question.toLowerCase().match(/[a-z0-9_]+/g) ?? []).filter((token) => token.length > 2);
 }
 
 const FULL_CATALOG_RELATION_TYPES = ['dbt_model', 'dbt_source', 'warehouse_table', 'runtime_table'];
@@ -3988,7 +4022,7 @@ function collectFullCatalogObjects(catalog: MetadataCatalog): MetadataObject[] |
   return mergeObjects([...relations, ...columns]);
 }
 
-export function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]): MetadataAllowedSqlContext {
+export function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[], questionTokens?: string[]): MetadataAllowedSqlContext {
   const byRelation = new Map<string, MetadataAllowedSqlRelation>();
   const objectsByKey = new Map(objects.map((object) => [object.objectKey, object]));
   const addRelation = (relation: MetadataAllowedSqlRelation) => {
@@ -3996,11 +4030,11 @@ export function buildAllowedSqlContext(objects: MetadataObject[], edges: Metadat
     if (!key) return;
     const existing = byRelation.get(key);
     if (!existing) {
-      const capped = capAllowedSqlColumns(dedupeRuntimeColumns(relation.columns), relation.columnCompleteness);
+      const capped = capAllowedSqlColumns(dedupeRuntimeColumns(relation.columns), relation.columnCompleteness, questionTokens);
       byRelation.set(key, { ...relation, columns: capped.columns, columnCompleteness: capped.columnCompleteness });
       return;
     }
-    const capped = capAllowedSqlColumns(mergeRelationColumns(existing, relation), mergeRelationCompletenessForCatalog(existing, relation));
+    const capped = capAllowedSqlColumns(mergeRelationColumns(existing, relation), mergeRelationCompletenessForCatalog(existing, relation), questionTokens);
     byRelation.set(key, {
       ...existing,
       objectKey: existing.objectKey ?? relation.objectKey,

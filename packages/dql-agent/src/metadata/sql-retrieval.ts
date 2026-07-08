@@ -11,7 +11,7 @@
  * paraphrase matches while lexical recall remains the gate.
  */
 
-import { defaultEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
+import { defaultEmbeddingProvider, envEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
 import type { DbtArtifacts, DbtModelNode } from '../propose/dbt-artifacts.js';
 
 export interface SelectRelevantModelsOptions {
@@ -91,7 +91,7 @@ export async function selectRelevantModels(
   const hasLexicalSignal = items.some((item) => item.ftsScore > 0);
   const ranked = await hybridRank(request, items, {
     alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_SQL_RETRIEVAL_EMBEDDING_ALPHA : 0,
-    provider: options.provider ?? defaultEmbeddingProvider(),
+    provider: options.provider ?? envEmbeddingProvider(),
   });
 
   const withSignal = ranked.filter((r) => r.ftsScore > 0 || (hasLexicalSignal && r.score > 0));
