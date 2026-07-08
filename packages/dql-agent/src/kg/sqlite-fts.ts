@@ -193,6 +193,9 @@ export class KGStore {
     }
     const whereExtra = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
 
+    // Fetch a wider window than `limit` so the feedback multiplier (W4.1) can
+    // reorder within it — a downvoted block can drop below a just-missed peer.
+    const fetchLimit = Math.min(limit * 3, limit + 50);
     const rows = this.db.prepare(`
       SELECT n.*,
              bm25(kg_nodes_fts) AS rank,
@@ -202,18 +205,61 @@ export class KGStore {
       WHERE kg_nodes_fts MATCH ?${whereExtra}
       ORDER BY rank
       LIMIT ?
-    `).all(...params, limit) as Array<{
+    `).all(...params, fetchLimit) as Array<{
       node_id: string; kind: string; name: string; domain: string | null;
       status: string | null; owner: string | null; description: string | null;
       llm_context: string | null; tags_json: string; examples_json: string;
       metadata_json?: string | null; source_path: string | null; git_sha: string; rank: number; snip: string;
     }>;
 
+    // W4.1 — feedback-aware ranking. A bounded ±15% multiplier from per-block
+    // up/down votes reorders retrieval candidates: downvoted blocks demote, upvoted
+    // ones rise. It is pre-cascade (the certified-first cascade still runs downstream)
+    // and bounded, so it never overrides a strong BM25 or certification signal. With
+    // no feedback, every multiplier is 1 → order is byte-identical to BM25.
+    const blockNames = rows
+      .filter((r) => r.node_id.startsWith('block:'))
+      .map((r) => r.node_id.slice('block:'.length));
+    const multipliers = this.feedbackMultipliers(blockNames);
+
     return rows.map((r) => ({
       node: rowToNode(r),
-      score: r.rank ? 1 / (1 + Math.max(0, r.rank)) : 0,
+      score: (r.rank ? 1 / (1 + Math.max(0, r.rank)) : 0)
+        * (r.node_id.startsWith('block:') ? (multipliers.get(r.node_id.slice('block:'.length)) ?? 1) : 1),
       snippet: r.snip ?? undefined,
-    }));
+    }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
+  /**
+   * Bounded ±15% feedback multiplier per block from up/down votes (W4.1). A
+   * saturating tanh keeps a handful of votes from dominating BM25: net 0 → 1.0,
+   * strongly downvoted → 0.85, strongly upvoted → 1.15. Blocks with no feedback
+   * are absent from the map (caller defaults to 1.0).
+   */
+  feedbackMultipliers(blockIds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    const strip = (id: string) => (id.startsWith('block:') ? id.slice('block:'.length) : id);
+    const names = [...new Set(blockIds.map(strip))].filter(Boolean);
+    if (names.length === 0) return out;
+    // Feedback may store the bare block name OR the `block:`-prefixed node id
+    // (callers differ); match both and normalize the result key to the bare name.
+    const candidates = [...names, ...names.map((name) => `block:${name}`)];
+    const placeholders = candidates.map(() => '?').join(', ');
+    const rows = this.db.prepare(`
+      SELECT block_id,
+        SUM(CASE WHEN rating = 'up' THEN 1 ELSE 0 END) AS up,
+        SUM(CASE WHEN rating = 'down' THEN 1 ELSE 0 END) AS down
+      FROM kg_feedback WHERE block_id IN (${placeholders}) GROUP BY block_id
+    `).all(...candidates) as Array<{ block_id: string; up: number | null; down: number | null }>;
+    const netByName = new Map<string, number>();
+    for (const row of rows) {
+      const name = strip(row.block_id);
+      netByName.set(name, (netByName.get(name) ?? 0) + ((row.up ?? 0) - (row.down ?? 0)));
+    }
+    for (const [name, net] of netByName) out.set(name, 1 + 0.15 * Math.tanh(net / 3));
+    return out;
   }
 
   getNode(nodeId: string): KGNode | null {

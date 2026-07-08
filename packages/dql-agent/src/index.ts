@@ -24,7 +24,8 @@ import { loadSkills } from "./skills/loader.js";
 import type { Skill } from "./skills/loader.js";
 import type { KGEdge, KGNode } from "./kg/types.js";
 import { ensureMetadataCatalogFresh } from "./metadata/catalog.js";
-import { reindexHints } from "./hints/git-store.js";
+import { reindexHints, listHintsFromGit } from "./hints/git-store.js";
+import { findStaleApprovedHints, type StaleHintFinding } from "./hints/staleness.js";
 
 export { KGStore } from "./kg/sqlite-fts.js";
 export type {
@@ -582,6 +583,19 @@ export {
   reviewsDir,
   defaultHintIndexPath,
 } from "./hints/git-store.js";
+export {
+  buildCorrectionEvalCase,
+  emitCorrectionEvalCase,
+  appendCorrectionEvalCase,
+  CORRECTIONS_EVAL_RELATIVE_PATH,
+  type CorrectionEvalCase,
+} from "./hints/correction-eval.js";
+export {
+  findStaleHints,
+  findStaleApprovedHints,
+  type StaleHintFinding,
+  type HintScopeTargetKind,
+} from "./hints/staleness.js";
 export type {
   RecordCorrectionTraceInput,
   RecordCorrectionTraceResult,
@@ -692,6 +706,8 @@ export interface ReindexProjectResult {
   metadataRefreshed: boolean;
   kgFingerprint: string;
   metadataFingerprint: string;
+  /** Approved hints whose scope targets no longer exist (W4.6); empty when none. */
+  staleHints: StaleHintFinding[];
 }
 
 /**
@@ -752,6 +768,23 @@ export async function reindexProject(
   } catch {
     // Hint indexing is advisory; never fail a reindex over it.
   }
+  // W4.6 — after reindexing, flag approved hints whose scope targets vanished (e.g.
+  // a renamed dbt model) so they can be retired/re-scoped instead of silently firing
+  // stale guidance. Advisory; never fails a reindex.
+  let staleHints: StaleHintFinding[] = [];
+  try {
+    const approved = listHintsFromGit(projectRoot).filter((hint) => hint.status === 'approved');
+    if (approved.length > 0) {
+      const kgForStale = new KGStore(opts.kgPath ?? defaultKgPath(projectRoot));
+      try {
+        staleHints = findStaleApprovedHints(approved, kgForStale);
+      } finally {
+        kgForStale.close();
+      }
+    }
+  } catch {
+    // Staleness detection is advisory.
+  }
   return {
     nodes: nodes.length,
     edges: edges.length,
@@ -760,6 +793,7 @@ export async function reindexProject(
     metadataRefreshed: metadataRefresh.refreshed,
     kgFingerprint,
     metadataFingerprint: metadataRefresh.fingerprint,
+    staleHints,
   };
 }
 

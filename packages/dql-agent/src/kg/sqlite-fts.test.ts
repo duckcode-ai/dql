@@ -104,6 +104,33 @@ describe('KGStore', () => {
     kg.close();
   });
 
+  it('feedback-aware ranking demotes a downvoted block, bounded to 15% (W4.1)', () => {
+    const kg = new KGStore(dbPath);
+    kg.rebuild(nodes(), []);
+    const scoreOf = () => kg.search({ query: 'revenue' }).find((h) => h.node.nodeId === 'block:revenue_total')?.score ?? 0;
+    const before = scoreOf();
+    expect(before).toBeGreaterThan(0);
+    for (let i = 0; i < 5; i++) {
+      kg.recordFeedback({ id: `d${i}`, ts: '2026-07-01T00:00:00Z', user: 'u', question: 'q', answerKind: 'certified', blockId: 'revenue_total', rating: 'down' });
+    }
+    const after = scoreOf();
+    expect(after).toBeLessThan(before);          // downvotes demote it
+    expect(after).toBeGreaterThanOrEqual(before * 0.85); // but bounded to -15%
+    kg.close();
+  });
+
+  it('feedback multiplier is bounded and saturating (W4.1)', () => {
+    const kg = new KGStore(dbPath);
+    kg.rebuild(nodes(), []);
+    for (let i = 0; i < 100; i++) {
+      kg.recordFeedback({ id: `u${i}`, ts: '2026-07-01T00:00:00Z', user: 'u', question: 'q', answerKind: 'certified', blockId: 'revenue_total', rating: 'up' });
+    }
+    const multiplier = kg.feedbackMultipliers(['revenue_total']).get('revenue_total')!;
+    expect(multiplier).toBeGreaterThan(1);
+    expect(multiplier).toBeLessThanOrEqual(1.15);
+    kg.close();
+  });
+
   it('promotionCandidates surfaces uncertified upvoted answers without downvotes', () => {
     const kg = new KGStore(dbPath);
     kg.rebuild(nodes(), []);
