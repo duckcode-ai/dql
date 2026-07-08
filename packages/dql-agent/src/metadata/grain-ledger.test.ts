@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
 import { buildGrainLedger, detectFanoutRisks, type GrainLedger } from './grain-ledger.js';
+import { extractDbtUniqueColumns } from './catalog.js';
 import type { MetadataObject } from './catalog.js';
 
 // Ledger matching the jaffle-supply-chain grains (one row per: order, order line, customer, supply).
@@ -133,5 +134,41 @@ describe('buildGrainLedger (W1.3)', () => {
     } as MetadataObject;
     const ledger = buildGrainLedger([entity]);
     expect(ledger.has('order_product_bridge')).toBe(false);
+  });
+
+  it('reads unique keys from a dbt model uniqueColumns payload (W5.3)', () => {
+    const model: MetadataObject = {
+      objectKey: 'dbt:model:fct_orders',
+      objectType: 'dbt_model',
+      name: 'fct_orders',
+      fullName: 'analytics.fct_orders',
+      status: 'dbt_catalog',
+      payload: { relation: 'analytics.fct_orders', uniqueColumns: ['order_id'] },
+    } as MetadataObject;
+    const ledger = buildGrainLedger([model]);
+    expect(ledger.get('fct_orders')?.uniqueKeys.has('order_id')).toBe(true);
+  });
+});
+
+describe('extractDbtUniqueColumns (W5.3)', () => {
+  it('extracts single-column unique tests keyed by model name', () => {
+    const nodes = {
+      'test.pkg.unique_fct_orders_order_id': {
+        resource_type: 'test',
+        test_metadata: { name: 'unique', kwargs: { column_name: 'order_id' } },
+        depends_on: { nodes: ['model.pkg.fct_orders'] },
+      },
+      'test.pkg.unique_dim_customers_customer_id': {
+        resource_type: 'test',
+        column_name: 'customer_id',
+        test_metadata: { name: 'unique' },
+        attached_node: 'model.pkg.dim_customers',
+      },
+      'test.pkg.not_null_x': { resource_type: 'test', test_metadata: { name: 'not_null', kwargs: { column_name: 'x' } }, attached_node: 'model.pkg.fct_orders' },
+      'model.pkg.fct_orders': { resource_type: 'model', name: 'fct_orders' },
+    } as Record<string, Record<string, unknown>>;
+    const map = extractDbtUniqueColumns(nodes);
+    expect(map.get('fct_orders')).toEqual(['order_id']); // not_null ignored
+    expect(map.get('dim_customers')).toEqual(['customer_id']);
   });
 });
