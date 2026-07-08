@@ -634,6 +634,27 @@ export class SemanticLayer {
     }
     if (unjoinedTables.size > 0) return null;
 
+    // Metric-scoped filters (G1 correctness). A governed metric may declare a
+    // `filter` that scopes its aggregate to a subset of rows (e.g.
+    // completed_revenue = SUM(amount) WHERE status='completed'). Dropping it
+    // silently returns a WRONG number at the highest-trust tier, so we either
+    // apply it or refuse to compose (null) — the caller then falls through to
+    // generated SQL rather than surfacing a governed-but-wrong answer.
+    const resolveFilterColumn = (ref: string): string => {
+      const dim = this.dimensions.get(ref);
+      if (dim?.sql) return dim.sql;
+      return ref.includes('__') ? ref.split('__').pop() ?? ref : ref;
+    };
+    const metricFilters = resolvedMetrics.map((m) => computeMetricFilterPredicate(m, resolveFilterColumn));
+    // A metric that declares a filter we cannot render fails the whole compose.
+    if (metricFilters.some((r) => r.kind === 'fail')) return null;
+    const okFilters = metricFilters.filter((r): r is { kind: 'ok'; sql: string } => r.kind === 'ok');
+    // When EVERY metric carries the SAME filter, hoist it to a single WHERE
+    // predicate (cleaner and equivalent); otherwise apply per-metric via CASE WHEN.
+    const distinctPredicates = new Set(okFilters.map((r) => r.sql));
+    const hoistFilterToWhere =
+      okFilters.length === resolvedMetrics.length && resolvedMetrics.length > 0 && distinctPredicates.size === 1;
+
     // Build SELECT
     const selectParts: string[] = [];
 
@@ -652,9 +673,19 @@ export class SemanticLayer {
       selectParts.push(`${truncated} AS ${timeDimDef.name}_${grain}`);
     }
 
-    // Add metrics
-    for (const m of resolvedMetrics) {
-      selectParts.push(`${renderMetricExpression(m)} AS ${m.name}`);
+    // Add metrics (applying per-metric scoped filters via CASE WHEN unless hoisted)
+    for (let i = 0; i < resolvedMetrics.length; i++) {
+      const m = resolvedMetrics[i];
+      const fr = metricFilters[i];
+      let expr = renderMetricExpression(m);
+      if (fr.kind === 'ok' && !hoistFilterToWhere) {
+        const wrapped = wrapAggregateWithFilter(expr, fr.sql);
+        // Unparseable aggregate + a per-metric filter → refuse rather than emit
+        // a partially-applied filter.
+        if (wrapped === null) return null;
+        expr = wrapped;
+      }
+      selectParts.push(`${expr} AS ${m.name}`);
     }
 
     // Build FROM + JOINs (apply tableMapping for actual DB table names)
@@ -748,6 +779,11 @@ export class SemanticLayer {
           whereParts.push(`${dimSql} IS NOT NULL`);
           break;
       }
+    }
+
+    // Governed metric filter shared by every metric: applied once as WHERE.
+    if (hoistFilterToWhere && okFilters.length > 0) {
+      whereParts.push(okFilters[0].sql);
     }
 
     // Build ORDER BY
@@ -1160,6 +1196,136 @@ function renderMetricExpression(metric: MetricDefinition): string {
     default:
       return sql;
   }
+}
+
+/**
+ * Outcome of resolving a governed metric's scoped `filter` into a SQL predicate.
+ *  - `none`: the metric declares no filter.
+ *  - `ok`: the metric filter rendered to a boolean SQL predicate.
+ *  - `fail`: the metric DECLARES a filter we cannot safely render — the caller
+ *    must refuse to compose (return null) rather than silently drop it and
+ *    return a wrong number at the highest-trust tier.
+ */
+type MetricFilterResult = { kind: 'none' } | { kind: 'ok'; sql: string } | { kind: 'fail' };
+
+/** Quote a scalar value for SQL, matching composeQuery's WHERE conventions. */
+function quoteSqlValue(v: string): string {
+  return /^-?\d+(\.\d+)?$/.test(v.trim()) ? v : `'${v.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Substitute MetricFlow-style `{{ Dimension('entity__dim') }}` /
+ * `{{ TimeDimension('entity__dim', 'day') }}` references in a raw SQL filter
+ * string. Plain SQL predicates (no Jinja) are trusted and returned as-is.
+ * Returns null when any non-Dimension Jinja tag remains, so the caller fails safe.
+ */
+function resolveFilterJinja(raw: string, resolveColumn: (ref: string) => string): string | null {
+  if (!raw.includes('{{')) return raw;
+  const out = raw.replace(
+    /\{\{\s*(?:Time)?Dimension\(\s*['"]([^'"]+)['"](?:\s*,\s*['"][^'"]+['"])?\s*\)\s*\}\}/g,
+    (_full, ref: string) => resolveColumn(String(ref)),
+  );
+  return out.includes('{{') ? null : out;
+}
+
+/** Render a single object-shaped metric filter (`{ field, operator, value(s) }`). */
+function renderObjectFilter(raw: Record<string, unknown>, resolveColumn: (ref: string) => string): string | null {
+  const field = raw.field ?? raw.dimension ?? raw.column ?? raw.name;
+  if (field == null || String(field).trim() === '') {
+    if (typeof raw.sql === 'string' && raw.sql.trim()) return resolveFilterJinja(raw.sql.trim(), resolveColumn);
+    return null;
+  }
+  const col = resolveColumn(String(field));
+  const rawValues = raw.values ?? (raw.value !== undefined ? [raw.value] : []);
+  const values = (Array.isArray(rawValues) ? rawValues : [rawValues]).map((v) => String(v));
+  const op = String(raw.operator ?? raw.op ?? (values.length > 1 ? 'in' : 'equals')).toLowerCase();
+  const q = quoteSqlValue;
+  switch (op) {
+    case 'equals': case '=': case 'eq':
+      return values.length > 1 ? `${col} IN (${values.map(q).join(', ')})` : `${col} = ${q(values[0] ?? '')}`;
+    case 'not_equals': case '!=': case 'neq':
+      return `${col} != ${q(values[0] ?? '')}`;
+    case 'in':
+      return values.length ? `${col} IN (${values.map(q).join(', ')})` : null;
+    case 'not_in':
+      return values.length ? `${col} NOT IN (${values.map(q).join(', ')})` : null;
+    case 'gt': case '>': return `${col} > ${q(values[0] ?? '')}`;
+    case 'gte': case '>=': return `${col} >= ${q(values[0] ?? '')}`;
+    case 'lt': case '<': return `${col} < ${q(values[0] ?? '')}`;
+    case 'lte': case '<=': return `${col} <= ${q(values[0] ?? '')}`;
+    case 'contains': return `${col} LIKE '%${String(values[0] ?? '').replace(/'/g, "''")}%'`;
+    case 'is_null': return `${col} IS NULL`;
+    case 'is_not_null': return `${col} IS NOT NULL`;
+    default: return null;
+  }
+}
+
+/** Render a metric `filter` spec (string | object | array-of-objects) to SQL, or null if unrenderable. */
+function renderFilterSpec(
+  spec: string | Record<string, unknown> | Array<Record<string, unknown>>,
+  resolveColumn: (ref: string) => string,
+): string | null {
+  if (typeof spec === 'string') {
+    const trimmed = spec.trim();
+    return trimmed ? resolveFilterJinja(trimmed, resolveColumn) : '';
+  }
+  if (Array.isArray(spec)) {
+    const parts: string[] = [];
+    for (const item of spec) {
+      if (!item || typeof item !== 'object') return null;
+      const r = renderObjectFilter(item, resolveColumn);
+      if (r === null) return null;
+      if (r) parts.push(`(${r})`);
+    }
+    return parts.length ? parts.join(' AND ') : '';
+  }
+  if (spec && typeof spec === 'object') return renderObjectFilter(spec, resolveColumn);
+  return null;
+}
+
+/** Compute a metric's scoped-filter predicate, distinguishing none / ok / unrenderable. */
+function computeMetricFilterPredicate(
+  metric: MetricDefinition,
+  resolveColumn: (ref: string) => string,
+): MetricFilterResult {
+  const f = metric.filter;
+  if (f === undefined || f === null) return { kind: 'none' };
+  const rendered = renderFilterSpec(f, resolveColumn);
+  if (rendered === null) return { kind: 'fail' };
+  if (!rendered) return { kind: 'none' };
+  return { kind: 'ok', sql: rendered };
+}
+
+/**
+ * Inject a metric's scoped filter INSIDE its aggregate via CASE WHEN so that a
+ * multi-metric query with differing per-metric filters stays correct, e.g.
+ * `SUM(amount)` + `status='completed'` → `SUM(CASE WHEN status='completed' THEN amount END)`.
+ * Returns null when the expression is not a single recognizable aggregate call
+ * (e.g. a ratio `SUM(a)/SUM(b)`), so the caller fails safe rather than emit
+ * a filter that only partially applies.
+ */
+function wrapAggregateWithFilter(expr: string, predicate: string): string | null {
+  const head = expr.match(/^\s*(sum|avg|min|max|count)\s*\(/i);
+  if (!head) return null;
+  const fn = head[1].toUpperCase();
+  const openIdx = expr.indexOf('(', head.index ?? 0);
+  // Find the close paren that matches the aggregate's opening paren. If it is
+  // not the end of the expression, this is NOT a single aggregate call (e.g. a
+  // ratio `SUM(a) / SUM(b)`) — refuse rather than inject a half-applied filter.
+  let depth = 0;
+  let closeIdx = -1;
+  for (let i = openIdx; i < expr.length; i++) {
+    if (expr[i] === '(') depth++;
+    else if (expr[i] === ')' && --depth === 0) { closeIdx = i; break; }
+  }
+  if (closeIdx === -1 || expr.slice(closeIdx + 1).trim() !== '') return null;
+  let inner = expr.slice(openIdx + 1, closeIdx).trim();
+  const distinctMatch = inner.match(/^distinct\s+/i);
+  const distinct = Boolean(distinctMatch);
+  if (distinct) inner = inner.slice(distinctMatch![0].length).trim();
+  if (fn === 'COUNT' && !distinct && inner === '*') return `COUNT(CASE WHEN ${predicate} THEN 1 END)`;
+  const distinctKw = distinct ? 'DISTINCT ' : '';
+  return `${fn}(${distinctKw}CASE WHEN ${predicate} THEN ${inner} END)`;
 }
 
 export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinition {

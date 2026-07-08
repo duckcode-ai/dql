@@ -62,6 +62,7 @@ import {
 } from './block-fit.js';
 import { retrieveScopedHints } from '../hints/retrieval.js';
 import type { QuestionScope } from '../hints/types.js';
+import { sanitizeFtsQuery } from '../memory/fts-query.js';
 
 /** An approved scoped hint folded into a context pack (after certified routing). */
 export interface AppliedContextHint {
@@ -1284,7 +1285,7 @@ export class MetadataCatalog {
     limit?: number;
   }): MetadataObject[] {
     const { query, objectTypes, domain, limit = 40 } = options;
-    const sanitized = sanitizeFtsQuery(query);
+    const sanitized = sanitizeFtsQuery(query, { prefix: true });
     if (!sanitized) return this.listObjects({ objectTypes, domain, limit });
 
     const filters: string[] = [];
@@ -1540,7 +1541,9 @@ export class MetadataCatalog {
 
   searchRuntimeValues(terms: string[], limit = 40): RuntimeValueMatch[] {
     const cleanTerms = uniqueStrings(terms.map(normalizeValueIndexText).filter(Boolean)).slice(0, 8);
-    const query = sanitizeFtsQuery(cleanTerms.join(' '));
+    // Filter VALUES may legitimately be stop words (a category named "current");
+    // fall back to raw tokens so value binding still fires rather than dropping to empty.
+    const query = sanitizeFtsQuery(cleanTerms.join(' '), { prefix: true, fallbackToRawTokens: true });
     if (!query) return [];
     const rows = this.db.prepare(`
       SELECT v.*,
@@ -3923,6 +3926,24 @@ function isSqlParentObject(object: MetadataObject): boolean {
     object.objectType === 'runtime_table';
 }
 
+/** Column budget for a single relation in the prompt's allowed-SQL context. */
+const MAX_ALLOWED_SQL_COLUMNS = 120;
+
+/**
+ * Cap a relation's column list to the prompt budget and downgrade completeness to
+ * 'partial' when columns are dropped. Keeping a truncated relation 'complete' would
+ * let column validation false-positive a valid column past the cut as unknown_column
+ * (the >120-column latent bug, W1.4). Applied at every place columns are truncated.
+ */
+function capAllowedSqlColumns(
+  columns: MetadataAllowedSqlRelation['columns'],
+  completeness: MetadataAllowedSqlRelation['columnCompleteness'],
+): { columns: MetadataAllowedSqlRelation['columns']; columnCompleteness: MetadataAllowedSqlRelation['columnCompleteness'] } {
+  return columns.length > MAX_ALLOWED_SQL_COLUMNS
+    ? { columns: columns.slice(0, MAX_ALLOWED_SQL_COLUMNS), columnCompleteness: 'partial' }
+    : { columns, columnCompleteness: completeness };
+}
+
 const FULL_CATALOG_RELATION_TYPES = ['dbt_model', 'dbt_source', 'warehouse_table', 'runtime_table'];
 const FULL_CATALOG_COLUMN_TYPES = ['dbt_column', 'warehouse_column', 'runtime_column'];
 /** Deep mode over a catalog this small hands the model everything instead of top-k. */
@@ -3949,7 +3970,7 @@ function collectFullCatalogObjects(catalog: MetadataCatalog): MetadataObject[] |
   return mergeObjects([...relations, ...columns]);
 }
 
-function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]): MetadataAllowedSqlContext {
+export function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]): MetadataAllowedSqlContext {
   const byRelation = new Map<string, MetadataAllowedSqlRelation>();
   const objectsByKey = new Map(objects.map((object) => [object.objectKey, object]));
   const addRelation = (relation: MetadataAllowedSqlRelation) => {
@@ -3957,16 +3978,17 @@ function buildAllowedSqlContext(objects: MetadataObject[], edges: MetadataEdge[]
     if (!key) return;
     const existing = byRelation.get(key);
     if (!existing) {
-      byRelation.set(key, { ...relation, columns: dedupeRuntimeColumns(relation.columns).slice(0, 120) });
+      const capped = capAllowedSqlColumns(dedupeRuntimeColumns(relation.columns), relation.columnCompleteness);
+      byRelation.set(key, { ...relation, columns: capped.columns, columnCompleteness: capped.columnCompleteness });
       return;
     }
-    const columnCompleteness = mergeRelationCompletenessForCatalog(existing, relation);
+    const capped = capAllowedSqlColumns(mergeRelationColumns(existing, relation), mergeRelationCompletenessForCatalog(existing, relation));
     byRelation.set(key, {
       ...existing,
       objectKey: existing.objectKey ?? relation.objectKey,
       source: mergeRelationSources(existing.source, relation.source),
-      columnCompleteness,
-      columns: mergeRelationColumns(existing, relation).slice(0, 120),
+      columnCompleteness: capped.columnCompleteness,
+      columns: capped.columns,
     });
   };
 
@@ -4434,12 +4456,13 @@ function coalesceRelationAliases(relations: MetadataAllowedSqlRelation[]): Metad
     if (targets.length !== 1) continue;
     const target = targets[0]!;
     const targetKey = normalizeRelationKey(target.relation);
+    const capped = capAllowedSqlColumns(mergeRelationColumns(target, relation), mergeRelationCompletenessForCatalog(target, relation));
     mergedByRelation.set(targetKey, {
       ...target,
       objectKey: target.objectKey ?? relation.objectKey,
       source: mergeRelationSources(target.source, relation.source),
-      columnCompleteness: mergeRelationCompletenessForCatalog(target, relation),
-      columns: mergeRelationColumns(target, relation).slice(0, 120),
+      columnCompleteness: capped.columnCompleteness,
+      columns: capped.columns,
     });
     skipped.add(relationKey);
   }
@@ -5589,21 +5612,3 @@ function scoreText(value: string, terms: string[]): number {
   return terms.reduce((score, term) => score + (lower.includes(term) ? 1 : 0), 0);
 }
 
-const STOP_WORDS = new Set([
-  'a', 'about', 'after', 'all', 'an', 'and', 'any', 'are', 'as', 'at', 'be', 'by',
-  'can', 'could', 'did', 'do', 'does', 'down', 'for', 'from', 'give', 'had', 'has',
-  'have', 'how', 'i', 'if', 'in', 'into', 'is', 'it', 'me', 'most', 'my', 'of',
-  'on', 'or', 'please', 'query', 'show', 'sql', 'than', 'that', 'the', 'their',
-  'them', 'this', 'to', 'up', 'using', 'was', 'we', 'were', 'what', 'when',
-  'where', 'which', 'who', 'why', 'with', 'would', 'you', 'your',
-]);
-
-function sanitizeFtsQuery(raw: string): string {
-  return raw
-    .split(/\s+/)
-    .map((term) => term.replace(/[^\p{L}\p{N}_]/gu, ''))
-    .filter((term) => term.length > 1 && !STOP_WORDS.has(term.toLowerCase()))
-    .slice(0, 48)
-    .map((term) => `"${term}"*`)
-    .join(' OR ');
-}

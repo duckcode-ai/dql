@@ -226,4 +226,33 @@ describe('analyzeSqlReferences', () => {
       ]),
     );
   });
+
+  it('extracts equality join conditions with aliases resolved to relations', () => {
+    const result = analyzeSqlReferences(`
+      SELECT SUM(o.order_total) AS revenue
+      FROM fct_orders o
+      JOIN order_items oi ON oi.order_id = o.order_id
+    `);
+    expect(result.joins).toEqual([
+      expect.objectContaining({
+        leftRelation: 'order_items',
+        leftColumn: 'order_id',
+        rightRelation: 'fct_orders',
+        rightColumn: 'order_id',
+      }),
+    ]);
+  });
+
+  it('extracts aggregate function references with their relation and distinct flag', () => {
+    const result = analyzeSqlReferences(`
+      SELECT SUM(o.order_total) AS revenue, COUNT(DISTINCT o.customer_id) AS customers
+      FROM fct_orders o
+    `);
+    expect(result.aggregates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ func: 'SUM', column: 'order_total', relation: 'fct_orders', distinct: false }),
+        expect.objectContaining({ func: 'COUNT', column: 'customer_id', relation: 'fct_orders', distinct: true }),
+      ]),
+    );
+  });
 });

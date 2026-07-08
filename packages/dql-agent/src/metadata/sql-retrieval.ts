@@ -69,8 +69,9 @@ function lexicalScore(queryTokens: string[], model: DbtModelNode, artifacts: Dbt
 /**
  * Rank models by relevance to `request` and return the top-K model names
  * (logical `name`, suitable for `buildSchemaGrounding`'s `relevantModels`).
- * When no model has any lexical overlap, returns the first K models so the
- * grounding is never empty.
+ * When no model has any lexical or embedding overlap, falls back to the most
+ * frequently run models (dbt run_results), then alphabetical — so the grounding
+ * is never empty and never arbitrary insertion order.
  */
 export async function selectRelevantModels(
   artifacts: DbtArtifacts | undefined,
@@ -94,6 +95,21 @@ export async function selectRelevantModels(
   });
 
   const withSignal = ranked.filter((r) => r.ftsScore > 0 || (hasLexicalSignal && r.score > 0));
-  const chosen = (withSignal.length > 0 ? withSignal : ranked).slice(0, topK);
+  let chosen: typeof ranked;
+  if (withSignal.length > 0) {
+    chosen = withSignal.slice(0, topK);
+  } else {
+    // No lexical or embedding signal at all. Rather than returning models in
+    // arbitrary insertion order, prefer the ones that actually matter: most
+    // frequently run (dbt run_results) first, then alphabetical for stability.
+    chosen = [...ranked]
+      .sort((a, b) => {
+        const runsA = artifacts.runCounts.get(a.item.uniqueId) ?? 0;
+        const runsB = artifacts.runCounts.get(b.item.uniqueId) ?? 0;
+        if (runsB !== runsA) return runsB - runsA;
+        return a.item.name.localeCompare(b.item.name);
+      })
+      .slice(0, topK);
+  }
   return chosen.map((r) => r.item.name);
 }

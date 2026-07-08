@@ -470,3 +470,26 @@ export function getDialect(driver?: string): SQLDialect {
 export function listDialectDrivers(): string[] {
   return Object.keys(DIALECT_MAP);
 }
+
+/**
+ * A concise, human-readable SQL-conventions block for the generation prompt, so
+ * the model writes dialect-correct SQL (quoting, row-limiting, date functions)
+ * instead of a DuckDB/Postgres default that then fails on Snowflake/BigQuery/etc.
+ * Every example is derived from the real dialect object, so it can never drift
+ * from what the semantic composer emits.
+ */
+export function describeDialectForPrompt(driver?: string): string {
+  const dialect = getDialect(driver);
+  const name = driver?.trim() || 'duckdb';
+  const limitGuidance = dialect.limitAtEnd
+    ? `row-limit with \`${dialect.limitClause(100)}\` at the END of the query`
+    : `row-limit with \`${dialect.limitClause(100)}\` (goes right after SELECT, not at the end)`;
+  return [
+    `Target warehouse dialect: ${name} (${dialect.name}). Write ${dialect.name}-compatible SQL only.`,
+    `- Quote identifiers when needed as ${dialect.quoteIdentifier('identifier')}.`,
+    `- ${limitGuidance}.`,
+    `- Truncate a timestamp to a grain with ${dialect.dateTrunc('month', 'ts_column')}.`,
+    `- Cast to date with ${dialect.castToDate('expr')}; current timestamp is ${dialect.currentTimestamp()}.`,
+    `- Case-insensitive text match: ${dialect.ilike('col', "'%value%'")}.`,
+  ].join('\n');
+}

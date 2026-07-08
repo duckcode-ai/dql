@@ -108,6 +108,98 @@ describe('SemanticLayer', () => {
     expect(layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' })?.sql).toContain('SUM(amount) AS revenue');
   });
 
+  describe('governed metric-scoped filters (G1)', () => {
+    it('hoists a single metric filter to WHERE', () => {
+      const layer = new SemanticLayer({
+        metrics: [{ name: 'completed_revenue', label: 'Completed Revenue', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: "status = 'completed'" }],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      const result = layer.composeQuery({ metrics: ['completed_revenue'], dimensions: ['region'], driver: 'duckdb' });
+      expect(result?.sql).toContain('SUM(amount) AS completed_revenue');
+      expect(result?.sql).toContain("WHERE status = 'completed'");
+      expect(result?.sql).not.toContain('CASE WHEN');
+    });
+
+    it('hoists to WHERE when every metric shares the same filter', () => {
+      const layer = new SemanticLayer({
+        metrics: [
+          { name: 'completed_revenue', label: 'A', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: "status = 'completed'" },
+          { name: 'completed_orders', label: 'B', description: '', domain: 'sales', sql: '*', type: 'count', table: 'orders', filter: "status = 'completed'" },
+        ],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      const result = layer.composeQuery({ metrics: ['completed_revenue', 'completed_orders'], dimensions: ['region'], driver: 'duckdb' });
+      expect(result?.sql).toContain("WHERE status = 'completed'");
+      expect(result?.sql).toContain('COUNT(*) AS completed_orders');
+      expect(result?.sql).not.toContain('CASE WHEN');
+    });
+
+    it('applies mixed per-metric filters via CASE WHEN inside the aggregate', () => {
+      const layer = new SemanticLayer({
+        metrics: [
+          { name: 'total_revenue', label: 'Total', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders' },
+          { name: 'completed_revenue', label: 'Completed', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: "status = 'completed'" },
+        ],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      const result = layer.composeQuery({ metrics: ['total_revenue', 'completed_revenue'], dimensions: ['region'], driver: 'duckdb' });
+      expect(result?.sql).toContain('SUM(amount) AS total_revenue');
+      expect(result?.sql).toContain("SUM(CASE WHEN status = 'completed' THEN amount END) AS completed_revenue");
+      // A per-metric filter must NOT leak into a global WHERE.
+      expect(result?.sql).not.toContain("WHERE status = 'completed'");
+    });
+
+    it('wraps COUNT(DISTINCT ...) and COUNT(*) filters correctly', () => {
+      const layer = new SemanticLayer({
+        metrics: [
+          { name: 'all_customers', label: 'All', description: '', domain: 'sales', sql: 'customer_id', type: 'count_distinct', table: 'orders' },
+          { name: 'active_customers', label: 'Active', description: '', domain: 'sales', sql: 'customer_id', type: 'count_distinct', table: 'orders', filter: "status = 'active'" },
+        ],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      const result = layer.composeQuery({ metrics: ['all_customers', 'active_customers'], dimensions: ['region'], driver: 'duckdb' });
+      expect(result?.sql).toContain("COUNT(DISTINCT CASE WHEN status = 'active' THEN customer_id END) AS active_customers");
+    });
+
+    it('substitutes MetricFlow {{ Dimension(...) }} references in string filters', () => {
+      const layer = new SemanticLayer({
+        metrics: [{ name: 'completed_revenue', label: 'Completed', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: "{{ Dimension('order__status') }} = 'completed'" }],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      const result = layer.composeQuery({ metrics: ['completed_revenue'], dimensions: ['region'], driver: 'duckdb' });
+      expect(result?.sql).toContain("WHERE status = 'completed'");
+    });
+
+    it('renders object-shaped filters', () => {
+      const layer = new SemanticLayer({
+        metrics: [{ name: 'big_orders', label: 'Big', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: { field: 'amount', operator: 'gte', value: 100 } }],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      const result = layer.composeQuery({ metrics: ['big_orders'], dimensions: ['region'], driver: 'duckdb' });
+      expect(result?.sql).toContain('WHERE amount >= 100');
+    });
+
+    it('refuses to compose (null) when a metric filter is unrenderable', () => {
+      const layer = new SemanticLayer({
+        metrics: [{ name: 'weird', label: 'Weird', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders', filter: "{{ Metric('other') }} > 0" }],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      expect(layer.composeQuery({ metrics: ['weird'], dimensions: ['region'], driver: 'duckdb' })).toBeNull();
+    });
+
+    it('refuses when a per-metric filter targets an unparseable (ratio) aggregate', () => {
+      const layer = new SemanticLayer({
+        metrics: [
+          { name: 'plain', label: 'Plain', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders' },
+          { name: 'margin', label: 'Margin', description: '', domain: 'sales', sql: 'SUM(profit) / SUM(amount)', type: 'custom', table: 'orders', filter: "status = 'completed'" },
+        ],
+        dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+      });
+      // Mixed filters + a ratio aggregate that can't take a CASE WHEN safely → fail safe.
+      expect(layer.composeQuery({ metrics: ['plain', 'margin'], dimensions: ['region'], driver: 'duckdb' })).toBeNull();
+    });
+  });
+
   it('supports hierarchy registration and drill-path resolution', () => {
     const layer = new SemanticLayer({
       metrics: [],

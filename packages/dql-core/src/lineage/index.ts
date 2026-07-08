@@ -6,6 +6,8 @@ export {
   type SqlColumnReference,
   type SqlParseResult,
   type SqlReferenceAnalysis,
+  type SqlJoinCondition,
+  type SqlAggregateReference,
 } from './sql-parser.js';
 
 export {

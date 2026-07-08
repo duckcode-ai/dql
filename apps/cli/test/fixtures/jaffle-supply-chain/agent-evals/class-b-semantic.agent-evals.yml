@@ -18,12 +18,15 @@
 # BOTH the current path and a proposed fast-path lever; the lever ships only if
 # execution_match_rate stays 1.0.
 #
-# DATA REQUIREMENT (honest note): this fixture ships dbt metadata only (no bundled
-# warehouse), so the `expected.rows` below are placeholders marked TODO — capture
-# the true rows once against the seeded dataset and commit them. Until then these
-# cases still exercise the routing + grounding gates (route, allowedRelationsOnly,
-# allowedColumnsOnly, sqlContains) offline-with-a-provider; they just don't yet
-# contribute to execution_match_rate (which only counts cases carrying `rows`).
+# DATA (W1.2): the `expected.rows` below are the grain-safe ground truth over the
+# committed seed dataset at ../seeds/seed.json. They are proven offline by
+# packages/dql-agent/src/testkit/class-b-ground-truth.test.ts, which executes both
+# the grain-safe and the naive (fan-out) query against a real SQL engine and
+# asserts the grain-safe result equals these rows while the naive query inflates.
+# To run the credentialed execution-match gate, seed a warehouse from seed.json
+# (scripts/seed-eval-warehouse.mjs) and point `dql serve` at it. Column aliases
+# and row order must match the seed-backed rows, so the fixture steers the shape
+# via sqlContains hints; treat rowsEqual as exact.
 #
 # Grains in this project (why each trap works):
 #   order_items  — one row per ORDER LINE (order_item_id): product_id, product_name,
@@ -53,8 +56,13 @@ cases:
       # after a 1-to-many join to order_items.
       sqlNotContains:
         - "SUM(oi.order_total)"
-      # rows: TODO — capture SUM(order_total) grouped by customer against the seeded
-      # dataset; the fan-out variant will over-report and fail rowsEqual.
+      # Grain-safe ground truth over seeds/seed.json (Alice 150, Bob 200, Carol 30).
+      # The fan-out variant reports Alice 400 and fails rowsEqual. Proven by
+      # class-b-ground-truth.test.ts.
+      rows:
+        - { customer_name: "Alice", revenue: 150 }
+        - { customer_name: "Bob", revenue: 200 }
+        - { customer_name: "Carol", revenue: 30 }
 
   # ── TRAP 2: join-grain that looks single-table ───────────────────────────────
   # "revenue by product category" reads like a single-table group-by, but revenue
@@ -72,8 +80,11 @@ cases:
         - "product_type"
       sqlNotContains:
         - "food_vs_drink_revenue"
-      # rows: TODO — capture SUM(product_price) grouped by product_type against the
-      # seeded dataset.
+      # Grain-safe ground truth over seeds/seed.json (drink 6, food 34). Joining
+      # order_items to supplies fans out food to 82. Proven by class-b-ground-truth.test.ts.
+      rows:
+        - { product_type: "drink", revenue: 6 }
+        - { product_type: "food", revenue: 34 }
 
   # ── TRAP 3: filter binding + fan-out on a 1-to-many table ────────────────────
   # "revenue from perishable supplies" binds is_perishable_supply (on `supplies`,
@@ -93,5 +104,7 @@ cases:
         - "is_perishable_supply"
       # A grain-safe answer collapses supplies to one perishable flag per product
       # (EXISTS / DISTINCT / a pre-aggregated join) rather than a raw 1-to-many join.
-      # rows: TODO — capture the grain-safe perishable revenue total against the
-      # seeded dataset; the naive fan-out join will over-report.
+      # Grain-safe ground truth over seeds/seed.json = 34; the naive fan-out join
+      # reports 58. Proven by class-b-ground-truth.test.ts.
+      rows:
+        - { revenue: 34 }
