@@ -655,7 +655,14 @@ export async function ensureMetadataCatalogFresh(
         fingerprint: snapshot.fingerprint,
       };
     }
-    catalog.rebuild(snapshot);
+    // W3.4 — incremental reindex when prior state exists (only re-tokenizes changed
+    // sources' FTS); `force` does a clean full rebuild. Proven equal to a full
+    // rebuild by incremental-reindex.test.ts.
+    if (options.force) {
+      catalog.rebuild(snapshot);
+    } else {
+      catalog.rebuildIncremental(snapshot);
+    }
     return {
       path: defaultMetadataPath(projectRoot),
       refreshed: true,
@@ -1308,6 +1315,124 @@ export class MetadataCatalog {
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
     });
     txn();
+  }
+
+  /**
+   * Incremental reindex (W3.4). Only re-inserts objects + FTS rows for sources
+   * whose per-source fingerprint changed (or vanished); unchanged sources' rows are
+   * left in place (skipping the expensive FTS re-tokenization at scale). Edges,
+   * diagnostics, domain shards, and sourceless objects are always rebuilt because
+   * they cross source boundaries. Provably equal to a full rebuild for the semantic
+   * content (object keys/types/names/domains/payloads + FTS + edges); only the
+   * `updated_at`/`built_at` timestamps of untouched rows differ. Falls back to a
+   * full rebuild when there is no prior fingerprint state.
+   */
+  rebuildIncremental(snapshot: MetadataSnapshot): { mode: 'full' | 'incremental'; changedSources: number } {
+    const stored = new Map<string, string>();
+    for (const row of this.db.prepare('SELECT source_path, fingerprint FROM metadata_source_fingerprints').all() as Array<{ source_path: string; fingerprint: string }>) {
+      stored.set(row.source_path, row.fingerprint);
+    }
+    if (stored.size === 0) {
+      this.rebuild(snapshot);
+      return { mode: 'full', changedSources: 0 };
+    }
+
+    const now = new Date().toISOString();
+    const incoming = buildSourceFingerprints(snapshot.objects, now);
+    const incomingSources = new Set(incoming.map((f) => f.sourcePath));
+    const changedSources = new Set<string>();
+    for (const fingerprint of incoming) {
+      if (stored.get(fingerprint.sourcePath) !== fingerprint.fingerprint) changedSources.add(fingerprint.sourcePath);
+    }
+    const removedSources = [...stored.keys()].filter((source) => !incomingSources.has(source));
+    const sourceOf = (object: MetadataObject): string | null => object.sourcePath ?? object.sourceSystem ?? null;
+    const domainShards = buildDomainShards(snapshot.objects, now);
+
+    const insertObject = this.db.prepare(`
+      INSERT INTO metadata_objects (
+        object_key, object_type, name, full_name, domain, owner, status,
+        description, source_path, source_system, payload_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const insertFts = this.db.prepare(`
+      INSERT INTO metadata_fts (object_key, name, full_name, description, domain, owner, payload)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const insertEdge = this.db.prepare(`
+      INSERT OR IGNORE INTO metadata_edges (edge_type, from_key, to_key, confidence, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`);
+    const insertDiagnostic = this.db.prepare(`
+      INSERT INTO metadata_diagnostics (id, kind, severity, message, object_key, file_path, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const insertSourceFingerprint = this.db.prepare(`
+      INSERT OR REPLACE INTO metadata_source_fingerprints (source_path, fingerprint, object_count, updated_at)
+      VALUES (?, ?, ?, ?)`);
+    const insertDomainShard = this.db.prepare(`
+      INSERT OR REPLACE INTO metadata_domain_shards (
+        domain, object_count, block_count, certified_block_count,
+        semantic_metric_count, dbt_object_count, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const setState = this.db.prepare('INSERT OR REPLACE INTO metadata_state (key, value) VALUES (?, ?)');
+    const deleteFtsForSource = this.db.prepare('DELETE FROM metadata_fts WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?)');
+    const deleteObjectsForSource = this.db.prepare('DELETE FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?');
+
+    const txn = this.db.transaction(() => {
+      // Drop changed + removed sources' rows, and ALL sourceless rows (never
+      // fingerprinted, so always refreshed).
+      for (const source of [...changedSources, ...removedSources]) {
+        deleteFtsForSource.run(source);
+        deleteObjectsForSource.run(source);
+      }
+      this.db.prepare('DELETE FROM metadata_fts WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE source_path IS NULL AND source_system IS NULL)').run();
+      this.db.prepare('DELETE FROM metadata_objects WHERE source_path IS NULL AND source_system IS NULL').run();
+
+      // Re-insert only objects from changed sources or sourceless; unchanged
+      // sources' rows are left untouched.
+      for (const object of snapshot.objects) {
+        const source = sourceOf(object);
+        if (source !== null && !changedSources.has(source)) continue;
+        const payload = object.payload ?? {};
+        insertObject.run(
+          object.objectKey, object.objectType, object.name, object.fullName ?? null,
+          object.domain ?? null, object.owner ?? null, object.status ?? null,
+          object.description ?? null, object.sourcePath ?? null, object.sourceSystem ?? null,
+          JSON.stringify(payload), object.updatedAt ?? now,
+        );
+        insertFts.run(object.objectKey, object.name, object.fullName ?? '', object.description ?? '', object.domain ?? '', object.owner ?? '', JSON.stringify(payload));
+      }
+
+      // Cross-source tables: rebuild fully.
+      this.db.prepare('DELETE FROM metadata_edges').run();
+      for (const edge of snapshot.edges) {
+        insertEdge.run(edge.edgeType, edge.fromKey, edge.toKey, edge.confidence ?? 1, JSON.stringify(edge.payload ?? {}), now);
+      }
+      this.db.prepare('DELETE FROM metadata_diagnostics').run();
+      for (const diagnostic of snapshot.diagnostics) {
+        insertDiagnostic.run(diagnosticId(diagnostic), diagnostic.kind, diagnostic.severity, diagnostic.message, diagnostic.objectKey ?? null, diagnostic.filePath ?? null, now);
+      }
+      this.db.prepare('DELETE FROM metadata_domain_shards').run();
+      for (const shard of domainShards) {
+        insertDomainShard.run(shard.domain, shard.objectCount, shard.blockCount, shard.certifiedBlockCount, shard.semanticMetricCount, shard.dbtObjectCount, shard.updatedAt);
+      }
+
+      for (const source of removedSources) {
+        this.db.prepare('DELETE FROM metadata_source_fingerprints WHERE source_path = ?').run(source);
+      }
+      for (const fingerprint of incoming) {
+        insertSourceFingerprint.run(fingerprint.sourcePath, fingerprint.fingerprint, fingerprint.objectCount, fingerprint.updatedAt);
+      }
+
+      setState.run('built_at', now);
+      setState.run('fingerprint', snapshot.fingerprint);
+      setState.run('project_root', snapshot.projectRoot);
+      setState.run('object_count', String(snapshot.objects.length));
+      setState.run('edge_count', String(snapshot.edges.length));
+      setState.run('source_fingerprint_count', String(incoming.length));
+      setState.run('domain_shard_count', String(domainShards.length));
+      setState.run('diagnostics_json', JSON.stringify(snapshot.diagnostics));
+      setState.run('compile_conflicts_json', JSON.stringify(snapshot.compileConflicts ?? []));
+      setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
+    });
+    txn();
+    return { mode: 'incremental', changedSources: changedSources.size };
   }
 
   searchObjects(options: {
