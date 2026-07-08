@@ -136,6 +136,42 @@ describe('buildGrainLedger (W1.3)', () => {
     expect(ledger.has('order_product_bridge')).toBe(false);
   });
 
+  it('reads single-column candidate/business keys from a DataLex entity (W5.2)', () => {
+    const entity: MetadataObject = {
+      objectKey: 'datalex:entity:sales.Customer',
+      objectType: 'datalex_entity',
+      name: 'Customer',
+      fullName: 'sales.Customer',
+      status: 'contract_evidence',
+      payload: {
+        binding: { ref: 'analytics.dim_customers' },
+        candidateKeys: ['customer_id'],
+        businessKeys: ['email'],
+        fields: [{ name: 'customer_id' }, { name: 'email' }],
+      },
+    } as MetadataObject;
+    const ledger = buildGrainLedger([entity]);
+    expect(ledger.get('dim_customers')?.uniqueKeys.has('customer_id')).toBe(true);
+    expect(ledger.get('dim_customers')?.uniqueKeys.has('email')).toBe(true);
+  });
+
+  it('skips composite candidate keys expressed as a non-atomic token (W5.2)', () => {
+    const entity: MetadataObject = {
+      objectKey: 'datalex:entity:sales.Bridge2',
+      objectType: 'datalex_entity',
+      name: 'Bridge2',
+      fullName: 'sales.Bridge2',
+      status: 'contract_evidence',
+      payload: {
+        binding: { ref: 'analytics.bridge2' },
+        candidateKeys: ['order_id, product_id'], // composite → not single-column unique
+        fields: [],
+      },
+    } as MetadataObject;
+    const ledger = buildGrainLedger([entity]);
+    expect(ledger.has('bridge2')).toBe(false);
+  });
+
   it('reads unique keys from a dbt model uniqueColumns payload (W5.3)', () => {
     const model: MetadataObject = {
       objectKey: 'dbt:model:fct_orders',
