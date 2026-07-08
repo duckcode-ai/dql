@@ -662,6 +662,15 @@ function currentActionLabel(events: AgentRunEvent[]): string {
  * number. Returns null on the fast paths, where no explanation is needed.
  */
 function slowReasonFor(thinkingMode: AgentThinkingMode | undefined, events: AgentRunEvent[]): string | null {
+  // Repair / escalation are the most common "why is this taking so long" cases —
+  // the first query hit an error and is being regenerated. Say so plainly instead
+  // of leaving the technical "repair attempt N" line to carry the whole story.
+  if (events.some((event) => event.type === 'repair.attempted')) {
+    return 'The first query hit an error — rewriting it and trying again to get the numbers right.';
+  }
+  if (events.some((event) => event.type === 'escalated')) {
+    return 'Switching to a deeper approach for a more reliable answer.';
+  }
   if (latestRoute(events) === 'research') return 'Deep investigation — slower by design.';
   if (thinkingMode === 'high') return 'Thorough mode — cross-checking the number takes a little longer.';
   return null;

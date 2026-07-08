@@ -46,9 +46,10 @@ export function ThinkingModeControl({ t, value, onChange }: {
 
   const active = THINKING_OPTIONS.find((option) => option.mode === value) ?? THINKING_OPTIONS[0];
   const modelLabel = provider ? [provider.label, provider.model].filter(Boolean).join(' · ') : null;
-  // Show the thinking selector unless the active model has no reasoning surface —
-  // matching how the settings page gates its reasoning-effort control.
-  const showThinking = provider ? provider.supportsReasoningEffort !== false : true;
+  // Always show the selector: even when the active model has no reasoning-token
+  // surface (e.g. a subscription CLI or Ollama), the choice still controls the
+  // engine's verification DEPTH (whether the self-consistency vote runs), which is
+  // provider-agnostic. Gating on `supportsReasoningEffort` wrongly hid it entirely.
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -59,8 +60,7 @@ export function ThinkingModeControl({ t, value, onChange }: {
         </span>
       ) : null}
 
-      {showThinking ? (
-        <div ref={rootRef} style={{ position: 'relative' }}>
+      <div ref={rootRef} style={{ position: 'relative' }}>
           <button
             type="button"
             onClick={() => setOpen((current) => !current)}
@@ -95,7 +95,6 @@ export function ThinkingModeControl({ t, value, onChange }: {
             </div>
           ) : null}
         </div>
-      ) : null}
     </div>
   );
 }
