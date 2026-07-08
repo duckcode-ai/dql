@@ -91,6 +91,8 @@ import {
   proposePlan,
   recordCorrectionTrace,
   emitCorrectionEvalCase,
+  mineJoinPatterns,
+  type JoinPatternCandidate,
   reviewHint,
   AgentRunEngine,
   FileAgentRunStore,
@@ -8951,6 +8953,8 @@ export interface SemanticCompostingChangesetResult {
     minSupport: number;
   };
   candidates: SemanticCompostingMetricCandidate[];
+  /** Recurring join shapes across certified blocks (composting v2, W4.4). */
+  joinCandidates: JoinPatternCandidate[];
   prBody: string;
 }
 
@@ -9042,6 +9046,7 @@ export function buildSemanticCompostingChangeset(
         minSupport: Math.max(2, Math.floor(options.minSupport ?? 2)),
       },
       candidates: [],
+      joinCandidates: [],
       prBody: '',
     };
   }
@@ -9111,6 +9116,11 @@ export function buildSemanticCompostingChangeset(
     .filter((candidate): candidate is SemanticCompostingMetricCandidate => Boolean(candidate))
     .slice(0, limit);
   const donorBlocksUsed = new Set(candidates.flatMap((candidate) => candidate.donorBlocks.map((donor) => donor.path))).size;
+  // Composting v2 (W4.4) — recurring join shapes across certified blocks.
+  const joinCandidates = mineJoinPatterns(
+    certifiedBlocks.map((block) => ({ name: block.name, sql: block.sql })),
+    minSupport,
+  ).slice(0, limit);
 
   return {
     ready: true,
@@ -9123,6 +9133,7 @@ export function buildSemanticCompostingChangeset(
       minSupport,
     },
     candidates,
+    joinCandidates,
     prBody: renderCompostingPrBody(candidates),
   };
 }

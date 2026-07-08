@@ -58,6 +58,7 @@ export type {
   SelectRelevantSkillsOptions,
 } from "./skills/loader.js";
 export { seedDefaultSkills } from "./skills/defaults.js";
+export { seedDomainSkills, buildDomainReferenceSkills } from "./skills/domain-skills.js";
 export type {
   SeedDefaultSkillsOptions,
   SeedDefaultSkillsResult,
@@ -522,6 +523,7 @@ export type {
   ReflectionFix,
 } from "./propose/index.js";
 export { reflectAndReviseBlock } from "./propose/index.js";
+export { mineJoinPatterns, type JoinPatternCandidate } from "./propose/join-mining.js";
 export type {
   BuildLocalContextPackRequest,
   CertifiedFitConfirmation,

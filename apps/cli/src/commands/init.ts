@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
-import { resolveLocalOwner, seedDefaultSkills } from '@duckcodeailabs/dql-agent';
+import { resolveLocalOwner, seedDefaultSkills, seedDomainSkills } from '@duckcodeailabs/dql-agent';
+import { buildManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { performSemanticImport } from '../semantic-import.js';
 import { runNotebook } from './notebook.js';
@@ -115,6 +116,12 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   let seededSkills = 0;
   try {
     seededSkills = seedDefaultSkills(targetDir).created.length;
+    // W4.5 — also draft one editable reference skill per domain from the manifest.
+    try {
+      seededSkills += seedDomainSkills(targetDir, buildManifest({ projectRoot: targetDir })).created.length;
+    } catch {
+      // Domain skills need a compilable manifest; best-effort like the starters.
+    }
   } catch {
     // Skill seeding is best-effort; never fail `dql init` over it.
   }
