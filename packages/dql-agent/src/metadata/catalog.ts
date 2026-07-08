@@ -5296,6 +5296,35 @@ function safeJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+/**
+ * W3.2 — domain-affinity ranking boost for MULTI-DOMAIN catalogs. At scale
+ * (thousands of models across domains), a question about one domain can be crowded
+ * out of the top-k by lexically-similar objects from other domains. This infers the
+ * dominant domain from the highest-scoring candidates and gives same-domain objects
+ * a small additive bonus. It is RECALL-PRESERVING — it only reorders; every
+ * candidate stays in the ranking, and the bonus (10% of the top score) is small
+ * enough that a much stronger cross-domain signal still wins. No-op for single-domain
+ * catalogs (fewer than 2 domains carry positive score).
+ */
+export function applyDomainAffinityBoost(
+  scored: Array<{ row: MetadataObject; score: number }>,
+): string | undefined {
+  const domainScore = new Map<string, number>();
+  for (const item of scored) {
+    const domain = item.row.domain;
+    if (domain && item.score > 0) domainScore.set(domain, (domainScore.get(domain) ?? 0) + item.score);
+  }
+  if (domainScore.size < 2) return undefined;
+  const [dominant] = [...domainScore.entries()].sort((a, b) => b[1] - a[1])[0];
+  const maxScore = Math.max(0, ...scored.map((item) => item.score));
+  const bonus = Number((0.1 * maxScore).toFixed(3));
+  if (bonus <= 0) return undefined;
+  for (const item of scored) {
+    if (item.row.domain === dominant) item.score = Number((item.score + bonus).toFixed(3));
+  }
+  return dominant;
+}
+
 function rankMetadataObjects(args: {
   rows: MetadataObject[];
   question: string;
@@ -5307,19 +5336,20 @@ function rankMetadataObjects(args: {
   rejected: LocalContextPack['retrievalDiagnostics']['topRejected'];
 } {
   const terms = tokenize(args.question).slice(0, 12);
-  const ranked = mergeObjects(args.rows)
-    .map((row) => {
-      const baseScore = scoreMetadataObject(row, terms);
-      const planScore = args.questionPlan ? scoreMetadataObjectWithAnalysisPlan(row, args.questionPlan) : { score: 0, reasons: [] };
-      const score = Number((baseScore + planScore.score).toFixed(3));
-      return {
-        row,
-        rank: 0,
-        score,
-        reason: selectionReason(row, score, planScore.reasons),
-        priorityTier: priorityTier(row),
-      };
-    })
+  const scored = mergeObjects(args.rows).map((row) => {
+    const baseScore = scoreMetadataObject(row, terms);
+    const planScore = args.questionPlan ? scoreMetadataObjectWithAnalysisPlan(row, args.questionPlan) : { score: 0, reasons: [] };
+    const score = Number((baseScore + planScore.score).toFixed(3));
+    return {
+      row,
+      rank: 0,
+      score,
+      reason: selectionReason(row, score, planScore.reasons),
+      priorityTier: priorityTier(row),
+    };
+  });
+  applyDomainAffinityBoost(scored);
+  const ranked = scored
     .sort((a, b) => b.score - a.score || objectPriority(a.row) - objectPriority(b.row) || a.row.name.localeCompare(b.row.name))
     .map((item, index) => ({ ...item, rank: index + 1 }));
   const selectedRanked = selectRankedMetadataObjects(ranked, args.limit);
