@@ -170,6 +170,35 @@ export class OpenAIProvider implements AgentProvider {
           output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
           isError: true,
         });
+        // Graceful final turn: ask the model to answer NOW from what the prior tool
+        // calls already returned — with `tools`/`tool_choice` OMITTED so it cannot
+        // request another tool and the loop is guaranteed to terminate.
+        chatMessages.push({
+          role: 'user',
+          content: 'Tool budget reached — do not call any more tools. Answer now using only the information the tool calls above already returned, following the required output format.',
+        });
+        try {
+          const finalBody: Record<string, unknown> = {
+            model,
+            messages: chatMessages,
+            ...openaiReasoning(model, options),
+            [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: completionTokenBudget,
+            // tools + tool_choice intentionally omitted — forces a final answer.
+          };
+          if (includeTemperature) finalBody.temperature = options.temperature ?? 0.2;
+          const finalRes = await fetch(`${this.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(finalBody),
+            signal: options.signal,
+          });
+          if (finalRes.ok) {
+            const finalMessage = extractOpenAIChatMessage(await finalRes.json());
+            if (finalMessage.content?.trim()) return finalMessage.content;
+          }
+        } catch {
+          // Fall through to the legacy behavior on any final-turn failure.
+        }
         return lastText || JSON.stringify({
           summary: `Tool-call budget exhausted after ${toolCallsUsed} call(s).`,
         });
