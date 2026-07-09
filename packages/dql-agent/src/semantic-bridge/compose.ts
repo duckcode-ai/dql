@@ -86,22 +86,41 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
     return tokens.length > 0 && !tokens.every((token) => consumed.has(token));
   });
   if (loadBearing.length > 0) return undefined;
-  const orderBy = input.questionPlan.requestedShape.topN
-    ? [{ name: primaryMetric.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
-    : undefined;
   const limit = input.questionPlan.requestedShape.topN?.n;
-  return buildSemanticBridgeResult({
-    semanticLayer: input.semanticLayer,
-    question: input.question,
-    metrics,
-    dimensions,
-    filters,
-    timeDimension,
-    orderBy,
-    limit,
-    driver: input.driver,
-    tableMapping: input.tableMapping,
-  });
+  const buildFor = (candidateMetrics: MetricDefinition[]): SemanticBridgeQueryResult | undefined => {
+    const primary = candidateMetrics[0];
+    if (!primary) return undefined;
+    const orderBy = input.questionPlan.requestedShape.topN
+      ? [{ name: primary.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
+      : undefined;
+    return buildSemanticBridgeResult({
+      semanticLayer: input.semanticLayer,
+      question: input.question,
+      metrics: candidateMetrics,
+      dimensions,
+      filters,
+      timeDimension,
+      orderBy,
+      limit,
+      driver: input.driver,
+      tableMapping: input.tableMapping,
+    });
+  };
+
+  const primary = buildFor(metrics);
+  if (primary || dimensions.length === 0) return primary;
+  // Grain-aware disambiguation: the chosen metric could not compose with the
+  // requested breakdown (wrong grain — e.g. an all-orders `total_revenue` asked
+  // "by product", when a product-grain `product_revenue` exists). Retry with each
+  // OTHER family/concept-matching metric as the sole primary until one whose grain
+  // actually joins the requested dimensions composes. This is what makes "revenue
+  // by product" land on product_revenue instead of falling to raw generation.
+  const tried = new Set(metrics.map((metric) => metric.name));
+  for (const alternative of alternativePrimaryMetrics(input, tried)) {
+    const result = buildFor([alternative]);
+    if (result) return result;
+  }
+  return undefined;
 }
 
 /** A validated member selection, e.g. from an LLM emitting the query_semantic_model contract. */
@@ -267,6 +286,27 @@ function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryI
     .filter((candidate) => candidate.score > 0)
     .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))
     .slice(0, 1)
+    .map((candidate) => candidate.metric);
+}
+
+/**
+ * Family/concept-matching metrics NOT already tried as primary, ranked by concept
+ * score, for the grain-aware disambiguation retry. When several metrics share a
+ * measure family ("revenue"), the first-picked one may sit at the wrong grain for
+ * the requested breakdown; these are the alternatives to try, best concept-match
+ * first, so the compose can land on the metric whose grain actually joins the
+ * requested dimensions. Bounded to a handful so the retry stays cheap.
+ */
+function alternativePrimaryMetrics(input: ComposeSemanticQueryInput, tried: Set<string>): MetricDefinition[] {
+  const concepts = metricSelectionConcepts(input.questionPlan);
+  const conceptTokens = new Set(concepts.flatMap((concept) => tokenize(concept)));
+  if (conceptTokens.size === 0) return [];
+  return input.semanticLayer.listMetrics()
+    .filter((metric) => !tried.has(metric.name))
+    .map((metric) => ({ metric, score: scoreMetric(metric, conceptTokens) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))
+    .slice(0, 6)
     .map((candidate) => candidate.metric);
 }
 
