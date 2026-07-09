@@ -1438,10 +1438,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     },
     sql_cell: async ({ request, routeDecision, attempt, repairHint }) => {
-      const result = await buildAgentPromptArtifact(request, 'cell', { attempt, repairHint });
+      // P4: route Notebook SQL-cell generation through the SAME tool-rich governed
+      // pipeline Ask AI uses (schema-discovery tools P3 + declined-retry P1 + budget
+      // recovery P2), instead of the tool-less buildFromPrompt path. A SQL cell only
+      // needs the SQL, which the governed answer produces directly as proposedSql.
+      const governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt: attempt ?? 0, repairHint });
+      const sql = governedAnswer.proposedSql ?? governedAnswer.sql ?? '';
+      const explanation = governedAnswer.answer ?? governedAnswer.text;
+      const hasSql = Boolean(sql.trim());
+      // Preserve the BuildCellResult shape the notebook UI already consumes.
+      const result = {
+        target: 'cell' as const,
+        sql,
+        explanation,
+        ...(governedAnswer.appliedSkills ? { appliedSkills: governedAnswer.appliedSkills } : {}),
+      };
       return {
-        summary: 'Created a review-required SQL cell draft.',
-        answer: result.target === 'cell' ? result.explanation : undefined,
+        summary: hasSql
+          ? 'Created a review-required SQL cell draft.'
+          : (explanation || 'No SQL could be generated for this request.'),
+        answer: explanation,
         artifacts: [agentRunArtifact('sql_cell', 'Generated SQL cell', result)],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to SQL cell generation.'),
@@ -1521,6 +1537,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ],
         };
       }
+      // P4 (partial): a direct "build a block from a cold prompt" still uses the
+      // tool-less buildFromPrompt path. Unlike a SQL cell, a block needs SQL→DQL-block
+      // CONSTRUCTION (name, outputs, grain, certifier verdict, reflection), which
+      // buildFromPrompt owns — routing this through answer() cleanly requires driving
+      // that construction from the tool-rich pipeline (thread captureGeneratedDraft
+      // through the governed answer), a larger change deferred to its own session.
+      // NOTE: the two-step "ask a question → Create DQL draft" flow ALREADY routes
+      // block creation through the tool-rich governed pipeline via the carried-artifact
+      // branch above, so only this cold-start direct-build case remains tool-less.
       const result = await buildAgentPromptArtifact(request, 'block', { attempt, repairHint });
       const ready = result.target === 'block' ? result.certifierVerdict.ready : false;
       return {
