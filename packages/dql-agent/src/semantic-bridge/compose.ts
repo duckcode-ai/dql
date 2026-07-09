@@ -397,7 +397,7 @@ function selectDimensions(
  */
 const DIMENSION_SYNONYMS: string[][] = [
   ['product', 'item', 'sku', 'article', 'goods'],
-  ['region', 'geo', 'geography', 'area', 'market', 'territory', 'zone', 'locale'],
+  ['region', 'geo', 'geography', 'area', 'market', 'territory', 'zone', 'locale', 'location', 'site'],
   ['country', 'nation'],
   ['state', 'province'],
   ['city', 'metro', 'municipality'],
