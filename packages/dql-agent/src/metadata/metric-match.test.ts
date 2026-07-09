@@ -103,6 +103,22 @@ describe('matchSemanticMetric (spec 17, part C)', () => {
     expect(match!.family).toBe('revenue');
   });
 
+  it('advances a strong description match to compiler validation even when the metric name differs', async () => {
+    const match = await matchSemanticMetric('customer lifetime contribution', [
+      metric('ltv_adjusted', 'Customer lifetime contribution after refunds'),
+      metric('shipment_velocity', 'Average time to deliver an order'),
+    ]);
+    expect(match?.metric.name).toBe('ltv_adjusted');
+    expect(match?.basis).toBe('description');
+  });
+
+  it('does not promote a weak one-word description overlap', async () => {
+    const match = await matchSemanticMetric('monthly cohort performance', [
+      metric('shipment_velocity', 'Monthly average delivery duration'),
+    ]);
+    expect(match).toBeNull();
+  });
+
   it('returns null for a bare non-measure question (honest no-match)', async () => {
     const match = await matchSemanticMetric('what is this?', jaffleMetrics);
     expect(match).toBeNull();

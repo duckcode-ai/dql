@@ -238,4 +238,17 @@ describe('selectRelevantSkills (spec 16)', () => {
     const forBob = selectRelevantSkills([personal], 'arr revenue', { userId: 'bob@acme.com' });
     expect(forBob.map((s) => s.id)).not.toContain('alice-arr');
   });
+
+  it('uses inferred domains to select the matching domain skill', () => {
+    const finance: Skill = {
+      id: 'finance-review', scope: 'project', domain: 'Finance', description: 'Monthly review',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Executive scorecard.', sourcePath: '',
+    };
+    const sales: Skill = {
+      id: 'sales-review', scope: 'project', domain: 'Sales', description: 'Monthly review',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Executive scorecard.', sourcePath: '',
+    };
+    const selected = selectRelevantSkills([sales, finance], 'monthly executive scorecard', { domains: ['Finance'] });
+    expect(selected[0]?.id).toBe('finance-review');
+  });
 });

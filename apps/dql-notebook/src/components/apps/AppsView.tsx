@@ -53,7 +53,7 @@ type AppSurface = 'library' | 'create' | 'workspace';
 type AppExperience = AppWorkspaceExperience;
 type BuilderMode = 'ai' | 'classic';
 type AppSection = AppWorkspaceSection;
-type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav' | 'review';
+type LibraryFilter = 'all' | 'mine' | 'shared' | 'fav';
 type DashboardFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number];
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type AppAskDecision = Extract<AppAskResponse, { ok: true }>['decision'];
@@ -132,12 +132,7 @@ const AGENT_SKILLS: AgentSkillCard[] = [
   {
     id: 'draft',
     title: 'Draft gaps',
-    description: 'Mark missing sections for review instead of hiding them.',
-  },
-  {
-    id: 'review',
-    title: 'Route review',
-    description: 'Keep generated parts visibly reviewable.',
+    description: 'Keep missing sections visible as draft work instead of hiding them.',
   },
 ];
 
@@ -146,7 +141,6 @@ const FILTER_LABELS: Record<LibraryFilter, string> = {
   mine: 'Mine',
   shared: 'Shared',
   fav: 'Favourites',
-  review: 'Review',
 };
 
 function normalizeAppTheme(themeMode: string): 'obsidian' | 'paper' | 'white' {
@@ -295,7 +289,6 @@ export function AppsView(): JSX.Element {
     return state.apps.filter((app) => {
       if (libraryFilter === 'mine' && (app.storage ?? 'shared') !== 'mine') return false;
       if (libraryFilter === 'shared' && (app.storage ?? 'shared') !== 'shared') return false;
-      if (libraryFilter === 'review' && app.lifecycle !== 'review') return false;
       if (libraryFilter === 'fav' && !favorites.has(app.id)) return false;
       if (!needle) return true;
       const haystack = [
@@ -712,7 +705,7 @@ function AppLibrarySurface({
 
       <div className="dql-apps-libbar">
         <div className="dql-apps-filter-tabs">
-          {(['all', 'mine', 'shared', 'fav', 'review'] as LibraryFilter[]).map((value) => (
+          {(['all', 'mine', 'shared', 'fav'] as LibraryFilter[]).map((value) => (
             <button key={value} className={filter === value ? 'on' : ''} onClick={() => onFilter(value)}>
               {FILTER_LABELS[value]} <span>{counts[value]}</span>
             </button>
@@ -3997,7 +3990,6 @@ function libraryCounts(apps: AppSummary[], favorites: Set<string>): Record<Libra
     mine: apps.filter((app) => app.storage === 'mine').length,
     shared: apps.filter((app) => (app.storage ?? 'shared') === 'shared').length,
     fav: favorites.size,
-    review: apps.filter((app) => app.lifecycle === 'review').length,
   };
 }
 

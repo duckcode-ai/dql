@@ -271,7 +271,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
           }
         : undefined,
     }).catch(() => undefined);
-    const answerLoopTools = buildAnswerLoopTools(projectRoot, { serverUrl: runtimeBase });
+    const answerLoopTools = buildAnswerLoopTools(projectRoot);
     const result = await answer({
       question,
       provider,
@@ -706,7 +706,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     ?? 'http://127.0.0.1:3474';
   const semanticLayer = loadAgentSemanticLayer(projectRoot);
   const expandGroundingContext = createGroundingContextExpander(projectRoot);
-  const answerLoopTools = buildAnswerLoopTools(projectRoot, { serverUrl: runtimeBase });
+  const answerLoopTools = buildAnswerLoopTools(projectRoot);
   const schemaContext = execute
     ? await fetchRuntimeSchemaContext(runtimeBase)
     : [];

@@ -85,8 +85,8 @@ export function ReadinessPage(): JSX.Element {
 
   useEffect(() => load(), [load]);
 
-  const openReview = useCallback(() => {
-    dispatch({ type: 'SET_MAIN_VIEW', view: 'review' });
+  const openBlockStudio = useCallback(() => {
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' });
   }, [dispatch]);
 
   const toggleSlug = useCallback((slug: string) => {
@@ -112,7 +112,7 @@ export function ReadinessPage(): JSX.Element {
   }, []);
 
   // Approve & Generate: materialize drafts for ONLY the approved scope, then
-  // route into the existing review/certify queue. Never certifies.
+  // open the first saved block directly. OSS has no separate review queue.
   const approveAndGenerate = useCallback(async () => {
     const slugs = [...selected];
     if (slugs.length === 0) return;
@@ -124,8 +124,13 @@ export function ReadinessPage(): JSX.Element {
       setGenerateError(result.reason ?? 'Could not generate drafts.');
       return;
     }
-    openReview();
-  }, [selected, openReview]);
+    const firstSaved = result.proposals.find((proposal) => proposal.path);
+    if (firstSaved?.path) {
+      void openInBlockStudio(firstSaved.path, firstSaved.slug);
+    } else {
+      openBlockStudio();
+    }
+  }, [selected, openBlockStudio, openInBlockStudio]);
 
   const summary = readiness?.summary;
   const plan = readiness?.ready ? readiness.plan : null;
@@ -278,8 +283,8 @@ export function ReadinessPage(): JSX.Element {
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <button type="button" onClick={openReview} style={reviewQueueBtnStyle}>
-                Open review queue <ArrowRight size={13} />
+              <button type="button" onClick={openBlockStudio} style={reviewQueueBtnStyle}>
+                Open Block Studio <ArrowRight size={13} />
               </button>
             </div>
           </>

@@ -50,7 +50,7 @@ describe('cascade budgets', () => {
       buildAnalysisQuestionPlan('What is the median order value?'),
       'ad_hoc_analysis',
     )).toMatchObject({
-      maxToolCalls: 3,
+      maxToolCalls: 2,
       effortClass: 'lookup',
     });
 
@@ -58,7 +58,7 @@ describe('cascade budgets', () => {
       buildAnalysisQuestionPlan('What is the order count by region and product category?'),
       'ad_hoc_analysis',
     )).toMatchObject({
-      maxToolCalls: 10,
+      maxToolCalls: 4,
       effortClass: 'multi_entity',
     });
 
@@ -68,7 +68,7 @@ describe('cascade budgets', () => {
       buildAnalysisQuestionPlan('Research why margin dropped in Q2'),
       'diagnose_change',
     )).toMatchObject({
-      maxToolCalls: 15,
+      maxToolCalls: 8,
       effortClass: 'deep_research',
     });
   });

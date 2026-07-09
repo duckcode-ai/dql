@@ -94,6 +94,29 @@ describe("AgentRunEngine", () => {
     expect(store.get("run-certified")?.route).toBe("certified_answer");
   });
 
+  it("treats a compiler-owned semantic answer as terminal governed output", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-semantic-route",
+      now: fixedClock(),
+      planner: fixedRoutePlanner("semantic_answer"),
+      executors: {
+        semantic_answer: () => ({
+          answer: "Revenue was $2.8M by region.",
+          answerTier: "semantic_metric",
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "revenue by region" }, () => {});
+    expect(run).toMatchObject({
+      route: "semantic_answer",
+      status: "completed",
+      trustState: "governed",
+      stopReason: "governed_semantic_answer",
+    });
+    expect(run.artifacts[0]).toMatchObject({ title: "Governed semantic answer", trustState: "governed" });
+  });
+
   it("escalates a shape-failed certified answer to generated_answer", async () => {
     const events: AgentRunEvent[] = [];
     const engine = new AgentRunEngine({

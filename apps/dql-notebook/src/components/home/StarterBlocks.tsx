@@ -140,7 +140,7 @@ export function StarterBlocks({
             New here? Start with blocks DQL built for you
           </div>
           <p style={{ margin: '3px 0 0', fontSize: 12.5, lineHeight: 1.5, color: t.textSecondary }}>
-            A <strong>block</strong> is a reviewed, reusable piece of analytics — one trusted metric or
+            A <strong>block</strong> is a reusable piece of analytics — one trusted metric or
             query your whole team can reuse across answers and Apps. Here are a few important ones DQL
             drafted from your dbt models. Open <em>See details</em> on each to understand exactly what it
             measures and the SQL behind it — then build your own.
@@ -163,11 +163,11 @@ export function StarterBlocks({
           </div>
           <div style={footerStyle(t)}>
             <span style={{ fontSize: 12, color: t.textMuted }}>
-              Got it? Review and certify the ones you trust, or build one from scratch.
+              Open a suggested block to edit it, or build one from scratch.
             </span>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button type="button" onClick={reviewAll} style={primaryBtnStyle(t)}>
-                Review &amp; certify these
+                Open block suggestions
                 <ArrowRight size={14} strokeWidth={2.2} aria-hidden="true" />
               </button>
               <button type="button" onClick={buildOwn} style={ghostBtnStyle(t)}>

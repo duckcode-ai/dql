@@ -12,8 +12,8 @@ import {
   buildAnalysisQuestionPlan,
   buildLocalContextPack,
   contextRetrievalBudgetForQuestion,
+  ensureAgentProjectReady,
   loadSkills,
-  reindexProject,
   type AgentAnswer,
   type AgentDqlArtifactReference,
   type CertifiedFitConfirmation,
@@ -23,6 +23,7 @@ import {
   type AgentProvider,
   type AgentResultPayload,
   type ConversationSnapshot,
+  type LocalContextPack,
 } from '@duckcodeailabs/dql-agent';
 import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
@@ -151,6 +152,61 @@ function createCertifiedFitConfirmation(provider: AgentProvider, signal?: AbortS
   };
 }
 
+/**
+ * Decide whether the answer path needs a live warehouse-schema read up front.
+ * Catalog-backed relations are already present in the context pack and the
+ * generated lane has bounded schema tools for genuine gaps, so eager warehouse
+ * scans are reserved for unresolved filters or an empty retrieved SQL context.
+ */
+function shouldLoadSchemaContext(
+  contextPack: LocalContextPack | undefined,
+  hasSemanticLayer: boolean,
+): boolean {
+  if (!contextPack) return true;
+  const route = contextPack.routeDecision.route;
+  if (route === 'certified' || route === 'clarify' || route === 'conflict') return false;
+  if (contextPack.questionPlan.requestedShape.filters.length > 0) return true;
+
+  const hasSemanticCandidates = hasSemanticLayer && contextPack.objects.some((object) =>
+    object.objectType === 'metric'
+    || object.objectType === 'dimension'
+    || object.objectType === 'measure'
+    || object.objectType === 'semantic_model');
+  if (hasSemanticCandidates) return false;
+
+  return contextPack.allowedSqlContext.relations.length === 0
+    && contextPack.allowedSqlContext.sourceBlockSql.length === 0;
+}
+
+function shouldSearchProjectFiles(contextPack: LocalContextPack | undefined): boolean {
+  if (!contextPack) return true;
+  if (contextPack.routeDecision.route === 'certified') return false;
+  const meaningfulObjects = contextPack.objects.filter((object) =>
+    object.objectType === 'block'
+    || object.objectType === 'metric'
+    || object.objectType === 'semantic_metric'
+    || object.objectType === 'semantic_model'
+    || object.objectType === 'dbt_model');
+  return meaningfulObjects.length < 2
+    || (contextPack.allowedSqlContext.relations.length === 0
+      && contextPack.allowedSqlContext.sourceBlockSql.length === 0);
+}
+
+function renderProjectSourceSearch(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const matches = (value as { matches?: unknown }).matches;
+  if (!Array.isArray(matches) || matches.length === 0) return undefined;
+  const lines = matches.slice(0, 24).flatMap((match) => {
+    if (!match || typeof match !== 'object' || Array.isArray(match)) return [];
+    const record = match as { path?: unknown; line?: unknown; text?: unknown };
+    if (typeof record.path !== 'string' || typeof record.text !== 'string') return [];
+    return [`${record.path}${typeof record.line === 'number' ? `:${record.line}` : ''} — ${record.text}`];
+  });
+  return lines.length > 0
+    ? `Live project source matches (bounded fallback; validate through DQL metadata before use):\n${lines.join('\n')}`
+    : undefined;
+}
+
 function summarizeBlockForFitConfirmation(block: CertifiedFitConfirmationRequest['block']): Record<string, unknown> {
   const payload = block.payload ?? {};
   return {
@@ -253,12 +309,16 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
       }
 
       try {
+        const requestStartedAt = Date.now();
         emit({ kind: 'thinking', text: `Using ${spec.label} through the governed DQL agent.` });
         const kgPath = defaultKgPath(req.projectRoot);
         if (!existsSync(kgPath)) {
           emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from terms, business views, blocks, apps, dashboards, dbt, and semantic metadata.' });
         }
-        await reindexProject(req.projectRoot, { kgPath });
+        const projectStateStartedAt = Date.now();
+        const projectState = await ensureAgentProjectReady(req.projectRoot, { kgPath });
+        const projectStateDurationMs = Date.now() - projectStateStartedAt;
+        emit({ kind: 'thinking', text: projectState.cacheHit ? 'Reused the warm project index.' : 'Refreshed the project index after source changes.' });
 
         const rawQuestion = resolveEffectiveQuestion(req);
         if (!rawQuestion) {
@@ -282,9 +342,6 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             scopeId: req.upstream?.cellId,
             limit: 6,
           });
-          const schemaContext = req.getSchemaContext
-            ? await req.getSchemaContext(question).catch(() => [])
-            : [];
           const skills = loadSkills(req.projectRoot).skills;
           const semanticLayer = loadAgentSemanticLayer(req.projectRoot);
           const questionPlan = buildAnalysisQuestionPlan(question, followUp);
@@ -294,6 +351,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             reasoningEffort: req.reasoningEffort,
           });
           const selectedContext = selectedContextForMetadata(req, question);
+          emit({ kind: 'thinking', text: 'Searching certified blocks, semantic metrics, relevant domains, and skills.' });
+          const contextStartedAt = Date.now();
           const contextPack = await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
@@ -306,21 +365,36 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             // filter-only refinements, re-stamp) the prior turn's context pack.
             priorContextPackId: priorContextPackIdFromSnapshot(conversationSnapshot),
             conversationTopicRelation: conversationSnapshot?.topicRelation,
-            runtimeSchemaSnapshot: schemaContext.length > 0
-              ? {
-                  source: 'agent provider schema context',
-                  tables: schemaContext.map((table) => ({
-                    relation: table.relation,
-                    schema: table.schema,
-                    name: table.name,
-                    description: table.description,
-                    source: table.source,
-                    columns: table.columns,
-                  })),
-                }
-              : undefined,
           })
             .catch(() => undefined);
+          const contextDurationMs = Date.now() - contextStartedAt;
+          const answerLoopTools = buildAnswerLoopTools(req.projectRoot);
+          const sourceSearchTool = answerLoopTools.find((tool) => tool.name === 'search_project_files');
+          const sourceSearchStartedAt = Date.now();
+          const earlySourceSearch = sourceSearchTool && shouldSearchProjectFiles(contextPack)
+            ? await (async () => {
+                emit({ kind: 'thinking', text: 'Checking live project definitions for a missed metric, dimension, or join.' });
+                return sourceSearchTool.run({ query: question, limit: 24 }).catch(() => undefined);
+              })()
+            : undefined;
+          const sourceSearchDurationMs = Date.now() - sourceSearchStartedAt;
+          const extraContext = [
+            renderExtraContext(req, followUp),
+            renderProjectSourceSearch(earlySourceSearch),
+          ].filter((value): value is string => Boolean(value)).join('\n\n') || undefined;
+          // Catalog relations already carry the bounded column context needed by
+          // certified and semantic lanes. Touch the live warehouse only when the
+          // retrieved context proves it is necessary (unresolved filters or no
+          // usable relation). This also passes the prepared pack so the runtime
+          // never builds a second metadata context pack for the same question.
+          const schemaStartedAt = Date.now();
+          if (req.getSchemaContext && shouldLoadSchemaContext(contextPack, Boolean(semanticLayer))) {
+            emit({ kind: 'thinking', text: 'Inspecting the runtime schema needed to ground this answer.' });
+          }
+          const schemaContext = req.getSchemaContext && shouldLoadSchemaContext(contextPack, Boolean(semanticLayer))
+            ? await req.getSchemaContext(question, contextPack).catch(() => [])
+            : [];
+          const schemaDurationMs = Date.now() - schemaStartedAt;
           const selectedBlockHints = shouldUseSelectedBlockHint(req, question, followUp)
             ? extractSelectedBlockHints(req)
             : [];
@@ -328,9 +402,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             ...(followUp?.kind === 'generic' && followUp.sourceBlockName ? [followUp.sourceBlockName] : []),
             ...selectedBlockHints,
           ]));
+          const answerStartedAt = Date.now();
+          emit({ kind: 'thinking', text: 'Resolving the best governed answer path and validating the result.' });
           const result = await answer({
             question,
-            extraContext: renderExtraContext(req, followUp),
+            extraContext,
             provider,
             kg,
             skills,
@@ -349,11 +425,29 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             executeCertifiedBlock: req.executeCertifiedBlock,
             executeGeneratedSql: req.executeGeneratedSql,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot),
-            answerLoopTools: buildAnswerLoopTools(req.projectRoot),
+            answerLoopTools,
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
           });
+          const answerDurationMs = Date.now() - answerStartedAt;
+          result.evidence = result.evidence ?? {
+            route: [], lineage: [], businessContext: [], selectedAssets: [], sourceTables: [], semanticObjects: [], citations: result.citations,
+          };
+          result.evidence.route.unshift({
+            tool: 'prepare_project_state',
+            status: 'checked',
+            label: projectState.cacheHit ? 'Reused warm project index' : 'Refreshed project index',
+            detail: `catalog=${projectState.metadataFingerprint.slice(0, 12)}; schema=${schemaContext.length > 0 ? 'loaded' : 'deferred'}`,
+          });
+          result.evidence.timings = [
+            { phase: 'project_state', durationMs: projectStateDurationMs, detail: projectState.cacheHit ? 'warm index reused' : 'project index refreshed' },
+            { phase: 'context_retrieval', durationMs: contextDurationMs, detail: contextPack ? `objects=${contextPack.objects.length}` : 'catalog unavailable' },
+            { phase: 'source_search', durationMs: sourceSearchDurationMs, detail: earlySourceSearch ? 'bounded live fallback ran' : 'not needed' },
+            { phase: 'runtime_schema', durationMs: schemaDurationMs, detail: schemaContext.length > 0 ? `tables=${schemaContext.length}` : 'deferred' },
+            { phase: 'answer_resolution', durationMs: answerDurationMs, detail: result.route?.tier ?? result.kind },
+            { phase: 'total', durationMs: Date.now() - requestStartedAt },
+          ];
           emit({ kind: 'tool_result', id: 'governed_answer', output: result });
           emit({ kind: 'text', text: formatAgentAnswer(result) });
           if (result.proposedSql) {
@@ -1175,6 +1269,9 @@ export const __test__ = {
   formatCascadeOutcome,
   parseCertifiedFitConfirmation,
   rewriteFollowUpQuestion,
+  shouldLoadSchemaContext,
+  shouldSearchProjectFiles,
+  renderProjectSourceSearch,
 };
 
 const GENERIC_FOLLOW_UP_WORDS = new Set([

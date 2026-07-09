@@ -220,6 +220,7 @@ export class OpenAIProvider implements AgentProvider {
         const args = parseToolArguments(call.argumentsJson);
         let output: unknown;
         let isError = false;
+        const toolStartedAt = Date.now();
         if (!tool) {
           output = { error: `Unknown tool: ${call.name}` };
           isError = true;
@@ -231,7 +232,7 @@ export class OpenAIProvider implements AgentProvider {
             isError = true;
           }
         }
-        options.onToolCall?.({ name: call.name, input: args, output, isError });
+        options.onToolCall?.({ name: call.name, input: args, output, isError, durationMs: Date.now() - toolStartedAt });
         chatMessages.push({
           role: 'tool',
           tool_call_id: call.id,

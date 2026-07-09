@@ -10,10 +10,15 @@ describe('sanitizeFtsQuery (W3.5)', () => {
     expect(sanitizeFtsQuery('revenue', { prefix: true })).toBe('"revenue"*');
   });
 
-  it('returns empty for an all-stop-word question (content-free) by default', () => {
-    // Natural-language search: an all-stop-word query should NOT noise-match every
-    // artifact that mentions "what"/"current". Stays empty without the value fallback.
-    expect(sanitizeFtsQuery('explain this current query')).toBe('');
+  it('retains analytical/schema nouns, dropping only request chatter', () => {
+    // Request verbs ("explain") and fillers ("this") are chatter, but schema/data
+    // nouns ("current", "query") carry retrieval signal and must survive — the old
+    // list dropped all four, sanitizing this to an empty MATCH that found nothing.
+    expect(sanitizeFtsQuery('explain this current query')).toBe('"current" OR "query"');
+  });
+
+  it('returns empty for a truly content-free (all-function-word) question', () => {
+    expect(sanitizeFtsQuery('what is this for')).toBe('');
   });
 
   it('falls back to raw tokens for VALUE lookups (fallbackToRawTokens)', () => {

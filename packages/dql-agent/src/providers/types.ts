@@ -46,8 +46,8 @@ export interface AgentToolDefinition {
 export interface ProviderToolLoopOptions extends ProviderRunOptions {
   /** Hard cap for provider-visible tool calls in this turn. Default 8. */
   maxToolCalls?: number;
-  /** Optional trace hook for tests/UI instrumentation. */
-  onToolCall?: (event: { name: string; input: unknown; output?: unknown; isError?: boolean }) => void;
+  /** Optional trace hook for tests/UI instrumentation. `durationMs` is the tool's wall-clock time. */
+  onToolCall?: (event: { name: string; input: unknown; output?: unknown; isError?: boolean; durationMs?: number }) => void;
 }
 
 export interface AgentProvider {

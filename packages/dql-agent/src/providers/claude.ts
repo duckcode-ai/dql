@@ -253,6 +253,7 @@ export class ClaudeProvider implements AgentProvider {
         const tool = toolMap.get(call.name);
         let output: unknown;
         let isError = false;
+        const toolStartedAt = Date.now();
         if (!tool) {
           output = { error: `Unknown tool: ${call.name}` };
           isError = true;
@@ -264,7 +265,7 @@ export class ClaudeProvider implements AgentProvider {
             isError = true;
           }
         }
-        options.onToolCall?.({ name: call.name, input: call.input ?? {}, output, isError });
+        options.onToolCall?.({ name: call.name, input: call.input ?? {}, output, isError, durationMs: Date.now() - toolStartedAt });
         toolResults.push({
           type: 'tool_result',
           tool_use_id: call.id,

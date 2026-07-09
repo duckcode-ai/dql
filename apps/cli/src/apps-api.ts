@@ -1248,9 +1248,23 @@ export function recommendVisualization(
   if (requestedViz && !isSupportedVizType(requestedViz)) {
     return { ok: false, error: `Unsupported visualization: ${requestedViz}` };
   }
-  const defaultVisualization = requestedViz
-    ? normalizeVizType(requestedViz)
-    : recommendVizType({ columns, rows, prompt, blockChartType: block?.chartType });
+  const requestedVisualization = requestedViz ? normalizeVizType(requestedViz) : undefined;
+  // An explicit component is an authored product contract, so reject an invalid
+  // pairing rather than silently changing it. A model/default visualization is a
+  // preference: validate it against the returned rows before displaying it.
+  if (input.component && requestedVisualization && !componentVizCompatible(input.component, requestedVisualization)) {
+    return {
+      ok: false,
+      error: `${input.component} cannot use ${requestedVisualization}. Choose one of ${allowedVisualizationsForComponent(input.component, requestedVisualization).join(', ')}.`,
+    };
+  }
+  const dataRecommendation = recommendVizType({ columns, rows, prompt, blockChartType: block?.chartType });
+  const defaultVisualization = requestedVisualization && visualizationFitsResult(requestedVisualization, columns, rows)
+    ? requestedVisualization
+    : dataRecommendation;
+  if (requestedVisualization && requestedVisualization !== defaultVisualization) {
+    warnings.push(`Preferred visualization ${requestedVisualization} did not fit the returned result shape; using ${defaultVisualization} instead.`);
+  }
   const component = input.component ?? componentForViz(defaultVisualization, prompt);
   if (!componentVizCompatible(component, defaultVisualization)) {
     return {
@@ -3099,6 +3113,30 @@ function recommendVizType(input: {
   if (measures.length === 1 && dimensions.length === 0) return 'single_value';
   if (dimensions.length > 0 && measures.length > 0) return 'bar';
   return normalizeVizType(input.blockChartType);
+}
+
+/** Whether an AI/default preference can actually be represented by the result. */
+function visualizationFitsResult(
+  viz: DashboardGridItem['viz']['type'],
+  columns: Array<{ name: string; type?: string }>,
+  rows: Array<Record<string, unknown>>,
+): boolean {
+  const measures = columns.filter((column) => isMeasureColumn(column, rows));
+  const dimensions = columns.filter((column) => !isMeasureColumn(column, rows));
+  const hasTime = columns.some((column) => /\b(date|time|week|month|quarter|year|season|period)\b/i.test(column.name));
+  if (viz === 'table' || viz === 'pivot' || viz === 'text' || viz === 'heading') return true;
+  if (rows.length === 0) return false;
+  if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return rows.length === 1 && measures.length >= 1;
+  if (viz === 'line' || viz === 'area') return hasTime && measures.length >= 1;
+  if (viz === 'scatter') return measures.length >= 2;
+  if (viz === 'grouped_bar' || viz === 'stacked_bar') return dimensions.length >= 1 && measures.length >= 2;
+  if (viz === 'pie' || viz === 'donut') return dimensions.length >= 1 && measures.length >= 1 && rows.length >= 2 && rows.length <= 8;
+  if (viz === 'heatmap') return columns.length >= 3 && measures.length >= 1;
+  if (viz === 'histogram') return measures.length >= 1;
+  // Treat a model/default bar as a soft preference on a time series. The data
+  // has an ordered axis, for which the deterministic recommendation is line.
+  if (viz === 'bar') return dimensions.length >= 1 && measures.length >= 1 && !hasTime;
+  return dimensions.length >= 1 && measures.length >= 1;
 }
 
 function isMeasureColumn(column: { name: string; type?: string }, rows: Array<Record<string, unknown>>): boolean {

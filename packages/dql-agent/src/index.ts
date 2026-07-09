@@ -8,8 +8,8 @@
  *   - the providers (Claude/OpenAI/Gemini/Ollama)
  */
 
-import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from "node:fs";
 import { createHash } from "node:crypto";
 import type { DQLManifest } from "@duckcodeailabs/dql-core";
 import {
@@ -205,6 +205,21 @@ export type {
   AiRouteTier,
 } from "./answer-loop.js";
 export { matchSemanticMetric } from "./metadata/metric-match.js";
+export {
+  runAgenticToolLoop,
+  parseTextToolCall,
+  type AgenticToolLoopOptions,
+} from "./agentic/tool-loop.js";
+export {
+  buildSemanticStageTools,
+  type SemanticStageToolsInput,
+} from "./agentic/toolset.js";
+export {
+  deriveAgenticTrust,
+  normalizeSql,
+  type AgenticTrustResult,
+  type CompiledSemanticRecord,
+} from "./agentic/answer-contract.js";
 export {
   composeSemanticQueryForQuestion,
   renderSemanticDqlArtifact,
@@ -724,6 +739,118 @@ export interface ReindexProjectResult {
   metadataFingerprint: string;
   /** Approved hints whose scope targets no longer exist (W4.6); empty when none. */
   staleHints: StaleHintFinding[];
+}
+
+export interface EnsureAgentProjectReadyResult extends ReindexProjectResult {
+  /** True when the existing in-process, versioned project state was reused. */
+  cacheHit: boolean;
+  /** Lightweight source version used to invalidate the warm state. */
+  sourceVersion: string;
+}
+
+interface WarmProjectIndexEntry {
+  sourceVersion: string;
+  promise: Promise<ReindexProjectResult>;
+}
+
+const warmProjectIndexes = new Map<string, WarmProjectIndexEntry>();
+
+/**
+ * Cheap source version for the agent indexes. It intentionally watches compiled
+ * artifacts plus the small mutable skill/hint trees, not the entire dbt repo.
+ * Large source repos are compiled explicitly; `dql compile` changes the manifest
+ * token and invalidates this state without making every question scan the repo.
+ */
+export function agentProjectSourceVersion(projectRoot: string): string {
+  const root = resolve(projectRoot);
+  const tokens: string[] = [];
+  const addPath = (path: string): void => {
+    try {
+      const stat = statSync(path);
+      tokens.push(`${path}:${stat.size}:${stat.mtimeMs}`);
+    } catch {
+      tokens.push(`${path}:missing`);
+    }
+  };
+  for (const relative of [
+    'dql-manifest.json',
+    'dql.config.json',
+    'dql.config.yaml',
+    'dql.config.yml',
+    'datalex-manifest.json',
+    'semantic_manifest.json',
+    join('target', 'manifest.json'),
+    join('target', 'semantic_manifest.json'),
+  ]) addPath(join(root, relative));
+
+  try {
+    const config = loadProjectConfig(root);
+    const dbtManifest = resolveDbtManifestPath(root);
+    if (dbtManifest) addPath(resolve(dbtManifest));
+    const semanticPath = config.semanticLayer?.path;
+    if (semanticPath) addPath(resolve(root, semanticPath));
+  } catch {
+    // The reindex path will surface real configuration errors. Versioning remains
+    // best-effort so a malformed config does not make the cache itself fail.
+  }
+
+  addSmallTreeState(join(root, '.dql', 'skills'), tokens);
+  addSmallTreeState(join(root, '.dql', 'hints'), tokens);
+  return createHash('sha1').update(tokens.sort().join('\n')).digest('hex');
+}
+
+function addSmallTreeState(dir: string, tokens: string[], budget = 2_000): void {
+  if (budget <= 0 || !existsSync(dir)) return;
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (tokens.length >= budget) return;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) addSmallTreeState(path, tokens, budget);
+    else if (entry.isFile()) {
+      try {
+        const stat = statSync(path);
+        tokens.push(`${path}:${stat.size}:${stat.mtimeMs}`);
+      } catch {
+        // File changed while the version was sampled; the next request resamples.
+      }
+    }
+  }
+}
+
+/**
+ * Prepare the local KG/catalog once per source version. Concurrent questions
+ * share the same in-flight promise, eliminating duplicate cold-start rebuilds.
+ */
+export async function ensureAgentProjectReady(
+  projectRoot: string,
+  opts: ReindexOptions = {},
+): Promise<EnsureAgentProjectReadyResult> {
+  const root = resolve(projectRoot);
+  const sourceVersion = agentProjectSourceVersion(root);
+  const existing = warmProjectIndexes.get(root);
+  if (existing?.sourceVersion === sourceVersion) {
+    return { ...(await existing.promise), cacheHit: true, sourceVersion };
+  }
+
+  const promise = reindexProject(root, opts);
+  warmProjectIndexes.set(root, { sourceVersion, promise });
+  try {
+    return { ...(await promise), cacheHit: false, sourceVersion };
+  } catch (error) {
+    if (warmProjectIndexes.get(root)?.promise === promise) warmProjectIndexes.delete(root);
+    throw error;
+  }
+}
+
+/** Explicit invalidation for hosts that mutate project sources in-process. */
+export function invalidateAgentProjectState(projectRoot?: string): void {
+  if (projectRoot) warmProjectIndexes.delete(resolve(projectRoot));
+  else warmProjectIndexes.clear();
 }
 
 /**

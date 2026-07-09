@@ -5,6 +5,7 @@ import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme'
 import { api } from '../../api/client';
 import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
+import { deriveResultChartConfig } from '../output/ResultView';
 import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
 import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage';
 import { useNotebook } from '../../store/NotebookStore';
@@ -239,8 +240,13 @@ function normalizeAgentResult(answer: AgentAnswerEnvelope): QueryResult | null {
 
 function normalizeChartConfig(config: unknown, answer: AgentAnswerEnvelope): CellChartConfig | undefined {
   const raw = (config && typeof config === 'object' ? config : {}) as Record<string, unknown>;
-  const chart = typeof raw.chart === 'string'
-    ? raw.chart
+  const authoredChart = typeof raw.chart === 'string' ? raw.chart : undefined;
+  const storedDecisionSource = raw.decisionSource === 'authored' || raw.decisionSource === 'agent'
+    || raw.decisionSource === 'data' || raw.decisionSource === 'user'
+    ? raw.decisionSource
+    : undefined;
+  const chart = authoredChart
+    ? authoredChart
     : typeof answer.suggestedViz === 'string'
       ? answer.suggestedViz
       : undefined;
@@ -249,6 +255,8 @@ function normalizeChartConfig(config: unknown, answer: AgentAnswerEnvelope): Cel
     : undefined;
   return {
     ...(normalizedChart ? { chart: normalizedChart } : {}),
+    ...(normalizedChart ? { decisionSource: storedDecisionSource ?? (authoredChart ? 'authored' : 'agent' as const) } : {}),
+    ...(typeof raw.rationale === 'string' ? { rationale: raw.rationale } : {}),
     ...(typeof raw.x === 'string' ? { x: raw.x } : {}),
     ...(typeof raw.y === 'string' ? { y: raw.y } : {}),
     ...(typeof raw.color === 'string' ? { color: raw.color } : {}),
@@ -258,30 +266,7 @@ function normalizeChartConfig(config: unknown, answer: AgentAnswerEnvelope): Cel
 
 function completeChartConfig(config: CellChartConfig | undefined, result: QueryResult | null): CellChartConfig | undefined {
   if (!result || result.columns.length === 0) return config;
-  const columns = result.columns;
-  const sample = result.rows.slice(0, 20);
-  const numericColumns = columns.filter((column) =>
-    sample.length === 0 || sample.some((row) => isChartNumericValue(row[column]))
-  );
-  const categoryColumn = columns.find((column) => !numericColumns.includes(column)) ?? columns[0];
-  const x = config?.x && columns.includes(config.x) ? config.x : categoryColumn;
-  const y = config?.y && columns.includes(config.y)
-    ? config.y
-    : numericColumns.find((column) => column !== x) ?? columns.find((column) => column !== x) ?? columns[1] ?? columns[0];
-  const color = config?.color && columns.includes(config.color) ? config.color : undefined;
-  return {
-    ...(config ?? {}),
-    chart: config?.chart ?? resolveChartType(result, config),
-    x,
-    y,
-    ...(color ? { color } : {}),
-  };
-}
-
-function isChartNumericValue(value: unknown): boolean {
-  if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value === 'string' && value.trim()) return Number.isFinite(Number(value));
-  return false;
+  return deriveResultChartConfig(result, config).config;
 }
 
 function cleanQuestion(value: unknown): string | undefined {
@@ -558,7 +543,7 @@ export function AgentAnswerCard({
             result={result}
             chartConfig={chartConfig}
             t={t}
-            onChange={(next) => setChartConfigOverride((current) => ({ ...(current ?? {}), ...next }))}
+            onChange={(next) => setChartConfigOverride((current) => ({ ...(current ?? {}), ...next, decisionSource: 'user', rationale: 'Adjusted manually.' }))}
           />
           <ChartOutput result={result} themeMode={themeMode} chartConfig={chartConfig} />
         </div>

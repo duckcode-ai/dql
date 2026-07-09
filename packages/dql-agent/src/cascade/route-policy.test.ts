@@ -68,7 +68,7 @@ describe('selectCascadeRunRoute', () => {
   it('maps answer-loop tiers back to engine routes', () => {
     expect(routeForCascadeAnswerTier('certified_block')).toBe('certified_answer');
     expect(routeForCascadeAnswerTier('business_context')).toBe('certified_answer');
-    expect(routeForCascadeAnswerTier('semantic_metric')).toBe('generated_answer');
+    expect(routeForCascadeAnswerTier('semantic_metric')).toBe('semantic_answer');
     expect(routeForCascadeAnswerTier('generated_sql')).toBe('generated_answer');
     expect(routeForCascadeAnswerTier('no_answer')).toBe('generated_answer');
     expect(routeForCascadeAnswerTier(undefined)).toBeUndefined();

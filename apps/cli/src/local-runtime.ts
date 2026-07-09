@@ -666,6 +666,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   }
 
+  // Auto-ensure the active connection's driver so a configured connection is never
+  // left "broken" after a fresh clone, a CLI upgrade, or a Node version change (the
+  // driver lives in gitignored, per-project .dql/connectors). Best-effort + non-fatal.
+  ensureConnectorInstalledForStartup(projectRoot, connection?.driver);
+
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
   let semanticLayer: SemanticLayer | undefined;
   let semanticLayerErrors: string[] = [];
@@ -925,6 +930,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     request: AgentRunRequest,
     repair?: { attempt: number; repairHint?: string },
     route: AgentRunRoute = 'generated_answer',
+    onProgress?: (message: string) => void,
   ): Promise<AgentAnswer> {
     const governed = resolveGovernedAnswerRunner(projectRoot);
     const resolvedProvider = governed?.provider ?? null;
@@ -988,6 +994,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         getSchemaContext: getSchemaContextForAgent,
       },
       (turn) => {
+        if (turn.kind === 'thinking') onProgress?.(turn.text);
         if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
           governedAnswer = turn.output as AgentAnswer;
         }
@@ -1020,15 +1027,84 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return tokens.length > 0 ? tokens.join('; ') : governedAnswer.text;
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emitAnswerDelta }) => {
+  /**
+   * The model picks a visualization while composing the answer, but only the
+   * executed rows know whether that choice is viable. Preserve an authored DQL
+   * chart; otherwise validate the model preference against the actual result and
+   * attach a compact, explainable display contract for every consumer.
+   */
+  function applySmartVisualization(governedAnswer: AgentAnswer, question: string): void {
+    const result = governedAnswer.result;
+    if (!result || !Array.isArray(result.rows)) return;
+    const rows = result.rows.filter((row): row is Record<string, unknown> => Boolean(agentRunRecord(row)));
+    const columns = Array.isArray(result.columns)
+      ? result.columns.map((column) => typeof column === 'string'
+        ? column
+        : agentRunString(agentRunRecord(column)?.name) ?? String(column))
+      : (rows.length > 0 ? Object.keys(rows[0]) : []);
+    if (rows.length === 0 || columns.length === 0) return;
+    const existing = agentRunRecord(result.chartConfig) ?? {};
+    // A declared chart on the execution result came from authored DQL and is a
+    // governed display contract. Agent `suggestedViz` remains a soft preference.
+    if (typeof existing.chart === 'string') return;
+    const recommendation = recommendVisualization(projectRoot, {
+      blockRef: governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
+      prompt: question,
+      resultSchema: columns,
+      rowSample: rows.slice(0, 25),
+      defaultVisualization: governedAnswer.suggestedViz,
+    });
+    if (!recommendation.ok) return;
+    const fieldHints = recommendation.display.fieldHints ?? {};
+    const chart = recommendation.display.defaultVisualization.replace(/_/g, '-');
+    const agentChoice = typeof governedAnswer.suggestedViz === 'string'
+      ? governedAnswer.suggestedViz.toLowerCase().replace(/_/g, '-')
+      : undefined;
+    result.chartConfig = {
+      ...existing,
+      chart,
+      decisionSource: agentChoice === chart ? 'agent' : 'data',
+      rationale: recommendation.display.rationale,
+      ...(typeof fieldHints.x === 'string' ? { x: fieldHints.x } : {}),
+      ...(typeof fieldHints.y === 'string' ? { y: fieldHints.y } : {}),
+    };
+    governedAnswer.suggestedViz = chart;
+    const evidence = governedAnswer.evidence ?? {
+      route: [],
+      lineage: [],
+      businessContext: [],
+      selectedAssets: [],
+      sourceTables: [],
+      semanticObjects: [],
+      citations: [],
+    };
+    governedAnswer.evidence = evidence;
+    evidence.route = [
+      ...evidence.route,
+      {
+        tool: 'recommend_visualization',
+        status: 'selected',
+        label: `Smart visualization: ${chart.replace(/-/g, ' ')}`,
+        detail: recommendation.display.rationale,
+      },
+    ];
+  }
+
+  const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit, emitAnswerDelta }) => {
     let governedAnswer: AgentAnswer;
     try {
-      governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt, repairHint }, route);
+      governedAnswer = await runGovernedAgentAnswerForRun(
+        request,
+        { attempt, repairHint },
+        route,
+        (message) => emit({ type: 'executor.started', message, route }),
+      );
       // Surface the approved Hint-Graph corrections that shaped this answer so the
       // UI can show an "applied learnings" chip (memoryContext is already on the answer).
       if (!governedAnswer.appliedHints) {
         governedAnswer.appliedHints = governedAnswer.contextPack?.appliedHints;
       }
+      applySmartVisualization(governedAnswer, request.question);
     } catch (error) {
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
       return {
@@ -1055,6 +1131,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     const resolvedRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
+    const isSemantic = governedAnswer.route?.tier === 'semantic_metric';
     const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
     // The model tried to compose a governed query and declined despite having usable
@@ -1111,9 +1188,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         synthesizedAnswer = undefined;
       }
     }
-    const status: AgentRunStatus = isProviderError ? 'blocked' : needsClarification ? 'needs_clarification' : isCertified ? 'completed' : 'needs_review';
-    const trustState: AgentRunTrustState = isProviderError ? 'blocked' : needsClarification ? 'not_applicable' : isCertified ? 'certified' : 'review_required';
-    const stopReason: AgentRunStopReason = isProviderError ? 'blocked' : needsClarification ? 'needs_clarification' : isCertified ? 'certified_answer_found' : 'human_review_required';
+    const status: AgentRunStatus = isProviderError
+      ? 'blocked'
+      : needsClarification
+        ? 'needs_clarification'
+        : isCertified || isSemantic
+          ? 'completed'
+          : 'needs_review';
+    const trustState: AgentRunTrustState = isProviderError
+      ? 'blocked'
+      : needsClarification
+        ? 'not_applicable'
+        : isCertified
+          ? 'certified'
+          : isSemantic
+            ? 'governed'
+            : 'review_required';
+    const stopReason: AgentRunStopReason = isProviderError
+      ? 'blocked'
+      : needsClarification
+        ? 'needs_clarification'
+        : isCertified
+          ? 'certified_answer_found'
+          : isSemantic
+            ? 'governed_semantic_answer'
+            : 'human_review_required';
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
       : [
@@ -1145,10 +1244,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : [])
         : [agentRunArtifact(
             'answer',
-            isCertified ? 'Certified answer' : 'Review-required answer',
+            isCertified ? 'Certified answer' : isSemantic ? 'Governed semantic answer' : 'Review-required answer',
             governedAnswer,
             governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
-            isCertified ? 'certified' : 'review_required',
+            isCertified ? 'certified' : isSemantic ? 'governed' : 'review_required',
           )],
       evaluations: [
         agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.', {
@@ -1159,11 +1258,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         agentRunEvaluation(
           'trust-boundary',
           'Trust boundary',
-          isCertified,
-          isCertified ? 'info' : 'warning',
+          isCertified || isSemantic,
+          isCertified || isSemantic ? 'info' : 'warning',
           isCertified
             ? 'The answer came from certified DQL context.'
-            : needsClarification
+            : isSemantic
+              ? 'The answer was compiled and executed from governed semantic definitions; it is not a human-certified reusable block.'
+              : needsClarification
               ? 'The answer loop needs more context before producing a governed answer.'
               : 'The answer is generated or semantic-layer backed and remains review-required.',
           governedAnswer.route,
@@ -1267,6 +1368,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const agentRunExecutors: AgentRunExecutors = {
     conversation: conversationRunExecutor,
     certified_answer: answerRunExecutor,
+    semantic_answer: answerRunExecutor,
     generated_answer: answerRunExecutor,
     research: async (researchContext) => {
       const { runId, request, routeDecision, emit } = researchContext;
@@ -1983,7 +2085,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
-  const getSchemaContextForAgent = async (question: string): Promise<AgentSchemaTable[]> => {
+  const getSchemaContextForAgent = async (question: string, preparedContextPack?: LocalContextPack): Promise<AgentSchemaTable[]> => {
     const scanRuntimeSchema = async (): Promise<{ ranked: AgentSchemaTable[]; snapshot: AgentSchemaTable[] }> => {
       if (!connection) return { ranked: [], snapshot: [] };
       const result = await executor.executeQuery(
@@ -2001,7 +2103,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         snapshot: buildAgentSchemaContext(question, result.rows, { includeUnscored: true, limit: 500 }),
       };
     };
-    const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
+    const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question, preparedContextPack).catch(() => []);
     if (catalogContext.length > 0) {
       if (!connection) return catalogContext;
       // Rescan live when the question shape calls for it OR the stored snapshot is
@@ -5255,10 +5357,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'name and content are required' }));
           return;
         }
+        // OSS keeps the save flow deliberately small: the person saving the
+        // reusable answer is accountable for it. Domain/description/tags are
+        // helpful defaults, but not reasons to send a single-user back to a
+        // review queue.
         const missing: string[] = [];
         if (!owner || !owner.trim()) missing.push('owner');
-        if (!domain || !domain.trim()) missing.push('domain');
-        if (!description || !description.trim()) missing.push('description');
         if (missing.length > 0) {
           res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({
@@ -5281,8 +5385,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           invariants,
           gitMetadata: readGitMetadata(projectRoot),
         });
+        // Save first, then certify against the same local runtime used for the
+        // answer. Passing blocks become certified immediately; anything that
+        // cannot prove itself remains a clearly labelled draft at this path.
+        setBlockStudioStatus(projectRoot, created.path, 'draft');
+        let source = readFileSync(join(projectRoot, created.path), 'utf-8');
+        let status: 'certified' | 'draft' = 'draft';
+        let blockers: string[] = [];
+        let certification: { certified: boolean; errors: unknown[]; warnings: unknown[] } | undefined;
+        try {
+          const verdict = await certifyBlockStudioSource(source, created.path);
+          blockers = Array.from(new Set(verdict.checklist.blockers));
+          certification = {
+            certified: verdict.certification.certified && blockers.length === 0,
+            errors: verdict.certification.errors,
+            warnings: verdict.certification.warnings,
+          };
+          if (certification.certified) {
+            setBlockStudioStatus(projectRoot, created.path, 'certified');
+            status = 'certified';
+            source = readFileSync(join(projectRoot, created.path), 'utf-8');
+          }
+        } catch (error) {
+          blockers = [error instanceof Error ? error.message : String(error)];
+        }
+        await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(created));
+        res.end(serializeJSON({ ...created, content: source, status, blockers, certification }));
       } catch (error) {
         if (error instanceof Error && error.message === 'BLOCK_EXISTS') {
           res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -9793,6 +9922,34 @@ function installConnectorPackage(projectRoot: string, driver: string): Connector
   return getConnectorInstallStatuses(projectRoot).find((status) => status.driver === definition.driver)!;
 }
 
+/**
+ * Ensure the active connection's driver package is present at startup.
+ *
+ * The connection CONFIG persists in dql.config.json, but the driver package
+ * (duckdb, snowflake-sdk, …) lives in the gitignored, per-project .dql/connectors
+ * — so a fresh clone, a `npm i -g` upgrade of the CLI, or even a Node version bump
+ * (native bindings are Node-version-specific) leaves a configured connection with
+ * no loadable driver, and the user has to reinstall it by hand from the Connections
+ * page. This installs it once, at boot, so connections just work after any
+ * install/upgrade. Best-effort and non-fatal: an offline machine keeps the manual
+ * "Install" button and a clear message rather than a failed startup.
+ */
+export function ensureConnectorInstalledForStartup(projectRoot: string, driver: string | undefined): void {
+  if (!driver) return;
+  const definition = CONNECTOR_INSTALLS[driver];
+  // Built-in drivers (e.g. the local file driver) and unknown drivers need nothing.
+  if (!definition || definition.builtIn || !definition.packageSpec || !definition.packageName) return;
+  if (isConnectorPackageInstalled(projectRoot, definition.packageName)) return;
+  console.log(`[dql] Installing the ${definition.label} driver into .dql/connectors (first run after install/upgrade)…`);
+  try {
+    installConnectorPackage(projectRoot, driver);
+    console.log(`[dql] ${definition.label} driver ready — connection restored without manual setup.`);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.log(`[dql] Could not auto-install the ${definition.label} driver (${detail}). Open the Connections page and click "Install" once you have network access.`);
+  }
+}
+
 function getStoredConnections(raw: Record<string, unknown>): Record<string, unknown> {
   const value = raw.connections;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -14066,7 +14223,7 @@ function normalizeBlockStudioContent(options: {
 }): string {
   const content = options.content?.trim();
   if (content && /^\s*block\s+"/i.test(content)) {
-    return `${content.trimEnd()}\n`;
+    return `${applySavedBlockMetadata(content, options).trimEnd()}\n`;
   }
 
   return buildBlankBlockContent({
@@ -14080,6 +14237,33 @@ function normalizeBlockStudioContent(options: {
     invariants: options.invariants,
     sql: content || 'SELECT 1 AS value',
   });
+}
+
+/** Apply the fields supplied by the save dialog to an AI/DQL artifact as well. */
+function applySavedBlockMetadata(source: string, options: {
+  name: string;
+  domain: string;
+  owner?: string;
+  description?: string;
+  tags?: string[];
+}): string {
+  let next = source.trim();
+  next = next.replace(/block\s+"[^"]*"\s*\{/, `block "${escapeDqlString(options.name)}" {`);
+  const upsert = (key: string, value: string) => {
+    const pattern = new RegExp(`^(\\s*)${key}\\s*=.*$`, 'm');
+    if (pattern.test(next)) {
+      next = next.replace(pattern, (_match, indent: string) => `${indent}${key} = ${value}`);
+    } else {
+      next = next.replace(/block\s+"[^"]*"\s*\{/, (match) => `${match}\n  ${key} = ${value}`);
+    }
+  };
+  upsert('domain', `"${escapeDqlString(options.domain)}"`);
+  if (options.owner?.trim()) upsert('owner', `"${escapeDqlString(options.owner.trim())}"`);
+  if (options.description?.trim()) upsert('description', `"${escapeDqlString(options.description.trim())}"`);
+  if (options.tags && options.tags.length > 0) {
+    upsert('tags', `[${options.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
+  }
+  return next;
 }
 
 function buildBlankBlockContent(options: {
@@ -15699,8 +15883,12 @@ function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
   return Date.now() - last >= 24 * 60 * 60 * 1000;
 }
 
-async function buildAgentSchemaContextFromCatalog(projectRoot: string, question: string): Promise<AgentSchemaTable[]> {
-  const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 80 });
+async function buildAgentSchemaContextFromCatalog(
+  projectRoot: string,
+  question: string,
+  preparedContextPack?: LocalContextPack,
+): Promise<AgentSchemaTable[]> {
+  const contextPack = preparedContextPack ?? await buildLocalContextPack(projectRoot, { question, limit: 80 });
   return buildAgentSchemaContextFromContextPack(question, contextPack);
 }
 

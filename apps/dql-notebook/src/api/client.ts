@@ -421,6 +421,7 @@ export type AgentRunRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block
 export type AgentRunRoute =
   | 'conversation'
   | 'certified_answer'
+  | 'semantic_answer'
   | 'generated_answer'
   | 'research'
   | 'sql_cell'
@@ -430,10 +431,11 @@ export type AgentRunRoute =
   | 'blocked';
 export type AgentRunAnswerKind = 'governed' | 'conversational' | 'general_knowledge';
 export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'blocked';
-export type AgentRunTrustState = 'certified' | 'grounded' | 'review_required' | 'blocked' | 'not_applicable';
+export type AgentRunTrustState = 'certified' | 'governed' | 'grounded' | 'review_required' | 'blocked' | 'not_applicable';
 export type AgentRunStopReason =
   | 'conversational_reply'
   | 'certified_answer_found'
+  | 'governed_semantic_answer'
   | 'generated_review_required'
   | 'artifact_created'
   | 'needs_clarification'
@@ -2490,8 +2492,20 @@ export const api = {
     llmContext?: string;
     examples?: Array<{ question: string; sql?: string }>;
     invariants?: string[];
-  }): Promise<{ path: string; content: string }> {
-    return request<{ path: string; content: string }>('/api/blocks/save-from-cell', {
+  }): Promise<{
+    path: string;
+    content: string;
+    status: 'certified' | 'draft';
+    blockers: string[];
+    certification?: { certified: boolean; errors: unknown[]; warnings: unknown[] };
+  }> {
+    return request<{
+      path: string;
+      content: string;
+      status: 'certified' | 'draft';
+      blockers: string[];
+      certification?: { certified: boolean; errors: unknown[]; warnings: unknown[] };
+    }>('/api/blocks/save-from-cell', {
       method: 'POST',
       body: JSON.stringify(payload),
     });

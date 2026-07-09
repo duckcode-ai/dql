@@ -62,7 +62,7 @@ import {
 } from './block-fit.js';
 import { retrieveScopedHints } from '../hints/retrieval.js';
 import type { QuestionScope } from '../hints/types.js';
-import { sanitizeFtsQuery } from '../memory/fts-query.js';
+import { buildFtsMatch, sanitizeFtsQuery } from '../memory/fts-query.js';
 import { envEmbeddingProvider } from '../embeddings/provider.js';
 import { matchExampleParaphrase } from './example-match.js';
 
@@ -1452,21 +1452,21 @@ export class MetadataCatalog {
     limit?: number;
   }): MetadataObject[] {
     const { query, objectTypes, domain, limit = 40 } = options;
-    const sanitized = sanitizeFtsQuery(query, { prefix: true });
-    if (!sanitized) return this.listObjects({ objectTypes, domain, limit });
+    const match = buildFtsMatch(query, { prefix: true });
+    if (!match.or) return this.listObjects({ objectTypes, domain, limit });
 
     const filters: string[] = [];
-    const params: unknown[] = [sanitized];
+    const extraParams: unknown[] = [];
     if (objectTypes && objectTypes.length > 0) {
       filters.push(`o.object_type IN (${objectTypes.map(() => '?').join(', ')})`);
-      params.push(...objectTypes);
+      extraParams.push(...objectTypes);
     }
     if (domain) {
       filters.push('o.domain = ?');
-      params.push(domain);
+      extraParams.push(domain);
     }
     const whereExtra = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
-    const rows = this.db.prepare(`
+    const runMatch = (matchExpr: string): MetadataObjectRow[] => this.db.prepare(`
       SELECT o.*,
              bm25(metadata_fts) AS rank,
              snippet(metadata_fts, -1, '<mark>', '</mark>', '...', 12) AS snip
@@ -1475,7 +1475,16 @@ export class MetadataCatalog {
       WHERE metadata_fts MATCH ?${whereExtra}
       ORDER BY rank
       LIMIT ?
-    `).all(...params, limit) as MetadataObjectRow[];
+    `).all(matchExpr, ...extraParams, limit) as MetadataObjectRow[];
+
+    // Precision-first, recall-preserving UNION: all-terms-co-occur (AND) matches
+    // lead, then OR-of-terms matches fill the remaining budget. A doc mentioning
+    // only one term (a relevant context column) still surfaces, while a doc
+    // containing every term ranks ahead of it. Dedup by object_key.
+    const andRows = match.and ? runMatch(match.and) : [];
+    const seen = new Set(andRows.map((row) => row.object_key));
+    const orRows = runMatch(match.or).filter((row) => !seen.has(row.object_key));
+    const rows = [...andRows, ...orRows].slice(0, limit);
 
     return rows.map((row) => ({
       ...rowToObject(row),

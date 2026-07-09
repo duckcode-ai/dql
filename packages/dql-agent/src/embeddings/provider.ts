@@ -377,8 +377,42 @@ export function embeddingOptionsFromEnv(env: Record<string, string | undefined> 
  * embedder gets true semantic recall, while offline/unconfigured projects stay on
  * the deterministic hashed provider with byte-identical behavior.
  */
-export function envEmbeddingProvider(): EmbeddingProvider {
-  return resolveEmbeddingProvider(embeddingOptionsFromEnv());
+let cachedEnvEmbeddingProvider: { key: string; provider: EmbeddingProvider } | undefined;
+
+/**
+ * Stable identity for environment-selected embedding configuration. API keys are
+ * hashed rather than retained in the cache key so diagnostics can never expose
+ * the credential. Keeping one provider instance is important: real providers are
+ * wrapped in `CachingEmbeddingProvider`, and recreating that wrapper at every
+ * retrieval call silently discarded the corpus cache between questions.
+ */
+function envEmbeddingProviderKey(options: EmbeddingResolveOptions): string {
+  const credentialHash = options.openaiApiKey
+    ? createHash('sha1').update(options.openaiApiKey).digest('hex')
+    : '';
+  return JSON.stringify({
+    ollamaEndpoint: options.ollamaEndpoint ?? '',
+    ollamaModel: options.ollamaModel ?? '',
+    openaiCredential: credentialHash,
+    model: options.model ?? '',
+    baseUrl: options.baseUrl ?? '',
+  });
+}
+
+export function envEmbeddingProvider(
+  env: Record<string, string | undefined> = process.env,
+): EmbeddingProvider {
+  const options = embeddingOptionsFromEnv(env);
+  const key = envEmbeddingProviderKey(options);
+  if (cachedEnvEmbeddingProvider?.key !== key) {
+    cachedEnvEmbeddingProvider = { key, provider: resolveEmbeddingProvider(options) };
+  }
+  return cachedEnvEmbeddingProvider.provider;
+}
+
+/** Test/runtime hook used when provider settings change without restarting. */
+export function clearEnvEmbeddingProviderCache(): void {
+  cachedEnvEmbeddingProvider = undefined;
 }
 
 export interface HybridRankItem<T> {

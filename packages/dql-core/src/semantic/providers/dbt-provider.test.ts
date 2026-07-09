@@ -133,6 +133,50 @@ metrics:
     expect(totalLtv.sql).toBe('SUM(ltv)');
   });
 
+  it('resolves a foreign entity to the target cube + key so cross-table composeQuery joins (not degenerate)', () => {
+    // Reproduces the real bug: a foreign entity `location` on `orders` (expr
+    // location_id) must join to the `locations` model whose PRIMARY entity is
+    // `location`. The old code set the join's target/right-column to the ENTITY
+    // name, so `orders.location_id = locations.location` pointed at a non-existent
+    // column and findJoinPath never matched the `locations` cube → composeQuery
+    // returned NULL → every cross-table governed query fell to generated SQL.
+    writeManifest({
+      semantic_models: {
+        'semantic_model.demo.orders': {
+          name: 'orders',
+          model: "ref('orders')",
+          entities: [
+            { name: 'order', type: 'primary', expr: 'order_id' },
+            { name: 'location', type: 'foreign', expr: 'location_id' },
+          ],
+          measures: [{ name: 'tax_paid', agg: 'sum' }],
+        },
+        'semantic_model.demo.locations': {
+          name: 'locations',
+          model: "ref('locations')",
+          entities: [{ name: 'location', type: 'primary', expr: 'location_id' }],
+          dimensions: [{ name: 'location_name', type: 'categorical' }],
+        },
+      },
+    });
+
+    const provider = new DbtProvider();
+    const layer = provider.load({ provider: 'dbt' }, tmpDir);
+
+    // The join must target the CUBE (`locations`) with the real key on both sides.
+    const orders = layer.getCube('orders')!;
+    expect(orders.joins).toEqual([
+      { name: 'locations', left: 'orders', right: 'locations', type: 'left', sql: '${left}.location_id = ${right}.location_id' },
+    ]);
+
+    // End-to-end: the metric on orders composes by a dimension on locations.
+    const composed = layer.composeQuery({ metrics: ['tax_paid'], dimensions: ['location_name'] });
+    expect(composed).not.toBeNull();
+    expect(composed!.sql).toContain('LEFT JOIN locations ON orders.location_id = locations.location_id');
+    expect(composed!.sql).toContain('SUM(tax_paid)');
+    expect(composed!.sql).toContain('location_name');
+  });
+
   it('surfaces regular dbt models when manifest has no MetricFlow semantic nodes', () => {
     writeManifest({
       nodes: {

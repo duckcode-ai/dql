@@ -7,7 +7,7 @@ import type { Cell } from '../../store/types';
 interface SaveAsBlockModalProps {
   cell: Cell;
   onClose: () => void;
-  onSaved?: (result: { path: string; content: string; name: string }) => void;
+  onSaved?: (result: { path: string; content: string; name: string; status: 'certified' | 'draft'; blockers: string[] }) => void;
   /** Override the starting block source (required for cell types that compute their output). */
   initialContent?: string;
   initialName?: string;
@@ -72,9 +72,9 @@ export function SaveAsBlockModal({
 
   const ruleResults: { id: string; label: string; severity: 'error' | 'warning'; passed: boolean }[] = [
     { id: 'has-name', label: 'Block has name', severity: 'error', passed: !!name.trim() },
-    { id: 'has-description', label: 'Block has description', severity: 'error', passed: !!description.trim() },
     { id: 'has-owner', label: 'Block has owner', severity: 'error', passed: !!owner.trim() },
-    { id: 'has-domain', label: 'Block has domain', severity: 'error', passed: !!domain.trim() },
+    { id: 'has-description', label: 'Description', severity: 'warning', passed: !!description.trim() },
+    { id: 'has-domain', label: 'Domain', severity: 'warning', passed: !!domain.trim() },
     { id: 'has-tags', label: 'Has at least one tag', severity: 'warning', passed: tagList.length > 0 },
     { id: 'has-llm-context', label: 'Has LLM context (for agents)', severity: 'warning', passed: !!llmContext.trim() },
   ];
@@ -98,7 +98,7 @@ export function SaveAsBlockModal({
 
   const handleSave = async () => {
     if (hasErrors) {
-      setError('Fix the required governance fields before saving.');
+      setError('Enter the block name and owner before saving.');
       return;
     }
     if (!content.trim()) {
@@ -223,7 +223,7 @@ export function SaveAsBlockModal({
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
-                Domain <RequiredMark />
+                Domain
               </label>
               <input
                 value={domain}
@@ -258,7 +258,7 @@ export function SaveAsBlockModal({
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
-              Description <RequiredMark />
+              Description
             </label>
             <input value={description} onChange={(e) => setDescription(e.target.value)} style={inputStyle} />
           </div>
@@ -470,8 +470,11 @@ export function SaveAsBlockModal({
             justifyContent: 'flex-end',
             gap: 10,
           }}
-        >
-          <button
+          >
+            <span style={{ fontSize: 11.5, color: t.textMuted, marginRight: 'auto', alignSelf: 'center' }}>
+              DQL will certify this block now when its local checks pass; otherwise it is saved as a draft.
+            </span>
+            <button
             onClick={onClose}
             style={{
               background: t.btnBg,
@@ -502,7 +505,7 @@ export function SaveAsBlockModal({
               opacity: saving || hasErrors ? 0.5 : 1,
             }}
           >
-            {saving ? 'Saving...' : 'Save Block'}
+            {saving ? 'Saving & checking…' : 'Save block'}
           </button>
         </div>
       </div>

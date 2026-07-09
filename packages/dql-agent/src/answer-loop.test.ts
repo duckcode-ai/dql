@@ -817,10 +817,12 @@ describe("answer (block-first loop)", () => {
     });
 
     expect(provider.calls).toHaveLength(0);
+    // scan_manifest is always merged in (index-free KG grep); no semantic layer here
+    // so the semantic search/compile tools are not added.
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 10 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 4 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
+    expect(provider.messages.at(-1)?.content).toContain("4 call(s) (multi_entity");
     expect(observed).toEqual([{ question: "tool-assisted generation" }]);
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("COUNT(*) AS order_count");
@@ -923,16 +925,16 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 3 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 2 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("3 call(s) (lookup");
+    expect(provider.messages.at(-1)?.content).toContain("2 call(s) (lookup");
     expect(result.kind).toBe("uncertified");
   });
 
   it("expands the provider tool budget for a multi-entity breakdown shape", async () => {
     // Tool budget follows the question SHAPE, not an effort/depth flag (S1
     // decouple): a two-dimension breakdown earns the mid-tier multi_entity budget.
-    // The full shape→budget mapping (incl. deep_research→15) is covered in budgets.test.ts.
+    // The full shape→budget mapping (incl. bounded deep research) is covered in budgets.test.ts.
     const provider = new ToolStubProvider("fallback should not be called");
     const result = await answer({
       question: "What is the order count by region and product category?",
@@ -943,9 +945,9 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 10 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 4 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
+    expect(provider.messages.at(-1)?.content).toContain("4 call(s) (multi_entity");
     expect(result.kind).toBe("uncertified");
   });
 
@@ -5806,6 +5808,66 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.route?.label).toContain("metric");
   });
 
+  it("keeps a directly resolved metric on the semantic route when retrieval selected dbt context", async () => {
+    // The compact catalog pack is intentionally dbt-only here.  Metric matching
+    // still comes from the loaded semantic graph, so its compiler-owned answer
+    // must not inherit the pack's dbt_manifest route.
+    seedMetricsKg();
+    const result = await answer({
+      question: "what is our total revenue",
+      provider: new StubProvider("should not be called"),
+      kg,
+      contextPack: {
+        id: "ctx_dbt_only",
+        question: "what is our total revenue",
+        mode: "question",
+        focusObjectKey: "dbt:model:orders",
+        trustLabel: "review_required",
+        objects: [{
+          objectKey: "dbt:model:orders",
+          objectType: "dbt_model",
+          name: "orders",
+          status: "ready",
+          sourceSystem: "dbt",
+          snippet: "orders model",
+        }],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated",
+          intent: "metadata_lookup",
+          reason: "dbt metadata selected",
+          trustLabel: "review_required",
+          reviewStatus: "review_required",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: { relations: [], sourceBlockSql: [] },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          certifiedCandidateFits: [],
+          candidateConflicts: [],
+        },
+        freshness: { catalogPath: ".dql/cache/metadata.sqlite", builtAt: null, fingerprint: null },
+      } as any,
+    });
+
+    expect(result.sourceTier).toBe("semantic_layer");
+    expect(result.certification).toBe("governed");
+    expect(result.reviewStatus).toBe("governed");
+    expect(result.route?.tier).toBe("semantic_metric");
+  });
+
   it("answers a metric question deterministically even when the model declines SQL", async () => {
     seedMetricsKg();
     // A provider that returns prose with no SQL block would normally refuse; the
@@ -5960,15 +6022,17 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
         },
       ],
     });
-    // "acquisition medium" is a paraphrase of `channel` that the deterministic
-    // token matcher cannot resolve, so composeSemanticQueryForQuestion misses —
-    // but the metric still matches, so the LLM member fallback fires.
+    // "attribution bucket" is a paraphrase of `channel` with no shared token and no
+    // entry in the dimension-synonym map, so the deterministic token matcher cannot
+    // resolve it and composeSemanticQueryForQuestion misses — but the metric still
+    // matches, so the LLM member fallback fires. (A closer paraphrase like
+    // "acquisition medium" now resolves deterministically via synonym expansion.)
     const provider = new StubProvider(
       '```json\n{"metrics":["total_revenue"],"dimensions":["channel"]}\n```',
     );
 
     const result = await answer({
-      question: "revenue by acquisition medium",
+      question: "revenue by attribution bucket",
       provider,
       kg,
       semanticLayer,
@@ -5986,6 +6050,60 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.proposedSql).toContain("SUM(amount) AS total_revenue");
     expect(result.proposedSql).toContain("channel AS channel");
     expect(result.dqlArtifact?.kind).toBe("semantic_block");
+  });
+
+  it("FLAGSHIP: 'tax by region and product' answers governed at ZERO LLM calls (the reported failure)", async () => {
+    // The exact case the user reported: a tax metric broken down by region and
+    // product answered with raw SQL after a slow generation, instead of using the
+    // governed semantic metric. `tax` is NOT in the old hardcoded MEASURE_FAMILIES,
+    // so matchSemanticMetric scored familyBoost=0 and missed; the metric never
+    // matched, generation ran, and the semantic model was ignored. With the Phase 1
+    // fixes (project-derived families + dimension resolution), Stage A now matches
+    // the metric AND compiles the group-by deterministically — no provider call.
+    const taxMetric: KGNode = {
+      nodeId: "metric:tax_amount",
+      kind: "metric",
+      name: "tax_amount",
+      domain: "finance",
+      description: "Total tax collected on orders.",
+      tags: ["tax"],
+      llmContext: "sql: SUM(tax_paid)\ntable: orders",
+      sourceTier: "semantic_layer",
+      certification: "ai_generated",
+      provenance: "semantic layer",
+    };
+    kg.rebuild([taxMetric], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "tax_amount", label: "Tax Amount", description: "Total tax collected on orders.", domain: "finance", sql: "tax_paid", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "region", label: "Region", description: "Order region.", domain: "finance", sql: "region", type: "string", table: "orders" },
+        { name: "product", label: "Product", description: "Product ordered.", domain: "finance", sql: "product", type: "string", table: "orders" },
+      ],
+    });
+    // Throws if the model is called at all — proves the 0-LLM governed fast path.
+    const provider = new StubProvider("MODEL MUST NOT BE CALLED");
+    const result = await answer({
+      question: "tax by region and product",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "product", "tax_amount"],
+        rows: [{ region: "West", product: "Jaffle", tax_amount: 12 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0); // ZERO LLM calls — deterministic Stage A.
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.proposedSql).toContain("SUM(tax_paid) AS tax_amount");
+    expect(result.proposedSql).toContain("region AS region");
+    expect(result.proposedSql).toContain("product AS product");
+    expect(result.dqlArtifact?.kind).toBe("semantic_block");
+    expect(result.kind).not.toBe("no_answer");
   });
 
   it("Tier 2.5: anchors generation on a matched metric when the shape needs a cross-table join", async () => {
@@ -6024,6 +6142,53 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(allPrompts).toMatch(/amount/); // the certified measure expression
     // ...and the answer states it reused the governed metric rather than hand-rolling one.
     expect(result.text).toContain("Computed using the governed metric total_revenue");
+  });
+
+  it("Stage B: a governed compile_semantic_query the model adopts verbatim lands as a governed answer", async () => {
+    // Stage A misses (the breakdown dimension is an unresolvable paraphrase and the
+    // Lane-2 member selection drops it), so generation runs with the semantic-stage
+    // tools. The model DRIVES compile_semantic_query and returns its SQL verbatim →
+    // deriveAgenticTrust labels the answer governed (compiler-owned), not hand-written,
+    // and the hallucination guard is skipped. This is Stage B producing a governed
+    // answer across any provider — the whole point of the tool-driven redesign.
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "total_revenue", label: "Total Revenue", description: "Total recognized revenue.", domain: "finance", sql: "amount", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "channel", label: "Channel", description: "Sales channel.", domain: "finance", sql: "channel", type: "string", table: "orders" },
+      ],
+    });
+    let compiledSql = "";
+    const provider: AgentProvider = {
+      name: "claude",
+      available: async () => true,
+      // Lane-2 member selection drops the breakdown → generation runs.
+      generate: async () => '```json\n{"metrics":["total_revenue"],"dimensions":[]}\n```',
+      generateWithTools: async (_messages, tools, options) => {
+        const compile = tools.find((tool) => tool.name === "compile_semantic_query");
+        if (!compile) throw new Error("compile_semantic_query not offered to the model");
+        const out = (await compile.run({ metrics: ["total_revenue"], dimensions: ["channel"] })) as { sql: string };
+        options?.onToolCall?.({ name: "compile_semantic_query", input: { metrics: ["total_revenue"], dimensions: ["channel"] }, output: out, isError: false });
+        compiledSql = out.sql;
+        return `\`\`\`json\n{"summary":"Total revenue by channel.","sql":${JSON.stringify(out.sql)},"outputs":["channel","total_revenue"]}\n\`\`\``;
+      },
+    };
+    const result = await answer({
+      question: "total revenue by acquisition path",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({ columns: ["channel", "total_revenue"], rows: [{ channel: "Direct", total_revenue: 100 }], rowCount: 1, sql }),
+    });
+
+    expect(compiledSql).toContain("total_revenue");
+    // The model's SQL is the compiled SQL verbatim → governed, not hand-written.
+    expect(result.text).toContain("compiled via the semantic layer");
+    expect(result.proposedSql).toContain("total_revenue");
+    expect(result.kind).not.toBe("no_answer");
+    expect(result.evidence?.toolCalls?.some((call) => call.name === "compile_semantic_query")).toBe(true);
   });
 
   it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {

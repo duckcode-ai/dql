@@ -25,7 +25,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       rowCount: 2,
     });
     expect(chartable).toBe(true);
-    expect(config.chart).toBe('bar');
+    expect(config.chart).toBe('grouped-bar');
     expect(config.x).toBe('product_name');
     expect(config.y).toBe('total_value');
   });
@@ -41,6 +41,47 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(config.x).toBe('month');
   });
 
+  it('uses a KPI for one returned aggregate instead of a bar chart', () => {
+    const { config, chartable } = deriveResultChartConfig({
+      columns: ['total_revenue'],
+      rows: [{ total_revenue: 42000 }],
+      rowCount: 1,
+    });
+    expect(chartable).toBe(true);
+    expect(config.chart).toBe('kpi');
+  });
+
+  it('uses grouped bars for one category with multiple numeric measures', () => {
+    const { config } = deriveResultChartConfig({
+      columns: ['region', 'revenue', 'orders'],
+      rows: [{ region: 'North', revenue: 420, orders: 23 }, { region: 'South', revenue: 390, orders: 18 }],
+      rowCount: 2,
+    });
+    expect(config.chart).toBe('grouped-bar');
+  });
+
+  it('uses a business label rather than an adjacent technical identifier for the chart axis', () => {
+    const { config } = deriveResultChartConfig({
+      columns: ['customer_id', 'customer_name', 'revenue'],
+      rows: [{ customer_id: 'c_1', customer_name: 'Acme', revenue: 420 }],
+      rowCount: 1,
+    });
+    expect(config.x).toBe('customer_name');
+  });
+
+  it('overrides an incompatible agent bar preference for a time series', () => {
+    const { config } = deriveResultChartConfig(
+      {
+        columns: ['month', 'revenue'],
+        rows: [{ month: '2026-01', revenue: 10 }, { month: '2026-02', revenue: 20 }],
+        rowCount: 2,
+      },
+      { chart: 'bar', decisionSource: 'agent' },
+    );
+    expect(config.chart).toBe('line');
+    expect(config.decisionSource).toBe('data');
+  });
+
   it('is not chartable when there is no numeric column', () => {
     const { chartable } = deriveResultChartConfig({
       columns: ['status', 'owner'],
@@ -50,14 +91,14 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(chartable).toBe(false);
   });
 
-  it('honors an explicit agent chart config over the heuristic', () => {
+  it('honors an authored chart config over the heuristic', () => {
     const { config } = deriveResultChartConfig(
       {
         columns: ['region', 'sales'],
         rows: [{ region: 'NA', sales: 5 }],
         rowCount: 1,
       },
-      { chart: 'pie', x: 'region', y: 'sales' },
+      { chart: 'pie', x: 'region', y: 'sales', decisionSource: 'authored' },
     );
     expect(config.chart).toBe('pie');
   });
