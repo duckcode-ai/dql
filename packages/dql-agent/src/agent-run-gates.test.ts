@@ -29,6 +29,51 @@ describe("defaultAgentRunGates", () => {
     expect(grounding?.repairAction).toMatchObject({ kind: "escalate", route: "research" });
   });
 
+  it("answer gate escalates a model_declined refusal that carries prose text to research (P1)", () => {
+    // The refusal has non-empty explanatory prose in `answer`, which the old
+    // `hasAnswer` check treated as a completed answer — dead-ending the run. With the
+    // refusal code surfaced, the gate now treats it as no-answer and escalates.
+    const evaluations = gateFor("generated_answer", {
+      answer: "I could not compose a governed query for this from the available tables and metrics.",
+      answerRefusalCode: "model_declined",
+      artifacts: [],
+    });
+    const grounding = evaluations.find((evaluation) => evaluation.id === "grounding");
+    expect(grounding?.passed).toBe(false);
+    expect(grounding?.repairAction).toMatchObject({ kind: "escalate", route: "research" });
+  });
+
+  it("answer gate does NOT add a duplicate escalation when the executor already attached one (P1)", () => {
+    // In the real app path the executor attaches `declined-despite-context`; the gate
+    // backstop must not pile a second escalate eval on top of it.
+    const evaluations = gateFor("generated_answer", {
+      answer: "I could not compose a governed query.",
+      answerRefusalCode: "model_declined",
+      artifacts: [],
+      evaluations: [{
+        id: "declined-despite-context",
+        label: "Answer grounding",
+        passed: false,
+        severity: "blocking",
+        message: "Declined despite context.",
+        suggestedRepair: "Investigate the join path and compose a query.",
+        repairAction: { kind: "escalate", route: "research", hint: "Investigate the join path and compose a query." },
+      }],
+    });
+    expect(evaluations.filter((evaluation) => evaluation.id === "grounding")).toHaveLength(0);
+    expect(evaluations.filter((evaluation) => !evaluation.passed && evaluation.repairAction?.kind === "escalate")).toHaveLength(1);
+  });
+
+  it("answer gate still ACCEPTS an ambiguous refusal as a genuine clarify (no escalation)", () => {
+    // `ambiguous` is a real "the user must clarify" case — it must not be escalated.
+    const evaluations = gateFor("generated_answer", {
+      answer: "Which revenue measure did you mean — gross or net?",
+      answerRefusalCode: "ambiguous",
+      artifacts: [],
+    });
+    expect(evaluations.some((evaluation) => evaluation.id === "grounding")).toBe(false);
+  });
+
   it("answer gate accepts a grounded answer with no execution error", () => {
     const evaluations = gateFor("certified_answer", {
       answer: "Revenue is $2.8M.",

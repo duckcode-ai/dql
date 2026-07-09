@@ -160,6 +160,64 @@ describe("AgentRunEngine", () => {
     )).toBe(true);
   });
 
+  it("escalates a model_declined generated answer to research instead of dead-ending (P1)", async () => {
+    const events: AgentRunEvent[] = [];
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-declined-escalate",
+      now: fixedClock(),
+      planner: fixedRoutePlanner("generated_answer"),
+      gates: defaultAgentRunGates,
+      executors: {
+        // Mirrors the real local-runtime answerRunExecutor for a model_declined
+        // refusal: non-empty apology prose, the refusal code surfaced, and a blocking
+        // escalate-to-research evaluation. Previously this dead-ended as needs_clarification.
+        generated_answer: () => {
+          generatedCalls += 1;
+          return {
+            answer: "I could not compose a governed query for this from the available tables and metrics.",
+            answerRefusalCode: "model_declined",
+            status: "needs_review",
+            artifacts: [],
+            evaluations: [{
+              id: "declined-despite-context",
+              label: "Answer grounding",
+              passed: false,
+              severity: "blocking",
+              message: "Declined despite context.",
+              suggestedRepair: "Investigate the join path and compose a query.",
+              repairAction: { kind: "escalate", route: "research", hint: "Investigate the join path and compose a query." },
+            }],
+          };
+        },
+        research: () => ({
+          answer: "Investigated the join path across orders, products, and locations and composed a review-required query.",
+          artifacts: [{
+            id: "research",
+            kind: "answer",
+            title: "Research",
+            trustState: "review_required",
+            payload: { answer: "Investigated and composed a review-required query." },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "average tax by location by product",
+      intent: "ad_hoc_analysis",
+    }, (event) => events.push(event));
+
+    expect(generatedCalls).toBe(1);
+    expect(run.escalationAttempts).toBe(1);
+    expect(run.steps.map((step) => step.route)).toEqual(["generated_answer", "research"]);
+    expect(run.stopReason).not.toBe("needs_clarification");
+    expect(events.some((event) =>
+      event.type === "escalated"
+      && (event.payload as { route?: string })?.route === "research"
+    )).toBe(true);
+  });
+
   it("opens research as review-required durable work for investigate requests", async () => {
     const engine = new AgentRunEngine({ idGenerator: () => "run-research", now: fixedClock() });
     const run = await engine.run({

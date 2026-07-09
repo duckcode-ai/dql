@@ -1034,10 +1034,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
+    // The model tried to compose a governed query and declined despite having usable
+    // context (e.g. it wasn't confident about a multi-table join). That is NOT a
+    // question for the USER to clarify — it's a case to retry harder: escalate to a
+    // deeper research pass (higher reasoning effort + deep analysis) through the
+    // engine's bounded loop, exactly as a grounding gap is retried today.
+    const isModelDeclined = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'model_declined';
     const groundingRepairHint = isGroundingGap ? groundingGapRepairHint(governedAnswer) : undefined;
-    // A provider outage is a retryable infrastructure failure, not a question the
-    // user needs to clarify — surface it as blocked so the UI offers a retry.
-    const needsClarification = governedAnswer.kind === 'no_answer' && !isGroundingGap && !isProviderError;
+    const declinedRepairHint = isModelDeclined
+      ? 'The first attempt declined to compose a governed query despite available context. Investigate the join path across the requested entities/metrics and compose a review-required query rather than declining.'
+      : undefined;
+    // Only a genuinely AMBIGUOUS question is surfaced as "needs clarification". A
+    // grounding gap or a model decline is retried/escalated by the engine, and a
+    // provider outage is surfaced as blocked so the UI offers a retry.
+    const needsClarification = governedAnswer.kind === 'no_answer'
+      && !isGroundingGap && !isProviderError && !isModelDeclined;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
     const runnableSql = governedAnswer.kind === 'no_answer' ? undefined : sql;
     // Synthesis is a legacy polish pass. Certified/no-answer paths and lanes
@@ -1089,6 +1100,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ];
     return {
       resolvedRoute,
+      answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
       summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
@@ -1150,6 +1162,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ),
             suggestedRepair: groundingRepairHint,
             repairAction: { kind: 'retry' as const, hint: groundingRepairHint },
+          },
+        ] : []),
+        ...(isModelDeclined ? [
+          {
+            ...agentRunEvaluation(
+              'declined-despite-context',
+              'Answer grounding',
+              false,
+              'blocking',
+              'The model declined to compose a governed query despite available context — escalating to a deeper investigation before accepting a refusal.',
+              {
+                refusalCode: governedAnswer.refusalCode,
+                refusalDetails: governedAnswer.refusalDetails,
+                validationWarnings: governedAnswer.validationWarnings,
+                route: governedAnswer.route,
+              },
+            ),
+            suggestedRepair: declinedRepairHint,
+            repairAction: { kind: 'escalate' as const, route: 'research' as const, hint: declinedRepairHint },
           },
         ] : []),
         ...(governedAnswer.executionError ? [

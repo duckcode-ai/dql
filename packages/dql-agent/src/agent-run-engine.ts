@@ -291,6 +291,13 @@ export interface AgentRouteExecutorResult {
   status?: AgentRunStatus;
   trustState?: AgentRunTrustState;
   stopReason?: AgentRunStopReason;
+  /**
+   * When this result is a governed no-answer, the reason the answer loop refused —
+   * so the gate can distinguish a genuine clarify (`ambiguous`) from a retryable
+   * decline (`model_declined`) or grounding gap without inspecting prose. Absent
+   * for any successful answer.
+   */
+  answerRefusalCode?: 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error';
   artifacts?: AgentRunArtifact[];
   evaluations?: AgentRunEvaluation[];
   nextActions?: AgentRunNextAction[];
