@@ -1935,15 +1935,19 @@ Rules:
    Do NOT use dbt/Jinja macros such as {{ ref(...) }} or {{ source(...) }} in
    proposed SQL. Do not emit INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, COPY,
    PRAGMA, SET, or multiple statements.
-8. If the schema is insufficient to answer, say so explicitly and ask a
-   clarifying question instead of guessing. But a MULTI-ENTITY question ("top
-   customers who bought the top products", "accounts with the most overdue
-   invoices") is NOT insufficient context when the grounded tables and a join
-   route between them are supplied (see any "Knowledge graph join routes"
-   section). In that case you MUST compose the joined SELECT that answers it
-   directly — never refuse it or offer to show the parts as separate datasets.
-   Reserve the clarifying question for a genuinely absent table, column, or join
-   key.
+8. If the schema is insufficient, DISCOVER before you decline: use
+   search_metadata to find candidate relations, get_table_schema to confirm a
+   relation's real columns and inferred join keys, and expand_context for a
+   relation you already know by name. Only ask a clarifying question once those
+   come up empty AND the question is genuinely ambiguous — never decline just
+   because the initially supplied context pack didn't already include the table.
+   A MULTI-ENTITY question ("top customers who bought the top products", "accounts
+   with the most overdue invoices") is NOT insufficient context when the grounded
+   tables and a join route between them are supplied (see any "Knowledge graph
+   join routes" section) or discoverable via the tools above. In that case you
+   MUST compose the joined SELECT that answers it directly — never refuse it or
+   offer to show the parts as separate datasets. Reserve the clarifying question
+   for a genuinely absent table, column, or join key.
 9. Write directly to the analyst. Do not say "the user is asking", "the user
    requested", "I will generate", or describe internal routing. State the
    answer, the certified context used, the DQL artifact expectation, and the
@@ -3697,7 +3701,8 @@ async function generateProposalWithOptionalTools(input: {
       'You may use the supplied DQL tools to inspect semantic members, certified context, metadata context, and bounded repair options.',
       `Tool budget for this question: ${toolBudget.maxToolCalls} call(s) (${toolBudget.effortClass}: ${toolBudget.reason}). Stop as soon as a lane can answer.`,
       'Prefer semantic compile before deep warehouse search when the semantic layer contains the requested metric/dimensions/time grain.',
-      'Use context expansion only to repair a named, known relation/column gap; do not loop on the same failed context.',
+      'When the supplied context is missing a table, column, or join key, DISCOVER it with `search_metadata` (find candidate relations) then `get_table_schema` (confirm real columns + inferred join keys) before declining — do not give up on a join you could compose. Use `expand_context` for a relation you already know by name; do not loop on the same failed context.',
+      'When unsure a relation/column exists, validate a composed query with `validate_sql` rather than guessing.',
       'Final response must be a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
     ].join('\n'),
   };

@@ -563,7 +563,7 @@ const CORE_TOOL_DEFINITIONS = [
         limit: { type: 'number', description: 'Max tables to return. Default 12.' },
       },
     },
-    surfaces: ['mcp'],
+    surfaces: ['mcp', 'native', 'answer_loop'],
   },
   {
     name: 'get_table_schema',
@@ -577,7 +577,7 @@ const CORE_TOOL_DEFINITIONS = [
         table: { type: 'string', description: 'Model name, alias, or qualified relation.' },
       },
     },
-    surfaces: ['mcp'],
+    surfaces: ['mcp', 'native', 'answer_loop'],
   },
   {
     name: 'validate_sql',
@@ -592,7 +592,7 @@ const CORE_TOOL_DEFINITIONS = [
         query: { type: 'string', description: 'Optional original request, used to scope grounding.' },
       },
     },
-    surfaces: ['mcp'],
+    surfaces: ['mcp', 'native', 'answer_loop'],
   },
   {
     name: 'inspect_dql_project',

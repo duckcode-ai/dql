@@ -818,9 +818,9 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 8 },
+      { toolNames: ["inspect_metadata_context"], maxToolCalls: 10 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("8 call(s) (multi_entity");
+    expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
     expect(observed).toEqual([{ question: "tool-assisted generation" }]);
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("COUNT(*) AS order_count");
@@ -943,9 +943,9 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 8 },
+      { toolNames: ["inspect_metadata_context"], maxToolCalls: 10 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("8 call(s) (multi_entity");
+    expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
     expect(result.kind).toBe("uncertified");
   });
 

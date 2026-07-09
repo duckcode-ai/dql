@@ -27,6 +27,14 @@ export { kgSearch, kgSearchInput, feedbackRecord, feedbackRecordInput } from './
 export { inspectMetadataContext, inspectMetadataContextInput } from './tools/kg.js';
 export { queryViaMetadata, queryViaMetadataInput } from './tools/query-via-metadata.js';
 export {
+  searchMetadata,
+  searchMetadataInput,
+  getTableSchema,
+  getTableSchemaInput,
+  validateSql,
+  validateSqlInput,
+} from './tools/metadata.js';
+export {
   askDql,
   askDqlInput,
   buildDqlApp,

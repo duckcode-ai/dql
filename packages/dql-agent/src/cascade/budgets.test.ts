@@ -58,7 +58,7 @@ describe('cascade budgets', () => {
       buildAnalysisQuestionPlan('What is the order count by region and product category?'),
       'ad_hoc_analysis',
     )).toMatchObject({
-      maxToolCalls: 8,
+      maxToolCalls: 10,
       effortClass: 'multi_entity',
     });
 
