@@ -974,6 +974,16 @@ export function recordRuntimeSchemaSnapshot(projectRoot: string, snapshot: Runti
   }
 }
 
+/** The most-recent stored live-warehouse schema snapshot for a project, or null. */
+export function latestRuntimeSchemaSnapshotForProject(projectRoot: string): RuntimeSchemaSnapshot | null {
+  const catalog = openMetadataCatalog(projectRoot);
+  try {
+    return catalog.latestRuntimeSchemaSnapshot();
+  } finally {
+    catalog.close();
+  }
+}
+
 export function buildMetadataSnapshot(
   projectRoot: string,
   manifest: DQLManifest,

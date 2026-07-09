@@ -32,6 +32,7 @@ import {
   resolveGovernedAnswerRunner,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
+  runtimeSnapshotStale,
   saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
   setBlockStudioStatus,
@@ -54,6 +55,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
+import { recordRuntimeSchemaSnapshot } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 
 const tempDirs: string[] = [];
@@ -64,6 +66,36 @@ afterEach(() => {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
+  function seedSnapshot(capturedAt?: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'p6-freshness-'));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, '.dql', 'cache'), { recursive: true });
+    recordRuntimeSchemaSnapshot(dir, {
+      source: 'test',
+      ...(capturedAt ? { capturedAt } : {}),
+      tables: [{ relation: 'raw.t', name: 't', columns: [{ name: 'id' }] }],
+    });
+    return dir;
+  }
+
+  it('treats a snapshot older than the window as stale (forces a rescan)', () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    expect(runtimeSnapshotStale(seedSnapshot(twoHoursAgo))).toBe(true);
+  });
+
+  it('treats a fresh snapshot as not stale (reuses it)', () => {
+    expect(runtimeSnapshotStale(seedSnapshot(new Date().toISOString()))).toBe(false);
+  });
+
+  it('treats a missing snapshot as stale (needs a first scan)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p6-empty-'));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, '.dql', 'cache'), { recursive: true });
+    expect(runtimeSnapshotStale(dir)).toBe(true);
+  });
 });
 
 describe('formatLocalQueryRuntimeError', () => {
