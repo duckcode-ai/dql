@@ -181,6 +181,44 @@ describe('agent run runtime API', () => {
     expect(parsed.request?.thinkingMode).toBeUndefined();
   });
 
+  it('saves an answer block with an owner and returns either a certified block or a labelled draft', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-save-answer-block-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/blocks/save-from-cell`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cellId: 'answer-1',
+          name: 'Monthly revenue',
+          owner: 'owner@example.com',
+          content: 'block "AI answer" {\n  query = """\n    SELECT 1 AS revenue\n  """\n}',
+        }),
+      });
+      expect(response.status).toBe(201);
+      const saved = await response.json() as { path: string; content: string; status: string; blockers: string[] };
+      expect(['certified', 'draft']).toContain(saved.status);
+      expect(Array.isArray(saved.blockers)).toBe(true);
+      expect(saved.content).toContain('block "Monthly revenue"');
+      expect(saved.content).toContain('owner = "owner@example.com"');
+      expect(readFileSync(join(projectRoot, saved.path), 'utf-8')).toContain(`status = "${saved.status}"`);
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) return resolve();
+        server.close(() => resolve());
+      });
+    }
+  });
+
   it('skips synthesis for DQL-first answers that already carry final prose', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',

@@ -46,13 +46,57 @@ describe('answer-loop tool surface', () => {
     const tools = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools');
     const names = tools.map((tool) => tool.name);
 
-    expect(names).toEqual(dqlToolNamesForSurface('answer_loop'));
+    expect(names).toEqual([...dqlToolNamesForSurface('answer_loop'), 'search_project_files']);
     expect(names).toEqual(expect.arrayContaining([
-      'query_semantic_model',
-      'inspect_metadata_context',
       'expand_context',
-      'query_via_metadata',
+      'search_metadata',
+      'get_table_schema',
+      'validate_sql',
+      'search_project_files',
     ]));
+    expect(names).not.toEqual(expect.arrayContaining(['ask_dql', 'query_via_metadata', 'query_via_block']));
+  });
+});
+
+describe('lazy schema loading', () => {
+  const pack = (overrides: Record<string, unknown> = {}) => ({
+    routeDecision: { route: 'generated_sql' },
+    questionPlan: { requestedShape: { filters: [] } },
+    objects: [],
+    allowedSqlContext: { relations: [{ relation: 'analytics.orders' }], sourceBlockSql: [] },
+    ...overrides,
+  } as never);
+
+  it('does not touch the warehouse for certified or catalog-grounded questions', () => {
+    expect(__test__.shouldLoadSchemaContext(pack({ routeDecision: { route: 'certified' } }), true)).toBe(false);
+    expect(__test__.shouldLoadSchemaContext(pack(), false)).toBe(false);
+  });
+
+  it('defers semantic questions but loads schema for unresolved filters or empty context', () => {
+    expect(__test__.shouldLoadSchemaContext(pack({ objects: [{ objectType: 'metric' }] }), true)).toBe(false);
+    expect(__test__.shouldLoadSchemaContext(pack({
+      questionPlan: { requestedShape: { filters: ['enterprise'] } },
+    }), true)).toBe(true);
+    expect(__test__.shouldLoadSchemaContext(pack({
+      allowedSqlContext: { relations: [], sourceBlockSql: [] },
+    }), false)).toBe(true);
+  });
+
+  it('uses live source search only when indexed retrieval is thin', () => {
+    expect(__test__.shouldSearchProjectFiles(pack({ routeDecision: { route: 'certified' } }))).toBe(false);
+    expect(__test__.shouldSearchProjectFiles(pack({
+      objects: [{ objectType: 'metric' }, { objectType: 'semantic_model' }],
+    }))).toBe(false);
+    expect(__test__.shouldSearchProjectFiles(pack({
+      objects: [],
+      allowedSqlContext: { relations: [], sourceBlockSql: [] },
+    }))).toBe(true);
+  });
+
+  it('renders bounded source matches as advisory context', () => {
+    expect(__test__.renderProjectSourceSearch({
+      matches: [{ path: 'semantic/metrics.yml', line: 4, text: 'name: net_revenue' }],
+    })).toContain('semantic/metrics.yml:4');
   });
 });
 

@@ -155,14 +155,15 @@ function metricSearchText(metric: KGNode): string {
 }
 
 /**
- * Text used ONLY for measure-FAMILY detection: the metric's name + description +
- * tags, but NOT its `llmContext`. The llmContext carries `table:`/`sql:` lines, so
+ * Text used ONLY for measure-FAMILY detection: the metric's name + explicit
+ * tags, but NOT its free-form description or `llmContext`. Those fields carry
+ * business prose and `table:`/`sql:` lines, so
  * including it wrongly assigns a metric to the family of its backing TABLE (a
  * `tax_paid` measure on the `orders` table would falsely read as the "orders"
  * family). Family must reflect what the metric MEASURES, i.e. its name/label.
  */
 function metricFamilyText(metric: KGNode): string {
-  return [metric.name, metric.name.replace(/[_.]+/g, ' '), metric.description ?? '', ...(metric.tags ?? [])]
+  return [metric.name, metric.name.replace(/[_.]+/g, ' '), ...(metric.tags ?? [])]
     .filter(Boolean)
     .join(' ');
 }
@@ -178,6 +179,8 @@ export interface MetricMatch {
   score: number;
   /** The shared measure family that justified the match, if any. */
   family?: string;
+  /** Why this candidate was safe to advance into semantic compilation. */
+  basis?: 'name' | 'family' | 'description' | 'embedding';
 }
 
 export interface MatchSemanticMetricOptions {
@@ -286,26 +289,52 @@ export async function matchSemanticMetric(
     // Precision guard: a candidate is only a genuine metric hit when the question
     // touches the metric's NAME or shares a measure family — a pure description
     // overlap (e.g. the word "monthly" appearing in a metric's prose) is not.
-    const grounded = nameHit > 0 || Boolean(sharedFamily);
-    return { metric, text: metricSearchText(metric), ftsScore: fts, family: sharedFamily, grounded };
+    const descriptionTokens = new Set(contentTokens(metric.description ?? ''));
+    let descriptionHits = 0;
+    for (const token of qContent) if (descriptionTokens.has(token)) descriptionHits += 1;
+    // Descriptions/examples are a recall source, not an automatic answer. Require
+    // at least two distinctive measure tokens before they can advance a metric to
+    // compiler validation; a single generic prose word remains insufficient.
+    const descriptionGrounded = qContent.size >= 2
+      && descriptionHits >= 2
+      && descriptionHits / qContent.size >= 0.6;
+    const grounded = nameHit > 0 || Boolean(sharedFamily) || descriptionGrounded;
+    const basis = nameHit > 0
+      ? 'name' as const
+      : sharedFamily
+        ? 'family' as const
+        : descriptionGrounded
+          ? 'description' as const
+          : undefined;
+    return { metric, text: metricSearchText(metric), ftsScore: fts, family: sharedFamily, grounded, basis };
   });
 
   const hasLexicalSignal = items.some((entry) => entry.ftsScore > 0);
+  const provider = options.provider ?? envEmbeddingProvider();
   const ranked = await hybridRank(
     question,
     items.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),
     {
       alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA : 0,
-      provider: options.provider ?? envEmbeddingProvider(),
+      provider,
     },
   );
 
   const best = ranked[0];
-  if (!best || best.score < threshold) return null;
-  // Reject an ungrounded winner even if embeddings nudged it over the (lowered)
-  // bar — precision over recall for the governed tier.
-  if (!best.item.grounded) return null;
-  return { metric: best.item.metric, score: best.score, family: best.item.family };
+  if (!best) return null;
+  const second = ranked[1];
+  const realEmbeddingProvider = !provider.id.includes('hashed-token');
+  const embeddingGrounded = !best.item.grounded
+    && realEmbeddingProvider
+    && best.vectorScore >= 0.86
+    && best.vectorScore - (second?.vectorScore ?? 0) >= 0.06;
+  if ((!best.item.grounded || best.score < threshold) && !embeddingGrounded) return null;
+  return {
+    metric: best.item.metric,
+    score: embeddingGrounded ? best.vectorScore : best.score,
+    family: best.item.family,
+    basis: embeddingGrounded ? 'embedding' : best.item.basis,
+  };
 }
 
 function clamp01(value: number): number {

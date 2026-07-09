@@ -38,6 +38,7 @@ const ANALYST_ONLY_ROUTES = new Set<AgentRunRoute>(["sql_cell", "dql_block_draft
 export type AgentRunRoute =
   | "conversation"
   | "certified_answer"
+  | "semantic_answer"
   | "generated_answer"
   | "research"
   | "sql_cell"
@@ -55,11 +56,12 @@ export type AgentRunRoute =
 export type AgentRunAnswerKind = "governed" | "conversational" | "general_knowledge";
 
 export type AgentRunStatus = "completed" | "needs_review" | "needs_clarification" | "blocked";
-export type AgentRunTrustState = "certified" | "grounded" | "review_required" | "blocked" | "not_applicable";
+export type AgentRunTrustState = "certified" | "governed" | "grounded" | "review_required" | "blocked" | "not_applicable";
 
 export type AgentRunStopReason =
   | "conversational_reply"
   | "certified_answer_found"
+  | "governed_semantic_answer"
   | "generated_review_required"
   | "artifact_created"
   | "needs_clarification"
@@ -449,6 +451,7 @@ export function routeReasoningEffort(route: AgentRunRoute): ReasoningEffort {
     case "conversation":
     case "clarify":
     case "certified_answer":
+    case "semantic_answer":
     case "blocked":
       return "low";
     case "generated_answer":
@@ -1184,7 +1187,7 @@ function isTerminalSuccess(route: AgentRunRoute, outcome: StepOutcome): boolean 
   // Every other accepted step falls through so a multi-step plan can keep going; the
   // run loop ends naturally when the planned queue empties or maxSteps is hit.
   if (route === "conversation" && outcome.status === "completed") return true;
-  if (route === "certified_answer" && outcome.status === "completed") return true;
+  if ((route === "certified_answer" || route === "semantic_answer") && outcome.status === "completed") return true;
   // A governed SEMANTIC answer (deterministically compiled from the semantic layer)
   // is as terminal as a certified block for a metric question — no further step adds
   // trust. Generated SQL (generated_sql / business_context) stays NON-terminal so a
@@ -1265,6 +1268,8 @@ export function defaultSuccessCriteria(route: AgentRunRoute): string[] {
       return ["A direct, friendly reply — no data routing needed."];
     case "certified_answer":
       return ["Answer is backed by a certified DQL block or governed metric."];
+    case "semantic_answer":
+      return ["Answer is compiled from governed semantic members and executed without generated SQL."];
     case "generated_answer":
       return ["Answer is grounded in governed context and marked review-required."];
     case "research":
@@ -1356,6 +1361,12 @@ function defaultOutcome(route: AgentRunRoute): Pick<AgentRun, "status" | "trustS
         trustState: "certified",
         summary: "Answered from certified DQL context.",
       };
+    case "semantic_answer":
+      return {
+        status: "completed",
+        trustState: "governed",
+        summary: "Answered from governed semantic definitions.",
+      };
     case "clarify":
       return {
         status: "needs_clarification",
@@ -1400,6 +1411,15 @@ function defaultEvaluations(
       message: "Certified status must come from the route executor or resolved answer-loop tier, not token-overlap routing.",
     });
   }
+  if (route === "semantic_answer") {
+    base.push({
+      id: "semantic-context",
+      label: "Governed semantic context",
+      passed: true,
+      severity: "info",
+      message: "The semantic compiler, not the language model, owns the executed SQL.",
+    });
+  }
   if (route === "generated_answer" || route === "sql_cell") {
     base.push({
       id: "review-boundary",
@@ -1430,6 +1450,7 @@ function statusFromEvaluations(
   if (route === "clarify") return "needs_clarification";
   if (route === "conversation") return "completed";
   if (route === "certified_answer") return "completed";
+  if (route === "semantic_answer") return "completed";
   return fallback;
 }
 
@@ -1440,6 +1461,7 @@ function trustStateFromEvaluations(
 ): AgentRunTrustState {
   if (evaluations.some((evaluation) => !evaluation.passed && evaluation.severity === "blocking")) return "blocked";
   if (route === "certified_answer") return "certified";
+  if (route === "semantic_answer") return "governed";
   if (route === "clarify" || route === "conversation") return "not_applicable";
   // A generated/research answer that grounded to the catalog AND executed cleanly against
   // real data is "grounded" — honest verification pending human certification (never auto-certified).
@@ -1459,11 +1481,16 @@ function defaultArtifacts(
   const trustState = defaultOutcome(route).trustState;
   switch (route) {
     case "certified_answer":
+    case "semantic_answer":
     case "generated_answer":
       return [{
         id: `${route}:answer`,
         kind: "answer",
-        title: route === "certified_answer" ? "Certified answer" : "Generated answer",
+        title: route === "certified_answer"
+          ? "Certified answer"
+          : route === "semantic_answer"
+            ? "Governed semantic answer"
+            : "Generated answer",
         trustState,
         payload: { question: request.question, answer: result.answer },
       }];
@@ -1514,6 +1541,7 @@ function stopReasonFor(
   if (route === "conversation") return "conversational_reply";
   if (status === "needs_clarification") return "needs_clarification";
   if (route === "certified_answer") return "certified_answer_found";
+  if (route === "semantic_answer") return "governed_semantic_answer";
   if (artifacts.length > 0 && route !== "generated_answer") return "artifact_created";
   if (status === "needs_review") return "human_review_required";
   return "generated_review_required";
@@ -1525,6 +1553,12 @@ function defaultNextActions(route: AgentRunRoute, status: AgentRunStatus): Agent
     return [
       { id: "research-gap", label: "Research missing breakdown", route: "research" },
       { id: "build-app", label: "Build app from certified answer", route: "app_build" },
+    ];
+  }
+  if (route === "semantic_answer") {
+    return [
+      { id: "create-block", label: "Save as reviewed DQL block", route: "dql_block_draft", artifactKind: "dql_block_draft" },
+      { id: "research-gap", label: "Research deeper", route: "research" },
     ];
   }
   if (route === "research") {

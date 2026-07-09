@@ -43,6 +43,10 @@ export type CellStatus = 'idle' | 'running' | 'success' | 'error';
 
 export interface CellChartConfig {
   chart?: string;   // bar | line | area | pie | donut | scatter | heatmap | funnel | waterfall | histogram | gauge | stacked-bar | grouped-bar | kpi | table
+  /** Who selected the chart. Agent suggestions are validated against returned data; authored/user choices are retained. */
+  decisionSource?: 'authored' | 'agent' | 'data' | 'user';
+  /** Short, user-facing explanation for a smart recommendation. */
+  rationale?: string;
   x?: string;       // X-axis column
   y?: string;       // Y-axis column
   color?: string;   // Color-by column
@@ -152,7 +156,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'domains' | 'settings' | 'agent_log';
+export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | 'agent_log';
 
 export type GlobalAiAudience = 'stakeholder' | 'analyst';
 

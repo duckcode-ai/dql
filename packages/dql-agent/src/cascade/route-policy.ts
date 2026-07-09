@@ -5,6 +5,7 @@ export type CascadeRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block'
 export type CascadeRunRoute =
   | 'conversation'
   | 'certified_answer'
+  | 'semantic_answer'
   | 'generated_answer'
   | 'research'
   | 'sql_cell'
@@ -60,6 +61,7 @@ export function routeForCascadeAnswerTier(tier: CascadeAnswerRouteTier | undefin
     case 'business_context':
       return 'certified_answer';
     case 'semantic_metric':
+      return 'semantic_answer';
     case 'generated_sql':
     case 'no_answer':
       return 'generated_answer';

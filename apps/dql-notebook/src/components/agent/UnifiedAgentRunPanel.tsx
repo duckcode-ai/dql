@@ -46,16 +46,33 @@ import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
 import { ResultView } from '../output/ResultView';
 import { DraftReviewCard } from '../blocks/DraftReviewCard';
+import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 export { deriveResultChartConfig } from '../output/ResultView';
-import type { QueryResult, AppSummary, CellChartConfig } from '../../store/types';
+import type { QueryResult, AppSummary, CellChartConfig, Cell } from '../../store/types';
 import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
-import { emitNotebookResearchChanged } from '../../utils/notebook-research';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
 
 export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
+
+/** A submitted run that may outlive this mounted panel (tab switch, reload, or navigation). */
+interface PendingAgentRun {
+  id: string;
+  question: string;
+  threadId?: string;
+  startedAt: string;
+}
+
+interface AgentBlockSave {
+  runId: string;
+  source: string;
+  name: string;
+  dqlArtifact?: AgentConversationDqlArtifact;
+}
+
+const ACTIVE_RUNS_STORAGE_KEY = 'dql.agent.active-runs.v1';
 
 /** An empty-state suggestion chip: the label is shown, the prompt is submitted. */
 export type ExamplePrompt = { label: string; prompt: string };
@@ -116,6 +133,7 @@ export interface InsertDqlPayload {
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
   conversation: 'Chat',
   certified_answer: 'Certified answer',
+  semantic_answer: 'Governed semantic answer',
   generated_answer: 'Generated answer',
   research: 'Research plan',
   sql_cell: 'SQL cell',
@@ -157,12 +175,13 @@ export function UnifiedAgentRunPanel({
   // "Draft this as a block") via this one-shot ref: consumed once at submit and cleared
   // the moment the user edits the prefilled prompt. The default is always auto.
   const pendingModeRef = useRef<AgentRunRequestedMode | undefined>(undefined);
-  const [certifying, setCertifying] = useState<Record<string, 'pending' | 'sent' | 'error'>>({});
   const [input, setInput] = useState(initialInput);
   const [items, setItems] = useState<ThreadItem[]>(initialItems ?? []);
   const [runningEvents, setRunningEvents] = useState<AgentRunEvent[]>([]);
   const [streamingAnswer, setStreamingAnswer] = useState('');
   const [running, setRunning] = useState(false);
+  const [backgroundRun, setBackgroundRun] = useState<PendingAgentRun | null>(null);
+  const [blockToSave, setBlockToSave] = useState<AgentBlockSave | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The composer "thinking" selection, sticky across refreshes. `auto` defers to
   // the engine's shape-adaptive routing; the user can change it mid-conversation.
@@ -175,6 +194,10 @@ export function UnifiedAgentRunPanel({
   const lastInitialInputRef = useRef(initialInput);
   const lastAutoRunNonceRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  const pendingRunRef = useRef<PendingAgentRun | null>(null);
+  const recoveryTimerRef = useRef<number | null>(null);
+  const recoveryEpochRef = useRef(0);
 
   useEffect(() => {
     if (!initialInput || running) return;
@@ -208,6 +231,64 @@ export function UnifiedAgentRunPanel({
   const onThreadIdChangeRef = useRef(onThreadIdChange);
   onThreadIdChangeRef.current = onThreadIdChange;
 
+  const appendFinishedRun = useCallback((run: AgentRun, pending: PendingAgentRun) => {
+    if (recoveryTimerRef.current !== null) {
+      window.clearTimeout(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+    clearActiveAgentRun(run.id);
+    if (activeRunIdRef.current === run.id) activeRunIdRef.current = null;
+    pendingRunRef.current = null;
+    setBackgroundRun(null);
+    setRunningEvents(run.events.slice(-8));
+    setStreamingAnswer('');
+    setItems((current) => {
+      if (current.some((item) => item.kind === 'run' && item.run.id === run.id)) return current;
+      // A reload can happen after the question was sent but before its local item
+      // was rendered. Restore that question ahead of the recovered answer.
+      const alreadyHasQuestion = current.some((item) => item.kind === 'user' && item.text === pending.question);
+      return [
+        ...current,
+        ...(alreadyHasQuestion ? [] : [{ kind: 'user' as const, id: `${run.id}-question`, text: pending.question }]),
+        { kind: 'run' as const, id: run.id, run },
+      ];
+    });
+  }, []);
+
+  const recoverPendingRun = useCallback((pending: PendingAgentRun) => {
+    if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
+    const recoveryEpoch = ++recoveryEpochRef.current;
+    activeRunIdRef.current = pending.id;
+    pendingRunRef.current = pending;
+    setBackgroundRun(pending);
+    setRunning(true);
+    setStreamingAnswer('');
+    setRunningEvents([]);
+
+    const check = async () => {
+      if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
+      try {
+        // Runs are saved atomically at completion. A 404 while the server is still
+        // working is expected; keep the reconnect loop quiet and lightweight.
+        const run = await api.getAgentRun(pending.id);
+        if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
+        appendFinishedRun(run, pending);
+        setRunning(false);
+      } catch {
+        if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
+        recoveryTimerRef.current = window.setTimeout(() => { void check(); }, 1_200);
+      }
+    };
+    void check();
+    return () => {
+      if (recoveryEpoch === recoveryEpochRef.current) recoveryEpochRef.current += 1;
+      if (recoveryTimerRef.current !== null) {
+        window.clearTimeout(recoveryTimerRef.current);
+        recoveryTimerRef.current = null;
+      }
+    };
+  }, [appendFinishedRun]);
+
   // Resume: when mounted with a threadId, hydrate the conversation from the
   // server-persisted turns. The server thread is the source of truth for
   // ANSWERS: host-seeded `initialItems` can be a stale partial snapshot (the
@@ -236,6 +317,29 @@ export function UnifiedAgentRunPanel({
     return () => { cancelled = true; };
   }, [threadIdProp]);
 
+  // The server deliberately keeps an accepted run alive when this view unmounts.
+  // Reconnect by run id rather than rerunning the question, so switching tabs,
+  // windows, or routes never duplicates work or loses the completed answer.
+  useEffect(() => {
+    const pending = findActiveAgentRun(threadIdProp ?? threadIdRef.current);
+    // The local stream is already healthy for a just-created thread; do not
+    // replace its live event feed with polling merely because the host persisted
+    // the new thread id.
+    if (!pending || abortRef.current) return;
+    return recoverPendingRun(pending);
+  }, [recoverPendingRun, threadIdProp]);
+
+  useEffect(() => {
+    const reconnectWhenVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (abortRef.current) return;
+      const pending = pendingRunRef.current ?? findActiveAgentRun(threadIdProp ?? threadIdRef.current);
+      if (pending) recoverPendingRun(pending);
+    };
+    document.addEventListener('visibilitychange', reconnectWhenVisible);
+    return () => document.removeEventListener('visibilitychange', reconnectWhenVisible);
+  }, [recoverPendingRun, threadIdProp]);
+
   const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
@@ -250,6 +354,14 @@ export function UnifiedAgentRunPanel({
     setStreamingAnswer('');
     const controller = new AbortController();
     abortRef.current = controller;
+    const runId = makeId('run');
+    let pending: PendingAgentRun = { id: runId, question: text, threadId: threadIdRef.current, startedAt: new Date().toISOString() };
+    activeRunIdRef.current = runId;
+    pendingRunRef.current = pending;
+    setBackgroundRun(pending);
+    saveActiveAgentRun(pending);
+    let receivedStreamMessage = false;
+    let recovering = false;
     try {
       // Thread-scoped persistence: make sure a server thread exists so this run is
       // recorded as a turn. Best-effort — never block the question on it; without
@@ -263,6 +375,10 @@ export function UnifiedAgentRunPanel({
           });
           threadIdRef.current = thread.id;
           onThreadIdChangeRef.current?.(thread.id);
+          pending = { ...pending, threadId: thread.id };
+          pendingRunRef.current = pending;
+          setBackgroundRun(pending);
+          saveActiveAgentRun(pending);
         } catch {
           // Conversation store unavailable — proceed without a threadId.
         }
@@ -279,9 +395,11 @@ export function UnifiedAgentRunPanel({
         conversationContext: buildConversationContext(items),
         history,
         thinkingMode,
+        runId,
         ...(threadIdRef.current ? { threadId: threadIdRef.current } : {}),
       };
       const run = await api.createAgentRunStream(runInput, (message) => {
+        receivedStreamMessage = true;
         if (message.kind === 'event') {
           setRunningEvents((current) => [...current, message.event].slice(-8));
         } else if (message.kind === 'answer-delta') {
@@ -290,16 +408,26 @@ export function UnifiedAgentRunPanel({
           setRunningEvents(message.run.events.slice(-8));
         }
       }, controller.signal);
-      setItems((current) => [...current, { kind: 'run', id: run.id, run }]);
-      setStreamingAnswer('');
+      appendFinishedRun(run, pending);
     } catch (err) {
       if (!controller.signal.aborted) {
         setError(err instanceof Error ? err.message : String(err));
         setInput(text);
+        // If streaming disconnected after the server began reporting progress,
+        // let the persisted run finish and quietly reconnect to its final answer.
+        if (receivedStreamMessage) {
+          recovering = true;
+          recoverPendingRun(pending);
+        } else {
+          clearActiveAgentRun(runId);
+          if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
+          pendingRunRef.current = null;
+          setBackgroundRun(null);
+        }
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      setRunning(false);
+      if (!recovering) setRunning(false);
     }
   };
 
@@ -322,35 +450,9 @@ export function UnifiedAgentRunPanel({
 
   useEffect(() => () => {
     abortRef.current?.abort();
+    recoveryEpochRef.current += 1;
+    if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
   }, []);
-
-  const requestCertification = async (run: AgentRun) => {
-    if (certifying[run.id] === 'pending' || certifying[run.id] === 'sent') return;
-    setCertifying((current) => ({ ...current, [run.id]: 'pending' }));
-    try {
-      const sql = answerSqlFromRun(run);
-      const dqlArtifact = answerDqlArtifactFromRun(run);
-      const cascade = answerCascadeFromRun(run);
-      const result = await api.requestCertification({
-        question: run.question,
-        generatedSql: sql,
-        dqlArtifact,
-        notebookPath: typeof workspaceContext?.notebookPath === 'string' ? workspaceContext.notebookPath : notebookPath,
-        context: { agentRunId: run.id, route: run.route, selectedObject: run.selectedObject, dqlArtifact, cascade },
-      });
-      if (result.ok) {
-        emitNotebookResearchChanged({
-          notebookPath: result.notebookPath,
-          runId: result.researchRunId,
-          reason: 'agent-run-request-certification',
-        });
-        if (result.researchRunId) onOpenResearch?.(result.researchRunId, result.notebookPath);
-      }
-      setCertifying((current) => ({ ...current, [run.id]: result.ok ? 'sent' : 'error' }));
-    } catch {
-      setCertifying((current) => ({ ...current, [run.id]: 'error' }));
-    }
-  };
 
   // Pre-selected app target when the panel is opened inside an app (the global
   // rail); on the Ask home there is none and the picker lists/creates apps.
@@ -360,8 +462,19 @@ export function UnifiedAgentRunPanel({
   };
 
   const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
-    if (action.id === 'request-certification') {
-      void requestCertification(run);
+    if (action.id === 'save-dql-block') {
+      const dqlArtifact = answerDqlArtifactFromRun(run);
+      const source = dqlArtifact?.source?.trim() ?? answerSqlFromRun(run)?.trim();
+      if (!source) {
+        setError('This answer does not include a reusable DQL or SQL artifact yet.');
+        return;
+      }
+      setBlockToSave({
+        runId: run.id,
+        source,
+        name: dqlArtifact?.name ?? `${run.question.slice(0, 48).trim() || 'saved_answer'}`,
+        dqlArtifact,
+      });
       return;
     }
     if (action.id === 'research-deeper') {
@@ -380,6 +493,22 @@ export function UnifiedAgentRunPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
+      {blockToSave ? (
+        <SaveAsBlockModal
+          cell={{
+            id: `agent-${blockToSave.runId}`,
+            type: blockToSave.dqlArtifact ? 'dql' : 'sql',
+            content: blockToSave.source,
+            name: blockToSave.name,
+            status: 'success',
+            ...(blockToSave.dqlArtifact ? { dqlArtifact: blockToSave.dqlArtifact } : {}),
+          } satisfies Cell}
+          initialContent={blockToSave.source}
+          initialName={blockToSave.name}
+          onClose={() => setBlockToSave(null)}
+          onSaved={() => setBlockToSave(null)}
+        />
+      ) : null}
       <style>{`
         @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
         @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
@@ -420,7 +549,6 @@ export function UnifiedAgentRunPanel({
             run={item.run}
             t={t}
             themeMode={themeMode}
-            certifyState={certifying[item.run.id]}
             appContext={appContext}
             onOpenApp={onOpenApp}
             onInsertSql={onInsertSql}
@@ -431,7 +559,7 @@ export function UnifiedAgentRunPanel({
           />
         ))}
 
-        {running && <RunProgress events={runningEvents} t={t} streamingAnswer={streamingAnswer} thinkingMode={thinkingMode} />}
+        {running && <RunProgress events={runningEvents} t={t} streamingAnswer={streamingAnswer} thinkingMode={thinkingMode} backgroundRun={backgroundRun} />}
       </div>
 
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
@@ -519,6 +647,47 @@ function readStoredThreadId(storageKey: string): string | undefined {
   }
 }
 
+function readActiveAgentRuns(): PendingAgentRun[] {
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(ACTIVE_RUNS_STORAGE_KEY) ?? '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is PendingAgentRun => {
+      if (!entry || typeof entry !== 'object') return false;
+      const value = entry as Record<string, unknown>;
+      return typeof value.id === 'string'
+        && typeof value.question === 'string'
+        && typeof value.startedAt === 'string'
+        && (value.threadId === undefined || typeof value.threadId === 'string');
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveActiveAgentRun(run: PendingAgentRun): void {
+  try {
+    const otherRuns = readActiveAgentRuns().filter((entry) => entry.id !== run.id);
+    window.localStorage.setItem(ACTIVE_RUNS_STORAGE_KEY, JSON.stringify([...otherRuns, run].slice(-12)));
+  } catch {
+    // A run continues on the server even if browser storage is unavailable.
+  }
+}
+
+function clearActiveAgentRun(runId: string): void {
+  try {
+    const remaining = readActiveAgentRuns().filter((entry) => entry.id !== runId);
+    window.localStorage.setItem(ACTIVE_RUNS_STORAGE_KEY, JSON.stringify(remaining));
+  } catch {
+    // Best effort only: an old entry is harmless and will be de-duplicated if found.
+  }
+}
+
+function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
+  const runs = readActiveAgentRuns().sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  if (threadId) return runs.find((entry) => entry.threadId === threadId);
+  return runs.find((entry) => !entry.threadId) ?? runs[0];
+}
+
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
 
 function readStoredThinkingMode(): AgentThinkingMode {
@@ -531,11 +700,11 @@ function readStoredThinkingMode(): AgentThinkingMode {
 }
 
 const AGENT_RUN_ROUTES = new Set<AgentRunRoute>([
-  'conversation', 'certified_answer', 'generated_answer', 'research',
+  'conversation', 'certified_answer', 'semantic_answer', 'generated_answer', 'research',
   'sql_cell', 'dql_block_draft', 'app_build', 'clarify', 'blocked',
 ]);
 const AGENT_RUN_TRUST_STATES = new Set<AgentRunTrustState>([
-  'certified', 'grounded', 'review_required', 'blocked', 'not_applicable',
+  'certified', 'governed', 'grounded', 'review_required', 'blocked', 'not_applicable',
 ]);
 
 /**
@@ -731,16 +900,66 @@ function phaseIconFor(events: AgentRunEvent[]): typeof Sparkles {
   return Sparkles;
 }
 
+interface AgentActivityCard {
+  title: string;
+  detail: string;
+  Icon: typeof Sparkles;
+}
+
+function compactActivityDetail(message: string): string {
+  const clean = message.replace(/\s+/g, ' ').trim();
+  return clean.length > 118 ? `${clean.slice(0, 115).trimEnd()}…` : clean;
+}
+
+/**
+ * Compact, evidence-safe activity cards. These are operational observations the
+ * runtime has emitted (not hidden reasoning), so people can see concrete work
+ * such as checking certified metrics or reading the live schema.
+ */
+function activityCardsFor(events: AgentRunEvent[]): AgentActivityCard[] {
+  const cardFor = (event: AgentRunEvent): AgentActivityCard | undefined => {
+    const detail = compactActivityDetail(event.message);
+    if (event.type === 'plan.created') return { title: 'Shaping the request', detail, Icon: Lightbulb };
+    if (event.type === 'route.decided') return { title: 'Choosing the safest route', detail, Icon: Route };
+    if (event.type === 'evaluation.recorded') return { title: 'Verifying the answer', detail, Icon: ShieldCheck };
+    if (event.type === 'repair.attempted' || event.type === 'escalated') return { title: 'Improving reliability', detail, Icon: Wrench };
+    if (event.type !== 'executor.started') return undefined;
+    if (/certified|semantic|metric|governed/i.test(detail)) return { title: 'Checking governed definitions', detail, Icon: ShieldCheck };
+    if (/search|definition|domain|skill|project index|source/i.test(detail)) return { title: 'Searching your project', detail, Icon: FileSearch };
+    if (/schema|column|table|relation/i.test(detail)) return { title: 'Inspecting data shape', detail, Icon: ListTree };
+    if (/resolv|answer|result/i.test(detail)) return { title: 'Building the answer', detail, Icon: Sparkles };
+    return { title: 'Working with your data', detail, Icon: Sparkles };
+  };
+  const cards: AgentActivityCard[] = [];
+  const seen = new Set<string>();
+  for (let index = events.length - 1; index >= 0 && cards.length < 3; index -= 1) {
+    const card = cardFor(events[index]);
+    if (!card || seen.has(card.title)) continue;
+    seen.add(card.title);
+    cards.unshift(card);
+  }
+  return cards;
+}
+
 /**
  * Live agent activity — boxless. A spinning halo + phase icon, a shimmering
  * action headline, a Plan→Work→Verify tracker, and the latest step line.
  * Expresses *what the agent is doing* rather than a generic progress bar.
  */
-function RunProgress({ events, t, streamingAnswer, thinkingMode }: { events: AgentRunEvent[]; t: Theme; streamingAnswer?: string; thinkingMode?: AgentThinkingMode }) {
-  const action = currentActionLabel(events);
+function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }: {
+  events: AgentRunEvent[];
+  t: Theme;
+  streamingAnswer?: string;
+  thinkingMode?: AgentThinkingMode;
+  backgroundRun?: PendingAgentRun | null;
+}) {
+  const action = events.length ? currentActionLabel(events) : backgroundRun ? 'Continuing your request in the background' : 'Starting';
   const stage = deriveStage(events);
   const Icon = phaseIconFor(events);
-  const latest = events.length ? events[events.length - 1].message : '';
+  const latest = events.length
+    ? events[events.length - 1].message
+    : backgroundRun ? 'Safe to switch tabs — this run will reconnect as soon as it is ready.' : '';
+  const activityCards = activityCardsFor(events);
   // Honest "why is this taking a moment" line — set expectations when the run is
   // deliberately on a slower, more thorough path (a deep investigation, or the
   // user's High thinking selection cross-checking the number).
@@ -822,6 +1041,17 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode }: { events: Age
           })}
         </div>
 
+        {activityCards.length > 0 ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6, marginTop: 2 }}>
+            {activityCards.map((card) => (
+              <div key={`${card.title}-${card.detail}`} style={{ minWidth: 0, padding: '7px 8px', border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.cellBg, display: 'grid', gap: 3 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.accent, fontSize: 10.5, fontWeight: 800 }}><card.Icon size={11} />{card.title}</span>
+                <span style={{ color: t.textMuted, fontSize: 10.5, lineHeight: 1.35 }}>{card.detail}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
         {slowReason && !streamingAnswer ? (
           <span style={{ fontSize: 11, color: t.textMuted, fontStyle: 'italic', lineHeight: 1.4 }}>{slowReason}</span>
         ) : null}
@@ -867,7 +1097,6 @@ function RunCard({
   run,
   t,
   themeMode,
-  certifyState,
   appContext,
   onOpenApp,
   onInsertSql,
@@ -879,7 +1108,6 @@ function RunCard({
   run: AgentRun;
   t: Theme;
   themeMode: ThemeMode;
-  certifyState?: 'pending' | 'sent' | 'error';
   appContext?: { appId?: string; dashboardId?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onInsertSql?: (sql: string, title?: string) => void;
@@ -936,20 +1164,21 @@ function RunCard({
   const isAnswer = run.route === 'certified_answer' || run.route === 'generated_answer';
   const hasResearchAction = run.nextActions.some((a) => a.route === 'research');
   const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
+  const sourceArtifact = answerDqlArtifactFromRun(run);
+  const canSaveBlock = pinnable && !sourceArtifact?.sourcePath && Boolean(sourceArtifact?.source ?? answerSqlFromRun(run));
   return (
     <div style={runCardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <StatusIcon run={run} />
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 850, color: t.textPrimary }}>{ROUTE_LABEL[run.route]}</div>
-          <div style={{ fontSize: 10.5, color: t.textMuted, marginTop: 1 }}>{run.stopReason.split('_').join(' ')}</div>
+          <div style={{ fontSize: 12.5, fontWeight: 850, color: t.textPrimary }}>{simpleRunTitle(run)}</div>
         </div>
         <TrustBadge run={run} t={t} />
       </div>
 
       {trustNote ? (
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', fontSize: 11, color: t.textMuted, lineHeight: 1.4 }}>
-          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} style={{ flex: '0 0 auto', marginTop: 1 }} /> : run.trustState === 'grounded' ? <ShieldCheck size={12} color={t.accent} style={{ flex: '0 0 auto', marginTop: 1 }} /> : <ShieldAlert size={12} color={t.warning} style={{ flex: '0 0 auto', marginTop: 1 }} />}
+          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} style={{ flex: '0 0 auto', marginTop: 1 }} /> : run.trustState === 'governed' || run.trustState === 'grounded' ? <ShieldCheck size={12} color={t.accent} style={{ flex: '0 0 auto', marginTop: 1 }} /> : <ShieldAlert size={12} color={t.warning} style={{ flex: '0 0 auto', marginTop: 1 }} />}
           <span>{trustNote}</span>
         </div>
       ) : null}
@@ -962,8 +1191,8 @@ function RunCard({
         </div>
       ) : null}
 
-      {run.summary && !(run.answer && sameText(run.summary, cleanAnswerText(run.answer))) ? (
-        <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{run.summary}</div>
+      {run.summary && !(run.answer && sameText(cleanPresentationText(run.summary), cleanAnswerText(run.answer))) ? (
+        <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
       {run.answer ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
 
@@ -1025,6 +1254,11 @@ function RunCard({
       {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
           {pinnable ? <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} /> : null}
+          {canSaveBlock ? (
+            <button type="button" className="dql-hover" onClick={() => onNextAction({ id: 'save-dql-block', label: 'Save as block', route: 'dql_block_draft' })} style={smallButtonStyle(t)}>
+              <Save size={11} /> Save as block
+            </button>
+          ) : null}
           {showResearchDeeper ? (
             <button
               type="button"
@@ -1038,29 +1272,17 @@ function RunCard({
             </button>
           ) : null}
           {/* confirm-app-build is owned by the proposal card itself, not a composer action. */}
-          {run.nextActions.filter((a) => a.id !== 'pin-to-app' && a.id !== 'research-deeper' && a.id !== 'confirm-app-build').map((action) => {
-            const isCertify = action.id === 'request-certification';
-            const label = isCertify && certifyState === 'sent'
-              ? 'Queued for review'
-              : isCertify && certifyState === 'pending'
-                ? 'Sending…'
-                : isCertify && certifyState === 'error'
-                  ? 'Retry request'
-                  : action.label;
-            return (
+          {run.nextActions.filter((a) => a.id !== 'pin-to-app' && a.id !== 'research-deeper' && a.id !== 'confirm-app-build' && a.id !== 'request-certification').map((action) => (
               <button
                 key={action.id}
                 type="button"
                 className="dql-hover"
                 onClick={() => onNextAction(action)}
-                disabled={isCertify && (certifyState === 'pending' || certifyState === 'sent')}
-                style={isCertify ? certifyButtonStyle(t, certifyState) : smallButtonStyle(t)}
+                style={smallButtonStyle(t)}
               >
-                {isCertify && certifyState === 'sent' ? <CheckCircle2 size={11} /> : isCertify ? <ShieldCheck size={11} /> : null}
-                {label}
+                {action.label}
               </button>
-            );
-          })}
+            ))}
         </div>
       ) : null}
     </div>
@@ -1268,11 +1490,21 @@ function AddToAppButton({
 
 /** Plain-English trust line so a stakeholder knows what they can rely on. */
 function trustExplainer(run: AgentRun): string | null {
-  if (run.trustState === 'certified') return 'Certified — answered from a governed metric you can trust.';
-  if (run.trustState === 'grounded') return 'Verified against your data — grounded and executed cleanly. Review to certify as a governed metric.';
-  if (run.trustState === 'review_required') return 'Review-required — generated from governed data; not a certified metric yet.';
+  if (run.trustState === 'certified') return 'Answered from a certified block.';
+  if (run.route === 'dql_block_draft') return 'Saved as a draft block. Add an owner and DQL will certify it when checks pass.';
+  if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
+  if (run.trustState === 'grounded') return 'Ran cleanly against your data. Save it as a block when it is reusable.';
+  if (run.trustState === 'review_required') return 'AI-generated answer. Save it as a block when you want to keep it.';
   if (run.trustState === 'blocked') return null;
   return null;
+}
+
+function simpleRunTitle(run: AgentRun): string {
+  if (run.trustState === 'certified') return 'Certified answer';
+  if (run.route === 'dql_block_draft') return 'Draft block';
+  if (run.route === 'semantic_answer') return 'Semantic answer';
+  if (run.route === 'generated_answer') return 'AI-generated answer';
+  return ROUTE_LABEL[run.route];
 }
 
 /**
@@ -1334,7 +1566,7 @@ function AppProposalArtifact({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <ArtifactIcon kind={artifact.kind} />
         <div style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {artifact.title}
+          {cleanPresentationText(artifact.title)}
         </div>
       </div>
       {created ? (
@@ -1478,7 +1710,7 @@ function ArtifactView({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <ArtifactIcon kind={artifact.kind} />
         <div style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {artifact.title}
+          {cleanPresentationText(artifact.title)}
         </div>
       </div>
       {keyFindings.length > 0 ? (
@@ -1592,6 +1824,7 @@ function ArtifactView({
 
 function StatusIcon({ run }: { run: AgentRun }) {
   if (run.trustState === 'certified') return <ShieldCheck size={16} color="#16a34a" />;
+  if (run.trustState === 'governed') return <ShieldCheck size={16} color="#2563eb" />;
   if (run.trustState === 'grounded') return <ShieldCheck size={16} color="#2563eb" />;
   if (run.status === 'completed') return <CheckCircle2 size={16} color="#16a34a" />;
   if (run.status === 'blocked') return <Route size={16} color="#ef4444" />;
@@ -1609,14 +1842,20 @@ function ArtifactIcon({ kind }: { kind: AgentRunArtifact['kind'] }) {
 function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
   const color = run.trustState === 'certified'
     ? t.success
-    : run.trustState === 'grounded'
+    : run.trustState === 'governed' || run.trustState === 'grounded'
       ? t.accent
       : run.trustState === 'blocked'
         ? t.error
         : run.trustState === 'not_applicable'
           ? t.textMuted
           : t.warning;
-  const label = run.trustState === 'grounded' ? 'verified' : run.trustState.split('_').join(' ');
+  const label = run.trustState === 'certified'
+    ? 'Certified'
+    : run.route === 'dql_block_draft'
+      ? 'Draft'
+      : run.trustState === 'blocked'
+        ? 'Needs input'
+        : 'AI-generated';
   return (
     <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '3px 7px', fontSize: 10, fontWeight: 850 }}>
       {label}
@@ -1744,7 +1983,7 @@ function routeToMode(route?: AgentRunRoute): AgentRunRequestedMode | undefined {
   if (route === 'sql_cell') return 'sql';
   if (route === 'dql_block_draft') return 'block';
   if (route === 'app_build') return 'app';
-  if (route === 'certified_answer' || route === 'generated_answer') return 'ask';
+  if (route === 'certified_answer' || route === 'semantic_answer' || route === 'generated_answer') return 'ask';
   return undefined;
 }
 
@@ -1766,9 +2005,19 @@ function makeId(prefix: string): string {
 function cleanAnswerText(answer: string): string {
   return answer
     .replace(/^\s*Outcome\s*:\s*[^\n]*\n+/i, '')
+    .replace(/^\s*Review required:\s*/gim, '')
+    .replace(/\breview-required\b/gi, 'AI-generated')
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/^_(.+?)_$/gm, '$1')
+    .trim();
+}
+
+function cleanPresentationText(value: string): string {
+  return value
+    .replace(/^\s*Review required:\s*/gim, '')
+    .replace(/\breview-required\b/gi, 'AI-generated')
+    .replace(/\bqueued for review\b/gi, 'saved as a draft')
     .trim();
 }
 
@@ -1821,6 +2070,10 @@ function extractChartConfig(payload: Record<string, unknown>, result: QueryResul
   const suggested = typeof payload.suggestedViz === 'string' ? payload.suggestedViz
     : typeof resultRecord?.suggestedViz === 'string' ? resultRecord.suggestedViz
     : undefined;
+  const storedDecisionSource = raw.decisionSource === 'authored' || raw.decisionSource === 'agent'
+    || raw.decisionSource === 'data' || raw.decisionSource === 'user'
+    ? raw.decisionSource
+    : undefined;
   const chartRaw = typeof raw.chart === 'string' ? raw.chart : suggested;
   const chart = chartRaw
     ? (chartRaw.toLowerCase().replace(/_/g, '-') === 'single-value' ? 'kpi' : chartRaw)
@@ -1830,6 +2083,8 @@ function extractChartConfig(payload: Record<string, unknown>, result: QueryResul
     typeof raw[key] === 'string' && columns.includes(raw[key] as string) ? raw[key] as string : undefined;
   const config: CellChartConfig = {
     ...(chart ? { chart } : {}),
+    ...(chart ? { decisionSource: storedDecisionSource ?? (typeof raw.chart === 'string' ? 'authored' as const : 'agent' as const) } : {}),
+    ...(typeof raw.rationale === 'string' ? { rationale: raw.rationale } : {}),
     ...(pick('x') ? { x: pick('x') } : {}),
     ...(pick('y') ? { y: pick('y') } : {}),
     ...(pick('color') ? { color: pick('color') } : {}),
@@ -2015,23 +2270,6 @@ function answerDqlArtifactFromRun(run: AgentRun): AgentConversationDqlArtifact |
   return undefined;
 }
 
-function answerCascadeFromRun(run: AgentRun): unknown {
-  for (const artifact of run.artifacts) {
-    const payload = payloadOf(artifact);
-    if (payload.cascade && typeof payload.cascade === 'object' && !Array.isArray(payload.cascade)) {
-      return payload.cascade;
-    }
-    const researchRun = payload.researchRun && typeof payload.researchRun === 'object' && !Array.isArray(payload.researchRun)
-      ? payload.researchRun as Record<string, unknown>
-      : undefined;
-    const cascade = researchRun?.cascade;
-    if (cascade && typeof cascade === 'object' && !Array.isArray(cascade)) {
-      return cascade;
-    }
-  }
-  return undefined;
-}
-
 function evidenceChipStyle(t: Theme, certified: boolean): React.CSSProperties {
   return {
     display: 'inline-flex',
@@ -2100,25 +2338,6 @@ function appliedStopStyle(t: Theme): React.CSSProperties {
     borderRadius: 6,
     padding: '2px 7px',
     cursor: 'pointer',
-  };
-}
-
-function certifyButtonStyle(t: Theme, state?: 'pending' | 'sent' | 'error'): React.CSSProperties {
-  const sent = state === 'sent';
-  const color = sent ? t.success : t.accent;
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 4,
-    border: `1px solid ${color}`,
-    background: `${color}14`,
-    color,
-    borderRadius: 7,
-    padding: '5px 8px',
-    fontSize: 11,
-    fontWeight: 800,
-    fontFamily: t.font,
-    cursor: sent || state === 'pending' ? 'default' : 'pointer',
   };
 }
 

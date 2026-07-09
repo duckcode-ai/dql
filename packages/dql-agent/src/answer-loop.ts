@@ -115,8 +115,8 @@ export interface AiRoute {
   label: string;
   ref?: string;
 }
-export type AnswerCertification = 'certified' | 'ai_generated' | 'analyst_review_required';
-export type AnswerReviewStatus = 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
+export type AnswerCertification = 'certified' | 'governed' | 'ai_generated' | 'analyst_review_required';
+export type AnswerReviewStatus = 'none' | 'governed' | 'draft_ready' | 'analyst_review_required' | 'certified';
 export type AgentIntent = MetadataAgentIntent | 'ad_hoc_analysis' | 'drillthrough';
 
 export interface AgentCitation {
@@ -178,6 +178,13 @@ export interface AgentEvidenceToolCall {
   order: number;
   /** Wall-clock time this tool call took, in ms — surfaces where a slow run spent its time. */
   durationMs?: number;
+}
+
+/** Coarse wall-clock spans for the request path, used to diagnose latency regressions. */
+export interface AgentEvidenceTiming {
+  phase: 'project_state' | 'context_retrieval' | 'source_search' | 'runtime_schema' | 'answer_resolution' | 'total';
+  durationMs: number;
+  detail?: string;
 }
 
 export interface AgentEvidenceOutcome {
@@ -305,6 +312,7 @@ export interface AgentEvidence {
   semanticObjects: AgentEvidenceAsset[];
   /** Real provider-visible tool observations, distinct from deterministic route breadcrumbs. */
   toolCalls?: AgentEvidenceToolCall[];
+  timings?: AgentEvidenceTiming[];
   validation?: {
     status: 'passed' | 'warning' | 'failed' | 'not_run';
     message: string;
@@ -724,10 +732,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // Select the RELEVANT skills (not all) for this question; keep pinned project
   // skills (SQL conventions). Block hints still come from the full set so a
   // preferred-block mapping is never lost.
-  const selectedSkills = selectRelevantSkills(skills, question, { userId: userId ?? null });
+  const inferredDomains = Array.from(new Set([
+    ...(domain ? [domain] : []),
+    ...(input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
+  ]));
+  const selectedSkills = selectRelevantSkills(skills, question, {
+    userId: userId ?? null,
+    domains: inferredDomains,
+  });
   const effectiveBlockHints = Array.from(new Set([
     ...blockHints,
-    ...buildSkillBlockHints(skills, userId ?? null),
+    // Only selected skills may influence block ranking. Previously a preferred
+    // block from any active but unrelated domain skill could jump to the front.
+    ...buildSkillBlockHints(selectedSkills, userId ?? null),
   ]));
   const followUpSourceBlock = input.followUp?.sourceBlockName
     ? kg.getNode(`block:${input.followUp.sourceBlockName}`)
@@ -1199,7 +1216,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     governedMetricAnswer = true;
     parsed = {
       sql: semanticBridgeAnswer.sql,
-      text: `Answered from governed semantic metric${semanticBridgeAnswer.metrics.length === 1 ? '' : 's'} ${semanticBridgeAnswer.metrics.join(', ')}${semanticBridgeAnswer.dimensions.length > 0 ? ` by ${semanticBridgeAnswer.dimensions.join(', ')}` : ''}. This result is uncertified until reviewed and promoted.`,
+      text: `Answered from governed semantic metric${semanticBridgeAnswer.metrics.length === 1 ? '' : 's'} ${semanticBridgeAnswer.metrics.join(', ')}${semanticBridgeAnswer.dimensions.length > 0 ? ` by ${semanticBridgeAnswer.dimensions.join(', ')}` : ''}. The semantic compiler owns this query; saving it as a reusable certified block still requires review.`,
       viz: semanticBridgeAnswer.dimensions.length === 0 && !semanticBridgeAnswer.timeDimension ? 'single_value' : undefined,
     };
   } else if (metricFirst) {
@@ -1207,7 +1224,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     governedMetricAnswer = true;
     parsed = {
       sql: metricFirst.sql,
-      text: `Answered from the governed metric ${metricFirst.metric.name}${metricFirst.dimensions.length > 0 ? ` by ${metricFirst.dimensions.join(', ')}` : ''}. This result is uncertified until reviewed and promoted.`,
+      text: `Answered from the governed metric ${metricFirst.metric.name}${metricFirst.dimensions.length > 0 ? ` by ${metricFirst.dimensions.join(', ')}` : ''}. The semantic definition owns the calculation; reusable block certification remains a separate review.`,
       viz: metricFirst.dimensions.length === 0 ? 'single_value' : undefined,
     };
   } else if (certifiedAdaptation) {
@@ -1295,7 +1312,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       if (trust.tier === 'semantic_metric' && trust.compiled) {
         governedMetricAnswer = true;
         const compiled = trust.compiled;
-        const governedNote = `Answered from governed semantic metric${compiled.metrics.length === 1 ? '' : 's'} ${compiled.metrics.join(', ')}${compiled.dimensions.length > 0 ? ` by ${compiled.dimensions.join(', ')}` : ''} (compiled via the semantic layer). This result is uncertified until reviewed and promoted.`;
+        const governedNote = `Answered from governed semantic metric${compiled.metrics.length === 1 ? '' : 's'} ${compiled.metrics.join(', ')}${compiled.dimensions.length > 0 ? ` by ${compiled.dimensions.join(', ')}` : ''} (compiled via the semantic layer). Reusable block certification remains a separate review.`;
         parsed = { ...parsed, text: parsed.text ? `${parsed.text}\n\n${governedNote}` : governedNote };
         proposalToolCalls.push({
           name: 'compile_semantic_query',
@@ -1357,7 +1374,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         sql: resolved.sql,
         text:
           parsed.text ||
-          `Answered from the governed metric ${resolved.metric.name}. This result is uncertified until reviewed and promoted.`,
+          `Answered from the governed metric ${resolved.metric.name}. The semantic definition owns the calculation; reusable block certification remains a separate review.`,
         viz: parsed.viz ?? 'single_value',
       };
     }
@@ -1894,26 +1911,32 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? { ...dqlArtifact, sourcePath: dqlArtifact.sourcePath ?? draftBlock.path }
       : dqlArtifact;
     const sourceCertifiedBlock = followUpSourceBlock?.name ?? input.followUp?.sourceBlockName;
-    const trustExplanation = generatedTrustExplanation({
-      followUp: input.followUp,
-      sourceCertifiedBlock,
-      draftBlock,
-    });
+    const trustExplanation = governedMetricAnswer
+      ? undefined
+      : generatedTrustExplanation({
+          followUp: input.followUp,
+          sourceCertifiedBlock,
+          draftBlock,
+        });
     const cleanedSummary = cleanGeneratedSummary(parsed.text);
     const generatedText = [partialShapeWarning, trustExplanation, cleanedSummary]
       .filter(Boolean)
       .join('\n\n');
-    const semanticMetricCertification = governedMetricAnswer && activeTier === 'semantic_layer'
+    // A metric can be resolved directly from the loaded semantic layer even if
+    // the small metadata pack happened to contain only dbt objects.  The answer
+    // is still compiler-owned semantic SQL in that case; do not accidentally
+    // downgrade its route/trust to generated SQL because of retrieval order.
+    const semanticMetricCertification = governedMetricAnswer
       ? semanticMetricMatch?.metric.certification
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
     return {
       kind: 'uncertified',
-      sourceTier: activeTier,
-      certification: 'ai_generated',
-      reviewStatus: 'draft_ready',
+      sourceTier: governedMetricAnswer ? 'semantic_layer' : activeTier,
+      certification: governedMetricAnswer ? 'governed' : 'ai_generated',
+      reviewStatus: governedMetricAnswer ? 'governed' : 'draft_ready',
       semanticMetricCertification,
-      confidence: certifiedMetricAnswer ? 0.8 : governedMetricAnswer && activeTier === 'semantic_layer' ? 0.72 : 0.55,
+      confidence: certifiedMetricAnswer ? 0.8 : governedMetricAnswer ? 0.72 : 0.55,
       text: generatedText,
       answer: generatedText,
       proposedSql: parsed.sql,
@@ -1963,7 +1986,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
       // Carry the governed metric match so the exit point can name a
       // `semantic_metric` route (spec 17, part C).
-      _semanticMetricMatch: governedMetricAnswer && activeTier === 'semantic_layer' ? semanticMetricMatch ?? undefined : undefined,
+      _semanticMetricMatch: governedMetricAnswer ? semanticMetricMatch ?? undefined : undefined,
   };
 }
 
@@ -2008,13 +2031,21 @@ Rules:
    separate SQL code fence when using JSON. The optional "dql" object is
    metadata for the deterministic draft-DQL renderer; do not hand-write a full
    DQL block.
+   Design the SELECT for a business reader: prefer a joined/display name, label,
+   title, or business value over raw *_id, *_uuid, *_key, or technical codes.
+   Alias calculated outputs with clear business names. Include identifiers only
+   when the question asks for them or no readable field exists.
 4. In summary, state your QUERY PLAN first: the grain (one row per WHAT), the
    measures and how they aggregate, the dimensions/filters, and the exact join
    path + join keys between the grounded tables. Then make the SQL match that
    plan — an explicit grain and join path prevents wrong-grain answers and
    fan-out (row-multiplying) joins.
-5. Use a visualization type from this list in the "viz" JSON field: line, bar,
-   area, pie, single_value, table, pivot, kpi.
+5. Choose a visualization deliberately in the "viz" JSON field: use single_value
+   or kpi for one aggregate, line/area only for an ordered time series, bar for a
+   categorical comparison, grouped-bar for multiple measures by one category,
+   scatter for two continuous measures, and table when the result is not chartable.
+   Do not default to bar. The runtime validates this preference against returned
+   rows before displaying it.
 6. NEVER fabricate column names that are not present in the supplied schema,
    dbt metadata, or certified source SQL shape context. If a requested filter
    value is supplied as a matched value, prefer the table and column that
@@ -3796,7 +3827,7 @@ async function generateProposalWithOptionalTools(input: {
     'You may use the supplied DQL tools to inspect semantic members, certified context, metadata context, and bounded repair options.',
     `Tool budget for this question: ${toolBudget.maxToolCalls} call(s) (${toolBudget.effortClass}: ${toolBudget.reason}). Stop as soon as a lane can answer.`,
     'Prefer a governed semantic compile (search_semantic_layer → compile_semantic_query) over hand-written SQL when the semantic layer contains the requested metric/dimensions/time grain.',
-    'When the supplied context is missing a table, column, or join key, DISCOVER it with `search_metadata` (find candidate relations) then `get_table_schema` (confirm real columns + inferred join keys) before declining — do not give up on a join you could compose. Use `scan_manifest` for a fresh grep over blocks/metrics, or `expand_context` for a relation you already know by name; do not loop on the same failed context.',
+    'When the supplied context is missing a table, column, or join key, DISCOVER it with `search_metadata` (find candidate relations) then `get_table_schema` (confirm real columns + inferred join keys) before declining. Use `search_project_files` for a bounded live source grep when indexed retrieval missed an identifier; use `scan_manifest` for cached graph objects; do not loop on the same failed context.',
     'When unsure a relation/column exists, validate a composed query with `validate_sql` rather than guessing.',
     'Final response must be a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
   ].join('\n');

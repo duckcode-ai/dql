@@ -80,4 +80,22 @@ describe('composeSemanticQueryForQuestion — grain-aware metric disambiguation'
     expect(result?.sql).toContain('location_name');
     expect(result?.metric).toBe('total_revenue');
   });
+
+  it('keeps multiple explicitly selected semantic metrics in one governed compiler plan', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'revenue', label: 'Revenue', description: '', domain: 'finance', sql: 'amount', type: 'sum', table: 'orders' },
+        { name: 'refunds', label: 'Refunds', description: '', domain: 'finance', sql: 'amount', type: 'sum', table: 'refund_events' },
+      ],
+      dimensions: [],
+    });
+    const result = composeSemanticQueryFromMembers({
+      semanticLayer: l,
+      question: 'revenue and refunds',
+      selection: { metrics: ['revenue', 'refunds'] },
+    });
+    expect(result?.metrics).toEqual(['revenue', 'refunds']);
+    expect(result?.composeResult.strategy).toBe('aggregate_islands');
+    expect(result?.sql).toContain('CROSS JOIN metric_2_refunds');
+  });
 });

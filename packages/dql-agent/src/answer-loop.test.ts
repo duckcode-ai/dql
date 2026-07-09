@@ -820,9 +820,9 @@ describe("answer (block-first loop)", () => {
     // scan_manifest is always merged in (index-free KG grep); no semantic layer here
     // so the semantic search/compile tools are not added.
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 10 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 4 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
+    expect(provider.messages.at(-1)?.content).toContain("4 call(s) (multi_entity");
     expect(observed).toEqual([{ question: "tool-assisted generation" }]);
     expect(result.kind).toBe("uncertified");
     expect(result.proposedSql).toContain("COUNT(*) AS order_count");
@@ -925,16 +925,16 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 3 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 2 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("3 call(s) (lookup");
+    expect(provider.messages.at(-1)?.content).toContain("2 call(s) (lookup");
     expect(result.kind).toBe("uncertified");
   });
 
   it("expands the provider tool budget for a multi-entity breakdown shape", async () => {
     // Tool budget follows the question SHAPE, not an effort/depth flag (S1
     // decouple): a two-dimension breakdown earns the mid-tier multi_entity budget.
-    // The full shape→budget mapping (incl. deep_research→15) is covered in budgets.test.ts.
+    // The full shape→budget mapping (incl. bounded deep research) is covered in budgets.test.ts.
     const provider = new ToolStubProvider("fallback should not be called");
     const result = await answer({
       question: "What is the order count by region and product category?",
@@ -945,9 +945,9 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 10 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 4 },
     ]);
-    expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
+    expect(provider.messages.at(-1)?.content).toContain("4 call(s) (multi_entity");
     expect(result.kind).toBe("uncertified");
   });
 
@@ -5806,6 +5806,66 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.route?.tier).toBe("semantic_metric");
     expect(result.route?.ref).toMatch(/revenue/);
     expect(result.route?.label).toContain("metric");
+  });
+
+  it("keeps a directly resolved metric on the semantic route when retrieval selected dbt context", async () => {
+    // The compact catalog pack is intentionally dbt-only here.  Metric matching
+    // still comes from the loaded semantic graph, so its compiler-owned answer
+    // must not inherit the pack's dbt_manifest route.
+    seedMetricsKg();
+    const result = await answer({
+      question: "what is our total revenue",
+      provider: new StubProvider("should not be called"),
+      kg,
+      contextPack: {
+        id: "ctx_dbt_only",
+        question: "what is our total revenue",
+        mode: "question",
+        focusObjectKey: "dbt:model:orders",
+        trustLabel: "review_required",
+        objects: [{
+          objectKey: "dbt:model:orders",
+          objectType: "dbt_model",
+          name: "orders",
+          status: "ready",
+          sourceSystem: "dbt",
+          snippet: "orders model",
+        }],
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: {
+          route: "generated",
+          intent: "metadata_lookup",
+          reason: "dbt metadata selected",
+          trustLabel: "review_required",
+          reviewStatus: "review_required",
+          selectedEvidence: [],
+          missingContext: [],
+          followUps: [],
+        },
+        evidenceRoles: [],
+        allowedSqlContext: { relations: [], sourceBlockSql: [] },
+        missingContext: [],
+        conflicts: [],
+        retrievalDiagnostics: {
+          strategy: "sqlite_fts",
+          selectedObjects: 1,
+          selectedEvidence: [],
+          topRejected: [],
+          certifiedCandidateFits: [],
+          candidateConflicts: [],
+        },
+        freshness: { catalogPath: ".dql/cache/metadata.sqlite", builtAt: null, fingerprint: null },
+      } as any,
+    });
+
+    expect(result.sourceTier).toBe("semantic_layer");
+    expect(result.certification).toBe("governed");
+    expect(result.reviewStatus).toBe("governed");
+    expect(result.route?.tier).toBe("semantic_metric");
   });
 
   it("answers a metric question deterministically even when the model declines SQL", async () => {

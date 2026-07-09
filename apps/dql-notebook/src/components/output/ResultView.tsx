@@ -5,6 +5,12 @@ import { ChartOutput, CHART_TYPE_OPTIONS } from './ChartOutput';
 import { TableOutput } from './TableOutput';
 
 const CHART_X_DATE_RE = /date|time|day|month|year|week|quarter|period|_at$|^at$/i;
+const TECHNICAL_IDENTIFIER_RE = /(?:^|_)(?:id|uuid|key|code)$/i;
+const BUSINESS_LABEL_RE = /(?:name|title|label|display|description|customer|account|product|region|segment|category|channel)$/i;
+const CHART_TYPES = new Set([
+  'bar', 'grouped-bar', 'stacked-bar', 'line', 'area', 'scatter', 'pie', 'donut',
+  'heatmap', 'histogram', 'funnel', 'waterfall', 'gauge', 'kpi', 'table',
+]);
 
 function isChartNumericCell(value: unknown): boolean {
   if (typeof value === 'number') return Number.isFinite(value);
@@ -25,24 +31,127 @@ function numericResultColumns(result: QueryResult): string[] {
   );
 }
 
+/** Prefer a human-readable dimension over a neighbouring technical identifier. */
+function preferredCategoryColumn(result: QueryResult, numeric: string[]): string {
+  const dimensions = result.columns.filter((column) => !numeric.includes(column));
+  return dimensions.find((column) => BUSINESS_LABEL_RE.test(column) && !TECHNICAL_IDENTIFIER_RE.test(column))
+    ?? dimensions.find((column) => !TECHNICAL_IDENTIFIER_RE.test(column))
+    ?? dimensions[0]
+    ?? result.columns[0];
+}
+
+/** Hide an ID only when the result also has a clearly corresponding business label. */
+function technicalColumnsWithLabels(result: QueryResult): string[] {
+  return result.columns.filter((column) => {
+    if (!TECHNICAL_IDENTIFIER_RE.test(column)) return false;
+    const stem = column.replace(/(?:_)?(?:id|uuid|key|code)$/i, '').replace(/_+$/, '');
+    return result.columns.some((candidate) => candidate !== column && (
+      (stem.length > 0 && candidate.toLowerCase().startsWith(stem.toLowerCase()) && BUSINESS_LABEL_RE.test(candidate))
+      || (stem.length === 0 && BUSINESS_LABEL_RE.test(candidate))
+    ));
+  });
+}
+
+function businessResult(result: QueryResult, hiddenColumns: string[]): QueryResult {
+  if (hiddenColumns.length === 0) return result;
+  const hidden = new Set(hiddenColumns);
+  return {
+    ...result,
+    columns: result.columns.filter((column) => !hidden.has(column)),
+    rows: result.rows.map((row) => Object.fromEntries(Object.entries(row).filter(([column]) => !hidden.has(column)))),
+  };
+}
+
+export interface SmartChartRecommendation {
+  config: CellChartConfig;
+  chartable: boolean;
+  reason: string;
+}
+
 /**
- * Best-effort chart config for an arbitrary result: honors any config supplied,
- * else picks a category column for X and a numeric column for Y and defaults to a
- * line (time X) or bar chart. Returns chartable=false only when there is genuinely
- * nothing to plot (no numeric column, <2 columns, or 0 rows) — far more permissive
- * than the strict name-based auto-detector, so the Chart tab actually shows for
- * real-world outputs like `product_name, total_value, order_count`.
+ * Choose a safe visualization from the returned shape. An LLM's `viz` is a
+ * preference, not a blind command: it wins only when the actual rows can support
+ * it. Authored DQL and an explicit user choice remain authoritative.
  */
-export function deriveResultChartConfig(result: QueryResult, base?: CellChartConfig): { config: CellChartConfig; chartable: boolean } {
+export function deriveResultChartConfig(result: QueryResult, base?: CellChartConfig): SmartChartRecommendation {
   const numeric = numericResultColumns(result);
-  const chartable = result.rows.length > 0 && result.columns.length >= 2 && numeric.length >= 1;
-  if (!chartable) return { config: base ?? {}, chartable: false };
-  const category = result.columns.find((column) => !numeric.includes(column)) ?? result.columns[0];
+  const hasRows = result.rows.length > 0;
+  const nonNumeric = result.columns.filter((column) => !numeric.includes(column));
+  const chartable = hasRows && numeric.length >= 1;
+  if (!chartable) return { config: { ...(base ?? {}), chart: 'table', decisionSource: 'data', rationale: 'The returned rows do not contain a numeric measure to plot.' }, chartable: false, reason: 'No numeric measure' };
+  const category = preferredCategoryColumn(result, numeric);
   const x = base?.x && result.columns.includes(base.x) ? base.x : category;
   const y = base?.y && result.columns.includes(base.y) ? base.y : (numeric.find((column) => column !== x) ?? numeric[0]);
-  const baseChart = base?.chart && base.chart.toLowerCase().replace(/_/g, '-') !== 'table' ? base.chart : undefined;
-  const chart = baseChart ?? (CHART_X_DATE_RE.test(x) ? 'line' : 'bar');
-  return { config: { ...(base ?? {}), chart, x, y }, chartable: true };
+  const automatic = automaticChartType(result, numeric, nonNumeric, x);
+  const preferred = normalizeChartType(base?.chart);
+  const source = base?.decisionSource;
+  const preserve = source === 'authored' || source === 'user';
+  const chart = preserve && preferred
+    ? preferred
+    : preferred && chartCanRepresent(preferred, result, numeric, nonNumeric, x, y)
+      ? preferred
+      : automatic.chart;
+  const wasOverridden = Boolean(preferred && preferred !== chart && !preserve);
+  const reason = wasOverridden
+    ? `${automatic.reason}; replaced the agent suggestion because the returned data is not compatible.`
+    : preferred && !preserve
+      ? 'Agent-selected visualization validated against the returned data.'
+      : automatic.reason;
+  return {
+    config: {
+      ...(base ?? {}),
+      chart,
+      x,
+      y,
+      decisionSource: preserve ? source : preferred && !wasOverridden ? 'agent' : 'data',
+      rationale: reason,
+    },
+    chartable: chart !== 'table',
+    reason,
+  };
+}
+
+function normalizeChartType(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase().replace(/_/g, '-').replace('single-value', 'kpi');
+  return CHART_TYPES.has(normalized) ? normalized : undefined;
+}
+
+function automaticChartType(
+  result: QueryResult,
+  numeric: string[],
+  nonNumeric: string[],
+  x: string,
+): { chart: string; reason: string } {
+  if (result.rows.length === 1 && numeric.length >= 1) return { chart: 'kpi', reason: 'Single returned value' };
+  if (CHART_X_DATE_RE.test(x) && numeric.length >= 1) return { chart: 'line', reason: `Time-like field ${x}` };
+  if (nonNumeric.length > 0 && numeric.length >= 2) return { chart: 'grouped-bar', reason: 'One category with multiple numeric measures' };
+  if (nonNumeric.length > 0 && numeric.length === 1) return { chart: 'bar', reason: 'Categorical comparison with one numeric measure' };
+  if (numeric.length >= 2) return { chart: 'scatter', reason: 'Two continuous numeric measures' };
+  return { chart: 'table', reason: 'No comparable category or time axis was returned' };
+}
+
+function chartCanRepresent(
+  chart: string,
+  result: QueryResult,
+  numeric: string[],
+  nonNumeric: string[],
+  x: string,
+  y: string,
+): boolean {
+  if (chart === 'table') return true;
+  if (chart === 'kpi' || chart === 'gauge') return numeric.length >= 1 && result.rows.length === 1;
+  if (chart === 'line' || chart === 'area') return numeric.includes(y) && CHART_X_DATE_RE.test(x);
+  if (chart === 'scatter') return numeric.length >= 2;
+  if (chart === 'histogram') return numeric.length >= 1;
+  if (chart === 'grouped-bar' || chart === 'stacked-bar') return nonNumeric.length >= 1 && numeric.length >= 2;
+  if (chart === 'pie' || chart === 'donut') return nonNumeric.length >= 1 && numeric.length >= 1 && result.rows.length >= 2 && result.rows.length <= 8;
+  if (chart === 'heatmap') return result.columns.length >= 3 && numeric.length >= 1;
+  if (chart === 'funnel' || chart === 'waterfall') return nonNumeric.length >= 1 && numeric.length >= 1;
+  // A time axis has an unambiguous ordering; an automatic bar suggestion masks
+  // that relationship. A user can still deliberately choose bars afterwards.
+  if (chart === 'bar') return nonNumeric.length >= 1 && numeric.length >= 1 && !CHART_X_DATE_RE.test(x);
+  return false;
 }
 
 /**
@@ -54,8 +163,15 @@ export function ResultView({ result, themeMode, t, chartConfig }: { result: Quer
   const isEmpty = result.rows.length === 0;
   // User overrides from the chart-type picker / settings gear (type / X / Y / palette …).
   const [override, setOverride] = useState<CellChartConfig | undefined>();
+  const [showTechnicalFields, setShowTechnicalFields] = useState(false);
   const base = useMemo<CellChartConfig>(() => ({ ...(chartConfig ?? {}), ...(override ?? {}) }), [chartConfig, override]);
   const { config: effectiveChart, chartable } = deriveResultChartConfig(result, base);
+  const numericColumns = useMemo(() => numericResultColumns(result), [result]);
+  const hiddenTechnicalColumns = useMemo(() => technicalColumnsWithLabels(result), [result]);
+  const tableResult = useMemo(
+    () => showTechnicalFields ? result : businessResult(result, hiddenTechnicalColumns),
+    [hiddenTechnicalColumns, result, showTechnicalFields],
+  );
   const [view, setView] = useState<'chart' | 'table'>(chartable ? 'chart' : 'table');
   const tabStyle = (active: boolean): React.CSSProperties => ({
     border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: t.font,
@@ -78,7 +194,7 @@ export function ResultView({ result, themeMode, t, chartConfig }: { result: Quer
         {chartable && view === 'chart' ? (
           <select
             value={currentChartType}
-            onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), chart: event.target.value }))}
+            onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), chart: event.target.value, decisionSource: 'user', rationale: 'Selected manually.' }))}
             title="Chart type"
             style={{
               fontFamily: t.font, fontSize: 10.5, fontWeight: 600, color: t.textSecondary,
@@ -90,6 +206,39 @@ export function ResultView({ result, themeMode, t, chartConfig }: { result: Quer
               <option key={option.value} value={option.value}>{option.label}</option>
             ))}
           </select>
+        ) : null}
+        {chartable && view === 'chart' ? (
+          <>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 10.5 }}>
+              X
+              <select
+                aria-label="X-axis field"
+                value={effectiveChart.x ?? ''}
+                onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), x: event.target.value, decisionSource: 'user', rationale: 'Axis selected manually.' }))}
+                style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
+              >
+                {result.columns.map((column) => <option key={column} value={column}>{column}</option>)}
+              </select>
+            </label>
+            {numericColumns.length > 0 ? (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 10.5 }}>
+                Y
+                <select
+                  aria-label="Y-axis field"
+                  value={effectiveChart.y ?? ''}
+                  onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), y: event.target.value, decisionSource: 'user', rationale: 'Axis selected manually.' }))}
+                  style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
+                >
+                  {numericColumns.map((column) => <option key={column} value={column}>{column}</option>)}
+                </select>
+              </label>
+            ) : null}
+          </>
+        ) : null}
+        {chartable && effectiveChart.rationale ? (
+          <span title={effectiveChart.rationale} style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 230 }}>
+            Smart chart · {effectiveChart.chart}
+          </span>
         ) : null}
         <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
@@ -103,9 +252,18 @@ export function ResultView({ result, themeMode, t, chartConfig }: { result: Quer
                 result={result}
                 themeMode={themeMode}
                 chartConfig={effectiveChart}
-                onConfigChange={(updates) => setOverride((prev) => ({ ...(prev ?? {}), ...updates }))}
+                onConfigChange={(updates) => setOverride((prev) => ({ ...(prev ?? {}), ...updates, decisionSource: 'user', rationale: 'Adjusted manually.' }))}
               />
-            : <TableOutput result={result} themeMode={themeMode} />}
+            : <>
+                {hiddenTechnicalColumns.length > 0 ? (
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                    <button type="button" onClick={() => setShowTechnicalFields((value) => !value)} style={{ border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', fontSize: 10.5, padding: 0 }}>
+                      {showTechnicalFields ? 'Hide technical fields' : 'Show IDs'}
+                    </button>
+                  </div>
+                ) : null}
+                <TableOutput result={tableResult} themeMode={themeMode} />
+              </>}
       </div>
     </div>
   );

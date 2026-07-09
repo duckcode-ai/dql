@@ -172,7 +172,7 @@ const CORE_TOOL_DEFINITIONS = [
         limit: { type: 'number', description: 'Maximum metadata objects in the context pack. Default 100.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'query_semantic_model',
@@ -264,7 +264,7 @@ const CORE_TOOL_DEFINITIONS = [
         },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'kg_search',
@@ -285,7 +285,7 @@ const CORE_TOOL_DEFINITIONS = [
         limit: { type: 'number', description: 'Max hits. Default 10.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'search_blocks',
@@ -300,7 +300,7 @@ const CORE_TOOL_DEFINITIONS = [
         limit: { type: 'number', description: 'Max results. Default 50.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'get_block',
@@ -314,7 +314,7 @@ const CORE_TOOL_DEFINITIONS = [
         includeSource: { type: 'boolean', description: 'Include full .dql source text. Default true.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'query_via_block',
@@ -337,7 +337,7 @@ const CORE_TOOL_DEFINITIONS = [
         },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'inspect_metadata_context',
@@ -359,7 +359,7 @@ const CORE_TOOL_DEFINITIONS = [
         },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'query_via_metadata',
@@ -413,7 +413,7 @@ const CORE_TOOL_DEFINITIONS = [
         serverUrl: { type: 'string', description: 'Base URL of the local DQL runtime. Default http://127.0.0.1:3474.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'expand_context',
@@ -515,7 +515,7 @@ const CORE_TOOL_DEFINITIONS = [
         nonSemantic: { type: 'boolean', description: 'With recert, treat the change as non-semantic.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code'],
   },
   {
     name: 'certify',

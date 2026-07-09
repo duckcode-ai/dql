@@ -6,6 +6,7 @@ import type {
   AnalysisDepth,
   ConversationSnapshot,
   KGNode,
+  LocalContextPack,
   ReasoningEffort,
 } from '@duckcodeailabs/dql-agent';
 
@@ -129,7 +130,7 @@ export interface AgentRunRequest {
   projectRoot: string;
   executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
-  getSchemaContext?: (question: string) => Promise<AgentSchemaTable[]>;
+  getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;
   /** Active warehouse dialect so Lane-2 semantic compiles emit dialect-correct SQL. */
   semanticDriver?: string;
   /** Logical->physical table mapping for the semantic compiler, when resolved. */

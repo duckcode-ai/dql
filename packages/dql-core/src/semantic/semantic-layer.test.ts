@@ -108,6 +108,38 @@ describe('SemanticLayer', () => {
     expect(layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' })?.sql).toContain('SUM(amount) AS revenue');
   });
 
+  it('pre-aggregates metrics from different fact tables before joining at a conformed grain', () => {
+    const layer = new SemanticLayer();
+    const cube = (name: string, joins: Array<{ name: string; left: string; right: string; type: 'left'; sql: string }> = []) => ({
+      name, label: name, description: '', sql: `SELECT * FROM ${name}`, table: name, domain: 'finance',
+      measures: [], dimensions: [], timeDimensions: [], joins, segments: [], preAggregations: [],
+    });
+    layer.addCube(cube('orders', [{ name: 'regions', left: 'orders', right: 'regions', type: 'left', sql: '${left}.region_id = ${right}.region_id' }]));
+    layer.addCube(cube('refunds', [{ name: 'regions', left: 'refunds', right: 'regions', type: 'left', sql: '${left}.region_id = ${right}.region_id' }]));
+    layer.addCube(cube('regions'));
+    layer.addMetric({ name: 'order_revenue', label: 'Revenue', description: '', domain: 'finance', sql: 'amount', type: 'sum', table: 'orders' });
+    layer.addMetric({ name: 'refund_amount', label: 'Refunds', description: '', domain: 'finance', sql: 'amount', type: 'sum', table: 'refunds' });
+    layer.addDimension({ name: 'region_name', label: 'Region', description: '', sql: 'name', type: 'string', table: 'regions' });
+
+    const result = layer.composeQuery({
+      metrics: ['order_revenue', 'refund_amount'],
+      dimensions: ['region_name'],
+      orderBy: [{ name: 'order_revenue', direction: 'desc' }],
+      limit: 10,
+      driver: 'duckdb',
+    });
+
+    expect(result?.strategy).toBe('aggregate_islands');
+    expect(result?.grainKeys).toEqual(['region_name']);
+    expect(result?.sql).toContain('metric_1_order_revenue AS');
+    expect(result?.sql).toContain('metric_2_refund_amount AS');
+    expect(result?.sql).toContain('grain_keys AS');
+    expect(result?.sql).toContain('LEFT JOIN metric_1_order_revenue ON grain_keys.region_name = metric_1_order_revenue.region_name');
+    expect(result?.sql).not.toMatch(/FROM orders[\s\S]*JOIN refunds/);
+    expect(result?.sql).toContain('ORDER BY order_revenue DESC');
+    expect(result?.sql).toContain('LIMIT 10');
+  });
+
   describe('governed metric-scoped filters (G1)', () => {
     it('hoists a single metric filter to WHERE', () => {
       const layer = new SemanticLayer({

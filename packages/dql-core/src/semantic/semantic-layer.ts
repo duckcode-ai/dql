@@ -233,6 +233,10 @@ export interface ComposeQueryResult {
   sql: string;
   joins: string[];
   tables: string[];
+  /** Compilation strategy used to protect multi-fact metric grain. */
+  strategy?: 'direct_join' | 'aggregate_islands';
+  /** Dimension/time aliases that form the aggregate-island join grain. */
+  grainKeys?: string[];
 }
 
 export interface BlockCompanionDefinition {
@@ -588,6 +592,20 @@ export class SemanticLayer {
       timeDimDef = this.dimensions.get(timeDimension.name);
     }
 
+    const resolvedFilterDimensions = (filters ?? [])
+      .map((filter) => this.dimensions.get(filter.dimension))
+      .filter(Boolean) as DimensionDefinition[];
+
+    // Multiple metrics from different fact tables must never be aggregated after
+    // one raw fact-to-fact join: that multiplies rows and silently inflates sums.
+    // Compile one aggregate island per metric at the requested conformed grain,
+    // then join the small aggregate results. Each island still uses the semantic
+    // graph and refuses independently when a dimension/filter is unjoinable.
+    const metricTables = new Set(resolvedMetrics.map((metric) => metric.table));
+    if (metricTables.size > 1) {
+      return this.composeAggregateIslands(options, resolvedMetrics, resolvedDimensions, timeDimDef, dialect);
+    }
+
     // Find the primary table (from first metric)
     const primaryTable = resolvedMetrics[0].table;
 
@@ -595,6 +613,7 @@ export class SemanticLayer {
     const allTables = new Set<string>([primaryTable]);
     for (const m of resolvedMetrics) allTables.add(m.table);
     for (const d of resolvedDimensions) allTables.add(d.table);
+    for (const d of resolvedFilterDimensions) allTables.add(d.table);
     if (timeDimDef) allTables.add(timeDimDef.table);
 
     // Find which cube corresponds to a table
@@ -718,7 +737,9 @@ export class SemanticLayer {
     for (const f of filters ?? []) {
       if (!f.dimension) continue;
       const dimDef = this.dimensions.get(f.dimension);
-      const dimSql = dimDef?.sql ?? f.dimension;
+      const dimSql = dimDef
+        ? (dimDef.sql.includes('.') || dimDef.table === primaryTable ? dimDef.sql : `${dimDef.table}.${dimDef.sql}`)
+        : f.dimension;
       const v0 = f.values?.[0] ?? '';
       const v1 = f.values?.[1] ?? '';
       // Detect if value looks numeric (no quoting needed)
@@ -804,6 +825,76 @@ export class SemanticLayer {
       sql,
       joins: joinClauses,
       tables: Array.from(allTables),
+      strategy: 'direct_join',
+      grainKeys: [
+        ...resolvedDimensions.map((dimension) => dimension.name),
+        ...(timeDimDef && timeDimension ? [`${timeDimDef.name}_${timeDimension.granularity}`] : []),
+      ],
+    };
+  }
+
+  private composeAggregateIslands(
+    options: ComposeQueryOptions,
+    metrics: MetricDefinition[],
+    dimensions: DimensionDefinition[],
+    timeDimension: DimensionDefinition | undefined,
+    dialect: SQLDialect,
+  ): ComposeQueryResult | null {
+    const grainKeys = [
+      ...dimensions.map((dimension) => dimension.name),
+      ...(timeDimension && options.timeDimension
+        ? [`${timeDimension.name}_${options.timeDimension.granularity}`]
+        : []),
+    ];
+    const islands = metrics.map((metric) => this.composeQuery({
+      ...options,
+      metrics: [metric.name],
+      // Ranking/limits apply to the consolidated result, never inside an island.
+      orderBy: undefined,
+      limit: undefined,
+    }));
+    if (islands.some((island) => !island)) return null;
+    const compiled = islands as ComposeQueryResult[];
+    const cteNames = metrics.map((metric, index) => `metric_${index + 1}_${sanitizeSqlAlias(metric.name)}`);
+    const ctes = compiled.map((island, index) => `${cteNames[index]} AS (\n${indentSql(island.sql)}\n)`);
+
+    let body: string;
+    const joinClauses: string[] = [];
+    if (grainKeys.length === 0) {
+      const select = metrics.map((metric, index) => `${cteNames[index]}.${metric.name} AS ${metric.name}`);
+      body = `SELECT\n  ${select.join(',\n  ')}\nFROM ${cteNames[0]}`;
+      for (const cte of cteNames.slice(1)) {
+        const clause = `CROSS JOIN ${cte}`;
+        joinClauses.push(clause);
+        body += `\n${clause}`;
+      }
+    } else {
+      const keysCte = `grain_keys AS (\n${cteNames.map((cte) => `  SELECT ${grainKeys.join(', ')} FROM ${cte}`).join('\n  UNION\n')}\n)`;
+      ctes.push(keysCte);
+      const select = [
+        ...grainKeys.map((key) => `grain_keys.${key} AS ${key}`),
+        ...metrics.map((metric, index) => `${cteNames[index]}.${metric.name} AS ${metric.name}`),
+      ];
+      body = `SELECT\n  ${select.join(',\n  ')}\nFROM grain_keys`;
+      for (let index = 0; index < cteNames.length; index += 1) {
+        const cte = cteNames[index];
+        const predicate = grainKeys.map((key) => `grain_keys.${key} = ${cte}.${key}`).join(' AND ');
+        const clause = `LEFT JOIN ${cte} ON ${predicate}`;
+        joinClauses.push(clause);
+        body += `\n${clause}`;
+      }
+    }
+
+    if ((options.orderBy ?? []).length > 0) {
+      body += `\nORDER BY ${options.orderBy!.map((order) => `${order.name} ${order.direction.toUpperCase()}`).join(', ')}`;
+    }
+    if (options.limit) body += `\n${dialect.limitClause(options.limit)}`;
+    return {
+      sql: `WITH ${ctes.join(',\n')}\n${body}`,
+      joins: joinClauses,
+      tables: Array.from(new Set(compiled.flatMap((island) => island.tables))),
+      strategy: 'aggregate_islands',
+      grainKeys,
     };
   }
 
@@ -1396,6 +1487,15 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     source: cubeSource,
   };
+}
+
+function sanitizeSqlAlias(value: string): string {
+  const normalized = value.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || 'metric';
+}
+
+function indentSql(sql: string): string {
+  return sql.split(/\r?\n/).map((line) => `  ${line}`).join('\n');
 }
 
 function validateMetricType(t: string): MetricDefinition['type'] {

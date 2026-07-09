@@ -6,8 +6,10 @@ import {
   OpenAIEmbeddingProvider,
   ResilientEmbeddingProvider,
   cosineSimilarity,
+  clearEnvEmbeddingProviderCache,
   defaultEmbeddingProvider,
   embeddingOptionsFromEnv,
+  envEmbeddingProvider,
   hybridRank,
   probeLocalOllamaEmbeddings,
   resolveEmbeddingProvider,
@@ -168,6 +170,16 @@ describe('local-first embeddings (W3.1)', () => {
 
   it('offline (no config) stays on the deterministic hashed provider', () => {
     expect(resolveEmbeddingProvider(embeddingOptionsFromEnv({})).id).toBe('hashed-token-v1');
+  });
+
+  it('reuses the environment-selected provider so corpus vectors stay cached between questions', () => {
+    clearEnvEmbeddingProviderCache();
+    const env = { DQL_OLLAMA_EMBED_URL: 'http://localhost:11434', DQL_OLLAMA_EMBED_MODEL: 'nomic' };
+    expect(envEmbeddingProvider(env)).toBe(envEmbeddingProvider(env));
+
+    const changed = envEmbeddingProvider({ ...env, DQL_OLLAMA_EMBED_MODEL: 'mxbai' });
+    expect(changed).not.toBe(envEmbeddingProvider(env));
+    clearEnvEmbeddingProviderCache();
   });
 
   describe('probeLocalOllamaEmbeddings (zero-config semantic search)', () => {

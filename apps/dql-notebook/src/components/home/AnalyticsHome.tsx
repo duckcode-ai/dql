@@ -1,5 +1,5 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { Sparkles, Plus, MessageSquare, Trash2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Sparkles, Plus, MessageSquare, Trash2, Loader2 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { UnifiedAgentRunPanel, type ThreadItem } from '../agent/UnifiedAgentRunPanel';
@@ -26,6 +26,7 @@ interface Conversation {
 }
 
 const STORAGE_KEY = 'dql-ask-conversations';
+const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
 const MAX_CONVERSATIONS = 40;
 
 function makeConversationId(): string {
@@ -60,6 +61,15 @@ function loadConversations(): Conversation[] {
     return (parsed as Conversation[]).map((c) => ({ ...c, items: normalizeItems(c.items) }));
   } catch {
     return [];
+  }
+}
+
+function loadActiveConversationId(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -123,10 +133,22 @@ export function AnalyticsHome() {
   const t = themes[state.themeMode];
 
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
-  const [activeId, setActiveId] = useState<string>(() => makeConversationId());
-  // Switching conversations remounts the panel (key=activeId), which aborts an
-  // in-flight run and loses the answer — so block switching while a run is running.
+  // Keep the selected thread across a page remount/reload. The panel's pending-run
+  // handoff uses this server thread id to reconnect rather than asking again.
+  const [activeId, setActiveId] = useState<string>(() => {
+    const stored = loadActiveConversationId();
+    return stored && conversations.some((conversation) => conversation.id === stored)
+      ? stored
+      : makeConversationId();
+  });
+  // Switching conversations remounts the panel. A running panel now persists its
+  // run id and reconnects on remount, but keeping the selected conversation stable
+  // still avoids an unnecessary context switch while an answer is in progress.
   const [isRunning, setIsRunning] = useState(false);
+
+  useEffect(() => {
+    try { window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* best-effort */ }
+  }, [activeId]);
 
   const activeItems = useMemo(
     () => conversations.find((c) => c.id === activeId)?.items ?? [],
@@ -356,9 +378,11 @@ function ConversationSidebar({
                     fontWeight: active ? 600 : 500,
                   }}
                 >
-                  <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.7 }} />
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conv.title}</span>
-                  <span style={{ flexShrink: 0, fontSize: 10, color: t.textMuted, fontWeight: 400 }}>{relativeTime(conv.updatedAt)}</span>
+                  {active && busy
+                    ? <Loader2 size={13} style={{ flexShrink: 0, color: t.accent, animation: 'dql-agent-run-spin 0.8s linear infinite' }} />
+                    : <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.7 }} />}
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{active && busy ? 'Working…' : conv.title}</span>
+                  <span style={{ flexShrink: 0, fontSize: 10, color: active && busy ? t.accent : t.textMuted, fontWeight: active && busy ? 650 : 400 }}>{active && busy ? 'Live' : relativeTime(conv.updatedAt)}</span>
                 </button>
                 {hovered ? (
                   <button

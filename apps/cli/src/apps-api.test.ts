@@ -857,6 +857,21 @@ describe('Apps command center API helpers', () => {
     expect(result.evidence.some((entry) => entry.source.endsWith('nba/top-scorers.dql'))).toBe(true);
   });
 
+  it('replaces an incompatible model bar preference with a time-series visualization', () => {
+    const root = createProject();
+    const result = recommendVisualization(root, {
+      prompt: 'How has revenue changed by month?',
+      defaultVisualization: 'bar',
+      resultSchema: { columns: [{ name: 'month', type: 'date' }, { name: 'revenue', type: 'number' }] },
+      rowSample: [{ month: '2026-01-01', revenue: 100 }, { month: '2026-02-01', revenue: 120 }],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.display.defaultVisualization).toBe('line');
+    expect(result.warnings).toContain('Preferred visualization bar did not fit the returned result shape; using line instead.');
+  });
+
   it('recommends dashboard tile metadata with filter bindings and source evidence', () => {
     const root = createProject();
     writeBlock(root, 'nba/top-scorers.dql', {

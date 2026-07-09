@@ -311,22 +311,22 @@ export function proposalToolBudgetForQuestion(
   switch (questionShapeClass(plan, intent)) {
     case 'deep_research':
       return {
-        maxToolCalls: 15,
+        // Research has its own orchestration route; generated-answer discovery
+        // remains bounded so a missed semantic match cannot trigger 15 serial
+        // provider round trips.
+        maxToolCalls: 8,
         effortClass: 'deep_research',
         reason: 'deep analysis, diagnosis, anomaly, trust review, or research workspace request',
       };
     case 'multi_entity':
       return {
-        // 10 (was 8) leaves headroom for one extra schema-discovery round-trip
-        // (search_metadata + get_table_schema) on a join question without changing
-        // the latency class — see P3. Lookup stays at 3 to preserve the S1 fast path.
-        maxToolCalls: 10,
+        maxToolCalls: 4,
         effortClass: 'multi_entity',
         reason: 'multi-entity, ranked, filtered, comparison, profile, or drilldown shape',
       };
     default:
       return {
-        maxToolCalls: 3,
+        maxToolCalls: 2,
         effortClass: 'lookup',
         reason: 'single metric or simple generated lookup',
       };

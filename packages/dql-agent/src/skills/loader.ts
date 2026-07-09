@@ -373,6 +373,8 @@ export interface SelectRelevantSkillsOptions {
    * kept when they are in-scope for the active user.
    */
   pinnedIds?: string[];
+  /** Domains inferred from the retrieved metadata context for this question. */
+  domains?: string[];
 }
 
 const DEFAULT_PINNED_SKILL_IDS = ['sql-conventions'];
@@ -383,10 +385,11 @@ function skillTokens(text: string): string[] {
   return (text.toLowerCase().match(SKILL_TOKEN_RE) ?? []).filter((t) => t.length > 1);
 }
 
-/** Searchable text for a skill: id, description, vocabulary keys/values, body. */
+/** Searchable text for a skill: domain, id, preferences, vocabulary, and body. */
 function skillSearchText(skill: Skill): string {
   return [
     skill.id,
+    skill.domain ?? '',
     skill.description ?? '',
     ...skill.preferredMetrics,
     ...skill.preferredBlocks,
@@ -412,9 +415,13 @@ export function selectRelevantSkills(
 ): Skill[] {
   const inScope = activeSkills(skills, options.userId ?? null);
   if (inScope.length === 0) return [];
-  const budget = Math.max(1, options.budget ?? 6);
+  // One pinned governance/conventions skill plus at most three topical skills is
+  // enough context for an answer. The previous default of six let several large
+  // domain prompts compete in enterprise repos and diluted the retrieved evidence.
+  const budget = Math.max(1, options.budget ?? 4);
   const pinnedIds = new Set((options.pinnedIds ?? DEFAULT_PINNED_SKILL_IDS).map((id) => id.toLowerCase()));
   const queryTokens = new Set(skillTokens(question));
+  const domains = new Set((options.domains ?? []).map((domain) => domain.trim().toLowerCase()).filter(Boolean));
 
   const pinned: Skill[] = [];
   const rest: Array<{ skill: Skill; score: number }> = [];
@@ -428,7 +435,10 @@ export function selectRelevantSkills(
     for (const token of textTokens) {
       if (queryTokens.has(token)) hits += 1;
     }
-    rest.push({ skill, score: hits });
+    const domainMatch = Boolean(skill.domain && domains.has(skill.domain.trim().toLowerCase()));
+    // Domain is a strong routing signal, but still requires either an inferred
+    // domain match or topical text. It never makes a skill a hard policy override.
+    rest.push({ skill, score: hits + (domainMatch ? 4 : 0) });
   }
 
   // Keep only skills with at least one topical hit; ordered by score desc, then
