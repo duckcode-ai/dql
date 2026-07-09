@@ -5992,6 +5992,60 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.dqlArtifact?.kind).toBe("semantic_block");
   });
 
+  it("FLAGSHIP: 'tax by region and product' answers governed at ZERO LLM calls (the reported failure)", async () => {
+    // The exact case the user reported: a tax metric broken down by region and
+    // product answered with raw SQL after a slow generation, instead of using the
+    // governed semantic metric. `tax` is NOT in the old hardcoded MEASURE_FAMILIES,
+    // so matchSemanticMetric scored familyBoost=0 and missed; the metric never
+    // matched, generation ran, and the semantic model was ignored. With the Phase 1
+    // fixes (project-derived families + dimension resolution), Stage A now matches
+    // the metric AND compiles the group-by deterministically — no provider call.
+    const taxMetric: KGNode = {
+      nodeId: "metric:tax_amount",
+      kind: "metric",
+      name: "tax_amount",
+      domain: "finance",
+      description: "Total tax collected on orders.",
+      tags: ["tax"],
+      llmContext: "sql: SUM(tax_paid)\ntable: orders",
+      sourceTier: "semantic_layer",
+      certification: "ai_generated",
+      provenance: "semantic layer",
+    };
+    kg.rebuild([taxMetric], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "tax_amount", label: "Tax Amount", description: "Total tax collected on orders.", domain: "finance", sql: "tax_paid", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "region", label: "Region", description: "Order region.", domain: "finance", sql: "region", type: "string", table: "orders" },
+        { name: "product", label: "Product", description: "Product ordered.", domain: "finance", sql: "product", type: "string", table: "orders" },
+      ],
+    });
+    // Throws if the model is called at all — proves the 0-LLM governed fast path.
+    const provider = new StubProvider("MODEL MUST NOT BE CALLED");
+    const result = await answer({
+      question: "tax by region and product",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["region", "product", "tax_amount"],
+        rows: [{ region: "West", product: "Jaffle", tax_amount: 12 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(0); // ZERO LLM calls — deterministic Stage A.
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.proposedSql).toContain("SUM(tax_paid) AS tax_amount");
+    expect(result.proposedSql).toContain("region AS region");
+    expect(result.proposedSql).toContain("product AS product");
+    expect(result.dqlArtifact?.kind).toBe("semantic_block");
+    expect(result.kind).not.toBe("no_answer");
+  });
+
   it("Tier 2.5: anchors generation on a matched metric when the shape needs a cross-table join", async () => {
     // total_revenue lives on `orders`; the question breaks it down by a dimension on a
     // DIFFERENT table (warehouse region) that the semantic layer can't compose. Instead
