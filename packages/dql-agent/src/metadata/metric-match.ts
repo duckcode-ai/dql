@@ -179,7 +179,13 @@ export async function matchSemanticMetric(
   // a bare "what is this" carries neither and should not match a metric.
   const items = candidates.map((metric) => {
     const text = metricSearchText(metric).toLowerCase();
-    const nameTokens = new Set(tokenize(metric.name));
+    // Normalize underscores/dots the SAME way metricSearchText (:99) and
+    // metricFamilyText (:116) already do, so an underscored metric name — the
+    // standard dbt/MetricFlow convention, e.g. `avg_tax_rate` — tokenizes to
+    // {avg, tax, rate} and can actually earn the name-match boost below. Without
+    // this, `tokenize('avg_tax_rate')` stays one glued token and the boost never
+    // fires for the most common naming style (the docstring's own example).
+    const nameTokens = new Set(tokenize(metric.name.replace(/[_.]+/g, ' ')));
     // Family is derived from the metric's name/label only (not its `table:`), so a
     // measure is never mis-assigned to the family of the relation it sits on.
     const metricFams = familiesFor(contentTokens(metricFamilyText(metric)));
