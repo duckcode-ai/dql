@@ -194,10 +194,26 @@ const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluat
     });
   }
 
-  const hasAnswer = nonEmptyString(result.answer)
+  // A governed refusal (the model declined, or a grounding gap) still carries
+  // explanatory PROSE in `answer`/`text` — but that prose is not a real answer.
+  // Treat those refusal codes as "no answer" so the loop retries/escalates instead
+  // of accepting the apology as done. (`ambiguous` is a genuine clarify and
+  // `provider_error` is surfaced as blocked, so both stay terminal here.)
+  const isRetryableRefusal = result.answerRefusalCode === "model_declined"
+    || result.answerRefusalCode === "grounding_gap";
+  const hasAnswer = !isRetryableRefusal && (
+    nonEmptyString(result.answer)
     ?? nonEmptyString(payload?.answer)
-    ?? nonEmptyString(payload?.text);
-  if (!hasAnswer && result.status !== "blocked") {
+    ?? nonEmptyString(payload?.text)
+  );
+  // The answer executor may already have attached an actionable escalate/retry
+  // evaluation for this refusal (local-runtime `answerRunExecutor`). This gate is a
+  // package-level backstop for hosts that don't — so only add it when nothing
+  // actionable is present yet, to avoid a duplicate escalation.
+  const hasActionableFailure = evaluations.some(
+    (evaluation) => !evaluation.passed && Boolean(evaluation.suggestedRepair),
+  );
+  if (!hasAnswer && !hasActionableFailure && result.status !== "blocked") {
     evaluations = upsert(evaluations, {
       id: "grounding",
       label: "Answer grounding",
