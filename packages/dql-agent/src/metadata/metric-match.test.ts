@@ -84,6 +84,19 @@ describe('matchSemanticMetric (spec 17, part C)', () => {
     expect(match!.metric.name).toBe('food_revenue');
   });
 
+  it('matches an underscored, non-revenue-family metric name (P5a — the reported avg_tax_rate miss)', async () => {
+    // 'tax' is in no MEASURE_FAMILY, so this match rests entirely on the NAME-token
+    // boost — which never fired before P5a because tokenize('avg_tax_rate') stayed one
+    // glued token. A decoy on the same table must not win.
+    const taxMetrics: KGNode[] = [
+      metric('avg_tax_rate', 'Average tax rate on order items'),
+      metric('total_shipping_cost', 'Total shipping cost per order'),
+    ];
+    const match = await matchSemanticMetric('what is the average tax rate', taxMetrics);
+    expect(match).not.toBeNull();
+    expect(match!.metric.name).toBe('avg_tax_rate');
+  });
+
   it('matches a synonym ("sales") into the revenue family', async () => {
     const match = await matchSemanticMetric('what were total sales', jaffleMetrics);
     expect(match).not.toBeNull();
