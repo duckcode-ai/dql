@@ -115,6 +115,7 @@ import {
   resolveProposeConfig,
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
+  latestRuntimeSchemaSnapshotForProject,
   loadSkills,
   writeSkill,
   deleteSkill,
@@ -1981,7 +1982,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question).catch(() => []);
     if (catalogContext.length > 0) {
       if (!connection) return catalogContext;
-      const runtimeScan = shouldAugmentAgentRuntimeSchema(question)
+      // Rescan live when the question shape calls for it OR the stored snapshot is
+      // stale/absent (P6) — otherwise a warehouse schema change between sessions is
+      // silently reasoned over from a cached snapshot that never expires.
+      const runtimeScan = (shouldAugmentAgentRuntimeSchema(question) || runtimeSnapshotStale(projectRoot))
         ? await scanRuntimeSchema().catch(() => undefined)
         : undefined;
       const runtimeContext = runtimeScan?.ranked ?? [];
@@ -15676,6 +15680,27 @@ function isAiPinRefreshDue(lastRefreshedAt?: string): boolean {
 async function buildAgentSchemaContextFromCatalog(projectRoot: string, question: string): Promise<AgentSchemaTable[]> {
   const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 80 });
   return buildAgentSchemaContextFromContextPack(question, contextPack);
+}
+
+/** How long a stored live-warehouse schema snapshot is trusted before a rescan (P6). */
+const RUNTIME_SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Whether the project's stored live-schema snapshot is missing or older than the
+ * freshness window (P6). Used to force a fresh information_schema scan even when the
+ * question-shape heuristic wouldn't otherwise trigger one — so a warehouse schema
+ * change between sessions isn't silently reasoned over. Best-effort: a catalog error
+ * returns false so it never causes a rescan storm.
+ */
+export function runtimeSnapshotStale(projectRoot: string, maxAgeMs: number = RUNTIME_SNAPSHOT_MAX_AGE_MS): boolean {
+  try {
+    const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+    if (!snapshot?.capturedAt) return true;
+    const age = Date.now() - new Date(snapshot.capturedAt).getTime();
+    return !Number.isFinite(age) || age > maxAgeMs;
+  } catch {
+    return false;
+  }
 }
 
 function recordAgentRuntimeSchemaSnapshot(projectRoot: string, schemaContext: AgentSchemaTable[], source: string): void {

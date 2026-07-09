@@ -372,6 +372,7 @@ export {
   openMetadataCatalog,
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
+  latestRuntimeSchemaSnapshotForProject,
   recordQueryRun,
   upsertMetadataSnapshot,
 } from "./metadata/catalog.js";
