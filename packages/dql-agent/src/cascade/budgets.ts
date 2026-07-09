@@ -317,7 +317,10 @@ export function proposalToolBudgetForQuestion(
       };
     case 'multi_entity':
       return {
-        maxToolCalls: 8,
+        // 10 (was 8) leaves headroom for one extra schema-discovery round-trip
+        // (search_metadata + get_table_schema) on a join question without changing
+        // the latency class — see P3. Lookup stays at 3 to preserve the S1 fast path.
+        maxToolCalls: 10,
         effortClass: 'multi_entity',
         reason: 'multi-entity, ranked, filtered, comparison, profile, or drilldown shape',
       };

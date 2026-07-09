@@ -12,8 +12,16 @@ import {
   suggestBlock,
   kgSearch,
   inspectMetadataContext,
+  searchMetadata,
+  getTableSchema,
+  validateSql,
 } from '@duckcodeailabs/dql-mcp';
-import { dqlToolDefinitionsForSurface, getDqlToolDefinition, type DqlToolName } from '@duckcodeailabs/dql-agent';
+import {
+  dqlToolDefinitionsForSurface,
+  getDqlToolDefinition,
+  openMetadataCatalog,
+  type DqlToolName,
+} from '@duckcodeailabs/dql-agent';
 
 export interface AgentTool {
   name: string;
@@ -55,5 +63,61 @@ function nativeToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, AgentT
     lineage_impact: async (args) => lineageImpact(ctx, args as Parameters<typeof lineageImpact>[1]),
     certify: async (args) => certify(ctx, args as Parameters<typeof certify>[1]),
     suggest_block: async (args) => suggestBlock(ctx, args as Parameters<typeof suggestBlock>[1]),
+    // Schema-discovery tools (P3): give the answer loop the same relation/column/
+    // join-key discovery Claude Code gets over MCP, so it can find and validate a
+    // join instead of declining.
+    search_metadata: async (args) => searchMetadata(ctx, args as Parameters<typeof searchMetadata>[1]),
+    validate_sql: async (args) => validateSql(ctx, args as Parameters<typeof validateSql>[1]),
+    get_table_schema: async (args) => {
+      const params = args as Parameters<typeof getTableSchema>[1];
+      const result = getTableSchema(ctx, params);
+      if (result.found) return result;
+      // Manifest miss: fall back to the live-scanned warehouse schema cached in the
+      // metadata catalog. A raw table dbt never wrapped is invisible to the manifest
+      // but may have been captured by a prior information_schema scan.
+      return lookupRuntimeTableSchema(ctx.projectRoot, params.table) ?? result;
+    },
   };
+}
+
+/**
+ * Resolve a table's columns from the live-scanned warehouse schema snapshot stored
+ * in the metadata catalog (`.dql/cache/metadata.sqlite`) — the fallback for
+ * `get_table_schema` when a table isn't in the dbt manifest. Read-only; returns
+ * undefined when there's no snapshot or no match.
+ */
+export function lookupRuntimeTableSchema(projectRoot: string, table: string): Record<string, unknown> | undefined {
+  const needle = table.trim().toLowerCase();
+  if (!needle) return undefined;
+  const bareNeedle = needle.split('.').pop();
+  const catalog = openMetadataCatalog(projectRoot);
+  try {
+    const snapshot = catalog.latestRuntimeSchemaSnapshot();
+    if (!snapshot) return undefined;
+    const match = snapshot.tables.find((entry) => {
+      const candidates = [entry.relation, entry.name, entry.schema && entry.name ? `${entry.schema}.${entry.name}` : undefined]
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+        .map((value) => value.toLowerCase());
+      const bareRelation = entry.relation?.split('.').pop()?.toLowerCase();
+      if (bareRelation) candidates.push(bareRelation);
+      return candidates.includes(needle) || (bareNeedle !== undefined && bareRelation === bareNeedle);
+    });
+    if (!match) return undefined;
+    return {
+      found: true,
+      source: 'runtime_schema',
+      name: match.name ?? match.relation,
+      qualifiedRelation: match.relation,
+      refForm: null,
+      columns: match.columns.map((column) => ({
+        name: column.name,
+        type: column.type ?? null,
+        description: column.description ?? null,
+      })),
+      joinKeys: [],
+      note: 'Resolved from the live-scanned warehouse schema (not modeled in dbt). Verify column names before relying on this in a certified block.',
+    };
+  } finally {
+    catalog.close();
+  }
 }

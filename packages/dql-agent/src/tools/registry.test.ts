@@ -29,8 +29,22 @@ describe('DQL tool registry', () => {
       'lineage_impact',
       'certify',
       'suggest_block',
+      // P3: schema-discovery tools, added to give the answer loop the same
+      // relation/column/join-key discovery Claude Code gets over MCP.
+      'search_metadata',
+      'get_table_schema',
+      'validate_sql',
     ]);
-    expect(nativeTools.length + 3).toBeLessThanOrEqual(15);
+    // Ceiling deliberately raised 15 -> 18 for the P3 discovery tools; still a
+    // bounded, auditable action space, not an unlimited toolset.
+    expect(nativeTools.length + 3).toBeLessThanOrEqual(18);
+  });
+
+  it('exposes the schema-discovery tools on the answer_loop surface (P3)', () => {
+    const answerLoop = dqlToolNamesForSurface('answer_loop');
+    expect(answerLoop).toContain('search_metadata');
+    expect(answerLoop).toContain('get_table_schema');
+    expect(answerLoop).toContain('validate_sql');
   });
 
   it('keeps the default MCP agentic surface bounded while preserving the governed cascade tools', () => {
