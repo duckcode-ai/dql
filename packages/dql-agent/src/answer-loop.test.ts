@@ -5960,15 +5960,17 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
         },
       ],
     });
-    // "acquisition medium" is a paraphrase of `channel` that the deterministic
-    // token matcher cannot resolve, so composeSemanticQueryForQuestion misses —
-    // but the metric still matches, so the LLM member fallback fires.
+    // "attribution bucket" is a paraphrase of `channel` with no shared token and no
+    // entry in the dimension-synonym map, so the deterministic token matcher cannot
+    // resolve it and composeSemanticQueryForQuestion misses — but the metric still
+    // matches, so the LLM member fallback fires. (A closer paraphrase like
+    // "acquisition medium" now resolves deterministically via synonym expansion.)
     const provider = new StubProvider(
       '```json\n{"metrics":["total_revenue"],"dimensions":["channel"]}\n```',
     );
 
     const result = await answer({
-      question: "revenue by acquisition medium",
+      question: "revenue by attribution bucket",
       provider,
       kg,
       semanticLayer,

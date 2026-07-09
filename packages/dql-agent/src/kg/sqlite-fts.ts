@@ -13,7 +13,7 @@ import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import type Database from 'better-sqlite3';
-import { sanitizeFtsQuery } from '../memory/fts-query.js';
+import { buildFtsMatch } from '../memory/fts-query.js';
 import type {
   KGNode,
   KGEdge,
@@ -177,26 +177,29 @@ export class KGStore {
     const { query, kinds, domain, limit = 20 } = options;
     if (!query.trim()) return [];
 
-    const sanitized = sanitizeFtsQuery(query, { prefix: true });
-    if (!sanitized) return [];
+    const match = buildFtsMatch(query, { prefix: true });
+    if (!match.or) return [];
 
     const filters: string[] = [];
-    const params: unknown[] = [sanitized];
-
     if (kinds && kinds.length > 0) {
       filters.push(`f.kind IN (${kinds.map(() => '?').join(', ')})`);
-      params.push(...kinds);
     }
     if (domain) {
       filters.push(`f.domain = ?`);
-      params.push(domain);
     }
+    const extraParams: unknown[] = [...(kinds && kinds.length > 0 ? kinds : []), ...(domain ? [domain] : [])];
     const whereExtra = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
 
     // Fetch a wider window than `limit` so the feedback multiplier (W4.1) can
     // reorder within it — a downvoted block can drop below a just-missed peer.
     const fetchLimit = Math.min(limit * 3, limit + 50);
-    const rows = this.db.prepare(`
+    type Row = {
+      node_id: string; kind: string; name: string; domain: string | null;
+      status: string | null; owner: string | null; description: string | null;
+      llm_context: string | null; tags_json: string; examples_json: string;
+      metadata_json?: string | null; source_path: string | null; git_sha: string; rank: number; snip: string;
+    };
+    const runMatch = (matchExpr: string): Row[] => this.db.prepare(`
       SELECT n.*,
              bm25(kg_nodes_fts) AS rank,
              snippet(kg_nodes_fts, -1, '<mark>', '</mark>', '…', 12) AS snip
@@ -205,12 +208,16 @@ export class KGStore {
       WHERE kg_nodes_fts MATCH ?${whereExtra}
       ORDER BY rank
       LIMIT ?
-    `).all(...params, fetchLimit) as Array<{
-      node_id: string; kind: string; name: string; domain: string | null;
-      status: string | null; owner: string | null; description: string | null;
-      llm_context: string | null; tags_json: string; examples_json: string;
-      metadata_json?: string | null; source_path: string | null; git_sha: string; rank: number; snip: string;
-    }>;
+    `).all(matchExpr, ...extraParams, fetchLimit) as Row[];
+
+    // Precision-first, recall-preserving UNION: nodes where all terms co-occur
+    // (AND) lead — a "region tax by product" block surfaces ahead of every node
+    // that merely mentions "product" — then OR-of-terms matches fill the window so
+    // single-term context nodes still appear. Dedup by node_id.
+    const andRows = match.and ? runMatch(match.and) : [];
+    const seenIds = new Set(andRows.map((row) => row.node_id));
+    const orRows = runMatch(match.or).filter((row) => !seenIds.has(row.node_id));
+    const rows = [...andRows, ...orRows].slice(0, fetchLimit);
 
     // W4.1 — feedback-aware ranking. A bounded ±15% multiplier from per-block
     // up/down votes reorders retrieval candidates: downvoted blocks demote, upvoted

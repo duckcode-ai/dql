@@ -72,10 +72,20 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   const timeDimension = selectTimeDimension(input.semanticLayer, input.question, input.questionPlan);
   const allDimensions = input.semanticLayer.listDimensions();
   const dimensionSelection = selectDimensions(allDimensions, input.questionPlan, timeDimension?.name);
-  if (dimensionSelection.unresolved.length > 0) return undefined;
   const dimensions = dimensionSelection.dimensions;
   const filters = selectFilters(allDimensions, dimensions, input.question, input.questionPlan, timeDimension?.name, input.filterValueColumns);
   if (input.questionPlan.requestedShape.filters.length > 0 && filters.length === 0) return undefined;
+  // Abort only on a LOAD-BEARING unresolved dimension — one that isn't actually a
+  // filter value or a time grain we already captured. Previously ANY unresolved
+  // term (compose.ts:75) killed the governed compile, so "revenue for beverages by
+  // month" fell to raw generation because "beverages" (a filter value) and "month"
+  // (the time grain) parsed as dimension terms that no dimension is named after.
+  const consumed = consumedTermTokens(filters, timeDimension);
+  const loadBearing = dimensionSelection.unresolved.filter((term) => {
+    const tokens = tokenize(term);
+    return tokens.length > 0 && !tokens.every((token) => consumed.has(token));
+  });
+  if (loadBearing.length > 0) return undefined;
   const orderBy = input.questionPlan.requestedShape.topN
     ? [{ name: primaryMetric.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
     : undefined;
@@ -316,14 +326,17 @@ function selectDimensions(
   const selected: string[] = [];
   const unresolved: string[] = [];
   for (const term of terms) {
-    const tokens = new Set(tokenize(term));
+    // Expand the QUERY term with common analytics synonyms + singular/plural so a
+    // question saying "product" can resolve a dimension named `sku`/`item`, or
+    // "region" a dimension named `geo`/`market`. The dimension's own aliases
+    // (name/label/leaf) are added to its searchable text on the other side.
+    const tokens = expandDimensionQueryTokens(term);
     const hit = dimensions
       .filter((dimension) => dimension.name !== timeDimensionName)
       .map((dimension) => ({
         dimension,
         score: scoreSemanticText([
-          dimension.name,
-          dimension.label,
+          ...semanticDimensionAliases(dimension),
           dimension.description,
           dimension.domain ?? '',
           ...(dimension.tags ?? []),
@@ -335,6 +348,74 @@ function selectDimensions(
     if (!hit) unresolved.push(term);
   }
   return { dimensions: selected, unresolved };
+}
+
+/**
+ * Generic analytics dimension-synonym seed. Each row is a synonym cluster: any
+ * term in the cluster expands to all of them for dimension matching. Curated to
+ * be domain-neutral (no project-specific values), so it's safe to apply broadly.
+ */
+const DIMENSION_SYNONYMS: string[][] = [
+  ['product', 'item', 'sku', 'article', 'goods'],
+  ['region', 'geo', 'geography', 'area', 'market', 'territory', 'zone', 'locale'],
+  ['country', 'nation'],
+  ['state', 'province'],
+  ['city', 'metro', 'municipality'],
+  ['customer', 'account', 'client', 'buyer', 'shopper', 'user', 'member'],
+  ['channel', 'source', 'medium', 'origin'],
+  ['category', 'segment', 'class', 'group', 'type', 'kind'],
+  ['store', 'shop', 'outlet', 'location', 'branch'],
+  ['supplier', 'vendor', 'merchant'],
+  ['employee', 'staff', 'agent', 'rep', 'representative'],
+  ['department', 'team', 'division', 'unit'],
+  ['status', 'state', 'stage'],
+];
+
+const DIMENSION_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
+  const index = new Map<string, Set<string>>();
+  for (const cluster of DIMENSION_SYNONYMS) {
+    const set = new Set(cluster);
+    for (const word of cluster) {
+      const existing = index.get(word);
+      if (existing) for (const w of set) existing.add(w);
+      else index.set(word, new Set(set));
+    }
+  }
+  return index;
+})();
+
+/** Query-side token expansion: the term's tokens + synonyms + singular/plural. */
+function expandDimensionQueryTokens(term: string): Set<string> {
+  const out = new Set<string>();
+  for (const token of tokenize(term)) {
+    out.add(token);
+    const singular = token.replace(/ies$/, 'y').replace(/s$/, '');
+    if (singular.length > 1) out.add(singular);
+    out.add(`${token}s`);
+    for (const synonym of DIMENSION_SYNONYM_INDEX.get(token) ?? []) out.add(synonym);
+    for (const synonym of DIMENSION_SYNONYM_INDEX.get(singular) ?? []) out.add(synonym);
+  }
+  return out;
+}
+
+/** Tokens already consumed by selected filters or the chosen time dimension. */
+function consumedTermTokens(
+  filters: SemanticBridgeFilter[],
+  timeDimension: { name: string; granularity: string } | undefined,
+): Set<string> {
+  const consumed = new Set<string>();
+  for (const filter of filters) {
+    for (const token of tokenize(filter.dimension)) consumed.add(token);
+    for (const value of filter.values) for (const token of tokenize(value)) consumed.add(token);
+  }
+  if (timeDimension) {
+    for (const token of tokenize(timeDimension.name)) consumed.add(token);
+    for (const token of tokenize(timeDimension.granularity)) consumed.add(token);
+    for (const grain of ['day', 'date', 'week', 'month', 'quarter', 'year', 'daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'annual']) {
+      consumed.add(grain);
+    }
+  }
+  return consumed;
 }
 
 function selectFilters(

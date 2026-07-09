@@ -915,7 +915,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // rank over the FTS semantic hits, then ALL metric KG nodes (revenue ⇄
   // cumulative_revenue). Certified-first is still preserved (checked above).
   const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
-  let semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes).catch(() => null);
+  let semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes, {
+    // Isolate the measure signal with the planner's terms so a group-by dimension
+    // ("... by product") can't be scored as a measure (see MatchSemanticMetricOptions).
+    measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
+  }).catch(() => null);
 
   const clarifyBeforeGeneration = shouldClarifyBeforeGeneration({
     intent,
@@ -997,9 +1001,27 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const matchedMetricHit: KGSearchHit[] = semanticMetricMatch
     ? [{ node: semanticMetricMatch.metric, score: Math.max(semanticMetricMatch.score, CERTIFIED_HIT_THRESHOLD) }]
     : [];
+  // Reserve prompt slots per source instead of appending semantic hits LAST and
+  // truncating the whole list to 14 — the old behavior dropped semantic-model hits
+  // out of the generation prompt entirely whenever artifact/business hits filled
+  // the budget first, so even a question a semantic metric could answer never saw
+  // the metric. Each group gets a guaranteed minimum; leftover budget is filled
+  // round-robin. See interleaveContextHits.
   const contextHits = activeTier === 'semantic_layer'
-    ? [...matchedMetricHit, ...trustedArtifactContext, ...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...semanticHits, ...manifestHits].slice(0, 14)
-    : [...trustedArtifactContext, ...reviewRequiredArtifactHits, ...businessHits.slice(0, 4), ...manifestHits].slice(0, 14);
+    ? interleaveContextHits([
+        { hits: matchedMetricHit, reserve: matchedMetricHit.length },
+        { hits: semanticHits, reserve: 5 },
+        { hits: trustedArtifactContext, reserve: 3 },
+        { hits: reviewRequiredArtifactHits, reserve: 2 },
+        { hits: businessHits.slice(0, 4), reserve: 2 },
+        { hits: manifestHits, reserve: 2 },
+      ], 14)
+    : interleaveContextHits([
+        { hits: trustedArtifactContext, reserve: 5 },
+        { hits: reviewRequiredArtifactHits, reserve: 3 },
+        { hits: businessHits.slice(0, 4), reserve: 3 },
+        { hits: manifestHits, reserve: 3 },
+      ], 14);
   const contextNodes = mergeNodes(
     followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
     (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
@@ -4153,6 +4175,52 @@ function mergeNodes(...groups: KGNode[][]): KGNode[] {
     }
   }
   return Array.from(byId.values());
+}
+
+/**
+ * Merge prioritized hit groups into a single deduped list under a total budget,
+ * giving each group a guaranteed minimum number of slots. Pass 1 takes up to
+ * `reserve` from each group in priority order; pass 2 fills any remaining budget
+ * round-robin from each group's leftovers. This prevents a high-priority group
+ * from starving a lower one out of the prompt entirely (the semantic-hit
+ * truncation bug) while still honoring priority for the reserved slots.
+ */
+function interleaveContextHits(
+  groups: Array<{ hits: KGSearchHit[]; reserve: number }>,
+  budget: number,
+): KGSearchHit[] {
+  const seen = new Set<string>();
+  const out: KGSearchHit[] = [];
+  const cursors = groups.map(() => 0);
+  const take = (hit: KGSearchHit): boolean => {
+    if (out.length >= budget || seen.has(hit.node.nodeId)) return false;
+    seen.add(hit.node.nodeId);
+    out.push(hit);
+    return true;
+  };
+  // Pass 1: reserved minimums, in priority order.
+  groups.forEach((group, gi) => {
+    let taken = 0;
+    while (cursors[gi] < group.hits.length && taken < group.reserve && out.length < budget) {
+      if (take(group.hits[cursors[gi]])) taken += 1;
+      cursors[gi] += 1;
+    }
+  });
+  // Pass 2: round-robin fill from leftovers until the budget is exhausted.
+  let progressed = true;
+  while (out.length < budget && progressed) {
+    progressed = false;
+    for (let gi = 0; gi < groups.length && out.length < budget; gi += 1) {
+      const group = groups[gi];
+      while (cursors[gi] < group.hits.length) {
+        const before = out.length;
+        take(group.hits[cursors[gi]]);
+        cursors[gi] += 1;
+        if (out.length > before) { progressed = true; break; }
+      }
+    }
+  }
+  return out;
 }
 
 /**

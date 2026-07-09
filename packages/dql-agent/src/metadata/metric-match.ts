@@ -42,11 +42,20 @@ const STOPWORDS = new Set([
 ]);
 
 /**
- * Measure synonym families. Each family maps a canonical measure to the set of
- * words that signal it. A question and a metric "share a family" when any word
+ * Seed measure synonym families. Each family maps a canonical measure to the set
+ * of words that signal it. A question and a metric "share a family" when any word
  * from the question and any word from the metric resolve to the same family.
+ *
+ * This hardcoded list only SEEDS common cross-vocabulary synonyms (revenue⇄sales,
+ * customer⇄user). The real family set is built PER PROJECT from the actual metric
+ * pool by {@link buildMeasureFamilies}, so a project's own measure vocabulary —
+ * `tax`, `discount`, `shipping`, `freight`, whatever this warehouse names its
+ * measures — self-registers as a family without ever touching this file. The old
+ * behavior (fixed 9-family list) silently dropped every measure not in the list:
+ * "region tax by product" scored `familyBoost = 0` and fell below threshold even
+ * though a `tax_amount` metric existed.
  */
-const MEASURE_FAMILIES: Record<string, string[]> = {
+const SEED_MEASURE_FAMILIES: Record<string, string[]> = {
   revenue: ['revenue', 'revenues', 'sales', 'income', 'turnover', 'earnings', 'gmv', 'arr', 'mrr', 'bookings', 'topline'],
   spend: ['spend', 'spending', 'spent', 'cost', 'costs', 'expense', 'expenses', 'cogs'],
   profit: ['profit', 'profits', 'margin', 'margins', 'gross', 'net', 'ebitda'],
@@ -57,6 +66,46 @@ const MEASURE_FAMILIES: Record<string, string[]> = {
   quantity: ['quantity', 'units', 'volume', 'qty'],
   aov: ['aov', 'basket'],
 };
+
+/**
+ * Backward-compatible alias: the seed families are the default family map used by
+ * helpers that don't have a project metric pool in scope (e.g. the fallback
+ * `buildGovernedMetricFirstSql` gate). Question↔metric matching in
+ * `matchSemanticMetric` uses a project-derived map instead.
+ */
+const MEASURE_FAMILIES = SEED_MEASURE_FAMILIES;
+
+/** A word that is too generic to be a distinctive per-project family on its own. */
+const GENERIC_FAMILY_TOKENS = new Set([
+  'amount', 'total', 'value', 'count', 'sum', 'avg', 'average', 'number', 'num',
+  'rate', 'ratio', 'pct', 'percent', 'percentage', 'metric', 'measure', 'kpi',
+  'daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'annual', 'ytd', 'mtd',
+]);
+
+/**
+ * Build the measure-family map for a specific project by merging the seed
+ * synonyms with a family for each distinctive token in the metric pool's names.
+ * A metric named `tax_amount` contributes the `tax` family; `avg_discount_rate`
+ * contributes `discount`. Generic tokens (`amount`, `rate`, `total`) never become
+ * families — they'd match everything. Seed families win when a token already
+ * belongs to one (so `sales` stays in `revenue`, not its own family).
+ */
+export function buildMeasureFamilies(metrics: KGNode[]): Record<string, string[]> {
+  const families: Record<string, string[]> = {};
+  for (const [family, words] of Object.entries(SEED_MEASURE_FAMILIES)) families[family] = [...words];
+  const seeded = new Set(Object.values(SEED_MEASURE_FAMILIES).flat());
+  for (const metric of metrics) {
+    if (metric.kind !== 'metric') continue;
+    // Only the metric NAME/label defines what it MEASURES — not its backing table
+    // (see metricFamilyText). Tokenize the same way so `avg_tax_rate` → tax.
+    for (const token of tokenize(metricFamilyText(metric))) {
+      if (token.length < 3) continue;
+      if (seeded.has(token) || GENERIC_FAMILY_TOKENS.has(token) || STOPWORDS.has(token)) continue;
+      (families[token] ??= [token]);
+    }
+  }
+  return families;
+}
 
 /**
  * Row/record-listing intent. A question asking to ENUMERATE rows or identifiers
@@ -82,11 +131,11 @@ function contentTokens(text: string): string[] {
   return tokenize(text).filter((t) => !STOPWORDS.has(t));
 }
 
-/** The measure families a set of words resolves to. */
-function familiesFor(words: Iterable<string>): Set<string> {
+/** The measure families a set of words resolves to (against a given family map). */
+function familiesFor(words: Iterable<string>, familyMap: Record<string, string[]> = MEASURE_FAMILIES): Set<string> {
   const set = new Set<string>(words);
   const families = new Set<string>();
-  for (const [family, members] of Object.entries(MEASURE_FAMILIES)) {
+  for (const [family, members] of Object.entries(familyMap)) {
     if (members.some((member) => set.has(member))) families.add(family);
   }
   return families;
@@ -134,12 +183,21 @@ export interface MetricMatch {
 export interface MatchSemanticMetricOptions {
   /**
    * Confidence threshold. A match below this is treated as "no confident metric"
-   * so ad-hoc questions still fall through to generated SQL. Default 0.34.
+   * so ad-hoc questions still fall through to generated SQL. Default 0.3.
    */
   threshold?: number;
   /** Vector-similarity weight; defaults to a small conservative blend. */
   alpha?: number;
   provider?: EmbeddingProvider;
+  /**
+   * The planner's isolated MEASURE terms for the question (from
+   * `requestedShape.measures` / `metricTerms`). When supplied, the measure/family
+   * signal is scored against these instead of every content word in the question,
+   * so a group-by dimension ("... by product") can't be mistaken for a measure and
+   * pull in a dimension-named metric like `product_count`. Falls back to all
+   * content tokens when empty, preserving the old behavior for bare callers.
+   */
+  measureTerms?: string[];
 }
 
 export const DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA = 0.18;
@@ -170,10 +228,22 @@ export async function matchSemanticMetric(
   // let it fall through to grounded generated SQL even if it names a measure.
   if (looksLikeRowRequest(question)) return null;
 
-  const threshold = options.threshold ?? 0.34;
-  const qContent = new Set(contentTokens(question));
+  // Lowered from 0.34: a project-derived family match (buildMeasureFamilies) now
+  // lifts in-vocabulary measures like `tax`/`discount` that the old fixed list
+  // dropped, and the name/family guard below keeps precision (a bare
+  // description-only overlap with no name hit and no family never wins).
+  const threshold = options.threshold ?? 0.3;
+  // Build the family map from THIS project's metric pool so the warehouse's own
+  // measure vocabulary self-registers as families (see buildMeasureFamilies).
+  const familyMap = buildMeasureFamilies(candidates);
+  // Score the measure signal against the planner's isolated measure terms when
+  // available; otherwise fall back to all content tokens (bare callers). This is
+  // what keeps "region tax by product" scoring `tax_amount`, not `product_count`.
+  const measureSignal = (options.measureTerms ?? [])
+    .flatMap((term) => contentTokens(term));
+  const qContent = new Set(measureSignal.length > 0 ? measureSignal : contentTokens(question));
   if (qContent.size === 0) return null;
-  const qFamilies = familiesFor(qContent);
+  const qFamilies = familiesFor(qContent, familyMap);
 
   // A measure question must carry at least one content word OR a measure family;
   // a bare "what is this" carries neither and should not match a metric.
@@ -188,7 +258,7 @@ export async function matchSemanticMetric(
     const nameTokens = new Set(tokenize(metric.name.replace(/[_.]+/g, ' ')));
     // Family is derived from the metric's name/label only (not its `table:`), so a
     // measure is never mis-assigned to the family of the relation it sits on.
-    const metricFams = familiesFor(contentTokens(metricFamilyText(metric)));
+    const metricFams = familiesFor(contentTokens(metricFamilyText(metric)), familyMap);
 
     let overlap = 0;
     let nameHit = 0;
@@ -213,7 +283,11 @@ export async function matchSemanticMetric(
     // clamp and hides a more specific name match.
     const familyBoost = sharedFamily ? 0.45 : 0;
     const fts = clamp01(0.35 * lexical + familyBoost + 0.35 * nameFraction);
-    return { metric, text: metricSearchText(metric), ftsScore: fts, family: sharedFamily };
+    // Precision guard: a candidate is only a genuine metric hit when the question
+    // touches the metric's NAME or shares a measure family — a pure description
+    // overlap (e.g. the word "monthly" appearing in a metric's prose) is not.
+    const grounded = nameHit > 0 || Boolean(sharedFamily);
+    return { metric, text: metricSearchText(metric), ftsScore: fts, family: sharedFamily, grounded };
   });
 
   const hasLexicalSignal = items.some((entry) => entry.ftsScore > 0);
@@ -228,6 +302,9 @@ export async function matchSemanticMetric(
 
   const best = ranked[0];
   if (!best || best.score < threshold) return null;
+  // Reject an ungrounded winner even if embeddings nudged it over the (lowered)
+  // bar — precision over recall for the governed tier.
+  if (!best.item.grounded) return null;
   return { metric: best.item.metric, score: best.score, family: best.item.family };
 }
 
