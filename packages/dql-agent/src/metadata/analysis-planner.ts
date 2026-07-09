@@ -613,6 +613,12 @@ function inferQuestionMode(input: {
   if (/\b(block|certified|saved|existing|approved|governed)\b/i.test(lower)) return 'exact_lookup';
   if (isDirectKpiValueQuestion(lower)) return 'exact_lookup';
   if (/\b(show|list|find|which|who|how many|how much|metric|kpi|dashboard|performance|revenue|sales|orders|customers|users)\b/i.test(lower)) return 'general_analysis';
+  // A question that carries real analytical structure — named grouping dimensions
+  // and/or a measure to aggregate — is a general analysis, not an ambiguous ask.
+  // Without this, "give me the average tax by location by product" (no whitelisted
+  // verb) falls to clarify and then over-escalates into a slow research investigation
+  // instead of a fast direct answer.
+  if (input.dimensionTerms.length > 0 || input.metricTerms.length > 0) return 'general_analysis';
   return 'clarify';
 }
 
@@ -699,8 +705,13 @@ function extractMetricTerms(question: string): string[] {
     if (new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
   for (const match of lower.matchAll(/\b(total|average|avg|count|sum|min|max)\s+([a-z][a-z0-9_ -]{2,40})/g)) {
-    terms.add(normalizeTerm(`${match[1]} ${match[2]}`));
-    terms.add(normalizeTerm(match[2]));
+    // Keep only the measure noun-phrase up to the first grouping/clause boundary,
+    // so "average tax info by location by product" yields the measure "tax info",
+    // not a 6-word blob that pollutes retrieval and masquerades as a column.
+    const tail = match[2].replace(/\s+\b(by|per|for|across|grouped?|over|where|with|and|or|from|in|of)\b.*$/i, '').trim();
+    if (tail.length < 2) continue;
+    terms.add(normalizeTerm(`${match[1]} ${tail}`));
+    terms.add(normalizeTerm(tail));
   }
   return uniqueStrings([...terms]).slice(0, 16);
 }
@@ -712,9 +723,15 @@ function extractDimensionTerms(question: string): string[] {
   for (const word of DIMENSION_WORDS) {
     if (new RegExp(`\\b(?:${escapeRegExp(word)}|${escapeRegExp(pluralizeDimensionWord(word))})\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
-  for (const match of lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,40})/g)) {
-    const value = match[1].replace(/\b(where|for|with|and|or|from|over|in)\b.*$/i, '').trim();
-    if (value) terms.add(normalizeTerm(value));
+  for (const match of lower.matchAll(/\bby\s+([a-z][a-z0-9_ -]{1,60})/g)) {
+    // "by A by B" is captured as one blob; split it back into the individual
+    // grouping dimensions and stop each at a clause boundary, so we get ["a", "b"]
+    // rather than a bogus single dimension "a_by_b" that later poisons retrieval
+    // and shows up as a phantom required-output column.
+    for (const piece of match[1].split(/\s+by\s+/)) {
+      const value = piece.replace(/\b(where|for|with|and|or|from|over|in|per|of)\b.*$/i, '').trim();
+      if (value) terms.add(normalizeTerm(value));
+    }
   }
   return uniqueStrings([...terms]).slice(0, 16);
 }
@@ -852,11 +869,28 @@ function wordNumberFromTopN(lower: string): number | undefined {
   return match ? words[match[1]!] : undefined;
 }
 
+// A required OUTPUT column is a hard contract on the result shape, so only a short,
+// concrete identifier qualifies — never a multi-clause phrase scraped from the
+// question (e.g. "location by product") that happens to leak through term extraction.
+function isPlausibleRequiredColumn(term: string): boolean {
+  const tokens = term.split(/[_\s]+/).filter(Boolean);
+  return tokens.length > 0 && tokens.length <= 2 && !tokens.includes('by');
+}
+
 function extractRequiredOutputs(question: string, dimensions: string[], measures: string[]): string[] {
   const lower = question.toLowerCase();
   const outputs = new Set<string>();
-  for (const dim of dimensions) outputs.add(dim);
-  for (const measure of measures) outputs.add(measure);
+  for (const dim of dimensions) {
+    if (isPlausibleRequiredColumn(dim)) outputs.add(dim);
+  }
+  for (const measure of measures) {
+    // A measure pins the result shape only when it names a concrete single concept
+    // ("revenue", "count", "orders"). A multi-word phrase scraped from the question
+    // ("average tax info", "tax info by location") is a fuzzy search hint, not a
+    // literal column the generated SQL must return — promoting it falsely flags a
+    // valid answer as "partial". Single tokens (incl. "count" for KPI blocks) stay.
+    if (measure.split(/[_\s]+/).filter(Boolean).length === 1) outputs.add(measure);
+  }
   if (/\bproduct\s+name\b/i.test(lower)) outputs.add('product_name');
   if (/\bcustomer\s+name\b/i.test(lower)) outputs.add('customer_name');
   if (/\bcategory\s+name\b/i.test(lower)) outputs.add('category_name');

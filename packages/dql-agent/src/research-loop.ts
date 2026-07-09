@@ -140,9 +140,16 @@ export async function planResearch(input: {
   });
 
   // When the user explicitly forced research, don't collapse to the single-step "answer"
-  // path — investigate. (clarify / compose_app remain honored — they are genuinely different.)
+  // path — investigate. A SOFT "nothing matched cleanly" clarify also becomes an
+  // investigation here: the user deliberately asked to research, so we dig rather than
+  // stop to ask. Only a genuinely-ambiguous HARD clarify (compose_app too) is honored,
+  // since those are meaningfully different intents. (A hard clarify leaves
+  // `clarifySoft` unset; the default "nothing governed matched" clarify sets it true.)
   const action: typeof decision.action =
-    input.forceInvestigate && decision.action === 'answer' ? 'investigate' : decision.action;
+    input.forceInvestigate
+      && (decision.action === 'answer' || (decision.action === 'clarify' && decision.clarifySoft === true))
+      ? 'investigate'
+      : decision.action;
 
   const sources = new Set<string>();
   if (metricName) sources.add(metricName);
