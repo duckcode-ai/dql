@@ -176,6 +176,8 @@ export interface AgentEvidenceToolCall {
   inputSummary?: string;
   outputSummary?: string;
   order: number;
+  /** Wall-clock time this tool call took, in ms — surfaces where a slow run spent its time. */
+  durationMs?: number;
 }
 
 export interface AgentEvidenceOutcome {
@@ -4051,7 +4053,7 @@ function stableResultRow(row: unknown): string {
 }
 
 function evidenceToolCallFromEvent(
-  event: { name: string; input: unknown; output?: unknown; isError?: boolean },
+  event: { name: string; input: unknown; output?: unknown; isError?: boolean; durationMs?: number },
   order: number,
 ): AgentEvidenceToolCall {
   return {
@@ -4060,6 +4062,7 @@ function evidenceToolCallFromEvent(
     inputSummary: summarizeEvidencePayload(event.input),
     outputSummary: summarizeEvidencePayload(event.output),
     order,
+    ...(typeof event.durationMs === 'number' ? { durationMs: event.durationMs } : {}),
   };
 }
 

@@ -73,6 +73,8 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
     );
     expect(text).toContain('SELECT region, SUM(tax)');
     expect(observed).toHaveLength(1);
+    // The tool call is timed so the UI can show where the run spent its wall-clock.
+    expect(typeof (observed[0] as { durationMs?: number }).durationMs).toBe('number');
     // Second generate call must have received the observation.
     const secondCall = provider.calls[1].map((m) => m.content).join('\n');
     expect(secondCall).toContain('Observation from search_semantic_layer');

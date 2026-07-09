@@ -96,6 +96,7 @@ async function runTextProtocolToolLoop(
     toolCallsUsed += 1;
     let output: unknown;
     let isError = false;
+    const startedAt = Date.now();
     if (!tool) {
       output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
       isError = true;
@@ -107,7 +108,7 @@ async function runTextProtocolToolLoop(
         isError = true;
       }
     }
-    options.onToolCall?.({ name: call.name, input: call.input, output, isError });
+    options.onToolCall?.({ name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
 
     messages.push({ role: 'assistant', content: text });
     messages.push({ role: 'user', content: renderObservation(call.name, output) });
