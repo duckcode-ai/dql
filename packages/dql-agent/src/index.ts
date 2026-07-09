@@ -206,6 +206,21 @@ export type {
 } from "./answer-loop.js";
 export { matchSemanticMetric } from "./metadata/metric-match.js";
 export {
+  runAgenticToolLoop,
+  parseTextToolCall,
+  type AgenticToolLoopOptions,
+} from "./agentic/tool-loop.js";
+export {
+  buildSemanticStageTools,
+  type SemanticStageToolsInput,
+} from "./agentic/toolset.js";
+export {
+  deriveAgenticTrust,
+  normalizeSql,
+  type AgenticTrustResult,
+  type CompiledSemanticRecord,
+} from "./agentic/answer-contract.js";
+export {
   composeSemanticQueryForQuestion,
   renderSemanticDqlArtifact,
   semanticDqlArtifactName,
