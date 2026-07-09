@@ -666,6 +666,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   }
 
+  // Auto-ensure the active connection's driver so a configured connection is never
+  // left "broken" after a fresh clone, a CLI upgrade, or a Node version change (the
+  // driver lives in gitignored, per-project .dql/connectors). Best-effort + non-fatal.
+  ensureConnectorInstalledForStartup(projectRoot, connection?.driver);
+
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
   let semanticLayer: SemanticLayer | undefined;
   let semanticLayerErrors: string[] = [];
@@ -9791,6 +9796,34 @@ function installConnectorPackage(projectRoot: string, driver: string): Connector
   );
 
   return getConnectorInstallStatuses(projectRoot).find((status) => status.driver === definition.driver)!;
+}
+
+/**
+ * Ensure the active connection's driver package is present at startup.
+ *
+ * The connection CONFIG persists in dql.config.json, but the driver package
+ * (duckdb, snowflake-sdk, …) lives in the gitignored, per-project .dql/connectors
+ * — so a fresh clone, a `npm i -g` upgrade of the CLI, or even a Node version bump
+ * (native bindings are Node-version-specific) leaves a configured connection with
+ * no loadable driver, and the user has to reinstall it by hand from the Connections
+ * page. This installs it once, at boot, so connections just work after any
+ * install/upgrade. Best-effort and non-fatal: an offline machine keeps the manual
+ * "Install" button and a clear message rather than a failed startup.
+ */
+export function ensureConnectorInstalledForStartup(projectRoot: string, driver: string | undefined): void {
+  if (!driver) return;
+  const definition = CONNECTOR_INSTALLS[driver];
+  // Built-in drivers (e.g. the local file driver) and unknown drivers need nothing.
+  if (!definition || definition.builtIn || !definition.packageSpec || !definition.packageName) return;
+  if (isConnectorPackageInstalled(projectRoot, definition.packageName)) return;
+  console.log(`[dql] Installing the ${definition.label} driver into .dql/connectors (first run after install/upgrade)…`);
+  try {
+    installConnectorPackage(projectRoot, driver);
+    console.log(`[dql] ${definition.label} driver ready — connection restored without manual setup.`);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.log(`[dql] Could not auto-install the ${definition.label} driver (${detail}). Open the Connections page and click "Install" once you have network access.`);
+  }
 }
 
 function getStoredConnections(raw: Record<string, unknown>): Record<string, unknown> {

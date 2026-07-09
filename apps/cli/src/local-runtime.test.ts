@@ -21,6 +21,7 @@ import {
   extractBlockInvariants,
   formatLocalQueryRuntimeError,
   getConnectorInstallStatuses,
+  ensureConnectorInstalledForStartup,
   loadProjectConfig,
   normalizeProjectConnection,
   openBlockStudioDocument,
@@ -955,6 +956,20 @@ describe('getConnectorInstallStatuses', () => {
       builtIn: true,
       installed: true,
     });
+  });
+});
+
+describe('ensureConnectorInstalledForStartup', () => {
+  it('is a no-op for undefined, built-in, and unknown drivers (never shells out)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ensure-connector-'));
+    tempDirs.push(projectRoot);
+    // None of these should attempt an install — so no .dql/connectors is created and
+    // no throw escapes. (duckdb/snowflake would npm-install, so they're not tested here.)
+    expect(() => ensureConnectorInstalledForStartup(projectRoot, undefined)).not.toThrow();
+    expect(() => ensureConnectorInstalledForStartup(projectRoot, 'databricks')).not.toThrow();
+    expect(() => ensureConnectorInstalledForStartup(projectRoot, 'file')).not.toThrow();
+    expect(() => ensureConnectorInstalledForStartup(projectRoot, 'not-a-real-driver')).not.toThrow();
+    expect(existsSync(join(projectRoot, '.dql/connectors'))).toBe(false);
   });
 });
 
