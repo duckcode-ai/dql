@@ -291,10 +291,15 @@ export function decideAgentAction(input: IntentDecisionInput): IntentDecision {
   }
 
   // 5) Direct-answer intent with some retrieval → answer (generate grounded SQL).
+  //    This is an UNAMBIGUOUS answerable question that already has governed context
+  //    — not the paraphrased/implicit case the LLM router exists to disambiguate —
+  //    so it clears the router's confidence threshold and skips the classify call
+  //    (Pillar 1: fewer LLM calls). The answer loop's own cascade still decides
+  //    certified-vs-generated; this only settles that it's an answer, not a clarify.
   if (DIRECT_ANSWER_INTENTS.has(intent) && (signals.hasRetrieval ?? false)) {
     return {
       action: 'answer',
-      confidence: 0.55,
+      confidence: 0.72,
       reason: 'A specific, answerable question with governed context available — I will answer it.',
       followsUp,
     };

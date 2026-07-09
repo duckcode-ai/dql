@@ -91,6 +91,35 @@ describe("createLlmAgentRunPlanner", () => {
     expect(plan.steps[0]?.route).toBe("sql_cell");
   });
 
+  it("does NOT call the LLM for single-step answer routes (generated/certified)", async () => {
+    // Pillar 1: a single-step answer gets the identical plan from the deterministic
+    // planner, so paying an LLM call to plan it is pure latency. Only research /
+    // app_build (multi-step) should spend the planner call.
+    const complete = vi.fn();
+    const planner = createLlmAgentRunPlanner({ complete });
+
+    for (const route of ["generated_answer", "certified_answer"] as const) {
+      const plan = await planner.plan(planInput({
+        request: { question: "total revenue by region", requestedMode: "auto" },
+        defaultRoute: route,
+      }));
+      expect(plan.source).toBe("deterministic");
+      expect(plan.steps).toHaveLength(1);
+      expect(plan.steps[0]?.route).toBe(route);
+    }
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("still calls the LLM planner for multi-step routes (research, app_build)", async () => {
+    const complete = vi.fn().mockResolvedValue(JSON.stringify({
+      rationale: "assemble",
+      steps: [{ route: "app_build", goal: "build" }],
+    }));
+    const planner = createLlmAgentRunPlanner({ complete });
+    await planner.plan(planInput({ defaultRoute: "app_build", request: { question: "build a dashboard", requestedMode: "auto" } }));
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to deterministic when the LLM output is unparsable", async () => {
     const complete = vi.fn().mockResolvedValue("not json at all");
     const planner = createLlmAgentRunPlanner({ complete });

@@ -46,6 +46,14 @@ const PLANNABLE_ROUTES: AgentRunRoute[] = [
 
 const PLANNABLE_ROUTE_SET = new Set<AgentRunRoute>(PLANNABLE_ROUTES);
 
+/**
+ * Routes whose plans genuinely branch into ordered multi-steps and therefore
+ * benefit from the LLM planner. Everything else is answered in a single step, for
+ * which the deterministic planner already produces the identical plan — so those
+ * skip the planner LLM call entirely (Pillar 1: fewer calls per question).
+ */
+const MULTI_STEP_PLANNER_ROUTES = new Set<AgentRunRoute>(["research", "app_build"]);
+
 export interface LlmAgentRunPlannerOptions {
   complete: AgentRunPlannerCompletion;
   /** Builds a compact, grounded catalog summary the model can plan against. */
@@ -67,9 +75,13 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
 
   return {
     async plan(input: AgentRunPlanInput): Promise<AgentRunPlan> {
-      // A conversational turn is a single deterministic step — never pay the
-      // planner LLM call to "plan" a greeting.
-      if (input.defaultRoute === "conversation" || !usesLlm(input.request)) {
+      // Only genuinely MULTI-STEP routes need the LLM planner's decomposition.
+      // A single-step answer (certified/generated/conversation/sql_cell/draft) gets
+      // the SAME 1-step plan from the deterministic planner — so paying an LLM call
+      // to "plan" it is pure latency, on every analytical question. Short-circuit it
+      // and reserve the planner call for research + app_build, which actually branch
+      // into ordered steps.
+      if (!MULTI_STEP_PLANNER_ROUTES.has(input.defaultRoute) || !usesLlm(input.request)) {
         return deterministic.plan(input);
       }
       try {
