@@ -5988,6 +5988,44 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.dqlArtifact?.kind).toBe("semantic_block");
   });
 
+  it("Tier 2.5: anchors generation on a matched metric when the shape needs a cross-table join", async () => {
+    // total_revenue lives on `orders`; the question breaks it down by a dimension on a
+    // DIFFERENT table (warehouse region) that the semantic layer can't compose. Instead
+    // of throwing the metric away and reinventing the aggregate as raw SQL, generation
+    // is ANCHORED on the metric's certified definition (WS2). This is the "use the
+    // metric, don't build raw SQL even though the metric exists" fix.
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "total_revenue", label: "Total Revenue", description: "Total recognized revenue.", domain: "finance", sql: "amount", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "channel", label: "Channel", description: "Sales channel.", domain: "finance", sql: "channel", type: "string", table: "orders" },
+      ],
+    });
+    const provider = new StubProvider([
+      // Lane-2 member selection can't resolve the cross-table dimension → no usable members.
+      '```json\n{"metrics":["total_revenue"],"dimensions":[]}\n```',
+      // Anchored generation composes the join, reusing the certified measure.
+      '```json\n{"summary":"Total revenue by warehouse region.","sql":"SELECT w.region, SUM(o.amount) AS total_revenue FROM orders o JOIN warehouses w ON o.warehouse_id = w.id GROUP BY w.region","outputs":["region","total_revenue"]}\n```',
+    ]);
+
+    const result = await answer({
+      question: "total revenue by warehouse region",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({ columns: ["region", "total_revenue"], rows: [{ region: "West", total_revenue: 100 }], rowCount: 1, sql }),
+    });
+
+    // The metric's certified definition was injected into the generation prompt...
+    const allPrompts = provider.calls.flat().map((message) => message.content).join("\n");
+    expect(allPrompts).toContain("total_revenue");
+    expect(allPrompts).toMatch(/amount/); // the certified measure expression
+    // ...and the answer states it reused the governed metric rather than hand-rolling one.
+    expect(result.text).toContain("Computed using the governed metric total_revenue");
+  });
+
   it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {
     const certifiedMetric: KGNode = {
       ...revenueMetric("total_revenue", "Total recognized revenue"),
