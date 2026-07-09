@@ -52,6 +52,9 @@ import {
   selectExpressionOutputName,
 } from './metadata/sql-shape.js';
 import { composeSemanticQueryForQuestion, composeSemanticQueryFromMembers, type SemanticBridgeQueryResult } from './semantic-bridge/compose.js';
+import { runAgenticToolLoop } from './agentic/tool-loop.js';
+import { buildSemanticStageTools } from './agentic/toolset.js';
+import { deriveAgenticTrust, type CompiledSemanticRecord } from './agentic/answer-contract.js';
 import { selectSemanticMembersViaLlm } from './semantic-bridge/member-select.js';
 import { normalizeValueIndexText } from './grounding/value-index.js';
 import {
@@ -1173,6 +1176,23 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let proposed = '';
   let parsed: ParsedProposal;
   const proposalToolCalls: AgentEvidenceToolCall[] = [...semanticBridgeToolCalls];
+  // Stage-B toolset: the host's warehouse/validation tools PLUS the answer loop's
+  // own governed semantic tools (search_semantic_layer, compile_semantic_query,
+  // scan_manifest), so tool-driven generation can compile governed SQL itself and
+  // grep the live graph — across every provider (native or text-protocol). Every
+  // governed compile is recorded so the answer can be labeled governed, not
+  // hand-written, downstream (deriveAgenticTrust).
+  const compiledSemanticRecords: CompiledSemanticRecord[] = [];
+  const stageBTools: AgentToolDefinition[] = [
+    ...(input.answerLoopTools ?? []),
+    ...buildSemanticStageTools({
+      semanticLayer: input.semanticLayer,
+      kg,
+      driver: input.semanticDriver,
+      tableMapping: input.semanticTableMapping,
+      onCompiled: (record) => compiledSemanticRecords.push(record),
+    }),
+  ];
   if (semanticBridgeAnswer) {
     governedMetricAnswer = true;
     parsed = {
@@ -1215,7 +1235,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       proposed = await generateProposalWithOptionalTools({
         provider,
         messages: generationMessages,
-        tools: input.answerLoopTools,
+        tools: stageBTools,
         questionPlan,
         intent,
         signal: input.signal,
@@ -1261,6 +1281,28 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     if (metricAnchor && parsed.sql) {
       const anchorNote = `Computed using the governed metric ${metricAnchor.metric.name}'s certified definition, joined to add the requested breakdown. Review-required (not itself certified).`;
       parsed = { ...parsed, text: parsed.text ? `${parsed.text}\n\n${anchorNote}` : anchorNote };
+    }
+    // Stage-B governed promotion: when the model drove compile_semantic_query and
+    // adopted its output VERBATIM (deriveAgenticTrust — exact match only), the SQL
+    // is governed semantic SQL the compiler owns and already validated, not
+    // hand-written. Treat it like the deterministic governed path: skip the
+    // hallucination guard (governedMetricAnswer) and note the provenance. Any edit
+    // to the compiled SQL falls back to generated/review-required by construction.
+    if (!governedMetricAnswer && parsed.sql) {
+      const trust = deriveAgenticTrust(parsed.sql, compiledSemanticRecords);
+      if (trust.tier === 'semantic_metric' && trust.compiled) {
+        governedMetricAnswer = true;
+        const compiled = trust.compiled;
+        const governedNote = `Answered from governed semantic metric${compiled.metrics.length === 1 ? '' : 's'} ${compiled.metrics.join(', ')}${compiled.dimensions.length > 0 ? ` by ${compiled.dimensions.join(', ')}` : ''} (compiled via the semantic layer). This result is uncertified until reviewed and promoted.`;
+        parsed = { ...parsed, text: parsed.text ? `${parsed.text}\n\n${governedNote}` : governedNote };
+        proposalToolCalls.push({
+          name: 'compile_semantic_query',
+          status: 'checked',
+          inputSummary: `metrics: ${compiled.metrics.join(', ')}${compiled.dimensions.length ? `; by ${compiled.dimensions.join(', ')}` : ''}`,
+          outputSummary: 'Model-selected semantic members compiled to governed SQL',
+          order: proposalToolCalls.length + 1,
+        });
+      }
     }
   }
   let deepCandidateResult: AgentResultPayload | undefined;
@@ -1341,7 +1383,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       proposed = await generateProposalWithOptionalTools({
         provider,
         messages: [...messages, { role: 'system', content: FORCE_JOIN_INSTRUCTION }],
-        tools: input.answerLoopTools,
+        tools: stageBTools,
         questionPlan,
         intent,
         signal: input.signal,
@@ -3740,26 +3782,29 @@ async function generateProposalWithOptionalTools(input: {
     signal: input.signal,
     reasoningEffort: input.reasoningEffort,
   };
-  if (!input.provider.generateWithTools || tools.length === 0) {
+  // No tools → plain generation (nothing for the loop to drive).
+  if (tools.length === 0) {
     return input.provider.generate(input.messages, options);
   }
   const toolBudget = proposalToolBudgetForQuestion(input.questionPlan, input.intent, {
     analysisDepth: input.analysisDepth,
     reasoningEffort: input.reasoningEffort,
   });
-  const toolPolicy: AgentMessage = {
-    role: 'system',
-    content: [
-      'You may use the supplied DQL tools to inspect semantic members, certified context, metadata context, and bounded repair options.',
-      `Tool budget for this question: ${toolBudget.maxToolCalls} call(s) (${toolBudget.effortClass}: ${toolBudget.reason}). Stop as soon as a lane can answer.`,
-      'Prefer semantic compile before deep warehouse search when the semantic layer contains the requested metric/dimensions/time grain.',
-      'When the supplied context is missing a table, column, or join key, DISCOVER it with `search_metadata` (find candidate relations) then `get_table_schema` (confirm real columns + inferred join keys) before declining — do not give up on a join you could compose. Use `expand_context` for a relation you already know by name; do not loop on the same failed context.',
-      'When unsure a relation/column exists, validate a composed query with `validate_sql` rather than guessing.',
-      'Final response must be a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
-    ].join('\n'),
-  };
-  return input.provider.generateWithTools([...input.messages, toolPolicy], tools, {
+  const toolPolicy = [
+    'You may use the supplied DQL tools to inspect semantic members, certified context, metadata context, and bounded repair options.',
+    `Tool budget for this question: ${toolBudget.maxToolCalls} call(s) (${toolBudget.effortClass}: ${toolBudget.reason}). Stop as soon as a lane can answer.`,
+    'Prefer a governed semantic compile (search_semantic_layer → compile_semantic_query) over hand-written SQL when the semantic layer contains the requested metric/dimensions/time grain.',
+    'When the supplied context is missing a table, column, or join key, DISCOVER it with `search_metadata` (find candidate relations) then `get_table_schema` (confirm real columns + inferred join keys) before declining — do not give up on a join you could compose. Use `scan_manifest` for a fresh grep over blocks/metrics, or `expand_context` for a relation you already know by name; do not loop on the same failed context.',
+    'When unsure a relation/column exists, validate a composed query with `validate_sql` rather than guessing.',
+    'Final response must be a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
+  ].join('\n');
+  // runAgenticToolLoop drives the loop over ANY provider: native tool use where the
+  // provider implements generateWithTools (Claude/OpenAI), and an equivalent text
+  // protocol otherwise (subscription-CLI passthrough, Ollama). This is what gives
+  // every provider — not just the two API ones — a real tool-driven Stage B.
+  return runAgenticToolLoop(input.provider, [...input.messages], tools, {
     ...options,
+    toolPolicy,
     maxToolCalls: toolBudget.maxToolCalls,
     onToolCall: (event) => {
       const sink = input.toolCalls;

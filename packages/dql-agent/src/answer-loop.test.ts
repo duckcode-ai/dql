@@ -817,8 +817,10 @@ describe("answer (block-first loop)", () => {
     });
 
     expect(provider.calls).toHaveLength(0);
+    // scan_manifest is always merged in (index-free KG grep); no semantic layer here
+    // so the semantic search/compile tools are not added.
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 10 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 10 },
     ]);
     expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
     expect(observed).toEqual([{ question: "tool-assisted generation" }]);
@@ -923,7 +925,7 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 3 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 3 },
     ]);
     expect(provider.messages.at(-1)?.content).toContain("3 call(s) (lookup");
     expect(result.kind).toBe("uncertified");
@@ -943,7 +945,7 @@ describe("answer (block-first loop)", () => {
 
     expect(provider.calls).toHaveLength(0);
     expect(provider.toolCalls).toEqual([
-      { toolNames: ["inspect_metadata_context"], maxToolCalls: 10 },
+      { toolNames: ["inspect_metadata_context", "scan_manifest"], maxToolCalls: 10 },
     ]);
     expect(provider.messages.at(-1)?.content).toContain("10 call(s) (multi_entity");
     expect(result.kind).toBe("uncertified");
@@ -6026,6 +6028,53 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(allPrompts).toMatch(/amount/); // the certified measure expression
     // ...and the answer states it reused the governed metric rather than hand-rolling one.
     expect(result.text).toContain("Computed using the governed metric total_revenue");
+  });
+
+  it("Stage B: a governed compile_semantic_query the model adopts verbatim lands as a governed answer", async () => {
+    // Stage A misses (the breakdown dimension is an unresolvable paraphrase and the
+    // Lane-2 member selection drops it), so generation runs with the semantic-stage
+    // tools. The model DRIVES compile_semantic_query and returns its SQL verbatim →
+    // deriveAgenticTrust labels the answer governed (compiler-owned), not hand-written,
+    // and the hallucination guard is skipped. This is Stage B producing a governed
+    // answer across any provider — the whole point of the tool-driven redesign.
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "total_revenue", label: "Total Revenue", description: "Total recognized revenue.", domain: "finance", sql: "amount", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "channel", label: "Channel", description: "Sales channel.", domain: "finance", sql: "channel", type: "string", table: "orders" },
+      ],
+    });
+    let compiledSql = "";
+    const provider: AgentProvider = {
+      name: "claude",
+      available: async () => true,
+      // Lane-2 member selection drops the breakdown → generation runs.
+      generate: async () => '```json\n{"metrics":["total_revenue"],"dimensions":[]}\n```',
+      generateWithTools: async (_messages, tools, options) => {
+        const compile = tools.find((tool) => tool.name === "compile_semantic_query");
+        if (!compile) throw new Error("compile_semantic_query not offered to the model");
+        const out = (await compile.run({ metrics: ["total_revenue"], dimensions: ["channel"] })) as { sql: string };
+        options?.onToolCall?.({ name: "compile_semantic_query", input: { metrics: ["total_revenue"], dimensions: ["channel"] }, output: out, isError: false });
+        compiledSql = out.sql;
+        return `\`\`\`json\n{"summary":"Total revenue by channel.","sql":${JSON.stringify(out.sql)},"outputs":["channel","total_revenue"]}\n\`\`\``;
+      },
+    };
+    const result = await answer({
+      question: "total revenue by acquisition path",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({ columns: ["channel", "total_revenue"], rows: [{ channel: "Direct", total_revenue: 100 }], rowCount: 1, sql }),
+    });
+
+    expect(compiledSql).toContain("total_revenue");
+    // The model's SQL is the compiled SQL verbatim → governed, not hand-written.
+    expect(result.text).toContain("compiled via the semantic layer");
+    expect(result.proposedSql).toContain("total_revenue");
+    expect(result.kind).not.toBe("no_answer");
+    expect(result.evidence?.toolCalls?.some((call) => call.name === "compile_semantic_query")).toBe(true);
   });
 
   it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {

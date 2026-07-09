@@ -121,7 +121,7 @@ describe('deriveAgenticTrust', () => {
     { sql: 'SELECT region, SUM(tax) AS tax_amount FROM orders GROUP BY region', metrics: ['tax_amount'], dimensions: ['region'], dqlArtifactSource: 'block ...' },
   ];
 
-  it('labels SQL matching a governed compile as semantic_metric', () => {
+  it('labels SQL matching a governed compile verbatim (modulo whitespace/;) as semantic_metric', () => {
     const result = deriveAgenticTrust('select region, sum(tax) as tax_amount from orders group by region;', compiled);
     expect(result.tier).toBe('semantic_metric');
     expect(result.compiled).toBe(compiled[0]);
@@ -129,6 +129,16 @@ describe('deriveAgenticTrust', () => {
 
   it('labels hand-written SQL as generated', () => {
     const result = deriveAgenticTrust('SELECT product, SUM(discount) FROM line_items GROUP BY product', compiled);
+    expect(result.tier).toBe('generated');
+  });
+
+  it('does NOT trust compiled SQL with an appended unvalidated clause', () => {
+    // The model added a WHERE to the compiled SQL — this must fall back to generated
+    // (review-required), not inherit the governed validation skip.
+    const result = deriveAgenticTrust(
+      "SELECT region, SUM(tax) AS tax_amount FROM orders WHERE region = 'West' GROUP BY region",
+      compiled,
+    );
     expect(result.tier).toBe('generated');
   });
 

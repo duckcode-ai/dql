@@ -36,9 +36,13 @@ export function deriveAgenticTrust(
   if (!finalSql || compiledRecords.length === 0) return { tier: 'generated' };
   const target = normalizeSql(finalSql);
   if (!target) return { tier: 'generated' };
+  // EXACT normalized equality only. Substring tolerance would let the model append
+  // an unvalidated WHERE/JOIN to the compiled SQL and still earn the governed label
+  // (which skips the hallucination guard) — the model must adopt the compiled SQL
+  // verbatim to be trusted as governed. The tool's contract instructs exactly that.
   const match = compiledRecords.find((record) => {
     const compiled = normalizeSql(record.sql);
-    return compiled.length > 0 && (compiled === target || target.includes(compiled) || compiled.includes(target));
+    return compiled.length > 0 && compiled === target;
   });
   return match ? { tier: 'semantic_metric', compiled: match } : { tier: 'generated' };
 }
