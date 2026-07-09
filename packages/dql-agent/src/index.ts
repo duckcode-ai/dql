@@ -638,12 +638,14 @@ export {
   defaultEmbeddingProvider,
   cosineSimilarity,
   hybridRank,
+  probeLocalOllamaEmbeddings,
 } from "./embeddings/provider.js";
 export type {
   EmbeddingProvider,
   HybridRankItem,
   HybridRankOptions,
   HybridRanked,
+  LocalOllamaEmbeddings,
 } from "./embeddings/provider.js";
 export type {
   AppliedContextHint,

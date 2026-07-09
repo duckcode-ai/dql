@@ -9,8 +9,10 @@ import {
   defaultEmbeddingProvider,
   embeddingOptionsFromEnv,
   hybridRank,
+  probeLocalOllamaEmbeddings,
   resolveEmbeddingProvider,
   type EmbeddingFetch,
+  type ProbeFetch,
   type EmbeddingProvider,
 } from './provider.js';
 
@@ -166,5 +168,28 @@ describe('local-first embeddings (W3.1)', () => {
 
   it('offline (no config) stays on the deterministic hashed provider', () => {
     expect(resolveEmbeddingProvider(embeddingOptionsFromEnv({})).id).toBe('hashed-token-v1');
+  });
+
+  describe('probeLocalOllamaEmbeddings (zero-config semantic search)', () => {
+    const tagsFetch = (models: string[]): ProbeFetch => async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ models: models.map((name) => ({ name })) }),
+    });
+
+    it('detects a pulled embedding model and returns endpoint + model', async () => {
+      const result = await probeLocalOllamaEmbeddings('http://127.0.0.1:11434', tagsFetch(['llama3:latest', 'nomic-embed-text:latest']));
+      expect(result).toEqual({ endpoint: 'http://127.0.0.1:11434', model: 'nomic-embed-text' });
+    });
+
+    it('returns null when Ollama has no embedding model pulled', async () => {
+      const result = await probeLocalOllamaEmbeddings('http://127.0.0.1:11434', tagsFetch(['llama3:latest', 'mistral:latest']));
+      expect(result).toBeNull();
+    });
+
+    it('returns null when Ollama is unreachable (never throws)', async () => {
+      const result = await probeLocalOllamaEmbeddings('http://127.0.0.1:11434', async () => { throw new Error('ECONNREFUSED'); });
+      expect(result).toBeNull();
+    });
   });
 });

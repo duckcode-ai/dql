@@ -284,6 +284,56 @@ export interface EmbeddingResolveOptions {
  * This is the single place config chooses an embedder, so retrieval/matching call
  * sites just call resolveEmbeddingProvider().
  */
+/** Default local Ollama endpoint auto-detection targets. */
+const DEFAULT_OLLAMA_ENDPOINT = 'http://127.0.0.1:11434';
+const OLLAMA_EMBED_MODELS = ['nomic-embed-text', 'mxbai-embed-large', 'all-minilm', 'bge-m3', 'snowflake-arctic-embed'];
+
+export interface LocalOllamaEmbeddings {
+  endpoint: string;
+  model: string;
+}
+
+/**
+ * Zero-config semantic search: probe a locally-running Ollama for a pulled embedding
+ * model, so OSS users who have Ollama get real semantic recall without setting any
+ * env var. Returns the endpoint + the first available embedding model, or null when
+ * Ollama isn't reachable or has no embedding model pulled. Deliberately NOT called by
+ * the library's default resolver (that stays deterministic-hashed for tests/CI) — the
+ * app runtime calls this once at startup and exports the result via env.
+ */
+export type ProbeFetch = (
+  url: string,
+  init: { method: string; signal?: AbortSignal },
+) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+
+export async function probeLocalOllamaEmbeddings(
+  endpoint: string = DEFAULT_OLLAMA_ENDPOINT,
+  fetchImpl: ProbeFetch = ((url, init) => fetch(url, init) as ReturnType<ProbeFetch>),
+  timeoutMs = 400,
+): Promise<LocalOllamaEmbeddings | null> {
+  const base = endpoint.replace(/\/$/, '');
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Awaited<ReturnType<EmbeddingFetch>>;
+    try {
+      response = await fetchImpl(`${base}/api/tags`, { method: 'GET', signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) return null;
+    const payload = await response.json() as { models?: Array<{ name?: string; model?: string }> };
+    const installed = (payload.models ?? []).map((m) => (m.name ?? m.model ?? '').toLowerCase());
+    // Prefer a known embedding model; match on the name stem so "nomic-embed-text:latest" counts.
+    const match = OLLAMA_EMBED_MODELS.find((known) => installed.some((name) => name.startsWith(known)));
+    const model = match
+      ?? installed.find((name) => name.includes('embed'))?.replace(/:.*$/, '');
+    return model ? { endpoint: base, model } : null;
+  } catch {
+    return null; // Ollama not running / not reachable — caller falls back to hashed.
+  }
+}
+
 export function resolveEmbeddingProvider(options: EmbeddingResolveOptions = {}): EmbeddingProvider {
   if (options.ollamaEndpoint) {
     return new CachingEmbeddingProvider(new ResilientEmbeddingProvider(new OllamaEmbeddingProvider({

@@ -148,6 +148,7 @@ import {
   bumpReasoningEffort,
   resolveThinkingMode,
   coerceThinkingMode,
+  probeLocalOllamaEmbeddings,
   upsertGeneratedDqlArtifactDraft,
   type AgentRun,
   type AgentRunArtifact,
@@ -643,6 +644,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     return candidate;
   };
+
+  // Zero-config semantic search: if the user is running Ollama with an embedding model
+  // but hasn't set an embed env var, auto-detect it so retrieval + metric/block matching
+  // get real semantic recall out of the box (match by meaning, not just keywords) — the
+  // biggest lever for "find the right metric/block instead of jumping to raw SQL".
+  // Explicit config always wins; when nothing is found we stay on the deterministic
+  // keyword matcher. Scoped to the app server (not eval/CI) and fully best-effort.
+  if (!process.env.DQL_OLLAMA_EMBED_URL && !process.env.DQL_OPENAI_API_KEY && !process.env.OPENAI_API_KEY) {
+    try {
+      const detected = await probeLocalOllamaEmbeddings();
+      if (detected) {
+        process.env.DQL_OLLAMA_EMBED_URL = detected.endpoint;
+        process.env.DQL_OLLAMA_EMBED_MODEL = detected.model;
+        console.log(`[dql] Semantic search on: local Ollama embeddings (${detected.model}) — matching by meaning, not just keywords.`);
+      } else {
+        console.log('[dql] Semantic search: keyword-only. For higher matching accuracy, install Ollama and run `ollama pull nomic-embed-text` — DQL detects and uses it automatically, fully local & free.');
+      }
+    } catch {
+      // Probe failure never blocks startup — fall back to the keyword matcher.
+    }
+  }
 
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
   let semanticLayer: SemanticLayer | undefined;
