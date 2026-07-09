@@ -210,9 +210,11 @@ export class DbtProvider implements SemanticLayerProvider {
       }
     }
 
-    // Convert each semantic model into a DQL CubeDefinition
+    // Convert each semantic model into a DQL CubeDefinition. Build the primary-entity
+    // index first so foreign-entity joins resolve to the right target cube + key.
+    const entityIndex = buildPrimaryEntityIndex(allModels);
     for (const model of allModels) {
-      registerSemanticModel(layer, model);
+      registerSemanticModel(layer, model, 'yaml', entityIndex);
     }
 
     // Convert dbt metrics (resolve measure references)
@@ -309,8 +311,9 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
     }
   }
 
+  const entityIndex = buildPrimaryEntityIndex(models);
   for (const model of models) {
-    registerSemanticModel(layer, model, artifactKind);
+    registerSemanticModel(layer, model, artifactKind, entityIndex);
   }
   for (const dbtMetric of dbtMetrics) {
     const metric = convertDbtMetric(dbtMetric, measureLookup);
@@ -536,12 +539,37 @@ function dbtSource(
   };
 }
 
+/**
+ * Where a foreign entity joins TO. In dbt/MetricFlow, a foreign entity `location`
+ * joins to the semantic model whose PRIMARY (or natural/unique) entity is also
+ * named `location`. This index maps that entity name → the target cube and its
+ * join key, so cross-model joins resolve to a real cube instead of the entity name.
+ */
+export type PrimaryEntityIndex = Map<string, { cube: string; key: string }>;
+
+/** Build the primary-entity → {cube, key} index across all semantic models. */
+export function buildPrimaryEntityIndex(models: DbtSemanticModel[]): PrimaryEntityIndex {
+  const index: PrimaryEntityIndex = new Map();
+  for (const model of models) {
+    for (const entity of model.entities ?? []) {
+      if (entity.type === 'primary' || entity.type === 'natural' || entity.type === 'unique') {
+        // First primary wins; a model's identity is its primary entity.
+        if (!index.has(entity.name)) {
+          index.set(entity.name, { cube: model.name, key: entity.expr ?? entity.name });
+        }
+      }
+    }
+  }
+  return index;
+}
+
 function registerSemanticModel(
   layer: SemanticLayer,
   model: DbtSemanticModel,
   artifactKind: 'manifest' | 'semantic_manifest' | 'yaml' = 'yaml',
+  entityIndex: PrimaryEntityIndex = new Map(),
 ): void {
-  const cube = convertSemanticModel(model, artifactKind);
+  const cube = convertSemanticModel(model, artifactKind, entityIndex);
   layer.addCube(cube);
   layer.addSemanticModel(convertSemanticModelDetail(model, cube));
   for (const measure of model.measures ?? []) {
@@ -556,6 +584,7 @@ function registerSemanticModel(
 function convertSemanticModel(
   model: DbtSemanticModel,
   artifactKind: 'manifest' | 'semantic_manifest' | 'yaml' = 'yaml',
+  entityIndex: PrimaryEntityIndex = new Map(),
 ): CubeDefinition {
   const tableName = resolveTableName(model);
   const domain = deriveDbtDomain(model);
@@ -640,18 +669,26 @@ function convertSemanticModel(
     }
   }
 
-  // Convert entities with foreign type to joins
+  // Convert foreign entities to joins. A foreign entity joins to the model whose
+  // PRIMARY entity shares its name (MetricFlow semantics) — resolve that target via
+  // the cross-model entity index so `join.right` is the real target CUBE and the SQL
+  // uses the target's actual key. The old code used `entity.name` for both the
+  // target and the right-hand column, so `orders.location_id = ${right}.location`
+  // pointed at a non-existent column on a cube named `locations` — findJoinPath
+  // (which matches `join.right === targetCube`) never resolved it, and EVERY
+  // cross-table governed query silently fell through to generated SQL.
   const joins: JoinDefinition[] = [];
   for (const entity of model.entities ?? []) {
-    if (entity.type === 'foreign') {
-      joins.push({
-        name: entity.name,
-        left: model.name,
-        right: entity.name,
-        type: 'left',
-        sql: `\${left}.${entity.expr ?? entity.name} = \${right}.${entity.name}`,
-      });
-    }
+    if (entity.type !== 'foreign') continue;
+    const leftKey = entity.expr ?? entity.name;
+    const target = entityIndex.get(entity.name);
+    joins.push({
+      name: target?.cube ?? entity.name,
+      left: model.name,
+      right: target?.cube ?? entity.name,
+      type: 'left',
+      sql: `\${left}.${leftKey} = \${right}.${target?.key ?? entity.expr ?? entity.name}`,
+    });
   }
 
   return {
