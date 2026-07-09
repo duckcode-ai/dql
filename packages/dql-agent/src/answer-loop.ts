@@ -35,7 +35,7 @@ import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './met
 import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metadata/drafts.js';
 import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan } from './metadata/analysis-planner.js';
 import { certifiedFitAllowsTier1, evaluateCertifiedBlockFit } from './metadata/block-fit.js';
-import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
+import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricDefinition, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
 import { decideAgentAction, type IntentDecision } from './intent-controller.js';
 import type {
   SqlContextValidationCode,
@@ -1174,10 +1174,25 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       text: certifiedAdaptation.provenance,
     };
   } else {
+    // Tier 2.5 — METRIC-ANCHORED generation. A governed metric matched this question,
+    // but its semantic definition couldn't compose the exact requested shape (typically
+    // the breakdown needs a join the semantic layer doesn't own — e.g. a location-grain
+    // tax metric asked for "by product"). Rather than throw the metric away and let the
+    // model reinvent the aggregation from scratch, inject the metric's CERTIFIED
+    // definition as a required building block, so the generated SQL reuses the trusted
+    // measure and only generates the join/grouping around it. Keeps the number
+    // consistent with the governed metric. Degrades to plain generation when the metric
+    // has no resolvable definition. The grain ledger + validation still gate the output.
+    const metricAnchor = semanticMetricMatch && input.semanticLayer
+      ? resolveGovernedMetricDefinition(semanticMetricMatch.metric, semanticMetricNodes, input.semanticLayer)
+      : undefined;
+    const generationMessages = metricAnchor
+      ? [...messages, { role: 'system' as const, content: metricAnchorInstruction(metricAnchor.metric.name, metricAnchor.def) }]
+      : messages;
     try {
       proposed = await generateProposalWithOptionalTools({
         provider,
-        messages,
+        messages: generationMessages,
         tools: input.answerLoopTools,
         questionPlan,
         intent,
@@ -1218,6 +1233,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
 
     parsed = parseProposal(proposed);
+    // Surface the tier choice (WS3): when generation was anchored on a governed
+    // metric, say so, so the answer reads as "reused the certified measure" rather
+    // than an opaque hand-written query.
+    if (metricAnchor && parsed.sql) {
+      const anchorNote = `Computed using the governed metric ${metricAnchor.metric.name}'s certified definition, joined to add the requested breakdown. Review-required (not itself certified).`;
+      parsed = { ...parsed, text: parsed.text ? `${parsed.text}\n\n${anchorNote}` : anchorNote };
+    }
   }
   let deepCandidateResult: AgentResultPayload | undefined;
   let deepCandidateExecutionError: string | undefined;
@@ -1962,6 +1984,14 @@ Rules:
 // combined dataset — show them separately" refusal into the join the user asked
 // for, while still allowing an honest refusal if context is truly missing.
 const FORCE_JOIN_INSTRUCTION = `Your previous attempt declined to produce SQL. Re-read the supplied schema, metadata, and any "Knowledge graph join routes": this question CAN be answered by joining the grounded tables along their documented keys. Do NOT refuse, and do NOT suggest showing the datasets separately — compose ONE read-only SELECT/WITH that joins the relevant tables to answer it directly, following the JSON contract from rule 3. State the grain and the exact join path in the summary. Only if a required table, column, or join key is truly absent from the supplied context may you still ask a clarifying question.`;
+
+// Metric-anchored generation (Tier 2.5): a governed metric matched the question but
+// the semantic layer couldn't compose the exact shape. Reuse the metric's CERTIFIED
+// definition as the measure rather than reinventing it, so the number stays consistent
+// with the governed metric — only the join/grouping around it is generated.
+function metricAnchorInstruction(metricName: string, def: { expr: string; table: string }): string {
+  return `A GOVERNED metric matched this question, but the semantic layer could not compose the exact requested shape on its own (the breakdown likely needs a join the metric's table does not own). You MUST compute the measure using this certified definition — do NOT redefine, rename, or approximate it:\n  metric "${metricName}": ${def.expr}   (defined over ${def.table})\nCompose ONE read-only SELECT/WITH that computes exactly this expression as the measure, joining ${def.table} to the other grounded tables along their documented keys to add the requested dimensions, then GROUP BY those dimensions. State the join path and grain in the summary. Reusing the governed definition keeps the answer consistent with the certified metric; only fall back to redefining the measure if ${def.table} genuinely cannot be joined to the requested breakdown.`;
+}
 
 function renderContextPrompt(
   blocks: KGNode[],
