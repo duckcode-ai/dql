@@ -17,6 +17,27 @@ describe('analysis planner', () => {
     expect(plan.requestedShape.rankingDirection).toBe('top');
   });
 
+  it('classifies a multi-dimension breakdown as analysis, not clarify, with clean outputs', () => {
+    // Regression: "average tax info by location by product" used to (a) fall to a
+    // clarify intent (brittle keyword classifier), which then over-escalated to a
+    // slow research investigation, and (b) manufacture phantom required-output
+    // columns ("location_by_product", "average_tax_info_by_location_by_product")
+    // from greedy term regexes, falsely flagging a correct answer as "partial".
+    const plan = buildAnalysisQuestionPlan('Can you give me the average tax info by location by product?');
+
+    // A breakdown with named dimensions is analytical (routes to a fast direct answer).
+    expect(plan.mode).toBe('general_analysis');
+    expect(plan.routeIntent).toBe('ad_hoc_ranking');
+    // Clean grouping dimensions — no "a by b" blob.
+    expect(plan.dimensionTerms).toEqual(expect.arrayContaining(['location', 'product']));
+    expect(plan.dimensionTerms).not.toContain('location by product');
+    // No phantom multi-clause required-output columns.
+    for (const output of plan.requestedShape.requiredOutputs) {
+      expect(output).not.toMatch(/_by_|\bby\b/);
+    }
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['location', 'product']));
+  });
+
   it('extracts top-N and follow-up references', () => {
     const plan = buildAnalysisQuestionPlan('who are the top 5 customers for these categories?', { kind: 'drilldown' });
 

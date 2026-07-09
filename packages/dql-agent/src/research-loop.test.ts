@@ -48,6 +48,30 @@ describe('planResearch', () => {
     expect(plan.followUp!.options).toContain('revenue'); // a real catalog metric, not open-ended
   });
 
+  it('investigates a forced-research turn even when it would otherwise soft-clarify', async () => {
+    // Explicit research mode must dig, not stop to ask, when nothing matched cleanly
+    // but the ask isn't genuinely ambiguous (a SOFT clarify). Guards the descriptive-
+    // breakdown routing fix that removed "by <dim>" from the soft-investigate regex.
+    const plan = await planResearch({
+      question: 'customer revenue by segment',
+      intent: 'definition_lookup',
+      forceInvestigate: true,
+      metrics: [],
+      blocks: [],
+    });
+    expect(plan.decision).toBe('investigate');
+  });
+
+  it('still honors a genuinely-ambiguous hard clarify even under forced research', async () => {
+    const plan = await planResearch({
+      question: 'tell me something interesting',
+      intent: 'clarify',
+      forceInvestigate: true,
+      ...ctx,
+    });
+    expect(plan.decision).toBe('clarify');
+  });
+
   it('offers the certified breakdown dimensions when a metric matched but no breakdown was asked', async () => {
     // A bare metric question with no "by X" — if the controller clarifies, options are real dims.
     const plan = await planResearch({ question: 'revenue please', intent: 'clarify', ...ctx });

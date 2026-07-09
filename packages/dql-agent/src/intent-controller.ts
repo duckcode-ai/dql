@@ -99,9 +99,16 @@ const MONITOR_RE = /\b(monitor|keep an eye on|track .* over time|standing (view|
  */
 const STRONG_INVESTIGATE_RE =
   /\b(why|what'?s driving|what is driving|root ?cause|diagnose|deep ?dive|investigate|what (happened|caused|changed)|drivers? of|contributed to|explain the|analy[sz]e|anomal)\b/i;
-/** SOFT analytical phrasing — only investigate when no confident direct answer fits. */
+/**
+ * SOFT analytical phrasing — only investigate when no confident direct answer fits.
+ * A plain "by <dimension>" grouping is deliberately NOT here: that's an ordinary
+ * descriptive breakdown the generated-SQL lane answers directly and fast, not a
+ * root-cause investigation. Investigation stays reserved for genuinely analytical
+ * phrasing (breakdown / compare / trend) and investigative intents — sending a
+ * simple "average X by A by B" to the research lane cost a 40s deep vote.
+ */
 const SOFT_INVESTIGATE_RE =
-  /\b(break ?down|breakdown|compare|vs\.?|versus|trend over|over time|by (region|segment|month|day|week|category|product|location|type))\b/i;
+  /\b(break ?down|breakdown|compare|vs\.?|versus|trend over|over time)\b/i;
 /** Deictic / continuation phrasing that only makes sense against a prior turn. */
 const FOLLOW_UP_RE =
   /^\s*(why|how come|and|but|what about|how about|ok|okay|so|then|more|show more|drill|dig|expand|same|that one|those|these|it|this)\b|\b(again|instead|by (region|segment|month|day|category|product|location))\b/i;
