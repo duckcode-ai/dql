@@ -201,6 +201,46 @@ export class ClaudeProvider implements AgentProvider {
           output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
           isError: true,
         });
+        // Graceful final turn: instead of dead-ending on whatever stray text the
+        // model last emitted, ask it to answer NOW from what the prior tool calls
+        // already returned — with `tools` OMITTED from the request so it physically
+        // cannot request another tool and the loop is guaranteed to terminate.
+        turns.push({
+          role: 'user',
+          content: 'Tool budget reached — do not call any more tools. Answer now using only the information the tool calls above already returned, following the required output format.',
+        });
+        try {
+          const finalRes = await postMessages(
+            `${this.baseUrl}/v1/messages`,
+            {
+              'x-api-key': this.apiKey,
+              'anthropic-version': '2023-06-01',
+              'content-type': 'application/json',
+            },
+            {
+              model,
+              max_tokens: options.maxTokens ?? 1024,
+              temperature: options.temperature ?? 0.2,
+              system: system || undefined,
+              messages: turns,
+              // tools intentionally omitted — forces a final answer, no more tool_use.
+            },
+            anthropicReasoning(model, options),
+            options.signal,
+          );
+          if (finalRes.ok) {
+            const finalJson = (await finalRes.json()) as {
+              content?: Array<{ type: string; text?: string }>;
+            };
+            const finalText = (finalJson.content ?? [])
+              .filter((block) => block.type === 'text')
+              .map((block) => block.text ?? '')
+              .join('');
+            if (finalText.trim()) return finalText;
+          }
+        } catch {
+          // Fall through to the legacy behavior on any final-turn failure.
+        }
         return lastText || JSON.stringify({
           summary: `Tool-call budget exhausted after ${toolCallsUsed} call(s).`,
         });
