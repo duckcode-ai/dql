@@ -1682,6 +1682,14 @@ export class MetadataCatalog {
         JSON.stringify(cleanSnapshot),
         capturedAt,
       );
+      // Only the most-recent snapshot is ever read; rows otherwise accumulate one per
+      // question forever. Keep a small margin and prune the rest (P7).
+      this.db.prepare(`
+        DELETE FROM runtime_schema_snapshots
+        WHERE id NOT IN (
+          SELECT id FROM runtime_schema_snapshots ORDER BY captured_at DESC LIMIT 5
+        )
+      `).run();
       this.db.prepare('DELETE FROM runtime_value_fts').run();
       this.db.prepare('DELETE FROM runtime_value_index').run();
       for (const entry of valueEntries) {
