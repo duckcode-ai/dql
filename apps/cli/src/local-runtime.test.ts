@@ -55,7 +55,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
-import { recordRuntimeSchemaSnapshot } from '@duckcodeailabs/dql-agent';
+import { recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 
 const tempDirs: string[] = [];
@@ -95,6 +95,21 @@ describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
     tempDirs.push(dir);
     mkdirSync(join(dir, '.dql', 'cache'), { recursive: true });
     expect(runtimeSnapshotStale(dir)).toBe(true);
+  });
+
+  it('keeps serving the latest snapshot after many writes are pruned (P7)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p7-prune-'));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, '.dql', 'cache'), { recursive: true });
+    for (let i = 0; i < 8; i += 1) {
+      recordRuntimeSchemaSnapshot(dir, {
+        source: `scan-${i}`,
+        capturedAt: new Date(Date.UTC(2026, 0, 1, i)).toISOString(), // distinct, increasing
+        tables: [{ relation: `raw.t${i}`, name: `t${i}`, columns: [{ name: 'id' }] }],
+      });
+    }
+    // The prune must never delete the newest row — it's the only one ever read.
+    expect(latestRuntimeSchemaSnapshotForProject(dir)?.source).toBe('scan-7');
   });
 });
 

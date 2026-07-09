@@ -270,8 +270,10 @@ export interface RuntimeRelationInput {
  * answer-loop receives these from the host as `schemaContext` /
  * `allowedSqlContext`, so the relations are already real warehouse relations).
  * This lets the governed answer-loop reuse the SAME resolver + validator as the
- * build path without re-reading dbt artifacts. No join-key inference here —
- * the answer-loop already renders join paths from its context pack.
+ * build path without re-reading dbt artifacts. No join-key inference here for
+ * relations already in the context pack — the answer-loop renders join paths from
+ * that pack. (Since P3, a relation the model DISCOVERS mid-loop via get_table_schema
+ * gets its inferred join keys directly from that tool's own result, not from here.)
  */
 export function buildGroundingFromRuntimeRelations(relations: RuntimeRelationInput[]): SchemaGrounding {
   const tables: GroundedTable[] = relations.map((rel) => ({
