@@ -1,6 +1,8 @@
 // v1.3.2 — three Luna themes (obsidian dark, paper warm light, white plain light).
 // `dark`/`light`/`midnight`/`arctic` kept as aliases so persisted state from
 // earlier v1.3 releases still loads; normalize in the reducer / App effect.
+import type { AgentRun } from '../api/client';
+
 export type ThemeMode = 'obsidian' | 'paper' | 'white' | 'dark' | 'light' | 'midnight' | 'arctic';
 
 /**
@@ -150,7 +152,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'domains' | 'settings';
+export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'review' | 'skills' | 'domains' | 'settings' | 'agent_log';
 
 export type GlobalAiAudience = 'stakeholder' | 'analyst';
 
@@ -1121,6 +1123,8 @@ export interface NotebookState {
   activePersona: ActivePersona | null;
   // Global, context-aware AI right rail (stakeholder copilot across surfaces).
   globalAi: GlobalAiState;
+  // The agent run currently open in the Agent Steps (agent_log) page, if any.
+  agentLogRun?: AgentRun;
 }
 
 export type InspectorContext =
@@ -1130,6 +1134,7 @@ export type InspectorContext =
 
 export type NotebookAction =
   | { type: 'SET_MAIN_VIEW'; view: MainView }
+  | { type: 'OPEN_AGENT_LOG'; run: AgentRun }
   | { type: 'SET_SETTINGS_TAB'; tab: SettingsTab }
   | { type: 'SET_THEME'; mode: ThemeMode }
   | { type: 'SET_APP_MODE'; mode: AppMode }

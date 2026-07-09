@@ -45,6 +45,7 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
 
 const initialState: NotebookState = {
   mainView: 'apps',
+  agentLogRun: undefined,
   settingsTab: 'database',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
@@ -149,6 +150,8 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         };
       }
       return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null, lineageReturnTarget: null };
+    case 'OPEN_AGENT_LOG':
+      return { ...state, agentLogRun: action.run, mainView: 'agent_log' };
 
     case 'SET_SETTINGS_TAB':
       return { ...state, settingsTab: action.tab };

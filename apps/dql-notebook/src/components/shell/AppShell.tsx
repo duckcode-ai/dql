@@ -21,6 +21,7 @@ import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { ReviewPage } from '../review/ReviewPage';
+import { AgentLogPage } from '../agent/AgentLogPage';
 import { SkillsPage } from '../skills/SkillsPage';
 import { DomainsPage } from '../domains/DomainsPage';
 import { AppsView } from '../apps/AppsView';
@@ -235,6 +236,13 @@ export function AppShell() {
             </FullPageSection>
           ) : state.mainView === 'apps' ? (
             <AppsView />
+          ) : state.mainView === 'agent_log' ? (
+            <FullPageSection
+              title="Agent steps"
+              description="What the agent did to answer this question, and where the time went — route, tools, checks, and per-step timing."
+            >
+              <AgentLogPage />
+            </FullPageSection>
           ) : (
             <>
               {state.mainView === 'imports' || state.mainView === 'block_studio' ? (

@@ -48,6 +48,7 @@ import { ResultView } from '../output/ResultView';
 import { DraftReviewCard } from '../blocks/DraftReviewCard';
 export { deriveResultChartConfig } from '../output/ResultView';
 import type { QueryResult, AppSummary, CellChartConfig } from '../../store/types';
+import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
 import { emitNotebookResearchChanged } from '../../utils/notebook-research';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
@@ -887,6 +888,7 @@ function RunCard({
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
+  const { dispatch } = useNotebook();
   // A conversational reply renders as a plain assistant bubble — no route label,
   // trust badge, checks, or evidence. Just the answer + optional suggestion chips.
   if (run.route === 'conversation') {
@@ -1003,6 +1005,22 @@ function RunCard({
       ) : (
         <VerificationChecks evaluations={run.evaluations} t={t} />
       )}
+
+      {run.events.length > 0 ? (
+        <button
+          type="button"
+          className="dql-hover"
+          onClick={() => dispatch({ type: 'OPEN_AGENT_LOG', run })}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start',
+            background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+            color: t.textMuted, fontSize: 11.5, fontFamily: t.font,
+          }}
+          title="See what the agent did and where the time went"
+        >
+          <ListTree size={12} /> View steps · where the time went
+        </button>
+      ) : null}
 
       {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
