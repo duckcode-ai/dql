@@ -49,9 +49,9 @@ npm run notebook
 Open `notebooks/welcome.dqlnb` first. It shows the starter workflow:
 
 1. Explore data with SQL.
-2. Promote repeated logic into reusable DQL blocks under `blocks/`.
-3. Define shared vocabulary under `terms/`.
-4. Compose business outcomes under `business-views/`.
+2. Add a business domain under `domains/`, then keep its DQL blocks, terms, and views together.
+3. Add shared agent guidance under `skills/`.
+4. Compose business outcomes under `domains/<domain>/views/`.
 5. Use Lineage to trace source data into business views and consumption.
 
 ## Connect an AI agent

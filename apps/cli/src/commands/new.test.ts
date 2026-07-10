@@ -49,7 +49,7 @@ describe('runNew', () => {
         skipTests: false, version: false,
       });
 
-      const blockPath = join(projectDir, 'blocks', 'pipeline_health.dql');
+      const blockPath = join(projectDir, 'domains', 'sales', 'blocks', 'pipeline_health.dql');
       expect(existsSync(blockPath)).toBe(true);
 
       const block = readFileSync(blockPath, 'utf-8');
@@ -187,9 +187,9 @@ describe('runNew', () => {
         skipTests: false, version: false,
       });
 
-      const blockPath = join(projectDir, 'blocks', 'arr_growth.dql');
+      const blockPath = join(projectDir, 'domains', 'finance', 'blocks', 'arr_growth.dql');
       const metricPath = join(projectDir, 'semantic-layer', 'metrics', 'arr_growth_metric.yaml');
-      const companionPath = join(projectDir, 'semantic-layer', 'blocks', 'arr_growth.yaml');
+      const companionPath = join(projectDir, 'semantic-layer', 'blocks', 'finance', 'arr_growth.yaml');
 
       expect(existsSync(blockPath)).toBe(true);
       expect(existsSync(metricPath)).toBe(true);
@@ -251,7 +251,7 @@ describe('runNew', () => {
         skipTests: false, version: false,
       });
 
-      const viewPath = join(projectDir, 'business-views', 'customer_360.dql');
+      const viewPath = join(projectDir, 'domains', 'customer', 'views', 'customer_360.dql');
       expect(existsSync(viewPath)).toBe(true);
 
       const view = readFileSync(viewPath, 'utf-8');
@@ -310,7 +310,7 @@ describe('runNew', () => {
         skipTests: false, version: false,
       });
 
-      const termPath = join(projectDir, 'terms', 'customer.dql');
+      const termPath = join(projectDir, 'domains', 'customer', 'terms', 'customer.dql');
       expect(existsSync(termPath)).toBe(true);
 
       const term = readFileSync(termPath, 'utf-8');
@@ -551,7 +551,7 @@ describe('runNew', () => {
         skipTests: false, version: false,
       });
 
-      const blockPath = join(projectDir, 'blocks', 'customer_revenue_bridge.dql');
+      const blockPath = join(projectDir, 'domains', 'customer', 'blocks', 'customer_revenue_bridge.dql');
       expect(existsSync(blockPath)).toBe(true);
 
       const block = readFileSync(blockPath, 'utf-8');
