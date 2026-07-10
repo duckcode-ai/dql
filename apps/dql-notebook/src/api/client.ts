@@ -2322,6 +2322,8 @@ export const api = {
       owner?: string;
       tags?: string[];
       provider?: string;
+      async?: boolean;
+      persistence?: 'session-only' | 'draft-files';
     }): Promise<DqlGenerationSession> {
       return request<DqlGenerationSession>('/api/block-studio/ai-imports', {
         method: 'POST',
@@ -2396,6 +2398,28 @@ export const api = {
       return request<{ candidate: DqlGenerationCandidate; block: BlockStudioOpenPayload }>(
         `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/candidates/${encodeURIComponent(candidateId)}/certify`,
         { method: 'POST' },
+      );
+    },
+
+    async saveSelectedDqlGenerationCandidates(
+      importId: string,
+      payload: { candidateIds: string[]; owner: string },
+    ): Promise<{
+      ok: boolean;
+      session: DqlGenerationSession;
+      results: Array<{
+        candidateId: string;
+        path?: string;
+        status: 'certified' | 'draft' | 'error';
+        blockers: string[];
+        candidate?: DqlGenerationCandidate;
+        block?: BlockStudioOpenPayload;
+        error?: string;
+      }>;
+    }> {
+      return request(
+        `/api/block-studio/ai-imports/${encodeURIComponent(importId)}/save-selected`,
+        { method: 'POST', body: JSON.stringify(payload) },
       );
     },
 

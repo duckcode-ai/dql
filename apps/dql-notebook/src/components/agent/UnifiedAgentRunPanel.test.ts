@@ -5,6 +5,7 @@ import type * as UnifiedAgentRunPanelModule from './UnifiedAgentRunPanel';
 let resolveArtifactDqlView: typeof UnifiedAgentRunPanelModule.resolveArtifactDqlView;
 let artifactSqlDisclosureLabel: typeof UnifiedAgentRunPanelModule.artifactSqlDisclosureLabel;
 let deriveResultChartConfig: typeof UnifiedAgentRunPanelModule.deriveResultChartConfig;
+let artifactReadyPayloadFromRun: typeof UnifiedAgentRunPanelModule.artifactReadyPayloadFromRun;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -13,6 +14,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     resolveArtifactDqlView = module.resolveArtifactDqlView;
     artifactSqlDisclosureLabel = module.artifactSqlDisclosureLabel;
     deriveResultChartConfig = module.deriveResultChartConfig;
+    artifactReadyPayloadFromRun = module.artifactReadyPayloadFromRun;
   });
 
   it('charts an arbitrary 3-column result whose names do not match the strict auto-detector', () => {
@@ -145,6 +147,27 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   it('labels SQL-only output as a preview instead of the default query artifact', () => {
     expect(resolveArtifactDqlView({ sql: 'SELECT 1' })).toBeUndefined();
     expect(artifactSqlDisclosureLabel(false)).toBe('View SQL preview');
+  });
+
+  it('hands semantic and generated SQL artifacts to Block Studio but never duplicates a certified answer', () => {
+    expect(artifactReadyPayloadFromRun({
+      id: 'certified',
+      question: 'revenue',
+      route: 'certified_answer',
+      artifacts: [{ kind: 'answer', payload: { sql: 'SELECT 1' } }],
+    } as any)).toBeUndefined();
+
+    expect(artifactReadyPayloadFromRun({
+      id: 'semantic',
+      question: 'revenue by region',
+      artifacts: [{ kind: 'answer', payload: { dqlArtifact: { kind: 'semantic_block', name: 'revenue_by_region', source: 'block "revenue_by_region" {\n  type = "semantic"\n  metric = "revenue"\n}' } } }],
+    } as any)).toMatchObject({ dqlArtifact: { kind: 'semantic_block', name: 'revenue_by_region' } });
+
+    expect(artifactReadyPayloadFromRun({
+      id: 'generated',
+      question: 'unmatched analysis',
+      artifacts: [{ kind: 'answer', payload: { sql: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region' } }],
+    } as any)).toMatchObject({ sql: expect.stringContaining('SELECT region') });
   });
 });
 

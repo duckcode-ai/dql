@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Blocks, Bot, CheckCircle2, Code2, Database, FileInput, Loader2, ShieldCheck, Sparkles, X, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MessageSquarePlus, PanelRightClose, PanelRightOpen, Plus, Search, ShieldCheck, Sparkles, Square, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
@@ -34,9 +34,15 @@ import {
   appendSemanticRefToQuery,
   buildSemanticRef,
   parseBlockFields,
+  getDqlSectionBody,
+  parseSemanticVisualFields,
+  setSemanticArray,
+  setSemanticMetrics,
+  setSemanticScalar,
   setBlockName,
   setBlockStringField,
   setBlockTags,
+  setDqlSectionBody,
   upsertSemanticSelection,
   upsertVisualizationConfig,
 } from '../../utils/block-studio';
@@ -44,6 +50,8 @@ import { getTypeColor } from '../../utils/type-colors';
 
 type ExplorerTab = 'blocks' | 'semantic' | 'database';
 type ResultTab = 'results' | 'lineage' | 'save' | 'history';
+type BlockStudioWorkspaceMode = 'start' | 'manual' | 'import';
+type BlockStudioEditorMode = 'visual' | 'source';
 
 interface FlatSemanticRow {
   node: SemanticTreeNode;
@@ -58,9 +66,11 @@ const TREE_OVERSCAN = 10;
 export function BlockStudio() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  // Server-persisted conversation thread for the Ask AI overlay — a page
-  // refresh resumes the same conversation.
-  const agentThread = usePersistedAgentThreadId('block-studio');
+  const [draftSessionId, setDraftSessionId] = useState(() => makeBlockStudioDraftId());
+  const agentScope = state.activeBlockPath
+    ? `block-studio.block.${encodeURIComponent(state.activeBlockPath)}`
+    : `block-studio.draft.${draftSessionId}`;
+  const agentThread = usePersistedAgentThreadId(agentScope);
   // Real tables→columns for IDE-style SQL completion inside the block's query body.
   const editorSchema = useMemo(
     () =>
@@ -91,6 +101,10 @@ export function BlockStudio() {
   const [runElapsedMs, setRunElapsedMs] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveIdentityOpen, setSaveIdentityOpen] = useState(false);
+  const [dirtyGuardOpen, setDirtyGuardOpen] = useState(false);
+  const saveAfterIdentityRef = useRef(false);
+  const newAfterSaveRef = useRef(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [historyEntries, setHistoryEntries] = useState<Array<{ hash: string; date: string; author: string; message: string }>>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -109,18 +123,22 @@ export function BlockStudio() {
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
   const [bottomPaneCollapsed, setBottomPaneCollapsed] = useState(false);
   const [compactLayout, setCompactLayout] = useState(() => typeof window !== 'undefined' ? window.innerWidth < 900 : false);
+  const [workspaceMode, setWorkspaceMode] = useState<BlockStudioWorkspaceMode>(() => state.blockStudioImportOpen ? 'import' : 'start');
+  const [editorMode, setEditorMode] = useState<BlockStudioEditorMode>('visual');
+  const [aiDockOpen, setAiDockOpen] = useState(() => readBlockStudioBoolean('dql.block-studio.ai.open', false));
+  const [aiDockWidth, setAiDockWidth] = useState(() => readBlockStudioNumber('dql.block-studio.ai.width', 420, 360, 520));
+  const [aiRunning, setAiRunning] = useState(false);
+  const [agentPanelEpoch, setAgentPanelEpoch] = useState(0);
   const [importSession, setImportSession] = useState<BlockStudioImportSession | null>(null);
   const [importSessions, setImportSessions] = useState<BlockStudioImportSessionSummary[]>([]);
   const [importSessionsLoading, setImportSessionsLoading] = useState(false);
   const [semanticInsertChoice, setSemanticInsertChoice] = useState<SemanticObjectDetail | null>(null);
   const [databaseInsertWarning, setDatabaseInsertWarning] = useState<string | null>(null);
-  const [aiAskOpen, setAiAskOpen] = useState(false);
   // How the governed Ask-AI overlay was opened: 'ask' = freeform, 'build' = draft a
   // new block, 'edit' = modify the current block. Drives requested mode + edit context.
   const [askAiKind, setAskAiKind] = useState<'ask' | 'build' | 'edit'>('ask');
   const [askAiInitialInput, setAskAiInitialInput] = useState('');
   const [askAiSeed, setAskAiSeed] = useState<{ text: string; mode: 'auto' | 'block'; nonce: number } | undefined>(undefined);
-  const [certifying, setCertifying] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
     checklist?: {
@@ -151,8 +169,9 @@ export function BlockStudio() {
     void Promise.allSettled([
       api.getBlockStudioCatalog(),
       api.getBlockStudioDbtStatus(),
+      api.getSemanticLayer(),
     ])
-      .then(([catalogResult, dbtResult]) => {
+      .then(([catalogResult, dbtResult, semanticLayerResult]) => {
         if (catalogResult.status === 'fulfilled') {
           dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog: catalogResult.value });
           setDatabaseTree(catalogResult.value.databaseTree);
@@ -163,6 +182,9 @@ export function BlockStudio() {
           type: 'SET_BLOCK_STUDIO_DBT_STATUS',
           status: dbtResult.status === 'fulfilled' ? dbtResult.value : null,
         });
+        if (semanticLayerResult.status === 'fulfilled') {
+          dispatch({ type: 'SET_SEMANTIC_LAYER', layer: semanticLayerResult.value });
+        }
       })
       .finally(() => dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: false }));
   }, [dispatch]);
@@ -292,6 +314,25 @@ export function BlockStudio() {
   }, []);
 
   useEffect(() => {
+    try { window.localStorage.setItem('dql.block-studio.ai.open', aiDockOpen ? '1' : '0'); } catch { /* best effort */ }
+  }, [aiDockOpen]);
+
+  useEffect(() => {
+    try { window.localStorage.setItem('dql.block-studio.ai.width', String(aiDockWidth)); } catch { /* best effort */ }
+  }, [aiDockWidth]);
+
+  useEffect(() => {
+    if (!state.blockStudioImportOpen) return;
+    setWorkspaceMode('import');
+    dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
+  }, [dispatch, state.blockStudioImportOpen]);
+
+  useEffect(() => {
+    setWorkspaceMode(hasBlockStudioWorkspaceContent(state) ? 'manual' : 'start');
+    setEditorMode(parseBlockFields(state.blockStudioDraft)?.blockType === 'semantic' ? 'visual' : 'source');
+  }, [state.activeBlockPath]);
+
+  useEffect(() => {
     setScrollTop(0);
     if (semanticTreeRef.current) semanticTreeRef.current.scrollTop = 0;
   }, [query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
@@ -343,6 +384,45 @@ export function BlockStudio() {
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
   };
 
+  const resetNewWorkspace = () => {
+    dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
+    setDraftSessionId(makeBlockStudioDraftId());
+    setWorkspaceMode('start');
+    setEditorMode('visual');
+    setImportSession(null);
+  };
+
+  const beginNewWorkspace = () => {
+    if (state.blockStudioDirty) {
+      setDirtyGuardOpen(true);
+      return;
+    }
+    resetNewWorkspace();
+  };
+
+  const beginManualDraft = (type: 'custom' | 'semantic') => {
+    const name = type === 'semantic' ? 'new_semantic_block' : 'new_sql_block';
+    const source = type === 'semantic' ? buildSemanticSkeleton(name) : buildCustomSkeleton(name);
+    dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft: source });
+    dispatch({
+      type: 'SET_BLOCK_STUDIO_METADATA',
+      metadata: {
+        name,
+        path: null,
+        domain: 'uncategorized',
+        description: '',
+        owner: '',
+        tags: [],
+        reviewStatus: 'draft',
+        sourceKind: 'manual',
+      },
+    });
+    dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: null });
+    dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation: null });
+    setWorkspaceMode('manual');
+    setEditorMode(type === 'semantic' ? 'visual' : 'source');
+  };
+
   const handleRun = async () => {
     setRunning(true);
     setRunError(null);
@@ -362,13 +442,13 @@ export function BlockStudio() {
     }
   };
 
-  const persistBlockStudioDraft = async (): Promise<BlockStudioOpenPayload> => {
+  const persistBlockStudioDraft = async (source = state.blockStudioDraft): Promise<BlockStudioOpenPayload> => {
     if (!state.blockStudioMetadata) {
       throw new Error('Block metadata is required before saving.');
     }
     const payload = await api.saveBlockStudio({
       path: state.activeBlockPath,
-      source: state.blockStudioDraft,
+      source,
       metadata: {
         name: state.blockStudioMetadata.name,
         domain: state.blockStudioMetadata.domain,
@@ -407,73 +487,60 @@ export function BlockStudio() {
     return payload;
   };
 
-  const handleSave = async () => {
-    // If no metadata yet (new block), open the New Block modal to collect a name
-    if (!state.blockStudioMetadata) {
-      dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
-      return;
+  const handleSave = async (): Promise<boolean> => {
+    if (!state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) {
+      setSaveIdentityOpen(true);
+      return false;
     }
+    let persisted = false;
     setSaving(true);
     setSaveError(null);
     try {
-      await persistBlockStudioDraft();
-      setResultTab('save');
-    } catch (err: any) {
-      const msg = err?.message ?? 'Save failed';
-      setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
-      setTimeout(() => setSaveError(null), 5000);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleCertify = async () => {
-    if (!state.activeBlockPath || !state.blockStudioDraft.trim()) return;
-    if (!state.blockStudioMetadata) {
-      dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
-      return;
-    }
-    setCertifying(true);
-    setSaveError(null);
-    try {
       setCertificationResult(null);
-      const saved = await persistBlockStudioDraft();
+      const sourceToSave = state.blockStudioMetadata.reviewStatus === 'certified' && state.blockStudioDirty
+        ? setBlockStringField(state.blockStudioDraft, 'status', 'draft')
+        : state.blockStudioDraft;
+      const saved = await persistBlockStudioDraft(sourceToSave);
+      persisted = true;
       const result = await api.certifyBlockStudio({ source: saved.source, path: saved.path });
       setCertificationResult(result);
       if (result.ok && result.status) {
         const nextPath = result.path || saved.path;
-        const nextSource = result.source ?? setBlockStringField(saved.source, 'status', result.status);
-        const nextMetadata = result.metadata ?? { ...saved.metadata, path: nextPath, reviewStatus: result.status };
         const nextPayload: BlockStudioOpenPayload = {
           path: nextPath,
-          source: nextSource,
-          metadata: { ...nextMetadata, path: nextPath, reviewStatus: result.status },
+          source: result.source ?? setBlockStringField(saved.source, 'status', result.status),
+          metadata: result.metadata ?? { ...saved.metadata, path: nextPath, reviewStatus: result.status },
           companionPath: result.companionPath ?? saved.companionPath ?? null,
           validation: result.validation ?? saved.validation,
         };
         dispatch({
           type: 'OPEN_BLOCK_STUDIO',
-          file: {
-            name: `${nextPayload.metadata.name}.dql`,
-            path: nextPath,
-            type: 'block',
-            folder: 'blocks',
-            isNew: false,
-          },
+          file: { name: `${nextPayload.metadata.name}.dql`, path: nextPath, type: 'block', folder: 'blocks', isNew: false },
           payload: nextPayload,
         });
       }
       setResultTab('save');
-    } catch (error: any) {
-      let parsed: any = null;
-      try { parsed = JSON.parse(error?.message ?? ''); } catch { /* no-op */ }
-      const message = error?.message ?? 'Certification failed';
-      setCertificationResult(parsed ?? { ok: false, error: message.includes('409') || message.includes('BLOCK_EXISTS') ? 'Save failed because a block with this name already exists. Rename and try again.' : message });
-      setResultTab('save');
+      return true;
+    } catch (err: any) {
+      const msg = err?.message ?? 'Save failed';
+      setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
+      setTimeout(() => setSaveError(null), 5000);
+      return persisted;
     } finally {
-      setCertifying(false);
+      setSaving(false);
     }
   };
+
+  useEffect(() => {
+    if (!saveAfterIdentityRef.current || !state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) return;
+    saveAfterIdentityRef.current = false;
+    void handleSave().then((saved) => {
+      if (saved && newAfterSaveRef.current) {
+        newAfterSaveRef.current = false;
+        resetNewWorkspace();
+      }
+    });
+  }, [state.blockStudioMetadata?.name, state.blockStudioMetadata?.owner, state.blockStudioDraft]);
 
   const handleImportCandidateSelect = (candidate: BlockStudioImportCandidate) => {
     const candidatePath = candidate.savedPath ?? candidate.draftSave?.path ?? '';
@@ -515,7 +582,8 @@ export function BlockStudio() {
     });
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: candidate.preview });
     setResultTab('results');
-    dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
+    setWorkspaceMode('manual');
+    setEditorMode(parseBlockFields(candidate.dqlSource)?.blockType === 'semantic' ? 'visual' : 'source');
   };
 
   const handleImportCandidateSaved = (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => {
@@ -576,9 +644,12 @@ export function BlockStudio() {
   };
 
   const handleAiSqlInsert = (sql: string, meta?: AiSqlDraftMeta) => {
+    const sourceBeforeInsert = state.blockStudioDraft.trim()
+      ? state.blockStudioDraft
+      : buildCustomSkeleton(meta?.title?.trim() || 'AI Generated Block');
     const nextDraft = meta?.blockSource?.trim()
       ? meta.blockSource.trim()
-      : applyGeneratedSqlToBlockDraft(state.blockStudioDraft, sql);
+      : applyGeneratedSqlToBlockDraft(sourceBeforeInsert, sql);
     handleDraftChange(nextDraft);
     const parsed = parseBlockFields(nextDraft);
     if (parsed) {
@@ -589,7 +660,7 @@ export function BlockStudio() {
           path: state.activeBlockPath,
           domain: parsed.domain || meta?.domain || 'analytics',
           description: parsed.description || meta?.description || `AI generated block for ${meta?.question ?? 'analysis'}`,
-          owner: parsed.owner || meta?.owner || 'analytics',
+          owner: parsed.owner || meta?.owner || '',
           tags: parsed.tags.length > 0 ? parsed.tags : (meta?.tags ?? ['ai-generated', 'review-required']),
           reviewStatus: parsed.status || 'draft',
           sourceKind: state.blockStudioMetadata?.sourceKind ?? 'ai-generated',
@@ -632,7 +703,8 @@ export function BlockStudio() {
       title: payload.title ?? payload.dqlArtifact?.name,
       blockSource,
     });
-    setAiAskOpen(false);
+    setWorkspaceMode('manual');
+    setEditorMode('source');
   };
 
   // Open the governed Ask-AI overlay in a given mode. Only the explicit 'edit'
@@ -649,7 +721,7 @@ export function BlockStudio() {
     setAskAiKind(kind);
     setAskAiInitialInput(opts?.initialInput ?? '');
     setAskAiSeed(opts?.autoRun ? { text: opts.autoRun, mode: kind === 'edit' ? 'block' : 'auto', nonce: Date.now() } : undefined);
-    setAiAskOpen(true);
+    setAiDockOpen(true);
   };
 
   const ensureDbColumns = async (node: DatabaseSchemaNode) => {
@@ -726,10 +798,25 @@ export function BlockStudio() {
     window.addEventListener('mouseup', onUp);
   };
 
+  const startAiResize = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = aiDockWidth;
+    const onMove = (moveEvent: MouseEvent) => {
+      setAiDockWidth(Math.min(520, Math.max(360, startWidth - (moveEvent.clientX - startX))));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   const bottomPaneVisible = hasActiveDraft && !bottomPaneCollapsed;
-  const rootGridColumns = compactLayout || leftPaneCollapsed
+  const rootGridColumns = compactLayout
     ? 'minmax(0, 1fr)'
-    : `${leftPaneWidth}px 6px minmax(0, 1fr)`;
+    : `${leftPaneCollapsed ? 0 : leftPaneWidth}px ${leftPaneCollapsed ? 0 : 6}px minmax(0, 1fr) ${aiDockOpen ? 6 : 0}px ${aiDockOpen ? aiDockWidth : 0}px`;
   const rootGridRows = compactLayout
     ? leftPaneCollapsed
       ? !bottomPaneVisible
@@ -813,7 +900,7 @@ export function BlockStudio() {
         }}
       />
 
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: editorGridColumn, gridRow: editorGridRow }}>
+      <div style={{ display: compactLayout && aiDockOpen ? 'none' : 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: editorGridColumn, gridRow: editorGridRow }}>
         {/* v1.3.3 Hex cleanup — tight single-row editor toolbar to match
             the explorer header; drop wordy subtitle. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
@@ -844,7 +931,14 @@ export function BlockStudio() {
           {state.blockStudioMetadata?.reviewStatus && (
             <BlockStatusBadge status={state.blockStudioMetadata.reviewStatus} t={t} />
           )}
+          {hasActiveDraft && workspaceMode === 'manual' && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg }}>
+              <button type="button" onClick={() => setEditorMode('visual')} style={editorModeButtonStyle(t, editorMode === 'visual')}>Visual Builder</button>
+              <button type="button" onClick={() => setEditorMode('source')} style={editorModeButtonStyle(t, editorMode === 'source')}>DQL Source</button>
+            </div>
+          )}
           <div style={{ flex: 1 }} />
+          <TemplateButton label="New block" Icon={Plus} onClick={beginNewWorkspace} />
           {hasActiveDraft && (
             <>
               <TemplateButton
@@ -863,11 +957,8 @@ export function BlockStudio() {
                 />
               )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-              <TemplateButton label="Save" onClick={() => void handleSave()} busy={saving} />
+              <TemplateButton label="Save block" onClick={() => void handleSave()} busy={saving} />
             </>
-          )}
-          {hasActiveDraft && state.activeBlockPath && (
-            <TemplateButton label="Request certification" onClick={() => void handleCertify()} busy={certifying} />
           )}
           {saveError && (
             <span style={{ fontSize: 11, color: '#f85149', fontFamily: t.font, padding: '4px 8px', background: '#f8514918', borderRadius: 6 }}>
@@ -876,27 +967,56 @@ export function BlockStudio() {
           )}
         </div>
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          {!hasActiveDraft ? (
+          {workspaceMode === 'import' ? (
+            <BlockStudioImportWorkspace
+              session={importSession}
+              sessions={importSessions}
+              sessionsLoading={importSessionsLoading}
+              onClose={() => setWorkspaceMode(hasActiveDraft ? 'manual' : 'start')}
+              onSessionChange={setImportSession}
+              onRefreshSessions={refreshImportSessions}
+              onSelectCandidate={handleImportCandidateSelect}
+              onSavedCandidate={handleImportCandidateSaved}
+              defaultDomain={state.blockStudioMetadata?.domain ?? ''}
+              defaultOwner={state.blockStudioMetadata?.owner ?? ''}
+              themeMode={state.themeMode}
+              t={t}
+              inline
+            />
+          ) : !hasActiveDraft ? (
             <BlockStudioStartPage
               dbtStatus={state.blockStudioDbtStatus}
               semanticStats={semanticStats}
               semanticObjectCount={semanticObjectCount}
               databaseStats={databaseStats}
-              onCreateSql={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'custom' })}
-              onCreateSemantic={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' })}
-              onImport={() => dispatch({ type: 'OPEN_BLOCK_IMPORT' })}
+              onCreateSql={() => beginManualDraft('custom')}
+              onCreateSemantic={() => beginManualDraft('semantic')}
+              onImport={() => setWorkspaceMode('import')}
               onBuildDql={() => openAskAi({ kind: 'build', initialInput: 'Draft a reusable DQL block that ' })}
-              onAskAi={() => openAskAi({ kind: 'ask' })}
               t={t}
             />
-          ) : isSemanticBlock ? (
+          ) : editorMode === 'visual' ? (
+            isSemanticBlock ? (
             <SemanticBlockBuilder
               source={state.blockStudioDraft}
+              metadata={state.blockStudioMetadata}
               semanticLayer={state.semanticLayer}
               chartConfig={currentChart}
               onChange={handleDraftChange}
+              onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
+              onOpenAi={() => openAskAi({ kind: 'edit', initialInput: 'Help resolve the selected semantic metrics and dimensions for this block: ' })}
               t={t}
             />
+            ) : (
+              <SqlBlockVisualBuilder
+                source={state.blockStudioDraft}
+                metadata={state.blockStudioMetadata}
+                chartConfig={currentChart}
+                onChange={handleDraftChange}
+                onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
+                t={t}
+              />
+            )
           ) : (
             <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               {(semanticInsertChoice || databaseInsertWarning) && (
@@ -1075,28 +1195,69 @@ export function BlockStudio() {
         </div>
       )}
 
-      {aiAskOpen && (
-        <BlockStudioAskOverlay t={t}>
+      {!compactLayout && aiDockOpen && (
+        <div onMouseDown={startAiResize} style={{ gridColumn: '4', gridRow: '1 / 4', cursor: 'col-resize', background: t.headerBorder }} />
+      )}
+
+      {aiDockOpen && (
+        <aside
+          aria-label="Block Studio AI"
+          style={{
+            gridColumn: compactLayout ? '1' : '5',
+            gridRow: compactLayout ? editorGridRow : '1 / 4',
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            borderLeft: compactLayout ? 'none' : `1px solid ${t.headerBorder}`,
+            background: t.cellBg,
+          }}
+        >
           <div style={askOverlayHeaderStyle(t)}>
+            {compactLayout && (
+              <button type="button" onClick={() => setAiDockOpen(false)} title="Back to block" style={closeAskButtonStyle(t)}>
+                <ChevronLeft size={15} strokeWidth={2} />
+              </button>
+            )}
             <div style={askOverlayIconStyle(t)}><Sparkles size={16} strokeWidth={2} /></div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>Ask AI</div>
-              <div style={{ fontSize: 12, color: t.textMuted, marginTop: 2, fontFamily: t.font }}>
-                Answers and reuse guidance are grounded in certified DQL, dbt, semantic, warehouse, and draft context.
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>
+                Block AI
+                {aiRunning && <Loader2 size={12} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} />}
+              </div>
+              <div title={activeBlockName ?? 'Unsaved draft'} style={{ fontSize: 10, color: t.textMuted, marginTop: 2, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activeBlockName ? `Current block: ${activeBlockName}` : 'Unsaved governed block draft'}
               </div>
             </div>
-            <button type="button" onClick={() => setAiAskOpen(false)} title="Close" style={closeAskButtonStyle(t)}>
-              <X size={15} strokeWidth={2} />
+            <button
+              type="button"
+              onClick={() => { agentThread.resetThreadId(); setAgentPanelEpoch((value) => value + 1); }}
+              title="New AI chat"
+              style={closeAskButtonStyle(t)}
+            >
+              <MessageSquarePlus size={15} strokeWidth={2} />
             </button>
+            {!compactLayout && (
+              <button type="button" onClick={() => setAiDockOpen(false)} title="Collapse AI" style={closeAskButtonStyle(t)}>
+                <PanelRightClose size={15} strokeWidth={2} />
+              </button>
+            )}
           </div>
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
             <UnifiedAgentRunPanel
+              key={`${agentScope}:${agentPanelEpoch}`}
               themeMode={state.themeMode}
-              title="Ask AI"
+              title="Block AI"
               scopeHint={activeBlockName ? `Current block: ${activeBlockName}` : 'Block Studio project context'}
               workspaceContext={{
+                surface: 'block-studio',
+                task: askAiKind === 'edit' ? 'edit_block' : 'author_block',
+                draftSessionId,
                 blockStudioDraft: state.blockStudioDraft,
                 activeBlockPath: state.activeBlockPath,
+                domain: state.blockStudioMetadata?.domain,
+                importId: importSession?.id,
+                importCandidateId: importSession?.candidates[0]?.id,
                 ...(askAiKind === 'edit' ? { mode: 'edit', blockPath: state.activeBlockPath } : {}),
               }}
               initialMode={askAiKind === 'edit' ? 'block' : 'auto'}
@@ -1104,36 +1265,61 @@ export function BlockStudio() {
               autoRun={askAiSeed}
               threadId={agentThread.threadId}
               onThreadIdChange={agentThread.onThreadIdChange}
+              onRunningChange={setAiRunning}
               onInsertSql={(sql, title) => handleAiSqlInsert(sql, { question: title ?? activeBlockName ?? 'analysis', title })}
               onInsertDql={insertGeneratedDqlIntoDraft}
-              emptyHint="Ask whether a block already exists, what domain it belongs in, which parameters should stay dynamic, or what evidence is missing before certification."
+              onArtifactReady={(payload) => insertGeneratedDqlIntoDraft(payload)}
+              emptyHint="Describe the governed block you need. DQL checks certified blocks and semantic metrics before creating a review-required draft."
               examplePrompts={[
-                { label: 'Find reusable blocks', prompt: 'Which certified DQL blocks already answer this kind of analysis, and what should be reused instead of duplicated?' },
-                { label: 'Choose domain', prompt: 'Based on the dbt and semantic metadata, which domain should this analysis belong to and why?' },
-                { label: 'Review parameters', prompt: 'Which filters in this analysis should be dynamic parameters, static defaults, or business-controlled parameters?' },
+                { label: 'Build from business question', prompt: 'Build a reusable governed DQL block for this business question: ' },
+                { label: 'Find reusable blocks', prompt: 'Which certified DQL blocks already answer this analysis, and what should be reused instead of duplicated?' },
+                { label: 'Review this block', prompt: 'Review this block for grain, compatible metrics and dimensions, parameters, tests, and certification gaps.' },
               ]}
             />
           </div>
-        </BlockStudioAskOverlay>
+        </aside>
       )}
 
-      {state.blockStudioImportOpen && (
-        <BlockStudioImportOverlay t={t}>
-          <BlockStudioImportWorkspace
-            session={importSession}
-            sessions={importSessions}
-            sessionsLoading={importSessionsLoading}
-            onClose={() => dispatch({ type: 'CLOSE_BLOCK_IMPORT' })}
-            onSessionChange={setImportSession}
-            onRefreshSessions={refreshImportSessions}
-            onSelectCandidate={handleImportCandidateSelect}
-            onSavedCandidate={handleImportCandidateSaved}
-            defaultDomain=""
-            defaultOwner=""
-            themeMode={state.themeMode}
-            t={t}
-          />
-        </BlockStudioImportOverlay>
+      {!aiDockOpen && !compactLayout && (
+        <button type="button" onClick={() => setAiDockOpen(true)} title="Open Block AI" style={{ position: 'absolute', right: 12, top: 58, width: 34, height: 34, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.accent, cursor: 'pointer', boxShadow: '0 6px 18px rgba(0, 0, 0, 0.12)' }}>
+          <PanelRightOpen size={16} strokeWidth={2} />
+        </button>
+      )}
+
+      {saveIdentityOpen && state.blockStudioMetadata && (
+        <BlockIdentityDialog
+          metadata={state.blockStudioMetadata}
+          onCancel={() => setSaveIdentityOpen(false)}
+          onConfirm={(identity) => {
+            let draft = setBlockName(state.blockStudioDraft, identity.name);
+            draft = setBlockStringField(draft, 'owner', identity.owner);
+            dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata!, ...identity } });
+            dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
+            saveAfterIdentityRef.current = true;
+            setSaveIdentityOpen(false);
+          }}
+          t={t}
+        />
+      )}
+      {dirtyGuardOpen && (
+        <DirtyWorkDialog
+          saving={saving}
+          onCancel={() => setDirtyGuardOpen(false)}
+          onDiscard={() => {
+            setDirtyGuardOpen(false);
+            resetNewWorkspace();
+          }}
+          onSave={async () => {
+            newAfterSaveRef.current = true;
+            setDirtyGuardOpen(false);
+            const saved = await handleSave();
+            if (saved) {
+              newAfterSaveRef.current = false;
+              resetNewWorkspace();
+            }
+          }}
+          t={t}
+        />
       )}
     </div>
   );
@@ -1186,87 +1372,6 @@ function TemplateButton(props: { label: string; onClick: () => void; busy?: bool
   return <ExplorerTabButton active={false} {...props} />;
 }
 
-function BlockStudioImportOverlay({
-  children,
-  t,
-}: {
-  children: React.ReactNode;
-  t: Theme;
-}) {
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        inset: '48px 0 0 0',
-        zIndex: 40,
-        background: 'rgba(0, 0, 0, 0.28)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 10,
-      }}
-    >
-      <div
-        style={{
-          width: 'min(1540px, calc(100vw - 20px))',
-          height: 'min(900px, calc(100vh - 76px))',
-          background: t.appBg,
-          border: `1px solid ${t.headerBorder}`,
-          borderRadius: 8,
-          boxShadow: '0 24px 80px rgba(0,0,0,0.36)',
-          overflow: 'hidden',
-          position: 'relative',
-        }}
-      >
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function BlockStudioAskOverlay({
-  children,
-  t,
-}: {
-  children: React.ReactNode;
-  t: Theme;
-}) {
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        inset: '48px 0 0 0',
-        zIndex: 38,
-        background: 'rgba(0, 0, 0, 0.22)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 14,
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Ask AI"
-        style={{
-          width: 'min(860px, calc(100vw - 28px))',
-          height: 'min(720px, calc(100vh - 92px))',
-          background: t.appBg,
-          border: `1px solid ${t.headerBorder}`,
-          borderRadius: 8,
-          boxShadow: '0 24px 80px rgba(0,0,0,0.32)',
-          overflow: 'hidden',
-          position: 'relative',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
-      >
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function askOverlayHeaderStyle(t: Theme): React.CSSProperties {
   return {
     display: 'flex',
@@ -1308,6 +1413,96 @@ function closeAskButtonStyle(t: Theme): React.CSSProperties {
   };
 }
 
+function editorModeButtonStyle(t: Theme, active: boolean): React.CSSProperties {
+  return {
+    border: 'none',
+    borderRadius: 5,
+    background: active ? t.cellBg : 'transparent',
+    color: active ? t.textPrimary : t.textMuted,
+    cursor: 'pointer',
+    fontSize: 10,
+    fontWeight: active ? 750 : 600,
+    padding: '4px 8px',
+  };
+}
+
+function selectionChipStyle(t: Theme, selected: boolean): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    background: selected ? `${t.accent}18` : t.btnBg,
+    border: `1px solid ${selected ? t.accent : t.btnBorder}`,
+    borderRadius: 999,
+    color: selected ? t.accent : t.textSecondary,
+    cursor: 'pointer',
+    fontSize: 11,
+    fontFamily: t.font,
+    padding: '5px 9px',
+  };
+}
+
+function BlockIdentityDialog({
+  metadata,
+  onCancel,
+  onConfirm,
+  t,
+}: {
+  metadata: BlockStudioOpenPayload['metadata'];
+  onCancel: () => void;
+  onConfirm: (identity: { name: string; owner: string }) => void;
+  t: Theme;
+}) {
+  const [name, setName] = useState(metadata.name);
+  const [owner, setOwner] = useState(metadata.owner);
+  const ready = Boolean(name.trim() && owner.trim());
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Save block" style={{ position: 'absolute', inset: 0, zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,.32)', padding: 18 }}>
+      <div style={{ width: 420, maxWidth: '100%', display: 'grid', gap: 14, padding: 18, borderRadius: 10, border: `1px solid ${t.headerBorder}`, background: t.cellBg, boxShadow: '0 24px 70px rgba(0,0,0,.35)' }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 850, color: t.textPrimary }}>Save governed block</div>
+          <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.45, color: t.textMuted }}>Name and owner are required. DQL will run the local governance checks and certify the block when they pass; otherwise it remains a draft with blockers.</div>
+        </div>
+        <FieldLabel label="Block name" t={t}><input autoFocus value={name} onChange={(event) => setName(event.target.value)} style={importInputStyle(t)} /></FieldLabel>
+        <FieldLabel label="Owner" t={t}><input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="analytics@company.com or team name" style={importInputStyle(t)} /></FieldLabel>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" onClick={onCancel} style={secondaryImportButtonStyle(t)}>Cancel</button>
+          <button type="button" disabled={!ready} onClick={() => ready && onConfirm({ name: name.trim(), owner: owner.trim() })} style={{ ...primaryImportButtonStyle(t), opacity: ready ? 1 : .55 }}>Save block</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DirtyWorkDialog({
+  saving,
+  onSave,
+  onDiscard,
+  onCancel,
+  t,
+}: {
+  saving: boolean;
+  onSave: () => Promise<void>;
+  onDiscard: () => void;
+  onCancel: () => void;
+  t: Theme;
+}) {
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Unsaved block" style={{ position: 'fixed', inset: 0, zIndex: 90, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0, 0, 0, 0.42)' }}>
+      <div style={{ width: 'min(430px, 100%)', border: `1px solid ${t.cellBorder}`, borderRadius: 12, background: t.cellBg, padding: 18, display: 'grid', gap: 14, boxShadow: '0 20px 60px rgba(0, 0, 0, 0.24)' }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Save this block before starting another?</div>
+          <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.5, color: t.textMuted, fontFamily: t.font }}>Your current workspace has unsaved changes.</div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" onClick={onCancel} disabled={saving} style={secondaryImportButtonStyle(t)}>Cancel</button>
+          <button type="button" onClick={onDiscard} disabled={saving} style={{ ...secondaryImportButtonStyle(t), color: t.error }}>Discard</button>
+          <button type="button" onClick={() => void onSave()} disabled={saving} style={primaryImportButtonStyle(t)}>{saving ? 'Saving…' : 'Save block'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BlockStudioStartPage({
   dbtStatus,
   semanticStats,
@@ -1317,7 +1512,6 @@ function BlockStudioStartPage({
   onCreateSemantic,
   onImport,
   onBuildDql,
-  onAskAi,
   t,
 }: {
   dbtStatus: BlockStudioDbtStatus | null;
@@ -1337,7 +1531,6 @@ function BlockStudioStartPage({
   onCreateSemantic: () => void;
   onImport: () => void;
   onBuildDql: () => void;
-  onAskAi: () => void;
   t: Theme;
 }) {
   const manualActions = [
@@ -1382,27 +1575,27 @@ function BlockStudioStartPage({
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
         <PrimaryStartAction
+          title="Ask AI"
+          detail="Describe the business asset you need. DQL checks certified blocks and semantic metrics before drafting anything new."
+          label="Describe block"
+          Icon={Bot}
+          onClick={onBuildDql}
+          t={t}
+        />
+        <PrimaryStartAction
           title="Import SQL"
-          detail="Paste scripts, upload files, or point at a folder. DQL analyzes metadata and creates autosaved review drafts."
+          detail="Paste scripts, upload files, or point at a folder. DQL analyzes candidates without writing block files until you save."
           label="Start import"
           Icon={FileInput}
           onClick={onImport}
           t={t}
         />
         <PrimaryStartAction
-          title="Build DQL"
-          detail="Describe the reusable block you need. DQL uses dbt, semantic, warehouse, and certified block context before drafting."
-          label="Build draft"
-          Icon={Bot}
-          onClick={onBuildDql}
-          t={t}
-        />
-        <PrimaryStartAction
-          title="Ask AI"
-          detail="Ask a business question over certified blocks, dbt, semantic, and warehouse context before deciding what to reuse or draft."
-          label="Ask question"
-          Icon={Sparkles}
-          onClick={onAskAi}
+          title="Build manually"
+          detail="Use the visual semantic builder for multiple metrics, compatible dimensions, time grain, filters, and chart intent."
+          label="Open builder"
+          Icon={Blocks}
+          onClick={onCreateSemantic}
           t={t}
         />
       </div>
@@ -1616,22 +1809,63 @@ function DbtStatusRows({ status, t }: { status: BlockStudioDbtStatus | null; t: 
 
 function SemanticBlockBuilder({
   source,
+  metadata,
   semanticLayer,
   chartConfig,
   onChange,
+  onMetadataChange,
+  onOpenAi,
   t,
 }: {
   source: string;
+  metadata: BlockStudioOpenPayload['metadata'] | null;
   semanticLayer: SemanticLayerState;
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
+  onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
+  onOpenAi: () => void;
   t: Theme;
 }) {
-  const values = parseSemanticBlockValues(source);
-  const allDimensions = [...semanticLayer.dimensions, ...semanticLayer.timeDimensions];
+  const parsedValues = parseSemanticVisualFields(source);
+  const values = { ...parsedValues, filters: parsedValues.requestedFilters };
+  const [compatibleDimensions, setCompatibleDimensions] = useState(semanticLayer.dimensions);
+  const [loadingCompatibility, setLoadingCompatibility] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (values.metrics.length === 0) {
+      setCompatibleDimensions(semanticLayer.dimensions);
+      return;
+    }
+    setLoadingCompatibility(true);
+    void api.getCompatibleDimensions(values.metrics).then((dimensions) => {
+      if (!cancelled) setCompatibleDimensions(dimensions);
+    }).finally(() => {
+      if (!cancelled) setLoadingCompatibility(false);
+    });
+    return () => { cancelled = true; };
+  }, [semanticLayer.dimensions, values.metrics.join('|')]);
+  const compatibleNames = new Set(compatibleDimensions.map((dimension) => dimension.name));
+  const allDimensions = Array.from(new Map([...semanticLayer.dimensions, ...semanticLayer.timeDimensions].map((dimension) => [dimension.name, dimension])).values());
   const inputStyle = importInputStyle(t);
-  const setMetric = (metric: string) => onChange(setSemanticMetricField(source, metric));
-  const setDimensions = (dimensions: string[]) => onChange(setDqlArrayField(source, 'dimensions', dimensions));
+  const [metricSearch, setMetricSearch] = useState('');
+  const [dimensionSearch, setDimensionSearch] = useState('');
+  const metricByName = useMemo(() => new Map(semanticLayer.metrics.map((metric) => [metric.name, metric])), [semanticLayer.metrics]);
+  const dimensionByName = useMemo(() => new Map(allDimensions.map((dimension) => [dimension.name, dimension])), [allDimensions]);
+  const metricMatches = useMemo(() => findSemanticFieldMatches(semanticLayer.metrics, metricSearch), [semanticLayer.metrics, metricSearch]);
+  const dimensionMatches = useMemo(() => findSemanticFieldMatches(allDimensions, dimensionSearch), [allDimensions, dimensionSearch]);
+  const testsBody = getDqlSectionBody(source, 'tests');
+  const outputFields = Array.from(new Set([...values.dimensions, ...(values.timeDimension ? [values.timeDimension] : []), ...values.metrics]));
+  const updateText = (field: 'name' | 'domain' | 'description' | 'owner', value: string) => {
+    onMetadataChange({ [field]: value });
+    onChange(field === 'name' ? setBlockName(source, value) : setBlockStringField(source, field, value));
+  };
+  const toggleMetric = (metric: string) => {
+    const metrics = values.metrics.includes(metric)
+      ? values.metrics.filter((item) => item !== metric)
+      : [...values.metrics, metric];
+    onChange(setSemanticMetrics(source, metrics));
+  };
+  const setDimensions = (dimensions: string[]) => onChange(setSemanticArray(source, 'dimensions', dimensions));
   const toggleDimension = (dimension: string) => {
     const next = values.dimensions.includes(dimension)
       ? values.dimensions.filter((item) => item !== dimension)
@@ -1640,27 +1874,43 @@ function SemanticBlockBuilder({
   };
   return (
     <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(280px, 0.6fr)', gap: 12 }}>
+      <PanelBox title="Business identity" t={t}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 9 }}>
+          <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => updateText('name', event.target.value)} style={inputStyle} /></FieldLabel>
+          <FieldLabel label="Domain" t={t}><input value={metadata?.domain ?? ''} onChange={(event) => updateText('domain', event.target.value)} style={inputStyle} /></FieldLabel>
+          <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => updateText('owner', event.target.value)} placeholder="Required to save" style={inputStyle} /></FieldLabel>
+          <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => updateText('description', event.target.value)} style={inputStyle} /></FieldLabel>
+          <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => { const tags = event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean); onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }} placeholder="finance, executive" style={inputStyle} /></FieldLabel>
+        </div>
+      </PanelBox>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
         <PanelBox title="Metric and grain" t={t}>
-          <FieldLabel label="Metric" t={t}>
-            <select value={values.metric} onChange={(event) => setMetric(event.target.value)} style={inputStyle}>
-              <option value="">Select a governed metric…</option>
-              {semanticLayer.metrics.map((metric) => (
-                <option key={metric.name} value={metric.name}>{metric.label || metric.name}</option>
-              ))}
-            </select>
-          </FieldLabel>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 750, color: t.textSecondary }}>Governed metrics · {values.metrics.length} selected</span>
+            {loadingCompatibility && <span style={{ fontSize: 10, color: t.textMuted }}>Checking compatibility…</span>}
+          </div>
+          <EnterpriseSemanticPicker
+            kind="metric"
+            total={semanticLayer.metrics.length}
+            search={metricSearch}
+            onSearchChange={setMetricSearch}
+            matches={metricMatches}
+            selected={values.metrics}
+            resolveLabel={(name) => metricByName.get(name)?.label || name}
+            onToggle={toggleMetric}
+            t={t}
+          />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
             <FieldLabel label="Time dimension" t={t}>
-              <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalarField(source, 'time_dimension', event.target.value))} style={inputStyle}>
+              <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={inputStyle}>
                 <option value="">None</option>
-                {semanticLayer.timeDimensions.map((dimension) => (
+                {semanticLayer.timeDimensions.filter((dimension) => values.metrics.length === 0 || compatibleNames.has(dimension.name)).map((dimension) => (
                   <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
                 ))}
               </select>
             </FieldLabel>
             <FieldLabel label="Grain" t={t}>
-              <select value={values.granularity} onChange={(event) => onChange(setSemanticScalarField(source, 'granularity', event.target.value))} style={inputStyle}>
+              <select value={values.granularity} onChange={(event) => onChange(setSemanticScalar(source, 'granularity', event.target.value))} style={inputStyle}>
                 <option value="">None</option>
                 {['day', 'week', 'month', 'quarter', 'year'].map((grain) => <option key={grain} value={grain}>{grain}</option>)}
               </select>
@@ -1668,6 +1918,12 @@ function SemanticBlockBuilder({
           </div>
           {semanticLayer.metrics.length === 0 && (
             <div style={{ fontSize: 12, color: '#d29922', lineHeight: 1.45 }}>No semantic metrics are loaded. Run `dbt parse` or import a semantic layer, then refresh Block Studio.</div>
+          )}
+          {values.metrics.length > 1 && compatibleDimensions.length === 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#d29922', fontSize: 11, lineHeight: 1.4 }}>
+              <AlertTriangle size={14} /> These metrics do not expose a common dimension or join path.
+              <button type="button" onClick={onOpenAi} style={secondaryImportButtonStyle(t)}>Resolve with AI</button>
+            </div>
           )}
         </PanelBox>
 
@@ -1681,6 +1937,10 @@ function SemanticBlockBuilder({
           <FieldLabel label="Title" t={t}>
             <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={inputStyle} />
           </FieldLabel>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={inputStyle}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
+            <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={inputStyle}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
+          </div>
         </PanelBox>
       </div>
 
@@ -1688,34 +1948,206 @@ function SemanticBlockBuilder({
         {allDimensions.length === 0 ? (
           <div style={{ fontSize: 12, color: t.textMuted }}>No dimensions are loaded yet.</div>
         ) : (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
-            {allDimensions.slice(0, 80).map((dimension) => {
-              const selected = values.dimensions.includes(dimension.name);
-              return (
-                <button
-                  key={dimension.name}
-                  onClick={() => toggleDimension(dimension.name)}
-                  style={{
-                    background: selected ? `${t.accent}18` : t.btnBg,
-                    border: `1px solid ${selected ? t.accent : t.btnBorder}`,
-                    borderRadius: 999,
-                    color: selected ? t.accent : t.textSecondary,
-                    cursor: 'pointer',
-                    fontSize: 11,
-                    fontFamily: t.font,
-                    padding: '5px 9px',
-                  }}
-                >
-                  {dimension.label || dimension.name}
-                </button>
-              );
-            })}
-          </div>
+          <EnterpriseSemanticPicker
+            kind="dimension"
+            total={allDimensions.length}
+            search={dimensionSearch}
+            onSearchChange={setDimensionSearch}
+            matches={dimensionMatches}
+            selected={values.dimensions}
+            resolveLabel={(name) => dimensionByName.get(name)?.label || name}
+            onToggle={toggleDimension}
+            compatible={(name) => values.metrics.length === 0 || compatibleNames.has(name)}
+            disabled={values.metrics.length === 0}
+            emptyHint="Choose a metric first; dimensions are checked against its governed join path."
+            t={t}
+          />
         )}
       </PanelBox>
 
+      <PanelBox title="Filters and parameters" t={t}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {Array.from(new Set([...values.dimensions, ...(values.timeDimension ? [values.timeDimension] : [])])).map((name) => {
+            const selected = values.filters.includes(name);
+            return <button key={name} type="button" onClick={() => onChange(setSemanticArray(source, 'requested_filters', selected ? values.filters.filter((item) => item !== name) : [...values.filters, name]))} style={selectionChipStyle(t, selected)}>{dimensionByName.get(name)?.label || name}</button>;
+          })}
+        </div>
+        <div style={{ fontSize: 10, color: t.textMuted, marginTop: 8 }}>{values.dimensions.length === 0 && !values.timeDimension ? 'Search and add a compatible dimension first, then choose whether it should also be a dynamic filter.' : 'Selected fields become governed runtime filters. Values stay dynamic rather than being hard-coded into SQL.'}</div>
+        {values.filters.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>{values.filters.map((filter) => <span key={filter} style={selectionChipStyle(t, true)}>{businessLabel(filter)} · dynamic</span>)}</div>}
+      </PanelBox>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
+        <PanelBox title="Output contract" t={t}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{outputFields.length > 0 ? outputFields.map((field) => <span key={field} style={selectionChipStyle(t, true)}>{businessLabel(field)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Select metrics and dimensions to define business outputs.</span>}</div>
+        </PanelBox>
+        <PanelBox title="Tests" t={t}>
+          <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...inputStyle, minHeight: 82, resize: 'vertical', fontFamily: t.fontMono }} />
+        </PanelBox>
+      </div>
+
       <PanelBox title="Generated DQL" t={t}>
         <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono }}>{source}</pre>
+      </PanelBox>
+    </div>
+  );
+}
+
+type SemanticPickerField = {
+  name: string;
+  label?: string;
+  description?: string;
+  domain?: string;
+  type?: string;
+};
+
+function findSemanticFieldMatches<T extends SemanticPickerField>(fields: T[], search: string): T[] {
+  const normalized = search.trim().toLowerCase();
+  if (normalized.length < 2) return [];
+  return fields.filter((field) => [field.name, field.label, field.description, field.domain]
+    .filter(Boolean)
+    .some((value) => value!.toLowerCase().includes(normalized)))
+    .slice(0, 30);
+}
+
+function EnterpriseSemanticPicker({
+  kind,
+  total,
+  search,
+  onSearchChange,
+  matches,
+  selected,
+  resolveLabel,
+  onToggle,
+  compatible = () => true,
+  disabled = false,
+  emptyHint,
+  t,
+}: {
+  kind: 'metric' | 'dimension';
+  total: number;
+  search: string;
+  onSearchChange: (value: string) => void;
+  matches: SemanticPickerField[];
+  selected: string[];
+  resolveLabel: (name: string) => string;
+  onToggle: (name: string) => void;
+  compatible?: (name: string) => boolean;
+  disabled?: boolean;
+  emptyHint?: string;
+  t: Theme;
+}) {
+  const label = kind === 'metric' ? 'metrics' : 'dimensions';
+  return (
+    <div style={{ display: 'grid', gap: 8, marginTop: 9 }}>
+      {selected.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {selected.map((name) => (
+            <button key={name} type="button" onClick={() => onToggle(name)} title={`Remove ${resolveLabel(name)}`} style={{ ...selectionChipStyle(t, true), display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <CheckSquare size={12} aria-hidden="true" /> {resolveLabel(name)} <X size={11} aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      )}
+      <label style={{ position: 'relative', display: 'block' }}>
+        <Search size={13} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: t.textMuted }} />
+        <input
+          value={search}
+          disabled={disabled}
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder={disabled ? emptyHint : `Search ${total.toLocaleString()} ${label} by name, domain, or description…`}
+          style={{ ...importInputStyle(t), width: '100%', paddingLeft: 30, opacity: disabled ? 0.62 : 1 }}
+        />
+        {search && <button type="button" onClick={() => onSearchChange('')} title="Clear search" style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', display: 'inline-flex', border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', padding: 2 }}><X size={12} /></button>}
+      </label>
+      {!disabled && search.trim().length < 2 && (
+        <div style={{ fontSize: 10, color: t.textMuted }}>Type at least two characters to search. Showing selected {label} only keeps this builder fast at enterprise scale.</div>
+      )}
+      {!disabled && search.trim().length >= 2 && (
+        <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, overflow: 'auto', maxHeight: 240, background: t.cellBg }}>
+          {matches.length === 0 ? (
+            <div style={{ padding: 10, fontSize: 11, color: t.textMuted }}>No {label} match “{search}”.</div>
+          ) : matches.map((field) => {
+            const isSelected = selected.includes(field.name);
+            const isCompatible = compatible(field.name);
+            return (
+              <button key={field.name} type="button" disabled={!isCompatible} onClick={() => onToggle(field.name)} title={isCompatible ? field.description || field.name : 'Not compatible with every selected metric'} style={{ width: '100%', display: 'grid', gridTemplateColumns: '16px minmax(0, 1fr) auto', gap: 8, alignItems: 'center', textAlign: 'left', padding: '8px 10px', border: 'none', borderBottom: `1px solid ${t.headerBorder}`, background: isSelected ? `${t.accent}10` : 'transparent', color: isCompatible ? t.textPrimary : t.textMuted, opacity: isCompatible ? 1 : .5, cursor: isCompatible ? 'pointer' : 'not-allowed' }}>
+                {isSelected ? <CheckSquare size={14} color={t.accent} /> : <Square size={14} />}
+                <span style={{ minWidth: 0 }}><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, fontWeight: 700 }}>{field.label || field.name}</span><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 10, color: t.textMuted }}>{field.description || field.name}</span></span>
+                <span style={{ fontSize: 9, color: t.textMuted, whiteSpace: 'nowrap' }}>{field.domain || field.type || ''}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SqlBlockVisualBuilder({
+  source,
+  metadata,
+  chartConfig,
+  onChange,
+  onMetadataChange,
+  t,
+}: {
+  source: string;
+  metadata: BlockStudioOpenPayload['metadata'] | null;
+  chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
+  onChange: (next: string) => void;
+  onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
+  t: Theme;
+}) {
+  const input = importInputStyle(t);
+  const query = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1]?.trim() ?? '';
+  const outputs = extractSelectAliases(query);
+  const parameters = Array.from(new Set(Array.from(query.matchAll(/\{\{\s*([a-zA-Z_][\w]*)\s*\}\}/g)).map((match) => match[1])));
+  const testsBody = getDqlSectionBody(source, 'tests');
+  const updateText = (field: 'name' | 'domain' | 'description' | 'owner', value: string) => {
+    onMetadataChange({ [field]: value });
+    onChange(field === 'name' ? setBlockName(source, value) : setBlockStringField(source, field, value));
+  };
+  return (
+    <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
+        <PanelBox title="Business identity" t={t}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 9 }}>
+            <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => updateText('name', event.target.value)} style={input} /></FieldLabel>
+            <FieldLabel label="Domain" t={t}><input value={metadata?.domain ?? ''} onChange={(event) => updateText('domain', event.target.value)} style={input} /></FieldLabel>
+            <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => updateText('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
+            <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => updateText('description', event.target.value)} style={input} /></FieldLabel>
+            <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => { const tags = event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean); onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }} placeholder="finance, executive" style={input} /></FieldLabel>
+          </div>
+        </PanelBox>
+        <PanelBox title="Chart intent" t={t}>
+          <FieldLabel label="Chart type" t={t}>
+            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={input}>
+              <option value="table">Table</option>
+              {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </FieldLabel>
+          <FieldLabel label="Title" t={t}><input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} style={input} /></FieldLabel>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
+            <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
+          </div>
+        </PanelBox>
+      </div>
+      <PanelBox title="Business outputs" t={t}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {outputs.length > 0 ? outputs.map((output) => <span key={output} style={selectionChipStyle(t, true)}>{businessLabel(output)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Add aliases in DQL Source to expose business-friendly output names.</span>}
+        </div>
+      </PanelBox>
+      <PanelBox title="Dynamic parameters" t={t}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+          {parameters.length > 0 ? parameters.map((parameter) => <span key={parameter} style={selectionChipStyle(t, true)}>{businessLabel(parameter)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>No dynamic parameters detected. Use {'{{ parameter_name }}'} in the query when a filter should remain configurable.</span>}
+        </div>
+      </PanelBox>
+      <PanelBox title="Tests" t={t}>
+        <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 82, resize: 'vertical', fontFamily: t.fontMono }} />
+      </PanelBox>
+      <PanelBox title="SQL preview" t={t}>
+        <pre style={{ margin: 0, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.5, fontFamily: t.fontMono }}>{query || 'Open DQL Source to add a SELECT query.'}</pre>
       </PanelBox>
     </div>
   );
@@ -1775,7 +2207,7 @@ function SegmentedTab({ active, onClick, label, t }: { active: boolean; onClick:
   );
 }
 
-type ImportSourceMode = 'import' | 'paste';
+type ImportSourceMode = 'path' | 'paste' | 'upload';
 type SmartImportPhase = 'idle' | 'creating' | 'running' | 'saving' | 'complete';
 type SmartImportItemStatus = 'queued' | 'running' | 'ready' | 'saving' | 'saved' | 'needs_attention';
 
@@ -1835,8 +2267,8 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
       rows: rowCountForImportCandidate(candidate),
       savedPath: candidate.savedPath,
       message: isDraftBlockPath(candidate.savedPath)
-        ? 'Preview ran successfully. Draft is autosaved for review.'
-        : 'Preview ran successfully.',
+        ? 'Preview ran successfully. Draft is saved for review.'
+        : 'Preview ran successfully. Nothing is written until you save.',
     };
   }
   if (candidate.draftSave?.status === 'saved' || isDraftBlockPath(candidate.savedPath)) {
@@ -1846,7 +2278,7 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
       sourcePath: candidate.sourcePath,
       status: 'ready',
       savedPath: candidate.draftSave?.path ?? candidate.savedPath,
-      message: 'Draft autosaved. Run preview, then certify when ready.',
+      message: 'Draft saved. Run preview, then certify when ready.',
     };
   }
   if (candidate.draftSave?.status === 'error') {
@@ -1855,7 +2287,7 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
       name: candidate.name,
       sourcePath: candidate.sourcePath,
       status: 'needs_attention',
-      message: candidate.draftSave.error ?? 'Draft autosave failed.',
+      message: candidate.draftSave.error ?? 'Draft preparation failed.',
     };
   }
   return {
@@ -1865,6 +2297,41 @@ function smartItemFromCandidate(candidate: BlockStudioImportCandidate): SmartImp
     status: 'queued',
     message: 'Ready to process.',
   };
+}
+
+function importAnalysisMessage(status: BlockStudioImportCandidate['analysisStatus']): string {
+  if (status === 'retrieving') return 'Checking certified blocks and semantic metrics.';
+  if (status === 'reviewing') return 'Reviewing governed evidence and building the candidate.';
+  if (status === 'ready') return 'Analysis ready. Preparing preview.';
+  if (status === 'needs_attention') return 'Analysis needs attention.';
+  return 'Queued for governed retrieval.';
+}
+
+async function waitForDqlImportAnalysis(
+  importId: string,
+  onProgress: (session: BlockStudioImportSession) => void,
+): Promise<BlockStudioImportSession> {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const next = await api.getDqlGenerationSession(importId);
+    onProgress(next);
+    if (next.candidates.every((candidate) => candidate.analysisStatus === 'ready' || candidate.analysisStatus === 'needs_attention')) {
+      return next;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 500));
+  }
+  throw new Error('Import analysis is still running. You can leave this workspace and resume the session later.');
+}
+
+async function mapWithUiConcurrency<T>(items: T[], limit: number, mapper: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      await mapper(items[index]);
+    }
+  });
+  await Promise.all(workers);
 }
 
 function isAiGeneratedCandidate(candidate: BlockStudioImportCandidate): boolean {
@@ -1903,6 +2370,7 @@ function BlockStudioImportWorkspace({
   defaultOwner,
   themeMode,
   t,
+  inline = false,
 }: {
   session: BlockStudioImportSession | null;
   sessions: BlockStudioImportSessionSummary[];
@@ -1916,6 +2384,7 @@ function BlockStudioImportWorkspace({
   defaultOwner: string;
   themeMode: ThemeMode;
   t: Theme;
+  inline?: boolean;
 }) {
   const [mode, setMode] = useState<ImportSourceMode>('paste');
   const [path, setPath] = useState('');
@@ -1997,7 +2466,9 @@ function BlockStudioImportWorkspace({
 
   const sourceReady = Boolean(mode === 'paste'
     ? pasteSql.trim()
-    : path.trim() || uploadSources.length > 0);
+    : mode === 'upload'
+      ? uploadSources.length > 0
+      : path.trim());
 
   const buildImportPayload = () => {
     if (mode === 'paste') {
@@ -2007,18 +2478,22 @@ function BlockStudioImportWorkspace({
         domain,
         owner,
         sources: [{ path: 'pasted.sql', content: pasteSql }],
+        async: true,
+        persistence: 'session-only' as const,
       };
     }
-    if (uploadSources.length > 0) {
+    if (mode === 'upload') {
       return {
         inputMode: 'upload' as const,
         sourceKind: 'raw-sql' as const,
         domain,
         owner,
         sources: uploadSources,
+        async: true,
+        persistence: 'session-only' as const,
       };
     }
-    return { path, inputMode: 'path' as const, sourceKind: 'raw-sql' as const, domain, owner };
+    return { path, inputMode: 'path' as const, sourceKind: 'raw-sql' as const, domain, owner, async: true, persistence: 'session-only' as const };
   };
 
     const runSmartImport = async () => {
@@ -2033,7 +2508,7 @@ function BlockStudioImportWorkspace({
         let workingSession: BlockStudioImportSession = created;
         let items: Record<string, SmartImportItem> = Object.fromEntries(created.candidates.map((candidate) => [
           candidate.id,
-          { ...smartItemFromCandidate(candidate), status: 'queued' as SmartImportItemStatus, message: candidate.draftSave?.status === 'saved' ? 'Draft saved. Waiting to preview.' : 'Waiting to run.' },
+          { ...smartItemFromCandidate(candidate), status: 'queued' as SmartImportItemStatus, message: 'Queued for governed retrieval.' },
         ]));
       const updateItem = (candidateId: string, updater: (item: SmartImportItem) => SmartImportItem) => {
         items = { ...items, [candidateId]: updater(items[candidateId]) };
@@ -2053,10 +2528,28 @@ function BlockStudioImportWorkspace({
       await onRefreshSessions();
 
         setSmartPhase('running');
-        for (const candidate of created.candidates) {
+        workingSession = await waitForDqlImportAnalysis(created.id, (next) => {
+          workingSession = next;
+          onSessionChange(next);
+          for (const candidate of next.candidates) {
+            updateItem(candidate.id, (item) => ({
+              ...item,
+              name: candidate.name,
+              sourcePath: candidate.sourcePath,
+              status: candidate.analysisStatus === 'needs_attention'
+                ? 'needs_attention'
+                : candidate.analysisStatus === 'ready'
+                  ? 'queued'
+                  : 'running',
+              message: importAnalysisMessage(candidate.analysisStatus),
+            }));
+          }
+        });
+        await mapWithUiConcurrency(workingSession.candidates, 2, async (candidate) => {
+          if (candidate.analysisStatus === 'needs_attention') return;
           updateItem(candidate.id, (item) => ({ ...item, status: 'running', message: 'Running preview.' }));
           try {
-            const next = await api.previewDqlGenerationCandidate(created.id, candidate.id);
+            const next = await api.previewDqlGenerationCandidate(workingSession.id, candidate.id);
             replaceCandidate(next);
             updateItem(candidate.id, (item) => ({
               ...item,
@@ -2065,14 +2558,16 @@ function BlockStudioImportWorkspace({
               status: 'ready',
               rows: rowCountForImportCandidate(next),
               savedPath: next.draftSave?.path ?? next.savedPath,
-              message: 'Preview ran successfully. Draft is autosaved for review.',
+              message: next.recommendedAction === 'reuse_existing'
+                ? 'A governed block already answers this SQL. Reuse it instead of saving a duplicate.'
+                : 'Preview ran successfully. Nothing is written until you save.',
             }));
         } catch (err: any) {
           const message = err?.message ?? 'Preview failed.';
           setCandidateErrors((current) => ({ ...current, [candidate.id]: message }));
           updateItem(candidate.id, (item) => ({ ...item, status: 'needs_attention', message }));
-        }
-      }
+          }
+        });
 
         onSessionChange(workingSession);
         setSelectedId(workingSession.candidates.find((candidate) => candidate.reviewStatus !== 'rejected')?.id ?? workingSession.candidates[0]?.id ?? null);
@@ -2179,15 +2674,30 @@ function BlockStudioImportWorkspace({
 
     const saveCandidate = async (candidate: BlockStudioImportCandidate) => {
       if (!session) return;
+      const saveOwner = candidate.owner.trim() || owner.trim();
+      if (!saveOwner) {
+        setError('Owner is required before a block can be saved or certified.');
+        return;
+      }
       setLoading(true);
       setError(null);
       try {
-        const result = isAiGeneratedCandidate(candidate)
-          ? await api.certifyDqlGenerationCandidate(session.id, candidate.id)
-          : await api.saveBlockStudioImportCandidate(session.id, candidate.id);
-        updateCandidate(result.candidate);
-        onSavedCandidate(result.candidate, result.block);
-      await onRefreshSessions();
+        if (isAiGeneratedCandidate(candidate)) {
+          const response = await api.saveSelectedDqlGenerationCandidates(session.id, { candidateIds: [candidate.id], owner: saveOwner });
+          onSessionChange(response.session);
+          const result = response.results[0];
+          if (!result || result.status === 'error') throw new Error(result?.error ?? result?.blockers.join(' ') ?? 'Candidate save failed.');
+          if (result.candidate) updateCandidate(result.candidate);
+          if (result.candidate && result.block) onSavedCandidate(result.candidate, result.block);
+          if (result.status === 'draft' && result.blockers.length > 0) {
+            setError(`Saved as draft: ${result.blockers.join(' ')}`);
+          }
+        } else {
+          const result = await api.saveBlockStudioImportCandidate(session.id, candidate.id);
+          updateCandidate(result.candidate);
+          onSavedCandidate(result.candidate, result.block);
+        }
+        await onRefreshSessions();
     } catch (err: any) {
       const message = err?.message ?? 'Candidate save failed.';
       setError(message.includes('409') || message.includes('already exists')
@@ -2200,13 +2710,21 @@ function BlockStudioImportWorkspace({
 
   const saveAll = async () => {
     if (!session) return;
+    const saveOwner = owner.trim() || session.defaults.owner.trim();
+    if (!saveOwner) {
+      setError('Owner is required before blocks can be saved or certified.');
+      return;
+    }
     setSavingAll(true);
     setError(null);
     try {
-      const result = await api.saveAllBlockStudioImportCandidates(session.id);
+      const candidateIds = session.candidates
+        .filter((candidate) => candidate.reviewStatus !== 'rejected' && candidate.analysisStatus !== 'needs_attention')
+        .map((candidate) => candidate.id);
+      const result = await api.saveSelectedDqlGenerationCandidates(session.id, { candidateIds, owner: saveOwner });
       onSessionChange(result.session);
-      const errorsByCandidateId = new Map(result.errors.map((item) => [item.candidateId, item.error]));
-      const savedByCandidateId = new Map(result.saved.map((item) => [item.candidateId, item.path]));
+      const errorsByCandidateId = new Map(result.results.filter((item) => item.status === 'error').map((item) => [item.candidateId, item.error ?? item.blockers.join(' ')]));
+      const savedByCandidateId = new Map(result.results.filter((item) => item.path).map((item) => [item.candidateId, item.path]));
       setSmartItems(Object.fromEntries(result.session.candidates.map((candidate) => {
         const errorMessage = errorsByCandidateId.get(candidate.id);
         const savedPath = savedByCandidateId.get(candidate.id) ?? candidate.savedPath;
@@ -2230,8 +2748,10 @@ function BlockStudioImportWorkspace({
         return [candidate.id, smartItemFromCandidate(candidate)];
       })));
       await onRefreshSessions();
-      if (result.errors.length > 0) {
-        setError(`${result.saved.length} saved. ${result.errors.length} candidate(s) need attention.`);
+      const failedCount = result.results.filter((item) => item.status === 'error').length;
+      const draftCount = result.results.filter((item) => item.status === 'draft').length;
+      if (failedCount > 0 || draftCount > 0) {
+        setError(`${result.results.length - failedCount} saved. ${draftCount} stayed draft; ${failedCount} need attention.`);
       }
     } catch (err: any) {
       setError(err?.message ?? 'Save all failed.');
@@ -2256,7 +2776,7 @@ function BlockStudioImportWorkspace({
   };
 
   return (
-    <div style={{ position: 'relative', height: '100%', display: 'grid', gridTemplateRows: '80px minmax(0, 1fr)', minHeight: 0, background: t.appBg }}>
+    <div style={{ position: 'relative', height: '100%', display: 'grid', gridTemplateRows: '80px minmax(0, 1fr)', minHeight: 0, background: t.appBg, borderRadius: inline ? 0 : 8 }}>
       <header style={{ borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg, padding: '14px 14px 12px', display: 'flex', alignItems: 'center', gap: 14, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 260 }}>
           <span style={{ width: 34, height: 34, borderRadius: 8, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: t.accent, background: `${t.accent}16`, flexShrink: 0 }}>
@@ -2270,7 +2790,7 @@ function BlockStudioImportWorkspace({
           </span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(130px, 1fr))', gap: 6, width: 'min(560px, 44vw)', minWidth: 390 }}>
-          <ImportStep index={1} active={activeStep === 1} complete={Boolean(session)} title="Source" detail={mode === 'paste' ? 'Paste SQL' : 'Files or folder'} t={t} />
+          <ImportStep index={1} active={activeStep === 1} complete={Boolean(session)} title="Source" detail={mode === 'paste' ? 'Paste SQL' : mode === 'upload' ? 'Upload files' : 'Local path'} t={t} />
           <ImportStep index={2} active={activeStep === 2} complete={smartCounts.ready > 0 || smartCounts.saved > 0} title="Draft" detail={session ? `${session.candidates.length} blocks · ${readyCount} ready` : 'Generate DQL'} t={t} />
           <ImportStep index={3} active={activeStep === 3} complete={smartCounts.saved > 0} title="Review" detail={smartCounts.saved > 0 ? `${smartCounts.saved} certified` : 'Preview and certify'} t={t} />
         </div>
@@ -2298,8 +2818,8 @@ function BlockStudioImportWorkspace({
             </button>
             {sourceOpen ? (
               <>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 4 }}>
-                  {(['import', 'paste'] as const).map((value) => (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 4 }}>
+                  {(['paste', 'upload', 'path'] as const).map((value) => (
                     <button
                       key={value}
                       onClick={() => setMode(value)}
@@ -2311,12 +2831,11 @@ function BlockStudioImportWorkspace({
                         background: mode === value ? `${t.accent}14` : t.btnBg,
                       }}
                     >
-                      {value === 'import' ? 'Files / folder' : 'Paste SQL'}
+                      {value === 'paste' ? 'Paste SQL' : value === 'upload' ? 'Upload files' : 'Local path'}
                     </button>
                   ))}
                 </div>
-                {mode === 'import' && (
-                  <div style={{ display: 'grid', gap: 8 }}>
+                {mode === 'path' && (
                     <FieldLabel label="Path" t={t}>
                       <input
                         value={path}
@@ -2328,13 +2847,14 @@ function BlockStudioImportWorkspace({
                         style={importInputStyle(t)}
                       />
                     </FieldLabel>
+                )}
+                {mode === 'upload' && (
                     <FieldLabel label="Upload SQL files" t={t}>
                       <input type="file" multiple accept=".sql,text/sql,text/plain" onChange={(event) => void handleFiles(event.target.files)} style={importInputStyle(t)} />
                       <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                        {uploadSources.length > 0 ? `${uploadSources.length} SQL file(s) ready` : 'Optional for multiple files.'}
+                        {uploadSources.length > 0 ? `${uploadSources.length} SQL file(s) ready` : 'Choose one or more SQL files.'}
                       </span>
                     </FieldLabel>
-                  </div>
                 )}
                 {mode === 'paste' && (
                   <FieldLabel label="Paste SQL" t={t}>
@@ -2365,9 +2885,9 @@ function BlockStudioImportWorkspace({
                 onClick={() => setSourceOpen(true)}
                 style={{ ...secondaryImportButtonStyle(t), display: 'grid', gap: 4, textAlign: 'left', width: '100%', justifyItems: 'start' }}
               >
-                <span style={{ fontSize: 11, color: t.textSecondary }}>{mode === 'paste' ? 'Pasted SQL' : 'Files / folder'}</span>
+                <span style={{ fontSize: 11, color: t.textSecondary }}>{mode === 'paste' ? 'Pasted SQL' : mode === 'upload' ? 'Uploaded files' : 'Local path'}</span>
                 <span style={{ maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.textMuted, fontFamily: t.fontMono }}>
-                  {session?.inputPath ?? (mode === 'paste' ? 'pasted.sql' : path || './queries')}
+                  {session?.inputPath ?? (mode === 'paste' ? 'pasted.sql' : mode === 'upload' ? `${uploadSources.length} file(s)` : path || './queries')}
                 </span>
               </button>
             )}
@@ -2376,7 +2896,7 @@ function BlockStudioImportWorkspace({
           <section style={{ minHeight: 0, overflow: 'auto', padding: 12, display: 'grid', alignContent: 'start', gap: 10 }}>
             {!session ? (
               <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.5 }}>
-                Paste SQL or choose files. DQL creates autosaved draft blocks for review.
+                Paste SQL, upload files, or choose a local path. Analysis stays in this session until you save a block.
               </div>
             ) : (
               <>
@@ -2621,7 +3141,7 @@ function SmartImportOverview({
           ? `${counts.ready} draft${counts.ready === 1 ? '' : 's'} ready for review`
           : `${counts.saved} DQL block${counts.saved === 1 ? '' : 's'} certified`;
     const detail = counts.attention > 0
-      ? 'Drafts that could be generated are autosaved. Fix the exceptions in advanced details.'
+      ? 'Ready candidates remain in this session. Fix the exceptions in advanced details before saving.'
       : counts.processing > 0
         ? 'DQL is previewing SQL and keeping generated drafts saved.'
         : counts.ready > 0
@@ -2820,7 +3340,6 @@ function ImportCandidateDetail({
     const warnings = candidate.warnings ?? candidate.lineage.warnings;
     const inputStyle = importInputStyle(t);
     const previewRowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
-    const generatedDraft = isAiGeneratedCandidate(candidate);
     const draftPath = candidate.draftSave?.path ?? (isDraftBlockPath(candidate.savedPath) ? candidate.savedPath : undefined);
     const reuseRecommended = candidate.recommendedAction === 'reuse_existing' || candidate.draftSave?.status === 'skipped';
     const contextCount = candidate.lineage.sourceTables.length + (candidate.evidence?.length ?? 0) + candidate.lineage.parameters.length + warnings.length;
@@ -2837,7 +3356,7 @@ function ImportCandidateDetail({
           {contextOpen ? 'Hide context' : `Show context${contextCount > 0 ? ` (${contextCount})` : ''}`}
         </button>
         <button onClick={() => onReviewInEditor(candidate)} style={primaryImportButtonStyle(t)}>Edit full DQL</button>
-        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved' || reuseRecommended} style={primaryImportButtonStyle(t)}>{reuseRecommended ? 'Reuse existing' : candidate.reviewStatus === 'saved' ? 'Certified' : generatedDraft ? 'Request certification' : 'Save'}</button>
+        <button onClick={() => void onSave(candidate)} disabled={loading || candidate.reviewStatus === 'saved' || reuseRecommended} style={primaryImportButtonStyle(t)}>{reuseRecommended ? 'Reuse existing' : candidate.reviewStatus === 'saved' ? 'Certified' : 'Save block'}</button>
       </div>
 
       {editError && <div role="alert" style={{ fontSize: 12, color: '#f85149', background: '#f8514914', borderRadius: 8, padding: 10 }}>{editError}</div>}
@@ -3044,328 +3563,6 @@ function ImportCandidateDetail({
   );
 }
 
-function BlockStudioImportModal({
-  session,
-  onSessionChange,
-  onClose,
-  onSelectCandidate,
-  onSavedCandidate,
-  defaultDomain,
-  defaultOwner,
-  t,
-}: {
-  session: BlockStudioImportSession | null;
-  onSessionChange: (session: BlockStudioImportSession | null) => void;
-  onClose: () => void;
-  onSelectCandidate: (candidate: BlockStudioImportCandidate) => void;
-  onSavedCandidate: (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => void;
-  defaultDomain: string;
-  defaultOwner: string;
-  t: Theme;
-}) {
-  const [path, setPath] = useState('');
-  const [domain, setDomain] = useState(defaultDomain);
-  const [owner, setOwner] = useState(defaultOwner);
-  const [loading, setLoading] = useState(false);
-  const [runningId, setRunningId] = useState<string | null>(null);
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [candidateErrors, setCandidateErrors] = useState<Record<string, string>>({});
-  const readyCount = session?.candidates.filter((candidate) => candidate.validation?.valid !== false).length ?? 0;
-  const savedCount = session?.candidates.filter((candidate) => candidate.reviewStatus === 'saved').length ?? 0;
-  const activeStep = !session ? 1 : savedCount > 0 ? 3 : 2;
-
-  useEffect(() => {
-    setCandidateErrors({});
-  }, [session?.id]);
-
-  const updateCandidate = (candidate: BlockStudioImportCandidate) => {
-    if (!session) return;
-    onSessionChange({
-      ...session,
-      candidates: session.candidates.map((item) => item.id === candidate.id ? candidate : item),
-    });
-  };
-
-  const handlePreview = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await api.previewBlockStudioImport({
-        path,
-        sourceKind: 'raw-sql',
-        domain,
-        owner,
-      });
-      onSessionChange(next);
-      setCandidateErrors({});
-    } catch (err: any) {
-      setError(err?.message ?? 'Import preview failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRunCandidate = async (candidate: BlockStudioImportCandidate) => {
-    if (!session) return;
-    setRunningId(candidate.id);
-    setError(null);
-    setCandidateErrors((current) => {
-      if (!current[candidate.id]) return current;
-      const next = { ...current };
-      delete next[candidate.id];
-      return next;
-    });
-    try {
-      const next = await api.runBlockStudioImportCandidate(session.id, candidate.id);
-      updateCandidate(next);
-      setCandidateErrors((current) => {
-        if (!current[candidate.id]) return current;
-        const cleared = { ...current };
-        delete cleared[candidate.id];
-        return cleared;
-      });
-    } catch (err: any) {
-      const message = err?.message ?? 'Candidate run failed.';
-      setError(message);
-      setCandidateErrors((current) => ({ ...current, [candidate.id]: message }));
-    } finally {
-      setRunningId(null);
-    }
-  };
-
-  const handleSaveCandidate = async (candidate: BlockStudioImportCandidate) => {
-    if (!session) return;
-    setSavingId(candidate.id);
-    setError(null);
-    try {
-      const result = await api.saveBlockStudioImportCandidate(session.id, candidate.id);
-      updateCandidate(result.candidate);
-      onSavedCandidate(result.candidate, result.block);
-    } catch (err: any) {
-      const message = err?.message ?? 'Candidate save failed.';
-      setError(message.includes('409') || message.includes('already exists')
-        ? 'A block with this name already exists. Open it in the editor to rename it, then save.'
-        : message);
-    } finally {
-      setSavingId(null);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        inset: 0,
-        zIndex: 30,
-        background: 'rgba(0,0,0,0.28)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 24,
-      }}
-    >
-      <div
-        style={{
-          width: 820,
-          maxWidth: 'calc(100vw - 48px)',
-          maxHeight: 'calc(100vh - 72px)',
-          background: t.cellBg,
-          border: `1px solid ${t.headerBorder}`,
-          borderRadius: 10,
-          boxShadow: '0 24px 70px rgba(0,0,0,0.35)',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
-      >
-        <div style={{ padding: '14px 16px', borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Import SQL into Block Studio</div>
-            <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, marginTop: 2 }}>Scan existing SQL, inspect candidates, then save DQL blocks.</div>
-          </div>
-          <div style={{ flex: 1 }} />
-          <button
-            onClick={onClose}
-            style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
-            title="Close import"
-          >
-            ×
-          </button>
-        </div>
-
-        <div style={{ padding: '12px 14px', borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, background: `${t.appBg}99` }}>
-          <ImportStep index={1} active={activeStep === 1} complete={Boolean(session)} title="Choose source" detail="SQL file or folder" t={t} />
-          <ImportStep index={2} active={activeStep === 2} complete={savedCount > 0} title="Inspect queries" detail={session ? `${session.candidates.length} found · ${readyCount} ready` : 'Validate metadata'} t={t} />
-          <ImportStep index={3} active={activeStep === 3} complete={savedCount > 0} title="Save blocks" detail={savedCount > 0 ? `${savedCount} saved` : 'Open or save as block'} t={t} />
-        </div>
-
-        <div style={{ padding: 14, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 150px 150px auto', gap: 8, alignItems: 'end' }}>
-          <FieldLabel label="SQL file or folder" t={t}>
-            <input
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-              placeholder="/path/to/sql or ./queries"
-              style={importInputStyle(t)}
-            />
-          </FieldLabel>
-          <FieldLabel label="Domain" t={t}>
-            <input value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="auto" style={importInputStyle(t)} />
-          </FieldLabel>
-          <FieldLabel label="Owner" t={t}>
-            <input value={owner} onChange={(event) => setOwner(event.target.value)} placeholder="analytics" style={importInputStyle(t)} />
-          </FieldLabel>
-          <button
-            onClick={() => void handlePreview()}
-            disabled={loading || !path.trim()}
-            style={{
-              background: t.accent,
-              border: `1px solid ${t.accent}`,
-              borderRadius: 6,
-              color: '#fff',
-              cursor: loading || !path.trim() ? 'not-allowed' : 'pointer',
-              fontSize: 12,
-              fontWeight: 700,
-              fontFamily: t.font,
-              padding: '8px 12px',
-              opacity: loading || !path.trim() ? 0.6 : 1,
-            }}
-          >
-            {loading ? 'Scanning…' : 'Preview'}
-          </button>
-        </div>
-
-        {error && (
-          <div role="alert" style={{ padding: '10px 14px', color: '#f85149', background: '#f8514914', borderBottom: `1px solid ${t.headerBorder}`, fontSize: 12, fontFamily: t.font }}>
-            {error}
-          </div>
-        )}
-
-        <div style={{ flex: 1, overflow: 'auto', padding: 14 }}>
-          {!session ? (
-            <ImportGuide t={t} />
-          ) : session.candidates.length === 0 ? (
-            <EmptyPanel message="No import candidates found." />
-          ) : (
-            <div style={{ display: 'grid', gap: 10 }}>
-              <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 12, display: 'grid', gap: 6, background: t.appBg }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{session.id}</span>
-                  <ImportPill label={`${session.candidates.length} candidates`} tone="info" t={t} />
-                  <ImportPill label={`${readyCount} ready`} tone="ok" t={t} />
-                  {savedCount > 0 && <ImportPill label={`${savedCount} saved`} tone="ok" t={t} />}
-                </div>
-                <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                  Source: <span style={{ fontFamily: t.fontMono }}>{session.inputPath}</span>
-                </div>
-              </div>
-              {session.candidates.map((candidate) => {
-                const valid = candidate.validation?.valid !== false;
-                const rowCount = candidate.preview?.result?.rowCount ?? candidate.preview?.result?.rows?.length;
-                const runError = candidateErrors[candidate.id];
-                return (
-                  <div
-                    key={candidate.id}
-                    style={{
-                      border: `1px solid ${t.headerBorder}`,
-                      borderRadius: 8,
-                      background: t.appBg,
-                      padding: 12,
-                      display: 'grid',
-                      gap: 10,
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>{candidate.name}</div>
-                        <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, marginTop: 3 }}>{candidate.sourcePath}</div>
-                      </div>
-                      <ImportPill label={`${Math.round(candidate.confidence * 100)}%`} tone="info" t={t} />
-                      <ImportPill label={valid ? 'valid' : 'fix'} tone={valid ? 'ok' : 'warn'} t={t} />
-                      <ImportPill label={candidate.reviewStatus} tone={candidate.reviewStatus === 'saved' ? 'ok' : 'info'} t={t} />
-                      {runError && <ImportPill label="run failed" tone="warn" t={t} />}
-                      {candidate.lineage.totalStatements > 1 && (
-                        <ImportPill label={`${candidate.lineage.statementIndex}/${candidate.lineage.totalStatements}`} tone="info" t={t} />
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {candidate.lineage.sourceTables.length > 0 ? candidate.lineage.sourceTables.map((table) => (
-                        <span key={table} style={{ fontSize: 11, color: t.textSecondary, background: t.pillBg, borderRadius: 999, padding: '3px 8px', fontFamily: t.fontMono }}>
-                          {table}
-                        </span>
-                      )) : (
-                        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>No source tables detected</span>
-                      )}
-                    </div>
-                    {candidate.lineage.parameters.length > 0 && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>Parameters:</span>
-                        {candidate.lineage.parameters.map((param) => (
-                          <span key={param} style={{ fontSize: 11, color: '#d29922', background: '#d2992218', borderRadius: 999, padding: '3px 8px', fontFamily: t.fontMono }}>
-                            {param}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {candidate.lineage.warnings.length > 0 && (
-                      <div style={{ fontSize: 11, color: '#d29922', fontFamily: t.font }}>
-                        {candidate.lineage.warnings.join(' · ')}
-                      </div>
-                    )}
-                    {candidate.validation?.diagnostics?.some((diagnostic) => diagnostic.severity === 'error') && (
-                      <div style={{ fontSize: 11, color: '#f85149', fontFamily: t.font }}>
-                        {candidate.validation.diagnostics.filter((diagnostic) => diagnostic.severity === 'error').map((diagnostic) => diagnostic.message).join(' · ')}
-                      </div>
-                    )}
-                    {runError && (
-                      <div role="alert" style={{ fontSize: 11, color: '#f85149', background: '#f8514914', border: `1px solid #f8514933`, borderRadius: 8, padding: 9, fontFamily: t.font, lineHeight: 1.45, overflowWrap: 'anywhere' }}>
-                        Preview failed: {runError}
-                      </div>
-                    )}
-                    {candidate.preview && (
-                      <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <span>Preview ready</span>
-                        {typeof rowCount === 'number' && <span>· {rowCount} rows</span>}
-                        <span>· Open it to inspect SQL, data, visualization, and metadata.</span>
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                      <button
-                        onClick={() => void handleRunCandidate(candidate)}
-                        disabled={runningId === candidate.id}
-                        style={secondaryImportButtonStyle(t)}
-                      >
-                        {runningId === candidate.id ? 'Running…' : 'Run preview'}
-                      </button>
-                      <button
-                        onClick={() => onSelectCandidate(candidate)}
-                        style={primaryImportButtonStyle(t)}
-                      >
-                        Open in editor
-                      </button>
-                      <button
-                        onClick={() => void handleSaveCandidate(candidate)}
-                        disabled={savingId === candidate.id || candidate.reviewStatus === 'saved'}
-                        style={{
-                          ...primaryImportButtonStyle(t),
-                          opacity: savingId === candidate.id || candidate.reviewStatus === 'saved' ? 0.55 : 1,
-                          cursor: savingId === candidate.id || candidate.reviewStatus === 'saved' ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        {candidate.reviewStatus === 'saved' ? 'Saved' : savingId === candidate.id ? 'Saving…' : 'Save block'}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function ImportStep({ index, active, complete, title, detail, t }: { index: number; active: boolean; complete: boolean; title: string; detail: string; t: Theme }) {
   const color = complete ? '#2ea043' : active ? t.accent : t.textMuted;
   return (
@@ -3413,7 +3610,7 @@ function ImportGuide({ t }: { t: Theme }) {
   ];
   return (
     <div style={{ display: 'grid', gap: 12 }}>
-      <EmptyPanel message="Add SQL to generate autosaved DQL draft blocks." />
+      <EmptyPanel message="Add SQL to analyze DQL candidates without creating block files." />
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
         {items.map(([index, title, detail]) => (
           <div key={title} style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.appBg, padding: 12, display: 'grid', gap: 6 }}>
@@ -4399,53 +4596,6 @@ function applyGeneratedSqlToBlockDraft(source: string, sql: string): string {
   return clean;
 }
 
-function parseSemanticBlockValues(source: string): { metric: string; dimensions: string[]; timeDimension: string; granularity: string } {
-  const str = (key: string) => source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
-  return {
-    metric: str('metric') || parseDqlArrayField(source, 'metrics')[0] || '',
-    dimensions: parseDqlArrayField(source, 'dimensions'),
-    timeDimension: str('time_dimension'),
-    granularity: str('granularity'),
-  };
-}
-
-function parseDqlArrayField(source: string, key: string): string[] {
-  const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
-  if (!match) return [];
-  return (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)).filter(Boolean);
-}
-
-function setSemanticMetricField(source: string, metric: string): string {
-  let next = source.replace(/\n\s*metrics\s*=\s*\[[\s\S]*?\]/i, '');
-  return setSemanticScalarField(next, 'metric', metric);
-}
-
-function setSemanticScalarField(source: string, key: string, value: string): string {
-  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
-  if (re.test(source)) {
-    return source.replace(re, `$1"${escaped}"`);
-  }
-  return insertSemanticField(source, `  ${key} = "${escaped}"`);
-}
-
-function setDqlArrayField(source: string, key: string, values: string[]): string {
-  const unique = Array.from(new Set(values.filter(Boolean)));
-  const rendered = `${key} = [${unique.map((value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(', ')}]`;
-  const re = new RegExp(`\\b${key}\\s*=\\s*\\[[\\s\\S]*?\\]`, 'i');
-  if (re.test(source)) {
-    return source.replace(re, rendered);
-  }
-  return insertSemanticField(source, `  ${rendered}`);
-}
-
-function insertSemanticField(source: string, field: string): string {
-  if (/visualization\s*\{/i.test(source)) {
-    return source.replace(/\n\s*visualization\s*\{/i, `\n${field}\n\n  visualization {`);
-  }
-  return source.replace(/\n\}\s*$/, `\n${field}\n}\n`);
-}
-
 function buildSemanticSkeleton(name: string): string {
   return `block "${name}" {
   domain = "uncategorized"
@@ -4453,8 +4603,6 @@ function buildSemanticSkeleton(name: string): string {
   description = ""
   owner = ""
   tags = []
-  metric = "total_revenue"
-
   visualization {
     chart = "table"
   }
@@ -4478,7 +4626,49 @@ SELECT 1 AS value
     chart = "table"
   }
 }
+
 `;
+}
+
+function makeBlockStudioDraftId(): string {
+  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function readBlockStudioBoolean(key: string, fallback: boolean): boolean {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value == null ? fallback : value === '1';
+  } catch {
+    return fallback;
+  }
+}
+
+function readBlockStudioNumber(key: string, fallback: number, min: number, max: number): number {
+  try {
+    const value = Number(window.localStorage.getItem(key));
+    return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function hasBlockStudioWorkspaceContent(state: { blockStudioDraft: string; blockStudioMetadata: unknown; activeBlockPath: string | null }): boolean {
+  return Boolean(state.blockStudioDraft.trim() || state.blockStudioMetadata || state.activeBlockPath);
+}
+
+function extractSelectAliases(sql: string): string[] {
+  const select = sql.match(/\bselect\b([\s\S]*?)\bfrom\b/i)?.[1] ?? '';
+  if (!select) return [];
+  return Array.from(new Set(select.split(',').map((expression) => {
+    const alias = expression.match(/\bas\s+([a-zA-Z_][\w$]*)\s*$/i)?.[1];
+    if (alias) return alias;
+    const simple = expression.trim().match(/(?:^|\.)([a-zA-Z_][\w$]*)$/)?.[1];
+    return simple ?? '';
+  }).filter(Boolean))).slice(0, 24);
+}
+
+function businessLabel(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function collectFacetValues(node: SemanticTreeNode | null, key: string): string[] {

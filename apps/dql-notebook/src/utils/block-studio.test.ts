@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { setBlockStringField } from './block-studio';
+import {
+  parseSemanticVisualFields,
+  setBlockStringField,
+  setDqlSectionBody,
+  setSemanticArray,
+  setSemanticMetrics,
+  setSemanticScalar,
+  upsertVisualizationConfig,
+} from './block-studio';
 
 describe('block-studio utils', () => {
   it('preserves generated source DQL lineage when normalizing a custom draft block', () => {
@@ -33,5 +41,44 @@ describe('block-studio utils', () => {
     expect(next).toContain('source_dql_hash = "abc123"');
     expect(next).toContain('source_dql_metrics = ["supply_cost"]');
     expect(next).toContain('source_dql_dimensions = ["product_id", "supply_id"]');
+  });
+
+  it('round-trips multi-metric visual fields without removing advanced clauses', () => {
+    const source = `block "revenue_quality" {
+  type = "semantic"
+  metric = "revenue"
+  dimensions = ["region"]
+  custom_governance_clause = "preserve-me"
+  tests {
+    assert = "revenue >= 0"
+  }
+  visualization {
+    chart = "bar"
+    custom_palette = "finance"
+  }
+}
+`;
+
+    let next = setSemanticMetrics(source, ['revenue', 'gross_margin']);
+    next = setSemanticArray(next, 'dimensions', ['region', 'channel']);
+    next = setSemanticArray(next, 'requested_filters', ['region']);
+    next = setSemanticScalar(next, 'time_dimension', 'order_date');
+    next = setSemanticScalar(next, 'granularity', 'month');
+    next = upsertVisualizationConfig(next, { chart: 'line', title: 'Revenue and margin' });
+    next = setDqlSectionBody(next, 'tests', 'assert row_count >= 1\nassert revenue >= 0');
+
+    expect(parseSemanticVisualFields(next)).toEqual({
+      metrics: ['revenue', 'gross_margin'],
+      dimensions: ['region', 'channel'],
+      requestedFilters: ['region'],
+      timeDimension: 'order_date',
+      granularity: 'month',
+    });
+    expect(next).toContain('custom_governance_clause = "preserve-me"');
+    expect(next).toContain('assert row_count >= 1');
+    expect(next).toContain('assert revenue >= 0');
+    expect(next).toContain('custom_palette = "finance"');
+    expect(next).toContain('chart = "line"');
+    expect(next).toContain('title = "Revenue and margin"');
   });
 });

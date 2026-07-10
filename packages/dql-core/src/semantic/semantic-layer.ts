@@ -1170,7 +1170,6 @@ export class SemanticLayer {
       .filter((metric): metric is MetricDefinition => Boolean(metric));
     if (resolvedMetrics.length === 0) return [];
 
-    const reachableTables = new Set<string>();
     const resolveCubeNameForTable = (table: string): string | undefined => {
       for (const cube of this.cubes.values()) {
         if (cube.table === table || cube.name === table) return cube.name;
@@ -1178,26 +1177,55 @@ export class SemanticLayer {
       return undefined;
     };
 
-    for (const metric of resolvedMetrics) {
-      reachableTables.add(metric.table);
-      const cubeName = resolveCubeNameForTable(metric.table);
-      if (!cubeName) continue;
-
-      const queue = [cubeName];
-      const visited = new Set<string>(queue);
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        const cube = this.cubes.get(current);
-        if (cube?.table) reachableTables.add(cube.table);
-        const joins = this.joinGraph.get(current) ?? [];
-        for (const join of joins) {
-          const next = join.right;
-          if (visited.has(next)) continue;
-          visited.add(next);
-          queue.push(next);
+    const metricTables = resolvedMetrics.map((metric) => {
+      const reachableTables = new Set<string>();
+      const measureNames = new Set<string>();
+      const measure = metric.typeParams?.measure;
+      if (measure && typeof measure === 'object' && !Array.isArray(measure) && typeof (measure as Record<string, unknown>).name === 'string') {
+        measureNames.add(String((measure as Record<string, unknown>).name));
+      }
+      const inputs = metric.typeParams?.input_measures;
+      if (Array.isArray(inputs)) {
+        for (const input of inputs) {
+          if (input && typeof input === 'object' && typeof (input as Record<string, unknown>).name === 'string') {
+            measureNames.add(String((input as Record<string, unknown>).name));
+          }
         }
       }
-    }
+      if (metric.table) reachableTables.add(metric.table);
+      for (const measureName of measureNames) {
+        const definition = this.measures.get(measureName);
+        if (definition?.table) reachableTables.add(definition.table);
+        for (const model of this.semanticModels.values()) {
+          if (model.measures.includes(measureName) && model.table) reachableTables.add(model.table);
+        }
+      }
+
+      for (const table of Array.from(reachableTables)) {
+        const cubeName = resolveCubeNameForTable(table);
+        if (!cubeName) continue;
+        const queue = [cubeName];
+        const visited = new Set<string>(queue);
+        while (queue.length > 0) {
+          const current = queue.shift()!;
+          const cube = this.cubes.get(current);
+          if (cube?.table) reachableTables.add(cube.table);
+          const joins = this.joinGraph.get(current) ?? [];
+          for (const join of joins) {
+            const next = join.right;
+            if (visited.has(next)) continue;
+            visited.add(next);
+            queue.push(next);
+          }
+        }
+      }
+      return reachableTables;
+    });
+
+    const reachableTables = metricTables.slice(1).reduce((common, tables) => {
+      for (const table of common) if (!tables.has(table)) common.delete(table);
+      return common;
+    }, new Set(metricTables[0]));
 
     return Array.from(this.dimensions.values())
       .filter((dimension) => reachableTables.has(dimension.table))

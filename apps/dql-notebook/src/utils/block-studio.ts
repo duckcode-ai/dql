@@ -34,6 +34,64 @@ interface SemanticSelection {
   name: string;
 }
 
+export interface SemanticVisualFields {
+  metrics: string[];
+  dimensions: string[];
+  requestedFilters: string[];
+  timeDimension: string;
+  granularity: string;
+}
+
+export function parseSemanticVisualFields(content: string): SemanticVisualFields {
+  const scalar = (key: string) => content.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
+  const array = (key: string) => {
+    const match = content.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
+    return (match?.[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)).filter(Boolean);
+  };
+  const metrics = array('metrics');
+  const metric = scalar('metric');
+  return {
+    metrics: metrics.length > 0 ? metrics : metric ? [metric] : [],
+    dimensions: array('dimensions'),
+    requestedFilters: array('requested_filters'),
+    timeDimension: scalar('time_dimension'),
+    granularity: scalar('granularity'),
+  };
+}
+
+export function setSemanticMetrics(content: string, metrics: string[]): string {
+  let next = content.replace(/\n\s*metrics\s*=\s*\[[\s\S]*?\]/i, '').replace(/\n\s*metric\s*=\s*"[^"]*"/i, '');
+  const unique = Array.from(new Set(metrics.filter(Boolean)));
+  if (unique.length === 0) return next;
+  return insertVisualField(next, unique.length === 1
+    ? `  metric = "${escapeDqlValue(unique[0])}"`
+    : `  metrics = [${unique.map((metricName) => `"${escapeDqlValue(metricName)}"`).join(', ')}]`);
+}
+
+export function setSemanticArray(content: string, key: string, values: string[]): string {
+  const unique = Array.from(new Set(values.filter(Boolean)));
+  const rendered = `${key} = [${unique.map((value) => `"${escapeDqlValue(value)}"`).join(', ')}]`;
+  const field = new RegExp(`\\b${key}\\s*=\\s*\\[[\\s\\S]*?\\]`, 'i');
+  return field.test(content) ? content.replace(field, rendered) : insertVisualField(content, `  ${rendered}`);
+}
+
+export function setSemanticScalar(content: string, key: string, value: string): string {
+  const escaped = escapeDqlValue(value);
+  const field = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
+  return field.test(content) ? content.replace(field, `$1"${escaped}"`) : insertVisualField(content, `  ${key} = "${escaped}"`);
+}
+
+function escapeDqlValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function insertVisualField(content: string, field: string): string {
+  if (/visualization\s*\{/i.test(content)) {
+    return content.replace(/\n\s*visualization\s*\{/i, `\n${field}\n\n  visualization {`);
+  }
+  return content.replace(/\n\}\s*$/, `\n${field}\n}\n`);
+}
+
 export function parseDqlChartConfig(content: string): CellChartConfig | undefined {
   const vizMatch = content.match(/visualization\s*\{([^}]+)\}/is);
   if (!vizMatch) return undefined;
@@ -129,59 +187,68 @@ export function parseBlockFields(content: string): BlockFields | null {
 }
 
 export function setBlockStringField(content: string, key: string, value: string): string {
-  const parsed = parseBlockDocument(content);
-  if (!parsed) {
-    const escaped = value.replace(/"/g, '\\"');
-    const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
-    if (re.test(content)) {
-      return content.replace(re, `$1"${escaped}"`);
-    }
-    return insertBlockField(content, `  ${key} = "${escaped}"`);
-  }
-
-  const next = { ...parsed };
-  if (key === 'domain') next.domain = value;
-  if (key === 'owner') next.owner = value;
-  if (key === 'description') next.description = value;
-  if (key === 'type') next.blockType = value;
-  if (key === 'status') next.status = value;
-  return normalizeBlockDocument(next);
+  const escaped = value.replace(/"/g, '\\"');
+  const re = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
+  if (re.test(content)) return content.replace(re, `$1"${escaped}"`);
+  return insertBlockField(content, `  ${key} = "${escaped}"`);
 }
 
 export function setBlockName(content: string, value: string): string {
-  const parsed = parseBlockDocument(content);
-  if (!parsed) {
-    const escaped = value.replace(/"/g, '\\"');
-    return /^\s*block\s+"/i.test(content)
-      ? content.replace(/^(\s*block\s+)"[^"]+"/i, `$1"${escaped}"`)
-      : content;
-  }
-  return normalizeBlockDocument({ ...parsed, name: value });
+  const escaped = value.replace(/"/g, '\\"');
+  return /^\s*block\s+"/i.test(content)
+    ? content.replace(/^(\s*block\s+)"[^"]+"/i, `$1"${escaped}"`)
+    : content;
 }
 
 export function setBlockTags(content: string, tags: string[]): string {
-  const parsed = parseBlockDocument(content);
-  if (!parsed) {
-    const tagStr = tags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(', ');
-    const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
-    if (re.test(content)) {
-      return content.replace(re, `$1[${tagStr}]`);
-    }
-    return insertBlockField(content, `  tags = [${tagStr}]`);
-  }
-  return normalizeBlockDocument({ ...parsed, tags });
+  const tagStr = tags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(', ');
+  const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
+  if (re.test(content)) return content.replace(re, `$1[${tagStr}]`);
+  return insertBlockField(content, `  tags = [${tagStr}]`);
 }
 
 export function upsertVisualizationConfig(content: string, chartConfig: CellChartConfig): string {
-  const parsed = parseBlockDocument(content);
-  const visualization = buildVisualizationSection(chartConfig);
-  if (!parsed) {
-    if (/visualization\s*\{[\s\S]*?\n\s*\}/i.test(content)) {
-      return content.replace(/visualization\s*\{[\s\S]*?\n\s*\}/i, visualization);
-    }
+  const section = /visualization\s*\{[\s\S]*?\n\s*\}/i;
+  if (!section.test(content)) {
+    const visualization = buildVisualizationSection(chartConfig);
     return insertBlockField(content, `  ${visualization.replace(/\n/g, '\n  ')}`, true);
   }
-  return normalizeBlockDocument({ ...parsed, visualization });
+  return content.replace(section, (current) => {
+    let next = current;
+    for (const [key, value] of Object.entries(chartConfig)) {
+      if (value == null || value === '') continue;
+      const escaped = String(value).replace(/"/g, '\\"');
+      const field = new RegExp(`(\\b${key}\\s*=\\s*)"[^"]*"`, 'i');
+      if (field.test(next)) next = next.replace(field, `$1"${escaped}"`);
+      else next = next.replace(/\n(\s*)\}$/, `\n$1  ${key} = "${escaped}"\n$1}`);
+    }
+    return next;
+  });
+}
+
+export function getDqlSectionBody(content: string, sectionName: string): string {
+  const section = content.match(new RegExp(`\\b${sectionName}\\s*\\{([\\s\\S]*?)\\n\\s*\\}`, 'i'));
+  return section?.[1]
+    ?.split(/\r?\n/)
+    .map((line) => line.replace(/^\s{4}/, ''))
+    .join('\n')
+    .trim() ?? '';
+}
+
+export function setDqlSectionBody(content: string, sectionName: string, body: string): string {
+  const cleanBody = body.trim();
+  const rendered = cleanBody
+    ? `  ${sectionName} {\n${cleanBody.split(/\r?\n/).map((line) => `    ${line.trimEnd()}`).join('\n')}\n  }`
+    : '';
+  const section = new RegExp(`\\n\\s*${sectionName}\\s*\\{[\\s\\S]*?\\n\\s*\\}`, 'i');
+  if (section.test(content)) {
+    return content.replace(section, rendered ? `\n${rendered}` : '');
+  }
+  if (!rendered) return content;
+  if (/\n\s*visualization\s*\{/i.test(content)) {
+    return content.replace(/\n\s*visualization\s*\{/i, `\n${rendered}\n\n  visualization {`);
+  }
+  return insertBlockField(content, rendered, true);
 }
 
 export function buildSemanticRef(kind: 'metric' | 'dimension', name: string): string {

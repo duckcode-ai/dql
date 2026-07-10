@@ -376,6 +376,29 @@ describe('SemanticLayer', () => {
     expect(layer.listDomains()).toEqual(['revenue']);
     expect(layer.listTags()).toContain('finance');
   });
+
+  it('resolves dbt metrics with empty table fields through their input measures and intersects multi-metric compatibility', () => {
+    const layer = new SemanticLayer({
+      metrics: [
+        { name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'revenue', type: 'custom', table: '', typeParams: { measure: { name: 'revenue' } } },
+        { name: 'orders', label: 'Orders', description: '', domain: 'sales', sql: 'orders', type: 'custom', table: '', typeParams: { measure: { name: 'order_count' } } },
+      ],
+      dimensions: [
+        { name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'order_items' },
+        { name: 'customer_tier', label: 'Customer Tier', description: '', sql: 'tier', type: 'string', table: 'customers' },
+      ],
+      measures: [
+        { name: 'revenue', label: 'Revenue', description: '', agg: 'sum', table: 'order_items' },
+        { name: 'order_count', label: 'Orders', description: '', agg: 'count', table: 'order_items' },
+      ],
+      semanticModels: [
+        { name: 'order_items', label: 'Order Items', description: '', table: 'order_items', entities: [], measures: ['revenue', 'order_count'], dimensions: ['region'], timeDimensions: [] },
+      ],
+    });
+
+    expect(layer.listCompatibleDimensions(['revenue']).map((dimension) => dimension.name)).toEqual(['region']);
+    expect(layer.listCompatibleDimensions(['revenue', 'orders']).map((dimension) => dimension.name)).toEqual(['region']);
+  });
 });
 
 describe('parseMetricDefinition', () => {

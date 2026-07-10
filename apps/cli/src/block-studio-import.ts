@@ -150,6 +150,7 @@ export interface BlockStudioImportCandidate {
   llmContext?: string;
   evidence?: DqlGenerationEvidence[];
   draftSave?: BlockDraftSaveState;
+  analysisStatus?: 'queued' | 'retrieving' | 'reviewing' | 'previewing' | 'ready' | 'needs_attention';
 }
 
 export type DqlGenerationCandidate = BlockStudioImportCandidate & {
@@ -182,6 +183,7 @@ export interface BlockStudioImportSession extends BlockStudioImportManifest {
 
 export interface DqlGenerationSession extends Omit<BlockStudioImportSession, 'candidates'> {
   mode: 'ai-import';
+  persistence?: 'session-only' | 'draft-files';
   generation: {
     provider: string;
     aiEnabled: boolean;

@@ -113,6 +113,12 @@ interface UnifiedAgentRunPanelProps {
    * self-contained, ready-rendered query cell. Preferred over onInsertSql when set.
    */
   onInsertDql?: (payload: InsertDqlPayload) => void;
+  /**
+   * Optional host handoff for authoring surfaces. Fires once when a completed
+   * non-certified run produces a new DQL/SQL artifact, allowing the host to
+   * populate an unsaved editor without changing the agent engine or RunCard.
+   */
+  onArtifactReady?: (payload: InsertDqlPayload, run: AgentRun) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   /** Navigate into an app/dashboard (used by the "Added to app" success link). */
@@ -162,6 +168,7 @@ export function UnifiedAgentRunPanel({
   autoRun,
   onInsertSql,
   onInsertDql,
+  onArtifactReady,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -219,6 +226,8 @@ export function UnifiedAgentRunPanel({
   // re-subscribing when the callback identity changes each render.
   const onItemsChangeRef = useRef(onItemsChange);
   onItemsChangeRef.current = onItemsChange;
+  const onArtifactReadyRef = useRef(onArtifactReady);
+  onArtifactReadyRef.current = onArtifactReady;
   useEffect(() => {
     onItemsChangeRef.current?.(items);
   }, [items]);
@@ -253,6 +262,10 @@ export function UnifiedAgentRunPanel({
         { kind: 'run' as const, id: run.id, run },
       ];
     });
+    if (run.route !== 'certified_answer') {
+      const ready = artifactReadyPayloadFromRun(run);
+      if (ready) onArtifactReadyRef.current?.(ready, run);
+    }
   }, []);
 
   const recoverPendingRun = useCallback((pending: PendingAgentRun) => {
@@ -2268,6 +2281,31 @@ function answerDqlArtifactFromRun(run: AgentRun): AgentConversationDqlArtifact |
     if (researchArtifact) return researchArtifact;
   }
   return undefined;
+}
+
+export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | undefined {
+  if (run.route === 'certified_answer') return undefined;
+  const dqlArtifact = answerDqlArtifactFromRun(run);
+  const sql = answerSqlFromRun(run);
+  if ((!dqlArtifact?.source || dqlArtifact.sourcePath) && !sql) return undefined;
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const result = extractResult(payload);
+    if (result) {
+      return {
+        sql,
+        dqlArtifact,
+        result,
+        chartConfig: extractChartConfig(payload, result),
+        title: dqlArtifact?.name ?? artifact.title ?? run.question,
+      };
+    }
+  }
+  return {
+    sql,
+    dqlArtifact,
+    title: dqlArtifact?.name ?? run.question,
+  };
 }
 
 function evidenceChipStyle(t: Theme, certified: boolean): React.CSSProperties {

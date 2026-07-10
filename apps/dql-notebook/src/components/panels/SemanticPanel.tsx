@@ -4,7 +4,6 @@ import { api } from '../../api/client';
 import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type {
-  SemanticLayerState,
   SemanticLayerDiagnostics,
   SemanticObjectDetail,
   SemanticTreeNode,
@@ -15,7 +14,6 @@ import { MetricDetailPanel } from './MetricDetailPanel';
 import { SemanticSearchBar } from './SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from './SemanticTreeNode';
 import { SetupWizard } from '../modals/SetupWizard';
-import { detectChartType } from '../output/ChartOutput';
 
 function PanelSectionHeader({ label, count, t }: { label: string; count?: number; t: Theme }) {
   return (
@@ -205,328 +203,6 @@ function SemanticDiagnosticsCard({
   );
 }
 
-function GuidedBuilderPanel({
-  t,
-  semanticLayer,
-  onClose,
-  onSaved,
-}: {
-  t: Theme;
-  semanticLayer: SemanticLayerState;
-  onClose: () => void;
-  onSaved: (result: { path: string; content: string; companionPath: string }) => void;
-}) {
-  const [step, setStep] = useState(1);
-  const [name, setName] = useState('new_semantic_block');
-  const [domain, setDomain] = useState('');
-  const [description, setDescription] = useState('');
-  const [owner, setOwner] = useState('');
-  const [tags, setTags] = useState('');
-  const [chart, setChart] = useState('table');
-  const [blockType, setBlockType] = useState<'semantic' | 'custom'>('semantic');
-  const [metrics, setMetrics] = useState<string[]>([]);
-  const [dimensions, setDimensions] = useState<string[]>([]);
-  const [timeDimensionName, setTimeDimensionName] = useState('');
-  const [granularity, setGranularity] = useState('month');
-  const [preview, setPreview] = useState<{ sql: string; joins: string[]; tables: string[]; result: any } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loadingCompatibleDimensions, setLoadingCompatibleDimensions] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [compatibleDimensions, setCompatibleDimensions] = useState(semanticLayer.dimensions);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (metrics.length === 0) {
-      setCompatibleDimensions(semanticLayer.dimensions);
-      return;
-    }
-    setLoadingCompatibleDimensions(true);
-    void api.getCompatibleDimensions(metrics)
-      .then((dimensions) => {
-        if (!cancelled) {
-          setCompatibleDimensions(dimensions);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadingCompatibleDimensions(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [metrics, semanticLayer.dimensions]);
-
-  const timeDimensions = compatibleDimensions.filter((dimension) => dimension.type === 'date');
-  const categoricalDimensions = compatibleDimensions.filter((dimension) => dimension.type !== 'date');
-
-  const toggle = (value: string, values: string[], setValues: React.Dispatch<React.SetStateAction<string[]>>) => {
-    setValues((prev) => prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]);
-  };
-
-  const inputStyle: React.CSSProperties = {
-    width: '100%',
-    background: t.inputBg,
-    border: `1px solid ${t.inputBorder}`,
-    borderRadius: 6,
-    color: t.textPrimary,
-    fontSize: 12,
-    fontFamily: t.font,
-    padding: '7px 10px',
-    outline: 'none',
-    boxSizing: 'border-box',
-  };
-
-  const handlePreview = async () => {
-    if (metrics.length === 0) {
-      setError('Select at least one metric.');
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    const response = await api.previewSemanticBuilder({
-      metrics,
-      dimensions,
-      timeDimension: timeDimensionName ? { name: timeDimensionName, granularity } : undefined,
-    });
-    setLoading(false);
-    if ('error' in response) {
-      setError(response.error);
-      return;
-    }
-    setPreview(response);
-    // Auto-suggest chart type based on result shape
-    if (response.result && response.result.columns && response.result.rows) {
-      const suggested = detectChartType(response.result);
-      if (suggested !== 'table') {
-        setChart(suggested);
-      }
-    }
-    setStep(3);
-  };
-
-  const handleSave = async () => {
-    if (!name.trim()) {
-      setError('Block name is required.');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await api.saveSemanticBuilder({
-        name: name.trim(),
-        domain: domain.trim() || undefined,
-        description: description.trim() || undefined,
-        owner: owner.trim() || undefined,
-        tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
-        metrics,
-        dimensions,
-        timeDimension: timeDimensionName ? { name: timeDimensionName, granularity } : undefined,
-        chart,
-        blockType,
-      });
-      onSaved(result);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        inset: 0,
-        zIndex: 200,
-        background: `${t.sidebarBg}f4`,
-        display: 'flex',
-        flexDirection: 'column',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.font }}>Guided Block Builder</div>
-        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 16 }}>×</button>
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        {[1, 2, 3, 4].map((index) => (
-          <div
-            key={index}
-            style={{
-              flex: 1,
-              textAlign: 'center',
-              padding: '6px 0',
-              borderRadius: 6,
-              background: step === index ? `${t.accent}18` : t.pillBg,
-              color: step === index ? t.accent : t.textMuted,
-              fontSize: 10,
-              fontFamily: t.font,
-              fontWeight: 600,
-            }}
-          >
-            Step {index}
-          </div>
-        ))}
-      </div>
-
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px', display: 'grid', gap: 12 }}>
-        {step === 1 && (
-          <>
-            <PanelSectionHeader label="Choose Metrics" count={metrics.length} t={t} />
-            <div style={{ display: 'grid', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
-              {semanticLayer.metrics.map((metric) => (
-                <label key={metric.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: t.textPrimary, fontFamily: t.font }}>
-                  <input type="checkbox" checked={metrics.includes(metric.name)} onChange={() => toggle(metric.name, metrics, setMetrics)} />
-                  <span style={{ flex: 1 }}>{metric.label || metric.name}</span>
-                  <span style={{ color: t.textMuted, fontFamily: t.fontMono }}>{metric.domain || 'uncategorized'}</span>
-                </label>
-              ))}
-            </div>
-          </>
-        )}
-
-        {step === 2 && (
-          <>
-            <PanelSectionHeader label="Dimensions" count={dimensions.length} t={t} />
-            {loadingCompatibleDimensions && (
-              <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>Resolving compatible dimensions…</div>
-            )}
-            <div style={{ display: 'grid', gap: 4, maxHeight: 180, overflowY: 'auto' }}>
-              {categoricalDimensions.map((dimension) => (
-                <label key={dimension.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: t.textPrimary, fontFamily: t.font }}>
-                  <input type="checkbox" checked={dimensions.includes(dimension.name)} onChange={() => toggle(dimension.name, dimensions, setDimensions)} />
-                  <span style={{ flex: 1 }}>{dimension.label || dimension.name}</span>
-                  <span style={{ color: t.textMuted, fontFamily: t.fontMono }}>{dimension.table}</span>
-                </label>
-              ))}
-            </div>
-            <div style={{ display: 'grid', gap: 8 }}>
-              <div style={{ fontSize: 11, color: t.textSecondary, fontFamily: t.font }}>Time grain</div>
-              <select value={timeDimensionName} onChange={(event) => setTimeDimensionName(event.target.value)} style={inputStyle}>
-                <option value="">No time dimension</option>
-                {timeDimensions.map((dimension) => (
-                  <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
-                ))}
-              </select>
-              {timeDimensionName && (
-                <select value={granularity} onChange={(event) => setGranularity(event.target.value)} style={inputStyle}>
-                  <option value="day">day</option>
-                  <option value="week">week</option>
-                  <option value="month">month</option>
-                  <option value="quarter">quarter</option>
-                  <option value="year">year</option>
-                </select>
-              )}
-            </div>
-          </>
-        )}
-
-        {step === 3 && (
-          <>
-            <PanelSectionHeader label="Preview SQL" t={t} />
-            {preview && (
-              <>
-                <pre style={{ margin: 0, padding: '10px', background: t.editorBg, border: `1px solid ${t.cellBorder}`, borderRadius: 6, fontSize: 10, color: t.textSecondary, fontFamily: t.fontMono, whiteSpace: 'pre-wrap' }}>
-                  {preview.sql}
-                </pre>
-                <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-                  {preview.tables.length} table(s) · {preview.result.rowCount ?? preview.result.rows.length} row(s)
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {step === 4 && (
-          <>
-            <div style={{ display: 'grid', gap: 8 }}>
-              <input value={name} onChange={(event) => setName(event.target.value)} style={inputStyle} placeholder="Block name" />
-              <input value={domain} onChange={(event) => setDomain(event.target.value)} style={inputStyle} placeholder="Domain" />
-              <input value={description} onChange={(event) => setDescription(event.target.value)} style={inputStyle} placeholder="Description" />
-              <input value={owner} onChange={(event) => setOwner(event.target.value)} style={inputStyle} placeholder="Owner" />
-              <input value={tags} onChange={(event) => setTags(event.target.value)} style={inputStyle} placeholder="Tags (comma separated)" />
-              <div>
-                <select value={chart} onChange={(event) => setChart(event.target.value)} style={inputStyle}>
-                  <option value="table">table</option>
-                  <option value="bar">bar</option>
-                  <option value="line">line</option>
-                  <option value="scatter">scatter</option>
-                  <option value="pie">pie</option>
-                  <option value="area">area</option>
-                  <option value="kpi">kpi</option>
-                  <option value="heatmap">heatmap</option>
-                  <option value="funnel">funnel</option>
-                  <option value="gauge">gauge</option>
-                </select>
-                {preview?.result && chart !== 'table' && (
-                  <div style={{ fontSize: 10, color: t.accent, fontFamily: t.font, marginTop: 2 }}>
-                    Suggested based on result shape
-                  </div>
-                )}
-              </div>
-              <select value={blockType} onChange={(event) => setBlockType(event.target.value as 'semantic' | 'custom')} style={inputStyle}>
-                <option value="semantic">semantic block</option>
-                <option value="custom">custom block</option>
-              </select>
-            </div>
-          </>
-        )}
-
-        {error && <div style={{ color: t.error, fontSize: 11, fontFamily: t.font }}>{error}</div>}
-      </div>
-
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}` }}>
-        <button
-          onClick={() => setStep((value) => Math.max(1, value - 1))}
-          disabled={step === 1}
-          style={{ background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
-        >
-          Back
-        </button>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {step < 2 && (
-            <button
-              onClick={() => setStep(2)}
-              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
-            >
-              Next
-            </button>
-          )}
-          {step === 2 && (
-            <button
-              onClick={() => void handlePreview()}
-              disabled={loading}
-              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
-            >
-              {loading ? 'Previewing…' : 'Preview'}
-            </button>
-          )}
-          {step === 3 && (
-            <button
-              onClick={() => setStep(4)}
-              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
-            >
-              Continue
-            </button>
-          )}
-          {step === 4 && (
-            <button
-              onClick={() => void handleSave()}
-              disabled={saving}
-              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 12px' }}
-            >
-              {saving ? 'Saving…' : 'Save Block'}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 interface TreeFilters {
   query: string;
   provider: string;
@@ -613,7 +289,6 @@ export function SemanticPanel() {
   const [tree, setTree] = useState<SemanticTreeNode | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<SemanticObjectDetail | null>(null);
-  const [builderOpen, setBuilderOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
   const [domainFilter, setDomainFilter] = useState('');
@@ -885,35 +560,6 @@ export function SemanticPanel() {
 
   return (
     <PanelFrame title="Semantic Layer" bodyPadding={0}>
-      {builderOpen && (
-        <GuidedBuilderPanel
-          t={t}
-          semanticLayer={sl}
-          onClose={() => setBuilderOpen(false)}
-          onSaved={(result) => {
-            const file = {
-              name: result.path.split('/').pop() ?? result.path,
-              path: result.path,
-              type: 'block' as const,
-              folder: 'blocks',
-            };
-            if (!state.files.some((existing) => existing.path === result.path)) {
-              dispatch({
-                type: 'FILE_ADDED',
-                file,
-              });
-            }
-            void api.openBlockStudio(result.path).then((payload) => {
-              dispatch({
-                type: 'OPEN_BLOCK_STUDIO',
-                file,
-                payload,
-              });
-            });
-          }}
-        />
-      )}
-
       <div style={{ padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 6, borderBottom: `1px solid ${t.headerBorder}` }}>
         {sl.provider && (
           <span style={{ fontSize: 9, fontWeight: 600, color: t.accent, background: `${t.accent}18`, borderRadius: 4, padding: '1px 5px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
@@ -929,12 +575,6 @@ export function SemanticPanel() {
           style={{ background: t.accent, border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, fontWeight: 600, fontFamily: t.font, padding: '2px 8px' }}
         >
           Open Studio
-        </button>
-        <button
-          onClick={() => setBuilderOpen(true)}
-          style={{ background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4, color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '2px 8px' }}
-        >
-          Quick Build
         </button>
         <button
           onClick={() => { setSelectMode((v) => !v); if (selectMode) { setSelectedMetrics(new Set()); setSelectedDimensions(new Set()); } }}

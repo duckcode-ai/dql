@@ -832,6 +832,123 @@ LIMIT 5;
     expect(candidate.dqlSource).toContain('LIMIT ${top_n}');
   });
 
+  it('keeps session-only SQL analysis out of the blocks directory until explicit save', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-import-session-only-'));
+    tempDirs.push(projectRoot);
+
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'paste',
+      sourceKind: 'raw-sql',
+      sources: [{ path: 'pasted.sql', content: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region;' }],
+      domain: 'finance',
+      owner: 'analytics',
+      provider: 'none',
+      persistence: 'session-only',
+    });
+
+    expect(session.persistence).toBe('session-only');
+    expect(session.generation.createdDrafts).toBe(0);
+    expect(session.candidates[0].analysisStatus).toBe('ready');
+    expect(session.candidates[0].draftSave).toEqual({ status: 'pending' });
+    expect(session.candidates[0].savedPath).toBeUndefined();
+    expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
+    expect(existsSync(join(projectRoot, 'domains'))).toBe(false);
+  });
+
+  it('returns asynchronous candidate shells before bounded import analysis finishes', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-import-async-shell-'));
+    tempDirs.push(projectRoot);
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'paste',
+      sourceKind: 'raw-sql',
+      sources: [{ path: 'pasted.sql', content: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region;' }],
+      domain: 'finance',
+      owner: 'analytics',
+      provider: 'none',
+      persistence: 'session-only',
+      async: true,
+    });
+
+    expect(session.candidates[0].analysisStatus).toBe('queued');
+    expect(session.generation.createdDrafts).toBe(0);
+    const candidatePath = join(projectRoot, '.dql', 'imports', session.id, 'candidates', `${session.candidates[0].id}.json`);
+    let completed: any = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      completed = JSON.parse(readFileSync(candidatePath, 'utf-8'));
+      if (completed.analysisStatus === 'ready' || completed.analysisStatus === 'needs_attention') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(completed.analysisStatus).toBe('ready');
+    expect(completed.draftSave.status).toBe('pending');
+    expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
+  });
+
+  it('promotes a complete semantic match before retaining raw SQL', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-import-semantic-match-'));
+    tempDirs.push(projectRoot);
+    const semanticLayer = new SemanticLayer({
+      metrics: [{ name: 'total_revenue', label: 'Total Revenue', description: '', domain: 'finance', sql: 'SUM(revenue)', type: 'sum', table: 'orders' }],
+      dimensions: [{ name: 'region', label: 'Region', description: '', domain: 'finance', sql: 'region', type: 'string', table: 'orders' }],
+      hierarchies: [], segments: [], preAggregations: [], measures: [], entities: [], semanticModels: [], savedQueries: [],
+    });
+
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'paste',
+      sourceKind: 'raw-sql',
+      sources: [{ path: 'pasted.sql', content: 'SELECT region, SUM(revenue) AS total_revenue FROM orders GROUP BY region;' }],
+      domain: 'finance',
+      owner: 'analytics',
+      provider: 'none',
+      persistence: 'session-only',
+    }, semanticLayer);
+
+    expect(session.candidates[0].dqlSource).toContain('type = "semantic"');
+    expect(session.candidates[0].dqlSource).toContain('metric = "total_revenue"');
+    expect(session.candidates[0].dqlSource).toContain('dimensions = ["region"]');
+    expect(session.candidates[0].sql).toContain('SUM(revenue)');
+    expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
+  });
+
+  it('skips the LLM when deterministic fingerprints find a reusable governed block', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-import-certified-reuse-'));
+    tempDirs.push(projectRoot);
+    const sql = 'SELECT region, SUM(revenue) AS total_revenue FROM orders GROUP BY region';
+    saveBlockStudioArtifacts(projectRoot, {
+      source: `block "revenue_by_region" {
+  status = "certified"
+  domain = "finance"
+  type = "custom"
+  description = "Revenue by region"
+  owner = "analytics"
+  tags = ["revenue"]
+  query = """
+${sql}
+  """
+  visualization { chart = "bar" }
+}`,
+      name: 'revenue_by_region',
+      domain: 'finance',
+      owner: 'analytics',
+    });
+    saveProviderSettings(projectRoot, { id: 'openai', enabled: true, apiKey: 'sk-test-openai', model: 'gpt-test' });
+    const fetchMock = vi.fn(async () => { throw new Error('LLM should not be invoked for exact reuse'); });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const session = await createDqlGenerationSessionForProject(projectRoot, {
+      inputMode: 'paste',
+      sourceKind: 'raw-sql',
+      sources: [{ path: 'pasted.sql', content: sql }],
+      domain: 'finance',
+      owner: 'analytics',
+      provider: 'openai',
+      persistence: 'session-only',
+    });
+
+    expect(session.candidates[0].recommendedAction).toBe('reuse_existing');
+    expect(session.candidates[0].draftSave.status).toBe('skipped');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('preserves dynamic parameter metadata for enterprise certification', () => {
     const source = `
 block "Top Players" {

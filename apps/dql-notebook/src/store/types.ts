@@ -864,6 +864,7 @@ export interface BlockStudioImportCandidate {
     llmContext?: string;
     evidence?: DqlGenerationEvidence[];
     draftSave?: BlockDraftSaveState;
+    analysisStatus?: 'queued' | 'retrieving' | 'reviewing' | 'previewing' | 'ready' | 'needs_attention';
   }
 
 export interface DqlGenerationEvidence {
@@ -955,6 +956,7 @@ export interface BlockStudioImportSession {
 
 export interface DqlGenerationSession extends Omit<BlockStudioImportSession, 'candidates'> {
   mode: 'ai-import';
+  persistence?: 'session-only' | 'draft-files';
   generation: {
     provider: string;
     aiEnabled: boolean;
@@ -1183,6 +1185,7 @@ export type NotebookAction =
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
   | { type: 'TOGGLE_DASHBOARD_MODE' }
   | { type: 'OPEN_BLOCK_STUDIO'; file: NotebookFile; payload: BlockStudioOpenPayload }
+  | { type: 'START_NEW_BLOCK_WORKSPACE'; blockType?: 'custom' | 'semantic' }
   | { type: 'SET_BLOCK_STUDIO_DRAFT'; draft: string }
   | { type: 'SET_BLOCK_STUDIO_DIRTY'; dirty: boolean }
   | { type: 'SET_BLOCK_STUDIO_PREVIEW'; preview: BlockStudioPreview | null }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Plus, Sparkles } from 'lucide-react';
 import { PanelFrame, PanelEmpty, StatusPill } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -87,15 +87,27 @@ export function BlockLibraryPanel() {
   };
 
   const actions = (
-    <button
-      onClick={refresh}
-      style={{
-        background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4,
-        color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '3px 8px',
-      }}
-    >
-      Refresh
-    </button>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <button
+        onClick={() => dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' })}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          background: t.accent, border: `1px solid ${t.accent}`, borderRadius: 5,
+          color: '#fff', cursor: 'pointer', fontSize: 10, fontWeight: 700, fontFamily: t.font, padding: '4px 8px',
+        }}
+      >
+        <Plus size={11} strokeWidth={2.2} /> New block
+      </button>
+      <button
+        onClick={refresh}
+        style={{
+          background: 'transparent', border: `1px solid ${t.cellBorder}`, borderRadius: 4,
+          color: t.textSecondary, cursor: 'pointer', fontSize: 10, fontFamily: t.font, padding: '3px 8px',
+        }}
+      >
+        Refresh
+      </button>
+    </div>
   );
 
   const toolbar = (
@@ -125,6 +137,14 @@ export function BlockLibraryPanel() {
               ? 'Open the builder to create your first review-ready DQL block.'
               : 'No blocks match your search.'
           }
+          action={blocks.length === 0 ? (
+            <button
+              onClick={() => dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' })}
+              style={{ background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontWeight: 700, padding: '7px 11px' }}
+            >
+              Create block
+            </button>
+          ) : undefined}
         />
       ) : (
         <>

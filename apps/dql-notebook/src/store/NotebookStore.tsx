@@ -410,6 +410,25 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'OPEN_NEW_BLOCK_MODAL':
       return { ...state, newBlockModalOpen: true, newBlockModalDefaultType: action.blockType ?? 'custom' };
 
+    case 'START_NEW_BLOCK_WORKSPACE':
+      return {
+        ...state,
+        mainView: 'block_studio',
+        sidebarPanel: 'block_library',
+        sidebarOpen: true,
+        activeFile: null,
+        activeBlockPath: null,
+        blockStudioDraft: '',
+        blockStudioDirty: false,
+        blockStudioPreview: null,
+        blockStudioValidation: null,
+        blockStudioMetadata: null,
+        blockStudioImportOpen: false,
+        newBlockModalOpen: false,
+        newBlockModalDefaultType: action.blockType ?? 'custom',
+        notebookTitle: 'Blocks',
+      };
+
     case 'CLOSE_NEW_BLOCK_MODAL':
       return { ...state, newBlockModalOpen: false };
 

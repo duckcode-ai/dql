@@ -237,6 +237,7 @@ import {
   type BlockStudioImportSource,
   type BlockStudioImportSourceKind,
   type BlockStudioImportCandidate,
+  type BlockStudioImportSession,
   type DqlGenerationCandidate,
   type DqlGenerationEvidence,
   type DqlGenerationSession,
@@ -3116,6 +3117,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       owner: typeof body.owner === 'string' ? body.owner : undefined,
       tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
       provider: typeof body.provider === 'string' ? body.provider : undefined,
+      async: body.async === true,
+      persistence: body.persistence === 'session-only' || body.persistence === 'draft-files' ? body.persistence : undefined,
     }, semanticLayer);
   };
 
@@ -5951,6 +5954,129 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    const aiImportSaveSelectedMatch = path.match(/^\/api\/block-studio\/ai-imports\/([^/]+)\/save-selected$/);
+    if (req.method === 'POST' && aiImportSaveSelectedMatch) {
+      const importId = decodeURIComponent(aiImportSaveSelectedMatch[1]);
+      try {
+        const body = await readJSON(req);
+        const candidateIds: string[] = Array.from(new Set<string>(
+          Array.isArray(body.candidateIds) ? body.candidateIds.map((value: unknown) => String(value)) : [],
+        ));
+        const owner = typeof body.owner === 'string' ? body.owner.trim() : '';
+        if (candidateIds.length === 0 || !owner) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Select at least one candidate and provide an owner.' }));
+          return;
+        }
+
+        const results: Array<{
+          candidateId: string;
+          path?: string;
+          status: 'certified' | 'draft' | 'error';
+          blockers: string[];
+          candidate?: DqlGenerationCandidate;
+          block?: ReturnType<typeof openBlockStudioDocument>;
+          error?: string;
+        }> = [];
+
+        for (const candidateId of candidateIds) {
+          try {
+            let candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
+            if (candidate.reviewStatus === 'saved' && candidate.savedPath && existsSync(join(projectRoot, candidate.savedPath))) {
+              results.push({
+                candidateId,
+                path: candidate.savedPath,
+                status: 'certified',
+                blockers: [],
+                candidate: candidate as DqlGenerationCandidate,
+                block: openBlockStudioDocument(projectRoot, candidate.savedPath, semanticLayer),
+              });
+              continue;
+            }
+            if (candidate.recommendedAction === 'reuse_existing') {
+              results.push({
+                candidateId,
+                status: 'error',
+                blockers: ['An equivalent governed block already exists. Open and reuse it instead of saving a duplicate.'],
+                candidate: candidate as DqlGenerationCandidate,
+              });
+              continue;
+            }
+
+            candidate = updateBlockStudioImportCandidate(projectRoot, importId, candidateId, { owner });
+            const readiness = validateImportCandidateForSave(candidate);
+            const validationBlockers = readiness.errors;
+            if (validationBlockers.length === 0) {
+              const certifiedSource = setBlockStudioSourceStatus(readiness.candidate.dqlSource, 'certified');
+              const certification = await certifyBlockStudioSource(certifiedSource, readiness.candidate.savedPath, { enterprise: false });
+              const blockers = Array.from(new Set(certification.checklist.blockers));
+              if (certification.certification.certified && blockers.length === 0) {
+                const savedPath = saveBlockStudioArtifacts(projectRoot, {
+                  currentPath: readiness.candidate.savedPath,
+                  source: certifiedSource,
+                  name: readiness.candidate.name,
+                  domain: readiness.candidate.domain,
+                  description: readiness.candidate.description,
+                  owner,
+                  tags: readiness.candidate.tags,
+                  lineage: readiness.candidate.lineage.sourceTables,
+                  importMeta: { importId, candidateId, sourceKind: readiness.candidate.sourceKind, sourcePath: readiness.candidate.sourcePath },
+                });
+                const savedCandidate: DqlGenerationCandidate = {
+                  ...readiness.candidate,
+                  dqlSource: certifiedSource,
+                  reviewStatus: 'saved',
+                  savedPath,
+                  analysisStatus: 'ready',
+                  validation: validateBlockStudioSource(certifiedSource, semanticLayer),
+                  generationMode: readiness.candidate.generationMode ?? 'deterministic',
+                  generationProvider: readiness.candidate.generationProvider ?? 'local-deterministic',
+                  llmContext: readiness.candidate.llmContext ?? deterministicDqlGenerationContext(readiness.candidate, readiness.candidate.evidence ?? []),
+                  evidence: readiness.candidate.evidence ?? [],
+                  draftSave: { status: 'saved', path: savedPath, savedAt: new Date().toISOString() },
+                };
+                writeBlockStudioImportCandidate(projectRoot, importId, savedCandidate);
+                results.push({ candidateId, path: savedPath, status: 'certified', blockers: [], candidate: savedCandidate, block: openBlockStudioDocument(projectRoot, savedPath, semanticLayer) });
+                continue;
+              }
+              validationBlockers.push(...blockers);
+            }
+
+            const draftCandidate = saveDqlGenerationDraft(importId, {
+              ...readiness.candidate,
+              dqlSource: setBlockStudioSourceStatus(readiness.candidate.dqlSource, 'draft'),
+              analysisStatus: 'needs_attention',
+            });
+            writeBlockStudioImportCandidate(projectRoot, importId, draftCandidate);
+            results.push({
+              candidateId,
+              path: draftCandidate.savedPath,
+              status: 'draft',
+              blockers: Array.from(new Set(validationBlockers.length > 0 ? validationBlockers : ['Certification gates did not pass.'])),
+              candidate: draftCandidate,
+              block: draftCandidate.savedPath ? openBlockStudioDocument(projectRoot, draftCandidate.savedPath, semanticLayer) : undefined,
+            });
+          } catch (error) {
+            results.push({
+              candidateId,
+              status: 'error',
+              blockers: [],
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        await refreshLocalMetadataCatalog(projectRoot);
+        const nextSession = loadDqlGenerationSession(importId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: results.every((result) => result.status !== 'error'), session: nextSession, results }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     const aiImportPathMatch = path.match(/^\/api\/block-studio\/ai-imports\/([^/]+)(?:\/candidates\/([^/]+)(?:\/(preview|certify))?)?$/);
     if (aiImportPathMatch) {
       const importId = decodeURIComponent(aiImportPathMatch[1]);
@@ -5988,9 +6114,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             llmContext: typeof body.llmContext === 'string' ? body.llmContext : undefined,
           });
           const validated = validateImportCandidate(candidate);
-          const savedDraft = saveDqlGenerationDraft(importId, validated);
+          const savedDraft = validated.draftSave?.status === 'pending' && !isDraftBlockPath(validated.savedPath)
+            ? ({
+                ...validated,
+                analysisStatus: 'ready',
+                generationMode: validated.generationMode ?? 'deterministic',
+                generationProvider: validated.generationProvider ?? 'local-deterministic',
+                llmContext: validated.llmContext ?? deterministicDqlGenerationContext(validated, validated.evidence ?? []),
+                evidence: validated.evidence ?? [],
+                draftSave: { status: 'pending' as const },
+              } satisfies DqlGenerationCandidate)
+            : saveDqlGenerationDraft(importId, validated);
           writeBlockStudioImportCandidate(projectRoot, importId, savedDraft);
-          await refreshLocalMetadataCatalog(projectRoot);
+          if (savedDraft.draftSave.status === 'saved') await refreshLocalMetadataCatalog(projectRoot);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON(savedDraft));
           return;
@@ -5999,11 +6135,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (req.method === 'POST' && candidateId && action === 'preview') {
           const candidate = readBlockStudioImportCandidate(projectRoot, importId, candidateId);
           const preview = await runBlockStudioPreviewSource(candidate.dqlSource);
-          const next = saveDqlGenerationDraft(importId, {
+          const previewed = {
             ...candidate,
             preview,
+            analysisStatus: 'ready' as const,
             validation: validateBlockStudioSource(candidate.dqlSource, semanticLayer),
-          });
+          };
+          const next = candidate.draftSave?.status === 'pending' && !isDraftBlockPath(candidate.savedPath)
+            ? ({
+                ...previewed,
+                generationMode: candidate.generationMode ?? 'deterministic',
+                generationProvider: candidate.generationProvider ?? 'local-deterministic',
+                llmContext: candidate.llmContext ?? deterministicDqlGenerationContext(candidate, candidate.evidence ?? []),
+                evidence: candidate.evidence ?? [],
+                draftSave: { status: 'pending' as const },
+              } satisfies DqlGenerationCandidate)
+            : saveDqlGenerationDraft(importId, previewed);
           writeBlockStudioImportCandidate(projectRoot, importId, next);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON(next));
@@ -11579,6 +11726,8 @@ export interface CreateDqlGenerationSessionForProjectOptions {
   owner?: string;
   tags?: string[];
   provider?: string;
+  async?: boolean;
+  persistence?: 'session-only' | 'draft-files';
 }
 
 export interface CreateDqlArtifactGenerationSessionForProjectOptions {
@@ -11699,9 +11848,6 @@ export async function createDqlGenerationSessionForProject(
   options: CreateDqlGenerationSessionForProjectOptions,
   semanticLayer?: SemanticLayer,
 ): Promise<DqlGenerationSession> {
-  const deterministicOnly = isDeterministicDqlGenerationProvider(options.provider);
-  const requestedProvider = !deterministicOnly && isProviderSettingsId(options.provider) ? options.provider : undefined;
-  const provider = deterministicOnly ? null : await createBlockStudioAssistProvider(projectRoot, requestedProvider);
   const session = createBlockStudioImportSession(projectRoot, {
     inputPath: options.inputPath ?? '',
     inputMode: options.inputMode,
@@ -11712,20 +11858,95 @@ export async function createDqlGenerationSessionForProject(
     tags: options.tags,
   });
 
+  const persistence = options.persistence ?? 'draft-files';
+  if (options.async) {
+    const queuedCandidates: DqlGenerationCandidate[] = session.candidates.map((candidate) => ({
+      ...candidate,
+      analysisStatus: 'queued',
+      generationMode: 'deterministic',
+      generationProvider: 'pending',
+      llmContext: '',
+      evidence: [],
+      draftSave: { status: 'pending' },
+    }));
+    const queuedSession: DqlGenerationSession = {
+      ...session,
+      mode: 'ai-import',
+      persistence,
+      candidates: queuedCandidates,
+      generation: {
+        provider: 'pending',
+        aiEnabled: false,
+        contextObjectCount: 0,
+        createdDrafts: 0,
+        warnings: [],
+      },
+    };
+    writeBlockStudioImportSession(projectRoot, queuedSession);
+    void processDqlGenerationSessionForProject(projectRoot, session, { ...options, async: false, persistence }, semanticLayer)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        for (const candidate of queuedCandidates) {
+          const current = readBlockStudioImportCandidate(projectRoot, session.id, candidate.id);
+          if (current.analysisStatus === 'ready') continue;
+          writeBlockStudioImportCandidate(projectRoot, session.id, {
+            ...current,
+            analysisStatus: 'needs_attention',
+            warnings: Array.from(new Set([...(current.warnings ?? []), message])),
+          });
+        }
+      });
+    return queuedSession;
+  }
+
+  return processDqlGenerationSessionForProject(projectRoot, session, { ...options, persistence }, semanticLayer);
+}
+
+async function processDqlGenerationSessionForProject(
+  projectRoot: string,
+  session: BlockStudioImportSession,
+  options: CreateDqlGenerationSessionForProjectOptions,
+  semanticLayer?: SemanticLayer,
+): Promise<DqlGenerationSession> {
+  const deterministicOnly = isDeterministicDqlGenerationProvider(options.provider);
+  const requestedProvider = !deterministicOnly && isProviderSettingsId(options.provider) ? options.provider : undefined;
+  const provider = deterministicOnly ? null : await createBlockStudioAssistProvider(projectRoot, requestedProvider);
+  const persistence = options.persistence ?? 'draft-files';
+
   const warnings: string[] = [];
-  const nextCandidates: DqlGenerationCandidate[] = [];
-  let contextObjectCount = 0;
   for (const candidate of session.candidates) {
-    const contextPack = await buildDqlGenerationContextPack(projectRoot, candidate).catch((error) => {
-      warnings.push(`Context pack failed for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
-      return null;
+    writeBlockStudioImportCandidate(projectRoot, session.id, {
+      ...readBlockStudioImportCandidate(projectRoot, session.id, candidate.id),
+      analysisStatus: 'retrieving',
+      draftSave: { status: 'pending' },
     });
-    contextObjectCount += contextPack?.objects.length ?? 0;
+  }
+  const sharedContextPack = await buildDqlGenerationSessionContextPack(projectRoot, session.candidates).catch((error) => {
+    warnings.push(`Shared context pack failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  });
+  const contextObjectCount = sharedContextPack?.objects.length ?? 0;
+  const nextCandidates = await mapWithConcurrency(session.candidates, 3, async (candidate): Promise<DqlGenerationCandidate> => {
+    try {
+    const contextPack = sharedContextPack;
     const evidence = contextPack ? dqlGenerationEvidenceFromContext(contextPack, candidate) : deterministicDqlGenerationEvidence(candidate);
+    writeBlockStudioImportCandidate(projectRoot, session.id, {
+      ...readBlockStudioImportCandidate(projectRoot, session.id, candidate.id),
+      analysisStatus: 'reviewing',
+      evidence,
+    });
     let patch = deterministicDqlGenerationPatch(candidate, evidence);
     let generatorName = 'local-deterministic';
     let generationMode: 'ai' | 'deterministic' = 'deterministic';
-    if (provider) {
+    const deterministicSimilarity = buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
+    if (deterministicSimilarity.recommendedAction === 'reuse_existing') {
+      patch = {
+        ...patch,
+        similarityMatches: deterministicSimilarity.matches,
+        recommendedAction: 'reuse_existing',
+      };
+      generatorName = 'certified-reuse';
+    } else if (provider) {
       const aiPatch = await buildAiDqlGenerationPatch(provider, candidate, evidence, contextPack).catch((error) => {
         warnings.push(`AI generation fell back for ${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
         return null;
@@ -11736,7 +11957,9 @@ export async function createDqlGenerationSessionForProject(
         generationMode = 'ai';
       }
     }
-    const similarity = buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
+    const similarity = patch.recommendedAction === 'reuse_existing'
+      ? deterministicSimilarity
+      : buildDqlGenerationSimilarityMatches(candidate, patch, contextPack);
     patch = {
       ...patch,
       similarityMatches: similarity.matches,
@@ -11773,16 +11996,50 @@ export async function createDqlGenerationSessionForProject(
     });
     const validated: BlockStudioImportCandidate = {
       ...enriched,
+      dqlSource: buildSemanticImportCandidateSource(enriched, patch, semanticLayer) ?? enriched.dqlSource,
       validation: validateBlockStudioSource(enriched.dqlSource, semanticLayer),
+      analysisStatus: 'ready',
     };
-    const savedDraft = saveDqlGenerationDraftForProject(projectRoot, session.id, validated);
-    writeBlockStudioImportCandidate(projectRoot, session.id, savedDraft);
-    nextCandidates.push(savedDraft);
-  }
+    validated.validation = validateBlockStudioSource(validated.dqlSource, semanticLayer);
+    const result = persistence === 'draft-files'
+      ? saveDqlGenerationDraftForProject(projectRoot, session.id, validated)
+      : {
+          ...validated,
+          reviewStatus: validated.recommendedAction === 'reuse_existing' ? 'review' as const : 'draft' as const,
+          generationMode: validated.generationMode ?? 'deterministic' as const,
+          generationProvider: validated.generationProvider ?? 'local-deterministic',
+          llmContext: validated.llmContext ?? deterministicDqlGenerationContext(validated, validated.evidence ?? []),
+          evidence: validated.evidence ?? [],
+          draftSave: {
+            status: validated.recommendedAction === 'reuse_existing' ? 'skipped' as const : 'pending' as const,
+            reason: validated.recommendedAction === 'reuse_existing' ? 'Reuse an existing governed block; no draft file was created.' : undefined,
+          },
+        };
+    writeBlockStudioImportCandidate(projectRoot, session.id, result);
+    return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`${candidate.name}: ${message}`);
+      const current = readBlockStudioImportCandidate(projectRoot, session.id, candidate.id);
+      const failed: DqlGenerationCandidate = {
+        ...current,
+        analysisStatus: 'needs_attention',
+        warnings: Array.from(new Set([...(current.warnings ?? []), message])),
+        generationMode: current.generationMode ?? 'deterministic',
+        generationProvider: current.generationProvider ?? 'local-deterministic',
+        llmContext: current.llmContext ?? deterministicDqlGenerationContext(current, current.evidence ?? []),
+        evidence: current.evidence ?? deterministicDqlGenerationEvidence(current),
+        draftSave: current.draftSave ?? { status: 'pending' },
+      };
+      writeBlockStudioImportCandidate(projectRoot, session.id, failed);
+      return failed;
+    }
+  });
 
   const generationSession: DqlGenerationSession = {
     ...session,
     mode: 'ai-import',
+    persistence,
     candidates: nextCandidates,
     updatedAt: new Date().toISOString(),
     generation: {
@@ -11796,6 +12053,24 @@ export async function createDqlGenerationSessionForProject(
   writeBlockStudioImportSession(projectRoot, generationSession);
   if (generationSession.generation.createdDrafts > 0) await refreshLocalMetadataCatalog(projectRoot);
   return generationSession;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function saveDqlGenerationDraftForProject(
@@ -12447,6 +12722,47 @@ async function buildDqlGenerationContextPack(
   });
 }
 
+async function buildDqlGenerationSessionContextPack(
+  projectRoot: string,
+  candidates: BlockStudioImportCandidate[],
+): Promise<LocalContextPack> {
+  const tables = Array.from(new Set(candidates.flatMap((candidate) => candidate.lineage.sourceTables))).join(', ');
+  const question = [
+    `Analyze ${candidates.length} SQL import candidate${candidates.length === 1 ? '' : 's'} for governed DQL reuse or composition.`,
+    tables ? `Source tables: ${tables}.` : '',
+    ...candidates.slice(0, 20).map((candidate, index) => [
+      `Candidate ${index + 1}: ${candidate.name}`,
+      candidate.description,
+      candidate.sql.slice(0, 1000),
+    ].filter(Boolean).join('\n')),
+  ].filter(Boolean).join('\n\n');
+  return buildLocalContextPack(projectRoot, {
+    question,
+    mode: 'build',
+    surface: 'block-studio',
+    limit: 160,
+    objectTypes: [
+      'dql_block',
+      'dql_term',
+      'business_view',
+      'domain',
+      'semantic_metric',
+      'semantic_model',
+      'semantic_dimension',
+      'semantic_measure',
+      'dbt_model',
+      'dbt_source',
+      'dbt_column',
+      'warehouse_table',
+      'datalex_domain',
+      'datalex_entity',
+      'datalex_contract',
+      'datalex_term',
+    ],
+    strictness: 'balanced',
+  });
+}
+
 function dqlGenerationEvidenceFromContext(
   contextPack: LocalContextPack,
   candidate: BlockStudioImportCandidate,
@@ -12606,6 +12922,57 @@ function deterministicDqlGenerationPatch(
     sourceSystems,
     reviewCadence: 'monthly',
   };
+}
+
+function buildSemanticImportCandidateSource(
+  candidate: BlockStudioImportCandidate,
+  patch: DqlGenerationPatch,
+  semanticLayer?: SemanticLayer,
+): string | null {
+  if (!semanticLayer || candidate.recommendedAction === 'reuse_existing') return null;
+  const aggregateAliases = Array.from(candidate.sql.matchAll(/\b(?:sum|count|avg|min|max)\s*\([^)]*\)\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*)/gi))
+    .map((match) => match[1]);
+  if (aggregateAliases.length === 0) return null;
+
+  const metrics = semanticLayer.listMetrics();
+  const matchedMetrics = aggregateAliases.map((alias) => metrics.find((metric) => normalizedTerm(metric.name) === normalizedTerm(alias)));
+  if (matchedMetrics.some((metric) => !metric)) return null;
+  const metricNames = Array.from(new Set(matchedMetrics.map((metric) => metric!.name)));
+  const compatibleDimensions = semanticLayer.listCompatibleDimensions(metricNames);
+  const compatibleByName = new Map(compatibleDimensions.map((dimension) => [normalizedTerm(dimension.name), dimension]));
+  const groupFields = extractDqlGenerationGroupByFields(candidate.sql)
+    .map((field) => field.split('.').pop() ?? field)
+    .filter((field) => !/^\d+$/.test(field));
+  const matchedDimensions = groupFields.map((field) => compatibleByName.get(normalizedTerm(field)));
+  if (groupFields.length > 0 && matchedDimensions.some((dimension) => !dimension)) return null;
+
+  const dimensionNames = Array.from(new Set(matchedDimensions.map((dimension) => dimension!.name)));
+  const allowedFilters = (patch.allowedFilters ?? [])
+    .map((filter) => compatibleByName.get(normalizedTerm(filter))?.name)
+    .filter((filter): filter is string => Boolean(filter));
+  const quote = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const metricLine = metricNames.length === 1
+    ? `  metric = ${quote(metricNames[0])}`
+    : `  metrics = [${metricNames.map(quote).join(', ')}]`;
+  const lines = [
+    `block ${quote(candidate.name)} {`,
+    '  status = "draft"',
+    `  domain = ${quote(candidate.domain)}`,
+    '  type = "semantic"',
+    `  description = ${quote(candidate.description)}`,
+    `  owner = ${quote(candidate.owner)}`,
+    `  tags = [${candidate.tags.map(quote).join(', ')}]`,
+    metricLine,
+    dimensionNames.length > 0 ? `  dimensions = [${dimensionNames.map(quote).join(', ')}]` : '',
+    allowedFilters.length > 0 ? `  requested_filters = [${allowedFilters.map(quote).join(', ')}]` : '',
+    '',
+    '  visualization {',
+    `    chart = "${dimensionNames.length > 0 ? 'bar' : 'kpi'}"`,
+    '  }',
+    '}',
+    '',
+  ];
+  return lines.filter((line, index) => line !== '' || (index > 0 && lines[index - 1] !== '')).join('\n');
 }
 
 function inferDqlGenerationTerms(evidence: DqlGenerationEvidence[]): string[] {
