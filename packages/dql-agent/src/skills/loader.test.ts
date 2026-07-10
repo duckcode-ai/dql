@@ -82,10 +82,10 @@ describe('buildSkillsPrompt', () => {
     { id: 'shared', scope: 'project', preferredMetrics: ['arr'], preferredBlocks: ['revenue_total'], vocabulary: {}, body: 'Shared body', sourcePath: '' },
     { id: 'alice', scope: 'personal', user: 'alice@acme.com', preferredMetrics: [], preferredBlocks: [], vocabulary: { ARR: 'metric:arr' }, body: 'Alice body', sourcePath: '' },
   ];
-  it('filters to skills matching the active user (or unscoped)', () => {
+  it('excludes legacy personal guidance even for its former user', () => {
     const prompt = buildSkillsPrompt(skills, 'alice@acme.com');
     expect(prompt).toContain('Skill: shared');
-    expect(prompt).toContain('Skill: alice');
+    expect(prompt).not.toContain('Skill: alice');
   });
   it('hides user-scoped skills for other users', () => {
     const prompt = buildSkillsPrompt(skills, 'bob@acme.com');
@@ -138,7 +138,7 @@ describe('writeSkill / round-trip (spec 16)', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('round-trips through parseSkill (renderSkill ↔ parseSkill)', () => {
+  it('writes every new skill as shared project guidance', () => {
     const skill = writeSkill(root, {
       id: 'cxo-review',
       scope: 'personal',
@@ -149,8 +149,8 @@ describe('writeSkill / round-trip (spec 16)', () => {
       vocabulary: { ARR: 'metric:arr', 'logo churn': 'metric:logo_churn' },
       body: 'Body content.',
     });
-    expect(skill.scope).toBe('personal');
-    expect(skill.user).toBe('alice@acme.com');
+    expect(skill.scope).toBe('project');
+    expect(skill.user).toBeUndefined();
     expect(skill.preferredMetrics).toEqual(['arr', 'nrr']);
     expect(skill.vocabulary).toEqual({ ARR: 'metric:arr', 'logo churn': 'metric:logo_churn' });
     expect(skill.body).toBe('Body content.');
@@ -159,8 +159,7 @@ describe('writeSkill / round-trip (spec 16)', () => {
     const reparsed = parseSkill(renderSkill(skill), skill.sourcePath);
     expect(reparsed).toMatchObject({
       id: 'cxo-review',
-      scope: 'personal',
-      user: 'alice@acme.com',
+      scope: 'project',
       preferredMetrics: ['arr', 'nrr'],
       preferredBlocks: ['revenue_total'],
       vocabulary: { ARR: 'metric:arr', 'logo churn': 'metric:logo_churn' },
@@ -185,14 +184,28 @@ describe('writeSkill / round-trip (spec 16)', () => {
     expect(renderSkill(noDomain)).not.toContain('domain:');
   });
 
-  it('project skills omit user; personal skills bind to a user', () => {
+  it('stores structured leaf-domain modules in a Git-friendly nested path', () => {
+    const skill = writeSkill(root, {
+      id: 'recognized-revenue-policy', scope: 'project', domain: 'Revenue', domains: ['Finance/Revenue'],
+      kind: 'metric_policy', status: 'draft', owner: 'finance-analytics', triggers: ['recognized revenue'],
+      exclusions: ['bookings'], preferredMetrics: ['recognized_revenue'], preferredDimensions: ['region'],
+      requiredFilters: ['date_range'], clarifyWhen: ['When currency is not specified'], examples: ['Recognized revenue by region'],
+      sourceRefs: ['metric:recognized_revenue'], body: 'Exclude bookings and use recognized revenue.',
+    });
+    expect(skill.sourcePath.replace(/\\/g, '/')).toContain('.dql/skills/finance/revenue/recognized-revenue-policy.skill.md');
+    expect(skill).toMatchObject({ kind: 'metric_policy', status: 'draft', preferredDimensions: ['region'], requiredFilters: ['date_range'] });
+    expect(renderSkill(skill)).toContain('clarify_when:');
+  });
+
+  it('omits personal user fields from newly written skills', () => {
     const project = writeSkill(root, { id: 'house-rules', scope: 'project', body: 'Shared.' });
     expect(project.scope).toBe('project');
     expect(project.user).toBeUndefined();
     expect(renderSkill(project)).not.toContain('user:');
 
-    const personal = writeSkill(root, { id: 'mine', scope: 'personal', user: 'bob@acme.com', body: 'Mine.' });
-    expect(renderSkill(personal)).toContain('user: bob@acme.com');
+    const requestedPersonal = writeSkill(root, { id: 'mine', scope: 'personal', user: 'bob@acme.com', body: 'Mine.' });
+    expect(requestedPersonal.scope).toBe('project');
+    expect(renderSkill(requestedPersonal)).not.toContain('user:');
   });
 
   it('deleteSkill removes the file', () => {
@@ -228,15 +241,13 @@ describe('selectRelevantSkills (spec 16)', () => {
     expect(ids).not.toContain('ops-glossary');
   });
 
-  it('respects personal scope — other users do not see a personal skill', () => {
+  it('keeps legacy personal skills out of shared agent selection', () => {
     const personal: Skill = {
       id: 'alice-arr', scope: 'personal', user: 'alice@acme.com', description: 'arr',
       preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'arr revenue', sourcePath: '',
     };
     const forAlice = selectRelevantSkills([personal], 'arr revenue', { userId: 'alice@acme.com' });
-    expect(forAlice.map((s) => s.id)).toContain('alice-arr');
-    const forBob = selectRelevantSkills([personal], 'arr revenue', { userId: 'bob@acme.com' });
-    expect(forBob.map((s) => s.id)).not.toContain('alice-arr');
+    expect(forAlice.map((s) => s.id)).not.toContain('alice-arr');
   });
 
   it('uses inferred domains to select the matching domain skill', () => {
@@ -250,5 +261,13 @@ describe('selectRelevantSkills (spec 16)', () => {
     };
     const selected = selectRelevantSkills([sales, finance], 'monthly executive scorecard', { domains: ['Finance'] });
     expect(selected[0]?.id).toBe('finance-review');
+  });
+
+  it('does not inject a draft skill until the user activates it', () => {
+    const draft: Skill = {
+      id: 'draft-revenue', scope: 'project', status: 'draft', domain: 'Revenue',
+      preferredMetrics: ['recognized_revenue'], preferredBlocks: [], vocabulary: {}, body: 'Use recognized revenue.', sourcePath: '',
+    };
+    expect(selectRelevantSkills([draft], 'revenue', { domains: ['Revenue'] })).toEqual([]);
   });
 });

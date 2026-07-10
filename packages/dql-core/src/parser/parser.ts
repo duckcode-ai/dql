@@ -812,6 +812,7 @@ export class Parser {
     this.expect(TokenType.LeftBrace);
 
     let owner: string | undefined;
+    let parent: string | undefined;
     let businessOwner: string | undefined;
     let boundedContext: string | undefined;
     let sourceSystems: string[] | undefined;
@@ -820,6 +821,13 @@ export class Parser {
     let tags: string[] | undefined;
     let businessOutcome: string | undefined;
     let description: string | undefined;
+    let inScope: string[] | undefined;
+    let outOfScope: string[] | undefined;
+    let dbtGroups: string[] | undefined;
+    let dbtPaths: string[] | undefined;
+    let dbtTags: string[] | undefined;
+    let semanticDomains: string[] | undefined;
+    let semanticTags: string[] | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.OwnerKeyword)) {
@@ -836,16 +844,26 @@ export class Parser {
         tags = this.parseStringArrayValues();
       } else if (
         this.check(TokenType.Identifier)
-        && (this.current().value === 'businessOwner'
+        && (this.current().value === 'parent'
+          || this.current().value === 'businessOwner'
           || this.current().value === 'boundedContext'
           || this.current().value === 'sourceSystems'
           || this.current().value === 'primaryTerms'
           || this.current().value === 'reviewCadence'
-          || this.current().value === 'businessOutcome')
+          || this.current().value === 'businessOutcome'
+          || this.current().value === 'inScope'
+          || this.current().value === 'outOfScope'
+          || this.current().value === 'dbtGroups'
+          || this.current().value === 'dbtPaths'
+          || this.current().value === 'dbtTags'
+          || this.current().value === 'semanticDomains'
+          || this.current().value === 'semanticTags')
       ) {
         const keyToken = this.advance();
         this.expect(TokenType.Equals);
-        if (keyToken.value === 'businessOwner') {
+        if (keyToken.value === 'parent') {
+          parent = this.expect(TokenType.StringLiteral).value;
+        } else if (keyToken.value === 'businessOwner') {
           businessOwner = this.expect(TokenType.StringLiteral).value;
         } else if (keyToken.value === 'boundedContext') {
           boundedContext = this.expectStringLike().value;
@@ -857,6 +875,20 @@ export class Parser {
           reviewCadence = this.expect(TokenType.StringLiteral).value;
         } else if (keyToken.value === 'businessOutcome') {
           businessOutcome = this.expect(TokenType.StringLiteral).value;
+        } else if (keyToken.value === 'inScope') {
+          inScope = this.parseStringArrayValues();
+        } else if (keyToken.value === 'outOfScope') {
+          outOfScope = this.parseStringArrayValues();
+        } else if (keyToken.value === 'dbtGroups') {
+          dbtGroups = this.parseStringArrayValues();
+        } else if (keyToken.value === 'dbtPaths') {
+          dbtPaths = this.parseStringArrayValues();
+        } else if (keyToken.value === 'dbtTags') {
+          dbtTags = this.parseStringArrayValues();
+        } else if (keyToken.value === 'semanticDomains') {
+          semanticDomains = this.parseStringArrayValues();
+        } else if (keyToken.value === 'semanticTags') {
+          semanticTags = this.parseStringArrayValues();
         }
       } else if (this.check(TokenType.RightBrace)) {
         break;
@@ -873,6 +905,7 @@ export class Parser {
     return {
       kind: NodeKind.DomainDecl,
       name: nameToken.value,
+      parent,
       owner,
       businessOwner,
       boundedContext,
@@ -882,6 +915,13 @@ export class Parser {
       tags,
       businessOutcome,
       description,
+      inScope,
+      outOfScope,
+      dbtGroups,
+      dbtPaths,
+      dbtTags,
+      semanticDomains,
+      semanticTags,
       decorators,
       span: this.makeSpan(start, this.previousSpan()),
     };

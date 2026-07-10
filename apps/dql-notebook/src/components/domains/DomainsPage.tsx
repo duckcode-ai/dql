@@ -26,8 +26,9 @@ import {
   Tags,
   UserRound,
   Layers,
+  Sparkles,
 } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, type ContextBootstrapSession } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Domain } from '../../store/types';
@@ -65,6 +66,11 @@ export function DomainsPage(): JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<Domain | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [bootstrap, setBootstrap] = useState<ContextBootstrapSession | null>(null);
+  const [bootstrapLoading, setBootstrapLoading] = useState(false);
+  const [bootstrapSaving, setBootstrapSaving] = useState(false);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrapSelected, setBootstrapSelected] = useState<string[]>([]);
 
   const load = useCallback(() => {
     let cancelled = false;
@@ -123,6 +129,55 @@ export function DomainsPage(): JSX.Element {
     }
   }, [pendingDelete]);
 
+  const startBootstrap = useCallback(async () => {
+    setBootstrapLoading(true);
+    setBootstrapError(null);
+    try {
+      const session = await api.startContextBootstrap({ ai: true });
+      setBootstrap(session);
+      setBootstrapSelected(session.candidates.filter((candidate) => candidate.action !== 'unchanged').map((candidate) => candidate.id));
+    } catch (error) {
+      setBootstrapError(error instanceof Error ? error.message : 'Could not draft repository context.');
+    } finally {
+      setBootstrapLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!bootstrap || ['ready', 'needs_attention'].includes(bootstrap.status)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const next = await api.getContextBootstrap(bootstrap.id);
+        if (!cancelled) setBootstrap(next);
+      } catch (error) {
+        if (!cancelled) setBootstrapError(error instanceof Error ? error.message : 'Could not update AI draft progress.');
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 750);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [bootstrap?.id, bootstrap?.status]);
+
+  const saveBootstrap = useCallback(async () => {
+    if (!bootstrap || bootstrapSelected.length === 0) return;
+    setBootstrapSaving(true);
+    setBootstrapError(null);
+    try {
+      await api.saveContextBootstrapSelected(bootstrap.id, bootstrapSelected);
+      setBootstrap(null);
+      setBootstrapSelected([]);
+      load();
+    } catch (error) {
+      setBootstrapError(error instanceof Error ? error.message : 'Could not save selected drafts.');
+    } finally {
+      setBootstrapSaving(false);
+    }
+  }, [bootstrap, bootstrapSelected, load]);
+
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg }}>
       <div style={{ maxWidth: 980, margin: '0 auto', padding: '22px 28px 40px' }}>
@@ -141,6 +196,9 @@ export function DomainsPage(): JSX.Element {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             <button type="button" onClick={() => load()} title="Refresh" style={ghostButton(t)}>
               <RefreshCw size={13} strokeWidth={2} /> Refresh
+            </button>
+            <button type="button" onClick={() => void startBootstrap()} disabled={bootstrapLoading} style={ghostButton(t)}>
+              {bootstrapLoading ? <Loader2 size={13} strokeWidth={2} /> : <Sparkles size={13} strokeWidth={2} />} Draft with AI
             </button>
             <button type="button" onClick={() => setForm({ kind: 'create' })} style={primaryButton(t)}>
               <Plus size={14} strokeWidth={2.2} /> Add domain
@@ -173,6 +231,32 @@ export function DomainsPage(): JSX.Element {
             ))}
           </div>
         )}
+
+        {bootstrapError ? <div style={{ marginTop: 12 }}><InlineNote t={t} tone="error">{bootstrapError}</InlineNote></div> : null}
+        {bootstrap ? (
+          <section style={{ marginTop: 18, border: `1px solid ${t.cellBorder}`, borderRadius: 10, background: t.cellBg, padding: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 750, color: t.textPrimary }}>Repository-guided AI draft</div>
+                <div style={{ fontSize: 12, color: t.textMuted, marginTop: 3 }}>Inventory is deterministic; AI may enrich only grounded prose and guidance. Nothing is written to Git until you save.</div>
+              </div>
+              <button type="button" disabled={bootstrapSaving || bootstrapSelected.length === 0 || !['ready', 'needs_attention'].includes(bootstrap.status)} onClick={() => void saveBootstrap()} style={{ ...primaryButton(t), opacity: bootstrapSaving || bootstrapSelected.length === 0 || !['ready', 'needs_attention'].includes(bootstrap.status) ? 0.55 : 1 }}>
+                {bootstrapSaving ? <Loader2 size={13} strokeWidth={2} /> : <Plus size={13} strokeWidth={2} />} Save selected drafts
+              </button>
+            </div>
+            <BootstrapProgress t={t} session={bootstrap} />
+            <div style={{ display: 'grid', gap: 7, marginTop: 12 }}>
+              {bootstrap.candidates.map((candidate) => {
+                const selectable = candidate.action !== 'unchanged';
+                const selected = bootstrapSelected.includes(candidate.id);
+                return <label key={candidate.id} style={{ display: 'flex', gap: 9, alignItems: 'flex-start', fontSize: 12.5, color: t.textSecondary, opacity: selectable ? 1 : 0.65 }}>
+                  <input type="checkbox" disabled={!selectable || bootstrapSaving} checked={selected} onChange={() => setBootstrapSelected((current) => selected ? current.filter((id) => id !== candidate.id) : [...current, candidate.id])} />
+                  <span><strong style={{ color: t.textPrimary }}>{candidate.kind === 'domain' ? 'Domain' : 'Skill'} · {candidate.id.replace(/^(domain|skill):/, '')}</strong> · {candidate.action} · {Math.round(candidate.confidence * 100)}%<br /><span style={{ color: t.textMuted }}>{candidate.evidence.join(' · ')}</span>{candidate.notes?.length ? <><br /><span style={{ color: t.accent }}>{candidate.notes.join(' ')}</span></> : null}</span>
+                </label>;
+              })}
+            </div>
+          </section>
+        ) : null}
       </div>
 
       {/* Add / Edit drawer */}
@@ -180,6 +264,7 @@ export function DomainsPage(): JSX.Element {
         <DomainFormDrawer
           mode={form}
           existingIds={domains.map((d) => d.id)}
+          domains={domains}
           t={t}
           onClose={() => setForm(null)}
           onSaved={handleSaved}
@@ -232,6 +317,7 @@ function DomainRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13.5, fontWeight: 750, color: t.textPrimary }}>{domain.name}</span>
+          {domain.parent ? <span style={contextBadge(t)}>↳ {domain.parent}</span> : null}
           {domain.owner ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: t.textMuted }}>
               <UserRound size={11} strokeWidth={2} /> {domain.owner}
@@ -278,12 +364,14 @@ function DomainRow({
 function DomainFormDrawer({
   mode,
   existingIds,
+  domains,
   t,
   onClose,
   onSaved,
 }: {
   mode: FormMode;
   existingIds: string[];
+  domains: Domain[];
   t: Theme;
   onClose: () => void;
   onSaved: (domain: Domain) => void;
@@ -317,9 +405,20 @@ function DomainFormDrawer({
       id: draft.id.trim(),
       name: draft.name.trim(),
       owner: draft.owner?.trim() ? draft.owner.trim() : undefined,
+      businessOwner: draft.businessOwner?.trim() ? draft.businessOwner.trim() : undefined,
+      parent: draft.parent?.trim() ? draft.parent.trim() : undefined,
       boundedContext: draft.boundedContext?.trim() ? draft.boundedContext.trim() : undefined,
       description: draft.description?.trim() ? draft.description.trim() : undefined,
       sourceSystems: (draft.sourceSystems ?? []).map((s) => s.trim()).filter(Boolean),
+      primaryTerms: (draft.primaryTerms ?? []).map((s) => s.trim()).filter(Boolean),
+      tags: (draft.tags ?? []).map((s) => s.trim()).filter(Boolean),
+      inScope: (draft.inScope ?? []).map((s) => s.trim()).filter(Boolean),
+      outOfScope: (draft.outOfScope ?? []).map((s) => s.trim()).filter(Boolean),
+      dbtGroups: (draft.dbtGroups ?? []).map((s) => s.trim()).filter(Boolean),
+      dbtPaths: (draft.dbtPaths ?? []).map((s) => s.trim()).filter(Boolean),
+      dbtTags: (draft.dbtTags ?? []).map((s) => s.trim()).filter(Boolean),
+      semanticDomains: (draft.semanticDomains ?? []).map((s) => s.trim()).filter(Boolean),
+      semanticTags: (draft.semanticTags ?? []).map((s) => s.trim()).filter(Boolean),
     };
     setSaving(true);
     setError(null);
@@ -376,6 +475,15 @@ function DomainFormDrawer({
             {idCollision ? <InlineNote t={t} tone="error">A domain with this id already exists.</InlineNote> : null}
           </Field>
 
+          <Field label="Parent domain" t={t} hint="Optional. Depth becomes Domain, Subdomain, Microdomain, and beyond.">
+            <select value={draft.parent ?? ''} onChange={(e) => set('parent', e.target.value || undefined)} style={inputStyle(t)}>
+              <option value="">Top-level domain</option>
+              {domains.filter((domain) => domain.id !== draft.id).map((domain) => (
+                <option key={domain.id} value={domain.id}>{domain.name}</option>
+              ))}
+            </select>
+          </Field>
+
           {/* Owner */}
           <Field label="Owner" t={t} hint="The team or person accountable for this domain.">
             <input
@@ -385,6 +493,10 @@ function DomainFormDrawer({
               placeholder="finance-analytics"
               style={inputStyle(t)}
             />
+          </Field>
+
+          <Field label="Business owner" t={t} hint="The stakeholder accountable for business use and definitions.">
+            <input type="text" value={draft.businessOwner ?? ''} onChange={(e) => set('businessOwner', e.target.value)} placeholder="Revenue Operations" style={inputStyle(t)} />
           </Field>
 
           {/* Bounded context */}
@@ -406,6 +518,14 @@ function DomainFormDrawer({
               onChange={(next) => set('sourceSystems', next)}
               placeholder="Add a source system…"
             />
+          </Field>
+
+          <Field label="Primary terms" t={t} hint="Business concepts the agent should use to recognize this domain.">
+            <TagInput t={t} values={draft.primaryTerms ?? []} onChange={(next) => set('primaryTerms', next)} placeholder="Add a term…" />
+          </Field>
+
+          <Field label="Scope tags" t={t} hint="Short labels used for routing and discovery.">
+            <TagInput t={t} values={draft.tags ?? []} onChange={(next) => set('tags', next)} placeholder="Add a tag…" />
           </Field>
 
           {/* Description */}
@@ -556,6 +676,31 @@ function ErrorPanel({ t, message, onRetry }: { t: Theme; message: string; onRetr
           <RefreshCw size={13} strokeWidth={2} /> Retry
         </button>
       </div>
+    </div>
+  );
+}
+
+function BootstrapProgress({ t, session }: { t: Theme; session: ContextBootstrapSession }): JSX.Element {
+  const active = !['ready', 'needs_attention'].includes(session.status);
+  const mode = session.ai.mode === 'evidence_only'
+    ? 'Evidence-only'
+    : session.ai.provider
+      ? `${session.ai.provider} grounded`
+      : 'Preparing AI';
+  return (
+    <div style={{ marginTop: 14, padding: '10px 11px', borderRadius: 8, background: t.appBg, border: `1px solid ${t.btnBorder}` }}>
+      <div style={{ display: 'flex', gap: 9, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: t.textSecondary }}>
+        {active ? <Loader2 size={14} strokeWidth={2} color={t.accent} /> : <Sparkles size={14} strokeWidth={2} color={t.accent} />}
+        <strong style={{ color: t.textPrimary, textTransform: 'capitalize' }}>{session.status.replace('_', ' ')}</strong>
+        <span>{mode}</span>
+        <span>{session.progress.domains.ready}/{session.progress.domains.total} domains</span>
+        <span>{session.progress.skills.ready}/{session.progress.skills.total} skills</span>
+      </div>
+      <div style={{ height: 5, borderRadius: 999, background: t.btnBg, overflow: 'hidden', marginTop: 9 }}>
+        <div style={{ width: `${Math.max(3, Math.min(100, session.progress.percent))}%`, height: '100%', background: t.accent, transition: 'width 260ms ease' }} />
+      </div>
+      <div style={{ marginTop: 7, fontSize: 11.5, color: t.textMuted, lineHeight: 1.45 }}>{session.progress.message}</div>
+      {session.warnings?.length ? <div style={{ marginTop: 7, fontSize: 11.5, color: t.warning, lineHeight: 1.45 }}>{session.warnings.slice(-2).join(' ')}</div> : null}
     </div>
   );
 }

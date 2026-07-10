@@ -71,6 +71,13 @@ describe('matchSemanticMetric (spec 17, part C)', () => {
     metric('order_count', 'Number of orders placed'),
   ];
 
+  it('finds a governed metric beyond the first 400 entries in an enterprise catalog', async () => {
+    const enterpriseMetrics = Array.from({ length: 7_000 }, (_, index) => metric(`metric_${index}`));
+    enterpriseMetrics[6_789] = metric('recognized_partner_revenue', 'Recognized partner revenue after refunds.');
+    const match = await matchSemanticMetric('recognized partner revenue', enterpriseMetrics);
+    expect(match?.metric.name).toBe('recognized_partner_revenue');
+  });
+
   it('connects "total revenue" to a revenue-family metric (the reported miss)', async () => {
     const match = await matchSemanticMetric('what is our total revenue', jaffleMetrics);
     expect(match).not.toBeNull();

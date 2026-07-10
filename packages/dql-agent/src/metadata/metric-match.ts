@@ -141,6 +141,24 @@ function familiesFor(words: Iterable<string>, familyMap: Record<string, string[]
   return families;
 }
 
+function buildFamilyLookup(familyMap: Record<string, string[]>): Map<string, string[]> {
+  const lookup = new Map<string, string[]>();
+  for (const [family, members] of Object.entries(familyMap)) {
+    for (const member of members) {
+      const current = lookup.get(member) ?? [];
+      if (!current.includes(family)) current.push(family);
+      lookup.set(member, current);
+    }
+  }
+  return lookup;
+}
+
+function familiesForWithLookup(words: Iterable<string>, lookup: Map<string, string[]>): Set<string> {
+  const result = new Set<string>();
+  for (const word of words) for (const family of lookup.get(word) ?? []) result.add(family);
+  return result;
+}
+
 /** Searchable text for a metric KG node: name, synonyms, label, description, tags. */
 function metricSearchText(metric: KGNode): string {
   return [
@@ -239,6 +257,7 @@ export async function matchSemanticMetric(
   // Build the family map from THIS project's metric pool so the warehouse's own
   // measure vocabulary self-registers as families (see buildMeasureFamilies).
   const familyMap = buildMeasureFamilies(candidates);
+  const familyLookup = buildFamilyLookup(familyMap);
   // Score the measure signal against the planner's isolated measure terms when
   // available; otherwise fall back to all content tokens (bare callers). This is
   // what keeps "region tax by product" scoring `tax_amount`, not `product_count`.
@@ -246,7 +265,7 @@ export async function matchSemanticMetric(
     .flatMap((term) => contentTokens(term));
   const qContent = new Set(measureSignal.length > 0 ? measureSignal : contentTokens(question));
   if (qContent.size === 0) return null;
-  const qFamilies = familiesFor(qContent, familyMap);
+  const qFamilies = familiesForWithLookup(qContent, familyLookup);
 
   // A measure question must carry at least one content word OR a measure family;
   // a bare "what is this" carries neither and should not match a metric.
@@ -261,7 +280,7 @@ export async function matchSemanticMetric(
     const nameTokens = new Set(tokenize(metric.name.replace(/[_.]+/g, ' ')));
     // Family is derived from the metric's name/label only (not its `table:`), so a
     // measure is never mis-assigned to the family of the relation it sits on.
-    const metricFams = familiesFor(contentTokens(metricFamilyText(metric)), familyMap);
+    const metricFams = familiesForWithLookup(contentTokens(metricFamilyText(metric)), familyLookup);
 
     let overlap = 0;
     let nameHit = 0;
@@ -309,11 +328,21 @@ export async function matchSemanticMetric(
     return { metric, text: metricSearchText(metric), ftsScore: fts, family: sharedFamily, grounded, basis };
   });
 
-  const hasLexicalSignal = items.some((entry) => entry.ftsScore > 0);
+  // Never embed an entire enterprise metric catalog. The deterministic pass
+  // above examines every metric for correctness, then hands only the strongest
+  // grounded candidates to the expensive hybrid ranker. This removes the old
+  // 400-row correctness cap without replacing it with a 7,000-vector latency
+  // cliff.
+  const rankedCandidates = items
+    .filter((entry) => entry.grounded || entry.ftsScore > 0)
+    .sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name))
+    .slice(0, 96);
+  if (rankedCandidates.length === 0) return null;
+  const hasLexicalSignal = rankedCandidates.some((entry) => entry.ftsScore > 0);
   const provider = options.provider ?? envEmbeddingProvider();
   const ranked = await hybridRank(
     question,
-    items.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),
+    rankedCandidates.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),
     {
       alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA : 0,
       provider,

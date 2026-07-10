@@ -390,6 +390,8 @@ export interface BlockDeclNode extends BaseNode {
 export interface DomainDeclNode extends BaseNode {
   kind: NodeKind.DomainDecl;
   name: string;
+  /** Stable parent-domain identifier. Domain / subdomain / microdomain are derived from depth. */
+  parent?: string;
   owner?: string;
   businessOwner?: string;
   boundedContext?: string;
@@ -399,6 +401,13 @@ export interface DomainDeclNode extends BaseNode {
   tags?: string[];
   businessOutcome?: string;
   description?: string;
+  inScope?: string[];
+  outOfScope?: string[];
+  dbtGroups?: string[];
+  dbtPaths?: string[];
+  dbtTags?: string[];
+  semanticDomains?: string[];
+  semanticTags?: string[];
   decorators: DecoratorNode[];
 }
 

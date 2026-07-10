@@ -27,7 +27,7 @@ import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
 import type { AgentProvider, AgentMessage, AgentToolDefinition } from './providers/types.js';
 import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
-import { buildSkillBlockHints, buildSkillsPrompt, selectRelevantSkills } from './skills/loader.js';
+import { buildSkillBlockHints, buildSkillMetricHints, buildSkillsPrompt, expandQuestionWithSkillVocabulary, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { ConversationSnapshot } from './conversation/snapshot.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
@@ -671,7 +671,13 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     // here so every return site inside runAnswerLoop stays untouched.
     appliedSkills:
       result.appliedSkills ??
-      selectRelevantSkills(input.skills ?? [], input.question, { userId: input.userId ?? null }).map((s) => ({
+      selectRelevantSkills(input.skills ?? [], input.question, {
+        userId: input.userId ?? null,
+        domains: Array.from(new Set([
+          ...(input.domain ? [input.domain] : []),
+          ...(input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
+        ])),
+      }).map((s) => ({
         id: s.id,
         description: s.description,
       })),
@@ -746,6 +752,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // block from any active but unrelated domain skill could jump to the front.
     ...buildSkillBlockHints(selectedSkills, userId ?? null),
   ]));
+  const effectiveMetricHints = buildSkillMetricHints(selectedSkills, userId ?? null);
+  const semanticQuestion = expandQuestionWithSkillVocabulary(question, selectedSkills, userId ?? null);
   const followUpSourceBlock = input.followUp?.sourceBlockName
     ? kg.getNode(`block:${input.followUp.sourceBlockName}`)
     : null;
@@ -937,7 +945,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // rank over the FTS semantic hits, then ALL metric KG nodes (revenue ⇄
   // cumulative_revenue). Certified-first is still preserved (checked above).
   const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
-  let semanticMetricMatch = await matchSemanticMetric(question, semanticMetricNodes, {
+  for (const metric of effectiveMetricHints) {
+    const node = kg.getNode(`metric:${metric}`);
+    if (node && !semanticMetricNodes.some((candidate) => candidate.nodeId === node.nodeId)) semanticMetricNodes.push(node);
+  }
+  let semanticMetricMatch = await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
     // Isolate the measure signal with the planner's terms so a group-by dimension
     // ("... by product") can't be scored as a measure (see MatchSemanticMetricOptions).
     measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],

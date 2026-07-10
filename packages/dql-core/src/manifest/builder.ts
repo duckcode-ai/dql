@@ -196,6 +196,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // Scan first-class business domains
   const domainDirs = ['domains', 'blocks', 'terms', 'business-views', ...(options.extraBlockDirs ?? [])];
   const domains = scanDomains(projectRoot, domainDirs, diagnostics);
+  validateDomainHierarchy(domains, diagnostics);
 
   // Scan blocks
   const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
@@ -509,6 +510,44 @@ function scanDomains(
   }
 
   return domains;
+}
+
+/** Validate parent references without changing legacy flat-domain semantics. */
+function validateDomainHierarchy(
+  domains: Record<string, ManifestDomain>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  const keyFor = (value: string) => domainAliasKey(value);
+  const byKey = new Map(Object.values(domains).map((domain) => [keyFor(domain.name), domain]));
+  for (const domain of Object.values(domains)) {
+    if (!domain.parent) continue;
+    const parent = byKey.get(keyFor(domain.parent));
+    if (!parent) {
+      diagnostics.push({
+        kind: 'resolve',
+        filePath: domain.filePath,
+        severity: 'error',
+        message: `domain "${domain.name}" references missing parent "${domain.parent}"`,
+      });
+      continue;
+    }
+    const visited = new Set<string>([keyFor(domain.name)]);
+    let current: ManifestDomain | undefined = parent;
+    while (current?.parent) {
+      const currentKey = keyFor(current.name);
+      if (visited.has(currentKey)) {
+        diagnostics.push({
+          kind: 'resolve',
+          filePath: domain.filePath,
+          severity: 'error',
+          message: `domain hierarchy contains a cycle involving "${domain.name}"`,
+        });
+        break;
+      }
+      visited.add(currentKey);
+      current = byKey.get(keyFor(current.parent));
+    }
+  }
 }
 
 function scanBlocks(
@@ -2289,6 +2328,7 @@ function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDoma
   return {
     name: domain.name,
     filePath,
+    parent: typeof domain.parent === 'string' ? domain.parent : undefined,
     owner: typeof domain.owner === 'string' ? domain.owner : undefined,
     businessOwner: typeof domain.businessOwner === 'string' ? domain.businessOwner : undefined,
     boundedContext: typeof domain.boundedContext === 'string' ? domain.boundedContext : undefined,
@@ -2298,6 +2338,13 @@ function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDoma
     tags: Array.isArray(domain.tags) ? domain.tags : undefined,
     businessOutcome: typeof domain.businessOutcome === 'string' ? domain.businessOutcome : undefined,
     description: typeof domain.description === 'string' ? domain.description : undefined,
+    inScope: Array.isArray(domain.inScope) ? domain.inScope : undefined,
+    outOfScope: Array.isArray(domain.outOfScope) ? domain.outOfScope : undefined,
+    dbtGroups: Array.isArray(domain.dbtGroups) ? domain.dbtGroups : undefined,
+    dbtPaths: Array.isArray(domain.dbtPaths) ? domain.dbtPaths : undefined,
+    dbtTags: Array.isArray(domain.dbtTags) ? domain.dbtTags : undefined,
+    semanticDomains: Array.isArray(domain.semanticDomains) ? domain.semanticDomains : undefined,
+    semanticTags: Array.isArray(domain.semanticTags) ? domain.semanticTags : undefined,
   };
 }
 

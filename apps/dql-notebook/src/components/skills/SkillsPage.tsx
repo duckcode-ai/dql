@@ -18,8 +18,6 @@ import {
   Pencil,
   Trash2,
   X,
-  Users,
-  UserRound,
   Sparkles,
   Loader2,
   AlertTriangle,
@@ -122,16 +120,7 @@ export function SkillsPage(): JSX.Element {
 
   useEffect(() => load(), [load]);
 
-  // Project skills first, then personal; stable alphabetical within each group.
-  const sorted = useMemo(() => {
-    return [...skills].sort((a, b) => {
-      if (a.scope !== b.scope) return a.scope === 'project' ? -1 : 1;
-      return a.id.localeCompare(b.id);
-    });
-  }, [skills]);
-
-  const projectCount = useMemo(() => skills.filter((s) => s.scope === 'project').length, [skills]);
-  const personalCount = skills.length - projectCount;
+  const sorted = useMemo(() => [...skills].sort((a, b) => a.id.localeCompare(b.id)), [skills]);
 
   const handleSaved = useCallback((saved: Skill) => {
     setSkills((prev) => {
@@ -171,7 +160,7 @@ export function SkillsPage(): JSX.Element {
             </div>
             <div style={{ fontSize: 13, color: t.textMuted, marginTop: 6, maxWidth: 680, lineHeight: 1.5 }}>
               Teach the AI your business context — definitions, rules, vocabulary, and the metrics and blocks it should
-              prefer. Project skills are shared with everyone; personal skills are just for you.
+              prefer. Skills are Git-backed project guidance and are applied only when their domain and triggers match.
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
@@ -183,14 +172,6 @@ export function SkillsPage(): JSX.Element {
             </button>
           </div>
         </div>
-
-        {/* Scope summary */}
-        {!loading && !loadError && skills.length > 0 ? (
-          <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-            <ScopeBadge scope="project" t={t} count={projectCount} />
-            <ScopeBadge scope="personal" t={t} count={personalCount} />
-          </div>
-        ) : null}
 
         {/* Body states */}
         {loading ? (
@@ -278,14 +259,11 @@ function SkillRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13.5, fontWeight: 750, color: t.textPrimary, fontFamily: t.fontMono }}>{skill.id}</span>
-          <ScopeBadge scope={skill.scope} t={t} />
+          {skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
           {skill.isStarter ? (
             <span style={starterBadge(t)} title="A dbt-seeded starter — edit it to make it yours">
               <Sparkles size={10} strokeWidth={2.2} /> starter — edit me
             </span>
-          ) : null}
-          {skill.scope === 'personal' && skill.user ? (
-            <span style={{ fontSize: 11, color: t.textMuted }}>· {skill.user}</span>
           ) : null}
         </div>
         {skill.description ? (
@@ -359,6 +337,13 @@ function SkillFormDrawer({
       description: draft.description?.trim() ? draft.description.trim() : undefined,
       body: draft.body,
       domain: draft.domain?.trim() ? draft.domain.trim() : undefined,
+      domains: (draft.domains ?? (draft.domain ? [draft.domain] : [])).map((value) => value.trim()).filter(Boolean),
+      triggers: (draft.triggers ?? []).map((value) => value.trim()).filter(Boolean),
+      exclusions: (draft.exclusions ?? []).map((value) => value.trim()).filter(Boolean),
+      preferredDimensions: (draft.preferredDimensions ?? []).map((value) => value.trim()).filter(Boolean),
+      requiredFilters: (draft.requiredFilters ?? []).map((value) => value.trim()).filter(Boolean),
+      clarifyWhen: (draft.clarifyWhen ?? []).map((value) => value.trim()).filter(Boolean),
+      examples: (draft.examples ?? []).map((value) => value.trim()).filter(Boolean),
     };
     setSaving(true);
     setError(null);
@@ -426,34 +411,16 @@ function SkillFormDrawer({
             />
           </Field>
 
-          {/* Scope toggle */}
-          <Field label="Scope" t={t} hint="Project skills are shared with everyone; personal skills are just for you.">
-            <div role="group" aria-label="Skill scope" style={segmentGroup(t)}>
-              <button
-                type="button"
-                onClick={() => set('scope', 'project')}
-                aria-pressed={draft.scope === 'project'}
-                style={segmentButton(t, draft.scope === 'project')}
-              >
-                <Users size={13} strokeWidth={2} /> Project
-              </button>
-              <button
-                type="button"
-                onClick={() => set('scope', 'personal')}
-                aria-pressed={draft.scope === 'personal'}
-                style={segmentButton(t, draft.scope === 'personal')}
-              >
-                <UserRound size={13} strokeWidth={2} /> Personal — me
-              </button>
-            </div>
-          </Field>
-
           {/* Domain picker (Spec 17 part B) */}
           <Field label="Domain" t={t} hint="Which business domain this skill belongs to. Domains are the top of the hierarchy.">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <select
                 value={draft.domain ?? ''}
-                onChange={(e) => set('domain', e.target.value || undefined)}
+                onChange={(e) => {
+                  const domain = e.target.value || undefined;
+                  set('domain', domain);
+                  set('domains', domain ? [domain] : []);
+                }}
                 style={{ ...inputStyle(t), flex: 1, cursor: 'pointer', color: draft.domain ? t.textPrimary : t.textMuted }}
               >
                 <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
@@ -472,6 +439,25 @@ function SkillFormDrawer({
             </div>
           </Field>
 
+          <Field label="Skill type" t={t} hint="Domain references provide broad context; policies encode a focused, reusable rule.">
+            <select value={draft.kind ?? 'custom'} onChange={(e) => set('kind', e.target.value as Skill['kind'])} style={inputStyle(t)}>
+              <option value="custom">Custom guidance</option>
+              <option value="domain_reference">Domain reference</option>
+              <option value="metric_policy">Metric policy</option>
+              <option value="glossary">Glossary</option>
+              <option value="analysis_pattern">Analysis pattern</option>
+              <option value="sql_policy">SQL policy</option>
+            </select>
+          </Field>
+
+          <Field label="Lifecycle" t={t} hint="Draft skills are stored in Git but do not affect agent answers until activated.">
+            <select value={draft.status ?? 'active'} onChange={(e) => set('status', e.target.value as Skill['status'])} style={inputStyle(t)}>
+              <option value="active">Active</option>
+              <option value="draft">Draft — inactive</option>
+              <option value="deprecated">Deprecated</option>
+            </select>
+          </Field>
+
           {/* Business-context body */}
           <Field label="Business context" t={t} hint="The guidance the AI follows — definitions, rules, and how to interpret a question.">
             <textarea
@@ -488,6 +474,7 @@ function SkillFormDrawer({
             <MultiSelect
               t={t}
               options={options.metrics}
+              optionKind="metrics"
               selected={draft.preferredMetrics}
               onChange={(next) => set('preferredMetrics', next)}
               placeholder="Add a metric…"
@@ -498,11 +485,22 @@ function SkillFormDrawer({
             <MultiSelect
               t={t}
               options={options.blocks}
+              optionKind="blocks"
               selected={draft.preferredBlocks}
               onChange={(next) => set('preferredBlocks', next)}
               placeholder="Add a block…"
               emptyOptionsHint="No blocks available from the project yet."
             />
+          </Field>
+
+          <Field label="Triggers" t={t} hint="Comma-separated phrases that make this skill relevant.">
+            <input value={(draft.triggers ?? []).join(', ')} onChange={(e) => set('triggers', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="recognized revenue, net sales" style={inputStyle(t)} />
+          </Field>
+          <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">
+            <input value={(draft.preferredDimensions ?? []).join(', ')} onChange={(e) => set('preferredDimensions', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="region, month" style={inputStyle(t)} />
+          </Field>
+          <Field label="Clarify when" t={t} hint="Ambiguities that should prompt one focused follow-up question.">
+            <input value={(draft.clarifyWhen ?? []).join(', ')} onChange={(e) => set('clarifyWhen', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="currency is not specified" style={inputStyle(t)} />
           </Field>
 
           {/* Vocabulary editor */}
@@ -533,6 +531,7 @@ function SkillFormDrawer({
 function MultiSelect({
   t,
   options,
+  optionKind,
   selected,
   onChange,
   placeholder,
@@ -540,19 +539,32 @@ function MultiSelect({
 }: {
   t: Theme;
   options: string[];
+  optionKind: 'metrics' | 'blocks';
   selected: string[];
   onChange: (next: string[]) => void;
   placeholder: string;
   emptyOptionsHint: string;
 }): JSX.Element {
   const [query, setQuery] = useState('');
+  const [remoteOptions, setRemoteOptions] = useState<string[]>(options);
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api.getSkillOptions(query).then((result) => {
+        if (!cancelled) setRemoteOptions(optionKind === 'metrics' ? result.metrics : result.blocks);
+      }).catch(() => {
+        if (!cancelled) setRemoteOptions(options);
+      });
+    }, 160);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [optionKind, options, query]);
   const available = useMemo(
     () =>
-      options
+      remoteOptions
         .filter((o) => !selected.includes(o))
         .filter((o) => (query ? o.toLowerCase().includes(query.toLowerCase()) : true))
         .slice(0, 8),
-    [options, selected, query],
+    [remoteOptions, selected, query],
   );
 
   const add = (value: string) => {
@@ -602,7 +614,7 @@ function MultiSelect({
             </button>
           ))}
         </div>
-      ) : options.length === 0 ? (
+      ) : remoteOptions.length === 0 ? (
         <div style={{ fontSize: 11, color: t.textMuted }}>{emptyOptionsHint} You can still type a value and press Enter.</div>
       ) : null}
     </div>
@@ -787,32 +799,6 @@ function ConfirmDeleteDialog({
 
 // ── Small shared pieces ──────────────────────────────────────────────────────
 
-function ScopeBadge({ scope, t, count }: { scope: Skill['scope']; t: Theme; count?: number }): JSX.Element {
-  const project = scope === 'project';
-  const color = project ? t.accent : t.textSecondary;
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        fontSize: 10.5,
-        fontWeight: 700,
-        letterSpacing: '0.02em',
-        color,
-        background: project ? `${t.accent}16` : t.btnBg,
-        border: `1px solid ${project ? `${t.accent}40` : t.btnBorder}`,
-        borderRadius: 999,
-        padding: '2px 9px',
-      }}
-    >
-      {project ? <Users size={11} strokeWidth={2.2} /> : <UserRound size={11} strokeWidth={2.2} />}
-      {project ? 'Project' : 'Personal'}
-      {typeof count === 'number' ? <span style={{ opacity: 0.7 }}>· {count}</span> : null}
-    </span>
-  );
-}
-
 function CountPill({ t, icon, label, count }: { t: Theme; icon: React.ReactNode; label: string; count: number }): JSX.Element {
   return (
     <span
@@ -949,35 +935,6 @@ function textareaStyle(t: Theme): CSSProperties {
     resize: 'vertical',
     lineHeight: 1.5,
     padding: '9px 11px',
-  };
-}
-
-function segmentGroup(t: Theme): CSSProperties {
-  return {
-    display: 'inline-flex',
-    padding: 2,
-    gap: 2,
-    border: `1px solid ${t.btnBorder}`,
-    borderRadius: 8,
-    background: t.btnBg,
-    alignSelf: 'start',
-  };
-}
-
-function segmentButton(t: Theme, active: boolean): CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 5,
-    padding: '6px 12px',
-    borderRadius: 6,
-    border: '1px solid transparent',
-    background: active ? t.accent : 'transparent',
-    color: active ? '#ffffff' : t.textSecondary,
-    fontSize: 12,
-    fontWeight: active ? 750 : 600,
-    fontFamily: t.font,
-    cursor: 'pointer',
   };
 }
 

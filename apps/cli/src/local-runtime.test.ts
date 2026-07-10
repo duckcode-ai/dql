@@ -2938,6 +2938,56 @@ describe('domains API (spec 17, part B)', () => {
     expect(parseDomainInput({ owner: 'x' })).toBeNull();
     expect(parseDomainInput({ id: 'Finance' })?.name).toBe('Finance');
   });
+
+  it('keeps domain declarations out of the Blocks library and saves bootstrap choices explicitly', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-bootstrap-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    mkdirSync(join(projectRoot, 'domains'), { recursive: true });
+    writeFileSync(join(projectRoot, 'domains', 'revenue.dql'), 'domain "Revenue" {\n  owner = "finance"\n}\n', 'utf-8');
+    writeFileSync(join(projectRoot, 'domains', 'block.dql'), 'block "Revenue total" {\n  domain = "Revenue"\n  type = "custom"\n  query = """SELECT 1 AS revenue"""\n}\n', 'utf-8');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const library = await fetch(`http://127.0.0.1:${port}/api/blocks/library`).then((response) => response.json()) as { blocks: Array<{ name: string }> };
+      expect(library.blocks.map((block) => block.name)).toEqual(['Revenue total']);
+
+      const before = existsSync(join(projectRoot, '.dql', 'skills'));
+      const session = await fetch(`http://127.0.0.1:${port}/api/context-bootstrap`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ai: false }),
+      }).then((response) => response.json()) as {
+        id: string;
+        status: string;
+        candidates: Array<{ id: string; kind: string }>;
+        progress: { domains: { total: number }; skills: { total: number } };
+      };
+      expect(session.status).toBe('queued');
+      expect(session.progress.domains.total).toBeGreaterThan(0);
+      expect(session.progress.skills.total).toBeGreaterThan(0);
+      expect(session.candidates.some((candidate) => candidate.kind === 'skill')).toBe(true);
+      expect(existsSync(join(projectRoot, '.dql', 'skills'))).toBe(before);
+
+      let completed: { status: string; ai: { mode: string }; progress: { percent: number } } | undefined;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const updated = await fetch(`http://127.0.0.1:${port}/api/context-bootstrap/${encodeURIComponent(session.id)}`).then((response) => response.json()) as { status: string; ai: { mode: string }; progress: { percent: number } };
+        completed = updated;
+        if (updated.status === 'ready') break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(completed?.status).toBe('ready');
+      expect(completed?.ai.mode).toBe('evidence_only');
+      expect(completed?.progress.percent).toBe(100);
+
+      const skill = session.candidates.find((candidate) => candidate.kind === 'skill');
+      const saved = await fetch(`http://127.0.0.1:${port}/api/context-bootstrap/${encodeURIComponent(session.id)}/save-selected`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidateIds: skill ? [skill.id] : [] }),
+      }).then((response) => response.json()) as { saved: Array<{ status: string; path?: string }> };
+      expect(saved.saved[0]?.status).toBe('saved');
+      expect(saved.saved[0]?.path).toContain('.dql/skills');
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
 });
 
 describe('skills carry an optional domain (spec 17, part B)', () => {

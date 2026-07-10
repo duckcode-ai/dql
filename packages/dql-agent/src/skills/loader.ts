@@ -17,7 +17,8 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
+import * as yaml from 'js-yaml';
 
 export interface Skill {
   id: string;
@@ -31,9 +32,21 @@ export interface Skill {
   user?: string;
   /** Optional domain this skill belongs to (spec 17, part B). */
   domain?: string;
+  /** Domain paths for cross-domain skills. `domain` remains backward compatible. */
+  domains?: string[];
+  kind?: 'domain_reference' | 'metric_policy' | 'glossary' | 'analysis_pattern' | 'sql_policy' | 'custom';
+  status?: 'draft' | 'active' | 'deprecated';
+  owner?: string;
+  triggers?: string[];
+  exclusions?: string[];
   description?: string;
   preferredMetrics: string[];
   preferredBlocks: string[];
+  preferredDimensions?: string[];
+  requiredFilters?: string[];
+  clarifyWhen?: string[];
+  examples?: string[];
+  sourceRefs?: string[];
   vocabulary: Record<string, string>;
   /** Markdown body (everything after the closing `---`). */
   body: string;
@@ -91,7 +104,7 @@ export function parseSkill(raw: string, path: string): Skill | null {
   if (!m) return null;
   const front = m[1];
   const body = m[2].trim();
-  const meta = parseMiniYaml(front);
+  const meta = parseSkillFrontmatter(front);
 
   const id = pickString(meta.id) ?? basename(path).replace(/\.skill\.md$|\.md$/, '');
   const user = pickString(meta.user);
@@ -101,9 +114,20 @@ export function parseSkill(raw: string, path: string): Skill | null {
     scope: user ? 'personal' : 'project',
     user,
     domain: pickString(meta.domain),
+    domains: pickStringArray(meta.domains ?? meta.domain),
+    kind: parseSkillKind(pickString(meta.kind)),
+    status: parseSkillStatus(pickString(meta.status)),
+    owner: pickString(meta.owner),
+    triggers: pickStringArray(meta.triggers),
+    exclusions: pickStringArray(meta.exclusions),
     description: pickString(meta.description),
     preferredMetrics: pickStringArray(meta.preferred_metrics),
     preferredBlocks: pickStringArray(meta.preferred_blocks),
+    preferredDimensions: pickStringArray(meta.preferred_dimensions),
+    requiredFilters: pickStringArray(meta.required_filters),
+    clarifyWhen: pickStringArray(meta.clarify_when),
+    examples: pickStringArray(meta.examples),
+    sourceRefs: pickStringArray(meta.source_refs),
     vocabulary: pickStringMap(meta.vocabulary),
     body,
     sourcePath: path,
@@ -119,8 +143,13 @@ export function skillsDir(projectRoot: string): string {
 }
 
 /** Resolve the `.skill.md` path a skill should be written to. */
-export function skillPath(projectRoot: string, id: string): string {
-  return join(skillsDir(projectRoot), `${sanitizeSkillId(id)}.skill.md`);
+export function skillPath(projectRoot: string, id: string, domains: string[] = []): string {
+  const firstDomain = domains[0]?.trim();
+  const folder = firstDomain
+    ? firstDomain.split('/').map(sanitizeSkillId).filter(Boolean)
+    : [];
+  const target = domains.length > 1 ? ['_cross-domain'] : folder;
+  return join(skillsDir(projectRoot), ...target, `${sanitizeSkillId(id)}.skill.md`);
 }
 
 function sanitizeSkillId(id: string): string {
@@ -147,11 +176,11 @@ function quoteIfNeeded(value: string): string {
  */
 export function renderSkill(skill: Skill): string {
   const lines: string[] = ['---', `id: ${quoteIfNeeded(skill.id)}`];
-  // PERSONAL skills carry a `user:`; PROJECT skills omit it.
-  if (skill.scope === 'personal' && skill.user) {
-    lines.push(`user: ${quoteIfNeeded(skill.user)}`);
-  }
   if (skill.domain) lines.push(`domain: ${quoteIfNeeded(skill.domain)}`);
+  if ((skill.domains?.length ?? 0) > 0) lines.push(`domains: [${(skill.domains ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if (skill.kind && skill.kind !== 'custom') lines.push(`kind: ${skill.kind}`);
+  if (skill.status && skill.status !== 'active') lines.push(`status: ${skill.status}`);
+  if (skill.owner) lines.push(`owner: ${quoteIfNeeded(skill.owner)}`);
   if (skill.description) lines.push(`description: ${quoteIfNeeded(skill.description)}`);
   if (skill.preferredMetrics.length > 0) {
     lines.push(`preferred_metrics: [${skill.preferredMetrics.map(quoteIfNeeded).join(', ')}]`);
@@ -159,6 +188,13 @@ export function renderSkill(skill: Skill): string {
   if (skill.preferredBlocks.length > 0) {
     lines.push(`preferred_blocks: [${skill.preferredBlocks.map(quoteIfNeeded).join(', ')}]`);
   }
+  if ((skill.preferredDimensions?.length ?? 0) > 0) lines.push(`preferred_dimensions: [${(skill.preferredDimensions ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.triggers?.length ?? 0) > 0) lines.push(`triggers: [${(skill.triggers ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.exclusions?.length ?? 0) > 0) lines.push(`exclusions: [${(skill.exclusions ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.requiredFilters?.length ?? 0) > 0) lines.push(`required_filters: [${(skill.requiredFilters ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.clarifyWhen?.length ?? 0) > 0) lines.push(`clarify_when: [${(skill.clarifyWhen ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.examples?.length ?? 0) > 0) lines.push(`examples: [${(skill.examples ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.sourceRefs?.length ?? 0) > 0) lines.push(`source_refs: [${(skill.sourceRefs ?? []).map(quoteIfNeeded).join(', ')}]`);
   const vocabEntries = Object.entries(skill.vocabulary);
   if (vocabEntries.length > 0) {
     lines.push('vocabulary:');
@@ -177,9 +213,20 @@ export interface WriteSkillInput {
   scope: 'project' | 'personal';
   user?: string;
   domain?: string;
+  domains?: string[];
+  kind?: Skill['kind'];
+  status?: Skill['status'];
+  owner?: string;
+  triggers?: string[];
+  exclusions?: string[];
   description?: string;
   preferredMetrics?: string[];
   preferredBlocks?: string[];
+  preferredDimensions?: string[];
+  requiredFilters?: string[];
+  clarifyWhen?: string[];
+  examples?: string[];
+  sourceRefs?: string[];
   vocabulary?: Record<string, string>;
   body?: string;
   isStarter?: boolean;
@@ -187,18 +234,31 @@ export interface WriteSkillInput {
 
 /** Normalize a partial input into a full Skill (with a resolved sourcePath). */
 function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
-  const scope = input.scope === 'personal' ? 'personal' : 'project';
+  // New skills are shared, Git-backed project guidance. Legacy personal skills
+  // are retained only for migration and are never written by this path.
+  const scope = 'project';
   return {
     id: input.id,
     scope,
-    user: scope === 'personal' ? (input.user || undefined) : undefined,
+    user: undefined,
     domain: input.domain || undefined,
+    domains: input.domains?.length ? input.domains : (input.domain ? [input.domain] : []),
+    kind: input.kind ?? 'custom',
+    status: input.status ?? 'active',
+    owner: input.owner,
+    triggers: input.triggers ?? [],
+    exclusions: input.exclusions ?? [],
     description: input.description,
     preferredMetrics: input.preferredMetrics ?? [],
     preferredBlocks: input.preferredBlocks ?? [],
+    preferredDimensions: input.preferredDimensions ?? [],
+    requiredFilters: input.requiredFilters ?? [],
+    clarifyWhen: input.clarifyWhen ?? [],
+    examples: input.examples ?? [],
+    sourceRefs: input.sourceRefs ?? [],
     vocabulary: input.vocabulary ?? {},
     body: input.body ?? '',
-    sourcePath: skillPath(projectRoot, input.id),
+    sourcePath: skillPath(projectRoot, input.id, input.domains?.length ? input.domains : (input.domain ? [input.domain] : [])),
     isStarter: input.isStarter,
   };
 }
@@ -209,7 +269,7 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
  */
 export function writeSkill(projectRoot: string, input: WriteSkillInput): Skill {
   const skill = toSkill(projectRoot, input);
-  const dir = skillsDir(projectRoot);
+  const dir = dirname(skill.sourcePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(skill.sourcePath, renderSkill(skill), 'utf-8');
   return parseSkill(readFileSync(skill.sourcePath, 'utf-8'), skill.sourcePath) ?? skill;
@@ -222,7 +282,8 @@ export function upsertSkill(projectRoot: string, input: WriteSkillInput): Skill 
 
 /** Delete `.dql/skills/<id>.skill.md`. Returns true when a file was removed. */
 export function deleteSkill(projectRoot: string, id: string): boolean {
-  const path = skillPath(projectRoot, id);
+  const existing = loadSkills(projectRoot).skills.find((skill) => skill.id === id);
+  const path = existing?.sourcePath ?? skillPath(projectRoot, id);
   if (!existsSync(path)) return false;
   rmSync(path, { force: true });
   return true;
@@ -233,7 +294,29 @@ function pickString(v: unknown): string | undefined {
 }
 
 function pickStringArray(v: unknown): string[] {
+  if (typeof v === 'string' && v.trim()) return [v.trim()];
   return Array.isArray(v) && v.every((x) => typeof x === 'string') ? (v as string[]) : [];
+}
+
+function parseSkillKind(value: string | undefined): Skill['kind'] {
+  return ['domain_reference', 'metric_policy', 'glossary', 'analysis_pattern', 'sql_policy', 'custom'].includes(value ?? '')
+    ? value as Skill['kind']
+    : 'custom';
+}
+
+function parseSkillStatus(value: string | undefined): Skill['status'] {
+  return ['draft', 'active', 'deprecated'].includes(value ?? '') ? value as Skill['status'] : 'active';
+}
+
+function parseSkillFrontmatter(text: string): Record<string, unknown> {
+  try {
+    const parsed = yaml.load(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return parseMiniYaml(text);
+  }
 }
 
 function pickStringMap(v: unknown): Record<string, string> {
@@ -318,10 +401,13 @@ export function buildSkillsPrompt(skills: Skill[], userId: string | null): strin
     const header = s.description ? `${s.id} — ${s.description}` : s.id;
     const metrics = s.preferredMetrics.length > 0 ? `\nPreferred metrics: ${s.preferredMetrics.join(', ')}` : '';
     const blocks = s.preferredBlocks.length > 0 ? `\nPreferred blocks: ${s.preferredBlocks.join(', ')}` : '';
+    const dimensions = (s.preferredDimensions?.length ?? 0) > 0 ? `\nPreferred dimensions: ${s.preferredDimensions?.join(', ')}` : '';
+    const filters = (s.requiredFilters?.length ?? 0) > 0 ? `\nRequired filters: ${s.requiredFilters?.join(', ')}` : '';
+    const clarify = (s.clarifyWhen?.length ?? 0) > 0 ? `\nClarify when: ${s.clarifyWhen?.join('; ')}` : '';
     const vocab = Object.keys(s.vocabulary).length > 0
       ? `\nVocabulary: ${Object.entries(s.vocabulary).map(([k, v]) => `"${k}" → ${v}`).join(', ')}`
       : '';
-    return `### Skill: ${header}${metrics}${blocks}${vocab}\n\n${s.body}`;
+    return `### Skill: ${header}${metrics}${blocks}${dimensions}${filters}${clarify}${vocab}\n\n${s.body}`;
   });
   return [
     '## Active Skills',
@@ -334,7 +420,8 @@ export function buildSkillsPrompt(skills: Skill[], userId: string | null): strin
 }
 
 export function activeSkills(skills: Skill[], userId: string | null): Skill[] {
-  return skills.filter((s) => !s.user || s.user === userId);
+  void userId;
+  return skills.filter((s) => s.scope === 'project' && (s.status ?? 'active') === 'active');
 }
 
 export function buildSkillBlockHints(skills: Skill[], userId: string | null): string[] {
@@ -351,6 +438,33 @@ export function buildSkillBlockHints(skills: Skill[], userId: string | null): st
     }
   }
   return Array.from(hints);
+}
+
+/** Metric ids a selected skill may prefer, including vocabulary aliases. */
+export function buildSkillMetricHints(skills: Skill[], userId: string | null): string[] {
+  const hints = new Set<string>();
+  for (const skill of activeSkills(skills, userId)) {
+    for (const metric of skill.preferredMetrics) if (metric.trim()) hints.add(metric.trim());
+    for (const target of Object.values(skill.vocabulary)) {
+      const match = target.trim().match(/^metric:(.+)$/i);
+      if (match?.[1]?.trim()) hints.add(match[1].trim());
+    }
+  }
+  return Array.from(hints);
+}
+
+/** Add governed metric aliases to retrieval text without changing the user request. */
+export function expandQuestionWithSkillVocabulary(question: string, skills: Skill[], userId: string | null): string {
+  const normalized = question.toLowerCase();
+  const additions = new Set<string>();
+  for (const skill of activeSkills(skills, userId)) {
+    for (const [term, target] of Object.entries(skill.vocabulary)) {
+      if (!term || !normalized.includes(term.toLowerCase())) continue;
+      const metric = target.trim().match(/^metric:(.+)$/i)?.[1]?.trim();
+      if (metric) additions.add(metric);
+    }
+  }
+  return additions.size > 0 ? `${question} ${Array.from(additions).join(' ')}` : question;
 }
 
 function normalizeBlockHint(value: string): string | undefined {
@@ -390,9 +504,13 @@ function skillSearchText(skill: Skill): string {
   return [
     skill.id,
     skill.domain ?? '',
+    ...(skill.domains ?? []),
     skill.description ?? '',
+    ...(skill.triggers ?? []),
+    ...(skill.exclusions ?? []),
     ...skill.preferredMetrics,
     ...skill.preferredBlocks,
+    ...(skill.preferredDimensions ?? []),
     ...Object.keys(skill.vocabulary),
     ...Object.values(skill.vocabulary),
     skill.body,
@@ -435,7 +553,7 @@ export function selectRelevantSkills(
     for (const token of textTokens) {
       if (queryTokens.has(token)) hits += 1;
     }
-    const domainMatch = Boolean(skill.domain && domains.has(skill.domain.trim().toLowerCase()));
+    const domainMatch = [skill.domain, ...(skill.domains ?? [])].some((domain) => Boolean(domain && domains.has(domain.trim().toLowerCase())));
     // Domain is a strong routing signal, but still requires either an inferred
     // domain match or topical text. It never makes a skill a hard policy override.
     rest.push({ skill, score: hits + (domainMatch ? 4 : 0) });

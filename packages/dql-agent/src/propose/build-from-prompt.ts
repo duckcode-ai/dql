@@ -54,7 +54,7 @@ import {
 } from '../metadata/sql-grounding.js';
 import { selectRelevantModels } from '../metadata/sql-retrieval.js';
 import type { Skill } from '../skills/loader.js';
-import { buildSkillsPrompt, loadSkills, selectRelevantSkills } from '../skills/loader.js';
+import { buildSkillsPrompt, expandQuestionWithSkillVocabulary, loadSkills, selectRelevantSkills } from '../skills/loader.js';
 import { pickProvider } from '../providers/index.js';
 import type { AgentProvider } from '../providers/types.js';
 import { loadDbtArtifacts, type DbtArtifacts } from './dbt-artifacts.js';
@@ -296,7 +296,10 @@ export function loadSemanticMetrics(projectRoot: string): KGNode[] {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
       const rows = db
-        .prepare("SELECT node_id, name, domain, description, llm_context, tags_json FROM kg_nodes WHERE kind = 'metric' LIMIT 400")
+        // The old LIMIT 400 silently excluded governed metrics in enterprise
+        // catalogs. Matching must consider every indexed metric; the caller's
+        // deterministic scorer decides relevance rather than row order.
+        .prepare("SELECT node_id, name, domain, description, llm_context, tags_json FROM kg_nodes WHERE kind = 'metric'")
         .all() as Array<{ node_id: string; name: string; domain: string | null; description: string | null; llm_context: string | null; tags_json: string | null }>;
       return rows.map((r): KGNode => ({
         nodeId: r.node_id,
@@ -1061,7 +1064,10 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   // Skills (spec 16): select the SELECTED skills (not all), inject as context,
   // and record which applied. Project (pinned) skills always kept.
   const allSkills = options.skills ?? loadSkills(options.projectRoot).skills;
-  const selectedSkills = selectRelevantSkills(allSkills, options.prompt, { userId: options.userId ?? null });
+  const selectedSkills = selectRelevantSkills(allSkills, options.prompt, {
+    userId: options.userId ?? null,
+    domains: options.domain ? [options.domain] : [],
+  });
   const skillsPrompt = buildSkillsPrompt(selectedSkills, options.userId ?? null);
   const appliedSkills: AppliedSkill[] = selectedSkills.map((s) => ({ id: s.id, description: s.description }));
 
@@ -1070,7 +1076,10 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   // of letting the model invent a formula. Skipped for edit mode (a different intent).
   const matchedMetric = options.mode === 'edit'
     ? undefined
-    : await matchGovernedMetric(options.projectRoot, options.prompt);
+    : await matchGovernedMetric(
+      options.projectRoot,
+      expandQuestionWithSkillVocabulary(options.prompt, selectedSkills, options.userId ?? null),
+    );
 
   if (options.target === 'cell') {
     return buildCell(options, grounding, provider, skillsPrompt, appliedSkills, matchedMetric);

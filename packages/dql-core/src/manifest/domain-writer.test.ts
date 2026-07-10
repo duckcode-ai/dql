@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildManifest } from './builder.js';
@@ -118,5 +118,32 @@ describe('domain declaration writer (spec 17, part B)', () => {
     expect(dql).toContain('domain "Customer Success" {');
     expect(dql).toContain('reviewCadence');
     expect(domainFolderSlug('Customer Success')).toBe('customer-success');
+  });
+
+  it('updates a legacy flat declaration in place and retains hierarchy metadata', () => {
+    mkdirSync(join(projectRoot, 'domains'), { recursive: true });
+    writeFileSync(join(projectRoot, 'domains', 'revenue.dql'), `domain "Revenue" {
+  owner = "old"
+  businessOwner = "Finance"
+  primaryTerms = ["Revenue"]
+  tags = ["finance"]
+}
+`, 'utf-8');
+    const written = writeDomainDeclaration(projectRoot, {
+      name: 'Revenue', parent: 'Finance', owner: 'new', businessOwner: 'Finance',
+      primaryTerms: ['Revenue'], tags: ['finance'], sourcePath: 'domains/revenue.dql',
+    });
+    expect(written.path).toBe('domains/revenue.dql');
+    expect(existsSync(join(projectRoot, 'domains', 'revenue', 'domain.dql'))).toBe(false);
+    const domain = buildManifest({ projectRoot, dqlVersion: 'test' }).domains?.Revenue;
+    expect(domain).toMatchObject({ parent: 'Finance', owner: 'new', businessOwner: 'Finance', primaryTerms: ['Revenue'] });
+  });
+
+  it('reports missing parents and hierarchy cycles', () => {
+    mkdirSync(join(projectRoot, 'domains'), { recursive: true });
+    writeFileSync(join(projectRoot, 'domains', 'a.dql'), 'domain "A" {\n  parent = "B"\n}\n', 'utf-8');
+    writeFileSync(join(projectRoot, 'domains', 'b.dql'), 'domain "B" {\n  parent = "A"\n}\n', 'utf-8');
+    const diagnostics = buildManifest({ projectRoot, dqlVersion: 'test' }).diagnostics.map((diagnostic) => diagnostic.message);
+    expect(diagnostics.some((message) => message.includes('cycle'))).toBe(true);
   });
 });

@@ -380,10 +380,23 @@ export interface AiRoute {
 export interface Domain {
   id: string;
   name: string;
+  parent?: string;
   owner?: string;
+  businessOwner?: string;
   boundedContext?: string;
   sourceSystems?: string[];
   description?: string;
+  primaryTerms?: string[];
+  tags?: string[];
+  businessOutcome?: string;
+  reviewCadence?: string;
+  inScope?: string[];
+  outOfScope?: string[];
+  dbtGroups?: string[];
+  dbtPaths?: string[];
+  dbtTags?: string[];
+  semanticDomains?: string[];
+  semanticTags?: string[];
   sourcePath?: string;
   blockCount?: number;
   skillCount?: number;
@@ -415,6 +428,17 @@ export interface Skill {
   isStarter?: boolean;
   /** Spec 17 (part B) — the domain this skill belongs to (domain id). */
   domain?: string;
+  domains?: string[];
+  kind?: 'domain_reference' | 'metric_policy' | 'glossary' | 'analysis_pattern' | 'sql_policy' | 'custom';
+  status?: 'draft' | 'active' | 'deprecated';
+  owner?: string;
+  triggers?: string[];
+  exclusions?: string[];
+  preferredDimensions?: string[];
+  requiredFilters?: string[];
+  clarifyWhen?: string[];
+  examples?: string[];
+  sourceRefs?: string[];
 }
 
 /** Skills that shaped an AI answer — surfaced as the "guided by" line. */
