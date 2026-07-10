@@ -1,6 +1,6 @@
 /**
  * Default starter Skills (spec 16) — `seedDefaultSkills` writes three EDITABLE
- * starters into `.dql/skills/`, idempotently (it NEVER clobbers a file the user
+ * starters into `skills/`, idempotently (it NEVER clobbers a file the user
  * has edited). The starters are:
  *
  *   (a) Metrics glossary  — pre-filled from the semantic layer (MetricFlow
@@ -194,7 +194,7 @@ function blockAuthoringSkill(): WriteSkillInput {
 }
 
 /**
- * Seed the editable starter skills into `.dql/skills/`. Idempotent: a starter is
+ * Seed the editable starter skills into `skills/`. Idempotent: a starter is
  * written only when its file does not already exist, so user edits are never
  * clobbered.
  */

@@ -22,6 +22,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Square,
   Wrench,
 } from 'lucide-react';
 import {
@@ -448,6 +449,24 @@ export function UnifiedAgentRunPanel({
     void submit();
   };
 
+  const handleStop = () => {
+    const runId = activeRunIdRef.current;
+    // Stop the server-owned run first so a hidden/background process cannot
+    // keep spending provider time after the visible composer has stopped.
+    if (runId) void api.cancelAgentRun(runId).catch(() => undefined);
+    abortRef.current?.abort();
+    recoveryEpochRef.current += 1;
+    if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
+    clearActiveAgentRun(runId ?? '');
+    activeRunIdRef.current = null;
+    pendingRunRef.current = null;
+    setBackgroundRun(null);
+    setStreamingAnswer('');
+    setRunningEvents([]);
+    setRunning(false);
+    setError('Stopped. No answer or draft was saved.');
+  };
+
   const onRunningChangeRef = useRef(onRunningChange);
   onRunningChangeRef.current = onRunningChange;
   useEffect(() => {
@@ -609,6 +628,7 @@ export function UnifiedAgentRunPanel({
             {running ? <Loader2 size={15} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Send size={15} />}
             <span>{running ? 'Working' : 'Ask'}</span>
           </button>
+          {running ? <button type="button" className="dql-hover" onClick={handleStop} style={{ ...sendButtonStyle(t, true), background: t.btnBg, borderColor: t.error, color: t.error }} title="Stop the active agent run"><Square size={13} fill="currentColor" /><span>Stop</span></button> : null}
         </div>
       </div>
     </div>

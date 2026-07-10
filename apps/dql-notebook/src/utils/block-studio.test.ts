@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   parseSemanticVisualFields,
+  setBlockArray,
   setBlockStringField,
   setDqlSectionBody,
   setSemanticArray,
@@ -80,5 +81,23 @@ describe('block-studio utils', () => {
     expect(next).toContain('custom_palette = "finance"');
     expect(next).toContain('chart = "line"');
     expect(next).toContain('title = "Revenue and margin"');
+  });
+
+  it('edits and clears context arrays without removing unknown DQL clauses', () => {
+    const source = `block "customer_retention" {
+  primaryTerms = ["retention", "churn"]
+  custom_governance_clause = "preserve-me"
+  query = """
+    SELECT 1 AS retained_customers
+  """
+}
+`;
+    const next = setBlockArray(source, 'primaryTerms', ['retention', 'active customer']);
+    const cleared = setBlockArray(next, 'sourceSystems', []);
+
+    expect(next).toContain('primaryTerms = ["retention", "active customer"]');
+    expect(cleared).toContain('sourceSystems = []');
+    expect(cleared).toContain('custom_governance_clause = "preserve-me"');
+    expect(cleared).toContain('SELECT 1 AS retained_customers');
   });
 });

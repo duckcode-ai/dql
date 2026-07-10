@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { GraduationCap, Boxes, MessageCircle, Settings, ListChecks } from 'lucide-react';
+import { Boxes, MessageCircle, Settings, ListChecks } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -165,8 +165,7 @@ export function ActivityBar() {
     {
       label: 'Govern',
       items: [
-        { key: 'domains', title: 'Domains', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' },
-        { key: 'skills', title: 'Skills', icon: <GraduationCap size={16} strokeWidth={1.75} />, active: state.mainView === 'skills' },
+        { key: 'domains', title: 'Context', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'skills' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
       ],
     },

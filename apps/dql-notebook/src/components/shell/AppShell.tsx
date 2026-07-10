@@ -21,8 +21,7 @@ import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { AgentLogPage } from '../agent/AgentLogPage';
-import { SkillsPage } from '../skills/SkillsPage';
-import { DomainsPage } from '../domains/DomainsPage';
+import { GovernedContextPage } from '../domains/GovernedContextPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { AiBuildDialog } from '../agent/AiBuildDialog';
@@ -223,9 +222,9 @@ export function AppShell() {
           ) : state.mainView === 'readiness' ? (
             <ReadinessPage />
           ) : state.mainView === 'skills' ? (
-            <SkillsPage />
+            <GovernedContextPage initialTab="skills" />
           ) : state.mainView === 'domains' ? (
-            <DomainsPage />
+            <GovernedContextPage />
           ) : state.mainView === 'apps' ? (
             <AppsView />
           ) : state.mainView === 'agent_log' ? (

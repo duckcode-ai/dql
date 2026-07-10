@@ -182,6 +182,7 @@ Lives at the project root. Written by `dql init` and `create-dql-app`.
 ```json
 {
   "project": "jaffle-analytics",
+  "layout": { "version": 2, "mode": "oss-dbt-workspace", "skillsPath": "skills" },
   "connections": {
     "default": { "driver": "duckdb", "filepath": ":memory:" }
   },
@@ -202,6 +203,9 @@ Lives at the project root. Written by `dql init` and `create-dql-app`.
 Fields:
 
 - **`project`** — human-readable project name
+- **`layout`** — OSS workspace convention. New projects use version `2` and
+  keep shared agent guidance in visible `skills/`; legacy `.dql/skills/` is
+  read only for migration compatibility.
 - **`connections`** — named database connections. `default` is used unless a block overrides it
 - **`semanticLayer`** — `{ provider, path, projectPath }`. Providers: `dql` (local YAML), `dbt`, `cubejs`, `snowflake`
 - **`dbt`** — `{ projectDir, manifestPath }` for in-place or sibling dbt projects. `dql compile` and `dql sync dbt` read from here

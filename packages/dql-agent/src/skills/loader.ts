@@ -16,8 +16,8 @@
  * key/value, list-of-strings, and one-level objects (good enough for skills).
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, basename, dirname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join, basename, dirname, relative } from 'node:path';
 import * as yaml from 'js-yaml';
 
 export interface Skill {
@@ -61,23 +61,29 @@ export interface SkillLoadResult {
 }
 
 /**
- * Walk `<projectRoot>/.dql/skills/**` and return every parsed Skill.
+ * Walk the visible, Git-owned `skills/**` tree. The historical
+ * `.dql/skills/**` tree remains read-compatible during migration, but a skill
+ * with the same id in `skills/` wins so projects can move incrementally.
  * Misformed files are reported in `errors`; valid Skills still come back.
  */
 export function loadSkills(projectRoot: string): SkillLoadResult {
-  const skillsDir = join(projectRoot, '.dql', 'skills');
-  if (!existsSync(skillsDir)) return { skills: [], errors: [] };
+  const roots = [skillsDir(projectRoot), legacySkillsDir(projectRoot)];
   const skills: Skill[] = [];
   const errors: Array<{ path: string; message: string }> = [];
+  const seen = new Set<string>();
 
-  const files = walkMd(skillsDir);
-  for (const f of files) {
-    try {
-      const raw = readFileSync(f, 'utf-8');
-      const skill = parseSkill(raw, f);
-      if (skill) skills.push(skill);
-    } catch (err) {
-      errors.push({ path: f, message: (err as Error).message });
+  for (const root of roots) {
+    for (const f of walkMd(root)) {
+      try {
+        const raw = readFileSync(f, 'utf-8');
+        const skill = parseSkill(raw, f);
+        if (skill && !seen.has(skill.id)) {
+          seen.add(skill.id);
+          skills.push(skill);
+        }
+      } catch (err) {
+        errors.push({ path: f, message: (err as Error).message });
+      }
     }
   }
   return { skills, errors };
@@ -108,7 +114,7 @@ export function parseSkill(raw: string, path: string): Skill | null {
 
   const id = pickString(meta.id) ?? basename(path).replace(/\.skill\.md$|\.md$/, '');
   const user = pickString(meta.user);
-  const starter = pickString(meta.starter);
+  const starter = meta.starter;
   return {
     id,
     scope: user ? 'personal' : 'project',
@@ -131,14 +137,19 @@ export function parseSkill(raw: string, path: string): Skill | null {
     vocabulary: pickStringMap(meta.vocabulary),
     body,
     sourcePath: path,
-    isStarter: starter === 'true' || starter === 'yes' ? true : undefined,
+    isStarter: starter === true || starter === 'true' || starter === 'yes' ? true : undefined,
   };
 }
 
 // ─── Serialization + CRUD (spec 16) ──────────────────────────────────────────
 
-/** Skills directory for a project. */
+/** Visible Git-owned skills directory for new and upgraded OSS projects. */
 export function skillsDir(projectRoot: string): string {
+  return join(projectRoot, 'skills');
+}
+
+/** Historical local-state location, retained only as a read/migration source. */
+export function legacySkillsDir(projectRoot: string): string {
   return join(projectRoot, '.dql', 'skills');
 }
 
@@ -263,10 +274,7 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
   };
 }
 
-/**
- * Write a skill to `.dql/skills/<id>.skill.md` (overwriting if present). Returns
- * the persisted Skill as re-read from disk so callers see the canonical form.
- */
+/** Write a skill to `skills/<id>.skill.md`, the shared source location. */
 export function writeSkill(projectRoot: string, input: WriteSkillInput): Skill {
   const skill = toSkill(projectRoot, input);
   const dir = dirname(skill.sourcePath);
@@ -280,13 +288,35 @@ export function upsertSkill(projectRoot: string, input: WriteSkillInput): Skill 
   return writeSkill(projectRoot, input);
 }
 
-/** Delete `.dql/skills/<id>.skill.md`. Returns true when a file was removed. */
+/** Delete a skill from its actual source path. Returns true when a file was removed. */
 export function deleteSkill(projectRoot: string, id: string): boolean {
   const existing = loadSkills(projectRoot).skills.find((skill) => skill.id === id);
   const path = existing?.sourcePath ?? skillPath(projectRoot, id);
   if (!existsSync(path)) return false;
   rmSync(path, { force: true });
   return true;
+}
+
+/**
+ * Explicit one-way OSS layout upgrade. Moves legacy skills into the visible
+ * source tree without overwriting a skill already migrated by a teammate.
+ */
+export function migrateLegacySkills(projectRoot: string): { moved: string[]; skipped: string[] } {
+  const legacyRoot = legacySkillsDir(projectRoot);
+  const visibleRoot = skillsDir(projectRoot);
+  const moved: string[] = [];
+  const skipped: string[] = [];
+  for (const source of walkMd(legacyRoot)) {
+    const destination = join(visibleRoot, relative(legacyRoot, source));
+    if (existsSync(destination)) {
+      skipped.push(relative(projectRoot, source));
+      continue;
+    }
+    mkdirSync(dirname(destination), { recursive: true });
+    renameSync(source, destination);
+    moved.push(relative(projectRoot, destination));
+  }
+  return { moved, skipped };
 }
 
 function pickString(v: unknown): string | undefined {
@@ -421,7 +451,10 @@ export function buildSkillsPrompt(skills: Skill[], userId: string | null): strin
 
 export function activeSkills(skills: Skill[], userId: string | null): Skill[] {
   void userId;
-  return skills.filter((s) => s.scope === 'project' && (s.status ?? 'active') === 'active');
+  // In-memory callers and older fixture data may not carry the persisted
+  // `scope` field. Treat that legacy absence as a project skill; explicitly
+  // personal skills remain excluded from OSS agent retrieval.
+  return skills.filter((s) => (s.scope ?? 'project') === 'project' && (s.status ?? 'active') === 'active');
 }
 
 export function buildSkillBlockHints(skills: Skill[], userId: string | null): string[] {

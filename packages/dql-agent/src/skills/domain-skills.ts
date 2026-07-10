@@ -75,7 +75,7 @@ export function buildDomainReferenceSkills(manifest: DQLManifest): WriteSkillInp
 }
 
 /**
- * Seed per-domain reference skills into `.dql/skills/`. Idempotent: a domain skill
+ * Seed per-domain reference skills into `skills/`. Idempotent: a domain skill
  * is written only when its file does not already exist, so curator edits are kept.
  */
 export function seedDomainSkills(projectRoot: string, manifest: DQLManifest): { created: Skill[]; skipped: string[] } {

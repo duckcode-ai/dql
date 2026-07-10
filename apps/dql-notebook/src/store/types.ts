@@ -404,7 +404,7 @@ export interface Domain {
 }
 
 // ── Spec 16 — Skills authoring & management ─────────────────────────────────
-// A "skill" is a business-context file (`.dql/skills/*.skill.md`) the agent
+// A "skill" is a shared business-context file (`skills/*.skill.md`) the agent
 // applies per question: definitions, rules, vocabulary, and preferred
 // metrics/blocks. Project skills are shared across everyone's AI; personal
 // skills are bound to one user. Three dbt-seeded starters ship editable
@@ -422,7 +422,7 @@ export interface Skill {
   preferredBlocks: string[];
   /** Term → target map, e.g. `arr` → `metric:arr`, `revenue` → `block:revenue_by_region`. */
   vocabulary: Record<string, string>;
-  /** On-disk source, e.g. `.dql/skills/metrics-glossary.skill.md`. */
+  /** On-disk source, e.g. `skills/metrics-glossary.skill.md`. */
   sourcePath: string;
   /** A dbt-seeded editable starter ("starter — edit me"). */
   isStarter?: boolean;

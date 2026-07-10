@@ -12,6 +12,7 @@ import {
   deleteSkill,
   selectRelevantSkills,
   skillPath,
+  migrateLegacySkills,
   type Skill,
 } from './loader.js';
 
@@ -60,7 +61,7 @@ Body content.`;
 });
 
 describe('loadSkills', () => {
-  it('discovers .skill.md files under .dql/skills/', () => {
+  it('keeps legacy .dql/skills files readable during the OSS layout migration', () => {
     writeFileSync(
       join(root, '.dql', 'skills', 'a.skill.md'),
       `---\nid: a\n---\nBody`,
@@ -74,6 +75,19 @@ describe('loadSkills', () => {
     );
     const { skills } = loadSkills(root);
     expect(skills.map((s) => s.id).sort()).toEqual(['a', 'b']);
+  });
+
+  it('prefers visible skills and moves legacy files without overwriting them', () => {
+    writeFileSync(join(root, '.dql', 'skills', 'revenue.skill.md'), '---\nid: revenue\n---\nLegacy', 'utf-8');
+    mkdirSync(join(root, 'skills'), { recursive: true });
+    writeFileSync(join(root, 'skills', 'revenue.skill.md'), '---\nid: revenue\n---\nVisible', 'utf-8');
+    writeFileSync(join(root, '.dql', 'skills', 'customers.skill.md'), '---\nid: customers\n---\nLegacy customers', 'utf-8');
+
+    expect(loadSkills(root).skills.find((skill) => skill.id === 'revenue')?.body).toBe('Visible');
+    const migration = migrateLegacySkills(root);
+    expect(migration.moved).toEqual(['skills/customers.skill.md']);
+    expect(migration.skipped).toEqual(['.dql/skills/revenue.skill.md']);
+    expect(existsSync(join(root, 'skills', 'customers.skill.md'))).toBe(true);
   });
 });
 
@@ -192,7 +206,7 @@ describe('writeSkill / round-trip (spec 16)', () => {
       requiredFilters: ['date_range'], clarifyWhen: ['When currency is not specified'], examples: ['Recognized revenue by region'],
       sourceRefs: ['metric:recognized_revenue'], body: 'Exclude bookings and use recognized revenue.',
     });
-    expect(skill.sourcePath.replace(/\\/g, '/')).toContain('.dql/skills/finance/revenue/recognized-revenue-policy.skill.md');
+    expect(skill.sourcePath.replace(/\\/g, '/')).toContain('skills/finance/revenue/recognized-revenue-policy.skill.md');
     expect(skill).toMatchObject({ kind: 'metric_policy', status: 'draft', preferredDimensions: ['region'], requiredFilters: ['date_range'] });
     expect(renderSkill(skill)).toContain('clarify_when:');
   });

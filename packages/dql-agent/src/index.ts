@@ -50,7 +50,9 @@ export {
   writeSkill,
   upsertSkill,
   deleteSkill,
+  migrateLegacySkills,
   skillsDir,
+  legacySkillsDir,
   skillPath,
 } from "./skills/loader.js";
 export type {
@@ -806,6 +808,9 @@ export function agentProjectSourceVersion(projectRoot: string): string {
     // best-effort so a malformed config does not make the cache itself fail.
   }
 
+  // New OSS projects keep shared skills visible and Git-owned at `skills/`.
+  // Watch the historical path as well until project migrations are complete.
+  addSmallTreeState(join(root, 'skills'), tokens);
   addSmallTreeState(join(root, '.dql', 'skills'), tokens);
   addSmallTreeState(join(root, '.dql', 'hints'), tokens);
   return createHash('sha1').update(tokens.sort().join('\n')).digest('hex');
