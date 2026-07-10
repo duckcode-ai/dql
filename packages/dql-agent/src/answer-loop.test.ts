@@ -5808,6 +5808,68 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.route?.label).toContain("metric");
   });
 
+  it("does not let a generic catalog-certified block pre-empt a more precise semantic metric", async () => {
+    kg.rebuild([
+      {
+        nodeId: "block:revenue_by_month",
+        kind: "block",
+        name: "revenue_by_month",
+        domain: "finance",
+        status: "certified",
+        description: "Monthly revenue trend.",
+        tags: ["revenue", "monthly"],
+        sourceTier: "certified_artifact",
+        certification: "certified",
+        provenance: "DQL block",
+        declaredOutputs: ["month", "revenue"],
+      },
+      {
+        nodeId: "metric:orders.tax_paid",
+        kind: "metric",
+        name: "orders.tax_paid",
+        domain: "finance",
+        description: "The total tax paid on each order.",
+        llmContext: "sql: SUM(tax_paid)\ntable: orders",
+        tags: ["tax"],
+        sourceTier: "semantic_layer",
+        certification: "ai_generated",
+        provenance: "dbt measure",
+      },
+    ], []);
+    const provider = new StubProvider("should not be called");
+    const contextPack = contextPackForRankedRelations("What is the total tax paid?", [], {
+      metricTerms: ["tax_paid"],
+      dimensionTerms: [],
+      mode: "definition",
+      routeIntent: "definition_lookup",
+      objects: [
+        { objectKey: "dql:block:revenue_by_month", objectType: "dql_block", name: "revenue_by_month" },
+        { objectKey: "semantic:metric:orders.tax_paid", objectType: "semantic_metric", name: "orders.tax_paid" },
+      ],
+    }) as any;
+    contextPack.routeDecision = {
+      route: "certified",
+      intent: "definition_lookup",
+      exactObjectKey: "dql:block:revenue_by_month",
+      reason: "Generic total token selected a certified block.",
+      trustLabel: "certified",
+      reviewStatus: "certified",
+      selectedEvidence: [],
+      missingContext: [],
+      followUps: [],
+    };
+    const result = await answer({
+      question: "What is the total tax paid?",
+      provider,
+      kg,
+      contextPack,
+    });
+    expect(result.sourceTier).toBe("semantic_layer");
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.sql).toContain("SUM(tax_paid)");
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("keeps a directly resolved metric on the semantic route when retrieval selected dbt context", async () => {
     // The compact catalog pack is intentionally dbt-only here.  Metric matching
     // still comes from the loaded semantic graph, so its compiler-owned answer

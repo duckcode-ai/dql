@@ -18,10 +18,11 @@ my-dql-project/
 │   │   ├─ views/
 │   │   └─ apps/
 │   └─ revenue/
-├─ blocks/                  # legacy-compatible shared blocks
-├─ terms/                   # legacy-compatible shared terms
-├─ business-views/          # legacy-compatible shared views
+├─ skills/                  # shared, Git-tracked agent guidance
+├─ tests/                   # block and agent-eval checks
+├─ notebooks/
 ├─ apps/
+├─ semantic-layer/          # optional local semantic source
 └─ .dql/cache/
 ```
 
@@ -85,6 +86,9 @@ my-dql-project/
 - **`semantic-layer/`** — metrics and dimensions authored locally. When you
   configure dbt artifacts, DQL reads MetricFlow semantics from
   `target/semantic_manifest.json` and keeps generated cache files under `.dql/`.
+- **`skills/`** — shared Markdown/YAML-frontmatter agent guidance. New projects
+  write here; `.dql/skills/` is read only for legacy migration compatibility.
+- **`tests/`** — committed block assertions and agent evaluation fixtures.
 - **`data/`** — sample data for local exploration. Production projects usually
   query a warehouse instead.
 - **`.dql/imports/`** — local import review sessions. AI SQL imports follow
@@ -154,9 +158,8 @@ my-dbt-repo/
 │   └─ manifest.json       # produced by `dbt parse` or `dbt build`
 └─ dql/
     ├─ dql.config.json     # dbt.projectDir: ".."
-    ├─ blocks/
-    ├─ terms/
-    ├─ business-views/
+    ├─ domains/
+    ├─ skills/
     ├─ notebooks/
     ├─ apps/
     └─ .dql/
@@ -193,6 +196,7 @@ dbt source -> dbt model -> semantic metric -> DQL block -> business_view -> dash
 
 **Commit:** durable shared source: `domains/**/domain.dql`,
 `domains/**/blocks/**/*.dql`, legacy `blocks/**/*.dql`, `terms/**/*.dql`,
+`skills/**/*.skill.md`,
 `business-views/**/*.dql`, `semantic-layer/**/*.yaml`, reviewed
 `apps/*/dql.app.json`, reviewed `apps/*/dashboards/*.dqld`, curated/shared
 `.dqlnb` notebooks, `dql.config.json`, and `package.json`.

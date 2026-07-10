@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { runInit } from './init.js';
+import { loadSkills } from '@duckcodeailabs/dql-agent';
 
 const DBT_SEMANTIC_YAML = `semantic_models:
   - name: orders
@@ -30,7 +31,7 @@ metrics:
 `;
 
 describe('runInit', () => {
-  it('scaffolds a DQL project with config, blocks dir, and notebook', async () => {
+  it('scaffolds a domain-first OSS project with visible shared skills', async () => {
     const targetDir = mkdtempSync(join(tmpdir(), 'dql-init-'));
     const projectDir = join(targetDir, 'demo-project');
 
@@ -54,9 +55,9 @@ describe('runInit', () => {
 
     const contents = readdirSync(projectDir);
     expect(contents).toContain('apps');
-    expect(contents).toContain('blocks');
-    expect(contents).toContain('terms');
-    expect(contents).toContain('business-views');
+    expect(contents).toContain('domains');
+    expect(contents).toContain('skills');
+    expect(contents).toContain('tests');
     expect(contents).toContain('dql.config.json');
     expect(contents).toContain('notebooks');
 
@@ -71,12 +72,11 @@ describe('runInit', () => {
     expect(notebook).toContain('DQL');
 
     // `dql init` seeds the editable starter skills (spec 16).
-    const skillFiles = readdirSync(join(projectDir, '.dql', 'skills'));
-    expect(skillFiles.sort()).toEqual([
-      'block-authoring.skill.md',
-      'domain-rules.skill.md',
-      'metrics-glossary.skill.md',
-      'sql-conventions.skill.md',
+    expect(loadSkills(projectDir).skills.map((skill) => skill.id).sort()).toEqual([
+      'block-authoring',
+      'domain-rules',
+      'metrics-glossary',
+      'sql-conventions',
     ]);
   });
 
@@ -146,9 +146,9 @@ describe('runInit', () => {
     const contents = readdirSync(dqlDir);
 
     expect(contents).toContain('apps');
-    expect(contents).toContain('blocks');
-    expect(contents).toContain('terms');
-    expect(contents).toContain('business-views');
+    expect(contents).toContain('domains');
+    expect(contents).toContain('skills');
+    expect(contents).toContain('tests');
     expect(contents).toContain('notebooks');
     expect(config.semanticLayer).toEqual({ provider: 'dbt', projectPath: '..' });
     expect(config.dbt).toEqual({ projectDir: '..', manifestPath: 'target/manifest.json' });

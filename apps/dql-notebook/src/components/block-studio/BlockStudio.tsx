@@ -40,6 +40,7 @@ import {
   setSemanticMetrics,
   setSemanticScalar,
   setBlockName,
+  setBlockArray,
   setBlockStringField,
   setBlockTags,
   setDqlSectionBody,
@@ -71,14 +72,6 @@ export function BlockStudio() {
     ? `block-studio.block.${encodeURIComponent(state.activeBlockPath)}`
     : `block-studio.draft.${draftSessionId}`;
   const agentThread = usePersistedAgentThreadId(agentScope);
-  // Real tables→columns for IDE-style SQL completion inside the block's query body.
-  const editorSchema = useMemo(
-    () =>
-      state.schemaTables.length > 0
-        ? Object.fromEntries(state.schemaTables.map((tbl) => [tbl.name, tbl.columns.map((c) => c.name)]))
-        : undefined,
-    [state.schemaTables],
-  );
   const [explorerTab, setExplorerTab] = useState<ExplorerTab>('blocks');
   const [resultTab, setResultTab] = useState<ResultTab>('results');
   const [query, setQuery] = useState('');
@@ -95,6 +88,21 @@ export function BlockStudio() {
   const [expandedDbNodes, setExpandedDbNodes] = useState<Record<string, boolean>>({});
   const [databaseQuery, setDatabaseQuery] = useState('');
   const [loadingDbNodes, setLoadingDbNodes] = useState<Set<string>>(new Set());
+  // Real tables→columns for IDE-style SQL completion inside the block's query
+  // body. The Block Studio catalog is included because a notebook schema may
+  // not have been opened before a user starts authoring a block.
+  const editorSchema = useMemo(
+    () => {
+      const liveSchema = state.schemaTables.map((tbl) => [tbl.name, tbl.columns.map((c) => c.name)] as const);
+      const catalogSchema = flattenDatabaseTables(databaseTree).map((table) => [table.path, table.columns] as const);
+      const entries = new Map<string, string[]>();
+      for (const [table, columns] of [...catalogSchema, ...liveSchema]) {
+        if (table) entries.set(table, columns);
+      }
+      return entries.size > 0 ? Object.fromEntries(entries) : undefined;
+    },
+    [state.schemaTables, databaseTree],
+  );
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
@@ -139,6 +147,7 @@ export function BlockStudio() {
   const [askAiKind, setAskAiKind] = useState<'ask' | 'build' | 'edit'>('ask');
   const [askAiInitialInput, setAskAiInitialInput] = useState('');
   const [askAiSeed, setAskAiSeed] = useState<{ text: string; mode: 'auto' | 'block'; nonce: number } | undefined>(undefined);
+  const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
     checklist?: {
@@ -937,6 +946,13 @@ export function BlockStudio() {
               <button type="button" onClick={() => setEditorMode('source')} style={editorModeButtonStyle(t, editorMode === 'source')}>DQL Source</button>
             </div>
           )}
+          {hasActiveDraft && (
+            <TemplateButton
+              label={`Context${blockContextCount(state.blockStudioDraft) ? ` (${blockContextCount(state.blockStudioDraft)})` : ''}`}
+              Icon={Database}
+              onClick={() => setContextInspectorOpen((open) => !open)}
+            />
+          )}
           <div style={{ flex: 1 }} />
           <TemplateButton label="New block" Icon={Plus} onClick={beginNewWorkspace} />
           {hasActiveDraft && (
@@ -966,6 +982,17 @@ export function BlockStudio() {
             </span>
           )}
         </div>
+        {hasActiveDraft && contextInspectorOpen && (
+          <BlockContextInspector
+            source={state.blockStudioDraft}
+            databaseStats={databaseStats}
+            semanticCount={semanticObjectCount}
+            onChange={handleDraftChange}
+            onOpenExplorer={() => { setLeftPaneCollapsed(false); setExplorerTab('database'); }}
+            onOpenAi={() => openAskAi({ kind: 'edit', initialInput: 'Review and improve this block context. Keep only grounded business references, sources, constraints, and caveats: ' })}
+            t={t}
+          />
+        )}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {workspaceMode === 'import' ? (
             <BlockStudioImportWorkspace
@@ -1804,6 +1831,76 @@ function DbtStatusRows({ status, t }: { status: BlockStudioDbtStatus | null; t: 
         {status.setupHint}
       </div>
     </div>
+  );
+}
+
+function BlockContextInspector({
+  source,
+  databaseStats,
+  semanticCount,
+  onChange,
+  onOpenExplorer,
+  onOpenAi,
+  t,
+}: {
+  source: string;
+  databaseStats: { schemas: number; tables: number; columns: number };
+  semanticCount: number;
+  onChange: (source: string) => void;
+  onOpenExplorer: () => void;
+  onOpenAi: () => void;
+  t: Theme;
+}) {
+  const field = (name: string) => source.match(new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
+  const array = (name: string) => (source.match(new RegExp(`\\b${name}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'))?.[1].match(/"([^"]*)"/g) ?? [])
+    .map((value) => value.slice(1, -1));
+  const tokenFields = [
+    { key: 'primaryTerms', label: 'Business terms', hint: 'net revenue, active customer' },
+    { key: 'sourceSystems', label: 'Source systems', hint: 'billing, product events' },
+    { key: 'synonyms', label: 'Question aliases', hint: 'sales, bookings' },
+  ];
+  return (
+    <div style={{ padding: '10px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.appBg, display: 'grid', gap: 10 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 12, fontWeight: 750, color: t.textPrimary }}>Block context</div>
+        <span style={{ fontSize: 11, color: t.textMuted }}>Only grounded context is kept with the block and used for retrieval.</span>
+        <div style={{ flex: 1 }} />
+        <button type="button" onClick={onOpenExplorer} style={secondaryImportButtonStyle(t)}>{databaseStats.tables} database tables</button>
+        <button type="button" onClick={onOpenAi} style={secondaryImportButtonStyle(t)}>Review with AI</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
+        <FieldLabel label="Business outcome" t={t}>
+          <input value={field('businessOutcome')} onChange={(event) => onChange(setBlockStringField(source, 'businessOutcome', event.target.value))} placeholder="Decision or outcome this block supports" style={importInputStyle(t)} />
+        </FieldLabel>
+        <FieldLabel label="Agent guidance" t={t}>
+          <input value={field('llmContext')} onChange={(event) => onChange(setBlockStringField(source, 'llmContext', event.target.value))} placeholder="When to use this block" style={importInputStyle(t)} />
+        </FieldLabel>
+        {tokenFields.map((item) => (
+          <ContextTokenEditor key={item.key} label={item.label} hint={item.hint} values={array(item.key)} onChange={(values) => onChange(setBlockArray(source, item.key, values))} t={t} />
+        ))}
+        <FieldLabel label="Rules and caveats" t={t}>
+          <input value={field('caveats')} onChange={(event) => onChange(setBlockStringField(source, 'caveats', event.target.value))} placeholder="Known limitation or interpretation rule" style={importInputStyle(t)} />
+        </FieldLabel>
+      </div>
+      <div style={{ fontSize: 10, color: t.textMuted }}>Available authoring context: {semanticCount} semantic objects, {databaseStats.schemas} schemas, {databaseStats.columns} columns. SQL completion uses the same loaded catalog.</div>
+    </div>
+  );
+}
+
+function ContextTokenEditor({ label, hint, values, onChange, t }: { label: string; hint: string; values: string[]; onChange: (values: string[]) => void; t: Theme }) {
+  const [input, setInput] = useState('');
+  const add = () => {
+    const next = input.split(',').map((value) => value.trim()).filter(Boolean);
+    if (next.length > 0) onChange([...values, ...next]);
+    setInput('');
+  };
+  return (
+    <FieldLabel label={label} t={t}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, padding: 6, minHeight: 36, border: `1px solid ${t.cellBorder}`, borderRadius: 6, background: t.cellBg }}>
+        {values.map((value) => <button type="button" key={value} onClick={() => onChange(values.filter((item) => item !== value))} title="Remove" style={{ ...selectionChipStyle(t, true), border: 'none', cursor: 'pointer' }}>{value} ×</button>)}
+        <input value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ',') { event.preventDefault(); add(); } }} onBlur={add} placeholder={values.length ? 'Add another…' : hint} style={{ minWidth: 120, flex: 1, border: 'none', outline: 'none', background: 'transparent', color: t.textPrimary, fontSize: 11, fontFamily: t.font }} />
+      </div>
+    </FieldLabel>
   );
 }
 
@@ -4768,6 +4865,23 @@ function summarizeDatabaseTree(tree: DatabaseSchemaNode[]): { schemas: number; t
 
   for (const node of tree) visit(node);
   return { schemas, tables, columns };
+}
+
+function flattenDatabaseTables(tree: DatabaseSchemaNode[]): Array<{ path: string; columns: string[] }> {
+  const tables: Array<{ path: string; columns: string[] }> = [];
+  const visit = (node: DatabaseSchemaNode) => {
+    if (node.kind === 'table' && node.path) {
+      tables.push({ path: node.path, columns: (node.children ?? []).filter((child) => child.kind === 'column').map((child) => child.label) });
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const node of tree) visit(node);
+  return tables;
+}
+
+function blockContextCount(source: string): number {
+  const fields = ['businessOutcome', 'llmContext', 'primaryTerms', 'sourceSystems', 'synonyms', 'caveats'];
+  return fields.filter((field) => new RegExp(`\\b${field}\\s*=`, 'i').test(source)).length;
 }
 
 function hasSemanticNodes(tree: SemanticTreeNode | null): boolean {

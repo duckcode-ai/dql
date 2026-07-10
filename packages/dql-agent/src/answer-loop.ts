@@ -788,6 +788,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   });
   let intent = catalogRoute ? agentIntentFromCatalogRoute(catalogRoute) : fallbackIntent;
 
+  // Resolve a governed metric before accepting a catalog-proposed certified
+  // block. Catalog token overlap can call a generic word such as "total" an
+  // exact block match (for example total tax → total revenue); the metric match
+  // is the precise measure signal that prevents that wrong Tier-1 shortcut.
+  const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
+  for (const metric of effectiveMetricHints) {
+    const node = kg.getNode(`metric:${metric}`);
+    if (node && !semanticMetricNodes.some((candidate) => candidate.nodeId === node.nodeId)) semanticMetricNodes.push(node);
+  }
+  let semanticMetricMatch = await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
+    measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
+  }).catch(() => null);
+
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
   const drilldownCertifiedHit = input.followUp?.kind === 'drilldown'
@@ -800,9 +813,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         kg,
       })
     : null;
-  const artifactHit = drilldownCertifiedHit ?? (shouldUseCertifiedRoute(catalogRoute, intent)
+  const shouldTryCertifiedRoute = shouldUseCertifiedRoute(catalogRoute, intent);
+  const catalogCertifiedHit = shouldTryCertifiedRoute
     ? certifiedHitFromContextPack(input.contextPack, kg)
-      ?? pickCertifiedArtifact({
+    : null;
+  const unsafeCatalogCertifiedHit = catalogCertifiedHit?.node.kind === 'block' && semanticMetricMatch
+    && !hasCertifiedNodeFit(question, questionPlan, catalogCertifiedHit.node)
+    ? null
+    : catalogCertifiedHit;
+  const fallbackCertifiedHit = shouldTryCertifiedRoute ? pickCertifiedArtifact({
           artifactHits,
           executableArtifactHits,
           businessHits,
@@ -811,8 +830,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           blockHints: input.followUp?.kind === 'drilldown' ? [] : effectiveBlockHints,
           excludedArtifactIds,
           kg,
-        })
-    : null);
+        }) : null;
+  let artifactHit = drilldownCertifiedHit ?? unsafeCatalogCertifiedHit
+    ?? (catalogCertifiedHit ? null : fallbackCertifiedHit);
+  // Certified remains first when it actually covers the question. If the
+  // retrieved block does not fit but a governed semantic metric does, never
+  // let the broad catalog match pre-empt Lane 2.
   // A certified TERM / BUSINESS VIEW is documentation, not data: it can be the
   // terminal answer only for a definition-style question with no data ask. A
   // question that requests a data shape (dimensions/measures/outputs/top-N) or
@@ -944,17 +967,6 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // a governed metric can answer. Match by name + synonyms + measure family + hybrid
   // rank over the FTS semantic hits, then ALL metric KG nodes (revenue ⇄
   // cumulative_revenue). Certified-first is still preserved (checked above).
-  const semanticMetricNodes = collectMetricCandidates(semanticHits, considered, kg);
-  for (const metric of effectiveMetricHints) {
-    const node = kg.getNode(`metric:${metric}`);
-    if (node && !semanticMetricNodes.some((candidate) => candidate.nodeId === node.nodeId)) semanticMetricNodes.push(node);
-  }
-  let semanticMetricMatch = await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
-    // Isolate the measure signal with the planner's terms so a group-by dimension
-    // ("... by product") can't be scored as a measure (see MatchSemanticMetricOptions).
-    measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
-  }).catch(() => null);
-
   const clarifyBeforeGeneration = shouldClarifyBeforeGeneration({
     intent,
     routeDecision: catalogRoute,

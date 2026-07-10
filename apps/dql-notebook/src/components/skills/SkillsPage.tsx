@@ -1,6 +1,6 @@
 // Spec 16 — Skills authoring & management.
 //
-// A "skill" is a business-context file (`.dql/skills/*.skill.md`) the agent
+// A "skill" is a shared business-context file (`skills/*.skill.md`) the agent
 // applies per question: definitions ("revenue = recognized, not bookings"),
 // rules ("always exclude test accounts"), vocabulary, and preferred
 // metrics/blocks. This page lets users author them without touching raw
@@ -24,6 +24,8 @@ import {
   RefreshCw,
   BookMarked,
   Tags,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -54,7 +56,7 @@ function emptyDraft(): Skill {
   };
 }
 
-export function SkillsPage(): JSX.Element {
+export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean } = {}): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
 
@@ -244,6 +246,8 @@ function SkillRow({
   onDelete: () => void;
 }): JSX.Element {
   const vocabCount = Object.keys(skill.vocabulary ?? {}).length;
+  const [expanded, setExpanded] = useState(false);
+  const domains = skill.domains?.length ? skill.domains : skill.domain ? [skill.domain] : [];
   return (
     <section
       style={{
@@ -260,6 +264,8 @@ function SkillRow({
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13.5, fontWeight: 750, color: t.textPrimary, fontFamily: t.fontMono }}>{skill.id}</span>
           {skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
+          {skill.status === 'active' || !skill.status ? <span style={activeBadge(t)}>active</span> : null}
+          {domains.map((domain) => <span key={domain} style={domainBadge(t)}>{domain}</span>)}
           {skill.isStarter ? (
             <span style={starterBadge(t)} title="A dbt-seeded starter — edit it to make it yours">
               <Sparkles size={10} strokeWidth={2.2} /> starter — edit me
@@ -276,8 +282,17 @@ function SkillRow({
           <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="blocks" count={skill.preferredBlocks?.length ?? 0} />
           <CountPill t={t} icon={<Tags size={11} strokeWidth={2} />} label="vocabulary" count={vocabCount} />
         </div>
+        {expanded ? <div style={{ display: 'grid', gap: 9, marginTop: 12, paddingTop: 11, borderTop: `1px solid ${t.btnBorder}` }}>
+          <SkillChipField t={t} label="Use these metrics" values={skill.preferredMetrics} empty="No preferred metrics" />
+          <SkillChipField t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" />
+          <SkillChipField t={t} label="Apply when" values={skill.triggers} empty="No trigger phrases defined" />
+          <SkillChipField t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
+          <SkillChipField t={t} label="Avoid when" values={skill.exclusions} empty="No exclusion rule defined" />
+          {skill.body ? <div style={{ display: 'grid', gap: 5 }}><strong style={{ color: t.textMuted, fontSize: 11.5 }}>Guidance the agent reads</strong><pre style={{ margin: 0, padding: '10px 11px', borderRadius: 7, background: t.appBg, color: t.textSecondary, fontFamily: t.font, fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 220, overflow: 'auto' }}>{skill.body}</pre></div> : null}
+        </div> : null}
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), padding: '5px 7px', fontSize: 11.5 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>{expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{expanded ? 'Less' : 'Details'}</button>
         <button type="button" onClick={onEdit} style={iconButton(t)} title="Edit skill">
           <Pencil size={13} strokeWidth={2} />
         </button>
@@ -821,6 +836,10 @@ function CountPill({ t, icon, label, count }: { t: Theme; icon: React.ReactNode;
   );
 }
 
+function SkillChipField({ t, label, values, empty }: { t: Theme; label: string; values?: string[]; empty: string }): JSX.Element {
+  return <div style={{ display: 'grid', gridTemplateColumns: '118px minmax(0, 1fr)', gap: 10, fontSize: 12, lineHeight: 1.5 }}><strong style={{ color: t.textMuted }}>{label}</strong><div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>{values?.length ? values.map((value) => <span key={value} style={skillChip(t)}>{value}</span>) : <span style={{ color: t.textMuted, fontStyle: 'italic' }}>{empty}</span>}</div></div>;
+}
+
 function Field({
   label,
   hint,
@@ -844,6 +863,18 @@ function Field({
 function InlineNote({ t, tone, children }: { t: Theme; tone: 'error' | 'muted'; children: React.ReactNode }): JSX.Element {
   const color = tone === 'error' ? t.error : t.textMuted;
   return <div style={{ fontSize: 11.5, color, lineHeight: 1.45 }}>{children}</div>;
+}
+
+function skillChip(t: Theme): CSSProperties {
+  return { fontSize: 11, fontWeight: 600, color: t.textSecondary, background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, padding: '3px 8px', fontFamily: t.fontMono };
+}
+
+function activeBadge(t: Theme): CSSProperties {
+  return { display: 'inline-flex', alignItems: 'center', fontSize: 10.5, fontWeight: 700, color: t.success, background: `${t.success}14`, border: `1px solid ${t.success}38`, borderRadius: 999, padding: '2px 7px' };
+}
+
+function domainBadge(t: Theme): CSSProperties {
+  return { display: 'inline-flex', alignItems: 'center', fontSize: 10.5, fontWeight: 700, color: t.accent, background: `${t.accent}14`, border: `1px solid ${t.accent}38`, borderRadius: 999, padding: '2px 7px' };
 }
 
 // ── Styles ───────────────────────────────────────────────────────────────────

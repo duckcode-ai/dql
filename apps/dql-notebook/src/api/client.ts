@@ -58,6 +58,19 @@ const EMPTY_PLAN = {
   },
 };
 
+export interface GitGovernedContextGroup {
+  total: number;
+  tracked: number;
+  changed: number;
+  untracked: number;
+  ignored: number;
+  paths: Array<{ path: string; state: 'tracked' | 'changed' | 'untracked' | 'ignored' }>;
+}
+
+function emptyGitGovernedContextGroup(): GitGovernedContextGroup {
+  return { total: 0, tracked: 0, changed: 0, untracked: 0, ignored: 0, paths: [] };
+}
+
 // ── Apps API types ───────────────────────────────────────────────────────
 
 export interface AppDocumentSummary {
@@ -1971,6 +1984,12 @@ export const api = {
     return raw.run;
   },
 
+  async cancelAgentRun(id: string): Promise<{ ok: boolean; id?: string }> {
+    return request<{ ok: boolean; id?: string }>(`/api/agent-runs/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+    });
+  },
+
   async listAgentThreads(input?: { limit?: number; archived?: boolean }): Promise<{ threads: AgentConversationThread[] }> {
     const params = new URLSearchParams();
     if (typeof input?.limit === 'number' && Number.isFinite(input.limit)) {
@@ -3468,6 +3487,27 @@ export const api = {
     }
   },
 
+  async fetchGitGovernedContext(): Promise<{
+    inRepo: boolean;
+    trackingReady: boolean;
+    domains: GitGovernedContextGroup;
+    skills: GitGovernedContextGroup;
+  }> {
+    try {
+      return await request('/api/git/governed-context');
+    } catch {
+      return { inRepo: false, trackingReady: false, domains: emptyGitGovernedContextGroup(), skills: emptyGitGovernedContextGroup() };
+    }
+  },
+
+  async enableGitGovernedContextTracking(): Promise<{ ok: boolean; changed?: boolean; error?: string }> {
+    try {
+      return await request('/api/git/governed-context/enable', { method: 'POST', body: '{}' });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async gitStage(paths: string[]): Promise<{ ok: boolean; error?: string }> {
     try {
       return await request<any>('/api/git/stage', { method: 'POST', body: JSON.stringify({ paths }) });
@@ -3525,6 +3565,17 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ name, checkout }),
       });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  /** Create a review branch, commit only the selected files, push it, and open a PR. Never merges. */
+  async gitCreateReview(payload: { paths: string[]; title: string; body?: string; base?: string }): Promise<{
+    ok: boolean; error?: string; branch?: string; hash?: string; prUrl?: string; warning?: string;
+  }> {
+    try {
+      return await request<any>('/api/git/review', { method: 'POST', body: JSON.stringify(payload) });
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -4224,6 +4275,11 @@ export const api = {
 
   async getContextBootstrap(id: string): Promise<ContextBootstrapSession> {
     return request<ContextBootstrapSession>(`/api/context-bootstrap/${encodeURIComponent(id)}`);
+  },
+
+  async getLatestContextBootstrap(): Promise<ContextBootstrapSession | null> {
+    const result = await request<{ session: ContextBootstrapSession | null }>('/api/context-bootstrap/latest');
+    return result.session ?? null;
   },
 
   async saveContextBootstrapSelected(id: string, candidateIds: string[]): Promise<{ id: string; saved: Array<{ id: string; path?: string; status: 'saved' | 'skipped' | 'blocked'; blockers?: string[] }> }> {

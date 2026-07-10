@@ -16,10 +16,11 @@ import {
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
-import { api } from '../../api/client';
+import { api, type GitGovernedContextGroup } from '../../api/client';
 
 type Status = Awaited<ReturnType<typeof api.fetchGitStatus>>;
 type RawChange = Status['changes'][number];
+type GovernedContext = Awaited<ReturnType<typeof api.fetchGitGovernedContext>>;
 
 interface FileEntry {
   path: string;
@@ -101,19 +102,28 @@ export function GitPage() {
   const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [newBranchOpen, setNewBranchOpen] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
+  const [reviewUrl, setReviewUrl] = useState<string | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [governedContext, setGovernedContext] = useState<GovernedContext | null>(null);
   const branchMenuRef = useRef<HTMLDivElement>(null);
 
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [s, b, r] = await Promise.all([
+      const [s, b, r, context] = await Promise.all([
         api.fetchGitStatus(),
         api.fetchGitBranches(),
         api.fetchGitRemote(),
+        api.fetchGitGovernedContext(),
       ]);
-      setStatus(s);
-      setBranchInfo({ current: b.current, branches: b.branches });
-      setRemote({ url: r.url, name: r.name });
+      // Keep a background poll invisible when nothing actually changed. In
+      // particular, do not replace the selected-file status every four seconds.
+      setStatus((previous) => sameGitStatus(previous, s) ? previous : s);
+      setBranchInfo((previous) => previous.current === b.current && sameStringList(previous.branches, b.branches)
+        ? previous
+        : { current: b.current, branches: b.branches });
+      setRemote((previous) => previous.url === r.url && previous.name === r.name ? previous : { url: r.url, name: r.name });
+      setGovernedContext(context);
     } finally {
       window.setTimeout(() => setRefreshing(false), 350);
     }
@@ -141,9 +151,14 @@ export function GitPage() {
     return () => document.removeEventListener('mousedown', onDoc);
   }, [branchMenuOpen]);
 
-  // Re-fetch the diff for the selected file when selection changes or after
-  // any operation refreshes status. The right pane keeps an explicit loading
-  // state so selecting a row never looks like a blank review.
+  const selectedFileStatus = useMemo(
+    () => (status?.changes ?? []).map((change) => `${change.status}:${change.path}`).sort().join('|'),
+    [status],
+  );
+
+  // A selected diff changes only when its file/status changes, not whenever the
+  // quiet Git poll receives an identical status response. This removes the
+  // distracting blank/loading flicker while someone is reviewing a file.
   useEffect(() => {
     if (!selectedPath) {
       setDiff(null);
@@ -166,7 +181,7 @@ export function GitPage() {
         if (!cancelled) setDiffLoading(false);
       });
     return () => { cancelled = true; };
-  }, [selectedPath, selectedStaged, status]);
+  }, [selectedPath, selectedStaged, selectedFileStatus]);
 
   const entries = useMemo(() => expandChanges(status?.changes ?? []), [status?.changes]);
   const stagedFiles = entries.filter((e) => e.staged);
@@ -244,6 +259,26 @@ export function GitPage() {
     setCommitMsg('');
     await runOp('push', () => api.gitPush(), 'Pushed to remote');
   };
+  const onRequestReview = async () => {
+    const title = commitMsg.trim();
+    if (!title) return flash('err', 'Review title required');
+    const paths = Array.from(new Set(entries.map((entry) => entry.path)));
+    if (paths.length === 0) return flash('err', 'No changes to request review for');
+    const review = await runOp('request review', () => api.gitCreateReview({
+      paths,
+      title,
+      body: 'Created from DQL Source Control. Review the governed analytics changes before merging.',
+      base: 'main',
+    }));
+    if (!review.ok) return;
+    setCommitMsg('');
+    setReviewUrl(review.prUrl ?? null);
+    flash('ok', review.warning ?? `Review branch ${review.branch ?? ''} is ready${review.prUrl ? '.' : '; create the PR from your Git host.'}`);
+  };
+  const onEnableGovernedTracking = async () => {
+    const result = await runOp('enable governed tracking', () => api.enableGitGovernedContextTracking());
+    if (result.ok) flash('ok', 'Domains and project skills are now included in source control.');
+  };
   const onPull = () => runOp('pull', () => api.gitPull(), 'Pulled from remote');
   const onPush = () => runOp('push', () => api.gitPush(), 'Pushed to remote');
   const onCheckout = (name: string) => {
@@ -261,8 +296,8 @@ export function GitPage() {
 
   const selectedEntry = entries.find((e) => e.path === selectedPath && e.staged === selectedStaged) ?? null;
   const prUrl = useMemo(
-    () => githubCompareUrl(remote.url, branchInfo.current),
-    [remote.url, branchInfo.current],
+    () => reviewUrl ?? githubCompareUrl(remote.url, branchInfo.current),
+    [remote.url, branchInfo.current, reviewUrl],
   );
 
   if (status && !status.inRepo) {
@@ -293,6 +328,16 @@ export function GitPage() {
         setNewBranchName={setNewBranchName}
         onCreateBranch={onCreateBranch}
         branchMenuRef={branchMenuRef}
+      />
+
+      <GitFlowGuide
+        t={t}
+        changeCount={entries.length}
+        branch={branchInfo.current}
+        advancedOpen={advancedOpen}
+        onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
+        context={governedContext}
+        onEnableTracking={onEnableGovernedTracking}
       />
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -345,6 +390,9 @@ export function GitPage() {
             unstagedCount={unstagedFiles.length}
             onCommit={onCommit}
             onCommitAndPush={onCommitAndPush}
+            onRequestReview={onRequestReview}
+            advancedOpen={advancedOpen}
+            onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
             busy={busy}
           />
         </div>
@@ -515,14 +563,14 @@ function TopBar(p: TopBarProps) {
       </button>
       <style>{`@keyframes dql-spin { to { transform: rotate(360deg); } }`}</style>
 
-      <button onClick={p.onPull} disabled={!!p.busy} style={topBtn(t)}>
+      <button onClick={p.onPull} disabled={!!p.busy} style={topBtn(t)} title="Get updates from the shared project">
         <ArrowDown size={12} strokeWidth={1.75} color={t.warning} />
-        Pull
+        Get updates
         {p.behind > 0 && <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textMuted, marginLeft: 2 }}>{p.behind}</span>}
       </button>
-      <button onClick={p.onPush} disabled={!!p.busy} style={topBtn(t, true)}>
+      <button onClick={p.onPush} disabled={!!p.busy} style={topBtn(t, true)} title="Send the current branch to the shared project">
         <ArrowUp size={12} strokeWidth={1.75} />
-        Push
+        Send branch
         {p.ahead > 0 && <span style={{ fontFamily: t.fontMono, fontSize: 10, opacity: 0.75, marginLeft: 2 }}>{p.ahead}</span>}
       </button>
       {p.prUrl && (
@@ -578,6 +626,100 @@ function githubCompareUrl(remoteUrl: string | null, branch: string | null): stri
   return `https://github.com/${match[1]}/compare/${encodeURIComponent(branch)}?expand=1`;
 }
 
+function sameStringList(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameGitStatus(left: Status | null, right: Status): boolean {
+  return Boolean(left)
+    && left!.inRepo === right.inRepo
+    && left!.branch === right.branch
+    && left!.ahead === right.ahead
+    && left!.behind === right.behind
+    && left!.changes.length === right.changes.length
+    && left!.changes.every((change, index) => change.path === right.changes[index]?.path && change.status === right.changes[index]?.status);
+}
+
+function GitFlowGuide({
+  t,
+  changeCount,
+  branch,
+  advancedOpen,
+  onToggleAdvanced,
+  context,
+  onEnableTracking,
+}: {
+  t: Theme;
+  changeCount: number;
+  branch: string | null;
+  advancedOpen: boolean;
+  onToggleAdvanced: () => void;
+  context: GovernedContext | null;
+  onEnableTracking: () => void;
+}) {
+  const steps = [
+    { label: 'Review changes', detail: changeCount === 0 ? 'Everything is up to date' : `${changeCount} change${changeCount === 1 ? '' : 's'} ready to review` },
+    { label: 'Describe your update', detail: 'Use plain language' },
+    { label: 'Request review', detail: 'Creates a branch and pull request' },
+  ];
+  return (
+    <div style={{ display: 'grid', gap: 9, padding: '9px 20px', background: t.sidebarBg, borderBottom: `1px solid ${t.headerBorder}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+      <div style={{ minWidth: 170 }}>
+        <div style={{ fontSize: 12, fontWeight: 720, color: t.textPrimary }}>Share changes safely</div>
+        <div style={{ fontSize: 10, color: t.textMuted, marginTop: 2 }}>Nothing merges automatically.</div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 300, flexWrap: 'wrap' }}>
+        {steps.map((step, index) => (
+          <React.Fragment key={step.label}>
+            {index > 0 && <span style={{ color: t.textMuted, fontSize: 12 }}>→</span>}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 18, height: 18, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: `${t.accent}18`, color: t.accent, fontSize: 10, fontWeight: 750 }}>{index + 1}</span>
+              <div>
+                <div style={{ fontSize: 11, color: t.textPrimary, fontWeight: 650 }}>{step.label}</div>
+                <div style={{ fontSize: 9, color: t.textMuted }}>{step.detail}</div>
+              </div>
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+      <button type="button" onClick={onToggleAdvanced} style={miniBtn(t)}>
+        {advancedOpen ? 'Hide Git details' : 'Git details'}
+      </button>
+      {branch && branch !== 'main' && branch !== 'master' && <span style={{ fontSize: 10, color: t.success }}>Review branch: {branch}</span>}
+      </div>
+      {context && <GovernedContextSummary t={t} context={context} onEnableTracking={onEnableTracking} />}
+    </div>
+  );
+}
+
+function GovernedContextSummary({ t, context, onEnableTracking }: { t: Theme; context: GovernedContext; onEnableTracking: () => void }) {
+  const groupSummary = (label: string, group: GitGovernedContextGroup) => {
+    if (group.total === 0) return `${label}: none yet`;
+    if (group.ignored > 0) return `${label}: ${group.total} found · ${group.ignored} hidden from Git`;
+    if (group.changed > 0 || group.untracked > 0) return `${label}: ${group.total} · ${group.changed + group.untracked} need review`;
+    return `${label}: ${group.total} tracked`;
+  };
+  const needsRepair = context.domains.ignored > 0 || context.skills.ignored > 0;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: needsRepair ? `${t.warning}10` : `${t.success}0d`, border: `1px solid ${needsRepair ? `${t.warning}45` : `${t.success}35`}`, borderRadius: 6, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 10, fontWeight: 750, letterSpacing: '0.05em', textTransform: 'uppercase', color: needsRepair ? t.warning : t.success }}>Governed context</span>
+      <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Domains', context.domains)}</span>
+      <span style={{ color: t.textMuted }}>·</span>
+      <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Skills', context.skills)}</span>
+      <div style={{ flex: 1 }} />
+      {needsRepair ? (
+        <>
+          <span style={{ fontSize: 10, color: t.textMuted }}>A legacy local folder is hiding shared guidance.</span>
+          <button type="button" onClick={onEnableTracking} style={miniBtn(t, 'primary')}>Move skills to source control</button>
+        </>
+      ) : (
+        <span style={{ fontSize: 10, color: t.textMuted }}>Shared project source</span>
+      )}
+    </div>
+  );
+}
+
 type ArtifactGroupId = 'business' | 'apps' | 'notebooks' | 'generated' | 'local';
 
 interface ArtifactGroup {
@@ -599,6 +741,9 @@ function artifactGroupForPath(path: string): ArtifactGroup {
   }
   if (/\/apps\/[^/]+\/dql\.app\.json$/.test(path) || /^apps\/[^/]+\/dql\.app\.json$/.test(path) || /\/dashboards\/[^/]+\.dqld$/.test(path) || /^apps\/[^/]+\/dashboards\/[^/]+\.dqld$/.test(path)) {
     return { id: 'apps', label: 'Shared app', tone: 'neutral', rank: 1 };
+  }
+  if (path.startsWith('skills/') || path.startsWith('.dql/skills/') || /^domains\/[^/]+\/domain\.dql$/i.test(path)) {
+    return { id: 'business', label: 'Governed context', tone: 'good', rank: 0 };
   }
   if (/\.dql$/i.test(path) || path.startsWith('semantic-layer/') || /\.(ya?ml)$/i.test(path) || path === 'dql.config.json' || path === 'package.json') {
     return { id: 'business', label: 'Business logic', tone: 'good', rank: 0 };
@@ -660,7 +805,7 @@ function FileTree(p: FileTreeProps) {
           <span style={{ fontSize: 11, color: t.textMuted }}>{p.totalCount} files</span>
           <div style={{ flex: 1 }} />
           {p.unstagedFiles.length > 0 && (
-            <button onClick={p.onStageAll} style={miniBtn(t)}>Stage all</button>
+            <button onClick={p.onStageAll} style={miniBtn(t)}>Include all</button>
           )}
         </div>
 
@@ -709,10 +854,10 @@ function FileTree(p: FileTreeProps) {
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: '6px 8px' }}>
-        <SectionHeader t={t} label="Staged" count={p.stagedFiles.length} />
+        <SectionHeader t={t} label="Included" count={p.stagedFiles.length} />
         {p.stagedFiles.length === 0 ? (
           <div style={{ fontSize: 11, color: t.textMuted, padding: '4px 10px', fontStyle: 'italic' }}>
-            No staged changes
+            No files included yet
           </div>
         ) : (
           p.stagedFiles.map((f) => (
@@ -722,17 +867,17 @@ function FileTree(p: FileTreeProps) {
               file={f}
               active={p.selectedPath === f.path && p.selectedStaged === true}
               onClick={() => p.onSelect(f.path, true)}
-              actionLabel="Unstage"
+              actionLabel="Remove"
               onAction={() => p.onUnstage(f.path)}
             />
           ))
         )}
 
         <div style={{ height: 8 }} />
-        <SectionHeader t={t} label="Changes" count={p.unstagedFiles.length} />
+        <SectionHeader t={t} label="Needs review" count={p.unstagedFiles.length} />
         {p.unstagedFiles.length === 0 ? (
           <div style={{ fontSize: 11, color: t.textMuted, padding: '4px 10px', fontStyle: 'italic' }}>
-            {p.totalCount === 0 ? 'Working tree clean' : 'No unstaged changes'}
+            {p.totalCount === 0 ? 'Everything is up to date' : 'No additional files to review'}
           </div>
         ) : (
           p.unstagedFiles.map((f) => (
@@ -742,7 +887,7 @@ function FileTree(p: FileTreeProps) {
               file={f}
               active={p.selectedPath === f.path && p.selectedStaged === false}
               onClick={() => p.onSelect(f.path, false)}
-              actionLabel="Stage"
+              actionLabel="Include"
               onAction={() => p.onStage(f.path)}
             />
           ))
@@ -924,7 +1069,7 @@ function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }:
           {entry.path}
         </div>
         <div style={{ fontSize: 11, color: t.textMuted, display: 'flex', gap: 8 }}>
-          <span>{stagedView ? 'Staged changes' : 'Unstaged changes'}</span>
+          <span>{stagedView ? 'Included in your next update' : 'Needs review'}</span>
           {entry.partiallyStaged && (
             <>
               <span>·</span>
@@ -936,11 +1081,11 @@ function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }:
       {!stagedView && (
         <>
           <button onClick={onDiscard} style={miniBtn(t)}>Discard</button>
-          <button onClick={onStage} style={miniBtn(t, 'primary')}>Stage</button>
+          <button onClick={onStage} style={miniBtn(t, 'primary')}>Include</button>
         </>
       )}
       {stagedView && (
-        <button onClick={onUnstage} style={miniBtn(t)}>Unstage</button>
+        <button onClick={onUnstage} style={miniBtn(t)}>Remove</button>
       )}
     </div>
   );
@@ -1169,17 +1314,20 @@ interface CommitBarProps {
   unstagedCount: number;
   onCommit: () => void;
   onCommitAndPush: () => void;
+  onRequestReview: () => void;
+  advancedOpen: boolean;
+  onToggleAdvanced: () => void;
   busy: string | null;
 }
 
-function CommitBar({ t, commitMsg, setCommitMsg, stagedCount, unstagedCount, onCommit, onCommitAndPush, busy }: CommitBarProps) {
+function CommitBar({ t, commitMsg, setCommitMsg, stagedCount, unstagedCount, onCommit, onCommitAndPush, onRequestReview, advancedOpen, onToggleAdvanced, busy }: CommitBarProps) {
   const willStageAll = stagedCount === 0 && unstagedCount > 0;
   const noChanges = stagedCount === 0 && unstagedCount === 0;
   const hint = willStageAll
-    ? `Will stage all ${unstagedCount} change${unstagedCount === 1 ? '' : 's'} and commit`
+    ? `${unstagedCount} change${unstagedCount === 1 ? '' : 's'} will be included in the review request`
     : stagedCount > 0
-      ? `Committing ${stagedCount} staged file${stagedCount === 1 ? '' : 's'}`
-      : 'Nothing to commit';
+      ? `${stagedCount} change${stagedCount === 1 ? '' : 's'} prepared for review`
+      : 'No changes to share';
   return (
     <div
       style={{
@@ -1190,7 +1338,10 @@ function CommitBar({ t, commitMsg, setCommitMsg, stagedCount, unstagedCount, onC
         display: 'flex', flexDirection: 'column', gap: 6,
       }}
     >
-      <div style={{ fontSize: 10, color: t.textMuted, letterSpacing: '0.04em' }}>{hint}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontSize: 11, color: t.textMuted, flex: 1 }}>{hint}</div>
+        <span style={{ fontSize: 10, color: t.textMuted }}>A review branch is created when needed.</span>
+      </div>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
         <input
           value={commitMsg}
@@ -1198,10 +1349,10 @@ function CommitBar({ t, commitMsg, setCommitMsg, stagedCount, unstagedCount, onC
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
               e.preventDefault();
-              onCommit();
+              onRequestReview();
             }
           }}
-          placeholder="Commit message (⌘↵ to commit)…"
+          placeholder="Describe this update for your reviewer…"
           style={{
             flex: 1,
             background: t.appBg, color: t.textPrimary,
@@ -1211,30 +1362,28 @@ function CommitBar({ t, commitMsg, setCommitMsg, stagedCount, unstagedCount, onC
           }}
         />
         <button
-          onClick={onCommit}
+          onClick={onRequestReview}
           disabled={!!busy || noChanges || !commitMsg.trim()}
           style={{
-            ...miniBtn(t),
-            padding: '7px 12px', fontSize: 12, opacity: noChanges || !commitMsg.trim() ? 0.45 : 1,
-          }}
-        >
-          Commit
-        </button>
-        <button
-          onClick={onCommitAndPush}
-          disabled={!!busy || noChanges || !commitMsg.trim()}
-          style={{
-            background: t.success, color: '#fff',
-            border: `1px solid ${t.success}`,
+            background: t.accent, color: '#fff',
+            border: `1px solid ${t.accent}`,
             padding: '7px 14px', borderRadius: 6,
-            fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            fontSize: 12, fontWeight: 700, cursor: 'pointer',
             opacity: (noChanges || !commitMsg.trim()) ? 0.5 : 1,
             fontFamily: t.font,
           }}
         >
-          Commit & Push
+          Request review
         </button>
+        <button onClick={onToggleAdvanced} style={miniBtn(t)}>{advancedOpen ? 'Hide details' : 'More options'}</button>
       </div>
+      {advancedOpen && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 2 }}>
+          <span style={{ fontSize: 10, color: t.textMuted, flex: 1 }}>Advanced Git actions are optional. They do not merge changes.</span>
+          <button onClick={onCommit} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...miniBtn(t), opacity: noChanges || !commitMsg.trim() ? 0.45 : 1 }}>Save locally</button>
+          <button onClick={onCommitAndPush} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...miniBtn(t), opacity: noChanges || !commitMsg.trim() ? 0.45 : 1 }}>Commit & push</button>
+        </div>
+      )}
     </div>
   );
 }

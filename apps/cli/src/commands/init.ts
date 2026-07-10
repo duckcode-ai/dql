@@ -60,7 +60,9 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   }
 
   // Create DQL directories
-  const dirs = ['blocks', 'terms', 'business-views', 'notebooks', 'apps'];
+  // New OSS projects are domain-first and keep shared skills visible at the
+  // project root. Legacy folders remain supported by the compiler/migrator.
+  const dirs = ['domains', 'skills', 'notebooks', 'apps', 'tests', 'tests/blocks', 'tests/agent-evals'];
   if (!isDbt) {
     dirs.push('semantic-layer', 'semantic-layer/metrics', 'semantic-layer/dimensions');
   }
@@ -110,7 +112,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     importedSemanticCatalog = true;
   }
 
-  // Seed the three editable starter Skills into .dql/skills/ (idempotent — never
+  // Seed the editable starter skills into skills/ (idempotent — never
   // clobbers user edits). The metrics glossary reflects the semantic layer, so
   // this runs AFTER any semantic import above.
   let seededSkills = 0;
@@ -155,16 +157,16 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log('');
   console.log('  Created:');
   console.log('    dql.config.json');
-  console.log('    blocks/');
-  console.log('    terms/');
-  console.log('    business-views/');
+  console.log('    domains/ (domain-first blocks, terms, views, and apps)');
+  console.log('    skills/ (shared agent guidance)');
+  console.log('    tests/');
   console.log('    apps/');
   console.log('    notebooks/welcome.dqlnb');
   if (importedSemanticCatalog) {
     console.log('    semantic-layer/ (imported local semantic catalog)');
   }
   if (seededSkills > 0) {
-    console.log(`    .dql/skills/ (${seededSkills} editable starter skill${seededSkills === 1 ? '' : 's'})`);
+    console.log(`    skills/ (${seededSkills} editable starter skill${seededSkills === 1 ? '' : 's'})`);
   }
   console.log('');
   console.log('  Next steps:');
@@ -284,6 +286,11 @@ function buildConfig(
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     project: projectName,
+    layout: {
+      version: 2,
+      mode: 'oss-dbt-workspace',
+      skillsPath: 'skills',
+    },
   };
 
   // Persist the resolved local owner so AI-drafted blocks pass the Certifier's

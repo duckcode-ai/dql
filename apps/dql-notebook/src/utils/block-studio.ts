@@ -207,6 +207,19 @@ export function setBlockTags(content: string, tags: string[]): string {
   return insertBlockField(content, `  tags = [${tagStr}]`);
 }
 
+/**
+ * Update a top-level block array without touching unknown clauses. This is used
+ * by the Block Studio context inspector for the business references that make a
+ * block discoverable to people and to the governed agent.
+ */
+export function setBlockArray(content: string, key: string, values: string[]): string {
+  const unique = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  const rendered = `${key} = [${unique.map((value) => `"${escapeDqlValue(value)}"`).join(', ')}]`;
+  const field = new RegExp(`(\\b${key}\\s*=\\s*)\\[[\\s\\S]*?\\]`, 'i');
+  if (field.test(content)) return content.replace(field, `$1[${unique.map((value) => `"${escapeDqlValue(value)}"`).join(', ')}]`);
+  return insertBlockField(content, `  ${rendered}`);
+}
+
 export function upsertVisualizationConfig(content: string, chartConfig: CellChartConfig): string {
   const section = /visualization\s*\{[\s\S]*?\n\s*\}/i;
   if (!section.test(content)) {

@@ -117,6 +117,7 @@ import {
   recordRuntimeSchemaSnapshot,
   latestRuntimeSchemaSnapshotForProject,
   loadSkills,
+  migrateLegacySkills,
   draftDomainSkillBootstrap,
   buildDomainSkillBootstrapPrompt,
   mergeDomainSkillBootstrapEnrichment,
@@ -260,6 +261,7 @@ const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 
 export interface ProjectConfig {
   project?: string;
+  layout?: { version?: number; mode?: string; skillsPath?: string };
   defaultConnection?: ConnectionConfig;
   defaultConnectionName?: string;
   connections?: Record<string, ConnectionConfig & { path?: string; type?: string }>;
@@ -967,7 +969,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(isRepair ? [`This is a repair attempt — fix the previous failure: ${repair?.repairHint}`] : []),
       ].join(' '),
     };
-    const controller = new AbortController();
+    const controller = request.runId
+      ? activeAgentRunControllers.get(request.runId) ?? new AbortController()
+      : new AbortController();
     // Best-effort active warehouse dialect so Lane-2 semantic compiles emit
     // dialect-correct SQL (e.g. DATE_TRUNC / identifier quoting). Absent when no
     // connection is configured — the compiler then uses its default dialect.
@@ -1873,6 +1877,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   });
 
   const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
+  // A run may outlive its streaming browser connection, so cancellation is
+  // server-owned and keyed by run id rather than relying on fetch abort alone.
+  const activeAgentRunControllers = new Map<string, AbortController>();
   // Server-side conversation threads: persisted multi-turn state (survives refresh).
   // Lazy so a failed native-sqlite load never blocks the runtime; conversation
   // persistence degrades to the per-request context instead.
@@ -3294,6 +3301,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && /^\/api\/agent-runs\/[^/]+\/cancel$/.test(path)) {
+      const match = path.match(/^\/api\/agent-runs\/([^/]+)\/cancel$/);
+      const id = decodeURIComponent(match?.[1] ?? '');
+      const controller = activeAgentRunControllers.get(id);
+      if (!controller) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: 'This run is no longer active.' }));
+        return;
+      }
+      controller.abort(new Error('Stopped by user.'));
+      res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ ok: true, id }));
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/agent-runs') {
       try {
         const body = await readJSON(req).catch(() => null);
@@ -3318,27 +3340,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           );
         }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
-        if (wantsStream) {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-          });
-          const run = await agentRunEngine.run(parsed.request, (event) => {
-            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-event', event);
-          }, (delta) => {
-            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-answer-delta', { runId: parsed.request!.runId, delta });
-          });
+        const runId = parsed.request.runId;
+        if (runId) activeAgentRunControllers.set(runId, new AbortController());
+        try {
+          if (wantsStream) {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+              'X-Accel-Buffering': 'no',
+            });
+            const run = await agentRunEngine.run(parsed.request, (event) => {
+              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-event', event);
+            }, (delta) => {
+              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-answer-delta', { runId: parsed.request!.runId, delta });
+            });
+            recordConversationTurn(conversationStore, parsed.request.threadId, run);
+            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', run);
+            res.end();
+            return;
+          }
+          const run = await agentRunEngine.run(parsed.request);
           recordConversationTurn(conversationStore, parsed.request.threadId, run);
-          writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', run);
-          res.end();
-          return;
+          res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ run }));
+        } finally {
+          if (runId) activeAgentRunControllers.delete(runId);
         }
-        const run = await agentRunEngine.run(parsed.request);
-        recordConversationTurn(conversationStore, parsed.request.threadId, run);
-        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ run }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (res.headersSent) {
@@ -3947,6 +3975,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/context-bootstrap/latest') {
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ session: latestOpenContextBootstrapSession(projectRoot) }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path.startsWith('/api/context-bootstrap/')) {
       try {
         const id = decodeURIComponent(path.slice('/api/context-bootstrap/'.length));
@@ -4000,6 +4039,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         }
         await refreshLocalMetadataCatalog(projectRoot);
+        updateContextBootstrapSession(projectRoot, id, (current) => ({ ...current, closedAt: new Date().toISOString() }));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ id, saved }));
       } catch (error) {
@@ -5256,6 +5296,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       res.end(serializeJSON(await readGitRemote(projectRoot)));
       return;
     }
+    if (req.method === 'GET' && path === '/api/git/governed-context') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(await readGitGovernedContext(projectRoot)));
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/governed-context/enable') {
+      try {
+        const result = await enableGitGovernedContextTracking(projectRoot);
+        res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
     if (req.method === 'POST' && path === '/api/git/stage') {
       try {
         const body = (await readJSON(req)) as { paths?: string[] };
@@ -5308,6 +5364,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const result = await gitPush(projectRoot);
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/git/review') {
+      try {
+        const body = (await readJSON(req)) as { paths?: string[]; title?: string; body?: string; base?: string };
+        const result = await gitCreateReview(projectRoot, {
+          paths: body.paths ?? [],
+          title: body.title ?? '',
+          body: body.body ?? '',
+          base: body.base ?? 'main',
+        });
+        res.writeHead(result.ok ? 201 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -9080,6 +9153,7 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
 interface ContextBootstrapSession {
   id: string;
   createdAt: string;
+  closedAt?: string;
   persistence: 'session-only';
   candidates: ReturnType<typeof draftDomainSkillBootstrap>;
   status: 'queued' | 'inventory' | 'grounding' | 'generating' | 'validating' | 'ready' | 'needs_attention';
@@ -9222,6 +9296,24 @@ function readContextBootstrapSession(projectRoot: string, id: string): ContextBo
   } catch {
     return null;
   }
+}
+
+function latestOpenContextBootstrapSession(projectRoot: string): ContextBootstrapSession | null {
+  const dir = contextBootstrapDir(projectRoot);
+  if (!existsSync(dir)) return null;
+  const paths = readdirSync(dir)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => join(dir, name))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+  for (const path of paths) {
+    try {
+      const session = JSON.parse(readFileSync(path, 'utf-8')) as ContextBootstrapSession;
+      if (session?.id && Array.isArray(session.candidates) && !session.closedAt) return session;
+    } catch {
+      // A truncated local session should not hide an earlier valid session.
+    }
+  }
+  return null;
 }
 
 async function refreshLocalMetadataCatalog(projectRoot: string): Promise<void> {
@@ -16241,6 +16333,92 @@ async function gitPush(cwd: string): Promise<{ ok: boolean; error?: string; outp
     : { ok: false, error: gitErrorOutput(res) };
 }
 
+async function execGh(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve) => {
+    execFile('gh', args, { cwd, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({
+        stdout: String(stdout ?? ''),
+        stderr: String(stderr ?? ''),
+        code: err ? ((err as NodeJS.ErrnoException).code ? 1 : (err as any).code ?? 1) : 0,
+      });
+    });
+  });
+}
+
+function gitReviewBranchName(title: string): string {
+  const slug = title.toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 46) || 'governed-update';
+  return `dql/review/${slug}-${Date.now().toString(36)}`;
+}
+
+function gitHubCompareUrl(remoteUrl: string | null, branch: string, base: string): string | undefined {
+  if (!remoteUrl) return undefined;
+  const normalized = remoteUrl
+    .replace(/^git@github\.com:/, 'https://github.com/')
+    .replace(/\.git$/, '');
+  const match = /^https?:\/\/github\.com\/([^/]+\/[^/]+)$/.exec(normalized);
+  return match ? `https://github.com/${match[1]}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1` : undefined;
+}
+
+/**
+ * The only Git write workflow that can create a PR from the UI. It explicitly
+ * creates/switches a review branch when starting from the base branch and never
+ * calls merge. Existing staged changes outside the requested files are blocked
+ * so a review cannot accidentally include unrelated work.
+ */
+async function gitCreateReview(cwd: string, input: { paths: string[]; title: string; body: string; base: string }): Promise<{
+  ok: boolean; error?: string; branch?: string; hash?: string; prUrl?: string; warning?: string;
+}> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const title = input.title.trim();
+  if (!title) return { ok: false, error: 'Review title required' };
+  const validPaths = validatePaths(gitRoot, input.paths);
+  if (!validPaths.ok) return { ok: false, error: validPaths.error };
+  const base = input.base.trim() || 'main';
+  const status = await readGitStatus(gitRoot);
+  const stagedOutsideReview = status.changes
+    .filter((change) => change.status[0] !== ' ' && change.status[0] !== '?' && !validPaths.paths.includes(change.path))
+    .map((change) => change.path);
+  if (stagedOutsideReview.length > 0) {
+    return { ok: false, error: `Unstage unrelated files before requesting review: ${stagedOutsideReview.slice(0, 3).join(', ')}` };
+  }
+  const remoteBeforeReview = await readGitRemote(gitRoot);
+  if (!remoteBeforeReview.url) {
+    return { ok: false, error: 'Add a Git remote before requesting review. No branch or commit was created.' };
+  }
+  let branch = status.branch;
+  if (!branch || branch === 'HEAD' || branch === base || branch === 'master') {
+    branch = gitReviewBranchName(title);
+    const created = await gitCreateBranch(gitRoot, branch, true);
+    if (!created.ok) return created;
+  }
+  const stage = await gitStage(gitRoot, validPaths.paths);
+  if (!stage.ok) return stage;
+  const commit = await gitCommit(gitRoot, title, false);
+  if (!commit.ok) return commit;
+  const pushed = await gitPush(gitRoot);
+  if (!pushed.ok) return { ...pushed, branch, hash: commit.hash };
+
+  const remote = await readGitRemote(gitRoot);
+  const compareUrl = gitHubCompareUrl(remote.url, branch, base);
+  const pr = await execGh(gitRoot, ['pr', 'create', '--base', base, '--head', branch, '--title', title, '--body', input.body.trim() || `Review governed analytics changes: ${title}`]);
+  if (pr.code === 0) {
+    const prUrl = (pr.stdout.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0]) ?? compareUrl;
+    return { ok: true, branch, hash: commit.hash, prUrl };
+  }
+  return {
+    ok: true,
+    branch,
+    hash: commit.hash,
+    prUrl: compareUrl,
+    warning: `Branch pushed. Open the compare page to create the PR: ${gitErrorOutput(pr) || 'GitHub CLI is not available or authenticated.'}`,
+  };
+}
+
 async function gitPull(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
   const gitRoot = await resolveGitRoot(cwd);
   if (!gitRoot) return { ok: false, error: 'Not a git repository' };
@@ -16271,6 +16449,85 @@ async function readGitRemote(cwd: string): Promise<{ inRepo: boolean; url: strin
   const name = remoteName.code === 0 && remoteName.stdout.trim() ? remoteName.stdout.trim() : 'origin';
   const url = await execGit(gitRoot, ['remote', 'get-url', name]);
   return { inRepo: true, url: url.code === 0 ? url.stdout.trim() : null, name };
+}
+
+type GitGovernedFileState = 'tracked' | 'changed' | 'untracked' | 'ignored';
+
+interface GitGovernedContextGroup {
+  total: number;
+  tracked: number;
+  changed: number;
+  untracked: number;
+  ignored: number;
+  paths: Array<{ path: string; state: GitGovernedFileState }>;
+}
+
+function collectGovernedSourcePaths(root: string, folder: string, predicate: (name: string) => boolean): string[] {
+  const start = join(root, folder);
+  if (!existsSync(start)) return [];
+  const paths: string[] = [];
+  const walk = (dir: string) => {
+    if (paths.length >= 400) return;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (paths.length >= 400) return;
+      const absolute = join(dir, entry.name);
+      if (entry.isDirectory()) walk(absolute);
+      else if (entry.isFile() && predicate(entry.name)) paths.push(absolute);
+    }
+  };
+  walk(start);
+  return paths;
+}
+
+async function gitGovernedFileState(gitRoot: string, path: string): Promise<GitGovernedFileState> {
+  const tracked = await execGit(gitRoot, ['ls-files', '--error-unmatch', '--', path]);
+  const status = await execGit(gitRoot, ['status', '--porcelain=v1', '--untracked-files=all', '--', path]);
+  if (tracked.code === 0) return status.stdout.trim() ? 'changed' : 'tracked';
+  const ignored = await execGit(gitRoot, ['check-ignore', '-q', '--', path]);
+  return ignored.code === 0 ? 'ignored' : 'untracked';
+}
+
+async function readGitGovernedContext(cwd: string): Promise<{ inRepo: boolean; trackingReady: boolean; domains: GitGovernedContextGroup; skills: GitGovernedContextGroup }> {
+  const gitRoot = await resolveGitRoot(cwd);
+  const empty = (): GitGovernedContextGroup => ({ total: 0, tracked: 0, changed: 0, untracked: 0, ignored: 0, paths: [] });
+  if (!gitRoot) return { inRepo: false, trackingReady: false, domains: empty(), skills: empty() };
+  const summarize = async (files: string[]): Promise<GitGovernedContextGroup> => {
+    const group = empty();
+    for (const absolute of files) {
+      const path = relative(gitRoot, absolute).replace(/\\/g, '/');
+      const state = await gitGovernedFileState(gitRoot, path);
+      group.total += 1;
+      group[state] += 1;
+      if (group.paths.length < 24) group.paths.push({ path, state });
+    }
+    return group;
+  };
+  const [domains, skills] = await Promise.all([
+    summarize(collectGovernedSourcePaths(cwd, 'domains', (name) => name === 'domain.dql')),
+    summarize([
+      ...collectGovernedSourcePaths(cwd, 'skills', (name) => name.endsWith('.skill.md')),
+      ...collectGovernedSourcePaths(cwd, '.dql/skills', (name) => name.endsWith('.skill.md')),
+    ]),
+  ]);
+  return { inRepo: true, trackingReady: domains.ignored === 0 && skills.ignored === 0, domains, skills };
+}
+
+/** Replace only the legacy broad `.dql/` ignore with cache/runtime-specific rules. */
+async function enableGitGovernedContextTracking(cwd: string): Promise<{ ok: boolean; changed?: boolean; error?: string }> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const ignorePath = join(cwd, '.gitignore');
+  const existing = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf-8') : '';
+  const lines = existing.split(/\r?\n/);
+  const next = lines.filter((line) => !/^\s*\/?\.dql\/\s*$/.test(line));
+  const keepLocal = ['.dql/runs/', '.dql/cache/', '.dql/imports/', '.dql/local/', '.dql/docker-starter/'];
+  for (const rule of keepLocal) {
+    if (!next.some((line) => line.trim() === rule)) next.push(rule);
+  }
+  const rendered = `${next.join('\n').replace(/\n+$/, '')}\n`;
+  if (rendered !== existing) writeFileSync(ignorePath, rendered, 'utf-8');
+  const migration = migrateLegacySkills(cwd);
+  return { ok: true, changed: rendered !== existing || migration.moved.length > 0 };
 }
 
 async function gitCreateBranch(cwd: string, name: string, checkout: boolean): Promise<{ ok: boolean; error?: string }> {

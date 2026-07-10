@@ -2977,13 +2977,17 @@ describe('domains API (spec 17, part B)', () => {
       expect(completed?.status).toBe('ready');
       expect(completed?.ai.mode).toBe('evidence_only');
       expect(completed?.progress.percent).toBe(100);
+      const latest = await fetch(`http://127.0.0.1:${port}/api/context-bootstrap/latest`).then((response) => response.json()) as { session?: { id?: string } | null };
+      expect(latest.session?.id).toBe(session.id);
 
       const skill = session.candidates.find((candidate) => candidate.kind === 'skill');
       const saved = await fetch(`http://127.0.0.1:${port}/api/context-bootstrap/${encodeURIComponent(session.id)}/save-selected`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidateIds: skill ? [skill.id] : [] }),
       }).then((response) => response.json()) as { saved: Array<{ status: string; path?: string }> };
       expect(saved.saved[0]?.status).toBe('saved');
-      expect(saved.saved[0]?.path).toContain('.dql/skills');
+      expect(saved.saved[0]?.path).toContain('skills');
+      const afterSave = await fetch(`http://127.0.0.1:${port}/api/context-bootstrap/latest`).then((response) => response.json()) as { session?: unknown };
+      expect(afterSave.session).toBeNull();
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }

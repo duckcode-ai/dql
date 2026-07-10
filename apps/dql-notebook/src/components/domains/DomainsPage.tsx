@@ -25,15 +25,18 @@ import {
   GraduationCap,
   Tags,
   UserRound,
-  Layers,
   Sparkles,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { api, type ContextBootstrapSession } from '../../api/client';
+import { api, type ContextBootstrapCandidate, type ContextBootstrapSession } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Domain } from '../../store/types';
 
 type FormMode = { kind: 'create' } | { kind: 'edit'; domain: Domain };
+const BOOTSTRAP_SESSION_KEY = 'dql-context-bootstrap-session';
+const BOOTSTRAP_SELECTION_KEY = 'dql-context-bootstrap-selection';
 
 function slugify(value: string): string {
   return value
@@ -55,7 +58,7 @@ function emptyDraft(): Domain {
   };
 }
 
-export function DomainsPage(): JSX.Element {
+export function DomainsPage({ embedded = false }: { embedded?: boolean } = {}): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
 
@@ -101,6 +104,37 @@ export function DomainsPage(): JSX.Element {
 
   useEffect(() => load(), [load]);
 
+  // A repository draft is local-only until save, but it must survive a reload
+  // or a user moving between pages while AI is still working.
+  useEffect(() => {
+    const id = window.sessionStorage.getItem(BOOTSTRAP_SESSION_KEY);
+    let cancelled = false;
+    const applySession = (session: ContextBootstrapSession | null) => {
+      if (!session) return;
+      if (cancelled) return;
+      setBootstrap(session);
+      try {
+        const saved = JSON.parse(window.sessionStorage.getItem(BOOTSTRAP_SELECTION_KEY) ?? '[]');
+        setBootstrapSelected(Array.isArray(saved) ? saved.filter((value): value is string => typeof value === 'string') : session.candidates.filter((candidate) => candidate.action !== 'unchanged').map((candidate) => candidate.id));
+      } catch {
+        setBootstrapSelected(session.candidates.filter((candidate) => candidate.action !== 'unchanged').map((candidate) => candidate.id));
+      }
+    };
+    const restore = id ? api.getContextBootstrap(id) : api.getLatestContextBootstrap();
+    void restore.then(applySession).catch(async () => {
+      window.sessionStorage.removeItem(BOOTSTRAP_SESSION_KEY);
+      window.sessionStorage.removeItem(BOOTSTRAP_SELECTION_KEY);
+      if (id) applySession(await api.getLatestContextBootstrap().catch(() => null));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!bootstrap) return;
+    window.sessionStorage.setItem(BOOTSTRAP_SESSION_KEY, bootstrap.id);
+    window.sessionStorage.setItem(BOOTSTRAP_SELECTION_KEY, JSON.stringify(bootstrapSelected));
+  }, [bootstrap?.id, bootstrapSelected]);
+
   const sorted = useMemo(() => [...domains].sort((a, b) => a.name.localeCompare(b.name)), [domains]);
 
   const handleSaved = useCallback((saved: Domain) => {
@@ -135,13 +169,23 @@ export function DomainsPage(): JSX.Element {
     try {
       const session = await api.startContextBootstrap({ ai: true });
       setBootstrap(session);
-      setBootstrapSelected(session.candidates.filter((candidate) => candidate.action !== 'unchanged').map((candidate) => candidate.id));
+      const selected = session.candidates.filter((candidate) => candidate.action !== 'unchanged').map((candidate) => candidate.id);
+      setBootstrapSelected(selected);
+      window.sessionStorage.setItem(BOOTSTRAP_SESSION_KEY, session.id);
+      window.sessionStorage.setItem(BOOTSTRAP_SELECTION_KEY, JSON.stringify(selected));
     } catch (error) {
       setBootstrapError(error instanceof Error ? error.message : 'Could not draft repository context.');
     } finally {
       setBootstrapLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (!embedded) return;
+    const onBuild = () => { void startBootstrap(); };
+    window.addEventListener('dql:context-build', onBuild);
+    return () => window.removeEventListener('dql:context-build', onBuild);
+  }, [embedded, startBootstrap]);
 
   useEffect(() => {
     if (!bootstrap || ['ready', 'needs_attention'].includes(bootstrap.status)) return;
@@ -170,6 +214,8 @@ export function DomainsPage(): JSX.Element {
       await api.saveContextBootstrapSelected(bootstrap.id, bootstrapSelected);
       setBootstrap(null);
       setBootstrapSelected([]);
+      window.sessionStorage.removeItem(BOOTSTRAP_SESSION_KEY);
+      window.sessionStorage.removeItem(BOOTSTRAP_SELECTION_KEY);
       load();
     } catch (error) {
       setBootstrapError(error instanceof Error ? error.message : 'Could not save selected drafts.');
@@ -245,14 +291,11 @@ export function DomainsPage(): JSX.Element {
               </button>
             </div>
             <BootstrapProgress t={t} session={bootstrap} />
-            <div style={{ display: 'grid', gap: 7, marginTop: 12 }}>
+            <div style={{ display: 'grid', gap: 9, marginTop: 12 }}>
               {bootstrap.candidates.map((candidate) => {
                 const selectable = candidate.action !== 'unchanged';
                 const selected = bootstrapSelected.includes(candidate.id);
-                return <label key={candidate.id} style={{ display: 'flex', gap: 9, alignItems: 'flex-start', fontSize: 12.5, color: t.textSecondary, opacity: selectable ? 1 : 0.65 }}>
-                  <input type="checkbox" disabled={!selectable || bootstrapSaving} checked={selected} onChange={() => setBootstrapSelected((current) => selected ? current.filter((id) => id !== candidate.id) : [...current, candidate.id])} />
-                  <span><strong style={{ color: t.textPrimary }}>{candidate.kind === 'domain' ? 'Domain' : 'Skill'} · {candidate.id.replace(/^(domain|skill):/, '')}</strong> · {candidate.action} · {Math.round(candidate.confidence * 100)}%<br /><span style={{ color: t.textMuted }}>{candidate.evidence.join(' · ')}</span>{candidate.notes?.length ? <><br /><span style={{ color: t.accent }}>{candidate.notes.join(' ')}</span></> : null}</span>
-                </label>;
+                return <BootstrapCandidateCard key={candidate.id} candidate={candidate} selected={selected} selectable={selectable} disabled={bootstrapSaving} t={t} onToggle={() => setBootstrapSelected((current) => selected ? current.filter((id) => id !== candidate.id) : [...current, candidate.id])} />;
               })}
             </div>
           </section>
@@ -302,6 +345,7 @@ function DomainRow({
   onDelete: () => void;
 }): JSX.Element {
   const sources = domain.sourceSystems ?? [];
+  const [expanded, setExpanded] = useState(false);
   return (
     <section
       style={{
@@ -323,11 +367,7 @@ function DomainRow({
               <UserRound size={11} strokeWidth={2} /> {domain.owner}
             </span>
           ) : null}
-          {domain.boundedContext ? (
-            <span style={contextBadge(t)} title="Bounded context">
-              <Layers size={10} strokeWidth={2.2} /> {domain.boundedContext}
-            </span>
-          ) : null}
+          {domain.businessOwner ? <span style={contextBadge(t)}><UserRound size={10} strokeWidth={2.2} /> Business owner: {domain.businessOwner}</span> : null}
         </div>
         {domain.description ? (
           <div style={{ fontSize: 12.5, color: t.textSecondary, marginTop: 5, lineHeight: 1.5 }}>{domain.description}</div>
@@ -346,8 +386,17 @@ function DomainRow({
           <CountPill t={t} icon={<GraduationCap size={11} strokeWidth={2} />} label="skills" count={domain.skillCount ?? 0} />
           <CountPill t={t} icon={<Tags size={11} strokeWidth={2} />} label="terms" count={domain.termCount ?? 0} />
         </div>
+        {expanded ? <div style={{ display: 'grid', gap: 9, marginTop: 12, paddingTop: 11, borderTop: `1px solid ${t.btnBorder}` }}>
+          {domain.boundedContext ? <ReadableField t={t} label="Business boundary">{domain.boundedContext}</ReadableField> : null}
+          {domain.businessOutcome ? <ReadableField t={t} label="Decision outcome">{domain.businessOutcome}</ReadableField> : null}
+          <ReadableChipField t={t} label="In scope" values={domain.inScope} empty="Not defined yet" />
+          <ReadableChipField t={t} label="Out of scope" values={domain.outOfScope} empty="Not defined yet" />
+          <ReadableChipField t={t} label="Primary terms" values={domain.primaryTerms} empty="No terms linked yet" />
+          <ReadableChipField t={t} label="Tags" values={domain.tags} empty="No tags" />
+        </div> : null}
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), padding: '5px 7px', fontSize: 11.5 }} title={expanded ? 'Hide domain details' : 'Show domain details'}>{expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{expanded ? 'Less' : 'Details'}</button>
         <button type="button" onClick={onEdit} style={iconButton(t)} title="Edit domain">
           <Pencil size={13} strokeWidth={2} />
         </button>
@@ -705,6 +754,56 @@ function BootstrapProgress({ t, session }: { t: Theme; session: ContextBootstrap
   );
 }
 
+function BootstrapCandidateCard({ candidate, selected, selectable, disabled, t, onToggle }: {
+  candidate: ContextBootstrapCandidate;
+  selected: boolean;
+  selectable: boolean;
+  disabled: boolean;
+  t: Theme;
+  onToggle: () => void;
+}): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const isDomain = candidate.kind === 'domain';
+  const title = candidate.domain?.name ?? candidate.skill?.id ?? candidate.id.replace(/^(domain|skill):/, '');
+  const summary = isDomain
+    ? candidate.domain?.description ?? candidate.domain?.boundedContext
+    : candidate.skill?.description ?? candidate.skill?.body?.split('\n').find(Boolean);
+  const details = isDomain
+    ? [
+        ['Business outcome', candidate.domain?.businessOutcome],
+        ['In scope', candidate.domain?.inScope?.join(' · ')],
+        ['Out of scope', candidate.domain?.outOfScope?.join(' · ')],
+        ['Primary terms', candidate.domain?.primaryTerms?.join(' · ')],
+      ]
+    : [
+        ['Applies when', candidate.skill?.triggers?.join(' · ')],
+        ['Ask first when', candidate.skill?.clarifyWhen?.join(' · ')],
+        ['Avoid when', candidate.skill?.exclusions?.join(' · ')],
+        ['Preferred metrics', candidate.skill?.preferredMetrics?.join(' · ')],
+        ['Preferred blocks', candidate.skill?.preferredBlocks?.join(' · ')],
+      ];
+  return <article style={{ border: `1px solid ${selected ? `${t.accent}66` : t.btnBorder}`, background: selected ? `${t.accent}08` : t.appBg, borderRadius: 8, padding: '10px 11px', opacity: selectable ? 1 : 0.72 }}>
+    <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
+      <input aria-label={`Select ${isDomain ? 'domain' : 'skill'} ${title}`} type="checkbox" disabled={!selectable || disabled} checked={selected} onChange={onToggle} style={{ marginTop: 3 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}>
+          <strong style={{ color: t.textPrimary, fontSize: 12.5 }}>{isDomain ? 'Domain' : 'Skill'} · {title}</strong>
+          <span style={contextBadge(t)}>{candidate.action.replace('_', ' ')}</span>
+          <span style={{ fontSize: 11, color: t.textMuted }}>{Math.round(candidate.confidence * 100)}% evidence confidence</span>
+        </div>
+        {summary ? <p style={{ marginTop: 5, color: t.textSecondary, fontSize: 12, lineHeight: 1.45 }}>{summary}</p> : <p style={{ marginTop: 5, color: t.textMuted, fontSize: 12, fontStyle: 'italic' }}>Waiting for grounded guidance…</p>}
+        <div style={{ display: 'flex', gap: 5, marginTop: 7, flexWrap: 'wrap' }}>{candidate.evidence.map((item) => <span key={item} style={sourceChip(t)}>{item}</span>)}</div>
+        {expanded ? <div style={{ marginTop: 9, display: 'grid', gap: 6, borderTop: `1px solid ${t.btnBorder}`, paddingTop: 9 }}>
+          {details.filter(([, value]) => Boolean(value)).map(([label, value]) => <div key={label} style={{ display: 'grid', gridTemplateColumns: '116px minmax(0, 1fr)', gap: 8, fontSize: 11.5, lineHeight: 1.45 }}><strong style={{ color: t.textMuted }}>{label}</strong><span style={{ color: t.textSecondary }}>{value}</span></div>)}
+          {!isDomain && candidate.skill?.body ? <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: t.font, fontSize: 11.5, color: t.textSecondary, background: t.cellBg, padding: 9, borderRadius: 6, maxHeight: 180, overflow: 'auto' }}>{candidate.skill.body}</pre> : null}
+          {candidate.notes?.length ? <div style={{ fontSize: 11.5, color: t.accent }}>{candidate.notes.join(' ')}</div> : null}
+        </div> : null}
+      </div>
+      <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), padding: '4px 6px', fontSize: 11.5 }} aria-expanded={expanded}>{expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{expanded ? 'Less' : 'Review'}</button>
+    </div>
+  </article>;
+}
+
 // ── Delete confirm dialog ────────────────────────────────────────────────────
 
 function ConfirmDeleteDialog({
@@ -770,6 +869,14 @@ function CountPill({ t, icon, label, count }: { t: Theme; icon: React.ReactNode;
       {count} {label}
     </span>
   );
+}
+
+function ReadableField({ t, label, children }: { t: Theme; label: string; children: React.ReactNode }): JSX.Element {
+  return <div style={{ display: 'grid', gridTemplateColumns: '118px minmax(0, 1fr)', gap: 10, fontSize: 12, lineHeight: 1.5 }}><strong style={{ color: t.textMuted }}>{label}</strong><span style={{ color: t.textSecondary }}>{children}</span></div>;
+}
+
+function ReadableChipField({ t, label, values, empty }: { t: Theme; label: string; values?: string[]; empty: string }): JSX.Element {
+  return <div style={{ display: 'grid', gridTemplateColumns: '118px minmax(0, 1fr)', gap: 10, fontSize: 12, lineHeight: 1.5 }}><strong style={{ color: t.textMuted }}>{label}</strong><div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>{values?.length ? values.map((value) => <span key={value} style={sourceChip(t)}>{value}</span>) : <span style={{ color: t.textMuted, fontStyle: 'italic' }}>{empty}</span>}</div></div>;
 }
 
 function Field({
