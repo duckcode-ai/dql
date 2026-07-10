@@ -6,7 +6,8 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { DQLContext } from '@duckcodeailabs/dql-mcp';
 import { spawn } from 'node:child_process';
-import { relative } from 'node:path';
+import { readdirSync, readFileSync, type Dirent } from 'node:fs';
+import { join, relative } from 'node:path';
 import { buildAgentTools } from './tools.js';
 
 export function createGroundingContextExpander(projectRoot: string) {
@@ -113,7 +114,10 @@ async function runRipgrep(
       if (output.length < 512_000) output += chunk.toString('utf8');
       else child.kill();
     });
-    child.on('error', () => finish([]));
+    // Some minimal hosted and container runtimes do not ship ripgrep. The
+    // governed answer flow must still find semantic definitions rather than
+    // silently falling through to generated SQL.
+    child.on('error', () => finish(runNativeSourceSearch(projectRoot, pattern, limit)));
     child.on('close', () => {
       const matches = output.split(/\r?\n/).flatMap((raw) => {
         const match = raw.match(/^(.*?):(\d+):(.*)$/);
@@ -122,6 +126,54 @@ async function runRipgrep(
       finish(matches);
     });
   });
+}
+
+const SOURCE_FILE_PATTERN = /\.(dql|sql|yml|yaml|json|md)$/i;
+const SOURCE_SEARCH_IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'target', '.dql']);
+
+function runNativeSourceSearch(
+  projectRoot: string,
+  pattern: string,
+  limit: number,
+): Array<{ path: string; line: number; text: string }> {
+  const matcher = new RegExp(pattern, 'i');
+  const matches: Array<{ path: string; line: number; text: string }> = [];
+  const directories = [projectRoot];
+  let scannedFiles = 0;
+
+  while (directories.length > 0 && matches.length < limit && scannedFiles < 5_000) {
+    const directory = directories.pop();
+    if (!directory) continue;
+    let entries: Dirent<string>[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (matches.length >= limit) break;
+      const filePath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!SOURCE_SEARCH_IGNORED_DIRECTORIES.has(entry.name)) directories.push(filePath);
+        continue;
+      }
+      if (!entry.isFile() || !SOURCE_FILE_PATTERN.test(entry.name)) continue;
+      scannedFiles += 1;
+      if (scannedFiles > 5_000) break;
+      let source: string;
+      try {
+        source = readFileSync(filePath, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const [index, line] of source.split(/\r?\n/).entries()) {
+        if (!matcher.test(line)) continue;
+        matches.push({ path: filePath, line: index + 1, text: line.trim().slice(0, 500) });
+        if (matches.length >= limit) break;
+      }
+    }
+  }
+  return matches;
 }
 
 function objectArgs(args: unknown): Record<string, unknown> {

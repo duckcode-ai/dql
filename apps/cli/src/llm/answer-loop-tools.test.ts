@@ -31,4 +31,27 @@ describe('answer-loop project source search', () => {
     expect(result.matches.some((match) => match.path === 'semantic-layer/metrics.yaml')).toBe(true);
     expect(result.matches.some((match) => match.path.includes('node_modules'))).toBe(false);
   });
+
+  it('uses bounded native source search when ripgrep is unavailable', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-source-search-fallback-'));
+    roots.push(root);
+    mkdirSync(join(root, 'semantic-layer'), { recursive: true });
+    writeFileSync(join(root, 'semantic-layer', 'metrics.yaml'), [
+      'metrics:',
+      '  - name: retained_customer_value',
+      '    description: Customer lifetime contribution after refunds',
+    ].join('\n'));
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      const tool = buildAnswerLoopTools(root).find((candidate) => candidate.name === 'search_project_files');
+      const result = await tool!.run({ query: 'customer lifetime contribution' }) as {
+        matches: Array<{ path: string }>;
+      };
+      expect(result.matches.map((match) => match.path)).toContain('semantic-layer/metrics.yaml');
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
 });
