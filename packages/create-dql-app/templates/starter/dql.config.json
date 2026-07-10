@@ -1,5 +1,10 @@
 {
   "project": "{{PROJECT_NAME}}",
+  "layout": {
+    "version": 2,
+    "mode": "oss-dbt-workspace",
+    "skillsPath": "skills"
+  },
   "semanticLayer": {
     "provider": "dql",
     "path": "semantic-layer"

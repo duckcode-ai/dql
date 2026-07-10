@@ -30,10 +30,10 @@ function assert(cond, msg) {
   console.log(`  ✓ ${msg}`);
 }
 
-// Must pin a CLI >= 1.6.30 so a fresh scaffold installs on Node 23/24 (a global
+// Must pin the current CLI so a fresh scaffold includes the supported OSS layout.
 // install of an older CLI fails there and never links the `dql` binary). Keep in
 // sync with templates/starter/package.json.
-const EXPECTED_CLI_RANGE = '^1.6.30';
+const EXPECTED_CLI_RANGE = '^1.6.34';
 
 function collectFiles(dir, predicate, out = []) {
   for (const entry of readdirSync(dir)) {
@@ -83,14 +83,15 @@ function runTest(template, name, expected, placeholderFile) {
 
 runTest('starter', 'smoke-starter', [
   'apps/.gitkeep',
-  'blocks/.gitkeep',
-  'business-views/.gitkeep',
+  'domains/.gitkeep',
   'dql.config.json',
   'package.json',
   'README.md',
   'notebooks/welcome.dqlnb',
   'semantic-layer/.gitkeep',
-  'terms/.gitkeep',
+  'skills/.gitkeep',
+  'tests/blocks/.gitkeep',
+  'tests/agent-evals/.gitkeep',
   '.gitignore',
 ], 'dql.config.json');
 
