@@ -370,6 +370,7 @@ export interface ManifestDomain {
   name: string;
   /** Relative path from project root */
   filePath: string;
+  parent?: string;
   owner?: string;
   businessOwner?: string;
   boundedContext?: string;
@@ -379,6 +380,13 @@ export interface ManifestDomain {
   tags?: string[];
   businessOutcome?: string;
   description?: string;
+  inScope?: string[];
+  outOfScope?: string[];
+  dbtGroups?: string[];
+  dbtPaths?: string[];
+  dbtTags?: string[];
+  semanticDomains?: string[];
+  semanticTags?: string[];
 }
 
 // ---- Business Terms ----

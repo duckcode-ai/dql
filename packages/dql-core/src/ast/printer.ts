@@ -177,6 +177,7 @@ function printDomainDecl(node: DomainDeclNode, indent: number): string {
   for (const dec of node.decorators) {
     result += printDecorator(dec, indent + 1);
   }
+  if (node.parent) result += `${prefix}  parent = "${node.parent}"\n`;
   if (node.owner) result += `${prefix}  owner = "${node.owner}"\n`;
   if (node.businessOwner) result += `${prefix}  businessOwner = "${node.businessOwner}"\n`;
   if (node.boundedContext) result += `${prefix}  boundedContext = "${node.boundedContext}"\n`;
@@ -184,6 +185,15 @@ function printDomainDecl(node: DomainDeclNode, indent: number): string {
   if (node.primaryTerms) result += `${prefix}  primaryTerms = [${node.primaryTerms.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.reviewCadence) result += `${prefix}  reviewCadence = "${node.reviewCadence}"\n`;
   if (node.tags) result += `${prefix}  tags = [${node.tags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.businessOutcome) result += `${prefix}  businessOutcome = "${node.businessOutcome}"\n`;
+  if (node.description) result += `${prefix}  description = "${node.description}"\n`;
+  if (node.inScope) result += `${prefix}  inScope = [${node.inScope.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.outOfScope) result += `${prefix}  outOfScope = [${node.outOfScope.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.dbtGroups) result += `${prefix}  dbtGroups = [${node.dbtGroups.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.dbtPaths) result += `${prefix}  dbtPaths = [${node.dbtPaths.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.dbtTags) result += `${prefix}  dbtTags = [${node.dbtTags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.semanticDomains) result += `${prefix}  semanticDomains = [${node.semanticDomains.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.semanticTags) result += `${prefix}  semanticTags = [${node.semanticTags.map(t => `"${t}"`).join(', ')}]\n`;
   return result;
 }
 

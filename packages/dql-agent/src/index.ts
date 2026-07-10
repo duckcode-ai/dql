@@ -45,6 +45,8 @@ export {
   renderSkill,
   buildSkillsPrompt,
   selectRelevantSkills,
+  buildSkillMetricHints,
+  expandQuestionWithSkillVocabulary,
   writeSkill,
   upsertSkill,
   deleteSkill,
@@ -59,6 +61,16 @@ export type {
 } from "./skills/loader.js";
 export { seedDefaultSkills } from "./skills/defaults.js";
 export { seedDomainSkills, buildDomainReferenceSkills } from "./skills/domain-skills.js";
+export {
+  draftDomainSkillBootstrap,
+  buildDomainSkillBootstrapPrompt,
+  mergeDomainSkillBootstrapEnrichment,
+} from "./skills/bootstrap.js";
+export type {
+  DomainBootstrapCandidate,
+  DomainSkillBootstrapAiDraft,
+  DomainSkillBootstrapEnrichment,
+} from "./skills/bootstrap.js";
 export type {
   SeedDefaultSkillsOptions,
   SeedDefaultSkillsResult,

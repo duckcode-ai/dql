@@ -16,18 +16,32 @@
  * doctor's "missing reviewCadence" warning is also satisfied.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 
 /** A domain authored through the writer (spec 17, part B). */
 export interface DomainInput {
   name: string;
+  parent?: string;
   owner?: string;
+  businessOwner?: string;
   boundedContext?: string;
   sourceSystems?: string[];
+  primaryTerms?: string[];
+  tags?: string[];
+  businessOutcome?: string;
   description?: string;
+  inScope?: string[];
+  outOfScope?: string[];
+  dbtGroups?: string[];
+  dbtPaths?: string[];
+  dbtTags?: string[];
+  semanticDomains?: string[];
+  semanticTags?: string[];
   /** Optional review cadence; defaults to "quarterly" so doctor stays quiet. */
   reviewCadence?: string;
+  /** Existing project-relative source path. Used for legacy flat declarations. */
+  sourcePath?: string;
 }
 
 export interface WrittenDomain {
@@ -67,11 +81,23 @@ function stringArrayField(name: string, values: string[] | undefined): string {
 export function renderDomainDeclaration(domain: DomainInput): string {
   const reviewCadence = domain.reviewCadence?.trim() || 'quarterly';
   const lines = [`domain "${escapeString(domain.name)}" {`];
+  if (domain.parent) lines.push(`  parent = "${escapeString(domain.parent)}"`);
   if (domain.owner) lines.push(`  owner = "${escapeString(domain.owner)}"`);
+  if (domain.businessOwner) lines.push(`  businessOwner = "${escapeString(domain.businessOwner)}"`);
   if (domain.boundedContext) lines.push(`  boundedContext = "${escapeString(domain.boundedContext)}"`);
   lines.push(`  reviewCadence = "${escapeString(reviewCadence)}"`);
   let body = lines.join('\n');
   body += stringArrayField('sourceSystems', domain.sourceSystems);
+  body += stringArrayField('primaryTerms', domain.primaryTerms);
+  body += stringArrayField('tags', domain.tags);
+  body += stringArrayField('inScope', domain.inScope);
+  body += stringArrayField('outOfScope', domain.outOfScope);
+  body += stringArrayField('dbtGroups', domain.dbtGroups);
+  body += stringArrayField('dbtPaths', domain.dbtPaths);
+  body += stringArrayField('dbtTags', domain.dbtTags);
+  body += stringArrayField('semanticDomains', domain.semanticDomains);
+  body += stringArrayField('semanticTags', domain.semanticTags);
+  if (domain.businessOutcome) body += `\n  businessOutcome = "${escapeString(domain.businessOutcome)}"`;
   if (domain.description) body += `\n  description = "${escapeString(domain.description)}"`;
   body += '\n}\n';
   return body;
@@ -90,8 +116,28 @@ export function resolveDomainDeclPath(
   const domainDir = join(projectRoot, 'domains', slug);
   // Prefer an existing declaration file (any `*.dql` that declares this domain).
   const existing = findExistingDomainFile(domainDir);
-  const absPath = existing ?? join(domainDir, 'domain.dql');
+  const flat = findFlatDomainFile(join(projectRoot, 'domains'), nameOrSlug);
+  const absPath = existing ?? flat ?? join(domainDir, 'domain.dql');
   return { absPath, relativePath: relative(projectRoot, absPath), slug };
+}
+
+/** Find a legacy flat `domains/<name>.dql` declaration by declared name. */
+function findFlatDomainFile(domainsRoot: string, nameOrSlug: string): string | undefined {
+  if (!existsSync(domainsRoot)) return undefined;
+  const wanted = domainFolderSlug(nameOrSlug);
+  try {
+    for (const entry of readdirSync(domainsRoot, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.dql')) continue;
+      const file = join(domainsRoot, entry.name);
+      if (statSync(file).size > 1024 * 256) continue;
+      const source = readFileSync(file, 'utf-8');
+      const match = source.match(/(^|\n)\s*domain\s+"([^"]+)"/);
+      if (match && domainFolderSlug(match[2] ?? '') === wanted) return file;
+    }
+  } catch {
+    // Best effort: use the canonical nested path when the legacy file cannot be read.
+  }
+  return undefined;
 }
 
 /** Find an existing `.dql` file under a domain folder that declares a domain. */
@@ -119,7 +165,14 @@ export function writeDomainDeclaration(projectRoot: string, domain: DomainInput)
   if (!domain.name || !domain.name.trim()) {
     throw new Error('writeDomainDeclaration requires a non-empty domain name.');
   }
-  const { absPath, relativePath, slug } = resolveDomainDeclPath(projectRoot, domain.name);
+  const requestedPath = domain.sourcePath?.replace(/\\/g, '/').replace(/^\/+/, '');
+  const safeRequested = requestedPath && requestedPath.startsWith('domains/') && !requestedPath.includes('../')
+    ? join(projectRoot, requestedPath)
+    : undefined;
+  const resolved = resolveDomainDeclPath(projectRoot, domain.name);
+  const absPath = safeRequested && existsSync(safeRequested) ? safeRequested : resolved.absPath;
+  const relativePath = relative(projectRoot, absPath);
+  const slug = resolved.slug;
   mkdirSync(dirname(absPath), { recursive: true });
   writeFileSync(absPath, renderDomainDeclaration(domain), 'utf-8');
   return { path: relativePath, absPath, slug };

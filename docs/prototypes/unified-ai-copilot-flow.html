@@ -1,0 +1,2089 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DQL Unified AI Copilot Mockup</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23276ef1'/%3E%3Cpath d='M8 9h8c5 0 8 2.7 8 7s-3 7-8 7H8V9zm5 4v6h3c2 0 3.5-1 3.5-3S18 13 16 13h-3z' fill='white'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg-0: #f6f7f9;
+      --bg-1: #ffffff;
+      --bg-2: #f9fafb;
+      --bg-3: #eef2f6;
+      --bg-4: #e5e9ef;
+      --text-primary: #172026;
+      --text-secondary: #4c5965;
+      --text-tertiary: #71808e;
+      --text-muted: #97a2ad;
+      --border-subtle: #edf0f4;
+      --border-default: #d9dfe7;
+      --border-strong: #b7c2ce;
+      --accent: #276ef1;
+      --accent-hover: #195ccc;
+      --accent-dim: #eaf1ff;
+      --accent-fg: #ffffff;
+      --green: #16805a;
+      --green-bg: #e8f7ef;
+      --green-border: #bde7d1;
+      --amber: #9b5d05;
+      --amber-bg: #fff3d8;
+      --amber-border: #f2d38a;
+      --purple: #6f42c1;
+      --purple-bg: #f2ecff;
+      --purple-border: #d8c7ff;
+      --red: #ba2d2d;
+      --red-bg: #fff0f0;
+      --red-border: #f0b8b8;
+      --cyan: #087c8a;
+      --cyan-bg: #e8f7fa;
+      --cyan-border: #b8e4ea;
+      --shadow-sm: 0 1px 2px rgba(19, 32, 43, 0.06);
+      --shadow-md: 0 16px 44px rgba(19, 32, 43, 0.09);
+      --radius: 8px;
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+      margin: 0;
+      background: var(--bg-0);
+      color: var(--text-primary);
+      font-family: var(--font);
+      letter-spacing: 0;
+    }
+
+    button,
+    textarea,
+    input {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .mockup {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 244px minmax(0, 1fr) 392px;
+    }
+
+    .sidebar {
+      min-height: 100vh;
+      background: #101820;
+      color: #dce4ec;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .brand {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      background: linear-gradient(135deg, #2f7df6, #11a37f);
+      color: white;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .brand-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .brand-copy strong {
+      font-size: 14px;
+      line-height: 1.1;
+    }
+
+    .brand-copy span {
+      color: #8ea0b0;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .nav {
+      display: grid;
+      gap: 4px;
+      padding: 14px 10px 10px;
+    }
+
+    .nav-button {
+      height: 38px;
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 8px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: #b8c5d1;
+      padding: 0 10px;
+      text-align: left;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .nav-button svg {
+      color: #7f93a6;
+    }
+
+    .nav-button.active,
+    .nav-button:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #ffffff;
+    }
+
+    .nav-button.active svg,
+    .nav-button:hover svg {
+      color: #88d8c5;
+    }
+
+    .count {
+      min-width: 22px;
+      height: 20px;
+      padding: 0 6px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #dce4ec;
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .sidebar-section {
+      padding: 14px 18px 0;
+    }
+
+    .sidebar-section h2 {
+      margin: 0 0 10px;
+      color: #7f93a6;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .prompt-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .prompt-card {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.045);
+      color: #dce4ec;
+      padding: 10px;
+      text-align: left;
+      display: grid;
+      gap: 4px;
+    }
+
+    .prompt-card:hover {
+      background: rgba(255, 255, 255, 0.075);
+      border-color: rgba(136, 216, 197, 0.35);
+    }
+
+    .prompt-card strong {
+      font-size: 12px;
+    }
+
+    .prompt-card span {
+      color: #9fb0bf;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .sidebar-foot {
+      margin-top: auto;
+      padding: 14px 18px 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      display: grid;
+      gap: 8px;
+    }
+
+    .mini-meter {
+      display: grid;
+      gap: 7px;
+    }
+
+    .mini-meter-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      color: #9fb0bf;
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .bar {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      overflow: hidden;
+    }
+
+    .bar span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #11a37f, #2f7df6);
+    }
+
+    .workspace {
+      min-width: 0;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 64px auto 1fr;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 22px;
+      background: rgba(255, 255, 255, 0.92);
+      border-bottom: 1px solid var(--border-default);
+      backdrop-filter: blur(16px);
+    }
+
+    .crumbs {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+      color: var(--text-tertiary);
+      font-size: 13px;
+      font-weight: 760;
+    }
+
+    .crumbs strong {
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: 1px solid var(--border-default);
+      border-radius: 7px;
+      background: var(--bg-1);
+      color: var(--text-primary);
+      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 850;
+      white-space: nowrap;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .btn:hover {
+      border-color: var(--border-strong);
+      background: var(--bg-2);
+    }
+
+    .btn.primary {
+      border-color: transparent;
+      background: var(--accent);
+      color: var(--accent-fg);
+    }
+
+    .btn.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .btn.success {
+      border-color: transparent;
+      background: var(--green);
+      color: #fff;
+    }
+
+    .btn.warning {
+      color: var(--amber);
+      border-color: var(--amber-border);
+      background: var(--amber-bg);
+    }
+
+    .btn.icon-only {
+      width: 34px;
+      padding: 0;
+    }
+
+    .context-band {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+      gap: 14px;
+      padding: 18px 22px 0;
+    }
+
+    .context-summary,
+    .activity-summary {
+      background: var(--bg-1);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-sm);
+      padding: 14px;
+      min-width: 0;
+    }
+
+    .context-summary {
+      display: grid;
+      gap: 12px;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .section-title h1,
+    .section-title h2,
+    .section-title h3 {
+      margin: 0;
+      min-width: 0;
+      color: var(--text-primary);
+      line-height: 1.2;
+    }
+
+    .section-title h1 {
+      font-size: 21px;
+      letter-spacing: 0;
+    }
+
+    .section-title h2 {
+      font-size: 15px;
+    }
+
+    .section-title h3 {
+      font-size: 13px;
+    }
+
+    .muted {
+      color: var(--text-tertiary);
+    }
+
+    .caption {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .badge-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      min-height: 22px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--border-default);
+      border-radius: 999px;
+      background: var(--bg-1);
+      color: var(--text-secondary);
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .badge.certified {
+      color: var(--green);
+      border-color: var(--green-border);
+      background: var(--green-bg);
+    }
+
+    .badge.review {
+      color: var(--amber);
+      border-color: var(--amber-border);
+      background: var(--amber-bg);
+    }
+
+    .badge.research {
+      color: var(--purple);
+      border-color: var(--purple-border);
+      background: var(--purple-bg);
+    }
+
+    .badge.context {
+      color: var(--cyan);
+      border-color: var(--cyan-border);
+      background: var(--cyan-bg);
+    }
+
+    .badge.blocked {
+      color: var(--red);
+      border-color: var(--red-border);
+      background: var(--red-bg);
+    }
+
+    .context-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric-tile {
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      background: var(--bg-2);
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .metric-tile span {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-weight: 820;
+      text-transform: uppercase;
+    }
+
+    .metric-tile strong {
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .metric-tile small {
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 780;
+    }
+
+    .activity-summary {
+      display: grid;
+      gap: 10px;
+    }
+
+    .activity-row {
+      display: grid;
+      grid-template-columns: 22px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      display: inline-block;
+    }
+
+    .dot.green {
+      background: var(--green);
+    }
+
+    .dot.amber {
+      background: #d8901f;
+    }
+
+    .dot.purple {
+      background: var(--purple);
+    }
+
+    .activity-row strong {
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .content {
+      min-width: 0;
+      padding: 16px 22px 22px;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+
+    .mode-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: end;
+      padding: 14px;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius);
+      background: var(--bg-1);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .mode-copy {
+      display: grid;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .eyebrow {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .mode-copy h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+
+    .mode-copy p {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .mode-tabs {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .mode-tab {
+      min-height: 30px;
+      border: 1px solid var(--border-default);
+      border-radius: 999px;
+      background: var(--bg-1);
+      color: var(--text-secondary);
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .mode-tab:hover {
+      border-color: var(--border-strong);
+      color: var(--text-primary);
+    }
+
+    .mode-tab.active {
+      border-color: #bfd2ff;
+      background: var(--accent-dim);
+      color: var(--accent);
+    }
+
+    .answer-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 0.38fr);
+      gap: 14px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius);
+      background: var(--bg-1);
+      box-shadow: var(--shadow-sm);
+      min-width: 0;
+    }
+
+    .panel-header {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    .panel-body {
+      padding: 14px;
+      display: grid;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .answer-main {
+      display: grid;
+      gap: 12px;
+    }
+
+    .answer-card {
+      display: none;
+      gap: 14px;
+    }
+
+    .answer-card.active {
+      display: grid;
+    }
+
+    .answer-text {
+      display: grid;
+      gap: 10px;
+    }
+
+    .answer-text h3 {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.32;
+    }
+
+    .answer-text p {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      overflow: hidden;
+      border-radius: 8px;
+      border: 1px solid var(--border-default);
+    }
+
+    .data-table th,
+    .data-table td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border-subtle);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .data-table th {
+      color: var(--text-tertiary);
+      background: var(--bg-2);
+      font-size: 10px;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      font-weight: 900;
+    }
+
+    .data-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .delta-up {
+      color: var(--green);
+      font-weight: 850;
+    }
+
+    .delta-risk {
+      color: var(--amber);
+      font-weight: 850;
+    }
+
+    .code-block {
+      margin: 0;
+      overflow: auto;
+      border: 1px solid var(--border-default);
+      border-radius: 8px;
+      background: #111820;
+      color: #d9e7f2;
+      padding: 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre;
+    }
+
+    .yaml-block {
+      background: #162016;
+      color: #dbf3df;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .mini-panel {
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      background: var(--bg-2);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .mini-panel h4 {
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .mini-panel p,
+    .mini-panel li {
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .mini-panel p {
+      margin: 0;
+    }
+
+    .mini-panel ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .action-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .proof-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .proof-item {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      background: var(--bg-2);
+    }
+
+    .proof-item strong {
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .proof-item span {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .decision-rail {
+      display: grid;
+      gap: 14px;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 10px;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 26px 1fr;
+      gap: 9px;
+      align-items: start;
+    }
+
+    .timeline-icon {
+      width: 26px;
+      height: 26px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      background: var(--bg-3);
+      color: var(--text-secondary);
+    }
+
+    .timeline-icon.done {
+      color: var(--green);
+      background: var(--green-bg);
+    }
+
+    .timeline-icon.review {
+      color: var(--amber);
+      background: var(--amber-bg);
+    }
+
+    .timeline-icon.research {
+      color: var(--purple);
+      background: var(--purple-bg);
+    }
+
+    .timeline-copy {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .timeline-copy strong {
+      font-size: 12px;
+    }
+
+    .timeline-copy span {
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .chart {
+      min-height: 180px;
+      border: 1px solid var(--border-default);
+      border-radius: 8px;
+      background:
+        linear-gradient(var(--border-subtle) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px),
+        var(--bg-2);
+      background-size: 100% 40px, 64px 100%;
+      padding: 14px;
+      display: grid;
+      align-items: end;
+      grid-template-columns: repeat(6, minmax(24px, 1fr));
+      gap: 10px;
+    }
+
+    .bar-col {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      gap: 8px;
+      align-items: end;
+      min-width: 0;
+    }
+
+    .bar-stack {
+      display: grid;
+      align-items: end;
+      height: 132px;
+    }
+
+    .bar-fill {
+      border-radius: 6px 6px 3px 3px;
+      background: linear-gradient(180deg, #2f7df6, #11a37f);
+      min-height: 18px;
+    }
+
+    .bar-col span {
+      color: var(--text-tertiary);
+      font-size: 10px;
+      font-weight: 850;
+      text-align: center;
+    }
+
+    .block-plan {
+      display: grid;
+      gap: 10px;
+    }
+
+    .block-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      background: var(--bg-2);
+    }
+
+    .block-row strong {
+      display: block;
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+
+    .block-row span {
+      color: var(--text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .copilot {
+      min-width: 0;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 64px auto 1fr auto;
+      background: var(--bg-1);
+      border-left: 1px solid var(--border-default);
+      position: sticky;
+      top: 0;
+      height: 100vh;
+    }
+
+    .copilot-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--border-default);
+    }
+
+    .copilot-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .copilot-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .copilot-title div {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+
+    .copilot-title strong {
+      font-size: 14px;
+    }
+
+    .copilot-title span {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      font-weight: 780;
+    }
+
+    .copilot-modes {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .rail-scroll {
+      overflow: auto;
+      padding: 14px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .rail-panel {
+      border: 1px solid var(--border-default);
+      border-radius: 8px;
+      background: var(--bg-1);
+      display: grid;
+      min-width: 0;
+    }
+
+    .rail-panel h3 {
+      margin: 0;
+      padding: 12px;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 13px;
+    }
+
+    .rail-panel-body {
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .context-item {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .context-item strong {
+      display: block;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .context-item span {
+      display: block;
+      color: var(--text-tertiary);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .context-icon {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--bg-3);
+      color: var(--text-secondary);
+    }
+
+    .composer {
+      border-top: 1px solid var(--border-default);
+      padding: 12px 14px 14px;
+      display: grid;
+      gap: 10px;
+      background: var(--bg-1);
+    }
+
+    .composer-box {
+      border: 1px solid var(--border-default);
+      border-radius: 8px;
+      background: var(--bg-2);
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+    }
+
+    .composer textarea {
+      width: 100%;
+      min-height: 82px;
+      max-height: 160px;
+      resize: vertical;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text-primary);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .composer-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .hint-text {
+      color: var(--text-tertiary);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .toast {
+      position: fixed;
+      right: 414px;
+      bottom: 18px;
+      z-index: 50;
+      border: 1px solid var(--green-border);
+      border-radius: 8px;
+      background: var(--green-bg);
+      color: var(--green);
+      padding: 10px 12px;
+      box-shadow: var(--shadow-md);
+      font-size: 12px;
+      font-weight: 850;
+      opacity: 0;
+      transform: translateY(10px);
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    svg {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+    }
+
+    @media (max-width: 1220px) {
+      .mockup {
+        grid-template-columns: 78px minmax(0, 1fr) 360px;
+      }
+
+      .brand-copy,
+      .nav-button span.label,
+      .nav-button .count,
+      .sidebar-section,
+      .sidebar-foot {
+        display: none;
+      }
+
+      .brand {
+        justify-content: center;
+        padding: 0;
+      }
+
+      .nav-button {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        padding: 0;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .mockup {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        min-height: auto;
+        position: static;
+      }
+
+      .brand {
+        justify-content: flex-start;
+        padding: 0 14px;
+      }
+
+      .brand-copy,
+      .nav-button span.label,
+      .nav-button .count,
+      .sidebar-section,
+      .sidebar-foot {
+        display: grid;
+      }
+
+      .nav {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .nav-button {
+        grid-template-columns: 24px 1fr auto;
+      }
+
+      .copilot {
+        position: static;
+        min-height: auto;
+        height: auto;
+        border-left: 0;
+        border-top: 1px solid var(--border-default);
+      }
+
+      .rail-scroll {
+        max-height: none;
+      }
+
+      .context-band,
+      .answer-layout,
+      .mode-header {
+        grid-template-columns: 1fr;
+      }
+
+      .mode-tabs {
+        justify-content: flex-start;
+      }
+
+      .toast {
+        right: 18px;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .topbar,
+      .context-band,
+      .content {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+
+      .context-grid,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .mode-header {
+        align-items: start;
+      }
+
+      .topbar {
+        align-items: flex-start;
+        height: auto;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        flex-direction: column;
+      }
+
+      .top-actions {
+        justify-content: flex-start;
+      }
+
+      .nav {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="mockup">
+    <aside class="sidebar" aria-label="DQL navigation">
+      <div class="brand">
+        <div class="brand-mark">DQL</div>
+        <div class="brand-copy">
+          <strong>DuckCode DQL</strong>
+          <span>Governed analytics</span>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-button active" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-9 9 9"/><path d="M9 21V9h6v12"/></svg>
+          <span class="label">Workspace</span>
+          <span class="count">1</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="label">Notebooks</span>
+          <span class="count">8</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="label">Blocks</span>
+          <span class="count">42</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/><path d="M8 14h3"/><path d="M14 14h2"/></svg>
+          <span class="label">Apps</span>
+          <span class="count">5</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+          <span class="label">Research</span>
+          <span class="count">12</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>
+          <span class="label">Review</span>
+          <span class="count">6</span>
+        </button>
+      </nav>
+
+      <section class="sidebar-section">
+        <h2>Prompt Starters</h2>
+        <div class="prompt-list">
+          <button class="prompt-card" type="button" data-fill-prompt="Why did revenue retention move last quarter? Use certified answers first, then research gaps.">
+            <strong>Deep answer</strong>
+            <span>Certified answer first, then research any missing context.</span>
+          </button>
+          <button class="prompt-card" type="button" data-fill-prompt="Create a notebook SQL cell for revenue by segment and explain what needs review.">
+            <strong>Notebook SQL</strong>
+            <span>Generate a cell with proof and review status.</span>
+          </button>
+          <button class="prompt-card" type="button" data-fill-prompt="Turn this reviewed SQL into a DQL block draft with gates and owner.">
+            <strong>DQL block</strong>
+            <span>Create a draft, not automatic certification.</span>
+          </button>
+          <button class="prompt-card" type="button" data-fill-prompt="Build a Revenue Health app for the COO using certified blocks and flag missing evidence.">
+            <strong>Build app</strong>
+            <span>Plan app tiles from certified blocks and gap notes.</span>
+          </button>
+        </div>
+      </section>
+
+      <div class="sidebar-foot">
+        <div class="mini-meter">
+          <div class="mini-meter-row"><span>Certified coverage</span><strong>74%</strong></div>
+          <div class="bar"><span style="width: 74%"></span></div>
+        </div>
+        <div class="mini-meter">
+          <div class="mini-meter-row"><span>Open review items</span><strong>6</strong></div>
+          <div class="bar"><span style="width: 38%"></span></div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="crumbs">
+          <span>Workspace</span>
+          <span>/</span>
+          <strong>Revenue Health App</strong>
+          <span class="badge certified">Certified-first</span>
+        </div>
+        <div class="top-actions">
+          <button class="btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l3-3 4 4 5-8"/></svg>
+            Lineage
+          </button>
+          <button class="btn" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+            Edit Context
+          </button>
+          <button class="btn primary" type="button" data-action="publish">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+            Share Preview
+          </button>
+        </div>
+      </header>
+
+      <section class="context-band">
+        <div class="context-summary">
+          <div class="section-title">
+            <div>
+              <h1>Unified AI surface for app, notebook, research, SQL, and DQL blocks</h1>
+              <p class="caption">One Copilot composer routes each request to the right path: certified answer, generated SQL, deep research, DQL draft, or app build. The output shape stays consistent, and generated work is visibly review-required until promoted.</p>
+            </div>
+          </div>
+          <div class="badge-row">
+            <span class="badge certified">Certified blocks answer first</span>
+            <span class="badge review">Generated SQL needs review</span>
+            <span class="badge research">Deep research loop</span>
+            <span class="badge context">Right-side context stack</span>
+          </div>
+          <div class="context-grid">
+            <div class="metric-tile">
+              <span>Certified blocks</span>
+              <strong>42</strong>
+              <small>18 revenue-ready</small>
+            </div>
+            <div class="metric-tile">
+              <span>Draft answers</span>
+              <strong>6</strong>
+              <small class="delta-risk">Review queue</small>
+            </div>
+            <div class="metric-tile">
+              <span>Research runs</span>
+              <strong>12</strong>
+              <small>4 ready for DQL draft</small>
+            </div>
+            <div class="metric-tile">
+              <span>App gaps</span>
+              <strong>3</strong>
+              <small class="delta-risk">Missing certified block</small>
+            </div>
+          </div>
+        </div>
+
+        <aside class="activity-summary">
+          <div class="section-title">
+            <h2>Recent AI Work</h2>
+            <button class="btn icon-only" type="button" title="Open history">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/><path d="M12 7v5l3 3"/></svg>
+            </button>
+          </div>
+          <div class="activity-row">
+            <span class="dot green"></span>
+            <strong>Retention answer matched certified block</strong>
+            <span>2m</span>
+          </div>
+          <div class="activity-row">
+            <span class="dot purple"></span>
+            <strong>Deep research run drafted SQL proof</strong>
+            <span>18m</span>
+          </div>
+          <div class="activity-row">
+            <span class="dot amber"></span>
+            <strong>New block draft awaits owner review</strong>
+            <span>1h</span>
+          </div>
+          <div class="activity-row">
+            <span class="dot green"></span>
+            <strong>COO app regenerated with 8 certified tiles</strong>
+            <span>3h</span>
+          </div>
+        </aside>
+      </section>
+
+      <section class="content">
+        <div class="mode-header">
+          <div class="mode-copy">
+            <div class="eyebrow">Current route</div>
+            <h2 id="modeTitle">Auto route: answer, research, SQL, block, or app</h2>
+            <p id="modeDescription">Copilot inspects selected context, searches certified DQL blocks first, then moves to generated SQL or research only when the certified path cannot answer the user’s question.</p>
+          </div>
+          <div class="mode-tabs" aria-label="Copilot routes">
+            <button class="mode-tab active" type="button" data-mode="auto">Auto</button>
+            <button class="mode-tab" type="button" data-mode="ask">Ask</button>
+            <button class="mode-tab" type="button" data-mode="research">Research</button>
+            <button class="mode-tab" type="button" data-mode="sql">SQL Cell</button>
+            <button class="mode-tab" type="button" data-mode="block">DQL Block</button>
+            <button class="mode-tab" type="button" data-mode="app">Build App</button>
+          </div>
+        </div>
+
+        <div class="answer-layout">
+          <section class="panel">
+            <div class="panel-header">
+              <div class="section-title">
+                <h2 id="answerPanelTitle">Copilot Response</h2>
+              </div>
+              <div class="badge-row">
+                <span class="badge certified" id="trustBadge">Certified-first</span>
+                <span class="badge review" id="reviewBadge">Review gates visible</span>
+              </div>
+            </div>
+            <div class="panel-body answer-main">
+              <article class="answer-card active" data-answer="auto">
+                <div class="answer-text">
+                  <h3>“Why did revenue retention move, and can we build this into a COO app?”</h3>
+                  <p>DQL found certified retention and revenue blocks for the top-line answer, but segment-level churn drivers are not certified yet. The clean path is to answer from certified blocks, run research for the missing driver view, create a review-required SQL cell, draft a DQL block, then build the app with uncertified areas clearly marked.</p>
+                </div>
+                <div class="split">
+                  <div class="mini-panel">
+                    <h4>Route decision</h4>
+                    <ul>
+                      <li>Certified answer is available for net revenue retention and ARR movement.</li>
+                      <li>Generated SQL is needed for segment driver detail.</li>
+                      <li>DQL draft can be created after preview and owner review.</li>
+                    </ul>
+                  </div>
+                  <div class="mini-panel">
+                    <h4>Next best action</h4>
+                    <p>Run the driver research loop, preview the SQL result, then create a DQL draft for “Retention Drivers by Segment.”</p>
+                  </div>
+                </div>
+                <div class="action-strip">
+                  <button class="btn primary" type="button" data-switch="research">Start Deep Research</button>
+                  <button class="btn" type="button" data-switch="ask">Show Certified Answer</button>
+                  <button class="btn warning" type="button" data-switch="block">Prepare DQL Draft</button>
+                </div>
+              </article>
+
+              <article class="answer-card" data-answer="ask">
+                <div class="answer-text">
+                  <h3>Certified answer: revenue retention improved because expansion outweighed logo churn.</h3>
+                  <p>Using the certified `revenue.retention_summary` and `customer.expansion_waterfall` blocks, net revenue retention rose to 108.4%. Expansion ARR contributed +$2.8M, contraction removed -$0.9M, and logo churn removed -$0.6M. Segment-level churn reasons are not certified in the selected context, so those details are marked for research.</p>
+                </div>
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Certified metric</th>
+                      <th>Current</th>
+                      <th>Prior</th>
+                      <th>Movement</th>
+                      <th>Evidence</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Net revenue retention</td>
+                      <td>108.4%</td>
+                      <td>104.9%</td>
+                      <td class="delta-up">+3.5 pts</td>
+                      <td>revenue.retention_summary</td>
+                    </tr>
+                    <tr>
+                      <td>Expansion ARR</td>
+                      <td>$2.8M</td>
+                      <td>$2.1M</td>
+                      <td class="delta-up">+$0.7M</td>
+                      <td>customer.expansion_waterfall</td>
+                    </tr>
+                    <tr>
+                      <td>Logo churn ARR</td>
+                      <td>$0.6M</td>
+                      <td>$0.8M</td>
+                      <td class="delta-up">-$0.2M</td>
+                      <td>revenue.churn_bridge</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div class="action-strip">
+                  <button class="btn primary" type="button" data-action="insert-answer">Insert Answer Cell</button>
+                  <button class="btn" type="button" data-switch="research">Research Missing Drivers</button>
+                  <button class="btn" type="button" data-action="copy-citations">Copy Evidence</button>
+                </div>
+              </article>
+
+              <article class="answer-card" data-answer="research">
+                <div class="answer-text">
+                  <h3>Deep research result: mid-market contraction is the main uncertified driver to review.</h3>
+                  <p>The research loop created a scoped plan, generated SQL from metadata, previewed the result, and found that mid-market contraction is concentrated in two product families. This remains review-required because no certified DQL block currently owns “contraction reason by product family.”</p>
+                </div>
+                <div class="chart" aria-label="Driver contribution chart">
+                  <div class="bar-col"><div class="bar-stack"><div class="bar-fill" style="height: 70%"></div></div><span>Expansion</span></div>
+                  <div class="bar-col"><div class="bar-stack"><div class="bar-fill" style="height: 42%"></div></div><span>Seat loss</span></div>
+                  <div class="bar-col"><div class="bar-stack"><div class="bar-fill" style="height: 55%"></div></div><span>Downgrade</span></div>
+                  <div class="bar-col"><div class="bar-stack"><div class="bar-fill" style="height: 26%"></div></div><span>Churn</span></div>
+                  <div class="bar-col"><div class="bar-stack"><div class="bar-fill" style="height: 35%"></div></div><span>Price</span></div>
+                  <div class="bar-col"><div class="bar-stack"><div class="bar-fill" style="height: 20%"></div></div><span>Other</span></div>
+                </div>
+                <div class="split">
+                  <div class="mini-panel">
+                    <h4>Research plan</h4>
+                    <ul>
+                      <li>Match certified retention blocks.</li>
+                      <li>Search metadata for contraction reason fields.</li>
+                      <li>Generate preview SQL at segment and product grain.</li>
+                      <li>Compare result against certified NRR totals.</li>
+                    </ul>
+                  </div>
+                  <div class="mini-panel">
+                    <h4>Readiness gates</h4>
+                    <ul>
+                      <li>Preview row count passed.</li>
+                      <li>Metric reconciliation passed within tolerance.</li>
+                      <li>Owner review missing.</li>
+                      <li>Business glossary term missing.</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="action-strip">
+                  <button class="btn primary" type="button" data-switch="sql">Open SQL Cell Draft</button>
+                  <button class="btn" type="button" data-switch="block">Create DQL Draft</button>
+                  <button class="btn" type="button" data-action="save-research">Save Research Run</button>
+                </div>
+              </article>
+
+              <article class="answer-card" data-answer="sql">
+                <div class="answer-text">
+                  <h3>Notebook SQL cell draft: retention drivers by segment</h3>
+                  <p>This SQL is generated from metadata and reconciled to certified retention totals. It should be inserted as a review-required notebook cell, not treated as certified until the DQL block review passes.</p>
+                </div>
+                <pre class="code-block">with retention_base as (
+  select
+    account_segment,
+    product_family,
+    contraction_reason,
+    sum(expansion_arr) as expansion_arr,
+    sum(contraction_arr) as contraction_arr,
+    sum(churn_arr) as churn_arr
+  from marts.customer_retention_monthly
+  where month between date '2026-01-01' and date '2026-03-31'
+  group by 1, 2, 3
+)
+select
+  account_segment,
+  product_family,
+  contraction_reason,
+  expansion_arr,
+  contraction_arr,
+  churn_arr,
+  expansion_arr - contraction_arr - churn_arr as net_arr_impact
+from retention_base
+order by abs(net_arr_impact) desc
+limit 50;</pre>
+                <div class="action-strip">
+                  <button class="btn primary" type="button" data-action="insert-sql">Insert SQL Cell</button>
+                  <button class="btn" type="button" data-action="run-preview">Run Preview</button>
+                  <button class="btn warning" type="button" data-switch="block">Promote to DQL Draft</button>
+                </div>
+              </article>
+
+              <article class="answer-card" data-answer="block">
+                <div class="answer-text">
+                  <h3>DQL block draft: retention_drivers_by_segment</h3>
+                  <p>The block draft is ready for review, but it is not certified. Certification requires owner approval, glossary mapping, test coverage, and reconciliation against existing certified retention blocks.</p>
+                </div>
+                <pre class="code-block yaml-block">block: revenue.retention_drivers_by_segment
+title: Retention Drivers by Segment
+status: draft
+owner: revenue-analytics
+grain: account_segment, product_family, contraction_reason
+inputs:
+  - marts.customer_retention_monthly
+certification_gates:
+  - preview_result: passed
+  - reconciliation: passed
+  - owner_review: pending
+  - glossary_mapping: pending
+  - tests: pending</pre>
+                <div class="block-plan">
+                  <div class="block-row">
+                    <div>
+                      <strong>Gate: preview result</strong>
+                      <span>50-row sample generated from connected metadata and matched expected columns.</span>
+                    </div>
+                    <span class="badge certified">Passed</span>
+                  </div>
+                  <div class="block-row">
+                    <div>
+                      <strong>Gate: owner review</strong>
+                      <span>Needs revenue analytics owner before certification can be requested.</span>
+                    </div>
+                    <span class="badge review">Pending</span>
+                  </div>
+                  <div class="block-row">
+                    <div>
+                      <strong>Gate: certification</strong>
+                      <span>Available only after tests, glossary, and review are complete.</span>
+                    </div>
+                    <span class="badge blocked">Blocked</span>
+                  </div>
+                </div>
+                <div class="action-strip">
+                  <button class="btn primary" type="button" data-action="create-block">Create Draft Block</button>
+                  <button class="btn" type="button" data-action="open-review">Open Review Checklist</button>
+                  <button class="btn" type="button" data-switch="app">Use in App as Draft Gap</button>
+                </div>
+              </article>
+
+              <article class="answer-card" data-answer="app">
+                <div class="answer-text">
+                  <h3>App plan: Revenue Health for COO</h3>
+                  <p>The app can be built from eight certified tiles today. Two tiles depend on the review-required retention driver draft and will appear with review badges until those blocks are certified.</p>
+                </div>
+                <div class="block-plan">
+                  <div class="block-row">
+                    <div>
+                      <strong>Executive Summary</strong>
+                      <span>NRR, ARR movement, expansion bridge, churn bridge.</span>
+                    </div>
+                    <span class="badge certified">Certified</span>
+                  </div>
+                  <div class="block-row">
+                    <div>
+                      <strong>Segment Driver View</strong>
+                      <span>Uses draft retention driver block until owner review passes.</span>
+                    </div>
+                    <span class="badge review">Draft</span>
+                  </div>
+                  <div class="block-row">
+                    <div>
+                      <strong>Customer Risk Table</strong>
+                      <span>Certified account health, renewal risk, and expansion potential.</span>
+                    </div>
+                    <span class="badge certified">Certified</span>
+                  </div>
+                  <div class="block-row">
+                    <div>
+                      <strong>Technical Appendix</strong>
+                      <span>SQL proof, block lineage, tests, and missing certification notes.</span>
+                    </div>
+                    <span class="badge context">Evidence</span>
+                  </div>
+                </div>
+                <div class="action-strip">
+                  <button class="btn primary" type="button" data-action="build-app">Generate App Draft</button>
+                  <button class="btn" type="button" data-action="open-app-preview">Open App Preview</button>
+                  <button class="btn warning" type="button" data-switch="block">Resolve Draft Tile</button>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <aside class="decision-rail">
+            <section class="panel">
+              <div class="panel-header">
+                <h2>Decision Trace</h2>
+                <span class="badge context">Visible</span>
+              </div>
+              <div class="panel-body">
+                <div class="timeline" id="decisionTimeline">
+                  <div class="timeline-item">
+                    <div class="timeline-icon done">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>
+                    </div>
+                    <div class="timeline-copy">
+                      <strong>Understand request</strong>
+                      <span>Classified as answer plus app-build follow-up.</span>
+                    </div>
+                  </div>
+                  <div class="timeline-item">
+                    <div class="timeline-icon done">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>
+                    </div>
+                    <div class="timeline-copy">
+                      <strong>Search certified blocks</strong>
+                      <span>Matched retention summary, expansion, churn bridge.</span>
+                    </div>
+                  </div>
+                  <div class="timeline-item">
+                    <div class="timeline-icon review">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.7 3.86a2 2 0 0 0-3.4 0z"/></svg>
+                    </div>
+                    <div class="timeline-copy">
+                      <strong>Identify certification gap</strong>
+                      <span>Segment contraction reasons are not certified.</span>
+                    </div>
+                  </div>
+                  <div class="timeline-item">
+                    <div class="timeline-icon research">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+                    </div>
+                    <div class="timeline-copy">
+                      <strong>Run research loop</strong>
+                      <span>Generate SQL, preview result, collect proof.</span>
+                    </div>
+                  </div>
+                  <div class="timeline-item">
+                    <div class="timeline-icon review">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10"/><path d="M7 12h6"/><path d="M7 16h8"/></svg>
+                    </div>
+                    <div class="timeline-copy">
+                      <strong>Draft artifact</strong>
+                      <span>Create notebook cell, DQL block draft, or app plan.</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>Evidence Paths</h2>
+                <span class="badge certified">3 certified</span>
+              </div>
+              <div class="panel-body">
+                <div class="proof-list">
+                  <div class="proof-item">
+                    <div class="context-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                    </div>
+                    <strong>revenue.retention_summary</strong>
+                    <span>certified</span>
+                  </div>
+                  <div class="proof-item">
+                    <div class="context-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l3-3 4 4 5-8"/></svg>
+                    </div>
+                    <strong>customer.expansion_waterfall</strong>
+                    <span>certified</span>
+                  </div>
+                  <div class="proof-item">
+                    <div class="context-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></svg>
+                    </div>
+                    <strong>marts.customer_retention_monthly</strong>
+                    <span>metadata</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <aside class="copilot" aria-label="Unified DQL Copilot">
+      <header class="copilot-head">
+        <div class="copilot-title">
+          <div class="copilot-mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.4 6.8L21 11l-6.6 2.2L12 20l-2.4-6.8L3 11l6.6-2.2L12 2z"/></svg>
+          </div>
+          <div>
+            <strong>DQL Copilot</strong>
+            <span>One AI flow, multiple governed routes</span>
+          </div>
+        </div>
+        <button class="btn icon-only" type="button" title="Collapse Copilot">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+      </header>
+
+      <div class="copilot-modes">
+        <button class="mode-tab active" type="button" data-mode="auto">Auto</button>
+        <button class="mode-tab" type="button" data-mode="ask">Ask</button>
+        <button class="mode-tab" type="button" data-mode="research">Research</button>
+        <button class="mode-tab" type="button" data-mode="sql">SQL</button>
+        <button class="mode-tab" type="button" data-mode="block">Block</button>
+        <button class="mode-tab" type="button" data-mode="app">App</button>
+      </div>
+
+      <div class="rail-scroll">
+        <section class="rail-panel">
+          <h3>Context Stack</h3>
+          <div class="rail-panel-body">
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/></svg>
+              </div>
+              <div>
+                <strong>Revenue Health App</strong>
+                <span>Active app, COO persona, Q1 filters</span>
+              </div>
+              <span class="badge context">App</span>
+            </div>
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              </div>
+              <div>
+                <strong>QBR retention notebook</strong>
+                <span>Cell 12 selected, reviewed SQL available</span>
+              </div>
+              <span class="badge context">Notebook</span>
+            </div>
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              </div>
+              <div>
+                <strong>18 certified revenue blocks</strong>
+                <span>Retention, ARR, churn, expansion</span>
+              </div>
+              <span class="badge certified">Certified</span>
+            </div>
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h18v18H3z"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+              </div>
+              <div>
+                <strong>marts.customer_retention_monthly</strong>
+                <span>Metadata match, not certified</span>
+              </div>
+              <span class="badge review">Draft</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="rail-panel">
+          <h3>Route Contract</h3>
+          <div class="rail-panel-body">
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>
+              </div>
+              <div>
+                <strong>Certified answer</strong>
+                <span>Use DQL blocks and citations when coverage exists.</span>
+              </div>
+              <span class="badge certified">Safe</span>
+            </div>
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
+              </div>
+              <div>
+                <strong>Generated SQL</strong>
+                <span>Allowed as draft proof with preview and reconciliation.</span>
+              </div>
+              <span class="badge review">Review</span>
+            </div>
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+              </div>
+              <div>
+                <strong>Deep research</strong>
+                <span>Plan, inspect metadata, run preview, produce answer memo.</span>
+              </div>
+              <span class="badge research">Loop</span>
+            </div>
+            <div class="context-item">
+              <div class="context-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+              </div>
+              <div>
+                <strong>DQL block draft</strong>
+                <span>Can be created from reviewed SQL, not auto-certified.</span>
+              </div>
+              <span class="badge review">Draft</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="rail-panel">
+          <h3>Output Standard</h3>
+          <div class="rail-panel-body">
+            <div class="mini-panel">
+              <h4>Every answer includes</h4>
+              <ul>
+                <li>Trust label: certified, draft, or blocked.</li>
+                <li>Evidence path: block, metadata, SQL, preview.</li>
+                <li>Next actions: insert cell, research gap, create draft, build app.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <form class="composer" id="copilotForm">
+        <div class="composer-box">
+          <textarea id="promptInput" aria-label="Ask DQL Copilot" placeholder="Ask a question, request deep research, create a SQL cell, draft a DQL block, or build an app..."></textarea>
+          <div class="composer-actions">
+            <span class="hint-text" id="composerHint">Auto mode chooses the safest route and keeps uncertified work labeled.</span>
+            <button class="btn primary" type="submit">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+              Run
+            </button>
+          </div>
+        </div>
+      </form>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">Action queued</div>
+
+  <script>
+    const modes = {
+      auto: {
+        title: 'Auto route: answer, research, SQL, block, or app',
+        description: 'Copilot inspects selected context, searches certified DQL blocks first, then moves to generated SQL or research only when the certified path cannot answer the user’s question.',
+        panel: 'Copilot Response',
+        trust: 'Certified-first',
+        review: 'Review gates visible',
+        placeholder: 'Ask anything. Example: Why did retention move, and can you build this into a COO app?',
+        hint: 'Auto mode chooses the safest route and keeps uncertified work labeled.',
+      },
+      ask: {
+        title: 'Ask: answer from certified DQL before using generated context',
+        description: 'Use certified blocks, citations, and business definitions first. If the answer is incomplete, Copilot clearly names the missing certified coverage.',
+        panel: 'Certified Answer',
+        trust: 'Certified',
+        review: 'Gaps named',
+        placeholder: 'Ask for an answer. Example: What drove net revenue retention last quarter?',
+        hint: 'Ask mode prefers certified blocks and stops before inventing missing facts.',
+      },
+      research: {
+        title: 'Research: plan, investigate, preview, and summarize',
+        description: 'Deep research creates a visible plan, checks certified context, generates draft SQL only when needed, previews results, and produces an answer memo with proof.',
+        panel: 'Deep Research Overview',
+        trust: 'Research loop',
+        review: 'Draft proof',
+        placeholder: 'Request research. Example: Investigate segment-level contraction drivers and prepare evidence.',
+        hint: 'Research mode creates proof, not certification.',
+      },
+      sql: {
+        title: 'SQL Cell: generate review-required notebook work',
+        description: 'Create a notebook SQL cell from available metadata, attach preview expectations, and mark it as review-required until a DQL block is promoted.',
+        panel: 'Notebook SQL Cell',
+        trust: 'Metadata-derived',
+        review: 'Review required',
+        placeholder: 'Create SQL. Example: Build a SQL cell for retention drivers by segment.',
+        hint: 'SQL cells are drafts unless backed by certified blocks.',
+      },
+      block: {
+        title: 'DQL Block: convert reviewed work into a draft block',
+        description: 'Create a DQL block draft from reviewed SQL and context. Certification remains gated by owner review, tests, glossary, and reconciliation.',
+        panel: 'DQL Block Draft',
+        trust: 'Draft block',
+        review: 'Certification gates',
+        placeholder: 'Draft a block. Example: Turn this SQL into a retention drivers DQL block.',
+        hint: 'Block mode can draft, but certification is a separate review outcome.',
+      },
+      app: {
+        title: 'Build App: compose governed apps from blocks and visible gaps',
+        description: 'Build app plans from certified DQL blocks where possible, keep draft tiles labeled, and include proof, SQL, lineage, and review notes in the appendix.',
+        panel: 'App Build Plan',
+        trust: 'Certified tiles',
+        review: 'Draft gaps visible',
+        placeholder: 'Build an app. Example: Create a Revenue Health app for the COO.',
+        hint: 'App mode never hides missing certification coverage.',
+      },
+    };
+
+    const tabs = Array.from(document.querySelectorAll('[data-mode]'));
+    const answers = Array.from(document.querySelectorAll('[data-answer]'));
+    const title = document.getElementById('modeTitle');
+    const description = document.getElementById('modeDescription');
+    const panelTitle = document.getElementById('answerPanelTitle');
+    const trustBadge = document.getElementById('trustBadge');
+    const reviewBadge = document.getElementById('reviewBadge');
+    const promptInput = document.getElementById('promptInput');
+    const composerHint = document.getElementById('composerHint');
+    const toast = document.getElementById('toast');
+    let activeMode = 'auto';
+
+    function setMode(mode) {
+      if (!modes[mode]) return;
+      activeMode = mode;
+      const data = modes[mode];
+      title.textContent = data.title;
+      description.textContent = data.description;
+      panelTitle.textContent = data.panel;
+      trustBadge.textContent = data.trust;
+      reviewBadge.textContent = data.review;
+      promptInput.placeholder = data.placeholder;
+      composerHint.textContent = data.hint;
+      tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.mode === mode));
+      answers.forEach((card) => card.classList.toggle('active', card.dataset.answer === mode));
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      window.clearTimeout(showToast.timeout);
+      showToast.timeout = window.setTimeout(() => toast.classList.remove('show'), 1800);
+    }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => setMode(tab.dataset.mode));
+    });
+
+    document.querySelectorAll('[data-switch]').forEach((button) => {
+      button.addEventListener('click', () => {
+        setMode(button.dataset.switch);
+        showToast('Route switched to ' + modes[button.dataset.switch].panel);
+      });
+    });
+
+    document.querySelectorAll('[data-action]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const labels = {
+          publish: 'Preview share prepared',
+          'insert-answer': 'Answer cell inserted as certified-backed narrative',
+          'copy-citations': 'Evidence paths copied',
+          'save-research': 'Research run saved with proof',
+          'insert-sql': 'SQL cell inserted as review-required',
+          'run-preview': 'Preview run queued',
+          'create-block': 'DQL draft block created',
+          'open-review': 'Review checklist opened',
+          'build-app': 'App draft generated with certification labels',
+          'open-app-preview': 'App preview opened',
+        };
+        showToast(labels[button.dataset.action] || 'Action queued');
+      });
+    });
+
+    document.querySelectorAll('[data-fill-prompt]').forEach((button) => {
+      button.addEventListener('click', () => {
+        promptInput.value = button.dataset.fillPrompt;
+        promptInput.focus();
+        showToast('Prompt loaded into Copilot');
+      });
+    });
+
+    document.getElementById('copilotForm').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const text = promptInput.value.trim();
+      if (!text) {
+        showToast('Add a request for Copilot to route');
+        return;
+      }
+      if (/app|dashboard|coo/i.test(text)) setMode('app');
+      else if (/block|dql/i.test(text)) setMode('block');
+      else if (/sql|cell/i.test(text)) setMode('sql');
+      else if (/research|investigate|why|driver/i.test(text)) setMode('research');
+      else setMode(activeMode === 'auto' ? 'ask' : activeMode);
+      showToast('Copilot routed the request');
+    });
+  </script>
+</body>
+</html>

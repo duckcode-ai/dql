@@ -1,0 +1,2270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DQL Unified AI Real Flow Prototype</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2311a37f'/%3E%3Cpath d='M8 9h8c5 0 8 2.7 8 7s-3 7-8 7H8V9zm5 4v6h3c2 0 3.5-1 3.5-3S18 13 16 13h-3z' fill='white'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --surface: #ffffff;
+      --surface-soft: #f9fbfd;
+      --surface-strong: #eef3f7;
+      --line: #d9e1ea;
+      --line-soft: #edf1f5;
+      --line-strong: #b9c5d0;
+      --text: #18222c;
+      --muted: #536575;
+      --faint: #81909e;
+      --nav: #111922;
+      --nav-soft: #192533;
+      --blue: #276ef1;
+      --blue-soft: #eaf1ff;
+      --green: #16805a;
+      --green-soft: #e8f7ef;
+      --green-line: #bde7d1;
+      --amber: #a06105;
+      --amber-soft: #fff4dc;
+      --amber-line: #f0d48e;
+      --purple: #6d45c2;
+      --purple-soft: #f3edff;
+      --purple-line: #d9c8ff;
+      --red: #b73535;
+      --red-soft: #fff1f1;
+      --red-line: #efb8b8;
+      --cyan: #087f8f;
+      --cyan-soft: #e8f8fb;
+      --cyan-line: #b9e8ef;
+      --shadow: 0 14px 34px rgba(20, 32, 44, 0.08);
+      --shadow-soft: 0 1px 2px rgba(20, 32, 44, 0.07);
+      --radius: 8px;
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      letter-spacing: 0;
+    }
+
+    button,
+    textarea,
+    input {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 252px minmax(0, 1fr) 420px;
+    }
+
+    .nav {
+      min-height: 100vh;
+      background: var(--nav);
+      color: #d8e3ed;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .brand {
+      height: 64px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 7px;
+      background: linear-gradient(135deg, #276ef1, #11a37f);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 950;
+    }
+
+    .brand-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .brand-copy strong {
+      font-size: 14px;
+    }
+
+    .brand-copy span {
+      color: #8ea2b3;
+      font-size: 11px;
+      font-weight: 850;
+      text-transform: uppercase;
+    }
+
+    .nav-section {
+      padding: 14px 10px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .nav-button {
+      height: 38px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: #b7c5d1;
+      padding: 0 10px;
+      display: grid;
+      grid-template-columns: 26px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      text-align: left;
+      font-size: 13px;
+      font-weight: 850;
+    }
+
+    .nav-button.active,
+    .nav-button:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .nav-button svg {
+      color: #8ea2b3;
+    }
+
+    .nav-button.active svg,
+    .nav-button:hover svg {
+      color: #88d8c5;
+    }
+
+    .pill-count {
+      min-width: 22px;
+      height: 20px;
+      display: inline-grid;
+      place-items: center;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #d8e3ed;
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .scenario-list {
+      padding: 8px 18px 0;
+      display: grid;
+      gap: 9px;
+    }
+
+    .side-title {
+      margin: 0 0 2px;
+      color: #8196aa;
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .scenario {
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.045);
+      color: #d8e3ed;
+      padding: 10px;
+      display: grid;
+      gap: 5px;
+      text-align: left;
+    }
+
+    .scenario:hover,
+    .scenario.active {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(136, 216, 197, 0.38);
+    }
+
+    .scenario strong {
+      font-size: 12px;
+    }
+
+    .scenario span {
+      color: #a4b5c4;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .nav-foot {
+      margin-top: auto;
+      padding: 14px 18px 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      display: grid;
+      gap: 10px;
+    }
+
+    .coverage-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      color: #a4b5c4;
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .meter {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      overflow: hidden;
+    }
+
+    .meter span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #11a37f, #276ef1);
+    }
+
+    .workspace {
+      min-width: 0;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 64px auto 1fr;
+    }
+
+    .topbar {
+      height: 64px;
+      padding: 0 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      background: rgba(255, 255, 255, 0.94);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(14px);
+    }
+
+    .crumbs {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--faint);
+      font-size: 13px;
+      font-weight: 820;
+    }
+
+    .crumbs strong {
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 0 12px;
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .btn:hover {
+      border-color: var(--line-strong);
+      background: var(--surface-soft);
+    }
+
+    .btn.primary {
+      color: #fff;
+      border-color: transparent;
+      background: var(--blue);
+    }
+
+    .btn.green {
+      color: #fff;
+      border-color: transparent;
+      background: var(--green);
+    }
+
+    .btn.warn {
+      color: var(--amber);
+      border-color: var(--amber-line);
+      background: var(--amber-soft);
+    }
+
+    .btn.icon {
+      width: 34px;
+      padding: 0;
+    }
+
+    .hero-strip {
+      padding: 18px 22px 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 270px;
+      gap: 14px;
+    }
+
+    .route-card,
+    .surface-shell,
+    .flow-card,
+    .chat-shell {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow-soft);
+      min-width: 0;
+    }
+
+    .route-card {
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .route-title {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .eyebrow {
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 950;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 21px;
+      line-height: 1.2;
+    }
+
+    h2 {
+      font-size: 16px;
+      line-height: 1.25;
+    }
+
+    h3 {
+      font-size: 14px;
+      line-height: 1.3;
+    }
+
+    h4 {
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .copy {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .badge-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      min-height: 22px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 950;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .badge.certified {
+      color: var(--green);
+      border-color: var(--green-line);
+      background: var(--green-soft);
+    }
+
+    .badge.review {
+      color: var(--amber);
+      border-color: var(--amber-line);
+      background: var(--amber-soft);
+    }
+
+    .badge.research {
+      color: var(--purple);
+      border-color: var(--purple-line);
+      background: var(--purple-soft);
+    }
+
+    .badge.context {
+      color: var(--cyan);
+      border-color: var(--cyan-line);
+      background: var(--cyan-soft);
+    }
+
+    .badge.blocked {
+      color: var(--red);
+      border-color: var(--red-line);
+      background: var(--red-soft);
+    }
+
+    .route-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+      gap: 8px;
+    }
+
+    .step {
+      min-width: 0;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+      position: relative;
+    }
+
+    .step.active {
+      border-color: #bcd0ff;
+      background: var(--blue-soft);
+    }
+
+    .step.done {
+      border-color: var(--green-line);
+      background: var(--green-soft);
+    }
+
+    .step.review {
+      border-color: var(--amber-line);
+      background: var(--amber-soft);
+    }
+
+    .step span {
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 950;
+      text-transform: uppercase;
+    }
+
+    .step strong {
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .rule-card {
+      padding: 14px;
+      display: grid;
+      align-content: start;
+      gap: 10px;
+    }
+
+    .rule-item {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 9px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    .rule-icon,
+    .small-icon {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--surface-strong);
+      color: var(--muted);
+    }
+
+    .rule-item strong {
+      display: block;
+      font-size: 12px;
+      margin-bottom: 2px;
+    }
+
+    .rule-item span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .main-area {
+      padding: 16px 22px 22px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 292px;
+      gap: 14px;
+      align-items: start;
+      min-width: 0;
+    }
+
+    .surface-shell {
+      min-height: 620px;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .surface-header {
+      min-height: 58px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .surface-title {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+
+    .surface-title strong {
+      font-size: 15px;
+      line-height: 1.3;
+    }
+
+    .surface-title span {
+      color: var(--faint);
+      font-size: 12px;
+      font-weight: 760;
+      line-height: 1.35;
+    }
+
+    .surface-body {
+      padding: 14px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .surface {
+      display: none;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .surface.active {
+      display: grid;
+    }
+
+    .answer-summary {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+      border: 1px solid var(--green-line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #f7fffa, var(--surface));
+    }
+
+    .answer-summary h2 {
+      font-size: 18px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .mini {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .mini p,
+    .mini li {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .mini ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .metric {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 11px;
+      display: grid;
+      gap: 5px;
+    }
+
+    .metric span {
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 950;
+      text-transform: uppercase;
+    }
+
+    .metric strong {
+      font-size: 19px;
+    }
+
+    .metric small {
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 12px;
+    }
+
+    .table th,
+    .table td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line-soft);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .table th {
+      color: var(--faint);
+      background: var(--surface-soft);
+      font-size: 10px;
+      font-weight: 950;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+
+    .table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .delta-good {
+      color: var(--green);
+      font-weight: 900;
+    }
+
+    .delta-risk {
+      color: var(--amber);
+      font-weight: 900;
+    }
+
+    .workbench {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .workbench-rail {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .task {
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
+      background: var(--surface);
+      padding: 9px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .task strong {
+      font-size: 12px;
+    }
+
+    .task span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .research-panel {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .chart {
+      min-height: 178px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(var(--line-soft) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line-soft) 1px, transparent 1px),
+        var(--surface-soft);
+      background-size: 100% 44px, 70px 100%;
+      padding: 14px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+
+    .bar {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      gap: 8px;
+      align-items: end;
+      height: 142px;
+    }
+
+    .bar-fill {
+      width: 100%;
+      border-radius: 6px 6px 3px 3px;
+      background: linear-gradient(180deg, #276ef1, #11a37f);
+      min-height: 20px;
+    }
+
+    .bar span {
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 900;
+      text-align: center;
+    }
+
+    .notebook-cell {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    .cell-top {
+      min-height: 42px;
+      padding: 9px 11px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--surface-soft);
+    }
+
+    .cell-top strong {
+      font-size: 12px;
+    }
+
+    pre {
+      margin: 0;
+      overflow: auto;
+      padding: 13px;
+      border-radius: 0;
+      background: #121b24;
+      color: #dcecf8;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre;
+    }
+
+    .yaml {
+      background: #152018;
+      color: #dcf4e1;
+    }
+
+    .block-editor {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 250px;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .gate-list {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .gate {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .gate strong {
+      font-size: 12px;
+    }
+
+    .gate span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .app-canvas {
+      display: grid;
+      grid-template-columns: 176px minmax(0, 1fr);
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .page-list {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .page-item {
+      border: 1px solid var(--line-soft);
+      border-radius: 7px;
+      background: var(--surface);
+      padding: 9px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .page-item.active {
+      border-color: #bcd0ff;
+      background: var(--blue-soft);
+    }
+
+    .page-item strong {
+      font-size: 12px;
+    }
+
+    .page-item span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .tile {
+      min-height: 130px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .tile h4 {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .line-chart {
+      height: 54px;
+      border-radius: 7px;
+      background:
+        linear-gradient(135deg, rgba(39, 110, 241, 0.24), rgba(17, 163, 127, 0.18)),
+        linear-gradient(var(--line-soft) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 18px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .line-chart::after {
+      content: "";
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      top: 28px;
+      height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #276ef1, #11a37f);
+      transform: skewY(-8deg);
+    }
+
+    .action-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .flow-column {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .flow-card {
+      overflow: hidden;
+    }
+
+    .flow-card h2 {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .flow-body {
+      padding: 12px 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .context-line {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .context-line strong {
+      display: block;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .context-line span {
+      display: block;
+      color: var(--faint);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chat {
+      min-height: 100vh;
+      border-left: 1px solid var(--line);
+      background: var(--surface);
+      display: grid;
+      grid-template-rows: 64px auto 1fr auto;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+    }
+
+    .chat-head {
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .chat-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .chat-mark {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .chat-title div {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .chat-title strong {
+      font-size: 14px;
+    }
+
+    .chat-title span {
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 820;
+    }
+
+    .mode-strip {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .mode-chip {
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 950;
+      white-space: nowrap;
+    }
+
+    .mode-chip.active {
+      color: var(--blue);
+      border-color: #bcd0ff;
+      background: var(--blue-soft);
+    }
+
+    .messages {
+      overflow: auto;
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .message {
+      max-width: 100%;
+      display: grid;
+      gap: 7px;
+    }
+
+    .message.user {
+      justify-items: end;
+    }
+
+    .bubble {
+      max-width: 330px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .user .bubble {
+      color: #fff;
+      background: var(--blue);
+      border-color: var(--blue);
+    }
+
+    .assistant-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow-soft);
+      overflow: hidden;
+      display: grid;
+      min-width: 0;
+    }
+
+    .assistant-card-head {
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .assistant-card-body {
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .mini-code {
+      overflow: auto;
+      max-height: 160px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #121b24;
+      color: #dcecf8;
+      padding: 9px;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre;
+    }
+
+    .route-log {
+      display: grid;
+      gap: 6px;
+    }
+
+    .log-row {
+      display: grid;
+      grid-template-columns: 18px 1fr;
+      gap: 7px;
+      align-items: start;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .log-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--faint);
+      margin-top: 4px;
+    }
+
+    .log-dot.green {
+      background: var(--green);
+    }
+
+    .log-dot.amber {
+      background: #d9961d;
+    }
+
+    .log-dot.purple {
+      background: var(--purple);
+    }
+
+    .composer {
+      padding: 12px 14px 14px;
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 10px;
+      background: var(--surface);
+    }
+
+    .composer-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .composer textarea {
+      width: 100%;
+      min-height: 86px;
+      max-height: 170px;
+      resize: vertical;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .composer-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .hint {
+      color: var(--faint);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .toast {
+      position: fixed;
+      right: 440px;
+      bottom: 18px;
+      z-index: 40;
+      border: 1px solid var(--green-line);
+      border-radius: 8px;
+      background: var(--green-soft);
+      color: var(--green);
+      box-shadow: var(--shadow);
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 900;
+      opacity: 0;
+      transform: translateY(10px);
+      pointer-events: none;
+      transition: opacity 160ms ease, transform 160ms ease;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    svg {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+    }
+
+    @media (max-width: 1240px) {
+      .app {
+        grid-template-columns: 82px minmax(0, 1fr) 390px;
+      }
+
+      .brand-copy,
+      .nav-button span.label,
+      .nav-button .pill-count,
+      .scenario-list,
+      .nav-foot {
+        display: none;
+      }
+
+      .brand {
+        justify-content: center;
+        padding: 0;
+      }
+
+      .nav-button {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        padding: 0;
+      }
+    }
+
+    @media (max-width: 1020px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .nav,
+      .chat {
+        min-height: auto;
+        height: auto;
+        position: static;
+      }
+
+      .brand {
+        justify-content: flex-start;
+        padding: 0 14px;
+      }
+
+      .brand-copy,
+      .nav-button span.label,
+      .nav-button .pill-count,
+      .scenario-list,
+      .nav-foot {
+        display: grid;
+      }
+
+      .nav-section {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .nav-button {
+        grid-template-columns: 24px 1fr auto;
+      }
+
+      .chat {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .hero-strip,
+      .main-area {
+        grid-template-columns: 1fr;
+      }
+
+      .route-steps {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .toast {
+        right: 18px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar,
+      .hero-strip,
+      .main-area {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+
+      .topbar {
+        height: auto;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .top-actions {
+        justify-content: flex-start;
+      }
+
+      .route-steps,
+      .grid-2,
+      .grid-3,
+      .workbench,
+      .block-editor,
+      .app-canvas,
+      .dashboard-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .surface-shell {
+        min-height: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="nav" aria-label="DQL navigation">
+      <div class="brand">
+        <div class="brand-mark">DQL</div>
+        <div class="brand-copy">
+          <strong>DQL Notebook</strong>
+          <span>Unified AI flow</span>
+        </div>
+      </div>
+
+      <nav class="nav-section">
+        <button class="nav-button active" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l9-9 9 9"/><path d="M9 21V9h6v12"/></svg>
+          <span class="label">Workspace</span>
+          <span class="pill-count">1</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="label">Notebook</span>
+          <span class="pill-count">8</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span class="label">Blocks</span>
+          <span class="pill-count">42</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/><path d="M8 14h3"/><path d="M14 14h2"/></svg>
+          <span class="label">Apps</span>
+          <span class="pill-count">5</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+          <span class="label">Research</span>
+          <span class="pill-count">12</span>
+        </button>
+        <button class="nav-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>
+          <span class="label">Review</span>
+          <span class="pill-count">6</span>
+        </button>
+      </nav>
+
+      <div class="scenario-list">
+        <p class="side-title">Try a real flow</p>
+        <button class="scenario active" type="button" data-scenario="ask">
+          <strong>1. Ask answer</strong>
+          <span>Certified answer stays in chat with citations.</span>
+        </button>
+        <button class="scenario" type="button" data-scenario="research">
+          <strong>2. Ask research</strong>
+          <span>Chat explains route, Research workbench opens.</span>
+        </button>
+        <button class="scenario" type="button" data-scenario="sql">
+          <strong>3. Ask SQL cell</strong>
+          <span>Chat previews SQL, Notebook inserts cell.</span>
+        </button>
+        <button class="scenario" type="button" data-scenario="block">
+          <strong>4. Ask DQL block</strong>
+          <span>Chat summarizes gates, Block Studio opens.</span>
+        </button>
+        <button class="scenario" type="button" data-scenario="app">
+          <strong>5. Ask app</strong>
+          <span>Chat gives plan, App Builder opens draft.</span>
+        </button>
+      </div>
+
+      <div class="nav-foot">
+        <div>
+          <div class="coverage-row"><span>Certified coverage</span><strong>74%</strong></div>
+          <div class="meter"><span style="width: 74%"></span></div>
+        </div>
+        <div>
+          <div class="coverage-row"><span>Review queue</span><strong>6</strong></div>
+          <div class="meter"><span style="width: 38%"></span></div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="crumbs">
+          <span>Workspace</span>
+          <span>/</span>
+          <strong id="workspaceCrumb">Certified Answer</strong>
+          <span class="badge certified" id="crumbBadge">Certified</span>
+        </div>
+        <div class="top-actions">
+          <button class="btn" type="button" data-scenario="research">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+            Open Research
+          </button>
+          <button class="btn" type="button" data-scenario="block">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            Draft Block
+          </button>
+          <button class="btn primary" type="button" data-scenario="app">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            Build App
+          </button>
+        </div>
+      </header>
+
+      <section class="hero-strip">
+        <div class="route-card">
+          <div class="route-title">
+            <div class="eyebrow">One chat input, automatic route</div>
+            <h1 id="routeHeadline">The user asks once. DQL decides the safest surface.</h1>
+            <p class="copy" id="routeCopy">The user does not pick a mode first. Chat is the command and answer surface. Research, Notebook, Block Studio, and App Builder open only when there is durable work to review or save.</p>
+          </div>
+          <div class="badge-row">
+            <span class="badge certified">Certified answers first</span>
+            <span class="badge review">Generated work is review-required</span>
+            <span class="badge context">Follow-ups use active context</span>
+          </div>
+          <div class="route-steps" id="routeSteps">
+            <div class="step done"><span>1</span><strong>Parse ask</strong></div>
+            <div class="step done"><span>2</span><strong>Check certified</strong></div>
+            <div class="step active"><span>3</span><strong>Answer in chat</strong></div>
+            <div class="step"><span>4</span><strong>Open artifact</strong></div>
+            <div class="step"><span>5</span><strong>Review or save</strong></div>
+          </div>
+        </div>
+
+        <aside class="route-card rule-card">
+          <div class="rule-item">
+            <div class="rule-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>
+            </div>
+            <div>
+              <strong>Certified route</strong>
+              <span>Answer directly in chat with DQL block evidence.</span>
+            </div>
+          </div>
+          <div class="rule-item">
+            <div class="rule-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.7 3.86a2 2 0 0 0-3.4 0z"/></svg>
+            </div>
+            <div>
+              <strong>Uncertified route</strong>
+              <span>Research or SQL can draft proof, never certify itself.</span>
+            </div>
+          </div>
+          <div class="rule-item">
+            <div class="rule-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg>
+            </div>
+            <div>
+              <strong>Durable surface</strong>
+              <span>Artifacts open where the user can inspect and edit them.</span>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="main-area">
+        <section class="surface-shell">
+          <div class="surface-header">
+            <div class="surface-title">
+              <strong id="surfaceTitle">Chat Answer Detail</strong>
+              <span id="surfaceSubtitle">No new artifact needed for a fully certified answer.</span>
+            </div>
+            <div class="badge-row" id="surfaceBadges">
+              <span class="badge certified">Certified</span>
+              <span class="badge context">Evidence attached</span>
+            </div>
+          </div>
+
+          <div class="surface-body">
+            <article class="surface active" data-surface="ask">
+              <div class="answer-summary">
+                <div class="badge-row">
+                  <span class="badge certified">Certified answer</span>
+                  <span class="badge context">No page switch required</span>
+                </div>
+                <h2>Retention improved because expansion ARR outweighed contraction and logo churn.</h2>
+                <p class="copy">The answer is complete from certified DQL blocks, so DQL keeps the response in chat and attaches evidence. The workspace only shows the supporting detail because there is no new artifact to create.</p>
+                <div class="grid-3">
+                  <div class="metric">
+                    <span>Net revenue retention</span>
+                    <strong>108.4%</strong>
+                    <small>+3.5 pts vs prior</small>
+                  </div>
+                  <div class="metric">
+                    <span>Expansion ARR</span>
+                    <strong>$2.8M</strong>
+                    <small>Certified block</small>
+                  </div>
+                  <div class="metric">
+                    <span>Logo churn ARR</span>
+                    <strong>$0.6M</strong>
+                    <small>Down $0.2M</small>
+                  </div>
+                </div>
+              </div>
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Evidence</th>
+                    <th>Status</th>
+                    <th>Why used</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>revenue.retention_summary</td>
+                    <td><span class="badge certified">Certified</span></td>
+                    <td>Owns NRR, retention grain, and time filters.</td>
+                  </tr>
+                  <tr>
+                    <td>customer.expansion_waterfall</td>
+                    <td><span class="badge certified">Certified</span></td>
+                    <td>Explains expansion contribution by customer segment.</td>
+                  </tr>
+                  <tr>
+                    <td>revenue.churn_bridge</td>
+                    <td><span class="badge certified">Certified</span></td>
+                    <td>Explains logo churn and contraction movement.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="surface" data-surface="research">
+              <div class="workbench">
+                <aside class="workbench-rail">
+                  <div class="task">
+                    <span class="badge research">Step 1</span>
+                    <strong>Plan</strong>
+                    <span>Define driver question, grain, time window, and certified baseline.</span>
+                  </div>
+                  <div class="task">
+                    <span class="badge certified">Step 2</span>
+                    <strong>Certified baseline</strong>
+                    <span>Use retention summary as the reconciliation source.</span>
+                  </div>
+                  <div class="task">
+                    <span class="badge review">Step 3</span>
+                    <strong>Generate proof SQL</strong>
+                    <span>Use metadata for segment and product driver detail.</span>
+                  </div>
+                  <div class="task">
+                    <span class="badge context">Step 4</span>
+                    <strong>Answer memo</strong>
+                    <span>Keep draft caveats and next actions attached.</span>
+                  </div>
+                </aside>
+
+                <div class="research-panel">
+                  <div class="mini">
+                    <div class="badge-row">
+                      <span class="badge research">Research workbench opened</span>
+                      <span class="badge review">Draft proof</span>
+                    </div>
+                    <h2>Research answer: mid-market contraction needs a draft driver block.</h2>
+                    <p>The chat gives the user the answer summary, but the full research artifact opens here: plan, SQL proof, preview result, reconciliation, and the path to a DQL draft.</p>
+                  </div>
+                  <div class="chart" aria-label="Retention driver contribution chart">
+                    <div class="bar"><div class="bar-fill" style="height: 80%"></div><span>Expansion</span></div>
+                    <div class="bar"><div class="bar-fill" style="height: 48%"></div><span>Seat loss</span></div>
+                    <div class="bar"><div class="bar-fill" style="height: 61%"></div><span>Downgrade</span></div>
+                    <div class="bar"><div class="bar-fill" style="height: 34%"></div><span>Logo churn</span></div>
+                    <div class="bar"><div class="bar-fill" style="height: 26%"></div><span>Other</span></div>
+                  </div>
+                  <div class="grid-2">
+                    <div class="mini">
+                      <h3>Research output</h3>
+                      <ul>
+                        <li>Certified NRR baseline found.</li>
+                        <li>Segment driver detail not certified.</li>
+                        <li>Preview SQL reconciles within tolerance.</li>
+                        <li>Ready to create a review-required DQL draft.</li>
+                      </ul>
+                    </div>
+                    <div class="mini">
+                      <h3>Next actions</h3>
+                      <div class="action-row">
+                        <button class="btn primary" type="button" data-scenario="sql">Insert SQL Cell</button>
+                        <button class="btn warn" type="button" data-scenario="block">Create Draft Block</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+
+            <article class="surface" data-surface="sql">
+              <div class="notebook-cell">
+                <div class="cell-top">
+                  <strong>Notebook cell: retention_driver_preview.sql</strong>
+                  <div class="badge-row">
+                    <span class="badge review">Review-required</span>
+                    <span class="badge context">Inserted by chat</span>
+                  </div>
+                </div>
+                <pre>with retention_base as (
+  select
+    account_segment,
+    product_family,
+    contraction_reason,
+    sum(expansion_arr) as expansion_arr,
+    sum(contraction_arr) as contraction_arr,
+    sum(churn_arr) as churn_arr
+  from marts.customer_retention_monthly
+  where month between date '2026-01-01' and date '2026-03-31'
+  group by 1, 2, 3
+)
+select
+  account_segment,
+  product_family,
+  contraction_reason,
+  expansion_arr,
+  contraction_arr,
+  churn_arr,
+  expansion_arr - contraction_arr - churn_arr as net_arr_impact
+from retention_base
+order by abs(net_arr_impact) desc
+limit 50;</pre>
+              </div>
+              <div class="grid-2">
+                <div class="mini">
+                  <h3>What chat shows</h3>
+                  <p>Chat previews the SQL and explains that it is generated from metadata. It offers actions: insert cell, run preview, create DQL draft.</p>
+                </div>
+                <div class="mini">
+                  <h3>What workspace shows</h3>
+                  <p>The notebook opens with the inserted SQL cell selected so the user can run, edit, or save the result.</p>
+                  <div class="action-row">
+                    <button class="btn primary" type="button" data-toast="Preview run queued">Run Preview</button>
+                    <button class="btn warn" type="button" data-scenario="block">Promote to DQL Draft</button>
+                  </div>
+                </div>
+              </div>
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Preview column</th>
+                    <th>Type</th>
+                    <th>Review note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>account_segment</td>
+                    <td>dimension</td>
+                    <td>Needs glossary mapping before block certification.</td>
+                  </tr>
+                  <tr>
+                    <td>net_arr_impact</td>
+                    <td>measure</td>
+                    <td>Must reconcile to certified NRR bridge.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </article>
+
+            <article class="surface" data-surface="block">
+              <div class="block-editor">
+                <div class="notebook-cell">
+                  <div class="cell-top">
+                    <strong>Block Studio: revenue.retention_drivers_by_segment</strong>
+                    <span class="badge review">Draft</span>
+                  </div>
+                  <pre class="yaml">block: revenue.retention_drivers_by_segment
+title: Retention Drivers by Segment
+status: draft
+owner: revenue-analytics
+grain:
+  - account_segment
+  - product_family
+  - contraction_reason
+inputs:
+  - marts.customer_retention_monthly
+certification_gates:
+  preview_result: passed
+  reconciliation: passed
+  owner_review: pending
+  glossary_mapping: pending
+  tests: pending</pre>
+                </div>
+                <aside class="gate-list">
+                  <div class="gate">
+                    <span class="badge certified">Passed</span>
+                    <strong>Preview result</strong>
+                    <span>SQL returns expected columns and row count.</span>
+                  </div>
+                  <div class="gate">
+                    <span class="badge certified">Passed</span>
+                    <strong>Reconciliation</strong>
+                    <span>Totals match certified NRR baseline within tolerance.</span>
+                  </div>
+                  <div class="gate">
+                    <span class="badge review">Pending</span>
+                    <strong>Owner review</strong>
+                    <span>Revenue analytics owner must approve before certification.</span>
+                  </div>
+                  <div class="gate">
+                    <span class="badge blocked">Blocked</span>
+                    <strong>Certification</strong>
+                    <span>Unavailable until review, tests, and glossary mapping pass.</span>
+                  </div>
+                </aside>
+              </div>
+              <div class="mini">
+                <h3>Real rule</h3>
+                <p>Chat can create and explain the DQL draft, but certification happens through the review gates. Generated SQL is never silently promoted to certified truth.</p>
+                <div class="action-row">
+                  <button class="btn primary" type="button" data-toast="Draft block saved to workspace">Save Draft Block</button>
+                  <button class="btn" type="button" data-scenario="app">Use in App as Draft Gap</button>
+                </div>
+              </div>
+            </article>
+
+            <article class="surface" data-surface="app">
+              <div class="app-canvas">
+                <aside class="page-list">
+                  <div class="page-item active">
+                    <strong>Executive Summary</strong>
+                    <span>Certified tiles</span>
+                  </div>
+                  <div class="page-item">
+                    <strong>Retention Drivers</strong>
+                    <span>One draft tile</span>
+                  </div>
+                  <div class="page-item">
+                    <strong>Customer Risk</strong>
+                    <span>Certified blocks</span>
+                  </div>
+                  <div class="page-item">
+                    <strong>Technical Appendix</strong>
+                    <span>SQL and evidence</span>
+                  </div>
+                </aside>
+                <div class="dashboard-grid">
+                  <div class="tile">
+                    <h4>NRR <span class="badge certified">Certified</span></h4>
+                    <div class="metric">
+                      <span>Net revenue retention</span>
+                      <strong>108.4%</strong>
+                      <small>From revenue.retention_summary</small>
+                    </div>
+                    <div class="line-chart"></div>
+                  </div>
+                  <div class="tile">
+                    <h4>ARR Bridge <span class="badge certified">Certified</span></h4>
+                    <div class="line-chart"></div>
+                    <p class="copy">Expansion ARR offset contraction and churn.</p>
+                  </div>
+                  <div class="tile">
+                    <h4>Segment Drivers <span class="badge review">Draft</span></h4>
+                    <div class="line-chart"></div>
+                    <p class="copy">Uses retention_drivers_by_segment draft until review passes.</p>
+                  </div>
+                  <div class="tile">
+                    <h4>Evidence <span class="badge context">Appendix</span></h4>
+                    <p class="copy">The generated app includes proof: DQL blocks, SQL previews, gates, and missing certification notes.</p>
+                    <div class="action-row">
+                      <button class="btn primary" type="button" data-toast="App draft opened">Open App Draft</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <aside class="flow-column">
+          <section class="flow-card">
+            <h2>Active Context</h2>
+            <div class="flow-body" id="contextBody">
+              <div class="context-line">
+                <div class="small-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>
+                </div>
+                <div><strong>Certified blocks</strong><span>Retention summary, expansion, churn bridge</span></div>
+                <span class="badge certified">3</span>
+              </div>
+              <div class="context-line">
+                <div class="small-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                </div>
+                <div><strong>QBR notebook</strong><span>Current analysis workspace</span></div>
+                <span class="badge context">Open</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="flow-card">
+            <h2>What Happens Where</h2>
+            <div class="flow-body">
+              <div class="task">
+                <span class="badge context">Chat</span>
+                <strong>Ask, answer, status, next actions</strong>
+                <span>The user never needs to pick a page first.</span>
+              </div>
+              <div class="task">
+                <span class="badge research">Research</span>
+                <strong>Durable investigation</strong>
+                <span>Plan, proof SQL, preview, answer memo, DQL draft path.</span>
+              </div>
+              <div class="task">
+                <span class="badge review">Notebook or Block</span>
+                <strong>Generated artifacts</strong>
+                <span>SQL cells and DQL drafts stay review-required.</span>
+              </div>
+              <div class="task">
+                <span class="badge certified">App</span>
+                <strong>Published experience</strong>
+                <span>Certified tiles are safe, draft gaps remain labeled.</span>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <aside class="chat" aria-label="DQL Copilot chat">
+      <header class="chat-head">
+        <div class="chat-title">
+          <div class="chat-mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.4 6.8L21 11l-6.6 2.2L12 20l-2.4-6.8L3 11l6.6-2.2L12 2z"/></svg>
+          </div>
+          <div>
+            <strong>DQL Copilot</strong>
+            <span>Single entry point for all AI work</span>
+          </div>
+        </div>
+        <button class="btn icon" type="button" title="New chat" data-toast="New chat would keep workspace context available">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+      </header>
+
+      <div class="mode-strip">
+        <button class="mode-chip active" type="button" data-scenario="ask">Ask</button>
+        <button class="mode-chip" type="button" data-scenario="research">Research</button>
+        <button class="mode-chip" type="button" data-scenario="sql">SQL</button>
+        <button class="mode-chip" type="button" data-scenario="block">Block</button>
+        <button class="mode-chip" type="button" data-scenario="app">App</button>
+      </div>
+
+      <div class="messages" id="messages"></div>
+
+      <form class="composer" id="composer">
+        <div class="composer-box">
+          <textarea id="prompt" aria-label="Ask DQL Copilot" placeholder="Ask naturally. Example: Research why retention changed by segment, then create a DQL draft."></textarea>
+          <div class="composer-actions">
+            <span class="hint" id="composerHint">Auto-route is on. The user does not select a mode first.</span>
+            <button class="btn primary" type="submit">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+              Ask
+            </button>
+          </div>
+        </div>
+      </form>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">Action queued</div>
+
+  <script>
+    const promptInput = document.getElementById('prompt');
+    const messages = document.getElementById('messages');
+    const toast = document.getElementById('toast');
+    const surfaceTitle = document.getElementById('surfaceTitle');
+    const surfaceSubtitle = document.getElementById('surfaceSubtitle');
+    const surfaceBadges = document.getElementById('surfaceBadges');
+    const workspaceCrumb = document.getElementById('workspaceCrumb');
+    const routeHeadline = document.getElementById('routeHeadline');
+    const routeCopy = document.getElementById('routeCopy');
+    const routeSteps = document.getElementById('routeSteps');
+    const contextBody = document.getElementById('contextBody');
+    const composerHint = document.getElementById('composerHint');
+
+    const scenarios = {
+      ask: {
+        prompt: 'Why did net revenue retention improve last quarter?',
+        surface: 'ask',
+        crumb: 'Certified Answer',
+        crumbBadge: '<span class="badge certified" id="crumbBadge">Certified</span>',
+        title: 'Chat Answer Detail',
+        subtitle: 'No new artifact needed for a fully certified answer.',
+        badges: '<span class="badge certified">Certified</span><span class="badge context">Evidence attached</span>',
+        headline: 'Certified answers stay in chat unless the user asks for work.',
+        copy: 'When certified DQL blocks cover the question, the AI returns the answer in chat with evidence. It does not force the user into a research page or builder.',
+        hint: 'Ask mode is automatic when certified coverage is sufficient.',
+        steps: ['done', 'done', 'active', '', ''],
+        context: [
+          ['Certified blocks', 'Retention summary, expansion, churn bridge', 'certified', '3'],
+          ['QBR notebook', 'Current analysis workspace', 'context', 'Open']
+        ],
+        messages: [
+          { role: 'user', text: 'Why did net revenue retention improve last quarter?' },
+          {
+            role: 'assistant',
+            title: 'Certified answer',
+            badges: ['Certified', 'Evidence'],
+            body: 'NRR improved to 108.4% because expansion ARR outweighed contraction and logo churn. I can answer this from certified DQL blocks, so I am keeping the answer in chat and attaching the evidence path.',
+            log: [
+              ['green', 'Matched revenue.retention_summary'],
+              ['green', 'Matched customer.expansion_waterfall'],
+              ['green', 'No generated SQL needed']
+            ],
+            actions: ['Research missing drivers', 'Insert answer cell']
+          }
+        ]
+      },
+      research: {
+        prompt: 'Research why retention changed by segment and show the proof.',
+        surface: 'research',
+        crumb: 'Research Workbench',
+        crumbBadge: '<span class="badge research" id="crumbBadge">Research</span>',
+        title: 'Research Workbench',
+        subtitle: 'Full durable research opens here; chat keeps summary and controls.',
+        badges: '<span class="badge research">Research loop</span><span class="badge review">Draft proof</span>',
+        headline: 'Research opens the workbench, but chat still gives the answer.',
+        copy: 'For deep investigation, chat shows the plan, progress, and answer summary. The Research workbench opens for the durable artifact: plan, SQL proof, preview, memo, citations, and next actions.',
+        hint: 'Research creates evidence and draft proof, not certification.',
+        steps: ['done', 'done', 'done', 'active', 'review'],
+        context: [
+          ['Research run', 'retention_segment_drivers_2026_q1', 'research', 'Open'],
+          ['Certified baseline', 'revenue.retention_summary', 'certified', 'Safe'],
+          ['Draft proof SQL', 'marts.customer_retention_monthly', 'review', 'Draft']
+        ],
+        messages: [
+          { role: 'user', text: 'Research why retention changed by segment and show the proof.' },
+          {
+            role: 'assistant',
+            title: 'Research route',
+            badges: ['Research', 'Draft proof'],
+            body: 'I found certified top-line retention coverage, but segment-level driver detail is not certified. I opened the Research workbench with the plan, proof SQL, preview, and answer memo.',
+            log: [
+              ['green', 'Certified NRR baseline found'],
+              ['amber', 'Segment driver block missing'],
+              ['purple', 'Research workbench opened']
+            ],
+            actions: ['Insert SQL cell', 'Create DQL draft']
+          }
+        ]
+      },
+      sql: {
+        prompt: 'Create a SQL notebook cell for retention drivers by segment.',
+        surface: 'sql',
+        crumb: 'Notebook SQL Cell',
+        crumbBadge: '<span class="badge review" id="crumbBadge">Review-required</span>',
+        title: 'Notebook Editor',
+        subtitle: 'The SQL cell is inserted into the notebook and selected for preview.',
+        badges: '<span class="badge review">Generated SQL</span><span class="badge context">Notebook cell</span>',
+        headline: 'SQL appears in chat and becomes a notebook cell.',
+        copy: 'The chat gives a concise SQL preview and warnings. The Notebook opens with the generated cell inserted, because SQL is an artifact the user needs to run, edit, and review.',
+        hint: 'Generated SQL is draft evidence until promoted through review.',
+        steps: ['done', 'done', 'done', 'active', 'review'],
+        context: [
+          ['Notebook cell', 'retention_driver_preview.sql', 'review', 'Draft'],
+          ['Source model', 'marts.customer_retention_monthly', 'context', 'Metadata'],
+          ['Certified baseline', 'revenue.retention_summary', 'certified', 'Safe']
+        ],
+        messages: [
+          { role: 'user', text: 'Create a SQL notebook cell for retention drivers by segment.' },
+          {
+            role: 'assistant',
+            title: 'SQL cell draft',
+            badges: ['Review-required', 'Notebook'],
+            body: 'I inserted a SQL cell into the notebook. It is generated from metadata and reconciles against the certified retention baseline, but it is not certified.',
+            code: "select account_segment, product_family, contraction_reason,\\n       sum(expansion_arr - contraction_arr - churn_arr) as net_arr_impact\\nfrom marts.customer_retention_monthly\\ngroup by 1, 2, 3;",
+            log: [
+              ['amber', 'Generated SQL from metadata'],
+              ['green', 'Attached certified baseline for reconciliation'],
+              ['amber', 'Marked cell review-required']
+            ],
+            actions: ['Run preview', 'Promote to DQL draft']
+          }
+        ]
+      },
+      block: {
+        prompt: 'Turn the reviewed retention driver SQL into a DQL block draft.',
+        surface: 'block',
+        crumb: 'Block Studio',
+        crumbBadge: '<span class="badge review" id="crumbBadge">Draft block</span>',
+        title: 'Block Studio',
+        subtitle: 'The DQL block draft opens with certification gates visible.',
+        badges: '<span class="badge review">Draft DQL block</span><span class="badge blocked">Certification gated</span>',
+        headline: 'DQL blocks open in Block Studio with review gates.',
+        copy: 'Chat explains the generated block, but the durable artifact is the DQL block draft. It cannot become certified until tests, owner review, glossary mapping, and reconciliation pass.',
+        hint: 'A block can be drafted by AI, but certification is a governed review outcome.',
+        steps: ['done', 'done', 'done', 'active', 'review'],
+        context: [
+          ['DQL draft', 'revenue.retention_drivers_by_segment', 'review', 'Draft'],
+          ['Owner gate', 'revenue-analytics review pending', 'blocked', 'Gate'],
+          ['Preview result', 'SQL proof passed', 'certified', 'Passed']
+        ],
+        messages: [
+          { role: 'user', text: 'Turn the reviewed retention driver SQL into a DQL block draft.' },
+          {
+            role: 'assistant',
+            title: 'DQL block draft created',
+            badges: ['Draft', 'Gated'],
+            body: 'I opened Block Studio with a draft DQL block. Preview and reconciliation passed. Owner review, glossary mapping, and tests are still required before certification.',
+            log: [
+              ['green', 'Preview result passed'],
+              ['green', 'Reconciled to certified NRR baseline'],
+              ['amber', 'Owner review and tests pending']
+            ],
+            actions: ['Save draft', 'Open review checklist']
+          }
+        ]
+      },
+      app: {
+        prompt: 'Build a COO Revenue Health app from certified blocks and mark gaps.',
+        surface: 'app',
+        crumb: 'App Builder',
+        crumbBadge: '<span class="badge context" id="crumbBadge">App draft</span>',
+        title: 'App Builder',
+        subtitle: 'The app draft opens with certified tiles and visible draft gaps.',
+        badges: '<span class="badge certified">Certified tiles</span><span class="badge review">Draft gaps</span>',
+        headline: 'App build opens the app canvas, not just a chat answer.',
+        copy: 'Chat gives the app plan and risk notes. The App Builder opens the generated app draft, with certified tiles safe to use and draft tiles clearly labeled.',
+        hint: 'App mode composes governed artifacts; it does not hide missing certification.',
+        steps: ['done', 'done', 'done', 'active', 'review'],
+        context: [
+          ['App draft', 'COO Revenue Health', 'context', 'Open'],
+          ['Certified tiles', 'NRR, ARR bridge, customer risk', 'certified', '8'],
+          ['Draft tile', 'Retention drivers by segment', 'review', '1']
+        ],
+        messages: [
+          { role: 'user', text: 'Build a COO Revenue Health app from certified blocks and mark gaps.' },
+          {
+            role: 'assistant',
+            title: 'App draft generated',
+            badges: ['App plan', 'Certified-first'],
+            body: 'I opened App Builder with a draft app. Eight tiles use certified DQL blocks. One retention driver tile is included as a review-required gap until the DQL draft is certified.',
+            log: [
+              ['green', 'Certified block tiles selected'],
+              ['amber', 'Draft driver tile marked review-required'],
+              ['purple', 'Technical appendix included']
+            ],
+            actions: ['Open app draft', 'Resolve draft tile']
+          }
+        ]
+      }
+    };
+
+    const iconMap = {
+      certified: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="M9 12l2 2 4-5"/></svg>',
+      review: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.7 3.86a2 2 0 0 0-3.4 0z"/></svg>',
+      research: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>',
+      context: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/></svg>',
+      blocked: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>'
+    };
+
+    let activeScenario = 'ask';
+
+    function badgeClass(label) {
+      const text = label.toLowerCase();
+      if (text.includes('certified') || text.includes('safe') || text.includes('passed')) return 'certified';
+      if (text.includes('research') || text.includes('app plan')) return 'research';
+      if (text.includes('blocked') || text.includes('gated')) return 'blocked';
+      if (text.includes('draft') || text.includes('review') || text.includes('sql')) return 'review';
+      return 'context';
+    }
+
+    function renderMessages(items) {
+      messages.innerHTML = items.map((item) => {
+        if (item.role === 'user') {
+          return '<div class="message user"><div class="bubble">' + escapeHtml(item.text) + '</div></div>';
+        }
+        const badges = item.badges.map((badge) => '<span class="badge ' + badgeClass(badge) + '">' + escapeHtml(badge) + '</span>').join('');
+        const log = item.log.map(([tone, text]) => '<div class="log-row"><span class="log-dot ' + tone + '"></span><span>' + escapeHtml(text) + '</span></div>').join('');
+        const actions = item.actions.map((action) => '<button class="btn" type="button" data-toast="' + escapeHtml(action) + ' queued">' + escapeHtml(action) + '</button>').join('');
+        const code = item.code ? '<div class="mini-code">' + escapeHtml(item.code) + '</div>' : '';
+        return '<div class="message assistant"><div class="assistant-card"><div class="assistant-card-head"><h3>' + escapeHtml(item.title) + '</h3><div class="badge-row">' + badges + '</div></div><div class="assistant-card-body"><p>' + escapeHtml(item.body) + '</p>' + code + '<div class="route-log">' + log + '</div><div class="action-row">' + actions + '</div></div></div></div>';
+      }).join('');
+      messages.scrollTop = 0;
+    }
+
+    function renderContext(items) {
+      contextBody.innerHTML = items.map(([title, subtitle, tone, tag]) => {
+        return '<div class="context-line"><div class="small-icon">' + (iconMap[tone] || iconMap.context) + '</div><div><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(subtitle) + '</span></div><span class="badge ' + tone + '">' + escapeHtml(tag) + '</span></div>';
+      }).join('');
+    }
+
+    function renderSteps(classes) {
+      const labels = [
+        ['1', 'Parse'],
+        ['2', 'Certified'],
+        ['3', 'Chat'],
+        ['4', 'Artifact'],
+        ['5', 'Review']
+      ];
+      routeSteps.innerHTML = labels.map(([number, label], index) => {
+        const cls = classes[index] || '';
+        return '<div class="step ' + cls + '"><span>' + number + '</span><strong>' + label + '</strong></div>';
+      }).join('');
+    }
+
+    function setScenario(name, source) {
+      const data = scenarios[name] || scenarios.ask;
+      activeScenario = name;
+      document.querySelectorAll('[data-scenario]').forEach((el) => {
+        el.classList.toggle('active', el.dataset.scenario === name);
+      });
+      document.querySelectorAll('[data-surface]').forEach((el) => {
+        el.classList.toggle('active', el.dataset.surface === data.surface);
+      });
+      workspaceCrumb.textContent = data.crumb;
+      document.getElementById('crumbBadge').outerHTML = data.crumbBadge;
+      surfaceTitle.textContent = data.title;
+      surfaceSubtitle.textContent = data.subtitle;
+      surfaceBadges.innerHTML = data.badges;
+      routeHeadline.textContent = data.headline;
+      routeCopy.textContent = data.copy;
+      composerHint.textContent = data.hint;
+      promptInput.value = source === 'click' ? data.prompt : promptInput.value;
+      renderSteps(data.steps);
+      renderContext(data.context);
+      renderMessages(data.messages);
+      attachToastButtons();
+      showToast('Routed to ' + data.crumb);
+    }
+
+    function inferScenario(text) {
+      const value = text.toLowerCase();
+      if (value.includes('app') || value.includes('dashboard') || value.includes('coo')) return 'app';
+      if (value.includes('block') || value.includes('dql draft') || value.includes('certify')) return 'block';
+      if (value.includes('sql') || value.includes('cell')) return 'sql';
+      if (value.includes('research') || value.includes('investigate') || value.includes('driver') || value.includes('segment') || value.includes('proof')) return 'research';
+      return 'ask';
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      window.clearTimeout(showToast.timeout);
+      showToast.timeout = window.setTimeout(() => toast.classList.remove('show'), 1700);
+    }
+
+    function attachToastButtons() {
+      document.querySelectorAll('[data-toast]').forEach((button) => {
+        button.onclick = () => showToast(button.dataset.toast);
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    document.querySelectorAll('[data-scenario]').forEach((button) => {
+      button.addEventListener('click', () => setScenario(button.dataset.scenario, 'click'));
+    });
+
+    document.getElementById('composer').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const text = promptInput.value.trim();
+      if (!text) {
+        showToast('Type a request or choose a scenario');
+        return;
+      }
+      const route = inferScenario(text);
+      setScenario(route, 'submit');
+      const cloned = JSON.parse(JSON.stringify(scenarios[route].messages));
+      cloned[0].text = text;
+      renderMessages(cloned);
+      attachToastButtons();
+    });
+
+    attachToastButtons();
+    setScenario('ask', 'init');
+  </script>
+</body>
+</html>

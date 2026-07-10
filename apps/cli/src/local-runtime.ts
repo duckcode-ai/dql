@@ -117,6 +117,9 @@ import {
   recordRuntimeSchemaSnapshot,
   latestRuntimeSchemaSnapshotForProject,
   loadSkills,
+  draftDomainSkillBootstrap,
+  buildDomainSkillBootstrapPrompt,
+  mergeDomainSkillBootstrapEnrichment,
   writeSkill,
   deleteSkill,
   deriveGeneratedDraftSlug,
@@ -3747,7 +3750,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     //    are shared; PERSONAL skills (user set) are user-bound. ────────────────
     if (req.method === 'GET' && path === '/api/skills') {
       try {
-        const skills = loadSkills(projectRoot).skills.map(serializeSkill);
+        const skills = loadSkills(projectRoot).skills
+          .filter((skill) => skill.scope === 'project')
+          .map(serializeSkill);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ skills }));
       } catch (error) {
@@ -3760,16 +3765,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Form pickers: metrics from the semantic layer + certified block ids.
     if (req.method === 'GET' && path === '/api/skills/options') {
       try {
+        const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+        const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') ?? 30) || 30));
+        const matches = (value: string) => !query || value.toLowerCase().includes(query);
         const metrics = semanticLayer
-          ? semanticLayer.listMetrics().map((m) => m.name).sort()
+          ? semanticLayer.listMetrics().map((m) => m.name).filter(matches).sort().slice(0, limit)
           : [];
         const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
         const blocks = Object.values(manifest.blocks)
           .filter((b) => b.status === 'certified')
           .map((b) => b.name)
+          .filter(matches)
           .sort();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ metrics, blocks }));
+        res.end(serializeJSON({ metrics, blocks: blocks.slice(0, limit) }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -3897,6 +3906,102 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // ── Domain + Skill bootstrap — evidence-first, session-only until save. ──
+    if (req.method === 'POST' && path === '/api/context-bootstrap') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { ai?: unknown };
+        const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
+        const existingSkills = new Set(loadSkills(projectRoot).skills.map((skill) => skill.id));
+        const candidates = draftDomainSkillBootstrap(manifest).map((candidate) => (
+          candidate.kind === 'skill' && candidate.skill && existingSkills.has(candidate.skill.id)
+            ? { ...candidate, action: 'unchanged' as const, evidence: [...candidate.evidence, 'Existing skill preserved'] }
+            : candidate
+        ));
+        const session = writeContextBootstrapSession(projectRoot, {
+          candidates,
+          status: 'queued',
+          ai: { requested: body.ai !== false, mode: 'pending' },
+          progress: bootstrapProgress(candidates, new Set(), 4, 'Queued repository inventory for domain and skill drafts…', ['Draft session created.']),
+        });
+        void enrichContextBootstrapSession(projectRoot, session.id).catch((error) => {
+          updateContextBootstrapSession(projectRoot, session.id, (current) => ({
+            ...current,
+            status: 'needs_attention',
+            progress: bootstrapProgress(current.candidates, new Set(), 100, 'Repository draft is ready, but AI enrichment could not start.', [...current.progress.events, 'AI enrichment could not start.']),
+            warnings: [...(current.warnings ?? []), `AI enrichment could not start: ${error instanceof Error ? error.message : String(error)}`],
+          }));
+        });
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(session));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/context-bootstrap/')) {
+      try {
+        const id = decodeURIComponent(path.slice('/api/context-bootstrap/'.length));
+        const session = readContextBootstrapSession(projectRoot, id);
+        if (!session) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Bootstrap session not found.' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(session));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && /^\/api\/context-bootstrap\/[^/]+\/save-selected$/.test(path)) {
+      try {
+        const match = path.match(/^\/api\/context-bootstrap\/([^/]+)\/save-selected$/);
+        const id = decodeURIComponent(match?.[1] ?? '');
+        const session = readContextBootstrapSession(projectRoot, id);
+        if (!session) throw new Error('Bootstrap session not found.');
+        if (!['ready', 'needs_attention'].includes(session.status)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Wait for the repository draft to finish before saving selected candidates.' }));
+          return;
+        }
+        const body = (await readJSON(req).catch(() => ({}))) as { candidateIds?: unknown };
+        const selected = new Set(Array.isArray(body.candidateIds) ? body.candidateIds.filter((value): value is string => typeof value === 'string') : []);
+        const saved: Array<{ id: string; path?: string; status: 'saved' | 'skipped' | 'blocked'; blockers?: string[] }> = [];
+        for (const candidate of session.candidates) {
+          if (!selected.has(candidate.id)) continue;
+          if (candidate.action === 'unchanged') {
+            saved.push({ id: candidate.id, status: 'skipped' });
+            continue;
+          }
+          try {
+            if (candidate.kind === 'domain' && candidate.domain) {
+              const written = writeDomainDeclaration(projectRoot, candidate.domain);
+              saved.push({ id: candidate.id, path: written.path, status: 'saved' });
+            } else if (candidate.kind === 'skill' && candidate.skill) {
+              const skill = writeSkill(projectRoot, { ...candidate.skill, scope: 'project', status: 'draft' });
+              saved.push({ id: candidate.id, path: relative(projectRoot, skill.sourcePath), status: 'saved' });
+            } else {
+              saved.push({ id: candidate.id, status: 'blocked', blockers: ['Candidate has no writable artifact.'] });
+            }
+          } catch (error) {
+            saved.push({ id: candidate.id, status: 'blocked', blockers: [error instanceof Error ? error.message : String(error)] });
+          }
+        }
+        await refreshLocalMetadataCatalog(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ id, saved }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -5457,6 +5562,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 const stat = statSync(filePath);
                 // Quick regex parse for key block fields
                 const nameMatch = /block\s+"([^"]+)"/.exec(source);
+                // `domains/**/domain.dql` is a business-boundary declaration,
+                // not a reusable block. Only a real block declaration belongs
+                // in the Blocks library.
+                if (!nameMatch) continue;
                 const domainMatch = /domain\s*=\s*"([^"]+)"/.exec(source);
                 const statusMatch = /status\s*=\s*"([^"]+)"/.exec(source);
                 const ownerMatch = /owner\s*=\s*"([^"]+)"/.exec(source);
@@ -8729,23 +8838,45 @@ function serializeSkill(skill: Skill): {
   scope: 'project' | 'personal';
   user?: string;
   domain?: string;
+  domains?: string[];
+  kind?: Skill['kind'];
+  status?: Skill['status'];
+  owner?: string;
+  triggers?: string[];
+  exclusions?: string[];
   description?: string;
   body: string;
   preferredMetrics: string[];
   preferredBlocks: string[];
+  preferredDimensions?: string[];
+  requiredFilters?: string[];
+  clarifyWhen?: string[];
+  examples?: string[];
+  sourceRefs?: string[];
   vocabulary: Record<string, string>;
   sourcePath: string;
   isStarter?: boolean;
 } {
   return {
     id: skill.id,
-    scope: skill.scope,
-    user: skill.user,
+    scope: 'project',
+    user: undefined,
     domain: skill.domain,
+    domains: skill.domains,
+    kind: skill.kind,
+    status: skill.status,
+    owner: skill.owner,
+    triggers: skill.triggers,
+    exclusions: skill.exclusions,
     description: skill.description,
     body: skill.body,
     preferredMetrics: skill.preferredMetrics,
     preferredBlocks: skill.preferredBlocks,
+    preferredDimensions: skill.preferredDimensions,
+    requiredFilters: skill.requiredFilters,
+    clarifyWhen: skill.clarifyWhen,
+    examples: skill.examples,
+    sourceRefs: skill.sourceRefs,
     vocabulary: skill.vocabulary,
     sourcePath: skill.sourcePath,
     isStarter: skill.isStarter,
@@ -8762,7 +8893,7 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
   const skill = raw as Record<string, unknown>;
   const id = typeof skill.id === 'string' && skill.id.trim() ? skill.id.trim() : fallbackId;
   if (!id) return null;
-  const scope = skill.scope === 'personal' ? 'personal' : skill.scope === 'project' ? 'project' : undefined;
+  const scope = skill.scope === 'project' ? 'project' : undefined;
   if (!scope) return null;
   if (typeof skill.body !== 'string') return null;
   const asStrings = (value: unknown): string[] =>
@@ -8777,13 +8908,24 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
   };
   return {
     id,
-    scope,
-    user: scope === 'personal' && typeof skill.user === 'string' ? skill.user : undefined,
+    scope: 'project',
+    user: undefined,
     domain: typeof skill.domain === 'string' && skill.domain.trim() ? skill.domain.trim() : undefined,
+    domains: asStrings(skill.domains),
+    kind: skill.kind === 'domain_reference' || skill.kind === 'metric_policy' || skill.kind === 'glossary' || skill.kind === 'analysis_pattern' || skill.kind === 'sql_policy' ? skill.kind : 'custom',
+    status: skill.status === 'draft' || skill.status === 'deprecated' ? skill.status : 'active',
+    owner: typeof skill.owner === 'string' ? skill.owner : undefined,
+    triggers: asStrings(skill.triggers),
+    exclusions: asStrings(skill.exclusions),
     description: typeof skill.description === 'string' ? skill.description : undefined,
     body: skill.body,
     preferredMetrics: asStrings(skill.preferredMetrics),
     preferredBlocks: asStrings(skill.preferredBlocks),
+    preferredDimensions: asStrings(skill.preferredDimensions),
+    requiredFilters: asStrings(skill.requiredFilters),
+    clarifyWhen: asStrings(skill.clarifyWhen),
+    examples: asStrings(skill.examples),
+    sourceRefs: asStrings(skill.sourceRefs),
     vocabulary: asMap(skill.vocabulary),
     isStarter: skill.isStarter === true ? true : undefined,
   };
@@ -8795,10 +8937,23 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
 interface DomainDto {
   id: string;
   name: string;
+  parent?: string;
   owner?: string;
+  businessOwner?: string;
   boundedContext?: string;
   sourceSystems?: string[];
   description?: string;
+  primaryTerms?: string[];
+  tags?: string[];
+  businessOutcome?: string;
+  reviewCadence?: string;
+  inScope?: string[];
+  outOfScope?: string[];
+  dbtGroups?: string[];
+  dbtPaths?: string[];
+  dbtTags?: string[];
+  semanticDomains?: string[];
+  semanticTags?: string[];
   sourcePath?: string;
   blockCount?: number;
   skillCount?: number;
@@ -8818,10 +8973,23 @@ function manifestDomainToDto(
   return {
     id: domain.name,
     name: domain.name,
+    parent: domain.parent,
     owner: domain.owner,
+    businessOwner: domain.businessOwner,
     boundedContext: domain.boundedContext,
     sourceSystems: domain.sourceSystems,
     description: domain.description,
+    primaryTerms: domain.primaryTerms,
+    tags: domain.tags,
+    businessOutcome: domain.businessOutcome,
+    reviewCadence: domain.reviewCadence,
+    inScope: domain.inScope,
+    outOfScope: domain.outOfScope,
+    dbtGroups: domain.dbtGroups,
+    dbtPaths: domain.dbtPaths,
+    dbtTags: domain.dbtTags,
+    semanticDomains: domain.semanticDomains,
+    semanticTags: domain.semanticTags,
     sourcePath: domain.filePath,
     blockCount: counts.blockCount,
     skillCount: counts.skillCount,
@@ -8886,11 +9054,174 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
       : undefined;
   return {
     name,
+    parent: typeof domain.parent === 'string' ? domain.parent : undefined,
     owner: typeof domain.owner === 'string' ? domain.owner : undefined,
+    businessOwner: typeof domain.businessOwner === 'string' ? domain.businessOwner : undefined,
     boundedContext: typeof domain.boundedContext === 'string' ? domain.boundedContext : undefined,
     sourceSystems: asStrings(domain.sourceSystems),
     description: typeof domain.description === 'string' ? domain.description : undefined,
+    primaryTerms: asStrings(domain.primaryTerms),
+    tags: asStrings(domain.tags),
+    businessOutcome: typeof domain.businessOutcome === 'string' ? domain.businessOutcome : undefined,
+    reviewCadence: typeof domain.reviewCadence === 'string' ? domain.reviewCadence : undefined,
+    inScope: asStrings(domain.inScope),
+    outOfScope: asStrings(domain.outOfScope),
+    dbtGroups: asStrings(domain.dbtGroups),
+    dbtPaths: asStrings(domain.dbtPaths),
+    dbtTags: asStrings(domain.dbtTags),
+    semanticDomains: asStrings(domain.semanticDomains),
+    semanticTags: asStrings(domain.semanticTags),
+    sourcePath: typeof domain.sourcePath === 'string' ? domain.sourcePath : undefined,
   };
+}
+
+// ── Domain / skill bootstrap sessions (local-only; never tracked) ────────────
+
+interface ContextBootstrapSession {
+  id: string;
+  createdAt: string;
+  persistence: 'session-only';
+  candidates: ReturnType<typeof draftDomainSkillBootstrap>;
+  status: 'queued' | 'inventory' | 'grounding' | 'generating' | 'validating' | 'ready' | 'needs_attention';
+  ai: {
+    requested: boolean;
+    mode: 'pending' | 'provider' | 'evidence_only';
+    provider?: string;
+  };
+  progress: {
+    percent: number;
+    message: string;
+    domains: { total: number; ready: number };
+    skills: { total: number; ready: number };
+    events: string[];
+  };
+  warnings?: string[];
+}
+
+function contextBootstrapDir(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'context-bootstrap');
+}
+
+function contextBootstrapPath(projectRoot: string, id: string): string {
+  const safe = id.replace(/[^a-zA-Z0-9_-]/g, '');
+  return join(contextBootstrapDir(projectRoot), `${safe}.json`);
+}
+
+function writeContextBootstrapSession(
+  projectRoot: string,
+  input: Pick<ContextBootstrapSession, 'candidates' | 'status' | 'ai' | 'progress'> & Partial<Pick<ContextBootstrapSession, 'warnings'>>,
+): ContextBootstrapSession {
+  const id = `ctx_${Date.now().toString(36)}_${createHash('sha1').update(JSON.stringify(input.candidates)).digest('hex').slice(0, 8)}`;
+  const session: ContextBootstrapSession = { id, createdAt: new Date().toISOString(), persistence: 'session-only', ...input };
+  const dir = contextBootstrapDir(projectRoot);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(contextBootstrapPath(projectRoot, id), JSON.stringify(session, null, 2), 'utf-8');
+  return session;
+}
+
+function updateContextBootstrapSession(
+  projectRoot: string,
+  id: string,
+  update: (session: ContextBootstrapSession) => ContextBootstrapSession,
+): ContextBootstrapSession | null {
+  const current = readContextBootstrapSession(projectRoot, id);
+  if (!current) return null;
+  const next = update(current);
+  writeFileSync(contextBootstrapPath(projectRoot, id), JSON.stringify(next, null, 2), 'utf-8');
+  return next;
+}
+
+function bootstrapProgress(candidates: ReturnType<typeof draftDomainSkillBootstrap>, readyCandidateIds: Set<string>, percent: number, message: string, events: string[]) {
+  const count = (kind: 'domain' | 'skill') => {
+    const all = candidates.filter((candidate) => candidate.kind === kind);
+    return { total: all.length, ready: all.filter((candidate) => readyCandidateIds.has(candidate.id)).length };
+  };
+  return { percent, message, domains: count('domain'), skills: count('skill'), events: events.slice(-6) };
+}
+
+async function enrichContextBootstrapSession(projectRoot: string, id: string): Promise<void> {
+  // One compiled snapshot serves the entire session; do not re-search a large
+  // repository for every domain/skill candidate.
+  const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
+  let session = updateContextBootstrapSession(projectRoot, id, (current) => ({
+    ...current,
+    status: 'inventory',
+    progress: bootstrapProgress(current.candidates, new Set(), 12, 'Repository inventory is ready. Checking the configured AI provider…', ['Repository inventory complete.']),
+  }));
+  if (!session) return;
+  const provider = session.ai.requested ? await createBlockStudioAssistProvider(projectRoot) : null;
+  if (!provider) {
+    updateContextBootstrapSession(projectRoot, id, (current) => ({
+      ...current,
+      status: 'ready',
+      ai: { ...current.ai, mode: 'evidence_only' },
+      progress: bootstrapProgress(current.candidates, new Set(current.candidates.map((candidate) => candidate.id)), 100, 'Evidence-first draft is ready. Configure an AI provider to enrich its prose and guidance.', ['Repository inventory complete.', 'No configured AI provider was available; retained evidence-only drafts.']),
+      warnings: [...(current.warnings ?? []), 'No configured AI provider was available. Candidates were drafted from repository evidence only.'],
+    }));
+    return;
+  }
+  session = updateContextBootstrapSession(projectRoot, id, (current) => ({
+    ...current,
+    status: 'grounding',
+    ai: { ...current.ai, mode: 'provider', provider: provider.name },
+    progress: bootstrapProgress(current.candidates, new Set(), 25, `Grounding ${current.candidates.length} candidate(s) in governed repository metadata…`, ['Repository inventory complete.', `Using ${provider.name} to enrich bounded guidance.`]),
+  }));
+  if (!session) return;
+
+  const chunks: Array<ReturnType<typeof draftDomainSkillBootstrap>> = [];
+  for (let index = 0; index < session.candidates.length; index += 4) chunks.push(session.candidates.slice(index, index + 4));
+  const complete = new Set<string>();
+  const warnings: string[] = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    const before = readContextBootstrapSession(projectRoot, id);
+    if (!before) return;
+    updateContextBootstrapSession(projectRoot, id, (current) => ({
+      ...current,
+      status: 'generating',
+      progress: bootstrapProgress(current.candidates, complete, 25 + Math.floor((index / Math.max(chunks.length, 1)) * 60), `Writing grounded guidance for ${index * 4 + 1}–${Math.min((index + 1) * 4, current.candidates.length)} of ${current.candidates.length} candidates…`, [...current.progress.events, `AI enrichment batch ${index + 1} of ${chunks.length}.`]),
+    }));
+    const prompt = buildDomainSkillBootstrapPrompt(manifest, chunks[index]);
+    try {
+      const response = await provider.generate([
+        { role: 'system', content: prompt.system },
+        { role: 'user', content: prompt.user },
+      ], { maxTokens: 1800, temperature: 0.1 });
+      updateContextBootstrapSession(projectRoot, id, (current) => {
+        const candidateById = new Map(current.candidates.map((candidate) => [candidate.id, candidate]));
+        const currentChunk = chunks[index].map((candidate) => candidateById.get(candidate.id) ?? candidate);
+        const merged = mergeDomainSkillBootstrapEnrichment(currentChunk, response);
+        for (const candidate of merged.candidates) candidateById.set(candidate.id, candidate);
+        for (const candidate of chunks[index]) complete.add(candidate.id);
+        warnings.push(...merged.rejected);
+        const candidates = current.candidates.map((candidate) => candidateById.get(candidate.id) ?? candidate);
+        return {
+          ...current,
+          candidates,
+          progress: bootstrapProgress(candidates, complete, 25 + Math.floor(((index + 1) / Math.max(chunks.length, 1)) * 60), `Grounded guidance ready for ${complete.size} of ${candidates.length} candidates.`, [...current.progress.events, `AI enrichment batch ${index + 1} complete.`]),
+        };
+      });
+    } catch (error) {
+      for (const candidate of chunks[index]) complete.add(candidate.id);
+      warnings.push(`AI enrichment batch ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  updateContextBootstrapSession(projectRoot, id, (current) => ({
+    ...current,
+    status: warnings.length ? 'needs_attention' : 'ready',
+    progress: bootstrapProgress(current.candidates, new Set(current.candidates.map((candidate) => candidate.id)), 100, warnings.length ? 'Drafts are ready; review the noted AI enrichment gaps before saving.' : 'Grounded domain and skill drafts are ready for review.', [...current.progress.events, warnings.length ? 'Some AI enrichment needs attention.' : 'Validation complete.']),
+    warnings: warnings.length ? [...(current.warnings ?? []), ...warnings] : current.warnings,
+  }));
+}
+
+function readContextBootstrapSession(projectRoot: string, id: string): ContextBootstrapSession | null {
+  const path = contextBootstrapPath(projectRoot, id);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as ContextBootstrapSession;
+    return parsed?.id === id && Array.isArray(parsed.candidates) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function refreshLocalMetadataCatalog(projectRoot: string): Promise<void> {

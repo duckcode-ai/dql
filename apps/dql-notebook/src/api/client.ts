@@ -4148,8 +4148,9 @@ export const api = {
   },
 
   /** Multi-select options for the preferred metrics/blocks fields. → GET /api/skills/options */
-  async getSkillOptions(): Promise<{ metrics: string[]; blocks: string[] }> {
-    return request<{ metrics: string[]; blocks: string[] }>('/api/skills/options');
+  async getSkillOptions(query = ''): Promise<{ metrics: string[]; blocks: string[] }> {
+    const suffix = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : '';
+    return request<{ metrics: string[]; blocks: string[] }>(`/api/skills/options${suffix}`);
   },
 
   /** Create a new skill. → POST /api/skills  body { skill } */
@@ -4213,4 +4214,50 @@ export const api = {
       method: 'DELETE',
     });
   },
+
+  async startContextBootstrap(options: { ai?: boolean } = {}): Promise<ContextBootstrapSession> {
+    return request<ContextBootstrapSession>('/api/context-bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(options),
+    });
+  },
+
+  async getContextBootstrap(id: string): Promise<ContextBootstrapSession> {
+    return request<ContextBootstrapSession>(`/api/context-bootstrap/${encodeURIComponent(id)}`);
+  },
+
+  async saveContextBootstrapSelected(id: string, candidateIds: string[]): Promise<{ id: string; saved: Array<{ id: string; path?: string; status: 'saved' | 'skipped' | 'blocked'; blockers?: string[] }> }> {
+    return request(`/api/context-bootstrap/${encodeURIComponent(id)}/save-selected`, {
+      method: 'POST',
+      body: JSON.stringify({ candidateIds }),
+    });
+  },
 };
+
+export interface ContextBootstrapCandidate {
+  id: string;
+  kind: 'domain' | 'skill';
+  action: 'create' | 'update' | 'unchanged' | 'needs_attention';
+  confidence: number;
+  evidence: string[];
+  notes?: string[];
+  domain?: Partial<Domain>;
+  skill?: Partial<Skill>;
+}
+
+export interface ContextBootstrapSession {
+  id: string;
+  createdAt: string;
+  persistence: 'session-only';
+  candidates: ContextBootstrapCandidate[];
+  status: 'queued' | 'inventory' | 'grounding' | 'generating' | 'validating' | 'ready' | 'needs_attention';
+  ai: { requested: boolean; mode: 'pending' | 'provider' | 'evidence_only'; provider?: string };
+  progress: {
+    percent: number;
+    message: string;
+    domains: { total: number; ready: number };
+    skills: { total: number; ready: number };
+    events: string[];
+  };
+  warnings?: string[];
+}
