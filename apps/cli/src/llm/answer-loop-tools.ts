@@ -102,10 +102,13 @@ async function runRipgrep(
       clearTimeout(timer);
       resolveSearch(value);
     };
+    // This is a safety ceiling, not an interaction target: normal searches
+    // finish in milliseconds. Give a CI-loaded machine enough time to start
+    // rg so a real semantic definition is not incorrectly reported missing.
     const timer = setTimeout(() => {
       child.kill();
       finish([]);
-    }, 1_500);
+    }, 4_000);
     child.stdout.on('data', (chunk: Buffer) => {
       if (output.length < 512_000) output += chunk.toString('utf8');
       else child.kill();
