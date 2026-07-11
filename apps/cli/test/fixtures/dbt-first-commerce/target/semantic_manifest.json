@@ -1,0 +1,7 @@
+{
+  "metrics": {
+    "metric.dbt_first_commerce.gross_revenue": {
+      "name": "gross_revenue", "semantic_model": "orders", "expression": "SUM(order_total)"
+    }
+  }
+}

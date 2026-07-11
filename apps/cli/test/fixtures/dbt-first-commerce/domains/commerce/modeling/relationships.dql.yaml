@@ -1,0 +1,12 @@
+relationships:
+  - id: order_to_customer
+    from: order
+    to: customer
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: certified
+    owner: commerce@company.test
+    certifiedAgainst:
+      from: { grain: order_id, keys: [customer_id] }
+      to: { grain: customer_id, keys: [customer_id] }

@@ -1,137 +1,121 @@
-# The DataLex + DQL stack
+# dbt-first DQL 2.0
 
-DQL is one half of a federated open-source stack. **DataLex** sits above dbt and defines business contracts; DQL sits below dbt and serves certified analytics to humans and AI agents. The two languages live in separate repos with separate release cadences, bridged by a public [manifest spec](https://github.com/duckcode-ai/manifest-spec).
+DQL is the open-source workspace for governed analytics: it connects dbt
+transformation and MetricFlow to analytical blocks, notebooks, business views,
+stakeholder apps, lineage, Ask AI, evaluations, and approved learning hints.
 
-This page is the orientation map. For deep dives, follow the links.
+In DQL 2.0, **dbt owns physical modeling**. DQL does not replace dbt and does
+not maintain a second `schema.yml`.
 
----
+## One source of truth, one sparse overlay
 
-## The wedge in one sentence
+| Concern | Owner | DQL behavior |
+| --- | --- | --- |
+| Model SQL, columns, descriptions, dbt tests | dbt | Read from dbt artifacts; edit through a previewed dbt YAML patch |
+| Transformation lineage | dbt | Import as provenance and transformation lineage |
+| MetricFlow models, measures, dimensions and formulas | dbt / MetricFlow | Compose from the dbt semantic artifact |
+| Domain/subdomain/microdomain organization | DQL | Git-versioned Domain Packages |
+| Entity binding, relationship cardinality, fanout, export policy | DQL | Sparse analytical overlay only where dbt is insufficient |
+| Business contracts, conformance, reusable blocks and apps | DQL | Version, review and certify in the DQL project |
+| Agent hints and evaluations | DQL | Draft → evaluate → review → approved retrieval |
 
-> **One question. One answer. Fully traced — every time.**
+The compiler records dbt **provenance**—unique IDs, artifact paths,
+fingerprints and availability—not a serialized copy of physical columns,
+descriptions, tests, or MetricFlow formulas. This prevents a second schema from
+drifting out of sync with dbt.
 
-Without contracts, the same business question — "what was monthly active customers last quarter?" — gets different numbers from different teams' AI tools. DataLex codifies the definition; DQL's compiler enforces the binding; the DQL MCP refuses to serve uncertified answers; the lineage is traceable from a chart pixel back to the dbt source column.
+## Domain Packages
 
----
+Each analytical domain is an ordinary Git folder:
 
-## How the layers compose
-
-```mermaid
-flowchart TD
-    subgraph Above["Above dbt"]
-      A[DataLex YAML<br/>contracts, glossary,<br/>conceptual model]
-    end
-    subgraph dbtL["dbt"]
-      D[dbt models]
-    end
-    subgraph Below["Below dbt"]
-      B[DQL blocks<br/>certified queries]
-      Apps[DQL Apps + notebooks]
-      MCP[DQL MCP for AI agents]
-    end
-
-    A -->|"contract id"| B
-    D --> B
-    B --> Apps
-    B --> MCP
-
-    classDef datalex fill:#eef2ff,stroke:#4f46e5,color:#1e293b
-    classDef dqlnode fill:#ecfdf5,stroke:#10b981,color:#065f46
-    classDef dbtnode fill:#fef3c7,stroke:#f59e0b,color:#78350f
-    class A datalex
-    class D dbtnode
-    class B,Apps,MCP dqlnode
+```text
+domains/
+  commerce/
+    domain.dql.yaml
+    modeling/
+      entities.dql.yaml
+      relationships.dql.yaml
+      contracts.dql.yaml
+    blocks/
+    notebooks/
+    business-views/
+    skills/
+    evaluations/
+  growth/
+    domain.dql.yaml
+    modeling/
+      relationships.dql.yaml
+    blocks/
+    business-views/
+    apps/
 ```
 
-| Layer | Purpose | Source of truth |
-|---|---|---|
-| **DataLex** (above dbt) | Domains, entities, fields, contracts, governance, glossary | [duckcode-ai/DataLex](https://github.com/duckcode-ai/DataLex) |
-| **dbt** (middle) | Transformations, model lineage, semantic-layer metrics | dbt Labs |
-| **DQL** (below dbt) | Certified blocks, notebooks, Apps, AI MCP | This repo |
+Domains organize ownership and retrieval; they do **not** imply a safe join or
+automatic cross-domain access. A generated analytical join needs a DQL
+relationship with explicit keys, cardinality, fanout policy, lifecycle state,
+and—across a domain boundary—an export contract.
 
----
+## Safe agent behavior
 
-## How a DQL block binds to a DataLex contract
+Ask AI follows this order:
 
-A certified block declares the contract it implements:
+1. compatible certified DQL block;
+2. compatible dbt/MetricFlow semantic query;
+3. review-required generated SQL backed by certified, fanout-safe DQL
+   relationships;
+4. a clarification or refusal when policy is missing, stale, unsafe, or
+   attribution-dependent.
 
-```dql
-block "Monthly Active Customers" {
-  type = "custom"
-  status = "certified"
-  datalex_contract = "commerce.Customer.monthly_active_customers@1"
-  query = """
-    SELECT DATE_TRUNC('month', ordered_at) AS order_month,
-           COUNT(DISTINCT customer_id)     AS monthly_active_customers
-    FROM   fct_orders
-    GROUP  BY 1
-  """
+dbt's DAG can explain how a model was transformed. It never proves that two
+models may be joined or that a revenue aggregate will not fan out. For example,
+revenue by customer acquisition channel can use a certified customer-grain
+relationship; revenue through raw campaign touches must ask for first-touch,
+last-touch, fractional, or another explicit attribution policy.
+
+## Enable DQL 2.0
+
+```json
+{
+  "project": "commerce-analytics",
+  "manifestVersion": 3,
+  "modeling": { "mode": "dbt-first" },
+  "dbt": {
+    "projectDir": "../dbt",
+    "manifestPath": "target/manifest.json"
+  }
 }
 ```
 
-The DataLex contract that backs it lives in your project's `*.model.yaml`:
+Then run:
 
-```yaml
-entities:
-  - name: Customer
-    contracts:
-      - id: commerce.Customer.monthly_active_customers
-        name: monthly_active_customers
-        version: 1
-        signature:
-          inputs:
-            - name: order_month
-              type: date
-          outputs:
-            - name: monthly_active_customers
-              type: integer
-              constraints: ["positive"]
+```bash
+dbt parse
+dql compile .
+dql notebook .
 ```
 
-What happens at each stage:
+Manifest v3 is opt-in during the compatibility window. Existing manifest v2
+projects keep their current behavior and do not need a separate migration.
 
-- **`dql compile`** — resolves the reference against the DataLex manifest. Compilation **fails** for `status: certified` if the contract doesn't exist, the version pin is missing, or the reference is malformed. Compilation **warns** for `status: draft|review` (work-in-progress is allowed). Implemented in [`dql-core/src/contracts/`](https://github.com/duckcode-ai/dql/tree/main/packages/dql-core/src/contracts).
-- **`dql mcp` `query_via_block`** — refuses to serve any block whose `datalex_contract` doesn't resolve in the project's loaded `datalex-manifest.json`. AI agents only ever get certified, traceable answers. The MCP enforcement check lives in [`dql-mcp/src/tools/query-via-block.ts`](https://github.com/duckcode-ai/dql/blob/main/packages/dql-mcp/src/tools/query-via-block.ts).
-- **`dql-openlineage`** — emits OpenLineage events that include the contract id as an upstream dataset, so Marquez, DataHub, Atlan, and Monte Carlo see the binding without depending on either compiler.
+## Migrating from DataLex
 
----
+DataLex can be migrated into a dbt-first DQL project without treating it as a
+second runtime dependency:
 
-## End-to-end tutorial
+```bash
+# Review only; default and --dry-run never write source
+dql migrate datalex --input ../datalex/datalex-manifest.json --dry-run
 
-Both halves of the stack now use one canonical dbt + DuckDB repo:
-[`duckcode-ai/jaffle-shop-duckdb`](https://github.com/duckcode-ai/jaffle-shop-duckdb).
-It contains `DataLex/` and `dql/` side by side, so the same story covers AI
-proposal generation, human certification, DQL blocks, Apps, notebooks, agents,
-and CI while the DataLex and DQL repos stay focused on product docs.
+# Write draft Domain Package overlays and suggested dbt YAML patch files
+dql migrate datalex --input ../datalex/datalex-manifest.json --apply
+```
 
-1. **Stage 1 — DataLex contracts.** Run `./setup.sh`, open the dbt evidence in
-   DataLex, generate the AI proposal pack, review assumptions, and publish
-   `DataLex/datalex-manifest.json`.
-2. **Stage 2 — DQL certified blocks.** In `dql/`, validate that each certified
-   block resolves a `datalex_contract`, then build the Growth Command Center
-   app from certified blocks.
-3. **Stage 3 — AI agent integration.** Reindex the DQL agent and ask covered
-   and uncovered questions. Covered questions cite certified blocks; uncovered
-   questions are review-required drafts.
+The migration matches legacy objects to dbt unique IDs, deliberately drops
+mirrored dbt facts, converts only DataLex-specific analytical semantics into
+draft overlays, writes divergent dbt-owned descriptions as suggested patches,
+and reports every loss. It is idempotent and never auto-certifies a migrated
+relationship, contract, block, or hint.
 
-Start with the example repo's
-[Jaffle Shop tutorial](https://github.com/duckcode-ai/jaffle-shop-duckdb/blob/main/docs/tutorials/jaffle/README.md).
-
----
-
-## The manifest spec
-
-DataLex and DQL never depend on each other's internals. They speak through the public schema at [`duckcode-ai/manifest-spec`](https://github.com/duckcode-ai/manifest-spec):
-
-- `schemas/v1/datalex-manifest.schema.json` — DataLex compiler output (consumed by `dql-core`'s `DataLexContractRegistry`).
-- `schemas/v1/dql-manifest.schema.json` — DQL compiler output (the artifact this repo emits).
-- `docs/interop.md` — the contract-id binding rules and resolution semantics.
-- `docs/versioning.md` — SemVer + RFC discipline + 12-month support windows.
-
-Third-party tools build on these schemas without depending on either compiler. That's the moat.
-
----
-
-## Why federation, not a unified product
-
-The two languages have different audiences (analytics engineers vs. data platform leads), different runtimes (TypeScript vs. Python), and different release cadences. Combining them in one repo would slow both down. Federation via spec is the pattern proven by **dbt's manifest, OpenAPI, and OpenLineage**: shared contracts at the boundary, independent evolution at the implementation. We followed that pattern deliberately.
+See [RFC 0002](rfcs/0002-dbt-first-domain-modeling.md) for the full contract
+and [the implementation plan](rfcs/0002-implementation-plan.md) for acceptance
+gates.

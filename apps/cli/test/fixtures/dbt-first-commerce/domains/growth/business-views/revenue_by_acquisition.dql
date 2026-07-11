@@ -1,0 +1,10 @@
+// dql-format: 1
+
+business_view "Growth Revenue by Acquisition" {
+  domain = "growth"
+  status = "certified"
+  owner = "growth@company.test"
+  includes {
+    block "Revenue by Acquisition Channel"
+  }
+}

@@ -1,6 +1,7 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
+import type { ManifestDbtFirstModeling, ManifestDbtProvenance, ManifestDiagnostic, ManifestLineage } from '@duckcodeailabs/dql-core';
 import type { AgentAnswerCascade, AgentConversationContext, AgentConversationDqlArtifact } from '../llm/types';
 import type {
   Cell,
@@ -149,6 +150,14 @@ export type DashboardDisplayMetadata = {
   trustState: 'certified' | 'review_required' | 'draft_ready';
   reviewStatus: 'certified' | 'draft_ready' | 'review_required';
 };
+
+export interface DbtFirstModelingResponse {
+  manifestVersion: 3;
+  dbtProvenance: ManifestDbtProvenance;
+  modeling: ManifestDbtFirstModeling;
+  lineage: ManifestLineage;
+  diagnostics: ManifestDiagnostic[];
+}
 
 export type DashboardTileFilterBinding = {
   filter: string;
@@ -1906,6 +1915,15 @@ export interface DatasetSource {
 }
 
 export const api = {
+  /** Read the compiled dbt-first overlay. dbt-owned details stay in dbt artifacts. */
+  async getDbtFirstModeling(): Promise<DbtFirstModelingResponse | null> {
+    try {
+      return await request<DbtFirstModelingResponse>('/api/modeling/dbt-first');
+    } catch {
+      return null;
+    }
+  },
+
   async getSettingsEnvStatus(): Promise<{ groups: SettingsEnvGroup[] }> {
     try {
       return await request<{ groups: SettingsEnvGroup[] }>('/api/settings/env-status');

@@ -1,0 +1,19 @@
+// dql-format: 1
+
+block "Revenue by Acquisition Channel" {
+  domain = "growth"
+  type = "custom"
+  status = "certified"
+  description = "Certified gross revenue by the customer acquisition channel."
+  owner = "growth@company.test"
+  grain = "acquisition_channel"
+  query = """
+    SELECT
+      a.acquisition_channel,
+      SUM(o.order_total) AS gross_revenue
+    FROM fct_orders AS o
+    JOIN dim_customer_acquisition AS a
+      ON o.customer_id = a.customer_id
+    GROUP BY 1
+  """
+}

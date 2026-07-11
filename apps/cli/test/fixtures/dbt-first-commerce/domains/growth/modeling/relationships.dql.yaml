@@ -1,0 +1,21 @@
+relationships:
+  - id: acquisition_to_customer
+    from: acquisition
+    to: customer
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_one
+    fanout: safe
+    crossDomain: true
+    status: certified
+    owner: growth@company.test
+    certifiedAgainst:
+      from: { grain: customer_id, keys: [customer_id] }
+      to: { grain: customer_id, keys: [customer_id] }
+  - id: touch_to_order_attribution
+    from: campaign_touch
+    to: order
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_many
+    fanout: attribution_required
+    status: draft
+    owner: growth@company.test

@@ -1,0 +1,5 @@
+entities:
+  - id: order
+    dbt_model: model.dbt_first_commerce.fct_orders
+  - id: customer
+    dbt_model: model.dbt_first_commerce.dim_customers

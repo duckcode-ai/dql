@@ -9,6 +9,8 @@ export interface CLIFlags {
   outDir: string;
   to?: string;
   dryRun?: boolean;
+  /** Explicitly apply a migration plan that otherwise defaults to preview-only. */
+  apply?: boolean;
   /** `dql propose --plan` — print the deterministic plan; write nothing. */
   plan?: boolean;
   port: number | null;
@@ -139,6 +141,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.to = argv[++i];
     } else if (arg === '--dry-run') {
       flags.dryRun = true;
+    } else if (arg === '--apply') {
+      flags.apply = true;
     } else if (arg === '--plan') {
       flags.plan = true;
     } else if (arg === '--port' && i + 1 < argv.length) {

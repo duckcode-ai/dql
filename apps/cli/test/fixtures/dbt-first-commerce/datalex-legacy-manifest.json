@@ -1,0 +1,27 @@
+{
+  "manifestSpecVersion": "1.0.0",
+  "datalexVersion": "1.10.0",
+  "generatedAt": "2026-07-10T00:00:00Z",
+  "project": { "name": "dbt-first-commerce" },
+  "domains": [{
+    "name": "commerce",
+    "entities": [{
+      "name": "Order",
+      "binding": { "kind": "dbt_model", "ref": "fct_orders" },
+      "grain": "order_id",
+      "candidate_keys": ["order_id"],
+      "contracts": [{ "id": "commerce.Order.gross_revenue", "name": "gross_revenue", "version": 1 }]
+    }, {
+      "name": "Customer",
+      "binding": { "kind": "dbt_model", "ref": "dim_customers" },
+      "grain": "customer_id",
+      "candidate_keys": ["customer_id"]
+    }]
+  }],
+  "relationships": [{
+    "name": "order_customer",
+    "from": { "domain": "commerce", "entity": "Order", "column": "customer_id" },
+    "to": { "domain": "commerce", "entity": "Customer", "column": "customer_id" },
+    "cardinality": "many_to_one"
+  }]
+}

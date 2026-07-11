@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "revenue-by-acquisition",
+  "metadata": { "title": "Revenue by Acquisition Channel", "domain": "growth", "lifecycle": "certified" },
+  "layout": {
+    "kind": "grid",
+    "cols": 12,
+    "rowHeight": 80,
+    "items": [{
+      "i": "revenue-by-channel",
+      "x": 0,
+      "y": 0,
+      "w": 8,
+      "h": 4,
+      "block": { "blockId": "Revenue by Acquisition Channel" },
+      "viz": { "type": "bar" }
+    }]
+  }
+}

@@ -71,6 +71,7 @@ export function Header() {
     git: 'Source control',
     settings: 'Connections',
     imports: 'Import SQL',
+    modeling: 'dbt-first modeling',
   };
   const headerTitle = isEditorView
     ? state.activeFile

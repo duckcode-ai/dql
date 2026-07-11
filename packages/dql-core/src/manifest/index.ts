@@ -12,6 +12,20 @@ export {
 
 export { detectOutputDrift } from './output-drift.js';
 export {
+  loadDbtFirstModeling,
+  siblingDbtArtifact,
+  type DbtFirstModelingLoadResult,
+} from './dbt-first-modeling.js';
+export {
+  planDataLexMigration,
+  applyDataLexMigration,
+  type DataLexMigrationInput,
+  type DataLexMigrationFile,
+  type DataLexMigrationLoss,
+  type DataLexMigrationReport,
+  type DataLexMigrationPlan,
+} from './datalex-migration.js';
+export {
   writeDomainDeclaration,
   deleteDomainDeclaration,
   renderDomainDeclaration,
@@ -42,6 +56,19 @@ export type {
   ManifestLineageNode,
   ManifestLineageEdge,
   ManifestDbtImport,
+  ManifestDbtProvenance,
+  ManifestDbtNodeProvenance,
+  ManifestMetricFlowProvenance,
+  ManifestDbtFirstModeling,
+  ManifestDomainPackage,
+  ManifestModelEntity,
+  ManifestModelRelationship,
+  ManifestRelationshipCardinality,
+  ManifestFanoutPolicy,
+  ManifestModelContract,
+  ManifestConformanceDeclaration,
+  ManifestModelRule,
+  ManifestDomainRelationshipLineage,
   ManifestDiagnostic,
   ManifestConflictDetail,
   ManifestConflictSide,

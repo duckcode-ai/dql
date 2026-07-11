@@ -44,6 +44,7 @@ import type {
   ManifestBusinessView,
   ManifestDomain,
   ManifestTerm,
+  ManifestDbtFirstModeling,
 } from './types.js';
 import {
   loadAppDocument,
@@ -57,6 +58,7 @@ import {
 } from '../apps/index.js';
 import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
 import { blockParameterDefinitions } from '../blocks/parameters.js';
+import { loadDbtFirstModeling, siblingDbtArtifact } from './dbt-first-modeling.js';
 
 // ---- Public API ----
 
@@ -160,6 +162,14 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
 
   if (options.dbtManifestPath && existsSync(options.dbtManifestPath)) {
     files.add(options.dbtManifestPath);
+    const catalogPath = siblingDbtArtifact(options.dbtManifestPath, 'catalog.json');
+    const semanticManifestPath = siblingDbtArtifact(options.dbtManifestPath, 'semantic_manifest.json');
+    if (catalogPath) files.add(catalogPath);
+    if (semanticManifestPath) files.add(semanticManifestPath);
+  }
+
+  if (config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first') {
+    for (const f of scanFilesRecursive(join(projectRoot, 'domains'), ['.yaml', '.yml'])) files.add(f);
   }
 
   // Apps & dashboards. Manifests live at apps/<id>/dql.app.json; dashboards
@@ -181,6 +191,14 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // Load project config
   const config = loadProjectConfig(projectRoot);
   const projectName = config.project ?? 'dql-project';
+  const dbtFirstV3 = config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
+  if ((config.manifestVersion === 3 || config.modeling?.mode === 'dbt-first') && !dbtFirstV3) {
+    diagnostics.push({
+      kind: 'config',
+      severity: 'error',
+      message: 'manifest v3 requires both `manifestVersion: 3` and `modeling.mode: "dbt-first"`; compiling with manifest v2 compatibility defaults',
+    });
+  }
   const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
   const datalexRegistry = datalexManifestPath
     ? new DataLexContractRegistry({ manifestPath: datalexManifestPath })
@@ -280,6 +298,20 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     applyBlockDataState(blocks, sources, dbtImport.dbtDag, runState);
   }
 
+  let dbtFirstModeling: ReturnType<typeof loadDbtFirstModeling> | undefined;
+  if (dbtFirstV3) {
+    if (!options.dbtManifestPath || !existsSync(options.dbtManifestPath)) {
+      diagnostics.push({
+        kind: 'config',
+        severity: 'error',
+        message: 'manifest v3 dbt-first modeling requires a readable dbt manifest.json',
+      });
+    } else {
+      dbtFirstModeling = loadDbtFirstModeling(projectRoot, options.dbtManifestPath);
+      diagnostics.push(...dbtFirstModeling.diagnostics);
+    }
+  }
+
   // Apps & dashboards (consumption layer). Scanned after blocks/notebooks
   // because dashboard refs are resolved against the block path → name map.
   const { apps, dashboards } = scanAppsAndDashboards(projectRoot, blocks, diagnostics);
@@ -291,15 +323,16 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     metrics,
     dimensions,
     notebooks,
-    dbtImport,
+    dbtFirstV3 ? stripDbtImportDetails(dbtImport) : dbtImport,
     apps,
     dashboards,
     businessViews,
     terms,
   );
+  if (dbtFirstModeling) appendDbtFirstModelingLineage(lineage, dbtFirstModeling.modeling);
 
   return {
-    manifestVersion: 2,
+    manifestVersion: dbtFirstV3 ? 3 : 2,
     dqlVersion,
     generatedAt: new Date().toISOString(),
     project: projectName,
@@ -311,11 +344,13 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     notebooks,
     metrics,
     dimensions,
-    sources,
+    sources: dbtFirstV3 ? stripDbtOwnedSourceDetails(sources) : sources,
     apps: Object.keys(apps).length > 0 ? apps : undefined,
     dashboards: Object.keys(dashboards).length > 0 ? dashboards : undefined,
     lineage,
-    dbtImport,
+    dbtImport: dbtFirstV3 ? undefined : dbtImport,
+    dbtProvenance: dbtFirstModeling?.provenance,
+    modeling: dbtFirstModeling?.modeling,
     diagnostics,
   };
 }
@@ -324,6 +359,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
 interface ProjectConfig {
   project?: string;
+  /** Manifest v3 is opt-in and only active with `modeling.mode: "dbt-first"`. */
+  manifestVersion?: 1 | 2 | 3;
+  modeling?: {
+    mode?: 'dbt-first';
+  };
   semanticLayer?: { provider?: string; path?: string; projectPath?: string };
   dataDir?: string;
   /** Selective dbt import filters; merged into buildManifest options. */
@@ -430,6 +470,77 @@ export function resolveDataLexManifestPath(
 
 function isAbsPath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+}
+
+/** Remove physical dbt payloads before serializing a v3 lineage graph. */
+function stripDbtImportDetails(dbtImport: ManifestDbtImport | undefined): ManifestDbtImport | undefined {
+  if (!dbtImport?.dbtDag) return dbtImport;
+  return {
+    ...dbtImport,
+    dbtDag: {
+      edges: dbtImport.dbtDag.edges,
+      models: dbtImport.dbtDag.models.map(({ columns: _columns, description: _description, ...model }) => model),
+    },
+  };
+}
+
+/** Keep source names/usage but never serialize dbt-owned schema content in v3. */
+function stripDbtOwnedSourceDetails(sources: Record<string, ManifestSource>): Record<string, ManifestSource> {
+  return Object.fromEntries(Object.entries(sources).map(([name, source]) => {
+    const { dbtModel: _dbtModel, ...sparseSource } = source;
+    return [name, sparseSource];
+  }));
+}
+
+/**
+ * Add DQL-owned analytical bindings and relationship proof to lineage without
+ * mutating or reclassifying dbt transformation edges. A relationship edge is
+ * intentionally distinct from dbt `depends_on`: it is a reviewed analytical
+ * join policy, not inferred DAG evidence.
+ */
+function appendDbtFirstModelingLineage(lineage: ManifestLineage, modeling: ManifestDbtFirstModeling): void {
+  const existingNodeIds = new Set(lineage.nodes.map((node) => node.id));
+  const existingEdges = new Set(lineage.edges.map((edge) => `${edge.source}:${edge.target}:${edge.type}`));
+  const dbtNodeByUniqueId = new Map<string, string>();
+  for (const node of lineage.nodes) {
+    const uniqueId = typeof node.metadata?.uniqueId === 'string' ? node.metadata.uniqueId : undefined;
+    if (uniqueId) dbtNodeByUniqueId.set(uniqueId, node.id);
+  }
+  const addEdge = (source: string, target: string, type: string) => {
+    const key = `${source}:${target}:${type}`;
+    if (!existingEdges.has(key)) {
+      lineage.edges.push({ source, target, type });
+      existingEdges.add(key);
+    }
+  };
+
+  for (const entity of Object.values(modeling.entities)) {
+    const entityId = `dql_entity:${entity.id}`;
+    if (!existingNodeIds.has(entityId)) {
+      lineage.nodes.push({
+        id: entityId,
+        type: 'dql_entity',
+        name: entity.id,
+        layer: 'answer',
+        domain: entity.domain,
+        filePath: entity.sourcePath,
+        metadata: {
+          dbtUniqueId: entity.dbtUniqueId,
+          grain: entity.grain,
+          keys: entity.keys,
+          identityFingerprint: entity.identityFingerprint,
+          provenance: 'dql sparse overlay',
+        },
+      });
+      existingNodeIds.add(entityId);
+    }
+    const dbtNode = dbtNodeByUniqueId.get(entity.dbtUniqueId);
+    if (dbtNode) addEdge(dbtNode, entityId, 'binds_dbt_model');
+  }
+
+  for (const relationship of Object.values(modeling.relationships)) {
+    addEdge(`dql_entity:${relationship.from}`, `dql_entity:${relationship.to}`, 'governed_relationship');
+  }
 }
 
 function resolveSemanticPath(projectRoot: string, config: ProjectConfig): string {

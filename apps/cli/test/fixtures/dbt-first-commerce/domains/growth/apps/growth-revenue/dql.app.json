@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "growth-revenue",
+  "name": "Growth Revenue",
+  "domain": "growth",
+  "owners": ["growth@company.test"],
+  "members": [{ "userId": "growth@company.test", "roles": ["owner"] }],
+  "roles": [{ "id": "owner" }],
+  "policies": [],
+  "homepage": { "type": "dashboard", "id": "revenue-by-acquisition" }
+}

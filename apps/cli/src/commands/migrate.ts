@@ -6,7 +6,10 @@ import {
   NodeKind,
   Parser,
   blockParameterDefinitions,
+  applyDataLexMigration,
   resolveBlockParameterValues,
+  planDataLexMigration,
+  resolveDbtManifestPath,
 } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
@@ -72,6 +75,10 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     await runParameterMigrateCheck(flags);
     return;
   }
+  if (file === 'datalex') {
+    await runDataLexManifestMigration(flags);
+    return;
+  }
   // file is used as the source type for migration
   const source = file as MigrationSource;
   const validSources: MigrationSource[] = ['looker', 'tableau', 'dbt', 'metabase', 'raw-sql'];
@@ -82,6 +89,7 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     console.error(`    Or: "format" to upgrade .dql/.dqlnb files to the canonical on-disk format`);
     console.error(`    Or: "layout --to domain-first --dry-run" to preview enterprise domain layout moves`);
     console.error(`    Or: "parameters --check" to audit legacy block parameter contracts`);
+    console.error(`    Or: "datalex --input <datalex-manifest.json> [--apply]" for a dbt-first DQL v3 migration`);
     console.error('');
     process.exit(1);
   }
@@ -162,6 +170,48 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
   console.log('    4. Run: dql certify blocks/migrated/example.dql --connection <driver>');
   console.log('    4. Commit and push for certification');
   console.log('');
+}
+
+async function runDataLexManifestMigration(flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(process.cwd());
+  const datalexManifestPath = flags.datalexManifestPath || flags.input;
+  if (!datalexManifestPath) {
+    console.error('Usage: dql migrate datalex --input <datalex-manifest.json> [--dry-run|--apply]');
+    process.exitCode = 1;
+    return;
+  }
+  const absoluteDataLex = resolve(datalexManifestPath);
+  if (!existsSync(absoluteDataLex)) {
+    console.error(`DataLex manifest not found: ${absoluteDataLex}`);
+    process.exitCode = 1;
+    return;
+  }
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+  if (!dbtManifestPath) {
+    console.error('No dbt manifest found. Run dbt parse/compile or configure dql.config.json before migrating DataLex.');
+    process.exitCode = 1;
+    return;
+  }
+  const plan = planDataLexMigration({ projectRoot, datalexManifestPath: absoluteDataLex, dbtManifestPath });
+  const apply = flags.apply === true && flags.dryRun !== true;
+  const result = apply ? applyDataLexMigration(projectRoot, plan) : undefined;
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify({ mode: apply ? 'applied' : 'dry-run', plan, result }, null, 2));
+    return;
+  }
+  console.log(`\n  DataLex → DQL dbt-first migration (${apply ? 'applied' : 'dry-run'})`);
+  console.log(`    matched dbt entities: ${plan.report.matchedEntities.length}`);
+  console.log(`    drafted DQL objects: ${plan.report.draftedObjects.length}`);
+  console.log(`    dropped dbt mirrors: ${plan.report.droppedDbtMirrors.length}`);
+  console.log(`    explicit losses: ${plan.report.losses.length}`);
+  console.log(`    auto-certified: ${plan.report.autoCertified}`);
+  if (apply) {
+    console.log(`    wrote: ${result?.written.length ?? 0}; unchanged: ${result?.unchanged.length ?? 0}`);
+  } else {
+    console.log('    no files written; add --apply after reviewing the generated plan.');
+  }
+  for (const file of plan.files) console.log(`    ${file.kind}: ${file.path}`);
 }
 
 interface FormatMigrateReport {

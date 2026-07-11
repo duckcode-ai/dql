@@ -21,6 +21,7 @@ import {
   type ResolvedTrustLabel,
   type TrustLabelId,
   type DqlArtifactReference,
+  type DQLManifest,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
@@ -45,6 +46,7 @@ import type { GroundingContextExpander } from './grounding/regrounding.js';
 import { createContextLedger, type ContextLedger } from './grounding/context-ledger.js';
 import { validateAnswerResultShape } from './answer-shape.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
+import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
 import { planCertifiedAdaptation, type CertifiedAdaptation } from './metadata/block-adapt.js';
 import {
   compactSqlSnippet,
@@ -462,6 +464,11 @@ export interface AnswerLoopInput {
   provider: AgentProvider;
   /** Live KG store. */
   kg: KGStore;
+  /**
+   * Optional compiled project manifest. Manifest v3 contributes explicit
+   * relationship proof to the generated-SQL guard; dbt DAG lineage never does.
+   */
+  manifest?: DQLManifest;
   /** Project + user-level Skills. */
   skills?: Skill[];
   /** Hints to prefer specific blocks first (vocabulary mappings from Skills). */
@@ -1776,6 +1783,49 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         considered,
         memoryContext: input.memoryContext ?? [],
         analysisPlan,
+      }),
+      contextPack: input.contextPack,
+      considered,
+      providerUsed: provider.name,
+    };
+  }
+
+  const dbtFirstJoinSafety = input.manifest
+    ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest)
+    : undefined;
+  if (dbtFirstJoinSafety && !dbtFirstJoinSafety.safe) {
+    const text = dbtFirstJoinSafety.message
+      ?? 'DQL could not prove this generated join from certified analytical relationships.';
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0.1,
+      text,
+      answer: text,
+      proposedSql: parsed.sql,
+      sql: parsed.sql,
+      refusalCode: dbtFirstJoinSafety.code === 'attribution_policy_required' ? 'ambiguous' : 'grounding_gap',
+      refusalDetails: {
+        code: dbtFirstJoinSafety.code === 'attribution_policy_required' ? 'ambiguous' : 'grounding_gap',
+        message: text,
+      },
+      validationWarnings: [
+        ...contextValidation.warnings,
+        `DQL v3 relationship guard: ${dbtFirstJoinSafety.code ?? 'unsafe relationship'}.`,
+      ],
+      citations: [],
+      memoryContext: input.memoryContext,
+      evidence: buildNoAnswerEvidence({
+        question,
+        reason: text,
+        artifactHits,
+        businessHits,
+        semanticHits,
+        manifestHits,
+        considered,
+        memoryContext: input.memoryContext ?? [],
       }),
       contextPack: input.contextPack,
       considered,

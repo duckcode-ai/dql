@@ -1,0 +1,9 @@
+{
+  "project": "dbt-first-commerce",
+  "manifestVersion": 3,
+  "modeling": { "mode": "dbt-first" },
+  "connections": {
+    "default": { "driver": "duckdb", "filepath": ":memory:" }
+  },
+  "dbt": { "projectDir": ".", "manifestPath": "target/manifest.json" }
+}

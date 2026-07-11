@@ -3577,6 +3577,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    // Manifest v3 modeling surface. This response intentionally contains dbt
+    // provenance references and the sparse DQL overlay, never copied dbt YAML.
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
+      const { buildManifest, resolveDbtManifestPath } = await import('@duckcodeailabs/dql-core');
+      const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+      const manifest = buildManifest({ projectRoot, dbtManifestPath });
+      if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: 'dbt-first modeling is not enabled. Set manifestVersion: 3 and modeling.mode: "dbt-first" in dql.config.json.',
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        manifestVersion: manifest.manifestVersion,
+        dbtProvenance: manifest.dbtProvenance,
+        modeling: manifest.modeling,
+        lineage: manifest.lineage,
+        diagnostics: manifest.diagnostics ?? [],
+      }));
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/agent-runs') {
       const rawLimit = Number(url.searchParams.get('limit'));
       const limit = Number.isFinite(rawLimit) && rawLimit > 0

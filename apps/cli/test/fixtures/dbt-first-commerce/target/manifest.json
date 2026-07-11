@@ -1,0 +1,31 @@
+{
+  "metadata": { "project_name": "dbt_first_commerce" },
+  "nodes": {
+    "model.dbt_first_commerce.fct_orders": {
+      "resource_type": "model", "name": "fct_orders", "alias": "fct_orders", "database": "analytics", "schema": "commerce", "original_file_path": "models/commerce/fct_orders.sql", "description": "One row per completed order.",
+      "meta": { "dql": { "grain": "order_id", "keys": ["customer_id"] } },
+      "columns": { "order_id": { "name": "order_id", "description": "dbt-owned order identifier", "tests": ["unique", "not_null"] }, "customer_id": { "name": "customer_id", "tests": ["not_null"] }, "order_total": { "name": "order_total" } }, "depends_on": { "nodes": [] }
+    },
+    "model.dbt_first_commerce.dim_customers": {
+      "resource_type": "model", "name": "dim_customers", "alias": "dim_customers", "database": "analytics", "schema": "commerce", "original_file_path": "models/commerce/dim_customers.sql", "description": "One row per customer.",
+      "meta": { "dql": { "grain": "customer_id", "keys": ["customer_id"] } },
+      "columns": { "customer_id": { "name": "customer_id", "tests": ["unique", "not_null"] }, "customer_name": { "name": "customer_name" } }, "depends_on": { "nodes": [] }
+    },
+    "model.dbt_first_commerce.dim_customer_acquisition": {
+      "resource_type": "model", "name": "dim_customer_acquisition", "alias": "dim_customer_acquisition", "database": "analytics", "schema": "growth", "original_file_path": "models/growth/dim_customer_acquisition.sql", "description": "One acquisition channel per customer.",
+      "meta": { "dql": { "grain": "customer_id", "keys": ["customer_id"] } },
+      "columns": { "customer_id": { "name": "customer_id", "tests": ["unique", "not_null"] }, "acquisition_channel": { "name": "acquisition_channel" } }, "depends_on": { "nodes": [] }
+    },
+    "model.dbt_first_commerce.fct_campaign_touches": {
+      "resource_type": "model", "name": "fct_campaign_touches", "alias": "fct_campaign_touches", "database": "analytics", "schema": "growth", "original_file_path": "models/growth/fct_campaign_touches.sql", "description": "One marketing touch per customer; not an attributed revenue fact.",
+      "meta": { "dql": { "grain": "touch_id", "keys": ["customer_id"] } },
+      "columns": { "touch_id": { "name": "touch_id", "tests": ["unique", "not_null"] }, "customer_id": { "name": "customer_id" }, "campaign_name": { "name": "campaign_name" } }, "depends_on": { "nodes": [] }
+    }
+  },
+  "sources": {},
+  "metrics": {
+    "metric.dbt_first_commerce.gross_revenue": {
+      "name": "gross_revenue", "original_file_path": "models/commerce/metrics.yml", "type_params": { "semantic_model": "orders", "expression": "SUM(order_total)" }
+    }
+  }
+}

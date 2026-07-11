@@ -1,0 +1,9 @@
+{
+  "nodes": {
+    "model.dbt_first_commerce.fct_orders": { "columns": { "order_id": { "type": "integer" }, "customer_id": { "type": "integer" }, "order_total": { "type": "numeric" } } },
+    "model.dbt_first_commerce.dim_customers": { "columns": { "customer_id": { "type": "integer" }, "customer_name": { "type": "varchar" } } },
+    "model.dbt_first_commerce.dim_customer_acquisition": { "columns": { "customer_id": { "type": "integer" }, "acquisition_channel": { "type": "varchar" } } },
+    "model.dbt_first_commerce.fct_campaign_touches": { "columns": { "touch_id": { "type": "integer" }, "customer_id": { "type": "integer" }, "campaign_name": { "type": "varchar" } } }
+  },
+  "sources": {}
+}

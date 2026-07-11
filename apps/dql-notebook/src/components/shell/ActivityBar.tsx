@@ -117,8 +117,8 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'home' | 'ask') {
-    if (panel === 'home' || panel === 'ask') {
+  function handlePanelClick(panel: SidebarPanel | 'home' | 'ask' | 'modeling') {
+    if (panel === 'home' || panel === 'ask' || panel === 'modeling') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
@@ -145,7 +145,7 @@ export function ActivityBar() {
   // the onboarding flow (Settings → Setup); the app lands on Apps.
   const navGroups: Array<{
     label: string;
-    items: Array<{ key: SidebarPanel | 'ask'; title: string; icon: React.ReactNode; active: boolean }>;
+    items: Array<{ key: SidebarPanel | 'ask' | 'modeling'; title: string; icon: React.ReactNode; active: boolean }>;
   }> = [
     {
       label: 'Insights',
@@ -166,6 +166,7 @@ export function ActivityBar() {
       label: 'Govern',
       items: [
         { key: 'domains', title: 'Context', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'skills' },
+        { key: 'modeling', title: 'Modeling', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'modeling' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
       ],
     },

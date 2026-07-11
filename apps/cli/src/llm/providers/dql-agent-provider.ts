@@ -25,7 +25,7 @@ import {
   type ConversationSnapshot,
   type LocalContextPack,
 } from '@duckcodeailabs/dql-agent';
-import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core';
+import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
@@ -404,11 +404,16 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           ]));
           const answerStartedAt = Date.now();
           emit({ kind: 'thinking', text: 'Resolving the best governed answer path and validating the result.' });
+          const manifest = buildManifest({
+            projectRoot: req.projectRoot,
+            dbtManifestPath: resolveDbtManifestPath(req.projectRoot) ?? undefined,
+          });
           const result = await answer({
             question,
             extraContext,
             provider,
             kg,
+            manifest,
             skills,
             blockHints,
             followUp,

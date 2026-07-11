@@ -11,7 +11,7 @@
 
 export interface DQLManifest {
   /** Manifest schema version */
-  manifestVersion: 1 | 2;
+  manifestVersion: 1 | 2 | 3;
   /** DQL CLI version that generated this manifest */
   dqlVersion: string;
   /** ISO 8601 timestamp */
@@ -53,6 +53,19 @@ export interface DQLManifest {
 
   /** dbt manifest import metadata (if --dbt-manifest was used) */
   dbtImport?: ManifestDbtImport;
+
+  /**
+   * Manifest v3 dbt artifact index. This is deliberately provenance-only:
+   * DQL references dbt unique IDs and artifact locations but never serializes a
+   * second copy of schema.yml columns, descriptions, tests, or MetricFlow SQL.
+   */
+  dbtProvenance?: ManifestDbtProvenance;
+
+  /**
+   * Manifest v3 sparse analytical overlay. Present only when
+   * `manifestVersion: 3` and `modeling.mode: "dbt-first"` are both selected.
+   */
+  modeling?: ManifestDbtFirstModeling;
 
   /**
    * Non-fatal problems encountered during the build — files that failed to
@@ -732,4 +745,133 @@ export interface ManifestDbtImport {
    * last-run/freshness state, when one was found alongside the manifest.
    */
   runResultsPath?: string;
+}
+
+// ---- Manifest v3: dbt-first analytical overlay ----
+
+/** A deterministic reference to dbt artifacts without copying their contents. */
+export interface ManifestDbtProvenance {
+  manifestPath: string;
+  catalogPath?: string;
+  semanticManifestPath?: string;
+  manifestFingerprint: string;
+  catalogFingerprint?: string;
+  semanticManifestFingerprint?: string;
+  projectName?: string;
+  nodes: Record<string, ManifestDbtNodeProvenance>;
+  metricFlow: Record<string, ManifestMetricFlowProvenance>;
+}
+
+export interface ManifestDbtNodeProvenance {
+  uniqueId: string;
+  resourceType: 'model' | 'source';
+  name: string;
+  packageName?: string;
+  relation?: string;
+  sourcePath?: string;
+  /** Fingerprint of identity-relevant dbt metadata, not a copy of it. */
+  identityFingerprint: string;
+  /** Lets consumers open dbt-owned fields from the source artifact on demand. */
+  available: {
+    description: boolean;
+    columns: boolean;
+    tests: boolean;
+    catalogTypes: boolean;
+    dqlMeta: boolean;
+  };
+}
+
+export interface ManifestMetricFlowProvenance {
+  uniqueId: string;
+  name: string;
+  sourcePath?: string;
+  semanticModel?: string;
+  fingerprint: string;
+}
+
+export interface ManifestDbtFirstModeling {
+  mode: 'dbt-first';
+  packages: Record<string, ManifestDomainPackage>;
+  entities: Record<string, ManifestModelEntity>;
+  relationships: Record<string, ManifestModelRelationship>;
+  contracts: Record<string, ManifestModelContract>;
+  conformance: Record<string, ManifestConformanceDeclaration>;
+  rules: Record<string, ManifestModelRule>;
+  /** DQL analytical edges; separate from dbt transformation lineage. */
+  domainLineage: ManifestDomainRelationshipLineage[];
+}
+
+export interface ManifestDomainPackage {
+  id: string;
+  filePath: string;
+  parent?: string;
+  exports: string[];
+  owner?: string;
+}
+
+export interface ManifestModelEntity {
+  id: string;
+  domain: string;
+  dbtUniqueId: string;
+  /** Analytical identity assertion; omitted when dbt `meta.dql` supplies it. */
+  grain?: string;
+  /** Analytical key assertion; no physical column catalog is copied. */
+  keys: string[];
+  sourcePath: string;
+  identityFingerprint: string;
+}
+
+export type ManifestRelationshipCardinality = 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
+export type ManifestFanoutPolicy = 'safe' | 'attribution_required' | 'unsafe' | 'unknown';
+
+export interface ManifestModelRelationship {
+  id: string;
+  from: string;
+  to: string;
+  keys: Array<{ from: string; to: string }>;
+  cardinality: ManifestRelationshipCardinality;
+  fanout: ManifestFanoutPolicy;
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  crossDomain: boolean;
+  owner?: string;
+  sourcePath: string;
+  fingerprint: string;
+  certificationFingerprint?: string;
+  staleCertification: boolean;
+  /** Only certified, fresh, exported, fanout-safe edges can prove a generated join. */
+  automaticJoinAllowed: boolean;
+}
+
+export interface ManifestModelContract {
+  id: string;
+  domain: string;
+  entities: string[];
+  blocks: string[];
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+  sourcePath: string;
+  requiredEvaluation: boolean;
+}
+
+export interface ManifestConformanceDeclaration {
+  id: string;
+  entities: string[];
+  rule: string;
+  sourcePath: string;
+}
+
+export interface ManifestModelRule {
+  id: string;
+  domain: string;
+  kind: 'fanout' | 'export' | 'contract' | 'custom';
+  expression: string;
+  sourcePath: string;
+}
+
+export interface ManifestDomainRelationshipLineage {
+  relationship: string;
+  fromDomain: string;
+  toDomain: string;
+  automaticJoinAllowed: boolean;
+  staleCertification: boolean;
 }
