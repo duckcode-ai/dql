@@ -1,3 +1,5 @@
+// dql-format: 1
+
 domain "Commerce" {
   id = "commerce"
   owner = "commerce@company.test"
