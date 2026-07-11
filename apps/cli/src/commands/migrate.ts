@@ -1,6 +1,13 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
-import { canonicalize, canonicalizeNotebook } from '@duckcodeailabs/dql-core';
+import {
+  canonicalize,
+  canonicalizeNotebook,
+  NodeKind,
+  Parser,
+  blockParameterDefinitions,
+  resolveBlockParameterValues,
+} from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 import { runImport } from './import.js';
@@ -61,6 +68,10 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     await runLayoutMigrate(flags);
     return;
   }
+  if (file === 'parameters') {
+    await runParameterMigrateCheck(flags);
+    return;
+  }
   // file is used as the source type for migration
   const source = file as MigrationSource;
   const validSources: MigrationSource[] = ['looker', 'tableau', 'dbt', 'metabase', 'raw-sql'];
@@ -70,6 +81,7 @@ export async function runMigrate(file: string, flags: CLIFlags): Promise<void> {
     console.error(`    Valid sources: ${validSources.join(', ')}`);
     console.error(`    Or: "format" to upgrade .dql/.dqlnb files to the canonical on-disk format`);
     console.error(`    Or: "layout --to domain-first --dry-run" to preview enterprise domain layout moves`);
+    console.error(`    Or: "parameters --check" to audit legacy block parameter contracts`);
     console.error('');
     process.exit(1);
   }
@@ -174,6 +186,119 @@ interface LayoutMigrateReport {
   scanned: number;
   moves: LayoutMove[];
   skipped: LayoutMove[];
+}
+
+export interface ParameterMigrationIssue {
+  path: string;
+  block?: string;
+  kind: 'undeclared_placeholder' | 'policy_without_definition' | 'incompatible_default' | 'ambiguous_semantic_filter' | 'duplicate_parameterized_contract';
+  detail: string;
+}
+
+export interface ParameterMigrationReport {
+  scanned: number;
+  blocksWithParameters: number;
+  issues: ParameterMigrationIssue[];
+}
+
+/**
+ * A read-only migration audit. Existing blocks keep their legacy execution
+ * defaults; the report identifies only the contracts that need a human review
+ * before AI may adapt their values.
+ */
+export async function runParameterMigrateCheck(flags: CLIFlags): Promise<void> {
+  const root = findProjectRoot(resolve(flags.input || process.cwd()));
+  const report: ParameterMigrationReport = { scanned: 0, blocksWithParameters: 0, issues: [] };
+  const contracts = new Map<string, Array<{ path: string; block: string }>>();
+
+  for (const absPath of walkDqlFiles(root)) {
+    if (!absPath.endsWith('.dql')) continue;
+    report.scanned += 1;
+    const source = readFileSync(absPath, 'utf-8');
+    const program = new Parser(source, absPath).parse();
+    for (const statement of program.statements) {
+      if (statement.kind !== NodeKind.BlockDecl) continue;
+      const block = statement;
+      const path = relative(root, absPath) || absPath;
+      const names = new Set(block.params?.params.map((parameter) => parameter.name) ?? []);
+      const definitions = blockParameterDefinitions(block);
+      if (definitions.length) report.blocksWithParameters += 1;
+
+      for (const interpolation of block.query?.interpolations ?? []) {
+        if (!names.has(interpolation.variableName)) {
+          report.issues.push({
+            path,
+            block: block.name,
+            kind: 'undeclared_placeholder',
+            detail: `\${${interpolation.variableName}} is not declared in params.`,
+          });
+        }
+      }
+      for (const policy of block.parameterPolicy ?? []) {
+        if (!names.has(policy.name)) {
+          report.issues.push({
+            path,
+            block: block.name,
+            kind: 'policy_without_definition',
+            detail: `parameterPolicy.${policy.name} has no parameter declaration.`,
+          });
+        }
+      }
+      for (const error of resolveBlockParameterValues(definitions).errors) {
+        report.issues.push({ path, block: block.name, kind: 'incompatible_default', detail: error });
+      }
+      if (block.blockType === 'semantic') {
+        for (const binding of block.filterBindings ?? []) {
+          if (!names.has(binding.filter)) {
+            report.issues.push({
+              path,
+              block: block.name,
+              kind: 'ambiguous_semantic_filter',
+              detail: `filterBindings.${binding.filter} does not map to a typed parameter.`,
+            });
+          }
+        }
+      }
+
+      const sql = block.query?.rawSQL
+        ?.replace(/'(?:[^']|'')*'/g, '?')
+        .replace(/\b\d+(?:\.\d+)?\b/g, '?')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      if (sql && definitions.length) {
+        const signature = `${sql}::${definitions.map((parameter) => `${parameter.name}:${parameter.type}:${parameter.binding?.kind ?? 'unbound'}`).sort().join('|')}`;
+        const entries = contracts.get(signature) ?? [];
+        entries.push({ path, block: block.name });
+        contracts.set(signature, entries);
+      }
+    }
+  }
+
+  for (const entries of contracts.values()) {
+    if (entries.length < 2) continue;
+    const detail = `Equivalent parameterized contract also appears in ${entries.map((entry) => `${entry.block} (${entry.path})`).join(', ')}.`;
+    for (const entry of entries) {
+      report.issues.push({ path: entry.path, block: entry.block, kind: 'duplicate_parameterized_contract', detail });
+    }
+  }
+
+  if (flags.format === 'json') {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log('\n  DQL parameter migration audit');
+    console.log('  ─────────────────────────────');
+    console.log(`  Project: ${root}`);
+    console.log(`  Scanned: ${report.scanned}`);
+    console.log(`  Blocks with parameters: ${report.blocksWithParameters}`);
+    console.log(`  Review issues: ${report.issues.length}`);
+    for (const issue of report.issues.slice(0, 50)) {
+      console.log(`    ✗ ${issue.path}${issue.block ? ` [${issue.block}]` : ''}: ${issue.detail}`);
+    }
+    if (report.issues.length > 50) console.log(`    ... ${report.issues.length - 50} more`);
+    console.log('');
+  }
+  if (flags.check && report.issues.length) process.exitCode = 1;
 }
 
 export async function runLayoutMigrate(flags: CLIFlags): Promise<void> {

@@ -1,19 +1,26 @@
-import type { Theme } from '../../themes/notebook-theme';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock3, History, Sparkles, X } from 'lucide-react';
-import { makeCell, useNotebook } from '../../store/NotebookStore';
-import { themes } from '../../themes/notebook-theme';
-import { api, type NotebookResearchRun } from '../../api/client';
-import { WelcomeScreen } from './WelcomeScreen';
-import { CellList } from './CellList';
-import { DashboardView } from './DashboardView';
-import { DocumentMetadataRow } from './DocumentMetadataRow';
-import { useOpenBlockInStudio } from '../agent/AiBuildResult';
-import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
+import type { Theme } from "../../themes/notebook-theme";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Clock3, History, Sparkles, X } from "lucide-react";
+import { makeCell, useNotebook } from "../../store/NotebookStore";
+import { themes } from "../../themes/notebook-theme";
 import {
-  emitNotebookResearchChanged,
-} from '../../utils/notebook-research';
-import type { Cell, NotebookFile } from '../../store/types';
+  api,
+  type DatasetSource,
+  type NotebookResearchRun,
+} from "../../api/client";
+import { WelcomeScreen } from "./WelcomeScreen";
+import { CellList } from "./CellList";
+import { DashboardView } from "./DashboardView";
+import { DocumentMetadataRow } from "./DocumentMetadataRow";
+import { useOpenBlockInStudio } from "../agent/AiBuildResult";
+import {
+  UnifiedAgentRunPanel,
+  usePersistedAgentThreadId,
+  type InsertDqlPayload,
+} from "../agent/UnifiedAgentRunPanel";
+import { emitNotebookResearchChanged } from "../../utils/notebook-research";
+import type { Cell, NotebookFile } from "../../store/types";
+import { DatasetImportPanel } from "./DatasetImportPanel";
 
 interface NotebookEditorProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -41,7 +48,19 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
   const [aiInitialInput, setAiInitialInput] = useState('');
   const [aiAutoAsk, setAiAutoAsk] = useState<{ text: string; nonce: number } | undefined>(undefined);
   const [aiHistoryRefreshKey, setAiHistoryRefreshKey] = useState(0);
-  const [aiHistoryBadge, setAiHistoryBadge] = useState<AiHistoryBadge>(EMPTY_AI_HISTORY_BADGE);
+  const [aiHistoryBadge, setAiHistoryBadge] = useState<AiHistoryBadge>(
+    EMPTY_AI_HISTORY_BADGE,
+  );
+  const [datasetImport, setDatasetImport] = useState<{
+    open: boolean;
+    afterId?: string;
+  }>({ open: false });
+  const [datasets, setDatasets] = useState<DatasetSource[]>([]);
+  const [compactWorkspace, setCompactWorkspace] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 900px)").matches,
+  );
   const activeNotebookPath = state.activeFile?.path;
 
   const aiSourceCell = useMemo(
@@ -49,13 +68,21 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     [aiSourceCellId, state.cells],
   );
   const aiContext = useMemo(
-    () => buildNotebookAiContext({
-      notebookPath: activeNotebookPath,
-      notebookTitle: state.notebookTitle,
-      cell: aiSourceCell,
-      cells: state.cells,
-    }),
-    [activeNotebookPath, aiSourceCell, state.cells, state.notebookTitle],
+    () =>
+      buildNotebookAiContext({
+        notebookPath: activeNotebookPath,
+        notebookTitle: state.notebookTitle,
+        cell: aiSourceCell,
+        cells: state.cells,
+        datasets,
+      }),
+    [
+      activeNotebookPath,
+      aiSourceCell,
+      datasets,
+      state.cells,
+      state.notebookTitle,
+    ],
   );
 
   const openFileForAiHistory = useCallback((file: NotebookFile) => {
@@ -109,54 +136,176 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     return () => window.removeEventListener('dql:open-notebook-ai', handler);
   }, []);
 
-  const openAiForCell = useCallback((cellId: string, prompt?: string, options?: { autoAsk?: boolean }) => {
-    const text = prompt?.trim() ?? '';
-    setAiSourceCellId(cellId);
-    setAiInitialInput(options?.autoAsk ? '' : text);
-    setAiAutoAsk(options?.autoAsk && text ? { text, nonce: Date.now() } : undefined);
-    setAiHistoryOpen(false);
-    setAiOpen(true);
+  useEffect(() => {
+    const refresh = () => {
+      void api
+        .getDatasets()
+        .then((payload) => setDatasets(payload.datasets))
+        .catch(() => setDatasets([]));
+    };
+    refresh();
+    window.addEventListener("dql:datasets-changed", refresh);
+    return () => window.removeEventListener("dql:datasets-changed", refresh);
+  }, [activeNotebookPath]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 900px)");
+    const update = () => setCompactWorkspace(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
   }, []);
 
-  const insertAiSqlCell = useCallback((sql: string, title?: string) => {
-    const trimmed = sql.trim();
-    if (!trimmed) return;
-    const cell = makeCell('sql', trimmed);
-    cell.name = safeCellName(title ?? 'AI SQL draft');
-    dispatch({ type: 'ADD_CELL', cell, afterId: aiSourceCellId ?? undefined });
-    setAiSourceCellId(cell.id);
-    setAiOpen(true);
-  }, [aiSourceCellId, dispatch]);
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ afterId?: string }>).detail;
+      setDatasetImport({ open: true, afterId: detail?.afterId });
+    };
+    window.addEventListener("dql:open-dataset-import", handler);
+    return () => window.removeEventListener("dql:open-dataset-import", handler);
+  }, []);
+
+  const openAiForCell = useCallback(
+    (cellId: string, prompt?: string, options?: { autoAsk?: boolean }) => {
+      const text = prompt?.trim() ?? "";
+      setAiSourceCellId(cellId);
+      setAiInitialInput(options?.autoAsk ? "" : text);
+      setAiAutoAsk(
+        options?.autoAsk && text ? { text, nonce: Date.now() } : undefined,
+      );
+      setAiHistoryOpen(false);
+      setAiOpen(true);
+    },
+    [],
+  );
+
+  const insertAiSqlCell = useCallback(
+    (sql: string, title?: string) => {
+      const trimmed = sql.trim();
+      if (!trimmed) return;
+      const cell = makeCell("sql", trimmed);
+      cell.name = safeCellName(title ?? "AI SQL draft");
+      const datasetRefs = datasets
+        .filter((dataset) =>
+          new RegExp(`\\b${escapeRegExp(dataset.alias)}\\b`, "i").test(trimmed),
+        )
+        .map((dataset) => ({
+          id: dataset.id,
+          alias: dataset.alias,
+          role:
+            dataset.storageMode === "staged"
+              ? ("staged" as const)
+              : ("source" as const),
+          fingerprint: dataset.fileFingerprint,
+        }));
+      if (datasetRefs.length > 0) {
+        cell.executionTarget = { target: "local" };
+        cell.datasetRefs = datasetRefs;
+      }
+      dispatch({
+        type: "ADD_CELL",
+        cell,
+        afterId: aiSourceCellId ?? undefined,
+      });
+      setAiSourceCellId(cell.id);
+      setAiOpen(true);
+    },
+    [aiSourceCellId, datasets, dispatch],
+  );
 
   // DQL-first insertion (default): create a self-contained query cell seeded with
   // the governed answer's compiled SQL body + executed result + chart config, and
   // carry the DQL artifact as provenance (surfaced + save-as-block on the cell).
-  const insertGeneratedDqlCell = useCallback((payload: InsertDqlPayload) => {
-    const sql = (payload.sql ?? payload.dqlArtifact?.source ?? '').trim();
-    if (!sql) return;
-    const cell = makeCell('sql', sql);
-    cell.name = safeCellName(payload.title ?? payload.dqlArtifact?.name ?? 'AI analysis');
-    if (payload.result) {
-      cell.result = payload.result;
-      cell.status = 'success';
-      cell.executionCount = 1;
-    }
-    if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
-    if (payload.dqlArtifact) {
-      cell.dqlArtifact = {
-        source: payload.dqlArtifact.source,
-        sql: payload.sql,
-        name: payload.dqlArtifact.name,
-        sourcePath: payload.dqlArtifact.sourcePath,
-        kind: payload.dqlArtifact.kind,
-        metrics: payload.dqlArtifact.metrics,
-        dimensions: payload.dqlArtifact.dimensions,
-      };
-    }
-    dispatch({ type: 'ADD_CELL', cell, afterId: aiSourceCellId ?? undefined });
-    setAiSourceCellId(cell.id);
-    setAiOpen(true);
-  }, [aiSourceCellId, dispatch]);
+  const insertGeneratedDqlCell = useCallback(
+    (payload: InsertDqlPayload) => {
+      const sql = (payload.sql ?? payload.dqlArtifact?.source ?? "").trim();
+      if (!sql) return;
+      if (payload.mixedSourcePlan) {
+        const plan = payload.mixedSourcePlan;
+        const contextCell = makeCell(
+          "markdown",
+          [
+            `### ${payload.title ?? 'Mixed-source analysis'}`,
+            '',
+            `This analysis combines a bounded warehouse extraction with the local dataset \`${plan.localDataset}\`.`,
+            '',
+            ...(plan.warehouseRelations?.length ? [`- Warehouse sources: ${plan.warehouseRelations.map((relation) => `\`${relation}\``).join(', ')}`] : []),
+            `- Join: \`${plan.warehouseKey}\` = \`${plan.localKey}\``,
+            '- Trust: local mixed-source analysis · review required',
+            '- Run the warehouse cell below, then confirm **Create joined analysis**.',
+          ].join('\n'),
+        );
+        contextCell.name = safeCellName('Analysis context');
+        const extractionCell = makeCell("sql", sql);
+        extractionCell.name = safeCellName(payload.title ?? "Warehouse extraction");
+        extractionCell.mixedSourcePlan = plan;
+        extractionCell.executionTarget = { target: 'connection' };
+        extractionCell.datasetRefs = [{
+          id: plan.datasetId ?? plan.localDataset,
+          alias: plan.localDataset,
+          role: 'source',
+        }];
+        extractionCell.annotations = [{
+          id: `note_${Date.now()}_mixed_source`,
+          body: `AI prepared a bounded warehouse extraction for a local join with ${plan.localDataset} on ${plan.warehouseKey} = ${plan.localKey}. Review required.`,
+          createdAt: new Date().toISOString(),
+          author: 'DQL',
+        }];
+        dispatch({ type: "ADD_CELL", cell: contextCell, afterId: aiSourceCellId ?? undefined });
+        dispatch({ type: "ADD_CELL", cell: extractionCell, afterId: contextCell.id });
+        setAiSourceCellId(extractionCell.id);
+        setAiOpen(true);
+        return;
+      }
+      const cell = makeCell("sql", sql);
+      cell.name = safeCellName(
+        payload.title ?? payload.dqlArtifact?.name ?? "AI analysis",
+      );
+      if (payload.result) {
+        cell.result = payload.result;
+        cell.status = "success";
+        cell.executionCount = 1;
+      }
+      if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+      if (payload.dqlArtifact) {
+        cell.dqlArtifact = {
+          source: payload.dqlArtifact.source,
+          sql: payload.sql,
+          name: payload.dqlArtifact.name,
+          sourcePath: payload.dqlArtifact.sourcePath,
+          kind: payload.dqlArtifact.kind,
+          metrics: payload.dqlArtifact.metrics,
+          dimensions: payload.dqlArtifact.dimensions,
+        };
+      }
+      const datasetRefs = datasets
+        .filter((dataset) =>
+          new RegExp(`\\b${escapeRegExp(dataset.alias)}\\b`, "i").test(sql),
+        )
+        .map((dataset) => ({
+          id: dataset.id,
+          alias: dataset.alias,
+          role:
+            dataset.storageMode === "staged"
+              ? ("staged" as const)
+              : ("source" as const),
+          fingerprint: dataset.fileFingerprint,
+        }));
+      if (datasetRefs.length > 0) {
+        cell.executionTarget = { target: "local" };
+        cell.datasetRefs = datasetRefs;
+        if (cell.dqlArtifact) cell.dqlArtifact.reviewState = "review_required";
+      }
+      dispatch({
+        type: "ADD_CELL",
+        cell,
+        afterId: aiSourceCellId ?? undefined,
+      });
+      setAiSourceCellId(cell.id);
+      setAiOpen(true);
+    },
+    [aiSourceCellId, datasets, dispatch],
+  );
 
   const askFromHistory = useCallback((run: NotebookResearchRun) => {
     setAiSourceCellId(run.sourceCellId ?? null);
@@ -244,18 +393,28 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           style={{
             flex: 1,
             minWidth: 0,
-            overflow: 'auto',
-            padding: '0 0 40px',
+            overflow: "auto",
+            padding: "0 0 40px",
+            display: compactWorkspace && aiOpen ? "none" : "block",
           }}
         >
           <DocumentMetadataRow />
+          {datasetImport.open && (
+            <DatasetImportPanel
+              afterId={datasetImport.afterId}
+              onClose={() => setDatasetImport({ open: false })}
+            />
+          )}
           <CellList
             registerCellRef={registerCellRef}
             researchRefreshKey={aiHistoryRefreshKey}
             onStartResearch={openAiForCell}
           />
         </div>
-        {aiOpen && (
+        <div
+          style={{ display: aiOpen ? "contents" : "none" }}
+          aria-hidden={!aiOpen}
+        >
           <NotebookAiDrawer
             t={t}
             notebookPath={activeNotebookPath}
@@ -271,8 +430,9 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
             onInsertDql={insertGeneratedDqlCell}
             onAskFromHistory={askFromHistory}
             onOpenResearch={openResearchFromAgentRun}
+            compact={compactWorkspace}
           />
-        )}
+        </div>
       </div>
     </div>
   );
@@ -435,6 +595,7 @@ function NotebookAiDrawer({
   onInsertDql,
   onAskFromHistory,
   onOpenResearch,
+  compact,
 }: {
   t: Theme;
   notebookPath?: string;
@@ -450,6 +611,7 @@ function NotebookAiDrawer({
   onInsertDql: (payload: InsertDqlPayload) => void;
   onAskFromHistory: (run: NotebookResearchRun) => void;
   onOpenResearch: (id: string, notebookPath?: string) => void | Promise<void>;
+  compact: boolean;
 }) {
   const { state } = useNotebook();
   const openBlockInStudio = useOpenBlockInStudio();
@@ -477,16 +639,17 @@ function NotebookAiDrawer({
     sourceCellId: sourceCell?.id,
     sourceCellName: sourceCell?.name,
     sourceCellType: sourceCell?.type,
+    notebookContext: upstreamContext,
   };
 
   return (
     <aside
       style={{
-        width: 440,
-        maxWidth: '42vw',
-        minWidth: 360,
-        flex: '0 0 auto',
-        borderLeft: `1px solid ${t.headerBorder}`,
+        width: compact ? "100%" : 440,
+        maxWidth: compact ? "none" : "42vw",
+        minWidth: compact ? 0 : 360,
+        flex: "0 0 auto",
+        borderLeft: compact ? "none" : `1px solid ${t.headerBorder}`,
         background: t.cellBg,
         display: 'flex',
         flexDirection: 'column',
@@ -694,19 +857,67 @@ function buildNotebookAiContext(input: {
   notebookTitle?: string;
   cell: Cell | null;
   cells: Cell[];
+  datasets: DatasetSource[];
 }): string {
   const lines: string[] = [];
-  lines.push('Notebook AI contract:');
-  lines.push([
-    '- Use the same path for research, SQL generation, SQL repair, DQL reuse checks, and DQL draft planning.',
-    '- Always check certified DQL blocks, draft blocks, dbt/semantic metadata, and runtime schema before proposing new SQL.',
-    '- Return one clear outcome: Reuse certified block, Use existing draft, Review SQL preview, Fix SQL, Create DQL draft, Needs review, or Cannot answer yet.',
-    '- For review-required DQL artifacts, prefer reusable parameterizable SQL preview logic over hard-coded literals when the business question implies a reusable block.',
-    '- Keep DQL certification manual; do not claim SQL previews or drafts are certified.',
-    '- Explain business purpose, grain, filters/parameters, technical lineage, duplicate/reuse evidence, preview status, and next action.',
-  ].join('\n'));
-  lines.push(`Notebook: ${input.notebookTitle || input.notebookPath || 'Untitled notebook'}`);
+  lines.push("Notebook AI contract:");
+  lines.push(
+    [
+      "- Use the same path for research, SQL generation, SQL repair, DQL reuse checks, and DQL draft planning.",
+      "- Always check certified DQL blocks, draft blocks, dbt/semantic metadata, and runtime schema before proposing new SQL.",
+      "- Return one clear outcome: Reuse certified block, Use existing draft, Review SQL preview, Fix SQL, Create DQL draft, Needs review, or Cannot answer yet.",
+      "- For review-required DQL artifacts, prefer reusable parameterizable SQL preview logic over hard-coded literals when the business question implies a reusable block.",
+      "- Keep DQL certification manual; do not claim SQL previews or drafts are certified.",
+      "- Imported CSV and staged warehouse snapshots are point-in-time local data. Never label a mixed local result certified.",
+      "- Before a cross-source join, state the governed source, local dataset, proposed join keys and cardinality, freshness mismatch, extraction scope, and review-required trust label.",
+      "- If join keys are ambiguous or likely many-to-many, ask a focused follow-up question instead of guessing.",
+      "- Never request or include complete dataset rows. Use the supplied schema/profile/lineage and only bounded redacted samples from explicit tools.",
+      "- Explain business purpose, grain, filters/parameters, technical lineage, duplicate/reuse evidence, preview status, and next action.",
+    ].join("\n"),
+  );
+  lines.push(
+    `Notebook: ${input.notebookTitle || input.notebookPath || "Untitled notebook"}`,
+  );
   if (input.notebookPath) lines.push(`Path: ${input.notebookPath}`);
+  if (input.datasets.length > 0) {
+    const selectedIds = new Set(
+      input.cell?.datasetRefs?.map((reference) => reference.id) ?? [],
+    );
+    const ranked = [...input.datasets]
+      .sort(
+        (a, b) => Number(selectedIds.has(b.id)) - Number(selectedIds.has(a.id)),
+      )
+      .slice(0, 20);
+    lines.push("Available notebook datasets (metadata only; no full rows):");
+    lines.push(
+      ranked
+        .map((dataset) =>
+          [
+            `- ${dataset.name} as ${dataset.alias}`,
+            `storage=${dataset.storageMode}`,
+            `trust=${dataset.trustState}`,
+            `rows=${dataset.profile.rowCount}`,
+            `refreshed=${dataset.refreshedAt}`,
+            `columns=${dataset.profile.columns
+              .slice(0, 40)
+              .map(
+                (column) =>
+                  `${column.name}:${column.type}${column.flags?.length ? `[${column.flags.join("|")}]` : ""}`,
+              )
+              .join(", ")}`,
+            dataset.lineage
+              ? `lineage=${compactText(JSON.stringify(dataset.lineage), 700)}`
+              : "",
+            dataset.schemaDrift
+              ? `schema_drift=${compactText(JSON.stringify(dataset.schemaDrift), 400)}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        )
+        .join("\n"),
+    );
+  }
   if (input.cell) {
     lines.push(`Selected cell: ${input.cell.type.toUpperCase()}${input.cell.name ? ` ${input.cell.name}` : ''}`);
     if (input.cell.error) lines.push(`Current error: ${input.cell.error}`);
@@ -727,6 +938,10 @@ function buildNotebookAiContext(input: {
     }
   }
   return lines.join('\n\n');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function compactText(value: string | undefined, limit: number): string {

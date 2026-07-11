@@ -35,9 +35,10 @@ import {
   parseSemanticDragRef,
   semanticCompletionSource,
   setActiveSemanticEditor,
-} from '../../editor/semantic-completions';
-import { dqlBlockCompletionSource } from '../../editor/dql-completions';
-import { api } from '../../api/client';
+} from "../../editor/semantic-completions";
+import { dqlBlockCompletionSource } from "../../editor/dql-completions";
+import { api } from "../../api/client";
+import { rankedSqlCompletionSource } from "../../editor/sql-completions";
 
 /**
  * Build the SQL language extension with IDE-style completion wired through
@@ -54,6 +55,7 @@ function buildSqlLanguage(schema: Record<string, string[]> | undefined, dqlMode:
   const exts = [
     lang,
     lang.language.data.of({ autocomplete: semanticCompletionSource }),
+    lang.language.data.of({ autocomplete: rankedSqlCompletionSource }),
   ];
   if (dqlMode) {
     exts.push(lang.language.data.of({ autocomplete: dqlBlockCompletionSource }));

@@ -433,6 +433,17 @@ export interface AgentResultPayload {
   sql?: string;
   blockName?: string;
   blockPath?: string;
+  parameters?: Array<{
+    name: string;
+    value: unknown;
+    source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+  }>;
+  auditId?: string;
+}
+
+export interface CertifiedBlockInvocationInput {
+  question?: string;
+  parameters?: Record<string, unknown>;
 }
 
 export interface AnswerLoopInput {
@@ -489,7 +500,7 @@ export interface AnswerLoopInput {
    * keeps retrieval deterministic, while hosts enforce persona/RBAC/RLS in the
    * runtime they already own.
    */
-  executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
+  executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
   /**
    * Optional host-side generated SQL preview executor. Generated SQL remains
    * AI-generated and review-required; this only lets local hosts show bounded
@@ -877,11 +888,65 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     let executionError: string | undefined;
     if (artifactHit.node.kind === 'block' && input.executeCertifiedBlock) {
       try {
-        result = await input.executeCertifiedBlock(artifactHit.node);
+        result = await input.executeCertifiedBlock(artifactHit.node, { question });
         result = trimResultToRequestedTopN(result, questionPlan);
       } catch (err) {
         executionError = err instanceof Error ? err.message : String(err);
       }
+    }
+    const missingParameters = /^I need values for:\s*(.+?)\.?$/i.exec(executionError ?? '')?.[1]
+      ?.split(',')
+      .map((value) => value.trim())
+      .filter(Boolean) ?? [];
+    if (missingParameters.length > 0) {
+      const text = `The certified block "${artifactHit.node.name}" needs ${missingParameters.join(', ')} before it can run. Please provide ${missingParameters.length === 1 ? 'that value' : 'those values'}; I will reuse the same certified block.`;
+      const citations: AgentCitation[] = [{
+        nodeId: artifactHit.node.nodeId,
+        kind: artifactHit.node.kind,
+        name: artifactHit.node.name,
+        gitSha: artifactHit.node.gitSha,
+        sourceTier: 'certified_artifact',
+        provenance: artifactHit.node.provenance,
+      }];
+      const analysisPlan = buildAnalysisPlan({
+        question,
+        intent: 'clarify',
+        routeReason: 'A certified block matched, but a required values-only parameter is unresolved.',
+        selectedNodes: [artifactHit.node],
+        schemaContext,
+        assumptions: [`Required parameter values: ${missingParameters.join(', ')}.`],
+      });
+      return {
+        kind: 'no_answer',
+        sourceTier: 'certified_artifact',
+        certification: 'analyst_review_required',
+        reviewStatus: 'none',
+        confidence: 0.95,
+        text,
+        answer: text,
+        block: artifactHit.node,
+        executionError,
+        sourceCertifiedBlock: artifactHit.node.name,
+        contextPackId: input.contextPack?.id,
+        citations,
+        memoryContext: input.memoryContext,
+        analysisPlan,
+        evidence: buildNoAnswerEvidence({
+          question,
+          reason: text,
+          artifactHits,
+          businessHits,
+          semanticHits,
+          manifestHits,
+          considered,
+          memoryContext: input.memoryContext ?? [],
+          analysisPlan,
+          budgetTrace: cascadeBudgetTrace(repairBudgetState),
+        }),
+        contextPack: input.contextPack,
+        considered,
+        providerUsed: provider.name,
+      };
     }
     const resultShapeWarnings = result ? validateAnswerResultShape(questionPlan, result).warnings : [];
     // When a certified block's execution was ATTEMPTED and FAILED, the answer

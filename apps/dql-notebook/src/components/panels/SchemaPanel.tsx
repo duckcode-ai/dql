@@ -6,6 +6,7 @@ import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { SchemaColumn, GovernanceStatus } from '../../store/types';
 import { getTypeColor } from '../../utils/type-colors';
+import { DataSourceIcon, describeSchemaObject } from './DataSourceIcon';
 
 function Skeleton({ t }: { t: Theme }) {
   return (
@@ -130,7 +131,7 @@ export function SchemaPanel() {
   return (
     <PanelFrame
       title="Data Catalog"
-      subtitle="Schemas, tables, views, and columns from the active connection."
+      subtitle="Warehouse objects and local research datasets, clearly separated."
       actions={refreshAction}
       toolbar={toolbar}
       bodyPadding={0}
@@ -185,7 +186,7 @@ function CatalogStatsBar({
     >
       <StatPill label="schemas" value={stats.schemas} t={t} />
       <span style={{ color: t.headerBorder }}>·</span>
-      <StatPill label="tables" value={stats.tables} t={t} />
+      <StatPill label="objects" value={stats.tables} t={t} />
       <span style={{ color: t.headerBorder }}>·</span>
       <StatPill label="columns" value={stats.columns} t={t} />
     </div>
@@ -311,9 +312,15 @@ function TableRow({
     }
   };
 
-  const isView = table.objectType?.toLowerCase().includes('view') ?? false;
-  const objectTypeLabel = isView ? 'view' : 'table';
-  const objectColor = isView ? '#d2a8ff' : t.accent;
+  const presentation = describeSchemaObject(table);
+  const objectTypeLabel = presentation.label;
+  const objectColor = presentation.tone === 'success'
+    ? t.success
+    : presentation.tone === 'warning'
+      ? t.warning
+      : presentation.tone === 'muted'
+        ? '#d2a8ff'
+        : t.accent;
   return (
     <div>
       <button
@@ -351,18 +358,10 @@ function TableRow({
         >
           <path d="M3 2l4 3-4 3V2Z" />
         </svg>
-        {isView ? (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: objectColor, flexShrink: 0 }}>
-            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" />
-            <circle cx="12" cy="12" r="3" />
-          </svg>
-        ) : (
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: objectColor, flexShrink: 0 }}>
-            <ellipse cx="12" cy="5" rx="9" ry="3" />
-            <path d="M3 5v14a9 3 0 0 0 18 0V5" />
-            <path d="M3 12a9 3 0 0 0 18 0" />
-          </svg>
-        )}
+        <DataSourceIcon
+          table={table}
+          colors={{ accent: t.accent, success: t.success, warning: t.warning, muted: '#d2a8ff' }}
+        />
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {table.name.includes('.') ? table.name.split('.').slice(1).join('.') : table.name}
         </span>

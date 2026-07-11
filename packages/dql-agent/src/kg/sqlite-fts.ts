@@ -472,6 +472,7 @@ function rowToNode(row: {
     dimensions: metadata.dimensions,
     allowedFilters: metadata.allowedFilters,
     parameterPolicy: metadata.parameterPolicy,
+    parameters: metadata.parameters,
     filterBindings: metadata.filterBindings,
     sourceSystems: metadata.sourceSystems,
     replacementFor: metadata.replacementFor,
@@ -508,6 +509,7 @@ function nodeMetadata(node: KGNode): Partial<KGNode> {
     'dimensions',
     'allowedFilters',
     'parameterPolicy',
+    'parameters',
     'filterBindings',
     'sourceSystems',
     'replacementFor',
@@ -537,4 +539,3 @@ function safeJSON<T>(raw: string | null | undefined, fallback: T): T {
     return fallback;
   }
 }
-

@@ -6,7 +6,7 @@
 // deterministic, versioned on-disk representation:
 //
 //   {
-//     "dqlnbVersion": 1,
+//     "dqlnbVersion": 2,
 //     "version": <legacy schema version>,
 //     "title": "...",
 //     "metadata": { ...sorted keys... },
@@ -17,7 +17,7 @@
 // Preserves cell order (cells[] is array-ordered by authoring intent).
 // Sorts object keys recursively at every depth.
 
-export const NOTEBOOK_FORMAT_VERSION = 1;
+export const NOTEBOOK_FORMAT_VERSION = 2;
 
 /**
  * Return the declared notebook format version, or `0` if absent. Missing

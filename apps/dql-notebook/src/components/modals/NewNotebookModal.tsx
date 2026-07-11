@@ -9,18 +9,30 @@ interface NewNotebookModalProps {
   onFileOpened: (file: NotebookFile) => void;
 }
 
-type Template = 'blank' | 'revenue' | 'pipeline';
+type Template =
+  | "blank"
+  | "analysis"
+  | "metric_diagnostic"
+  | "data_quality"
+  | "experiment";
 
 const TEMPLATE_LABELS: Record<Template, string> = {
-  blank: 'Blank',
-  revenue: 'Revenue Analysis',
-  pipeline: 'Pipeline Health',
+  blank: "Blank",
+  analysis: "Analysis",
+  metric_diagnostic: "Metric diagnostic",
+  data_quality: "Data-quality investigation",
+  experiment: "Experiment log",
 };
 
 const TEMPLATE_DESCRIPTIONS: Record<Template, string> = {
-  blank: 'Start with an empty notebook.',
-  revenue: 'Pre-built queries for revenue metrics and trends.',
-  pipeline: 'Templates for data pipeline health monitoring.',
+  blank: "Start with an empty notebook.",
+  analysis:
+    "A decision-ready research narrative from context through takeaways.",
+  metric_diagnostic:
+    "Trace a metric change through segments, time, and validation checks.",
+  data_quality:
+    "Profile a source, document issues, and record validation evidence.",
+  experiment: "Capture a hypothesis, method, results, and decision.",
 };
 
 function slugify(name: string): string {
@@ -40,23 +52,104 @@ function validateName(name: string): string | null {
 
 function buildTemplateCells(template: Template): Cell[] {
   switch (template) {
-    case 'revenue':
+    case "analysis":
       return [
         makeCell(
-          'markdown',
-          '# Revenue Analysis\n\nThis notebook analyzes revenue metrics and trends over time.'
+          "markdown",
+          "# TL;DR\n\nSummarize the answer and decision here.",
         ),
-        { ...makeCell('sql', 'SELECT\n  DATE_TRUNC(\'month\', order_date) AS month,\n  SUM(amount) AS revenue\nFROM orders\nGROUP BY 1\nORDER BY 1'), name: 'monthly_revenue' },
-        { ...makeCell('sql', 'SELECT\n  product_category,\n  SUM(amount) AS total_revenue,\n  COUNT(*) AS orders\nFROM orders\nGROUP BY 1\nORDER BY 2 DESC'), name: 'revenue_by_category' },
+        makeCell(
+          "markdown",
+          "## Context and methods\n\nState the business question, scope, definitions, and assumptions.",
+        ),
+        {
+          ...makeCell(
+            "sql",
+            "-- Choose a governed semantic query, block, connection, or local dataset.",
+          ),
+          name: "analysis_data",
+        },
+        makeCell(
+          "markdown",
+          "## Results\n\nExplain the material findings and uncertainty.",
+        ),
+        makeCell(
+          "markdown",
+          "## Takeaways\n\nRecord the decision, risks, and next action.",
+        ),
       ];
-    case 'pipeline':
+    case "metric_diagnostic":
       return [
         makeCell(
-          'markdown',
-          '# Pipeline Health\n\nMonitor data pipeline performance, SLA compliance, and error rates.'
+          "markdown",
+          "# Metric diagnostic\n\n**Question:** What changed, when, and for whom?\n\n**Metric definition:** Add the certified definition and expected behavior.",
         ),
-        { ...makeCell('sql', 'SELECT\n  pipeline_name,\n  COUNT(*) AS runs,\n  AVG(duration_seconds) AS avg_duration,\n  SUM(CASE WHEN status = \'failed\' THEN 1 ELSE 0 END) AS failures\nFROM pipeline_runs\nGROUP BY 1\nORDER BY 4 DESC'), name: 'pipeline_summary' },
-        { ...makeCell('sql', 'SELECT\n  *\nFROM pipeline_runs\nWHERE status = \'failed\'\n  AND run_date >= CURRENT_DATE - INTERVAL \'7 days\'\nORDER BY run_date DESC'), name: 'recent_failures' },
+        {
+          ...makeCell(
+            "sql",
+            "-- Add the semantic metric with a time dimension and comparison period.",
+          ),
+          name: "metric_trend",
+        },
+        {
+          ...makeCell(
+            "sql",
+            "-- Break the change down by compatible business dimensions.",
+          ),
+          name: "driver_breakdown",
+          dependencies: [],
+        },
+        makeCell(
+          "markdown",
+          "## Diagnosis\n\nSeparate validated drivers from hypotheses and data limitations.",
+        ),
+      ];
+    case "data_quality":
+      return [
+        makeCell(
+          "markdown",
+          "# Data-quality investigation\n\nDocument the source, owner, freshness expectation, and affected decisions.",
+        ),
+        {
+          ...makeCell(
+            "sql",
+            "-- Select or import a dataset, then inspect nulls, duplicates, ranges, and freshness.",
+          ),
+          name: "quality_profile",
+        },
+        {
+          ...makeCell(
+            "sql",
+            "-- Add focused validation checks for suspected issues.",
+          ),
+          name: "quality_checks",
+        },
+        makeCell(
+          "markdown",
+          "## Findings and disposition\n\nRecord severity, impacted metrics, owner, and remediation.",
+        ),
+      ];
+    case "experiment":
+      return [
+        makeCell(
+          "markdown",
+          "# Experiment log\n\n**Hypothesis:**\n\n**Primary metric:**\n\n**Guardrails:**\n\n**Population and dates:**",
+        ),
+        {
+          ...makeCell(
+            "sql",
+            "-- Build the reproducible experiment population and outcome query.",
+          ),
+          name: "experiment_results",
+        },
+        makeCell(
+          "markdown",
+          "## Results\n\nReport effect size, uncertainty, guardrails, and data-quality checks.",
+        ),
+        makeCell(
+          "markdown",
+          "## Decision\n\nShip, iterate, or stop — with rationale.",
+        ),
       ];
     default:
       return [makeCell('sql')];

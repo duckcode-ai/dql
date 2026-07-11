@@ -6,6 +6,15 @@
     "moduleResolution": "NodeNext",
     "paths": {
       "@duckcodeailabs/dql-core": ["packages/dql-core/src/index.ts"],
+      "@duckcodeailabs/dql-core/format": [
+        "packages/dql-core/src/format/index.ts"
+      ],
+      "@duckcodeailabs/dql-core/lineage": [
+        "packages/dql-core/src/lineage/index.ts"
+      ],
+      "@duckcodeailabs/dql-core/artifacts": [
+        "packages/dql-core/src/artifacts/index.ts"
+      ],
       "@duckcodeailabs/dql-compiler": ["packages/dql-compiler/src/index.ts"],
       "@duckcodeailabs/dql-runtime": ["packages/dql-runtime/src/index.ts"],
       "@duckcodeailabs/dql-charts": ["packages/dql-charts/src/index.ts"],

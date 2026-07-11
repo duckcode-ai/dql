@@ -4,6 +4,7 @@ import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { NotebookFile, SchemaTable, SemanticTreeNode } from '../../store/types';
+import { DataSourceIcon, describeSchemaObject } from './DataSourceIcon';
 import type { Theme } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
 import type { BlockEntry } from '../blocks/block-types';
@@ -241,8 +242,12 @@ function DatabaseList({ t, search, onInsert, onSeedBlock }: { t: Theme; search: 
                 title="Insert a SELECT for this table"
                 style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 7, padding: 0, fontFamily: t.font }}
               >
-                <Database size={13} color={t.accent} style={{ flexShrink: 0 }} />
+                <DataSourceIcon
+                  table={tb}
+                  colors={{ accent: t.accent, success: t.success, warning: t.warning, muted: t.textMuted }}
+                />
                 <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontFamily: t.fontMono }}>{tb.name}</span>
+                <span style={{ fontSize: 8.5, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.04em', flexShrink: 0 }}>{describeSchemaObject(tb).label}</span>
                 <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{tb.columns.length}</span>
               </button>
               {onSeedBlock ? (

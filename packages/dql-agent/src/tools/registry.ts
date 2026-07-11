@@ -249,6 +249,11 @@ const CORE_TOOL_DEFINITIONS = [
           type: 'boolean',
           description: 'Return the semantic DQL artifact and compiled SQL without runtime execution. Default false.',
         },
+        parameters: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'Explicit values for the certified block\'s declared runtime parameters. Values may not alter metrics, dimensions, joins, or output shape.',
+        },
         serverUrl: {
           type: 'string',
           description: 'Base URL of the local DQL runtime for preview execution. Default http://127.0.0.1:3474.',

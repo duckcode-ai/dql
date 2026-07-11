@@ -339,7 +339,9 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
   if (node.params) {
     lines.push(`${indent(level + 1, state)}params {`);
     for (const entry of node.params.params) {
-      lines.push(`${indent(level + 2, state)}${entry.name} = ${formatExpression(entry.initializer)}`);
+      const typeSuffix = entry.paramType ? `: ${entry.paramType}` : '';
+      const defaultSuffix = entry.initializer ? ` = ${formatExpression(entry.initializer)}` : '';
+      lines.push(`${indent(level + 2, state)}${entry.name}${typeSuffix}${defaultSuffix}`);
     }
     lines.push(`${indent(level + 1, state)}}`);
   }

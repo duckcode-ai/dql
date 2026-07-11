@@ -9,8 +9,15 @@ import type {
   SingleValueCellConfig,
   TableCellConfig,
   BlockBinding,
-} from '../store/types';
-import { makeCellId } from '../store/NotebookStore';
+  ChatCellConfig,
+  CellDqlArtifact,
+  ExecutionTarget,
+  DatasetReference,
+  CellDependency,
+  CellAnnotation,
+  CellKernelMetadata,
+} from "../store/types";
+import { makeCellId } from "../store/NotebookStore";
 
 export interface ParsedWorkbook {
   title: string;
@@ -105,6 +112,32 @@ export interface NotebookMetadata {
   projectFilter?: string;
 }
 
+const KNOWN_CELL_FIELDS = new Set([
+  "id",
+  "type",
+  "content",
+  "source",
+  "name",
+  "title",
+  "paramConfig",
+  "paramValue",
+  "chartConfig",
+  "filterConfig",
+  "pivotConfig",
+  "singleValueConfig",
+  "tableConfig",
+  "chatConfig",
+  "upstream",
+  "blockBinding",
+  "dqlArtifact",
+  "executionTarget",
+  "datasetRefs",
+  "dependencies",
+  "annotations",
+  "mixedSourcePlan",
+  "kernel",
+]);
+
 export interface DqlNotebookFile {
   /** Canonical on-disk format version (v0.12+). Missing => legacy v0 file. */
   dqlnbVersion?: number;
@@ -125,31 +158,56 @@ export interface DqlNotebookFile {
     pivotConfig?: PivotCellConfig;
     singleValueConfig?: SingleValueCellConfig;
     tableConfig?: TableCellConfig;
+    chatConfig?: ChatCellConfig;
     upstream?: string;
     blockBinding?: BlockBinding;
+    dqlArtifact?: CellDqlArtifact;
+    executionTarget?: ExecutionTarget;
+    datasetRefs?: DatasetReference[];
+    dependencies?: CellDependency[];
+    annotations?: CellAnnotation[];
+    mixedSourcePlan?: import('../api/client').MixedSourceNotebookPlan;
+    kernel?: CellKernelMetadata;
+    [key: string]: unknown;
   }>;
 }
 
 export function parseDqlNotebook(content: string): ParsedWorkbook {
   try {
     const data = JSON.parse(content) as DqlNotebookFile;
-    const title = data.title || data.metadata?.title || 'Untitled';
-    const cells: Cell[] = (data.cells || []).map((c) => ({
-      id: c.id || makeCellId(),
-      type: c.type || 'sql',
-      content: c.content ?? c.source ?? '',
-      name: c.name || c.title,
-      status: 'idle' as const,
-      ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
-      ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
-      ...(c.chartConfig ? { chartConfig: c.chartConfig } : {}),
-      ...(c.filterConfig ? { filterConfig: c.filterConfig } : {}),
-      ...(c.pivotConfig ? { pivotConfig: c.pivotConfig } : {}),
-      ...(c.singleValueConfig ? { singleValueConfig: c.singleValueConfig } : {}),
-      ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
-      ...(c.upstream ? { upstream: c.upstream } : {}),
-      ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
-    }));
+    const title = data.title || data.metadata?.title || "Untitled";
+    const cells: Cell[] = (data.cells || []).map((c) => {
+      const preservedFields = Object.fromEntries(
+        Object.entries(c).filter(([key]) => !KNOWN_CELL_FIELDS.has(key)),
+      );
+      return {
+        id: c.id || makeCellId(),
+        type: c.type || "sql",
+        content: c.content ?? c.source ?? "",
+        name: c.name || c.title,
+        status: "idle" as const,
+        ...(c.paramConfig ? { paramConfig: c.paramConfig } : {}),
+        ...(c.paramValue !== undefined ? { paramValue: c.paramValue } : {}),
+        ...(c.chartConfig ? { chartConfig: c.chartConfig } : {}),
+        ...(c.filterConfig ? { filterConfig: c.filterConfig } : {}),
+        ...(c.pivotConfig ? { pivotConfig: c.pivotConfig } : {}),
+        ...(c.singleValueConfig
+          ? { singleValueConfig: c.singleValueConfig }
+          : {}),
+        ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
+        ...(c.chatConfig ? { chatConfig: c.chatConfig } : {}),
+        ...(c.upstream ? { upstream: c.upstream } : {}),
+        ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
+        ...(c.dqlArtifact ? { dqlArtifact: c.dqlArtifact } : {}),
+        ...(c.executionTarget ? { executionTarget: c.executionTarget } : {}),
+        ...(c.datasetRefs ? { datasetRefs: c.datasetRefs } : {}),
+        ...(c.dependencies ? { dependencies: c.dependencies } : {}),
+        ...(c.annotations ? { annotations: c.annotations } : {}),
+        ...(c.mixedSourcePlan ? { mixedSourcePlan: c.mixedSourcePlan } : {}),
+        ...(c.kernel ? { kernel: c.kernel } : {}),
+        ...(Object.keys(preservedFields).length > 0 ? { preservedFields } : {}),
+      };
+    });
     const { title: _metaTitle, ...restMeta } = data.metadata ?? {};
     return { title, cells, metadata: restMeta };
   } catch (err) {
@@ -182,6 +240,7 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(!existingMetadata?.createdAt ? { createdAt: new Date().toISOString() } : {}),
     },
     cells: cells.map((c) => ({
+      ...(c.preservedFields ?? {}),
       id: c.id,
       type: c.type,
       content: c.content,
@@ -193,8 +252,16 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(c.pivotConfig ? { pivotConfig: c.pivotConfig } : {}),
       ...(c.singleValueConfig ? { singleValueConfig: c.singleValueConfig } : {}),
       ...(c.tableConfig ? { tableConfig: c.tableConfig } : {}),
+      ...(c.chatConfig ? { chatConfig: c.chatConfig } : {}),
       ...(c.upstream ? { upstream: c.upstream } : {}),
       ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
+      ...(c.dqlArtifact ? { dqlArtifact: c.dqlArtifact } : {}),
+      ...(c.executionTarget ? { executionTarget: c.executionTarget } : {}),
+      ...(c.datasetRefs ? { datasetRefs: c.datasetRefs } : {}),
+      ...(c.dependencies ? { dependencies: c.dependencies } : {}),
+      ...(c.annotations ? { annotations: c.annotations } : {}),
+      ...(c.mixedSourcePlan ? { mixedSourcePlan: c.mixedSourcePlan } : {}),
+      ...(c.kernel ? { kernel: c.kernel } : {}),
     })),
   };
   return canonicalizeNotebook(JSON.stringify(data));

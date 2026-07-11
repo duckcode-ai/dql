@@ -1,103 +1,45 @@
 import { describe, expect, it } from 'vitest';
-
 import {
-  parseSemanticVisualFields,
-  setBlockArray,
-  setBlockStringField,
-  setDqlSectionBody,
-  setSemanticArray,
-  setSemanticMetrics,
-  setSemanticScalar,
-  upsertVisualizationConfig,
-} from './block-studio';
+  inferVisualParameterType,
+  parseVisualBlockParameters,
+  removeVisualBlockParameter,
+  upsertVisualBlockParameter,
+} from './block-studio.js';
 
-describe('block-studio utils', () => {
-  it('preserves generated source DQL lineage when normalizing a custom draft block', () => {
-    const source = `block "product_supply_draft" {
-  status = "draft"
-  domain = "misc"
+const SOURCE = `block "Revenue by Region" {
+  domain = "sales"
   type = "custom"
-  description = "Can you include the product details with previous results?"
-  owner = "analytics@example.com"
-  tags = ["generated"]
-  source_dql_kind = "certified_block"
-  source_dql_name = "product_supply_breakdown"
-  source_dql_path = "domains/supply_chain/blocks/product_supply_breakdown.dql"
-  source_dql_hash = "abc123"
-  source_dql_metrics = ["supply_cost"]
-  source_dql_dimensions = ["product_id", "supply_id"]
+  query = """SELECT region, revenue FROM revenue WHERE region IN (${ '${region_set}' })"""
+}`;
 
-  query = """
-    SELECT 1
-  """
-}
-`;
-
-    const next = setBlockStringField(source, 'domain', 'supply_chain');
-
-    expect(next).toContain('domain = "supply_chain"');
-    expect(next).toContain('source_dql_kind = "certified_block"');
-    expect(next).toContain('source_dql_name = "product_supply_breakdown"');
-    expect(next).toContain('source_dql_path = "domains/supply_chain/blocks/product_supply_breakdown.dql"');
-    expect(next).toContain('source_dql_hash = "abc123"');
-    expect(next).toContain('source_dql_metrics = ["supply_cost"]');
-    expect(next).toContain('source_dql_dimensions = ["product_id", "supply_id"]');
+describe('visual block parameters', () => {
+  it('infers author-entered values into safe DQL types', () => {
+    expect(inferVisualParameterType('10', 'top_n')).toBe('number');
+    expect(inferVisualParameterType('2026-01-01', 'start_date')).toBe('date');
+    expect(inferVisualParameterType('Central, East', 'region_set')).toBe('string[]');
+    expect(inferVisualParameterType('true', 'include_inactive')).toBe('boolean');
   });
 
-  it('round-trips multi-metric visual fields without removing advanced clauses', () => {
-    const source = `block "revenue_quality" {
-  type = "semantic"
-  metric = "revenue"
-  dimensions = ["region"]
-  custom_governance_clause = "preserve-me"
-  tests {
-    assert = "revenue >= 0"
-  }
-  visualization {
-    chart = "bar"
-    custom_palette = "finance"
-  }
-}
-`;
-
-    let next = setSemanticMetrics(source, ['revenue', 'gross_margin']);
-    next = setSemanticArray(next, 'dimensions', ['region', 'channel']);
-    next = setSemanticArray(next, 'requested_filters', ['region']);
-    next = setSemanticScalar(next, 'time_dimension', 'order_date');
-    next = setSemanticScalar(next, 'granularity', 'month');
-    next = upsertVisualizationConfig(next, { chart: 'line', title: 'Revenue and margin' });
-    next = setDqlSectionBody(next, 'tests', 'assert row_count >= 1\nassert revenue >= 0');
-
-    expect(parseSemanticVisualFields(next)).toEqual({
-      metrics: ['revenue', 'gross_margin'],
-      dimensions: ['region', 'channel'],
-      requestedFilters: ['region'],
-      timeDimension: 'order_date',
-      granularity: 'month',
+  it('writes visual definitions back into the DQL source and reads source edits', () => {
+    const withParameter = upsertVisualBlockParameter(SOURCE, {
+      name: 'region_set',
+      type: 'string[]',
+      required: false,
+      defaultText: 'Central, East',
+      policy: 'dynamic',
     });
-    expect(next).toContain('custom_governance_clause = "preserve-me"');
-    expect(next).toContain('assert row_count >= 1');
-    expect(next).toContain('assert revenue >= 0');
-    expect(next).toContain('custom_palette = "finance"');
-    expect(next).toContain('chart = "line"');
-    expect(next).toContain('title = "Revenue and margin"');
-  });
 
-  it('edits and clears context arrays without removing unknown DQL clauses', () => {
-    const source = `block "customer_retention" {
-  primaryTerms = ["retention", "churn"]
-  custom_governance_clause = "preserve-me"
-  query = """
-    SELECT 1 AS retained_customers
-  """
-}
-`;
-    const next = setBlockArray(source, 'primaryTerms', ['retention', 'active customer']);
-    const cleared = setBlockArray(next, 'sourceSystems', []);
-
-    expect(next).toContain('primaryTerms = ["retention", "active customer"]');
-    expect(cleared).toContain('sourceSystems = []');
-    expect(cleared).toContain('custom_governance_clause = "preserve-me"');
-    expect(cleared).toContain('SELECT 1 AS retained_customers');
+    expect(withParameter).toContain('region_set: string[] = ["Central", "East"]');
+    expect(withParameter).toContain('region_set = "dynamic"');
+    expect(parseVisualBlockParameters(withParameter)).toEqual([
+      expect.objectContaining({
+        name: 'region_set',
+        type: 'string[]',
+        default: ['Central', 'East'],
+        required: false,
+        binding: { kind: 'sql_value' },
+      }),
+    ]);
+    expect(parseVisualBlockParameters(removeVisualBlockParameter(withParameter, 'region_set'))).toEqual([]);
   });
 });

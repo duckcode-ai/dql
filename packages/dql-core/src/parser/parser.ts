@@ -1806,10 +1806,31 @@ export class Parser {
         this.advance();
         continue;
       }
-      this.expect(TokenType.Equals);
-      const initializer = this.parseExpression();
+      let paramType: import('../ast/nodes.js').BlockParamType | undefined;
+      if (this.check(TokenType.ColonToken)) {
+        this.advance();
+        const typeToken = this.expect(TokenType.Identifier);
+        let renderedType = typeToken.value;
+        if (this.check(TokenType.LeftBracket) && this.tokens[this.pos + 1]?.type === TokenType.RightBracket) {
+          this.advance();
+          this.advance();
+          renderedType += '[]';
+        }
+        const validTypes = ['string', 'number', 'boolean', 'date', 'string[]', 'number[]', 'date[]'];
+        if (validTypes.includes(renderedType)) {
+          paramType = renderedType as import('../ast/nodes.js').BlockParamType;
+        } else {
+          this.error(`Invalid block parameter type '${renderedType}'. Valid types: ${validTypes.join(', ')}`);
+        }
+      }
+      let initializer: import('../ast/nodes.js').ExpressionNode | undefined;
+      if (this.check(TokenType.Equals)) {
+        this.advance();
+        initializer = this.parseExpression();
+      }
       paramEntries.push({
         name: nameToken.value,
+        paramType,
         initializer,
         span: this.makeSpan(paramStart, this.previousSpan()),
       });

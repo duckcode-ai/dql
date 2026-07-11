@@ -83,6 +83,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       dimensions: block.dimensions,
       allowedFilters: block.allowedFilters,
       parameterPolicy: block.parameterPolicy,
+      parameters: block.parameters,
       filterBindings: block.filterBindings,
       sourceSystems: block.sourceSystems,
       replacementFor: block.replacementFor,

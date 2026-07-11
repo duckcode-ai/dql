@@ -56,6 +56,7 @@ import {
   type DashboardDocument,
 } from '../apps/index.js';
 import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
+import { blockParameterDefinitions } from '../blocks/parameters.js';
 
 // ---- Public API ----
 
@@ -2232,6 +2233,7 @@ function blockDeclToManifestBlock(block: any, filePath: string): ManifestBlock {
           policy: entry.policy,
         }))
       : undefined,
+    parameters: blockParameterDefinitions(block),
     filterBindings: Array.isArray(block.filterBindings)
       ? block.filterBindings.map((entry: { filter: string; binding: string }) => ({
           filter: entry.filter,

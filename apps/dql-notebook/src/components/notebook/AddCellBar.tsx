@@ -1,12 +1,16 @@
-import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useRef, useEffect } from 'react';
-import { useNotebook, makeCell } from '../../store/NotebookStore';
-import { themes } from '../../themes/notebook-theme';
-import type { Cell, CellType } from '../../store/types';
-import { parseSemanticDragRef, SEMANTIC_REF_MIME } from '../../editor/semantic-completions';
-import { api } from '../../api/client';
-import { BlockPicker, type BlockEntry } from '../blocks/BlockPicker';
-import { extractSqlFromText } from '../../utils/block-studio';
+import type { Theme } from "../../themes/notebook-theme";
+import React, { useState, useRef, useEffect } from "react";
+import { MoreHorizontal, Upload } from "lucide-react";
+import { useNotebook, makeCell } from "../../store/NotebookStore";
+import { themes } from "../../themes/notebook-theme";
+import type { Cell, CellType } from "../../store/types";
+import {
+  parseSemanticDragRef,
+  SEMANTIC_REF_MIME,
+} from "../../editor/semantic-completions";
+import { api } from "../../api/client";
+import { BlockPicker, type BlockEntry } from "../blocks/BlockPicker";
+import { extractSqlFromText } from "../../utils/block-studio";
 import {
   BlockIcon,
   SQLCellIcon,
@@ -15,7 +19,6 @@ import {
   SingleValueCellIcon,
   ParamCellIcon,
   FilterCellIcon,
-  ChatCellIcon,
   FileText,
   Sparkles,
   Table,
@@ -25,7 +28,7 @@ interface AddCellBarProps {
   afterId?: string;
 }
 
-type PaletteType = CellType | 'block' | 'ai_sql';
+type PaletteType = CellType | "block" | "ai_sql" | "import_data";
 
 type PaletteEntry = {
   type: PaletteType;
@@ -33,22 +36,91 @@ type PaletteEntry = {
   shortLabel?: string;
   Icon: React.ComponentType<any>;
   color: string;
-  group: 'compute' | 'viz' | 'transform' | 'io' | 'library';
+  group: "core" | "input" | "transform" | "presentation";
 };
 
-// v1.4 pill-menu — color aligned to DQL cell-type palette (New-UI handoff)
-const PALETTE: PaletteEntry[] = [
-  { type: 'block', label: 'Block', Icon: BlockIcon, color: '#6b8afd', group: 'library' },
-  { type: 'chat', label: 'Chat', Icon: ChatCellIcon, color: '#8a8f9b', group: 'compute' },
-  { type: 'ai_sql', label: 'AI', Icon: Sparkles, color: '#f0883e', group: 'compute' },
-  { type: 'sql', label: 'SQL', Icon: SQLCellIcon, color: '#3b8ef0', group: 'compute' },
-  { type: 'markdown', label: 'Text', Icon: FileText, color: '#2fb97a', group: 'compute' },
-  { type: 'chart', label: 'Chart', Icon: ChartCellIcon, color: '#b067f7', group: 'viz' },
-  { type: 'pivot', label: 'Pivot', Icon: PivotCellIcon, color: '#e5a84d', group: 'viz' },
-  { type: 'single_value', label: 'Value', Icon: SingleValueCellIcon, color: '#b067f7', group: 'viz' },
-  { type: 'table', label: 'Table', Icon: Table, color: '#5dd1c8', group: 'viz' },
-  { type: 'param', label: 'Inputs', Icon: ParamCellIcon, color: '#9aa0ae', group: 'io' },
-  { type: 'filter', label: 'Filter', Icon: FilterCellIcon, color: '#f26a6a', group: 'transform' },
+const CORE_PALETTE: PaletteEntry[] = [
+  {
+    type: "sql",
+    label: "Query",
+    Icon: SQLCellIcon,
+    color: "#3b8ef0",
+    group: "core",
+  },
+  {
+    type: "markdown",
+    label: "Text",
+    Icon: FileText,
+    color: "#2fb97a",
+    group: "core",
+  },
+  {
+    type: "ai_sql",
+    label: "Ask AI",
+    Icon: Sparkles,
+    color: "#f0883e",
+    group: "core",
+  },
+  {
+    type: "import_data",
+    label: "Import data",
+    Icon: Upload,
+    color: "#5dd1c8",
+    group: "core",
+  },
+  {
+    type: "block",
+    label: "Use block",
+    Icon: BlockIcon,
+    color: "#6b8afd",
+    group: "core",
+  },
+];
+
+const MORE_PALETTE: PaletteEntry[] = [
+  {
+    type: "param",
+    label: "Parameter",
+    Icon: ParamCellIcon,
+    color: "#9aa0ae",
+    group: "input",
+  },
+  {
+    type: "filter",
+    label: "Filter",
+    Icon: FilterCellIcon,
+    color: "#f26a6a",
+    group: "transform",
+  },
+  {
+    type: "pivot",
+    label: "Pivot",
+    Icon: PivotCellIcon,
+    color: "#e5a84d",
+    group: "transform",
+  },
+  {
+    type: "chart",
+    label: "Chart",
+    Icon: ChartCellIcon,
+    color: "#b067f7",
+    group: "presentation",
+  },
+  {
+    type: "table",
+    label: "Table",
+    Icon: Table,
+    color: "#5dd1c8",
+    group: "presentation",
+  },
+  {
+    type: "single_value",
+    label: "Single value",
+    shortLabel: "Value",
+    Icon: SingleValueCellIcon,
+    color: "#b067f7",
+    group: "presentation",
+  },
 ];
 
 export function AddCellBar({ afterId }: AddCellBarProps) {
@@ -57,6 +129,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const [hovered, setHovered] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [blockPickerOpen, setBlockPickerOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +139,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setPopoverOpen(false);
         setBlockPickerOpen(false);
+        setMoreOpen(false);
       }
     }
     document.addEventListener('mousedown', handler);
@@ -75,6 +149,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const closeAll = () => {
     setPopoverOpen(false);
     setBlockPickerOpen(false);
+    setMoreOpen(false);
   };
 
   const addCell = (type: CellType) => {
@@ -84,19 +159,18 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   };
 
   const insertBoundBlockCell = async (block: BlockEntry) => {
-    let payload;
     try {
-      payload = await api.openBlockStudio(block.path);
+      await api.openBlockStudio(block.path);
     } catch (error) {
       console.error('Failed to bind block cell', error);
       window.alert(`Couldn't load block ${block.path}. Check the console for details.`);
       closeAll();
       return;
     }
-    const sqlBody = extractSqlFromText(payload.source) ?? payload.source;
-    const cell = makeCell('sql', sqlBody);
+    const blockReference = `@block(${JSON.stringify(block.name)})`;
+    const cell = makeCell('dql', blockReference);
     cell.name = block.name;
-    cell.blockBinding = { path: block.path, state: 'bound', originalContent: sqlBody };
+    cell.blockBinding = { path: block.path, state: 'bound', originalContent: blockReference };
     dispatch({ type: 'ADD_CELL', cell, afterId });
     closeAll();
   };
@@ -201,13 +275,14 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
               paddingBottom: 1,
             }}
           >
-            {PALETTE.map((entry) => (
+            {CORE_PALETTE.map((entry) => (
               <PaletteTile
                 key={entry.type}
                 entry={entry}
                 active={entry.type === 'block' && blockPickerOpen}
                 onClick={() => {
-                  if (entry.type === 'block') {
+                  if (entry.type === "block") {
+                    setMoreOpen(false);
                     setBlockPickerOpen((v) => !v);
                     return;
                   }
@@ -218,12 +293,90 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
                     closeAll();
                     return;
                   }
+                  if (entry.type === "import_data") {
+                    window.dispatchEvent(
+                      new CustomEvent("dql:open-dataset-import", {
+                        detail: { afterId },
+                      }),
+                    );
+                    closeAll();
+                    return;
+                  }
                   addCell(entry.type as CellType);
                 }}
                 t={t}
               />
             ))}
+            <button
+              type="button"
+              aria-label="More cell types"
+              data-testid="add-cell-more"
+              onClick={() => {
+                setBlockPickerOpen(false);
+                setMoreOpen((value) => !value);
+              }}
+              style={{
+                height: 48,
+                minWidth: 52,
+                borderRadius: 8,
+                border: `1px solid ${moreOpen ? t.accent : t.cellBorder}`,
+                background: moreOpen ? `${t.accent}12` : "transparent",
+                color: moreOpen ? t.accent : t.textSecondary,
+                display: "inline-flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 4,
+                font: `600 11px ${t.font}`,
+                cursor: "pointer",
+              }}
+            >
+              <MoreHorizontal size={17} aria-hidden="true" />
+              More
+            </button>
           </div>
+
+          {moreOpen && (
+            <div
+              style={{ borderTop: `1px solid ${t.cellBorder}`, paddingTop: 8 }}
+            >
+              {(["input", "transform", "presentation"] as const).map(
+                (group) => (
+                  <div
+                    key={group}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      marginTop: group === "input" ? 0 : 6,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 72,
+                        color: t.textMuted,
+                        fontSize: 10,
+                        textTransform: "uppercase",
+                        letterSpacing: ".06em",
+                      }}
+                    >
+                      {group}
+                    </span>
+                    {MORE_PALETTE.filter((entry) => entry.group === group).map(
+                      (entry) => (
+                        <PaletteTile
+                          key={entry.type}
+                          entry={entry}
+                          onClick={() => addCell(entry.type as CellType)}
+                          t={t}
+                        />
+                      ),
+                    )}
+                  </div>
+                ),
+              )}
+            </div>
+          )}
 
           {blockPickerOpen && (
             <div
@@ -261,7 +414,13 @@ function PaletteTile({
   const Icon = entry.Icon;
   return (
     <button
-      aria-label={entry.type === 'ai_sql' ? 'Ask AI to build SQL' : `Add ${entry.label} cell`}
+      aria-label={
+        entry.type === "ai_sql"
+          ? "Ask AI"
+          : entry.type === "import_data"
+            ? "Import data"
+            : `Add ${entry.label} cell`
+      }
       data-testid={`add-cell-${entry.type}`}
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}

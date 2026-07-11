@@ -1,14 +1,42 @@
-import { execFileSync, execSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { createServer } from 'node:http';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { homedir } from 'node:os';
-import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import Anthropic from '@anthropic-ai/sdk';
-import OpenAI from 'openai';
-import { QueryExecutor, type ConnectionConfig, type DatabaseConnector, type SQLParamSpec } from '@duckcodeailabs/dql-connectors';
+import { execFileSync, execSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  watch,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import {
+  dirname,
+  extname,
+  join,
+  normalize,
+  relative,
+  resolve,
+} from "node:path";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
+import {
+  buildMixedSourceWarehouseFallbackSql,
+  findMentionedNotebookDataset,
+  planMixedSourceNotebookSql,
+  planMixedSourceSql,
+} from "./mixed-source-sql.js";
+import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
+import {
+  QueryExecutor,
+  type ConnectionConfig,
+  type DatabaseConnector,
+  type SQLParamSpec,
+} from "@duckcodeailabs/dql-connectors";
 import {
   buildExecutionPlan,
   createWelcomeNotebook,
@@ -25,6 +53,8 @@ import {
   resolveSemanticLayerAsync,
   getDialect,
   Parser,
+  NodeKind,
+  blockParameterDefinitions,
   buildLineageGraph,
   buildManifest,
   findAppDocuments,
@@ -254,7 +284,12 @@ import {
   MetricFlowUnavailableError,
   compileMetricFlowQuery,
   hasDbtSemanticManifest,
-} from './metricflow.js';
+} from "./metricflow.js";
+import {
+  NotebookDatasetWorkspace,
+  type DatasetSource,
+} from "./notebook-datasets.js";
+import { prepareBlockInvocation } from './block-invocation.js';
 
 const NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT = 500;
 const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#6d5dfc"/><path d="M9 9h14v14H9z" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 13h6M13 17h6M13 21h4" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
@@ -275,6 +310,14 @@ export interface ProjectConfig {
     port?: number;
     theme?: string;
     open?: boolean;
+  };
+  notebook?: {
+    staging?: {
+      maxRows?: number;
+      maxBytes?: number;
+      timeoutSeconds?: number;
+      expiryDays?: number;
+    };
   };
   /** Optional `dql propose` conventions (classifier + bounded selection). */
   propose?: ProposeConfigInput;
@@ -644,7 +687,56 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   let connection = rawConnection ? normalizeProjectConnection(rawConnection, projectRoot) : null;
   let projectConfig = loadProjectConfig(projectRoot);
-  const requireActiveConnection = (candidate: ConnectionConfig | null | undefined = connection): ConnectionConfig => {
+  const datasetWorkspace = new NotebookDatasetWorkspace(
+    projectRoot,
+    executor,
+    connectorModuleSearchPaths(projectRoot),
+  );
+  let localWorkspaceReady = false;
+  const ensureLocalWorkspaceReady = async (): Promise<ConnectionConfig> => {
+    ensureConnectorInstalledForStartup(projectRoot, "duckdb");
+    if (!localWorkspaceReady) {
+      await datasetWorkspace.initialize();
+      localWorkspaceReady = true;
+    }
+    return datasetWorkspace.localConnection;
+  };
+  const resolveNamedConnection = (
+    name: string | undefined,
+  ): ConnectionConfig | null => {
+    if (!name) return null;
+    const stored = getStoredConnections(
+      projectConfig as unknown as Record<string, unknown>,
+    );
+    const normalized = normalizeStoredConnection(stored[name]);
+    return normalized
+      ? normalizeProjectConnection(normalized, projectRoot)
+      : null;
+  };
+  const resolveExecutionConnection = async (
+    body: Record<string, unknown>,
+  ): Promise<ConnectionConfig> => {
+    const target =
+      body.executionTarget && typeof body.executionTarget === "object"
+        ? (body.executionTarget as Record<string, unknown>)
+        : null;
+    if (target?.target === "local") return ensureLocalWorkspaceReady();
+    if (
+      target?.target === "connection" &&
+      typeof target.connectionName === "string"
+    ) {
+      const named = resolveNamedConnection(target.connectionName);
+      if (!named)
+        throw new Error(`Connection not found: ${target.connectionName}`);
+      return named;
+    }
+    return requireActiveConnection(
+      isConnectionConfig(body.connection) ? body.connection : connection,
+    );
+  };
+  const requireActiveConnection = (
+    candidate: ConnectionConfig | null | undefined = connection,
+  ): ConnectionConfig => {
     if (!candidate) {
       throw new Error('No database connection is configured yet. Open Connections, add a warehouse or local DuckDB/file connection, then retry.');
     }
@@ -706,6 +798,47 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   }
   await refreshLocalMetadataCatalog(projectRoot);
+
+  const recordDatasetMetadataSnapshot = (
+    datasets: DatasetSource[] = datasetWorkspace.list(),
+  ): void => {
+    if (datasets.length === 0) return;
+    try {
+      recordRuntimeSchemaSnapshot(projectRoot, {
+        source: "notebook_local_datasets",
+        tables: datasets.map((dataset) => ({
+          relation: dataset.alias,
+          schema: "notebook_local",
+          name: dataset.name,
+          description: [
+            dataset.description,
+            `${dataset.storageMode} ${dataset.format} dataset`,
+            `refreshed ${dataset.refreshedAt}`,
+            `trust ${dataset.trustState}`,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          source:
+            dataset.storageMode === "project"
+              ? "project_dataset"
+              : "local_dataset",
+          columns: dataset.profile.columns.map((column) => ({
+            name: column.name,
+            type: column.type,
+            description: column.flags?.length
+              ? column.flags.join(", ")
+              : undefined,
+          })),
+        })),
+      });
+    } catch {
+      // Dataset metadata improves retrieval but must never block notebook startup.
+    }
+  };
+  if (datasetWorkspace.list().length > 0) {
+    await ensureLocalWorkspaceReady().catch(() => undefined);
+    recordDatasetMetadataSnapshot();
+  }
 
   // Auto-register data/ CSV and Parquet files as DuckDB views so semantic layer
   // queries like `FROM orders` resolve without requiring read_csv_auto() in SQL.
@@ -873,7 +1006,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       target,
       mode,
       blockPath: target === 'block'
-        ? agentRunWorkspaceValue(request, 'blockPath') ?? request.selectedObject?.path
+        ? agentRunWorkspaceValue(request, 'blockPath')
+          ?? (request.selectedObject?.kind === 'block' && request.selectedObject.path?.endsWith('.dql')
+            ? request.selectedObject.path
+            : undefined)
         : undefined,
       owner: agentRunWorkspaceValue(request, 'owner'),
       domain: target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined,
@@ -966,6 +1102,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         'Prefer certified DQL blocks when they exactly cover the question.',
         'Generated DQL artifacts remain review-required; SQL is only the bounded preview/compiled evidence.',
         'If the question needs investigation, return the clearest answer and next review action without certifying generated work.',
+        ...(route === 'sql_cell'
+          ? ['This is a notebook authoring fallback. Reuse certified blocks and semantic definitions as context, but return the requested row-level SQL cell rather than substituting a related aggregate answer.']
+          : []),
         ...(isRepair ? [`This is a repair attempt — fix the previous failure: ${repair?.repairHint}`] : []),
       ].join(' '),
     };
@@ -1140,6 +1279,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const resolvedRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const isSemantic = governedAnswer.route?.tier === 'semantic_metric';
+    const requestedNotebookDataset = findMentionedNotebookDataset(
+      request.question,
+      datasetWorkspace.list(),
+    );
+    const governedAssetMissesLocalSource = Boolean(requestedNotebookDataset && (
+      isCertified
+      || isSemantic
+      || governedAnswer.sourceCertifiedBlock
+      || governedAnswer.dqlArtifact?.kind === 'certified_block'
+    ));
     const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
     // The model tried to compose a governed query and declined despite having usable
@@ -1263,6 +1412,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           resolvedRoute,
           aiRoute: governedAnswer.route,
         }),
+        ...(governedAssetMissesLocalSource ? [
+          {
+            ...agentRunEvaluation(
+              'requested-local-source',
+              'Requested local dataset',
+              false,
+              'warning',
+              `${requestedNotebookDataset!.alias} was explicitly requested, but the governed answer did not use local data. Reuse its governed logic only as context and build the mixed-source SQL fallback.`,
+              { datasetId: requestedNotebookDataset!.id, alias: requestedNotebookDataset!.alias },
+            ),
+            suggestedRepair: `Build a notebook SQL fallback that combines the requested ${requestedNotebookDataset!.alias} dataset with the required warehouse extraction.`,
+            repairAction: {
+              kind: 'escalate' as const,
+              route: 'sql_cell' as const,
+              hint: `The certified or semantic result is not exact because it omits the explicitly requested local dataset ${requestedNotebookDataset!.alias}. Author the warehouse extraction and mixed-source notebook handoff.`,
+            },
+          },
+        ] : []),
         agentRunEvaluation(
           'trust-boundary',
           'Trust boundary',
@@ -1571,32 +1738,130 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     },
     sql_cell: async ({ request, routeDecision, attempt, repairHint }) => {
+      const selectedCellSql = agentRunWorkspaceValue(request, 'cellSql');
+      const mixedSourcePlan = selectedCellSql
+        ? planMixedSourceSql(selectedCellSql, datasetWorkspace.list().map((dataset) => dataset.alias))
+        : null;
+      if (mixedSourcePlan) {
+        const explanation = [
+          `The original query directly joined warehouse data with the local dataset ${mixedSourcePlan.localDataset}. Those sources execute in different engines, so the CSV is not a missing dbt table.`,
+          `I prepared the warehouse-only extraction and retained ${mixedSourcePlan.warehouseKey}, the key needed to join with ${mixedSourcePlan.localDataset}.${mixedSourcePlan.localKey}.`,
+          'Insert and run this SQL on the warehouse connection. On its result, choose Combine with local data, select the local dataset, and confirm the suggested keys. The final mixed result runs locally and remains review-required.',
+        ].join(' ');
+        const result = {
+          target: 'cell' as const,
+          sql: mixedSourcePlan.warehouseSql,
+          explanation,
+          mixedSourcePlan,
+        };
+        return {
+          summary: `Prepared a warehouse extraction for local combination with ${mixedSourcePlan.localDataset}.`,
+          answer: explanation,
+          artifacts: [agentRunArtifact('sql_cell', 'Warehouse extraction for local analysis', result)],
+          evaluations: [
+            agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Detected a mixed local and warehouse SQL repair.'),
+            agentRunEvaluation('mixed-source-boundary', 'Mixed-source boundary', true, 'warning', 'No direct cross-engine join was executed. The user must explicitly stage the bounded warehouse result.'),
+          ],
+          nextActions: [{ id: 'insert-sql', label: 'Insert warehouse extraction', artifactKind: 'sql_cell' }],
+        };
+      }
+      const requestedNotebookDataset = findMentionedNotebookDataset(
+        request.question,
+        datasetWorkspace.list(),
+      );
+      const authoringRequest: AgentRunRequest = requestedNotebookDataset
+        ? {
+            ...request,
+            question: [
+              request.question,
+              '',
+              `Notebook SQL fallback contract: ${requestedNotebookDataset.alias} is a local dataset, not a warehouse table. Produce the warehouse-only row-level extraction needed for the requested analysis. Include the warehouse join key that corresponds to the local dataset identifier, plus the requested order/detail columns. Do not return an aggregate certified answer and do not reference ${requestedNotebookDataset.alias} in the warehouse SQL. The UI will stage this bounded result and create the local join cell after confirmation.`,
+            ].join('\n'),
+          }
+        : request;
       // P4: route Notebook SQL-cell generation through the SAME tool-rich governed
       // pipeline Ask AI uses (schema-discovery tools P3 + declined-retry P1 + budget
       // recovery P2), instead of the tool-less buildFromPrompt path. A SQL cell only
       // needs the SQL, which the governed answer produces directly as proposedSql.
-      const governedAnswer = await runGovernedAgentAnswerForRun(request, { attempt: attempt ?? 0, repairHint });
-      const sql = governedAnswer.proposedSql ?? governedAnswer.sql ?? '';
+      const governedAnswer = await runGovernedAgentAnswerForRun(
+        authoringRequest,
+        { attempt: attempt ?? 0, repairHint },
+        'sql_cell',
+      );
+      const schemaContext = requestedNotebookDataset
+        ? await getSchemaContextForAgent(request.question)
+        : [];
+      const generatedSql = governedAnswer.proposedSql ?? governedAnswer.sql ?? '';
+      const generatedPlan = requestedNotebookDataset && generatedSql.trim()
+        ? planMixedSourceNotebookSql(
+            generatedSql,
+            {
+              id: requestedNotebookDataset.id,
+              name: requestedNotebookDataset.name,
+              alias: requestedNotebookDataset.alias,
+              columns: requestedNotebookDataset.profile.columns.map((column) => ({
+                name: column.name,
+                flags: column.flags,
+              })),
+            },
+            schemaContext,
+          )
+        : null;
+      const generatedReusedNonExactAsset = Boolean(
+        governedAnswer.sourceCertifiedBlock || governedAnswer.dqlArtifact?.kind === 'certified_block',
+      );
+      const fallbackSql = requestedNotebookDataset && (generatedReusedNonExactAsset || !generatedSql.trim())
+        ? buildMixedSourceWarehouseFallbackSql(
+            request.question,
+            {
+              id: requestedNotebookDataset.id,
+              name: requestedNotebookDataset.name,
+              alias: requestedNotebookDataset.alias,
+              columns: requestedNotebookDataset.profile.columns.map((column) => ({ name: column.name, flags: column.flags })),
+            },
+            schemaContext,
+          )
+        : undefined;
+      const naturalMixedSourcePlan = requestedNotebookDataset && fallbackSql
+        ? planMixedSourceNotebookSql(
+            fallbackSql,
+            {
+              id: requestedNotebookDataset.id,
+              name: requestedNotebookDataset.name,
+              alias: requestedNotebookDataset.alias,
+              columns: requestedNotebookDataset.profile.columns.map((column) => ({ name: column.name, flags: column.flags })),
+            },
+            schemaContext,
+          )
+        : generatedPlan;
+      const sql = naturalMixedSourcePlan?.warehouseSql ?? generatedSql;
       const explanation = governedAnswer.answer ?? governedAnswer.text;
       const hasSql = Boolean(sql.trim());
       // Preserve the BuildCellResult shape the notebook UI already consumes.
       const result = {
         target: 'cell' as const,
         sql,
-        explanation,
+        explanation: naturalMixedSourcePlan
+          ? `No certified block or semantic result exactly covered all requested sources. The workflow combines ${naturalMixedSourcePlan.warehouseRelations?.join(', ') || 'the requested warehouse tables'} in one bounded warehouse extraction, then joins it locally with ${naturalMixedSourcePlan.localDataset} on ${naturalMixedSourcePlan.warehouseKey} = ${naturalMixedSourcePlan.localKey}. Click Add workflow to notebook below to create the cells. The mixed result remains review-required.`
+          : explanation,
+        ...(naturalMixedSourcePlan ? { mixedSourcePlan: naturalMixedSourcePlan } : {}),
         ...(governedAnswer.appliedSkills ? { appliedSkills: governedAnswer.appliedSkills } : {}),
       };
       return {
         summary: hasSql
-          ? 'Created a review-required SQL cell draft.'
+          ? naturalMixedSourcePlan
+            ? `Prepared a mixed-source notebook workflow using ${naturalMixedSourcePlan.localDataset}.`
+            : 'Created a review-required SQL cell draft.'
           : (explanation || 'No SQL could be generated for this request.'),
-        answer: explanation,
+        answer: result.explanation,
         artifacts: [agentRunArtifact('sql_cell', 'Generated SQL cell', result)],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to SQL cell generation.'),
-          agentRunEvaluation('review-boundary', 'Review boundary', true, 'warning', 'Generated SQL must be reviewed before it becomes certified analytics.'),
+          agentRunEvaluation('review-boundary', 'Review boundary', true, 'warning', naturalMixedSourcePlan
+            ? 'The warehouse extraction is staged with limits and the CSV join runs locally. Mixed-source output is never auto-certified.'
+            : 'Generated SQL must be reviewed before it becomes certified analytics.'),
         ],
-        nextActions: [
+        nextActions: naturalMixedSourcePlan ? [] : [
           { id: 'insert-sql', label: 'Insert SQL preview', artifactKind: 'sql_cell' },
           { id: 'create-block', label: 'Review as DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
         ],
@@ -2011,7 +2276,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
   };
 
-  const executeCertifiedBlockForAgent = async (node: KGNode): Promise<AgentResultPayload> => {
+  const executeCertifiedBlockForAgent = async (
+    node: KGNode,
+    invocationInput?: { question?: string; parameters?: Record<string, unknown> },
+  ): Promise<AgentResultPayload> => {
     if (node.kind !== 'block') {
       throw new Error(`Certified ${node.kind} "${node.name}" is a navigation artifact and cannot be executed as a block.`);
     }
@@ -2023,8 +2291,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     const absBlockPath = join(projectRoot, block.filePath);
     const source = readFileSync(absBlockPath, 'utf-8');
+    const invocation = prepareBlockInvocation({
+      source,
+      parameters: invocationInput?.parameters,
+      question: invocationInput?.question,
+      surface: 'ask_ai',
+    });
+    if (invocation.errors.length > 0) throw new Error(invocation.errors.join(' '));
+    if (invocation.unresolvedParameters.length > 0) {
+      throw new Error(`I need values for: ${invocation.unresolvedParameters.join(', ')}.`);
+    }
     const activeConnection = requireActiveConnection();
     const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+    const plan = buildExecutionPlan(
+      { id: `agent-${block.name}`, type: 'dql', source, title: block.name },
+      { semanticLayer, driver: activeConnection.driver, tableMapping },
+    );
     const semanticCompose = semanticLayer
       ? composeSemanticBlockSql(source, semanticLayer, {
           driver: activeConnection.driver,
@@ -2032,12 +2314,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectRoot,
           projectConfig,
           detectedProvider: semanticDetectedProvider,
+          parameters: invocation.values,
         })
       : null;
-    const plan = buildExecutionPlan(
-      { id: `agent-${block.name}`, type: 'dql', source, title: block.name },
-      { semanticLayer, driver: activeConnection.driver, tableMapping },
-    );
     if (!plan && !semanticCompose?.sql) {
       const semanticError = semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
       throw new Error(semanticError ?? `Block "${block.name}" produced no executable SQL.`);
@@ -2054,7 +2333,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const rawResult = await executor.executeQuery(
       prepared.sql,
       plan?.sqlParams ?? [],
-      runtimeVariables(plan?.variables ?? {}),
+      runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
       prepared.connection,
     );
     const normalized = normalizeQueryResult(rawResult);
@@ -2067,6 +2346,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       sql: prepared.sql,
       blockName: block.name,
       blockPath: block.filePath,
+      parameters: invocation.resolvedParameters,
+      auditId: invocation.auditId,
     };
   };
 
@@ -2958,10 +3239,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const runBlockStudioPreviewSource = async (
     source: string,
     targetConnection?: ConnectionConfig | null,
+    parameters: Record<string, unknown> = {},
   ): Promise<{
     sql: string;
     result: ReturnType<typeof normalizeQueryResult>;
     chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string } | null;
+    invocation: ReturnType<typeof prepareBlockInvocation>;
   }> => {
     const activeConnection = requireActiveConnection(targetConnection);
     let tableMapping: Record<string, string> | undefined;
@@ -2978,6 +3261,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         tableMapping = undefined;
       }
     }
+    const invocation = prepareBlockInvocation({ source, parameters, surface: 'block_studio' });
+    if (invocation.errors.length > 0) throw new Error(invocation.errors.join(' '));
+    if (invocation.unresolvedParameters.length > 0) {
+      throw new Error(`Provide required parameter${invocation.unresolvedParameters.length === 1 ? '' : 's'}: ${invocation.unresolvedParameters.join(', ')}.`);
+    }
     const semanticCompose = semanticLayer
       ? composeSemanticBlockSql(source, semanticLayer, {
           driver: activeConnection.driver,
@@ -2985,6 +3273,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectRoot,
           projectConfig,
           detectedProvider: semanticDetectedProvider,
+          parameters: invocation.values,
         })
       : null;
     const validation = validateBlockStudioSource(source, semanticLayer);
@@ -3008,13 +3297,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const result = await executor.executeQuery(
       prepared.sql,
       plan?.sqlParams ?? [],
-      runtimeVariables(plan?.variables ?? {}),
+      runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
       prepared.connection,
     );
     return {
       sql: prepared.sql,
       result: normalizeQueryResult(result),
       chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
+      invocation,
     };
   };
 
@@ -4569,6 +4859,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             const source = readFileSync(absBlockPath, 'utf-8');
             const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
             const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
+            const boundParameters = dashboardTileParameterValues({
+              item,
+              dashboardValues: dashboardVariables,
+              requestValues: variables,
+            });
+            const invocation = prepareBlockInvocation({
+              block: block.name,
+              source,
+              parameters: { ...dashboardVariables, ...boundParameters },
+              parameterSources: Object.fromEntries(
+                Object.keys(boundParameters).map((name) => [name, 'surface' as const]),
+              ),
+              surface: 'app',
+            });
+            if (invocation.errors.length || invocation.unresolvedParameters.length) {
+              tiles.push({
+                tileId: item.i,
+                status: 'unresolved',
+                tileType: 'block',
+                blockId: block.name,
+                title: item.title ?? block.name,
+                error: invocation.errors[0] ?? `Needs values for: ${invocation.unresolvedParameters.join(', ')}`,
+                invocation: {
+                  resolvedParameters: invocation.resolvedParameters,
+                  unresolvedParameters: invocation.unresolvedParameters,
+                  auditId: invocation.auditId,
+                },
+              });
+              continue;
+            }
             const semanticCompose = semanticLayer
               ? composeSemanticBlockSql(source, semanticLayer, {
                   driver: targetConnection.driver,
@@ -4576,6 +4896,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   projectRoot,
                   projectConfig,
                   detectedProvider: semanticDetectedProvider,
+                  parameters: invocation.values,
                 })
               : null;
             const plan = buildExecutionPlan(
@@ -4607,7 +4928,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             const result = await executor.executeQuery(
               prepared.sql,
               filterApplication.sqlParams,
-              runtimeVariables(filterApplication.variables),
+              runtimeVariables({ ...filterApplication.variables, ...invocation.values }),
               prepared.connection,
             );
             tiles.push({
@@ -4623,6 +4944,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               filters: {
                 applied: filterApplication.appliedFilters,
                 skipped: filterApplication.skippedFilters,
+              },
+              invocation: {
+                resolvedParameters: invocation.resolvedParameters,
+                unresolvedParameters: invocation.unresolvedParameters,
+                auditId: invocation.auditId,
               },
               citation: {
                 kind: 'block',
@@ -5427,6 +5753,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && path === '/api/schema') {
       try {
         const dataFiles = scanDataFiles(projectRoot);
+        const notebookDatasets = datasetWorkspace.list().map((dataset) => ({
+          name: dataset.alias,
+          path: dataset.sourcePath,
+          columns: dataset.profile.columns.map((column) => ({
+            name: column.name,
+            type: column.type,
+          })),
+          source: "file",
+          objectType:
+            dataset.storageMode === "staged" ? "staged_dataset" : "dataset",
+          datasetId: dataset.id,
+          fileFingerprint: dataset.fileFingerprint,
+          storageMode: dataset.storageMode,
+          refreshedAt: dataset.refreshedAt,
+          trustState: dataset.trustState,
+        }));
         const { tables, columnsByPath } = connection
           ? await introspectSchema(executor, connection)
           : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
@@ -5437,9 +5779,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           source: 'database',
           objectType: t.type,
         }));
-        const seen = new Set(dataFiles.map((f) => f.name));
+        const seen = new Set([
+          ...dataFiles.map((f) => f.name),
+          ...notebookDatasets.map((dataset) => dataset.name),
+        ]);
         const merged = [
-          ...dataFiles.map((f) => ({ ...f, source: 'file' })),
+          ...notebookDatasets,
+          ...dataFiles.map((f) => ({ ...f, source: "file" })),
           ...dbTables.filter((t) => !seen.has(t.name)),
         ];
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -5447,8 +5793,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(`[dql] /api/schema introspection failed: ${message}`);
-        const fallback = scanDataFiles(projectRoot).map((f) => ({ ...f, source: 'file' }));
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        const fallback = [
+          ...datasetWorkspace.list().map((dataset) => ({
+            name: dataset.alias,
+            path: dataset.sourcePath,
+            columns: dataset.profile.columns.map((column) => ({
+              name: column.name,
+              type: column.type,
+            })),
+            source: "file",
+            objectType:
+              dataset.storageMode === "staged" ? "staged_dataset" : "dataset",
+            datasetId: dataset.id,
+            fileFingerprint: dataset.fileFingerprint,
+            storageMode: dataset.storageMode,
+            refreshedAt: dataset.refreshedAt,
+            trustState: dataset.trustState,
+          })),
+          ...scanDataFiles(projectRoot).map((f) => ({ ...f, source: "file" })),
+        ];
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
         res.end(serializeJSON(fallback));
       }
       return;
@@ -5520,6 +5886,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           llmContext,
           examples,
           invariants,
+          reviewRequired,
+          datasetRefs,
+          lineage,
         } = body as {
           name: string;
           domain?: string;
@@ -5532,6 +5901,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           llmContext?: string;
           examples?: Array<{ question: string; sql?: string }>;
           invariants?: string[];
+          reviewRequired?: boolean;
+          datasetRefs?: Array<{
+            id?: string;
+            alias?: string;
+            role?: string;
+            fingerprint?: string;
+          }>;
+          lineage?: Record<string, unknown>;
         };
         if (!name || typeof name !== 'string' || !content || typeof content !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -5569,12 +5946,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // Save first, then certify against the same local runtime used for the
         // answer. Passing blocks become certified immediately; anything that
         // cannot prove itself remains a clearly labelled draft at this path.
-        setBlockStudioStatus(projectRoot, created.path, 'draft');
-        let source = readFileSync(join(projectRoot, created.path), 'utf-8');
-        let status: 'certified' | 'draft' = 'draft';
-        let blockers: string[] = [];
-        let certification: { certified: boolean; errors: unknown[]; warnings: unknown[] } | undefined;
+        setBlockStudioStatus(projectRoot, created.path, "draft");
+        let source = readFileSync(join(projectRoot, created.path), "utf-8");
+        let status: "certified" | "draft" = "draft";
+        let blockers: string[] = reviewRequired
+          ? [
+              "Imported or staged datasets require review and reproducibility checks before certification.",
+            ]
+          : [];
+        let certification:
+          | { certified: boolean; errors: unknown[]; warnings: unknown[] }
+          | undefined;
         try {
+          if (reviewRequired) throw new Error(blockers[0]);
           const verdict = await certifyBlockStudioSource(source, created.path);
           blockers = Array.from(new Set(verdict.checklist.blockers));
           certification = {
@@ -5588,7 +5972,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             source = readFileSync(join(projectRoot, created.path), 'utf-8');
           }
         } catch (error) {
-          blockers = [error instanceof Error ? error.message : String(error)];
+          blockers = Array.from(
+            new Set([
+              ...blockers,
+              error instanceof Error ? error.message : String(error),
+            ]),
+          );
         }
         await refreshLocalMetadataCatalog(projectRoot);
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -6782,7 +7171,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const body = await readJSON(req);
         const source = typeof body.source === 'string' ? body.source : '';
         const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-        const preview = await runBlockStudioPreviewSource(source, targetConnection);
+        const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+          ? body.parameters as Record<string, unknown>
+          : {};
+        const preview = await runBlockStudioPreviewSource(source, targetConnection, parameters);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(preview));
       } catch (error) {
@@ -6874,7 +7266,372 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    if (req.method === 'POST' && path === '/api/connectors/install') {
+    if (req.method === "GET" && path === "/api/datasets") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        serializeJSON({
+          datasets: datasetWorkspace.list(),
+          workspace: {
+            target: "local",
+            databasePath: relative(
+              projectRoot,
+              datasetWorkspace.databasePath,
+            ).replaceAll("\\", "/"),
+          },
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "POST" && path === "/api/datasets/import") {
+      try {
+        const multipart = String(req.headers["content-type"] ?? "")
+          .toLowerCase()
+          .startsWith("multipart/form-data")
+          ? await readMultipartForm(req)
+          : null;
+        const body = multipart?.fields ?? (await readJSON(req));
+        if (
+          typeof body.contentBase64 === "string" &&
+          body.contentBase64.length > 350_000_000
+        ) {
+          throw new Error(
+            "Uploaded dataset exceeds the 250 MB local import limit. Link the local path or reduce the file first.",
+          );
+        }
+        if (
+          multipart?.file &&
+          multipart.file.content.byteLength > 250_000_000
+        ) {
+          throw new Error(
+            "Uploaded dataset exceeds the 250 MB local import limit. Link the local path or reduce the file first.",
+          );
+        }
+        await ensureLocalWorkspaceReady();
+        const imported = await datasetWorkspace.import({
+          filename:
+            multipart?.file?.filename ??
+            (typeof body.filename === "string" ? body.filename : undefined),
+          sourcePath:
+            typeof body.sourcePath === "string" ? body.sourcePath : undefined,
+          contentBase64:
+            typeof body.contentBase64 === "string"
+              ? body.contentBase64
+              : undefined,
+          content: multipart?.file?.content,
+          storageMode: body.storageMode === "project" ? "project" : "local",
+          link: body.link === true || body.link === "true",
+          name: typeof body.name === "string" ? body.name : undefined,
+          alias: typeof body.alias === "string" ? body.alias : undefined,
+          description:
+            typeof body.description === "string" ? body.description : undefined,
+          owner: typeof body.owner === "string" ? body.owner : undefined,
+          tags: Array.isArray(body.tags)
+            ? body.tags.map(String)
+            : typeof body.tags === "string"
+              ? body.tags
+                  .split(",")
+                  .map((tag: string) => tag.trim())
+                  .filter(Boolean)
+              : undefined,
+        });
+        recordDatasetMetadataSnapshot();
+        res.writeHead(imported.duplicate ? 200 : 201, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(serializeJSON(imported));
+      } catch (error) {
+        res.writeHead(400, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(
+          serializeJSON({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (req.method === "GET" && /^\/api\/datasets\/[^/]+$/.test(path)) {
+      const id = decodeURIComponent(path.slice("/api/datasets/".length));
+      const dataset = datasetWorkspace.get(id);
+      if (!dataset) {
+        res.writeHead(404, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(serializeJSON({ error: "Dataset not found." }));
+      } else {
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(serializeJSON({ dataset }));
+      }
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      /^\/api\/datasets\/[^/]+\/refresh$/.test(path)
+    ) {
+      try {
+        const id = decodeURIComponent(
+          path.match(/^\/api\/datasets\/([^/]+)\/refresh$/)?.[1] ?? "",
+        );
+        await ensureLocalWorkspaceReady();
+        const dataset = await datasetWorkspace.refresh(id);
+        recordDatasetMetadataSnapshot();
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(serializeJSON({ dataset }));
+      } catch (error) {
+        res.writeHead(400, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(
+          serializeJSON({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      /^\/api\/datasets\/[^/]+\/(rename|pin)$/.test(path)
+    ) {
+      try {
+        const match = path.match(/^\/api\/datasets\/([^/]+)\/(rename|pin)$/)!;
+        const body = await readJSON(req);
+        const dataset =
+          match[2] === "pin"
+            ? datasetWorkspace.pin(
+                decodeURIComponent(match[1]),
+                body.pinned !== false,
+              )
+            : datasetWorkspace.rename(
+                decodeURIComponent(match[1]),
+                String(body.name ?? ""),
+                typeof body.alias === "string" ? body.alias : undefined,
+              );
+        recordDatasetMetadataSnapshot();
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(serializeJSON({ dataset }));
+      } catch (error) {
+        res.writeHead(400, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(
+          serializeJSON({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      /^\/api\/datasets\/[^/]+\/schema$/.test(path)
+    ) {
+      try {
+        const id = decodeURIComponent(
+          path.match(/^\/api\/datasets\/([^/]+)\/schema$/)?.[1] ?? "",
+        );
+        const body = await readJSON(req);
+        await ensureLocalWorkspaceReady();
+        const dataset = await datasetWorkspace.updateSchema(
+          id,
+          body.overrides && typeof body.overrides === "object"
+            ? body.overrides
+            : {},
+        );
+        recordDatasetMetadataSnapshot();
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(serializeJSON({ dataset }));
+      } catch (error) {
+        res.writeHead(400, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(
+          serializeJSON({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (req.method === "DELETE" && /^\/api\/datasets\/[^/]+$/.test(path)) {
+      const id = decodeURIComponent(path.slice("/api/datasets/".length));
+      datasetWorkspace.remove(id);
+      recordDatasetMetadataSnapshot();
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === "POST" && path === "/api/datasets/stage") {
+      try {
+        const body = await readJSON(req);
+        if (body.confirmed !== true) {
+          res.writeHead(428, {
+            "Content-Type": "application/json; charset=utf-8",
+          });
+          res.end(
+            serializeJSON({
+              error:
+                "Confirm the bounded local copy before staging warehouse data.",
+            }),
+          );
+          return;
+        }
+        const configured = projectConfig.notebook?.staging;
+        const maxRows = Math.max(
+          1,
+          Math.min(
+            Number(body.maxRows ?? configured?.maxRows ?? 100_000),
+            500_000,
+          ),
+        );
+        const maxBytes = Math.max(
+          1_000_000,
+          Math.min(
+            Number(body.maxBytes ?? configured?.maxBytes ?? 250_000_000),
+            1_000_000_000,
+          ),
+        );
+        const timeoutMs = Math.max(
+          1_000,
+          Math.min(
+            Number(body.timeoutSeconds ?? configured?.timeoutSeconds ?? 120) *
+              1000,
+            600_000,
+          ),
+        );
+        const sql = typeof body.sql === "string" ? body.sql.trim() : "";
+        const validationError = readOnlySqlValidationError(
+          sql,
+          "Local staging",
+        );
+        if (validationError) throw new Error(validationError);
+        const semantic = prepareSemanticSql(sql, semanticLayer);
+        if (semantic.unresolvedRefs.length > 0)
+          throw new Error(
+            `Unknown semantic references: ${semantic.unresolvedRefs.join(", ")}`,
+          );
+        const named =
+          typeof body.connectionName === "string"
+            ? resolveNamedConnection(body.connectionName)
+            : connection;
+        const sourceConnection = requireActiveConnection(named);
+        const prepared = prepareLocalExecution(
+          `SELECT * FROM (${stripSqlTerminator(semantic.sql)}) AS dql_stage_source LIMIT ${maxRows + 1}`,
+          sourceConnection,
+          projectRoot,
+          projectConfig,
+        );
+        const execution = executor.executeQuery(
+          prepared.sql,
+          [],
+          runtimeVariables({}),
+          prepared.connection,
+        );
+        const result = await Promise.race([
+          execution,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Staging query exceeded ${Math.round(timeoutMs / 1000)} seconds.`,
+                  ),
+                ),
+              timeoutMs,
+            ),
+          ),
+        ]);
+        const rows = (result.rows ?? []) as Array<Record<string, unknown>>;
+        if (rows.length > maxRows)
+          throw new Error(
+            `Staging would exceed the ${maxRows.toLocaleString()} row limit. Add filters or aggregate the warehouse query.`,
+          );
+        const rowPayload = serializeJSON(rows);
+        const byteCount = Buffer.byteLength(rowPayload);
+        if (byteCount > maxBytes)
+          throw new Error(
+            `Staging would exceed the ${(maxBytes / 1_000_000).toFixed(0)} MB limit. Add filters or aggregate the warehouse query.`,
+          );
+        await ensureLocalWorkspaceReady();
+        const dataset = await datasetWorkspace.stageRows({
+          name:
+            typeof body.name === "string" && body.name.trim()
+              ? body.name.trim()
+              : "Staged warehouse result",
+          rows,
+          expiresInDays: configured?.expiryDays ?? 7,
+          lineage: {
+            connectionName:
+              typeof body.connectionName === "string"
+                ? body.connectionName
+                : projectConfig.defaultConnectionName,
+            query: sql,
+            blockPath:
+              typeof body.blockPath === "string" ? body.blockPath : undefined,
+            semanticMetrics: semantic.semanticRefs.metrics,
+            semanticDimensions: semantic.semanticRefs.dimensions,
+            filters:
+              body.filters && typeof body.filters === "object"
+                ? body.filters
+                : undefined,
+            parameters:
+              body.parameters && typeof body.parameters === "object"
+                ? body.parameters
+                : undefined,
+            extractedAt: new Date().toISOString(),
+            rowCount: rows.length,
+            byteCount,
+            sourceFingerprint: createHash("sha256")
+              .update(
+                `${body.connectionName ?? projectConfig.defaultConnectionName ?? "default"}:${sql}`,
+              )
+              .digest("hex"),
+            resultFingerprint: createHash("sha256")
+              .update(rowPayload)
+              .digest("hex"),
+          },
+        });
+        recordDatasetMetadataSnapshot();
+        res.writeHead(201, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(
+          serializeJSON({
+            dataset,
+            limits: { maxRows, maxBytes, timeoutMs },
+            trustLabel: "review_required",
+          }),
+        );
+      } catch (error) {
+        res.writeHead(400, {
+          "Content-Type": "application/json; charset=utf-8",
+        });
+        res.end(
+          serializeJSON({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+      return;
+    }
+
+    if (req.method === "POST" && path === "/api/connectors/install") {
       try {
         const body = await readJSON(req);
         const driver = typeof body.driver === 'string' ? body.driver : '';
@@ -7512,9 +8269,239 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       return;
     }
-    // ── Semantic completions for SQL cells ─────────────────────────────────────
-    if (req.method === 'GET' && path === '/api/semantic-completions') {
-      const completions: Array<{ type: string; name: string; label: string; description: string; sql: string; domain?: string; tags: string[] }> = [];
+    // ── Ranked, lazy editor completions (large-repo safe) ───────────────────────
+    if (req.method === "GET" && path === "/api/editor/completions") {
+      const query = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+      const kind = (url.searchParams.get("kind") ?? "all").trim().toLowerCase();
+      const relationFilter = (url.searchParams.get("relation") ?? "")
+        .trim()
+        .toLowerCase();
+      const selectedDomain = (url.searchParams.get("domain") ?? "")
+        .trim()
+        .toLowerCase();
+      const limit = Math.max(
+        1,
+        Math.min(100, Number(url.searchParams.get("limit") ?? 50) || 50),
+      );
+      const recent = readUserPrefs(userPrefsPath).recentlyUsed.map((name) =>
+        name.toLowerCase(),
+      );
+      const candidates: Array<{
+        type: string;
+        name: string;
+        label: string;
+        description: string;
+        detail?: string;
+        domain?: string;
+        tags?: string[];
+        relation?: string;
+        governance?: string;
+        apply?: string;
+        score?: number;
+      }> = [];
+      if (semanticLayer && (kind === "all" || kind === "metric")) {
+        for (const metric of semanticLayer.listMetrics())
+          candidates.push({
+            type: "metric",
+            name: metric.name,
+            label: metric.label,
+            description: metric.description ?? "",
+            domain: metric.domain,
+            tags: metric.tags ?? [],
+            detail: "@metric",
+            apply: metric.name,
+            governance: "semantic",
+          });
+      }
+      if (semanticLayer && (kind === "all" || kind === "dimension")) {
+        for (const dimension of semanticLayer.listDimensions())
+          candidates.push({
+            type: "dimension",
+            name: dimension.name,
+            label: dimension.label,
+            description: dimension.description ?? "",
+            domain: dimension.domain,
+            tags: dimension.tags ?? [],
+            detail: "@dim",
+            apply: dimension.name,
+            governance: "semantic",
+          });
+      }
+      const datasets = datasetWorkspace.list();
+      if (kind === "all" || kind === "relation" || kind === "dataset") {
+        for (const dataset of datasets)
+          candidates.push({
+            type: kind === "dataset" ? "dataset" : "relation",
+            name: dataset.alias,
+            label: dataset.name,
+            description: `${dataset.storageMode} ${dataset.format} · refreshed ${dataset.refreshedAt}`,
+            relation: dataset.alias,
+            detail: dataset.trustState,
+            apply: `"${dataset.alias.replaceAll('"', '""')}"`,
+            governance: dataset.trustState,
+          });
+      }
+      if (kind === "all" || kind === "column") {
+        for (const dataset of datasets) {
+          if (
+            relationFilter &&
+            ![dataset.id, dataset.alias, dataset.name].some(
+              (value) => value.toLowerCase() === relationFilter,
+            )
+          )
+            continue;
+          for (const column of dataset.profile.columns)
+            candidates.push({
+              type: "column",
+              name: column.name,
+              label: column.name,
+              description: column.flags?.join(", ") ?? "",
+              relation: dataset.alias,
+              detail: column.type,
+              apply: column.name,
+              governance: dataset.trustState,
+            });
+        }
+        const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+        for (const table of snapshot?.tables ?? []) {
+          if (
+            relationFilter &&
+            ![table.relation, table.name]
+              .filter(Boolean)
+              .some(
+                (value) =>
+                  value!.toLowerCase() === relationFilter ||
+                  value!.toLowerCase().endsWith(`.${relationFilter}`),
+              )
+          )
+            continue;
+          for (const column of table.columns)
+            candidates.push({
+              type: "column",
+              name: column.name,
+              label: column.name,
+              description: column.description ?? "",
+              relation: table.relation,
+              detail: column.type,
+              apply: column.name,
+              governance: "runtime_schema",
+            });
+        }
+      }
+      if (kind === "all" || kind === "relation") {
+        const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+        for (const table of snapshot?.tables ?? [])
+          candidates.push({
+            type: "relation",
+            name: table.relation,
+            label: table.name ?? table.relation,
+            description: table.description ?? "",
+            relation: table.relation,
+            detail: table.schema,
+            apply: table.relation,
+            governance: table.source ?? "runtime_schema",
+          });
+      }
+      if (kind === "all" || kind === "block") {
+        for (const file of scanNotebookFiles(projectRoot).filter(
+          (entry) => entry.type === "block",
+        ))
+          candidates.push({
+            type: "block",
+            name: file.name.replace(/\.dql$/i, ""),
+            label: file.name.replace(/\.dql$/i, ""),
+            description: file.path,
+            detail: "@block",
+            apply: `@block("${file.name.replace(/\.dql$/i, "")}")`,
+            governance: file.path.includes("_draft") ? "draft" : "governed",
+          });
+      }
+      if (kind === "all" || kind === "connection") {
+        for (const name of Object.keys(
+          getStoredConnections(
+            projectConfig as unknown as Record<string, unknown>,
+          ),
+        ))
+          candidates.push({
+            type: "connection",
+            name,
+            label: name,
+            description: "Configured connection",
+            detail:
+              name === projectConfig.defaultConnectionName
+                ? "default"
+                : undefined,
+            apply: name,
+          });
+      }
+      const uniqueCandidates = [
+        ...new Map(
+          candidates.map((candidate) => [
+            `${candidate.type}:${candidate.name.toLowerCase()}:${candidate.relation?.toLowerCase() ?? ""}`,
+            candidate,
+          ]),
+        ).values(),
+      ];
+      const scored = uniqueCandidates
+        .map((candidate) => {
+          const name = candidate.name.toLowerCase();
+          const label = candidate.label.toLowerCase();
+          const haystack = `${name} ${label} ${candidate.description.toLowerCase()} ${(candidate.tags ?? []).join(" ").toLowerCase()} ${candidate.domain?.toLowerCase() ?? ""}`;
+          let score = query
+            ? name === query
+              ? 100
+              : name.startsWith(query)
+                ? 80
+                : label.startsWith(query)
+                  ? 70
+                  : haystack.includes(query)
+                    ? 40
+                    : 0
+            : 10;
+          if (
+            selectedDomain &&
+            candidate.domain?.toLowerCase() === selectedDomain
+          )
+            score += 20;
+          if (recent.includes(name)) score += 15;
+          if (
+            candidate.governance === "certified" ||
+            candidate.governance === "semantic" ||
+            candidate.governance === "project_controlled"
+          )
+            score += 10;
+          return { ...candidate, score };
+        })
+        .filter((candidate) => !query || (candidate.score ?? 0) > 0)
+        .sort(
+          (a, b) =>
+            (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name),
+        )
+        .slice(0, limit);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        serializeJSON({
+          completions: scored,
+          query,
+          kind,
+          limit,
+          totalCandidates: uniqueCandidates.length,
+        }),
+      );
+      return;
+    }
+
+    // ── Legacy semantic completion endpoint ────────────────────────────────────
+    if (req.method === "GET" && path === "/api/semantic-completions") {
+      const completions: Array<{
+        type: string;
+        name: string;
+        label: string;
+        description: string;
+        sql: string;
+        domain?: string;
+        tags: string[];
+      }> = [];
       if (semanticLayer) {
         for (const m of semanticLayer.listMetrics()) {
           completions.push({
@@ -7705,9 +8692,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }));
           return;
         }
+        const executionConnection = await resolveExecutionConnection(
+          body as Record<string, unknown>,
+        );
         const prepared = prepareLocalExecution(
           semantic.sql,
-          requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection),
+          executionConnection,
           projectRoot,
           projectConfig,
         );
@@ -8365,7 +9355,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
         const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
         const executableCell = resolved.cell;
-        const cellConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
+        const invocation = executableCell.type === 'dql'
+          ? prepareBlockInvocation({
+              source: executableCell.source,
+              parameters: body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+                ? body.parameters as Record<string, unknown>
+                : {},
+              surface: 'notebook',
+            })
+          : null;
+        if (invocation?.errors.length) throw new Error(invocation.errors.join(' '));
+        if (invocation?.unresolvedParameters.length) {
+          throw new Error(`Provide required parameter${invocation.unresolvedParameters.length === 1 ? '' : 's'}: ${invocation.unresolvedParameters.join(', ')}.`);
+        }
+        const cellConnection = await resolveExecutionConnection(
+          body as Record<string, unknown>,
+        );
         const tableMapping = needsSemanticTableMapping(executableCell)
           ? await resolveSemanticTableMapping(executor, cellConnection, semanticLayer)
           : undefined;
@@ -8387,7 +9392,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const rawResult = await executor.executeQuery(
           prepared.sql,
           plan.sqlParams,
-          runtimeVariables(plan.variables),
+          runtimeVariables({ ...plan.variables, ...(invocation?.values ?? {}) }),
           prepared.connection,
         );
         const normalized = normalizeQueryResult(rawResult);
@@ -8427,6 +9432,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           chartConfig: plan.chartConfig,
           tests: plan.tests,
           result: normalized,
+          ...(invocation ? {
+            invocation: {
+              resolvedParameters: invocation.resolvedParameters,
+              unresolvedParameters: invocation.unresolvedParameters,
+              auditId: invocation.auditId,
+            },
+          } : {}),
           ...(invariants
             ? {
                 invariantResults: invariants.invariantResults,
@@ -10640,6 +11652,43 @@ export function dashboardRuntimeVariables(
   return { ...variables, ...overrides };
 }
 
+/**
+ * Resolve only declared tile parameter bindings.  Dashboard filters remain
+ * values; they never become SQL identifiers or an implicit name-based binding.
+ */
+export function dashboardTileParameterValues(input: {
+  item: Pick<DashboardGridItem, 'parameterBindings'>;
+  dashboardValues: Record<string, unknown>;
+  requestValues?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  const requestValues = input.requestValues ?? {};
+  const persona = requestValues.persona && typeof requestValues.persona === 'object' && !Array.isArray(requestValues.persona)
+    ? requestValues.persona as Record<string, unknown>
+    : {};
+
+  for (const binding of input.item.parameterBindings ?? []) {
+    const lookup = binding.filter ?? binding.field ?? binding.param;
+    let value: unknown;
+    switch (binding.source) {
+      case 'constant':
+        value = binding.value;
+        break;
+      case 'dashboard_filter':
+        value = input.dashboardValues[lookup];
+        break;
+      case 'persona':
+        value = persona[lookup] ?? requestValues[`persona.${lookup}`];
+        break;
+      case 'variable':
+        value = requestValues[lookup];
+        break;
+    }
+    if (value !== undefined) values[binding.param] = value;
+  }
+  return values;
+}
+
 export function applyDashboardFiltersToBlockExecution(input: {
   sql: string;
   sqlParams: SQLParamSpec[];
@@ -11226,6 +12275,38 @@ function readJSON(req: import('node:http').IncomingMessage): Promise<any> {
     });
     req.on('error', reject);
   });
+}
+
+async function readMultipartForm(
+  req: import("node:http").IncomingMessage,
+): Promise<{
+  fields: Record<string, string>;
+  file?: { filename: string; content: Buffer };
+}> {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value))
+      value.forEach((item) => headers.append(key, item));
+    else if (value !== undefined) headers.set(key, value);
+  }
+  const request = new Request("http://127.0.0.1/upload", {
+    method: "POST",
+    headers,
+    body: Readable.toWeb(req) as ReadableStream,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  const form = await request.formData();
+  const fields: Record<string, string> = {};
+  let file: { filename: string; content: Buffer } | undefined;
+  for (const [key, value] of form.entries()) {
+    if (typeof value === "string") fields[key] = value;
+    else if (key === "file")
+      file = {
+        filename: value.name,
+        content: Buffer.from(await value.arrayBuffer()),
+      };
+  }
+  return { fields, file };
 }
 
 function safeJoin(rootDir: string, requestPath: string): string | null {
@@ -11869,9 +12950,12 @@ function composeSemanticBlockSql(
     projectRoot?: string;
     projectConfig?: ProjectConfig;
     detectedProvider?: string | null;
+    /** Values are applied to the semantic request before SQL composition. */
+    parameters?: Record<string, unknown>;
   },
 ): { sql: string | null; diagnostics: BlockStudioDiagnostic[]; semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] } } {
   const config = parseSemanticBlockConfig(source);
+  const runtimeBindings = semanticRuntimeParameterBindings(source, options?.parameters ?? {});
   const metrics = config.metrics.length > 0
     ? config.metrics
     : config.metric
@@ -11934,11 +13018,11 @@ function composeSemanticBlockSql(
       ? composeRuntimeSemanticQuery({
           metrics,
           dimensions: config.dimensions,
-          filters: config.filters,
+          filters: mergeSemanticRuntimeFilters(config.filters, runtimeBindings.filters),
           timeDimension: config.timeDimension && config.granularity
             ? { name: config.timeDimension, granularity: config.granularity }
             : undefined,
-          limit: config.limit,
+          limit: runtimeBindings.limit ?? config.limit,
         }, semanticLayer, {
           projectRoot: options.projectRoot,
           projectConfig: options.projectConfig,
@@ -11949,11 +13033,11 @@ function composeSemanticBlockSql(
       : semanticLayer.composeQuery({
           metrics,
           dimensions: config.dimensions,
-          filters: config.filters,
+          filters: mergeSemanticRuntimeFilters(config.filters, runtimeBindings.filters),
           timeDimension: config.timeDimension && config.granularity
             ? { name: config.timeDimension, granularity: config.granularity }
             : undefined,
-          limit: config.limit,
+          limit: runtimeBindings.limit ?? config.limit,
           driver: options?.driver,
           tableMapping: options?.tableMapping,
         });
@@ -11979,6 +13063,46 @@ function composeSemanticBlockSql(
     diagnostics,
     semanticRefs,
   };
+}
+
+function semanticRuntimeParameterBindings(
+  source: string,
+  values: Record<string, unknown>,
+): {
+  filters: Array<{ dimension: string; operator: string; values: string[] }>;
+  limit?: number;
+} {
+  const program = new Parser(source, '<semantic-parameters>').parse();
+  const block = program.statements.find((statement) => statement.kind === NodeKind.BlockDecl);
+  if (!block || block.kind !== NodeKind.BlockDecl || block.blockType !== 'semantic') return { filters: [] };
+
+  const filters: Array<{ dimension: string; operator: string; values: string[] }> = [];
+  let limit: number | undefined;
+  for (const definition of blockParameterDefinitions(block)) {
+    const value = values[definition.name];
+    if (value === undefined || value === null || value === '') continue;
+    if (definition.binding?.kind === 'semantic_filter') {
+      const rawValues = Array.isArray(value) ? value : [value];
+      filters.push({
+        dimension: definition.binding.field,
+        operator: definition.binding.operator,
+        values: rawValues.map((item) => String(item)),
+      });
+    } else if (definition.binding?.kind === 'limit') {
+      const parsed = typeof value === 'number' ? value : Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) limit = Math.floor(parsed);
+    }
+  }
+  return { filters, ...(limit !== undefined ? { limit } : {}) };
+}
+
+function mergeSemanticRuntimeFilters(
+  declared: Array<{ dimension: string; operator: string; values: string[] }>,
+  runtime: Array<{ dimension: string; operator: string; values: string[] }>,
+): Array<{ dimension: string; operator: string; values: string[] }> {
+  if (runtime.length === 0) return declared;
+  const runtimeDimensions = new Set(runtime.map((filter) => filter.dimension));
+  return [...declared.filter((filter) => !runtimeDimensions.has(filter.dimension)), ...runtime];
 }
 
 function resolveCustomBlockSql(
@@ -12035,6 +13159,7 @@ export function validateBlockStudioSource(
   semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
   chartConfig?: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   executableSql?: string | null;
+  parameters?: ReturnType<typeof prepareBlockInvocation>['parameters'];
 } {
   const diagnostics: BlockStudioDiagnostic[] = [];
   const semanticConfig = parseSemanticBlockConfig(source);
@@ -12131,12 +13256,17 @@ export function validateBlockStudioSource(
         });
   }
 
+  const parameterInvocation = prepareBlockInvocation({ source, surface: 'block_studio' });
+  if (parameterInvocation.errors.length > 0) {
+    diagnostics.push(...parameterInvocation.errors.map((message) => ({ severity: 'error' as const, code: 'parameter_parse', message })));
+  }
   return {
     valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
     diagnostics,
     semanticRefs,
     chartConfig: chartConfig ?? undefined,
     executableSql,
+    parameters: parameterInvocation.parameters,
   };
 }
 
@@ -14533,7 +15663,13 @@ function buildDeterministicAiAssistSummary(
   return `This is a deterministic review note for ${candidate.name}. Tables: ${tables}. Parameters: ${params}. DQL wraps the SQL into a custom block and defaults visualization to table.`;
 }
 
-function extractBlockStudioChartConfig(source: string): { chart?: string; x?: string; y?: string; color?: string; title?: string } | null {
+function extractBlockStudioChartConfig(source: string): {
+  chart?: string;
+  x?: string;
+  y?: string;
+  color?: string;
+  title?: string;
+} | null {
   const vizMatch = source.match(/visualization\s*\{([^}]+)\}/is);
   if (!vizMatch) return null;
   const body = vizMatch[1];
@@ -15157,16 +16293,118 @@ function buildNotebookTemplate(title: string, template: string): string {
   const id = () => Math.random().toString(36).slice(2, 10);
   let cells: object[];
 
-  if (template === 'revenue') {
+  if (template === "analysis") {
     cells = [
-      { id: id(), type: 'markdown', content: `# ${title}\n\nRevenue analysis using DQL and DuckDB.` },
-      { id: id(), type: 'sql', name: 'revenue_summary', content: "SELECT\n  segment_tier AS segment,\n  SUM(amount) AS total_revenue,\n  COUNT(*) AS deals\nFROM read_csv_auto('./data/revenue.csv')\nGROUP BY segment_tier\nORDER BY total_revenue DESC" },
-      { id: id(), type: 'sql', name: 'revenue_trend', content: "SELECT\n  recognized_at AS date,\n  SUM(amount) AS revenue\nFROM read_csv_auto('./data/revenue.csv')\nGROUP BY recognized_at\nORDER BY recognized_at" },
+      {
+        id: id(),
+        type: "markdown",
+        content: "# TL;DR\n\nSummarize the answer and decision here.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content:
+          "## Context and methods\n\nState the business question, scope, definitions, and assumptions.",
+      },
+      {
+        id: id(),
+        type: "sql",
+        name: "analysis_data",
+        content:
+          "-- Choose a governed semantic query, block, connection, or local dataset.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content: "## Results\n\nExplain the material findings and uncertainty.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content: "## Takeaways\n\nRecord the decision, risks, and next action.",
+      },
     ];
-  } else if (template === 'pipeline') {
+  } else if (template === "metric_diagnostic") {
     cells = [
-      { id: id(), type: 'markdown', content: `# ${title}\n\nPipeline health and conversion analysis.` },
-      { id: id(), type: 'sql', name: 'pipeline_overview', content: "SELECT *\nFROM read_csv_auto('./data/pipeline.csv')\nLIMIT 100" },
+      {
+        id: id(),
+        type: "markdown",
+        content: "# Metric diagnostic\n\nWhat changed, when, and for whom?",
+      },
+      {
+        id: id(),
+        type: "sql",
+        name: "metric_trend",
+        content:
+          "-- Add the semantic metric with a time dimension and comparison period.",
+      },
+      {
+        id: id(),
+        type: "sql",
+        name: "driver_breakdown",
+        content: "-- Break the change down by compatible business dimensions.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content:
+          "## Diagnosis\n\nSeparate validated drivers from hypotheses and data limitations.",
+      },
+    ];
+  } else if (template === "data_quality") {
+    cells = [
+      {
+        id: id(),
+        type: "markdown",
+        content:
+          "# Data-quality investigation\n\nDocument the source, owner, freshness expectation, and affected decisions.",
+      },
+      {
+        id: id(),
+        type: "sql",
+        name: "quality_profile",
+        content:
+          "-- Select or import a dataset, then inspect nulls, duplicates, ranges, and freshness.",
+      },
+      {
+        id: id(),
+        type: "sql",
+        name: "quality_checks",
+        content: "-- Add focused validation checks for suspected issues.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content:
+          "## Findings and disposition\n\nRecord severity, impacted metrics, owner, and remediation.",
+      },
+    ];
+  } else if (template === "experiment") {
+    cells = [
+      {
+        id: id(),
+        type: "markdown",
+        content:
+          "# Experiment log\n\nHypothesis, primary metric, guardrails, population, and dates.",
+      },
+      {
+        id: id(),
+        type: "sql",
+        name: "experiment_results",
+        content:
+          "-- Build the reproducible experiment population and outcome query.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content:
+          "## Results\n\nReport effect size, uncertainty, guardrails, and data-quality checks.",
+      },
+      {
+        id: id(),
+        type: "markdown",
+        content: "## Decision\n\nShip, iterate, or stop — with rationale.",
+      },
     ];
   } else {
     cells = [
@@ -15175,7 +16413,7 @@ function buildNotebookTemplate(title: string, template: string): string {
     ];
   }
 
-  return JSON.stringify({ version: 1, title, cells }, null, 2);
+  return JSON.stringify({ dqlnbVersion: 2, version: 1, title, cells }, null, 2);
 }
 
 /** Build a lineage graph from the project's blocks and semantic layer. */
@@ -16487,7 +17725,12 @@ async function gitGovernedFileState(gitRoot: string, path: string): Promise<GitG
   return ignored.code === 0 ? 'ignored' : 'untracked';
 }
 
-async function readGitGovernedContext(cwd: string): Promise<{ inRepo: boolean; trackingReady: boolean; domains: GitGovernedContextGroup; skills: GitGovernedContextGroup }> {
+async function readGitGovernedContext(cwd: string): Promise<{
+  inRepo: boolean;
+  trackingReady: boolean;
+  domains: GitGovernedContextGroup;
+  skills: GitGovernedContextGroup;
+}> {
   const gitRoot = await resolveGitRoot(cwd);
   const empty = (): GitGovernedContextGroup => ({ total: 0, tracked: 0, changed: 0, untracked: 0, ignored: 0, paths: [] });
   if (!gitRoot) return { inRepo: false, trackingReady: false, domains: empty(), skills: empty() };

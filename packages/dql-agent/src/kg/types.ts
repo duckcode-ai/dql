@@ -9,6 +9,7 @@
  */
 
 import type { TrustLabelId } from '@duckcodeailabs/dql-core';
+import type { BlockParameterDefinition } from '@duckcodeailabs/dql-core';
 
 export type KGNodeKind =
   | 'block'
@@ -115,6 +116,8 @@ export interface KGNode {
   allowedFilters?: string[];
   /** Parameter reuse policy per block parameter. */
   parameterPolicy?: Array<{ name: string; policy: string }>;
+  /** Typed runtime parameter contract used by AI, notebooks, and apps. */
+  parameters?: BlockParameterDefinition[];
   /** Business/app filter to physical column or expression bindings. */
   filterBindings?: Array<{ filter: string; binding: string }>;
   /** Business/source systems represented by this artifact. */

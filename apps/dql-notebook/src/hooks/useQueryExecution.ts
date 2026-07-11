@@ -1,9 +1,11 @@
-import { useCallback, useRef } from 'react';
-import { useNotebook, makeCellId } from '../store/NotebookStore';
-import { api } from '../api/client';
-import { useVariableSubstitution } from './useVariableSubstitution';
-import type { Cell } from '../store/types';
-import { extractSqlFromText, parseDqlChartConfig } from '../utils/block-studio';
+import { useCallback, useRef } from "react";
+import { useNotebook, makeCellId } from "../store/NotebookStore";
+import { api } from "../api/client";
+import { useVariableSubstitution } from "./useVariableSubstitution";
+import type { Cell } from "../store/types";
+import { extractSqlFromText, parseDqlChartConfig } from "../utils/block-studio";
+import { planNotebookExecution } from "../utils/notebook-dependencies";
+import { findDatasetReferences, findWarehouseReferences } from '../utils/dataset-references';
 
 // Global map of running AbortControllers keyed by cellId
 const runningControllers = new Map<string, AbortController>();
@@ -85,6 +87,7 @@ export function useQueryExecution() {
               },
               ...(chartConfig ? { chartConfig } : {}),
               executionCount: nextCount,
+              stale: false,
             },
           });
 
@@ -147,6 +150,34 @@ export function useQueryExecution() {
       const rawSql = extractSql(cell);
       if (!rawSql) return;
 
+      const referencedDatasets = findDatasetReferences(rawSql, state.schemaTables);
+      const referencedWarehouseTables = findWarehouseReferences(rawSql, state.schemaTables);
+      if (referencedDatasets.length > 0 && referencedWarehouseTables.length > 0) {
+        dispatch({
+          type: 'UPDATE_CELL',
+          id: cellId,
+          updates: {
+            status: 'error',
+            datasetRefs: referencedDatasets,
+            error: [
+              `Mixed-source query detected: ${referencedWarehouseTables.join(', ')} runs in the warehouse, while ${referencedDatasets.map((dataset) => dataset.alias ?? dataset.id).join(', ')} is local data.`,
+              'Direct cross-engine joins are not executed. Run the warehouse-only extraction first, then choose Combine with local data on its result.',
+            ].join(' '),
+          },
+        });
+        return;
+      }
+      const executionTarget = referencedDatasets.length > 0
+        ? { target: 'local' as const }
+        : cell.executionTarget;
+      if (referencedDatasets.length > 0 && cell.executionTarget?.target !== 'local') {
+        dispatch({
+          type: 'UPDATE_CELL',
+          id: cellId,
+          updates: { executionTarget, datasetRefs: referencedDatasets },
+        });
+      }
+
       // Substitute {{cell_name}} references with inline CTEs
       const { sql } = substituteVariables(rawSql);
 
@@ -167,15 +198,23 @@ export function useQueryExecution() {
       });
 
       try {
-        const result = await api.executeQuery(sql, controller.signal, {
-          notebookPath: state.activeFile?.path,
-          cellId: cell.id,
-          cellName: cell.name,
-          source: 'notebook_sql_cell',
-        });
+        const result = await api.executeQuery(
+          sql,
+          controller.signal,
+          {
+            notebookPath: state.activeFile?.path,
+            cellId: cell.id,
+            cellName: cell.name,
+            source: "notebook_sql_cell",
+          },
+          executionTarget,
+        );
         const elapsed = Date.now() - start;
 
         const nextCount = (cell.executionCount ?? 0) + 1;
+        const datasetRefs = cell.executionTarget?.target === 'local'
+          ? findDatasetReferences(sql, state.schemaTables)
+          : cell.datasetRefs;
 
         dispatch({
           type: 'UPDATE_CELL',
@@ -188,6 +227,8 @@ export function useQueryExecution() {
               rowCount: result.rowCount ?? result.rows.length,
             },
             executionCount: nextCount,
+            stale: false,
+            datasetRefs,
           },
         });
 
@@ -249,16 +290,40 @@ export function useQueryExecution() {
         runningControllers.delete(cellId);
       }
     },
-    [state.cells, state.activeFile?.path, dispatch, substituteVariables]
+    [state.cells, state.activeFile?.path, state.schemaTables, dispatch, substituteVariables]
   );
 
   const executeAll = useCallback(async () => {
-    for (const cell of state.cells) {
-      if (cell.type !== 'markdown') {
-        await executeCell(cell.id);
+    const plan = planNotebookExecution(state.cells);
+    if (plan.cycleCellIds.length > 0) {
+      for (const cellId of plan.cycleCellIds) {
+        dispatch({
+          type: "UPDATE_CELL",
+          id: cellId,
+          updates: {
+            status: "error",
+            error:
+              "Dependency cycle detected. Update the cell dependencies before running all.",
+          },
+        });
       }
+      return;
     }
-  }, [state.cells, executeCell]);
+    for (const missing of plan.missing) {
+      dispatch({
+        type: "UPDATE_CELL",
+        id: missing.cellId,
+        updates: {
+          status: "error",
+          error: `Missing dependency: ${missing.dependency}`,
+        },
+      });
+    }
+    if (plan.missing.length > 0) return;
+    for (const cell of plan.ordered) {
+      await executeCell(cell.id);
+    }
+  }, [state.cells, executeCell, dispatch]);
 
   const executeDependents = useCallback(
     async (paramName: string) => {

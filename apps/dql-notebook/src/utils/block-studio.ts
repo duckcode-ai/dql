@@ -1,5 +1,16 @@
 import type { CellChartConfig } from '../store/types';
 
+export type VisualBlockParameterType = 'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]' | 'date[]';
+
+export interface VisualBlockParameter {
+  name: string;
+  type: VisualBlockParameterType;
+  required: boolean;
+  default?: unknown;
+  policy: 'dynamic' | 'static' | 'business' | 'derived' | 'optional' | 'ambiguous_review_required';
+  binding?: { kind: 'sql_value' | 'semantic_filter' | 'limit'; field?: string; operator?: 'equals' | 'in' | 'gte' | 'lte' };
+}
+
 export interface BlockFields {
   domain: string;
   owner: string;
@@ -73,6 +84,259 @@ export function setSemanticArray(content: string, key: string, values: string[])
   const rendered = `${key} = [${unique.map((value) => `"${escapeDqlValue(value)}"`).join(', ')}]`;
   const field = new RegExp(`\\b${key}\\s*=\\s*\\[[\\s\\S]*?\\]`, 'i');
   return field.test(content) ? content.replace(field, rendered) : insertVisualField(content, `  ${rendered}`);
+}
+
+/**
+ * Browser-safe read of DQL's params section. The server-side DQL parser remains
+ * authoritative for validation and execution; this only keeps the visual form
+ * synchronized while the author types.
+ */
+export function parseVisualBlockParameters(content: string): VisualBlockParameter[] {
+  const policies = parseSectionAssignments(content, 'parameterPolicy');
+  const filters = parseSectionAssignments(content, 'filterBindings');
+  const placeholders = new Set(Array.from(content.matchAll(/\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g)).map((match) => match[1]));
+  const semantic = /\btype\s*=\s*"semantic"/i.test(content);
+  const params = readDqlSection(content, 'params');
+
+  return params.split(/\r?\n/).flatMap((rawLine) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('//') || line.startsWith('#')) return [];
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(string|number|boolean|date)(\[\])?)?\s*(?:=\s*(.+))?$/.exec(line);
+    if (!match) return [];
+    const name = match[1];
+    const parsedDefault = match[4] === undefined ? undefined : parseVisualDefault(match[4]);
+    const type = (match[2] ? `${match[2]}${match[3] ?? ''}` : inferVisualParameterType(visualDefaultValueText(parsedDefault), name)) as VisualBlockParameterType;
+    const filterField = filters.get(name);
+    const binding = placeholders.has(name)
+      ? { kind: 'sql_value' as const }
+      : name === 'top_n' || name === 'limit'
+        ? { kind: 'limit' as const }
+        : semantic && filterField
+          ? { kind: 'semantic_filter' as const, field: filterField, operator: name.endsWith('_set') ? 'in' as const : 'equals' as const }
+          : undefined;
+    return [{
+      name,
+      type,
+      required: match[4] === undefined,
+      ...(match[4] === undefined ? {} : { default: parsedDefault }),
+      policy: normalizeVisualPolicy(policies.get(name)),
+      ...(binding ? { binding } : {}),
+    }];
+  });
+}
+
+/**
+ * Turns a value the author typed into a useful default type. The author can
+ * always choose a different type in the visual editor.
+ */
+export function inferVisualParameterType(value: string, name = ''): VisualBlockParameterType {
+  const trimmed = value.trim();
+  const nameHint = name.toLowerCase();
+  if (trimmed.includes(',')) {
+    const items = trimmed.split(',').map((item) => item.trim()).filter(Boolean);
+    if (items.length > 0 && items.every((item) => isDateValue(item))) return 'date[]';
+    if (items.length > 0 && items.every((item) => isNumberValue(item))) return 'number[]';
+    return 'string[]';
+  }
+  if (trimmed === 'true' || trimmed === 'false') return 'boolean';
+  if (isDateValue(trimmed)) return 'date';
+  if (isNumberValue(trimmed)) return 'number';
+  if (/\b(date|from|start|end|until)\b|(?:^|_)(date|at)(?:_|$)/.test(nameHint)) return 'date';
+  if (/(?:^|_)(top_n|limit|count|rank|number)(?:_|$)|_n$/.test(nameHint)) return 'number';
+  if (/(?:_set|_list|_ids|_values)$/.test(nameHint)) return 'string[]';
+  return 'string';
+}
+
+export function visualParameterDefaultText(parameter: Pick<VisualBlockParameter, 'default'>): string {
+  if (parameter.default === undefined) return '';
+  return visualDefaultValueText(parameter.default);
+}
+
+/** Write a canonical typed declaration and matching policy back into DQL source. */
+export function upsertVisualBlockParameter(
+  content: string,
+  update: {
+    name: string;
+    previousName?: string;
+    type: VisualBlockParameterType;
+    required: boolean;
+    defaultText?: string;
+    policy: VisualBlockParameter['policy'];
+  },
+): string {
+  const safeName = normalizeParameterName(update.name);
+  if (!safeName) return content;
+  const parameters = parseVisualBlockParameters(content)
+    .filter((parameter) => parameter.name !== update.previousName && parameter.name !== safeName)
+    .map((parameter) => ({
+      name: parameter.name,
+      type: parameter.type,
+      required: parameter.required,
+      defaultText: visualParameterDefaultText(parameter),
+      policy: parameter.policy,
+    }));
+  parameters.push({
+    name: safeName,
+    type: update.type,
+    required: update.required,
+    defaultText: update.defaultText ?? '',
+    policy: update.policy,
+  });
+  return writeVisualParameters(content, parameters);
+}
+
+export function removeVisualBlockParameter(content: string, name: string): string {
+  const parameters = parseVisualBlockParameters(content)
+    .filter((parameter) => parameter.name !== name)
+    .map((parameter) => ({
+      name: parameter.name,
+      type: parameter.type,
+      required: parameter.required,
+      defaultText: visualParameterDefaultText(parameter),
+      policy: parameter.policy,
+    }));
+  return writeVisualParameters(content, parameters);
+}
+
+function writeVisualParameters(
+  content: string,
+  parameters: Array<{
+    name: string;
+    type: VisualBlockParameterType;
+    required: boolean;
+    defaultText: string;
+    policy: VisualBlockParameter['policy'];
+  }>,
+): string {
+  const paramsBody = parameters.map((parameter) => {
+    const declaration = `${parameter.name}: ${parameter.type}`;
+    return parameter.required ? declaration : `${declaration} = ${serializeVisualDefault(parameter.defaultText, parameter.type)}`;
+  }).join('\n');
+  const policyBody = parameters.map((parameter) => `${parameter.name} = "${parameter.policy}"`).join('\n');
+  let next = setDqlSectionBody(content, 'params', paramsBody);
+  next = setDqlSectionBody(next, 'parameterPolicy', policyBody);
+  return next;
+}
+
+function serializeVisualDefault(value: string, type: VisualBlockParameterType): string {
+  const trimmed = value.trim();
+  if (type === 'boolean') return trimmed === 'true' ? 'true' : 'false';
+  if (type === 'number') return isNumberValue(trimmed) ? String(Number(trimmed)) : '0';
+  if (type.endsWith('[]')) {
+    const itemType = type.slice(0, -2) as Exclude<VisualBlockParameterType, `${string}[]`>;
+    const values = trimmed.split(',').map((item) => item.trim()).filter(Boolean);
+    return `[${values.map((item) => serializeVisualDefault(item, itemType)).join(', ')}]`;
+  }
+  return `"${escapeDqlValue(trimmed)}"`;
+}
+
+function normalizeParameterName(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  return /^[a-z_][a-z0-9_]*$/.test(normalized) ? normalized : '';
+}
+
+function isNumberValue(value: string): boolean {
+  return value !== '' && Number.isFinite(Number(value));
+}
+
+function isDateValue(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function readDqlSection(content: string, sectionName: string): string {
+  const start = new RegExp(`\\b${sectionName}\\s*\\{`, 'i').exec(content);
+  if (!start || start.index === undefined) return '';
+  const opening = content.indexOf('{', start.index);
+  let depth = 0;
+  for (let index = opening; index < content.length; index += 1) {
+    if (content[index] === '{') depth += 1;
+    if (content[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return content.slice(opening + 1, index).trim();
+    }
+  }
+  return '';
+}
+
+function parseSectionAssignments(content: string, sectionName: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  for (const line of readDqlSection(content, sectionName).split(/\r?\n/)) {
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"\s*$/.exec(line);
+    if (match) entries.set(match[1], match[2]);
+  }
+  return entries;
+}
+
+function parseVisualDefault(raw: string): unknown {
+  const value = raw.trim();
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (isNumberValue(value)) return Number(value);
+  if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return splitDqlArray(value.slice(1, -1)).map(parseVisualDefault);
+  }
+  return value;
+}
+
+function splitDqlArray(value: string): string[] {
+  const values: string[] = [];
+  let quote = false;
+  let current = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '"' && value[index - 1] !== '\\') quote = !quote;
+    if (char === ',' && !quote) {
+      if (current.trim()) values.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) values.push(current.trim());
+  return values;
+}
+
+function visualDefaultValueText(value: unknown): string {
+  return Array.isArray(value) ? value.join(', ') : String(value ?? '');
+}
+
+function normalizeVisualPolicy(value: string | undefined): VisualBlockParameter['policy'] {
+  return value === 'static' || value === 'business' || value === 'derived' || value === 'optional' || value === 'ambiguous_review_required'
+    ? value
+    : 'dynamic';
+}
+
+/**
+ * A semantic filter is a typed runtime value, not a saved literal predicate.
+ * Keep the legacy requested_filters metadata for older readers, while emitting
+ * the params + filterBindings contract consumed by the unified invocation path.
+ */
+export function setSemanticRuntimeFilters(content: string, filters: string[]): string {
+  const managedNames = new Set(parseSemanticVisualFields(content).requestedFilters);
+  const unique = Array.from(new Set(filters.filter(Boolean)));
+  let next = setSemanticArray(content, 'requested_filters', unique);
+  next = updateNamedSectionEntries(next, 'params', managedNames, unique, (name) => `${name}: string`);
+  next = updateNamedSectionEntries(next, 'filterBindings', managedNames, unique, (name) => `${name} = "${escapeDqlValue(name)}"`);
+  return next;
+}
+
+function updateNamedSectionEntries(
+  content: string,
+  section: string,
+  managedNames: Set<string>,
+  activeNames: string[],
+  render: (name: string) => string,
+): string {
+  const body = getDqlSectionBody(content, section);
+  const retained = body
+    .split(/\r?\n/)
+    .filter((line) => {
+      const name = line.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?::|=)/)?.[1];
+      return !name || !managedNames.has(name);
+    });
+  const nextBody = [...retained.filter((line) => line.trim()), ...activeNames.map(render)].join('\n');
+  return setDqlSectionBody(content, section, nextBody);
 }
 
 export function setSemanticScalar(content: string, key: string, value: string): string {

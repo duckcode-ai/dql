@@ -7,16 +7,18 @@ type SemanticCompletionItem = {
   name: string;
   label: string;
   description: string;
-  sql: string;
+  sql?: string;
   domain?: string;
   tags: string[];
 };
 
-const COMPLETION_TTL_MS = 30_000;
-export const SEMANTIC_REF_MIME = 'application/dql-semantic-ref';
+const COMPLETION_TTL_MS = 20_000;
+export const SEMANTIC_REF_MIME = "application/dql-semantic-ref";
 
-let cachedItems: SemanticCompletionItem[] = [];
-let cacheExpiresAt = 0;
+const completionCache = new Map<
+  string,
+  { items: SemanticCompletionItem[]; expiresAt: number }
+>();
 let activeEditor: EditorView | null = null;
 
 function notifySemanticUsage(name: string): void {
@@ -24,19 +26,29 @@ function notifySemanticUsage(name: string): void {
   window.dispatchEvent(new CustomEvent('dql:semantic-used', { detail: { name } }));
 }
 
-async function loadSemanticCompletions(): Promise<SemanticCompletionItem[]> {
-  if (Date.now() < cacheExpiresAt && cachedItems.length > 0) {
-    return cachedItems;
-  }
-
-  const response = await fetch(`${window.location.origin}/api/semantic-completions`);
+async function loadSemanticCompletions(
+  type: "metric" | "dimension",
+  query: string,
+): Promise<SemanticCompletionItem[]> {
+  const cacheKey = `${type}:${query.toLowerCase()}`;
+  const cached = completionCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.items;
+  const params = new URLSearchParams({ kind: type, q: query, limit: "50" });
+  const response = await fetch(
+    `${window.location.origin}/api/editor/completions?${params.toString()}`,
+  );
   if (!response.ok) {
     throw new Error(`Failed to load semantic completions: HTTP ${response.status}`);
   }
-  const data = (await response.json()) as { completions?: SemanticCompletionItem[] };
-  cachedItems = Array.isArray(data.completions) ? data.completions : [];
-  cacheExpiresAt = Date.now() + COMPLETION_TTL_MS;
-  return cachedItems;
+  const data = (await response.json()) as {
+    completions?: SemanticCompletionItem[];
+  };
+  const items = Array.isArray(data.completions) ? data.completions : [];
+  completionCache.set(cacheKey, {
+    items,
+    expiresAt: Date.now() + COMPLETION_TTL_MS,
+  });
+  return items;
 }
 
 function buildSemanticReference(type: 'metric' | 'dimension', name: string): string {
@@ -139,16 +151,7 @@ export const semanticCompletionSource: CompletionSource = async (
   if (metricMatch) {
     const query = metricMatch[1].trim().toLowerCase();
     const from = pos - metricMatch[1].length;
-    const items = (await loadSemanticCompletions())
-      .filter((item) => item.type === 'metric')
-      .filter((item) =>
-        !query ||
-        item.name.toLowerCase().includes(query) ||
-        item.label.toLowerCase().includes(query) ||
-        (item.domain ?? '').toLowerCase().includes(query) ||
-        item.tags.some((tag) => tag.toLowerCase().includes(query)),
-      )
-      .slice(0, 50);
+    const items = await loadSemanticCompletions("metric", query);
     return {
       from,
       options: items.map((item) => buildItemCompletion(item, from, pos)),
@@ -160,16 +163,7 @@ export const semanticCompletionSource: CompletionSource = async (
   if (dimensionMatch) {
     const query = dimensionMatch[1].trim().toLowerCase();
     const from = pos - dimensionMatch[1].length;
-    const items = (await loadSemanticCompletions())
-      .filter((item) => item.type === 'dimension')
-      .filter((item) =>
-        !query ||
-        item.name.toLowerCase().includes(query) ||
-        item.label.toLowerCase().includes(query) ||
-        (item.domain ?? '').toLowerCase().includes(query) ||
-        item.tags.some((tag) => tag.toLowerCase().includes(query)),
-      )
-      .slice(0, 50);
+    const items = await loadSemanticCompletions("dimension", query);
     return {
       from,
       options: items.map((item) => buildItemCompletion(item, from, pos)),

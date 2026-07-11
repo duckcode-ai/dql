@@ -146,15 +146,22 @@ function cellLabel(cell: NotebookCellShape): string | undefined {
 }
 
 const CELL_CONFIG_KEYS = [
-  'paramConfig',
-  'paramValue',
-  'chartConfig',
-  'filterConfig',
-  'pivotConfig',
-  'singleValueConfig',
-  'tableConfig',
-  'upstream',
-  'blockBinding',
+  "paramConfig",
+  "paramValue",
+  "chartConfig",
+  "filterConfig",
+  "pivotConfig",
+  "singleValueConfig",
+  "tableConfig",
+  "chatConfig",
+  "upstream",
+  "blockBinding",
+  "dqlArtifact",
+  "executionTarget",
+  "datasetRefs",
+  "dependencies",
+  "annotations",
+  "kernel",
 ] as const;
 
 function diffCell(a: NotebookCellShape, b: NotebookCellShape): FieldChange[] {
@@ -242,8 +249,9 @@ function diffBlock(a: BlockDeclNode, b: BlockDeclNode): FieldChange[] {
 }
 
 function diffParams(out: FieldChange[], a: BlockParamEntry[], b: BlockParamEntry[]): void {
-  const am = new Map(a.map((p) => [p.name, formatExpr(p.initializer)]));
-  const bm = new Map(b.map((p) => [p.name, formatExpr(p.initializer)]));
+  const render = (p: BlockParamEntry) => `${p.paramType ? `${p.paramType} ` : ''}${p.initializer ? formatExpr(p.initializer) : '(required)'}`;
+  const am = new Map(a.map((p) => [p.name, render(p)]));
+  const bm = new Map(b.map((p) => [p.name, render(p)]));
   for (const name of union(am, bm)) {
     scalar(out, `params.${name}`, am.get(name), bm.get(name));
   }

@@ -2,6 +2,7 @@ import type {
   AgentDqlArtifactReference,
   CascadeAnswerResult,
   AgentResultPayload,
+  CertifiedBlockInvocationInput,
   AgentSchemaTable,
   AnalysisDepth,
   ConversationSnapshot,
@@ -128,7 +129,7 @@ export interface AgentRunRequest {
   /** Context/prompt depth for governed Ask AI. Research routes pass deep. */
   analysisDepth?: AnalysisDepth;
   projectRoot: string;
-  executeCertifiedBlock?: (block: KGNode) => Promise<AgentResultPayload>;
+  executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;
   /** Active warehouse dialect so Lane-2 semantic compiles emit dialect-correct SQL. */

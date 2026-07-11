@@ -61,6 +61,7 @@ const HELP = `
     dql migrate format [--check]    Upgrade all .dql/.dqlnb files to canonical format
     dql migrate layout --to domain-first [--dry-run]
                                     Preview or apply legacy-to-domain folder moves
+    dql migrate parameters --check  Audit legacy block parameters before AI adaptation
     dql import sql <path>           Generate AI import drafts from SQL files/folders
     dql import sql <path> --save    Compatibility alias; drafts autosave before certification
     dql propose [path]              Draft a ranked governance layer from dbt evidence

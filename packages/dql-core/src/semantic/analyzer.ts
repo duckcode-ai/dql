@@ -429,7 +429,7 @@ export class SemanticAnalyzer {
           this.currentScope().variables.set(p.name, {
             kind: NodeKind.VariableDecl,
             name: p.name,
-            initializer: p.initializer,
+            initializer: p.initializer ?? { kind: NodeKind.StringLiteral, value: '', span: p.span },
             span: p.span,
           } as VariableDeclNode);
         }

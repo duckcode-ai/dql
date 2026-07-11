@@ -206,7 +206,7 @@ export function Header() {
   // AI insert/repair actions dispatch ADD_CELL/UPDATE_CELL, so they are covered
   // by the same path as manual edits.
   useEffect(() => {
-    if (!state.autoSave || !currentDirty || !state.activeFile) return;
+    if (!state.autoSave || !currentDirty || !state.activeFile || state.mainView === 'block_studio') return;
     const timer = setTimeout(() => {
       handleSave();
     }, 750);
@@ -379,7 +379,7 @@ export function Header() {
       {/* Right: actions. Apps are opened from the sidebar, so the header stays
           focused on the active authoring surface. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {state.appMode === 'studio' && hasActiveEditorFile && (
+        {state.appMode === 'studio' && hasActiveEditorFile && state.mainView !== 'block_studio' && (
           <>
             {/* v1.3.3 Hex handoff — Run all pill. Accent purple primary CTA. */}
             <button
@@ -514,7 +514,7 @@ export function Header() {
           )}
         </div>
 
-        {state.appMode === 'studio' && hasActiveEditorFile && (
+        {state.appMode === 'studio' && hasActiveEditorFile && state.mainView !== 'block_studio' && (
           <>
         {/* Save */}
         <button
@@ -591,7 +591,7 @@ export function Header() {
 
         {/* v1.3.3 Hex handoff — Share pill (dark ink). Editor views only;
             opens the same export menu the old "Export" button used. */}
-        {hasActiveEditorFile && (
+        {hasActiveEditorFile && state.mainView !== 'block_studio' && (
         <div ref={exportDropdownRef} style={{ position: 'relative' }}>
           <button
             onClick={() => {

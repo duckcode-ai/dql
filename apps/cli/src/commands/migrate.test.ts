@@ -86,3 +86,26 @@ describe('runMigrate layout', () => {
     expect(readFileSync(target, 'utf-8')).toContain('block "Customer Orders"');
   });
 });
+
+describe('runMigrate parameters', () => {
+  it('audits legacy placeholders without rewriting source', async () => {
+    const projectRoot = tempProject();
+    writeFileSync(join(projectRoot, 'blocks', 'orders.dql'), `block "Customer Orders" {
+  domain = "Customer Success"
+  type = "custom"
+  parameterPolicy { region = "dynamic" }
+  query = """SELECT * FROM orders WHERE region = ${'${region}'} AND occurred_at >= ${'${start_date}'}"""
+}`);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await runMigrate('parameters', baseFlags({ input: projectRoot, check: false }));
+
+    const report = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.blocksWithParameters).toBe(0);
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'undeclared_placeholder', detail: expect.stringContaining('start_date') }),
+      expect.objectContaining({ kind: 'policy_without_definition', detail: expect.stringContaining('region') }),
+    ]));
+    expect(readFileSync(join(projectRoot, 'blocks', 'orders.dql'), 'utf-8')).toContain('${start_date}');
+  });
+});
