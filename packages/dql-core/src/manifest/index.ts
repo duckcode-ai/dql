@@ -24,6 +24,8 @@ export {
   type EntityBindingAuthoringInput,
   type RelationshipAuthoringInput,
   type ContractAuthoringInput,
+  type DomainExportAuthoringInput,
+  type DomainImportAuthoringInput,
   type ModelingAuthoringChange,
   type ModelingSourcePatch,
   type ModelingChangePreview,
@@ -47,6 +49,11 @@ export {
   type DomainInput,
   type WrittenDomain,
 } from './domain-writer.js';
+export {
+  loadDomainPackageRegistry,
+  type DomainPackageRecord,
+  type DomainPackageRegistryResult,
+} from './domain-package-registry.js';
 export {
   loadDbtRunState,
   applyBlockDataState,
@@ -79,7 +86,13 @@ export type {
   ManifestRelationshipValidationEvidence,
   ManifestRelationshipCardinality,
   ManifestFanoutPolicy,
+  ManifestRelationshipOptionality,
+  ManifestRelationshipJoinType,
+  ManifestRelationshipAggregationPolicy,
+  ManifestRelationshipTemporalPolicy,
   ManifestModelContract,
+  ManifestDomainExport,
+  ManifestDomainImport,
   ManifestConformanceDeclaration,
   ManifestModelRule,
   ManifestDomainRelationshipLineage,

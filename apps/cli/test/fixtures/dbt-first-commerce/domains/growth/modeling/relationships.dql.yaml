@@ -1,11 +1,13 @@
 relationships:
   - id: acquisition_to_customer
+    owner_domain: growth
     from: acquisition
     to: customer
     keys: [{ from: customer_id, to: customer_id }]
     cardinality: many_to_one
     fanout: safe
     crossDomain: true
+    imports: [commerce.customer_identity@1]
     status: certified
     owner: growth@company.test
     certifiedAgainst:
@@ -24,10 +26,12 @@ relationships:
       max_from_per_key: 1
       max_to_per_key: 1
   - id: touch_to_order_attribution
+    owner_domain: growth
     from: campaign_touch
     to: order
     keys: [{ from: customer_id, to: customer_id }]
     cardinality: many_to_many
     fanout: attribution_required
+    imports: [commerce.order_analytics@1]
     status: draft
     owner: growth@company.test

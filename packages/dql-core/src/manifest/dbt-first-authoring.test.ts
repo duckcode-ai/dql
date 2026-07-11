@@ -10,7 +10,7 @@ describe('dbt-first Domain Package authoring', () => {
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'dql-authoring-'));
     mkdirSync(join(root, 'domains', 'commerce'), { recursive: true });
-    writeFileSync(join(root, 'domains', 'commerce', 'domain.dql.yaml'), 'id: commerce\nowner: data@example.com\n');
+    writeFileSync(join(root, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" { id = "commerce" owner = "data@example.com" }\n');
   });
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -33,8 +33,10 @@ describe('dbt-first Domain Package authoring', () => {
   it('rejects an apply when source changed after preview', () => {
     const change = { operation: 'upsert_domain' as const, value: { id: 'growth', name: 'Growth', exports: [] } };
     const preview = previewModelingChange(root, change);
+    expect(preview.patches).toHaveLength(1);
+    expect(preview.patches[0]?.path).toBe('domains/growth/domain.dql');
     mkdirSync(join(root, 'domains', 'growth'), { recursive: true });
-    writeFileSync(join(root, 'domains', 'growth', 'domain.dql.yaml'), 'id: growth\nowner: someone@example.com\n');
+    writeFileSync(join(root, 'domains', 'growth', 'domain.dql'), 'domain "Growth" { id = "growth" owner = "someone@example.com" }\n');
     expect(() => applyModelingChange(root, change, preview.fingerprint)).toThrow(/changed after the preview/);
   });
 

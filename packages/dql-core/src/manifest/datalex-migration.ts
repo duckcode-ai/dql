@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import * as yaml from 'js-yaml';
 import type { DataLexManifest, DataLexEntity, DataLexRelationship } from '../contracts/types.js';
+import { renderDomainDeclaration } from './domain-writer.js';
 
 export interface DataLexMigrationInput {
   projectRoot: string;
@@ -22,7 +23,7 @@ export interface DataLexMigrationInput {
 export interface DataLexMigrationFile {
   path: string;
   content: string;
-  kind: 'domain_overlay' | 'dbt_yaml_patch' | 'report';
+  kind: 'domain_declaration' | 'domain_overlay' | 'dbt_yaml_patch' | 'report';
 }
 
 export interface DataLexMigrationLoss {
@@ -157,6 +158,20 @@ export function planDataLexMigration(input: DataLexMigrationInput): DataLexMigra
   }
 
   const files: DataLexMigrationFile[] = [];
+  for (const domain of [...(datalex.domains ?? [])].sort((a, b) => a.name.localeCompare(b.name))) {
+    const domainId = slug(domain.name);
+    files.push({
+      path: `domains/${domainId}/domain.dql`,
+      content: renderDomainDeclaration({
+        id: domainId,
+        name: domain.name,
+        description: domain.description,
+        owner: domain.owners?.[0],
+        tags: ['migrated-from-datalex'],
+      }),
+      kind: 'domain_declaration',
+    });
+  }
   for (const [domainId, overlay] of [...overlays.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const content = yaml.dump(compact(overlay), { noRefs: true, lineWidth: 120, sortKeys: false });
     if (content.trim()) {

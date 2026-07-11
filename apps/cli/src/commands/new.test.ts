@@ -410,6 +410,10 @@ describe('runNew', () => {
       expect(existsSync(domainPath)).toBe(true);
       expect(existsSync(join(projectDir, 'domains', 'customer', 'terms'))).toBe(true);
       expect(existsSync(join(projectDir, 'domains', 'customer', 'views'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'modeling'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'skills'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'notebooks'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'evaluations'))).toBe(true);
       expect(existsSync(blockPath)).toBe(true);
       expect(existsSync(viewPath)).toBe(true);
 
@@ -417,6 +421,7 @@ describe('runNew', () => {
       const block = readFileSync(blockPath, 'utf-8');
       const view = readFileSync(viewPath, 'utf-8');
       expect(domain).toContain('domain "Customer"');
+      expect(domain).toContain('id = "customer"');
       expect(domain).toContain('boundedContext = "Describe the business boundary for customer."');
       expect(block).toContain('block "Customer Profile"');
       expect(block).toContain('tags = ["starter", "customer", "entity_profile"]');

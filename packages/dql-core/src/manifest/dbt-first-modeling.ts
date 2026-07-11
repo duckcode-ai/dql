@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, join, relative, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import type {
   ManifestConformanceDeclaration,
@@ -18,6 +18,8 @@ import type {
   ManifestDiagnostic,
   ManifestDomainPackage,
   ManifestDomainRelationshipLineage,
+  ManifestDomainExport,
+  ManifestDomainImport,
   ManifestFanoutPolicy,
   ManifestMetricFlowProvenance,
   ManifestModelContract,
@@ -27,6 +29,7 @@ import type {
   ManifestRelationshipCardinality,
   ManifestRelationshipValidationEvidence,
 } from './types.js';
+import { loadDomainPackageRegistry } from './domain-package-registry.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -59,6 +62,11 @@ interface RawEntity {
   domain?: unknown;
   grain?: unknown;
   keys?: unknown;
+  analytical_role?: unknown;
+  analyticalRole?: unknown;
+  concept_refs?: unknown;
+  conceptRefs?: unknown;
+  status?: unknown;
 }
 
 interface RawRelationship {
@@ -73,6 +81,22 @@ interface RawRelationship {
   owner?: unknown;
   certifiedAgainst?: unknown;
   validation?: unknown;
+  owner_domain?: unknown;
+  ownerDomain?: unknown;
+  verb?: unknown;
+  description?: unknown;
+  rationale?: unknown;
+  roles?: unknown;
+  optionality?: unknown;
+  join_types?: unknown;
+  joinTypes?: unknown;
+  aggregation?: unknown;
+  temporal?: unknown;
+  attribution_block?: unknown;
+  attributionBlock?: unknown;
+  imports?: unknown;
+  evidence_expires_at?: unknown;
+  evidenceExpiresAt?: unknown;
 }
 
 /** Result of compiling the v3 overlay. The raw dbt facts never leave this module. */
@@ -184,6 +208,8 @@ export function loadDbtFirstModeling(
   const contracts: Record<string, ManifestModelContract> = {};
   const conformance: Record<string, ManifestConformanceDeclaration> = {};
   const rules: Record<string, ManifestModelRule> = {};
+  const domainExports: Record<string, ManifestDomainExport> = {};
+  const domainImports: Record<string, ManifestDomainImport> = {};
 
   for (const filePath of modelFiles) {
     const source = readYaml(filePath, diagnostics);
@@ -222,6 +248,9 @@ export function loadDbtFirstModeling(
         dbtUniqueId,
         grain,
         keys,
+        analyticalRole: analyticalRole(rawEntity.analytical_role ?? rawEntity.analyticalRole),
+        conceptRefs: stringArray(rawEntity.concept_refs ?? rawEntity.conceptRefs),
+        status: lifecycle(rawEntity.status),
         sourcePath: relPath,
         identityFingerprint: fingerprint({
           dbt: dbt.identityFingerprint,
@@ -254,6 +283,14 @@ export function loadDbtFirstModeling(
         owner: stringValue(rawContract.owner),
         sourcePath: relPath,
         requiredEvaluation: rawContract.required_evaluation !== false && rawContract.requiredEvaluation !== false,
+        version: positiveInteger(rawContract.version, 1),
+        grain: stringValue(rawContract.grain),
+        metricRefs: stringArray(rawContract.metrics ?? rawContract.metric_refs ?? rawContract.metricRefs),
+        dimensions: stringArray(rawContract.dimensions),
+        allowedFilters: stringArray(rawContract.allowed_filters ?? rawContract.allowedFilters),
+        requiredFilters: stringArray(rawContract.required_filters ?? rawContract.requiredFilters),
+        purpose: stringValue(rawContract.purpose),
+        evaluationRefs: stringArray(rawContract.evaluations ?? rawContract.evaluation_refs ?? rawContract.evaluationRefs),
       };
     }
 
@@ -282,9 +319,68 @@ export function loadDbtFirstModeling(
         sourcePath: relPath,
       };
     }
+
+    for (const rawExport of arrayOfRecords(source.exports)) {
+      const localId = stringValue(rawExport.id);
+      if (!localId) {
+        diagnostics.push(modelingError(relPath, 'each domain export requires `id`'));
+        continue;
+      }
+      const version = positiveInteger(rawExport.version, 1);
+      const id = localId.includes('.') ? localId : `${domain}.${localId}`;
+      const ref = `${id}@${version}`;
+      if (domainExports[ref]) {
+        diagnostics.push(modelingError(relPath, `duplicate domain export "${ref}"`));
+        continue;
+      }
+      const value: ManifestDomainExport = {
+        id,
+        domain: stringValue(rawExport.domain) ?? domain,
+        version,
+        entity: stringValue(rawExport.entity),
+        metrics: stringArray(rawExport.metrics ?? rawExport.allowed_metrics ?? rawExport.allowedMetrics),
+        blocks: stringArray(rawExport.blocks),
+        allowedKeys: stringArray(rawExport.allowed_keys ?? rawExport.allowedKeys),
+        allowedDimensions: stringArray(rawExport.allowed_dimensions ?? rawExport.allowedDimensions),
+        allowedFilters: stringArray(rawExport.allowed_filters ?? rawExport.allowedFilters),
+        purposes: stringArray(rawExport.purposes),
+        consumerDomains: stringArray(rawExport.consumer_domains ?? rawExport.consumerDomains),
+        classification: stringValue(rawExport.classification),
+        contract: stringValue(rawExport.contract),
+        status: lifecycle(rawExport.status),
+        owner: stringValue(rawExport.owner),
+        sourcePath: relPath,
+        fingerprint: '',
+      };
+      value.fingerprint = fingerprint(value);
+      domainExports[ref] = value;
+    }
+
+    for (const rawImport of arrayOfRecords(source.imports)) {
+      const exportRef = stringValue(rawImport.export ?? rawImport.export_ref ?? rawImport.exportRef);
+      if (!exportRef) {
+        diagnostics.push(modelingError(relPath, 'each domain import requires `export`'));
+        continue;
+      }
+      const id = stringValue(rawImport.id) ?? `${domain}:${exportRef}`;
+      if (domainImports[id]) {
+        diagnostics.push(modelingError(relPath, `duplicate domain import "${id}"`));
+        continue;
+      }
+      domainImports[id] = {
+        id,
+        domain: stringValue(rawImport.domain ?? rawImport.consumer_domain ?? rawImport.consumerDomain) ?? domain,
+        exportRef,
+        purpose: stringValue(rawImport.purpose) ?? '',
+        status: lifecycle(rawImport.status),
+        owner: stringValue(rawImport.owner),
+        sourcePath: relPath,
+      };
+    }
   }
 
-  const relationships = buildRelationships(rawRelationships, entities, nodeFacts, domainSources, diagnostics);
+  validateInterfaces(domainExports, domainImports, entities, diagnostics);
+  const relationships = buildRelationships(rawRelationships, entities, nodeFacts, domainSources, domainExports, domainImports, diagnostics);
   validateContracts(contracts, entities, diagnostics);
   validateConformance(conformance, entities, diagnostics);
   const packages = Object.fromEntries([...domainSources.values()]
@@ -317,6 +413,10 @@ export function loadDbtFirstModeling(
       contracts: sortRecord(contracts),
       conformance: sortRecord(conformance),
       rules: sortRecord(rules),
+      interfaces: {
+        exports: sortRecord(domainExports),
+        imports: sortRecord(domainImports),
+      },
       domainLineage,
     },
     diagnostics,
@@ -328,10 +428,12 @@ function buildRelationships(
   entities: Record<string, ManifestModelEntity>,
   nodeFacts: Map<string, DbtNodeFacts>,
   packages: Map<string, DomainSource>,
+  domainExports: Record<string, ManifestDomainExport>,
+  domainImports: Record<string, ManifestDomainImport>,
   diagnostics: ManifestDiagnostic[],
 ): Record<string, ManifestModelRelationship> {
   const relationships: Record<string, ManifestModelRelationship> = {};
-  for (const { value, sourcePath } of rawRelationships) {
+  for (const { value, sourcePath, domain } of rawRelationships) {
     const id = stringValue(value.id);
     const from = stringValue(value.from);
     const to = stringValue(value.to);
@@ -368,6 +470,12 @@ function buildRelationships(
     const fanout = fanoutPolicy(value.fanout);
     const status = lifecycle(value.status);
     const crossDomain = value.crossDomain === true || fromEntity.domain !== toEntity.domain;
+    const ownerDomain = stringValue(value.owner_domain ?? value.ownerDomain) ?? domain;
+    const importRefs = stringArray(value.imports);
+    const structuredInterfaces = Object.keys(domainExports).length > 0 || Object.keys(domainImports).length > 0;
+    const interfacesGranted = !crossDomain || (structuredInterfaces
+      ? crossDomainInterfacesGranted(ownerDomain, [fromEntity, toEntity], importRefs, domainExports, domainImports, sourcePath, id, diagnostics)
+      : packages.get(fromEntity.domain)?.exports.includes(from) === true);
     const certificationFingerprint = certificationProof(value.certifiedAgainst, keys, cardinality, fanout);
     const validation = validationEvidence(value.validation);
     const currentProof = fingerprint({
@@ -397,13 +505,12 @@ function buildRelationships(
         message: `certification for relationship "${id}" is stale because its dbt identity/grain proof changed`,
       });
     }
-    const exported = !crossDomain || packages.get(fromEntity.domain)?.exports.includes(from) === true;
-    if (crossDomain && !exported) {
+    if (crossDomain && !interfacesGranted && !structuredInterfaces) {
       diagnostics.push(modelingError(sourcePath, `cross-domain relationship "${id}" requires ${fromEntity.domain} to export entity "${from}"`));
     }
     const automaticJoinAllowed = status === 'certified'
       && !staleCertification
-      && exported
+      && interfacesGranted
       && validation?.status === 'passed'
       && (cardinality === 'many_to_one' || cardinality === 'one_to_many' || cardinality === 'one_to_one')
       && fanout === 'safe';
@@ -424,7 +531,19 @@ function buildRelationships(
       fanout,
       status,
       crossDomain,
+      ownerDomain,
       owner: stringValue(value.owner),
+      verb: stringValue(value.verb),
+      description: stringValue(value.description),
+      rationale: stringValue(value.rationale),
+      roles: relationshipRoles(value.roles),
+      optionality: relationshipOptionality(value.optionality),
+      joinTypes: relationshipJoinTypes(value.join_types ?? value.joinTypes),
+      aggregation: relationshipAggregation(value.aggregation),
+      temporal: relationshipTemporal(value.temporal),
+      attributionBlock: stringValue(value.attribution_block ?? value.attributionBlock),
+      importRefs,
+      evidenceExpiresAt: stringValue(value.evidence_expires_at ?? value.evidenceExpiresAt),
       sourcePath,
       fingerprint: currentProof,
       certificationFingerprint,
@@ -482,6 +601,105 @@ function certificationProof(
   });
 }
 
+function validateInterfaces(
+  exports: Record<string, ManifestDomainExport>,
+  imports: Record<string, ManifestDomainImport>,
+  entities: Record<string, ManifestModelEntity>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  for (const value of Object.values(exports)) {
+    if (value.entity && !entities[value.entity]) {
+      diagnostics.push(modelingError(value.sourcePath, `domain export "${value.id}@${value.version}" references unknown entity "${value.entity}"`));
+    }
+    if (value.status === 'certified' && !value.owner) {
+      diagnostics.push(modelingError(value.sourcePath, `certified domain export "${value.id}@${value.version}" requires an owner`));
+    }
+  }
+  for (const value of Object.values(imports)) {
+    const exported = exports[value.exportRef];
+    if (!exported) {
+      diagnostics.push(modelingError(value.sourcePath, `domain import "${value.id}" references unknown export "${value.exportRef}"`));
+      continue;
+    }
+    if (exported.consumerDomains.length > 0 && !exported.consumerDomains.includes(value.domain)) {
+      diagnostics.push(modelingError(value.sourcePath, `domain import "${value.id}" is not an allowed consumer of "${value.exportRef}"`));
+    }
+    if (exported.purposes.length > 0 && !exported.purposes.includes(value.purpose)) {
+      diagnostics.push(modelingError(value.sourcePath, `domain import "${value.id}" purpose "${value.purpose}" is not allowed by "${value.exportRef}"`));
+    }
+  }
+}
+
+function crossDomainInterfacesGranted(
+  ownerDomain: string,
+  endpoints: ManifestModelEntity[],
+  importRefs: string[],
+  exports: Record<string, ManifestDomainExport>,
+  imports: Record<string, ManifestDomainImport>,
+  sourcePath: string,
+  relationshipId: string,
+  diagnostics: ManifestDiagnostic[],
+): boolean {
+  let granted = true;
+  for (const endpoint of endpoints.filter((entity) => entity.domain !== ownerDomain)) {
+    const matching = importRefs
+      .map((ref) => Object.values(imports).find((value) => value.exportRef === ref && value.domain === ownerDomain))
+      .filter((value): value is ManifestDomainImport => Boolean(value))
+      .find((value) => {
+        const exported = exports[value.exportRef];
+        return exported?.domain === endpoint.domain && (!exported.entity || exported.entity === endpoint.id);
+      });
+    const exported = matching ? exports[matching.exportRef] : undefined;
+    if (!matching || matching.status !== 'certified' || !exported || exported.status !== 'certified') {
+      diagnostics.push(modelingError(sourcePath, `cross-domain relationship "${relationshipId}" requires a certified ${ownerDomain} import of a certified ${endpoint.domain} export for entity "${endpoint.id}"`));
+      granted = false;
+    }
+  }
+  return granted;
+}
+
+function relationshipRoles(value: unknown): { from?: string; to?: string } | undefined {
+  const raw = asRecord(value);
+  const from = stringValue(raw.from);
+  const to = stringValue(raw.to);
+  return from || to ? { from, to } : undefined;
+}
+
+function relationshipOptionality(value: unknown): { from: 'required' | 'optional' | 'unknown'; to: 'required' | 'optional' | 'unknown' } | undefined {
+  const raw = asRecord(value);
+  if (Object.keys(raw).length === 0) return undefined;
+  const normalize = (input: unknown): 'required' | 'optional' | 'unknown' => input === 'required' || input === 'optional' ? input : 'unknown';
+  return { from: normalize(raw.from), to: normalize(raw.to) };
+}
+
+function relationshipJoinTypes(value: unknown): Array<'left' | 'inner'> | undefined {
+  const values = stringArray(value).filter((item): item is 'left' | 'inner' => item === 'left' || item === 'inner');
+  return values.length > 0 ? [...new Set(values)] : undefined;
+}
+
+function relationshipAggregation(value: unknown): { measuresFrom: string[]; dimensionsFrom: string[]; requiresPreAggregation?: boolean } | undefined {
+  const raw = asRecord(value);
+  if (Object.keys(raw).length === 0) return undefined;
+  return {
+    measuresFrom: stringArray(raw.measures_from ?? raw.measuresFrom),
+    dimensionsFrom: stringArray(raw.dimensions_from ?? raw.dimensionsFrom),
+    requiresPreAggregation: raw.requires_pre_aggregation === true || raw.requiresPreAggregation === true || undefined,
+  };
+}
+
+function relationshipTemporal(value: unknown): { factTime: string; validFrom: string; validTo?: string; openEnded?: boolean } | undefined {
+  const raw = asRecord(value);
+  const factTime = stringValue(raw.fact_time ?? raw.factTime);
+  const validFrom = stringValue(raw.valid_from ?? raw.validFrom);
+  if (!factTime || !validFrom) return undefined;
+  return {
+    factTime,
+    validFrom,
+    validTo: stringValue(raw.valid_to ?? raw.validTo),
+    openEnded: raw.open_ended === true || raw.openEnded === true || undefined,
+  };
+}
+
 function validateContracts(
   contracts: Record<string, ManifestModelContract>,
   entities: Record<string, ManifestModelEntity>,
@@ -510,26 +728,16 @@ function validateConformance(
 }
 
 function loadDomainSources(projectRoot: string, diagnostics: ManifestDiagnostic[]): Map<string, DomainSource> {
-  const sources = new Map<string, DomainSource>();
-  const root = join(projectRoot, 'domains');
-  for (const filePath of scanYaml(root).filter((path) => basename(path) === 'domain.dql.yaml' || basename(path) === 'domain.dql.yml')) {
-    const source = readYaml(filePath, diagnostics);
-    if (!source) continue;
-    const id = stringValue(source.id) ?? stringValue(source.domain) ?? basename(dirname(filePath));
-    if (sources.has(id)) {
-      diagnostics.push(modelingError(relative(projectRoot, filePath), `duplicate Domain Package "${id}"`));
-      continue;
-    }
-    sources.set(id, {
-      id,
-      root: dirname(filePath),
-      filePath,
-      parent: stringValue(source.parent),
-      exports: stringArray(source.exports),
-      owner: stringValue(source.owner),
-    });
-  }
-  return sources;
+  const registry = loadDomainPackageRegistry(projectRoot);
+  diagnostics.push(...registry.diagnostics);
+  return new Map(registry.values().map((pkg) => [pkg.id, {
+    id: pkg.id,
+    root: pkg.root,
+    filePath: join(projectRoot, pkg.declarationPath),
+    parent: pkg.parent,
+    exports: pkg.exports,
+    owner: pkg.owner,
+  }]));
 }
 
 function collectModelingFiles(packages: Map<string, DomainSource>): string[] {
@@ -650,6 +858,15 @@ function lifecycle(value: unknown): 'draft' | 'review' | 'certified' | 'deprecat
 
 function ruleKind(value: unknown): 'fanout' | 'export' | 'contract' | 'custom' {
   return value === 'fanout' || value === 'export' || value === 'contract' ? value : 'custom';
+}
+
+function analyticalRole(value: unknown): 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown' {
+  return value === 'event' || value === 'dimension' || value === 'snapshot' || value === 'bridge' ? value : 'unknown';
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function arrayOfRecords(value: unknown): UnknownRecord[] {

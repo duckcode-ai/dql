@@ -2922,7 +2922,7 @@ describe('domains API (spec 17, part B)', () => {
     const domains = listDomains(projectRoot);
     const sales = domains.find((d) => d.name === 'Sales');
     expect(sales).toMatchObject({
-      id: 'Sales',
+      id: 'sales',
       owner: 'sales@x.com',
       sourceSystems: ['orders'],
       blockCount: 1,

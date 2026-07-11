@@ -391,6 +391,8 @@ export interface ManifestBlockParameter {
 // ---- Business Domains ----
 
 export interface ManifestDomain {
+  /** Stable dot-qualified package id. */
+  id?: string;
   name: string;
   /** Relative path from project root */
   filePath: string;
@@ -411,6 +413,7 @@ export interface ManifestDomain {
   dbtTags?: string[];
   semanticDomains?: string[];
   semanticTags?: string[];
+  exports?: string[];
 }
 
 // ---- Business Terms ----
@@ -797,6 +800,10 @@ export interface ManifestDbtFirstModeling {
   contracts: Record<string, ManifestModelContract>;
   conformance: Record<string, ManifestConformanceDeclaration>;
   rules: Record<string, ManifestModelRule>;
+  interfaces?: {
+    exports: Record<string, ManifestDomainExport>;
+    imports: Record<string, ManifestDomainImport>;
+  };
   /** DQL analytical edges; separate from dbt transformation lineage. */
   domainLineage: ManifestDomainRelationshipLineage[];
 }
@@ -817,12 +824,30 @@ export interface ManifestModelEntity {
   grain?: string;
   /** Analytical key assertion; no physical column catalog is copied. */
   keys: string[];
+  analyticalRole?: 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown';
+  conceptRefs?: string[];
+  status?: 'draft' | 'review' | 'certified' | 'deprecated';
   sourcePath: string;
   identityFingerprint: string;
 }
 
 export type ManifestRelationshipCardinality = 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
 export type ManifestFanoutPolicy = 'safe' | 'attribution_required' | 'unsafe' | 'unknown';
+export type ManifestRelationshipOptionality = 'required' | 'optional' | 'unknown';
+export type ManifestRelationshipJoinType = 'left' | 'inner';
+
+export interface ManifestRelationshipAggregationPolicy {
+  measuresFrom: string[];
+  dimensionsFrom: string[];
+  requiresPreAggregation?: boolean;
+}
+
+export interface ManifestRelationshipTemporalPolicy {
+  factTime: string;
+  validFrom: string;
+  validTo?: string;
+  openEnded?: boolean;
+}
 
 export interface ManifestModelRelationship {
   id: string;
@@ -833,7 +858,19 @@ export interface ManifestModelRelationship {
   fanout: ManifestFanoutPolicy;
   status: 'draft' | 'review' | 'certified' | 'deprecated';
   crossDomain: boolean;
+  ownerDomain?: string;
   owner?: string;
+  verb?: string;
+  description?: string;
+  rationale?: string;
+  roles?: { from?: string; to?: string };
+  optionality?: { from: ManifestRelationshipOptionality; to: ManifestRelationshipOptionality };
+  joinTypes?: ManifestRelationshipJoinType[];
+  aggregation?: ManifestRelationshipAggregationPolicy;
+  temporal?: ManifestRelationshipTemporalPolicy;
+  attributionBlock?: string;
+  importRefs?: string[];
+  evidenceExpiresAt?: string;
   sourcePath: string;
   fingerprint: string;
   certificationFingerprint?: string;
@@ -868,6 +905,44 @@ export interface ManifestModelContract {
   owner?: string;
   sourcePath: string;
   requiredEvaluation: boolean;
+  version?: number;
+  grain?: string;
+  metricRefs?: string[];
+  dimensions?: string[];
+  allowedFilters?: string[];
+  requiredFilters?: string[];
+  purpose?: string;
+  evaluationRefs?: string[];
+}
+
+export interface ManifestDomainExport {
+  id: string;
+  domain: string;
+  version: number;
+  entity?: string;
+  metrics: string[];
+  blocks: string[];
+  allowedKeys: string[];
+  allowedDimensions: string[];
+  allowedFilters: string[];
+  purposes: string[];
+  consumerDomains: string[];
+  classification?: string;
+  contract?: string;
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+  sourcePath: string;
+  fingerprint: string;
+}
+
+export interface ManifestDomainImport {
+  id: string;
+  domain: string;
+  exportRef: string;
+  purpose: string;
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+  sourcePath: string;
 }
 
 export interface ManifestConformanceDeclaration {

@@ -59,6 +59,8 @@ import {
 import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
 import { blockParameterDefinitions } from '../blocks/parameters.js';
 import { loadDbtFirstModeling, siblingDbtArtifact } from './dbt-first-modeling.js';
+import { domainFolderSlug } from './domain-writer.js';
+import { loadDomainPackageRegistry } from './domain-package-registry.js';
 
 // ---- Public API ----
 
@@ -150,7 +152,7 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
 
-  const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
+  const notebookDirs = ['notebooks', 'domains', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   for (const dir of notebookDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'])) files.add(f);
   }
@@ -214,8 +216,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
   // Scan first-class business domains
   const domainDirs = ['domains', 'blocks', 'terms', 'business-views', ...(options.extraBlockDirs ?? [])];
-  const domains = scanDomains(projectRoot, domainDirs, diagnostics);
-  validateDomainHierarchy(domains, diagnostics);
+  const packageRegistry = dbtFirstV3 ? loadDomainPackageRegistry(projectRoot) : undefined;
+  const domains = packageRegistry
+    ? Object.fromEntries(packageRegistry.values().map((pkg) => [pkg.id, pkg.domain]))
+    : scanDomains(projectRoot, domainDirs, diagnostics);
+  if (!packageRegistry) validateDomainHierarchy(domains, diagnostics);
 
   // Scan blocks
   const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
@@ -334,7 +339,9 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   return {
     manifestVersion: dbtFirstV3 ? 3 : 2,
     dqlVersion,
-    generatedAt: new Date().toISOString(),
+    // v3 is a reproducible policy artifact. Runtime build time lives in the
+    // local cache, not in the canonical manifest content.
+    generatedAt: dbtFirstV3 ? new Date(0).toISOString() : new Date().toISOString(),
     project: projectName,
     projectRoot,
     domains,
@@ -2439,6 +2446,7 @@ function buildOutputContract(
 
 function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDomain {
   return {
+    id: typeof domain.id === 'string' ? domain.id : domainFolderSlug(domain.name),
     name: domain.name,
     filePath,
     parent: typeof domain.parent === 'string' ? domain.parent : undefined,
@@ -2458,6 +2466,7 @@ function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDoma
     dbtTags: Array.isArray(domain.dbtTags) ? domain.dbtTags : undefined,
     semanticDomains: Array.isArray(domain.semanticDomains) ? domain.semanticDomains : undefined,
     semanticTags: Array.isArray(domain.semanticTags) ? domain.semanticTags : undefined,
+    exports: Array.isArray(domain.exports) ? domain.exports : undefined,
   };
 }
 

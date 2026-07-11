@@ -47,6 +47,7 @@ import { createContextLedger, type ContextLedger } from './grounding/context-led
 import { validateAnswerResultShape } from './answer-shape.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
 import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
+import { planAnalyticalPath, type AnalyticalPathPlan } from './metadata/analytical-policy.js';
 import { planCertifiedAdaptation, type CertifiedAdaptation } from './metadata/block-adapt.js';
 import {
   compactSqlSnippet,
@@ -1159,6 +1160,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   ];
   const skillsPrompt = buildSkillsPrompt(selectedSkills, userId ?? null);
   if (skillsPrompt) messages.push({ role: 'system', content: skillsPrompt });
+  const analyticalPlan = input.manifest
+    ? planAnalyticalPath(input.manifest, {
+        entityIds: inferAnalyticalEntityIds(question, contextNodes, input.manifest),
+      })
+    : undefined;
+  const analyticalPlanPrompt = renderAnalyticalPlanPrompt(analyticalPlan);
+  if (analyticalPlanPrompt) messages.push({ role: 'system', content: analyticalPlanPrompt });
 
   messages.push({
     role: 'system',
@@ -1493,7 +1501,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     || (input.contextPack?.allowedSqlContext?.relations.length ?? 0) > 0
     || (input.contextPack?.allowedSqlContext?.sourceBlockSql.length ?? 0) > 0
     || contextBlocks.length > 0;
-  if (!parsed.sql && !governedMetricAnswer && wantsGeneratedData && hasGeneratableContext) {
+  if (!parsed.sql && !governedMetricAnswer && wantsGeneratedData && hasGeneratableContext && analyticalPlan?.safe !== false) {
     try {
       proposed = await generateProposalWithOptionalTools({
         provider,
@@ -1521,7 +1529,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // every run and every surface — instead of passing through the model's varying
     // text. A genuinely context-less ask keeps the plain honest message.
     const declinedDespiteContext = wantsGeneratedData && hasGeneratableContext;
-    const text = declinedDespiteContext
+    const text = analyticalPlan?.safe === false
+      ? analyticalPlan.message ?? 'DQL could not prove a safe analytical relationship path.'
+      : declinedDespiteContext
       ? 'I could not compose a governed query for this from the available tables and metrics. This usually needs a clearer join path or an explicit metric and grouping — name the specific measure and how to break it down, and I can generate a review-required draft.'
       : parsed.text || 'No answer (the model declined to propose SQL).';
     return {
@@ -1531,9 +1541,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       reviewStatus: 'none',
       confidence: 0.1,
       text,
-      refusalCode: 'model_declined',
+      refusalCode: analyticalPlan?.code === 'attribution_policy_required' ? 'ambiguous' : analyticalPlan?.safe === false ? 'grounding_gap' : 'model_declined',
       refusalDetails: {
-        code: 'model_declined',
+        code: analyticalPlan?.code === 'attribution_policy_required' ? 'ambiguous' : analyticalPlan?.safe === false ? 'grounding_gap' : 'model_declined',
         message: text,
       },
       answer: text,
@@ -2220,6 +2230,46 @@ Rules:
 // combined dataset — show them separately" refusal into the join the user asked
 // for, while still allowing an honest refusal if context is truly missing.
 const FORCE_JOIN_INSTRUCTION = `Your previous attempt declined to produce SQL. Re-read the supplied schema, metadata, and any "Knowledge graph join routes": this question CAN be answered by joining the grounded tables along their documented keys. Do NOT refuse, and do NOT suggest showing the datasets separately — compose ONE read-only SELECT/WITH that joins the relevant tables to answer it directly, following the JSON contract from rule 3. State the grain and the exact join path in the summary. Only if a required table, column, or join key is truly absent from the supplied context may you still ask a clarifying question.`;
+
+function inferAnalyticalEntityIds(question: string, contextNodes: KGNode[], manifest: DQLManifest): string[] {
+  if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) return [];
+  const normalizedQuestion = question.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  const contextIds = new Set(contextNodes.map((node) => node.nodeId.toLowerCase()));
+  const scored = Object.values(manifest.modeling.entities).map((entity) => {
+    const dbt = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
+    const tokens = [entity.id, dbt?.name]
+      .filter((value): value is string => Boolean(value))
+      .flatMap((value) => value.toLowerCase().replace(/^(fct|dim|stg)_/, '').split(/[^a-z0-9]+/))
+      .filter((token) => token.length > 2);
+    const direct = tokens.some((token) => normalizedQuestion.includes(token));
+    const inContext = contextIds.has(`entity:${entity.id}`.toLowerCase())
+      || contextIds.has(`dbt_model:${entity.dbtUniqueId}`.toLowerCase())
+      || contextNodes.some((node) => node.kind === 'dbt_model' && node.name === dbt?.name);
+    return { id: entity.id, score: direct ? 2 : inContext ? 1 : 0 };
+  });
+  return scored.filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, 5).map((entry) => entry.id);
+}
+
+function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): string | undefined {
+  if (!plan || plan.entities.length < 2) return undefined;
+  if (!plan.safe) {
+    return [
+      'DQL ANALYTICAL POLICY DECISION: BLOCKED.',
+      plan.message ?? 'No certified analytical relationship path is available.',
+      `Policy code: ${plan.code ?? 'unsafe_relationship'}.`,
+      'Do not invent a join from dbt lineage or shared column names. Return a clarification or refusal that asks for the missing relationship, export/import, or attribution policy.',
+    ].join('\n');
+  }
+  return [
+    'DQL CERTIFIED ANALYTICAL JOIN PLAN (authoritative):',
+    ...plan.edges.map((edge, index) => [
+      `${index + 1}. ${edge.fromEntity} (${edge.fromRelation ?? 'bound dbt model'}) -> ${edge.toEntity} (${edge.toRelation ?? 'bound dbt model'})`,
+      `   relationship=${edge.relationshipId}; keys=${edge.keys.map((key) => `${key.from}=${key.to}`).join(', ')}; cardinality=${edge.cardinality}; fanout=${edge.fanout}`,
+      edge.importRefs.length ? `   imports=${edge.importRefs.join(', ')}` : '',
+    ].filter(Boolean).join('\n')),
+    'Use only these relationships and exact key pairs. dbt DAG lineage and same-named columns are not join authorization. Any different join must be refused.',
+  ].join('\n');
+}
 
 // Metric-anchored generation (Tier 2.5): a governed metric matched the question but
 // the semantic layer couldn't compose the exact shape. Reuse the metric's CERTIFIED

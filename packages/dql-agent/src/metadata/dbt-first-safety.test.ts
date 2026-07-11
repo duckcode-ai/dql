@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { DQLManifest } from '@duckcodeailabs/dql-core';
+import { buildManifest, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { evaluateDbtFirstGeneratedSql } from './dbt-first-safety.js';
+import { planAnalyticalPath } from './analytical-policy.js';
+
+const commerceFixture = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../apps/cli/test/fixtures/dbt-first-commerce');
 
 describe('evaluateDbtFirstGeneratedSql', () => {
   it('allows a certified fanout-safe relationship path', () => {
@@ -33,6 +38,39 @@ describe('evaluateDbtFirstGeneratedSql', () => {
     );
 
     expect(decision).toMatchObject({ safe: false, code: 'stale_certification' });
+  });
+
+  it('rejects a connected table pair when the SQL uses the wrong join keys', () => {
+    const decision = evaluateDbtFirstGeneratedSql(
+      'select * from fct_orders o join dim_customers c on o.order_id = c.customer_id',
+      manifest(),
+    );
+    expect(decision).toMatchObject({ safe: false, code: 'join_key_mismatch', relationshipIds: ['order_to_customer'] });
+  });
+
+  it('rejects an unbound relation in generated join SQL', () => {
+    const decision = evaluateDbtFirstGeneratedSql(
+      'select * from fct_orders o join mystery_table m on o.customer_id = m.customer_id',
+      manifest(),
+    );
+    expect(decision).toMatchObject({ safe: false, code: 'unbound_relation' });
+  });
+
+  it('uses the compiled Commerce to Growth safe path and blocks raw campaign-touch attribution', () => {
+    const compiled = buildManifest({ projectRoot: commerceFixture, dbtManifestPath: join(commerceFixture, 'target/manifest.json') });
+    const safe = planAnalyticalPath(compiled, {
+      entityIds: ['order', 'acquisition'],
+      purpose: 'growth_attribution',
+      question: 'gross revenue by acquisition channel',
+    });
+    expect(safe).toMatchObject({ safe: true, relationshipIds: ['acquisition_to_customer', 'order_to_customer'] });
+
+    const unsafe = planAnalyticalPath(compiled, {
+      entityIds: ['campaign_touch', 'order'],
+      purpose: 'growth_attribution',
+      question: 'gross revenue by raw campaign touch',
+    });
+    expect(unsafe).toMatchObject({ safe: false, code: 'attribution_policy_required', relationshipIds: ['touch_to_order_attribution'] });
   });
 });
 

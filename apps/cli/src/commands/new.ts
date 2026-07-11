@@ -146,6 +146,7 @@ function buildDomainTemplate(opts: {
 }): string {
   const domainSlug = toSlug(opts.domain || opts.title).replace(/_/g, '-');
   return `domain "${opts.title}" {
+    id = "${domainSlug.replace(/-/g, '_')}"
     owner = "${opts.owner}"
     businessOwner = "${opts.owner}"
     boundedContext = "Describe the business boundary for ${opts.title.toLowerCase()}."
@@ -706,7 +707,11 @@ async function runNewDomain(opts: {
   }
 
   mkdirSync(domainDir, { recursive: true });
-  for (const child of ['terms', 'blocks', 'views', 'apps']) {
+  const packageFolders = [
+    'modeling', 'modeling/layouts', 'terms', 'skills', 'blocks', 'blocks/_drafts',
+    'views', 'notebooks', 'apps', 'evaluations', 'tests',
+  ];
+  for (const child of packageFolders) {
     mkdirSync(join(domainDir, child), { recursive: true });
   }
 
@@ -727,7 +732,7 @@ async function runNewDomain(opts: {
       type: 'domain',
       name: title,
       path: filePath,
-      folders: ['terms', 'blocks', 'views', 'apps'].map((child) => join(domainDir, child)),
+      folders: packageFolders.map((child) => join(domainDir, child)),
       nextSteps,
     }, null, 2));
     return;

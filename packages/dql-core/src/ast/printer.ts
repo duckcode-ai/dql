@@ -177,6 +177,7 @@ function printDomainDecl(node: DomainDeclNode, indent: number): string {
   for (const dec of node.decorators) {
     result += printDecorator(dec, indent + 1);
   }
+  if (node.id) result += `${prefix}  id = "${node.id}"\n`;
   if (node.parent) result += `${prefix}  parent = "${node.parent}"\n`;
   if (node.owner) result += `${prefix}  owner = "${node.owner}"\n`;
   if (node.businessOwner) result += `${prefix}  businessOwner = "${node.businessOwner}"\n`;
@@ -194,6 +195,7 @@ function printDomainDecl(node: DomainDeclNode, indent: number): string {
   if (node.dbtTags) result += `${prefix}  dbtTags = [${node.dbtTags.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.semanticDomains) result += `${prefix}  semanticDomains = [${node.semanticDomains.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.semanticTags) result += `${prefix}  semanticTags = [${node.semanticTags.map(t => `"${t}"`).join(', ')}]\n`;
+  if (node.exports) result += `${prefix}  exports = [${node.exports.map(t => `"${t}"`).join(', ')}]\n`;
   return result;
 }
 

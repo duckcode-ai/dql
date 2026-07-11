@@ -69,23 +69,29 @@ domain's analytical intent without creating a copy of dbt source metadata:
 ```text
 domains/
   commerce/
-    domain.dql.yaml
+    domain.dql
     modeling/
       entities.dql.yaml
       relationships.dql.yaml
+      interfaces.dql.yaml
       contracts.dql.yaml
       rules.dql.yaml
+      layouts/
+    terms/
     blocks/
     notebooks/
-    business-views/
+    views/
     skills/
     evaluations/
+    tests/
+    apps/
   growth/
-    domain.dql.yaml
+    domain.dql
     modeling/
       relationships.dql.yaml
+      interfaces.dql.yaml
     blocks/
-    business-views/
+    views/
 ```
 
 Domain nesting is organizational and retrieval-scoping metadata. It does not
@@ -138,11 +144,11 @@ the compiler; the manifest is the generated result. A representative package:
 ```yaml
 # domains/commerce/modeling/entities.dql.yaml
 entities:
-  - id: order
+  - id: commerce.orders.order
     dbt_model: model.jaffle_shop.fct_orders
     domain: commerce.orders
     grain: order_id
-  - id: customer
+  - id: commerce.customers.customer
     dbt_model: model.jaffle_shop.dim_customers
     domain: commerce.customers
     grain: customer_id
@@ -152,8 +158,8 @@ entities:
 # domains/commerce/modeling/relationships.dql.yaml
 relationships:
   - id: order_to_customer
-    from: order
-    to: customer
+    from: commerce.orders.order
+    to: commerce.customers.customer
     keys: [{ from: customer_id, to: customer_id }]
     cardinality: many_to_one
     fanout: safe
@@ -171,9 +177,11 @@ automatic generated joins.
 
 ### 4. Cross-domain contracts and conformance
 
-Cross-domain joins require a certified relationship and a declared export
-contract. The relationship declares `crossDomain: true`; the exporting domain
-declares the entities/metrics it exports and any purpose or privacy constraints.
+Cross-domain joins require a certified relationship plus a certified provider
+export and consumer import. The relationship declares `crossDomain: true` and
+the exact import reference; the exporting domain declares the narrow entity,
+keys, metrics, blocks, dimensions, filters, purposes, consumers, classification,
+and contract version it exposes.
 A parent domain does not automatically export all child-domain data.
 
 Conformance declarations state that two entities represent the same governed
@@ -189,8 +197,9 @@ The compiler computes a stable fingerprint from the relevant dbt node identity,
 selected identity/grain metadata, relation aliases, and the relevant catalog or
 semantic artifact records. A relationship or contract that depends on a
 changed key/grain binding receives `stale_certification`; certification is never
-silently preserved. Fingerprints and package source paths are deterministic;
-`generatedAt` is the only intentionally time-varying top-level field.
+silently preserved. Fingerprints, package source paths, and the complete
+serialized v3 manifest are deterministic. Runtime build time belongs in
+ignored cache state, not source truth; v3 emits a stable epoch `generatedAt`.
 
 Compilation may produce diagnostics but must not mutate source files. A stale
 relationship is retained for review and excluded from certified routing.
@@ -233,11 +242,11 @@ files when source artifacts are unchanged.
 
 ### 8. UI and API surface
 
-The modeling surface presents separate sections for **dbt-owned provenance**
-and **DQL-owned overlay**. It supports package-scoped relationship/contract
-editing, source patch previews for dbt-owned edits, stale-certification
-diagnostics, and a lineage view that distinguishes dbt transformation edges
-from DQL analytical relationship edges.
+The single **Domains** workspace presents package overview, relationship graph,
+relationships, interfaces, contracts, quality, and **dbt-owned provenance**.
+It supports source-previewed package edits, warehouse proof, stale diagnostics,
+and lineage that distinguishes dbt transformation edges from DQL analytical
+relationship edges. Context and modeling are not separate navigation roots.
 
 Existing DQL Cloud embed selectors, token names and `dql-theme` persistence
 remain unchanged. DQL owns the functionality; Cloud may reskin the existing

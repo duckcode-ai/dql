@@ -1,0 +1,11 @@
+imports:
+  - id: growth_customer_identity
+    export: commerce.customer_identity@1
+    purpose: growth_attribution
+    status: certified
+    owner: growth@company.test
+  - id: growth_order_analytics
+    export: commerce.order_analytics@1
+    purpose: growth_attribution
+    status: certified
+    owner: growth@company.test

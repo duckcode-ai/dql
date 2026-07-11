@@ -19,6 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, basename, dirname, relative } from 'node:path';
 import * as yaml from 'js-yaml';
+import { loadDomainPackageRegistry } from '@duckcodeailabs/dql-core';
 
 export interface Skill {
   id: string;
@@ -67,7 +68,8 @@ export interface SkillLoadResult {
  * Misformed files are reported in `errors`; valid Skills still come back.
  */
 export function loadSkills(projectRoot: string): SkillLoadResult {
-  const roots = [skillsDir(projectRoot), legacySkillsDir(projectRoot)];
+  const domainRoots = loadDomainPackageRegistry(projectRoot).values().map((pkg) => join(pkg.root, 'skills'));
+  const roots = [...domainRoots, skillsDir(projectRoot), legacySkillsDir(projectRoot)];
   const skills: Skill[] = [];
   const errors: Array<{ path: string; message: string }> = [];
   const seen = new Set<string>();
@@ -156,8 +158,12 @@ export function legacySkillsDir(projectRoot: string): string {
 /** Resolve the `.skill.md` path a skill should be written to. */
 export function skillPath(projectRoot: string, id: string, domains: string[] = []): string {
   const firstDomain = domains[0]?.trim();
+  if (firstDomain && domains.length === 1) {
+    const packageRoot = loadDomainPackageRegistry(projectRoot).get(firstDomain)?.root;
+    if (packageRoot) return join(packageRoot, 'skills', `${sanitizeSkillId(id)}.skill.md`);
+  }
   const folder = firstDomain
-    ? firstDomain.split('/').map(sanitizeSkillId).filter(Boolean)
+    ? firstDomain.split(/[/.]/).map(sanitizeSkillId).filter(Boolean)
     : [];
   const target = domains.length > 1 ? ['_cross-domain'] : folder;
   return join(skillsDir(projectRoot), ...target, `${sanitizeSkillId(id)}.skill.md`);

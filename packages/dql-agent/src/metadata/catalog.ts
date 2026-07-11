@@ -1018,7 +1018,11 @@ export function buildMetadataSnapshot(
   addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
   addBlockDependencyEdges(manifest, edges);
   addBlockOutputLineageObjects(manifest, objects, edges);
-  addDataLexManifestObjects(projectRoot, manifest, objects, edges, diagnostics);
+  // Manifest v3 is the unified DQL runtime. DataLex is migration input only;
+  // retaining it here would reintroduce a second analytical source of truth.
+  if (manifest.manifestVersion !== 3) {
+    addDataLexManifestObjects(projectRoot, manifest, objects, edges, diagnostics);
+  }
 
   const nodeKeyMap = new Map<string, string>();
   for (const node of [...manifestGraph.nodes, ...semanticGraph.nodes]) {

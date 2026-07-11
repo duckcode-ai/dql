@@ -87,14 +87,13 @@ import {
   canonicalizeNotebook,
   diffDQL,
   diffNotebook,
-  writeDomainDeclaration,
-  deleteDomainDeclaration,
   domainFolderSlug,
   type DomainInput,
   type ManifestDomain,
   type DiffReport,
   previewModelingChange,
   applyModelingChange,
+  loadDomainPackageRegistry,
   loadDbtNodeAuthoringDetail,
   type ModelingAuthoringChange,
   type RelationshipAuthoringInput,
@@ -178,6 +177,7 @@ import {
   type EnrichedContent,
   type BuildFromPromptResult,
   reindexProject,
+  invalidateAgentProjectState,
   defaultKgPath,
   planApp,
   planResearch,
@@ -3165,18 +3165,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
 
-  // Watch notebooks/, workbooks/, semantic-layer/, and data/ dirs for changes
+  // Watch all Git-owned authoring roots. Domain Packages are recursive and are
+  // the canonical home for modeling, skills, blocks, notebooks, Apps, and evals.
   if (projectRoot) {
-    for (const dir of ['notebooks', 'workbooks', 'blocks', 'dashboards', 'semantic-layer', 'data']) {
+    let sourceRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    for (const dir of ['domains', 'skills', 'tests', 'notebooks', 'workbooks', 'blocks', 'apps', 'dashboards', 'semantic-layer', 'data']) {
       const watchDir = join(projectRoot, dir);
       if (!existsSync(watchDir)) continue;
       try {
-        watch(watchDir, { persistent: false }, (eventType, filename) => {
+        watch(watchDir, { persistent: false, recursive: true }, (eventType, filename) => {
           if (!filename) return;
           const path = `${dir}/${filename}`;
           const payload = JSON.stringify({ type: eventType === 'rename' ? 'file-added' : 'file-changed', path });
           for (const client of sseClients) {
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+          if (['domains', 'skills', 'tests', 'blocks', 'apps', 'notebooks'].includes(dir)) {
+            invalidateAgentProjectState(projectRoot);
+            if (sourceRefreshTimer) clearTimeout(sourceRefreshTimer);
+            sourceRefreshTimer = setTimeout(() => {
+              void refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
+            }, 250);
           }
           // Hot-reload semantic layer on change and notify frontend
           if (dir === 'semantic-layer') {
@@ -3202,6 +3211,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         });
       } catch { /* dir not watchable */ }
+    }
+    const configuredDbtManifest = resolveDbtManifestPath(projectRoot);
+    if (configuredDbtManifest && existsSync(dirname(configuredDbtManifest))) {
+      try {
+        watch(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
+          if (!filename || !['manifest.json', 'catalog.json', 'semantic_manifest.json', 'run_results.json'].includes(String(filename))) return;
+          invalidateAgentProjectState(projectRoot);
+          if (sourceRefreshTimer) clearTimeout(sourceRefreshTimer);
+          sourceRefreshTimer = setTimeout(() => {
+            void refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
+          }, 250);
+          const payload = JSON.stringify({ type: 'dbt-artifacts-changed', path: String(filename) });
+          for (const client of sseClients) {
+            try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+        });
+      } catch { /* dbt artifact directory not watchable */ }
     }
   }
 
@@ -3583,6 +3609,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/domain-packages') {
+      const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+      const manifest = buildManifest({ projectRoot, dbtManifestPath });
+      const registry = loadDomainPackageRegistry(projectRoot);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        domains: listDomains(projectRoot),
+        packages: registry.values().map((pkg) => ({
+          id: pkg.id,
+          name: pkg.name,
+          parent: pkg.parent,
+          depth: pkg.depth,
+          ancestry: pkg.ancestry,
+          declarationPath: pkg.declarationPath,
+          root: relative(projectRoot, pkg.root).replace(/\\/g, '/'),
+          owner: pkg.owner,
+          exports: pkg.exports,
+        })),
+        modeling: manifest.modeling,
+        dbtProvenance: manifest.dbtProvenance,
+        domainAssets: collectDomainPackageAssets(projectRoot, registry),
+        diagnostics: manifest.diagnostics ?? [],
+      }));
+      return;
+    }
+
     // Manifest v3 modeling surface. This response intentionally contains dbt
     // provenance references and the sparse DQL overlay, never copied dbt YAML.
     if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
@@ -3600,6 +3652,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         manifestVersion: manifest.manifestVersion,
         dbtProvenance: manifest.dbtProvenance,
         modeling: manifest.modeling,
+        domainAssets: collectDomainPackageAssets(projectRoot, loadDomainPackageRegistry(projectRoot)),
         lineage: manifest.lineage,
         diagnostics: manifest.diagnostics ?? [],
       }));
@@ -3639,9 +3692,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const body = await readJSON(req) as { change?: ModelingAuthoringChange; fingerprint?: string };
         if (!body.change) throw new Error('A modeling change is required.');
         const applied = applyModelingChange(projectRoot, body.change, body.fingerprint);
-        await ensureMetadataCatalogFresh(projectRoot, { force: true }).catch(() => undefined);
         const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
         const manifest = buildManifest({ projectRoot, dbtManifestPath });
+        await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ applied, modeling: manifest.modeling, diagnostics: manifest.diagnostics ?? [] }));
       } catch (error) {
@@ -4275,9 +4328,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Provide { domain } with a non-empty name.' }));
           return;
         }
-        writeDomainDeclaration(projectRoot, input);
-        await refreshLocalMetadataCatalog(projectRoot);
-        const domain = findDomain(projectRoot, input.name);
+        applyModelingChange(projectRoot, {
+          operation: 'upsert_domain',
+          value: { ...input, id: input.id ?? domainFolderSlug(input.name).replace(/-/g, '_') },
+        });
+        await refreshUnifiedProjectIndexes(projectRoot);
+        const domain = findDomain(projectRoot, input.id ?? input.name);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ domain }));
       } catch (error) {
@@ -4298,12 +4354,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         // If the name changed, remove the old declaration so we never orphan one.
-        if (domainFolderSlug(id) !== domainFolderSlug(input.name)) {
-          deleteDomainDeclaration(projectRoot, id);
+        if (domainKey(id) !== domainKey(input.id ?? input.name)) {
+          deleteCanonicalDomainDeclaration(projectRoot, id);
         }
-        writeDomainDeclaration(projectRoot, input);
-        await refreshLocalMetadataCatalog(projectRoot);
-        const domain = findDomain(projectRoot, input.name);
+        applyModelingChange(projectRoot, {
+          operation: 'upsert_domain',
+          value: { ...input, id: input.id ?? id },
+        });
+        await refreshUnifiedProjectIndexes(projectRoot);
+        const domain = findDomain(projectRoot, input.id ?? input.name);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ domain }));
       } catch (error) {
@@ -4316,8 +4375,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'DELETE' && path.startsWith('/api/domains/')) {
       try {
         const id = decodeURIComponent(path.slice('/api/domains/'.length));
-        deleteDomainDeclaration(projectRoot, id);
-        await refreshLocalMetadataCatalog(projectRoot);
+        deleteCanonicalDomainDeclaration(projectRoot, id);
+        await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -4412,8 +4471,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           try {
             if (candidate.kind === 'domain' && candidate.domain) {
-              const written = writeDomainDeclaration(projectRoot, candidate.domain);
-              saved.push({ id: candidate.id, path: written.path, status: 'saved' });
+              const domainId = candidate.domain.id ?? domainFolderSlug(candidate.domain.name).replace(/-/g, '_');
+              const written = applyModelingChange(projectRoot, {
+                operation: 'upsert_domain',
+                value: { ...candidate.domain, id: domainId },
+              });
+              saved.push({ id: candidate.id, path: written.patches[0]?.path, status: 'saved' });
             } else if (candidate.kind === 'skill' && candidate.skill) {
               const skill = writeSkill(projectRoot, { ...candidate.skill, scope: 'project', status: 'draft' });
               saved.push({ id: candidate.id, path: relative(projectRoot, skill.sourcePath), status: 'saved' });
@@ -4424,7 +4487,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             saved.push({ id: candidate.id, status: 'blocked', blockers: [error instanceof Error ? error.message : String(error)] });
           }
         }
-        await refreshLocalMetadataCatalog(projectRoot);
+        await refreshUnifiedProjectIndexes(projectRoot);
         updateContextBootstrapSession(projectRoot, id, (current) => ({ ...current, closedAt: new Date().toISOString() }));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ id, saved }));
@@ -10235,7 +10298,7 @@ function manifestDomainToDto(
   counts: { blockCount: number; skillCount: number; termCount: number },
 ): DomainDto {
   return {
-    id: domain.name,
+    id: domain.id ?? domain.name,
     name: domain.name,
     parent: domain.parent,
     owner: domain.owner,
@@ -10285,7 +10348,7 @@ export function listDomains(projectRoot: string): DomainDto[] {
 
   return Object.values(domains)
     .map((domain) => {
-      const key = domainKey(domain.name);
+      const key = domainKey(domain.id ?? domain.name);
       return manifestDomainToDto(domain, {
         blockCount: blockCounts.get(key) ?? 0,
         skillCount: skillCounts.get(key) ?? 0,
@@ -10298,7 +10361,55 @@ export function listDomains(projectRoot: string): DomainDto[] {
 /** Find a single authored domain by name/id (case/slug-insensitive). */
 function findDomain(projectRoot: string, nameOrId: string): DomainDto | undefined {
   const key = domainKey(nameOrId);
-  return listDomains(projectRoot).find((domain) => domainKey(domain.name) === key);
+  return listDomains(projectRoot).find((domain) => domainKey(domain.id) === key || domainKey(domain.name) === key);
+}
+
+function deleteCanonicalDomainDeclaration(projectRoot: string, nameOrId: string): boolean {
+  const registry = loadDomainPackageRegistry(projectRoot);
+  const key = domainKey(nameOrId);
+  const pkg = registry.values().find((candidate) => domainKey(candidate.id) === key || domainKey(candidate.name) === key);
+  if (!pkg) return false;
+  const declaration = join(projectRoot, pkg.declarationPath);
+  if (existsSync(declaration)) rmSync(declaration, { force: true });
+  if (pkg.legacyYamlPath) {
+    const legacy = join(projectRoot, pkg.legacyYamlPath);
+    if (existsSync(legacy)) rmSync(legacy, { force: true });
+  }
+  return true;
+}
+
+async function refreshUnifiedProjectIndexes(projectRoot: string): Promise<void> {
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+  const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook', dbtManifestPath });
+  invalidateAgentProjectState(projectRoot);
+  await reindexProject(projectRoot, {
+    manifest,
+    kgPath: defaultKgPath(projectRoot),
+    forceMetadataCatalog: true,
+    forceKgIndex: true,
+  });
+}
+
+function collectDomainPackageAssets(
+  projectRoot: string,
+  registry: ReturnType<typeof loadDomainPackageRegistry>,
+): Record<string, Record<string, string[]>> {
+  const output: Record<string, Record<string, string[]>> = {};
+  for (const pkg of registry.values()) output[pkg.id] = {};
+  for (const path of listProjectFiles(projectRoot).filter((candidate) => candidate.startsWith('domains/'))) {
+    const pkg = registry.packageForPath(join(projectRoot, path));
+    if (!pkg || path === pkg.declarationPath) continue;
+    const local = relative(pkg.root, join(projectRoot, path)).replace(/\\/g, '/');
+    const top = local.split('/')[0] ?? '';
+    const kind = top === 'business-views' ? 'views' : top;
+    if (!['terms', 'skills', 'blocks', 'views', 'notebooks', 'apps', 'evaluations', 'tests'].includes(kind)) continue;
+    const bucket = output[pkg.id] ?? (output[pkg.id] = {});
+    (bucket[kind] ??= []).push(path);
+  }
+  for (const assets of Object.values(output)) {
+    for (const paths of Object.values(assets)) paths.sort();
+  }
+  return output;
 }
 
 /** Validate + normalize an inbound `{ domain }` body into a DomainInput. */
@@ -10317,6 +10428,7 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
       ? value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       : undefined;
   return {
+    id: typeof domain.id === 'string' && domain.id.trim() ? domain.id.trim() : domainFolderSlug(name).replace(/-/g, '_'),
     name,
     parent: typeof domain.parent === 'string' ? domain.parent : undefined,
     owner: typeof domain.owner === 'string' ? domain.owner : undefined,
@@ -12635,7 +12747,39 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
     if (!existsSync(dir)) continue;
     collect(dir, folder, type);
   }
+  collectDomainArtifacts(join(projectRoot, 'domains'), 'domains');
   return result;
+
+  function collectDomainArtifacts(currentDir: string, relativeDir: string): void {
+    if (!existsSync(currentDir)) return;
+    try {
+      for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        const fullPath = join(currentDir, entry.name);
+        const relativePath = `${relativeDir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          collectDomainArtifacts(fullPath, relativePath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const segments = relativePath.split('/');
+        const ownerFolder = segments.find((segment) => ['notebooks', 'blocks', 'terms', 'views'].includes(segment));
+        const type = ownerFolder === 'notebooks' ? 'notebook'
+          : ownerFolder === 'blocks' ? 'block'
+            : ownerFolder === 'terms' ? 'term'
+              : ownerFolder === 'views' ? 'business_view'
+                : undefined;
+        if (!type || (!entry.name.endsWith('.dql') && !entry.name.endsWith('.dqlnb'))) continue;
+        const fallbackName = entry.name.replace(/\.(dql|dqlnb)$/, '');
+        result.push({
+          name: inferDqlArtifactName(fullPath, type, fallbackName),
+          path: relativePath,
+          type,
+          folder: relativeDir,
+        });
+      }
+    } catch { /* skip unreadable domain package dirs */ }
+  }
 
   function collect(currentDir: string, relativeDir: string, type: NotebookFileEntry['type']): void {
     try {

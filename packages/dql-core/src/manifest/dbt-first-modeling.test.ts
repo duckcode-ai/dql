@@ -48,13 +48,22 @@ describe('manifest v3 dbt-first modeling', () => {
       crossDomain: true,
       automaticJoinAllowed: true,
     });
+    expect(manifest.modeling?.interfaces?.exports['commerce.customer_identity@1']).toMatchObject({
+      entity: 'customer',
+      status: 'certified',
+    });
+    expect(manifest.modeling?.interfaces?.imports.growth_customer_identity).toMatchObject({
+      exportRef: 'commerce.customer_identity@1',
+      domain: 'growth',
+    });
 
     const serialized = JSON.stringify(manifest);
     expect(serialized).not.toContain('The authoritative order fact description');
     expect(serialized).not.toContain('SUM(order_total)');
     expect(serialized).not.toContain('Do not copy this dbt test description');
     expect(manifest.sources.fct_orders.dbtModel).toBeUndefined();
-    expect({ ...manifest, generatedAt: '' }).toEqual({ ...rebuilt, generatedAt: '' });
+    expect(manifest).toEqual(rebuilt);
+    expect(manifest.generatedAt).toBe('1970-01-01T00:00:00.000Z');
 
     const inputs = collectInputFiles({ projectRoot, dbtManifestPath });
     expect(inputs).toContain(join(projectRoot, 'target', 'catalog.json'));
@@ -122,9 +131,10 @@ function writeProject(projectRoot: string): string {
     metrics: { 'metric.commerce.gross_revenue': { name: 'gross_revenue', semantic_model: 'orders', expression: 'SUM(order_total)' } },
   }));
 
-  writeYaml(projectRoot, 'domains/commerce/domain.dql.yaml', `id: commerce
-owner: commerce@company.test
-exports: [customer]
+  writeYaml(projectRoot, 'domains/commerce/domain.dql', `domain "Commerce" {
+  id = "commerce"
+  owner = "commerce@company.test"
+}
 `);
   writeYaml(projectRoot, 'domains/commerce/modeling/entities.dql.yaml', `entities:
   - id: order
@@ -156,9 +166,20 @@ exports: [customer]
       max_from_per_key: 5
       max_to_per_key: 1
 `);
-  writeYaml(projectRoot, 'domains/growth/domain.dql.yaml', `id: growth
-owner: growth@company.test
-exports: [acquisition]
+  writeYaml(projectRoot, 'domains/commerce/modeling/interfaces.dql.yaml', `exports:
+  - id: customer_identity
+    version: 1
+    entity: customer
+    allowed_keys: [customer_id]
+    purposes: [growth_attribution]
+    consumer_domains: [growth]
+    status: certified
+    owner: commerce@company.test
+`);
+  writeYaml(projectRoot, 'domains/growth/domain.dql', `domain "Growth" {
+  id = "growth"
+  owner = "growth@company.test"
+}
 `);
   writeYaml(projectRoot, 'domains/growth/modeling/entities.dql.yaml', `entities:
   - id: acquisition
@@ -168,12 +189,14 @@ exports: [acquisition]
 `);
   writeYaml(projectRoot, 'domains/growth/modeling/relationships.dql.yaml', `relationships:
   - id: acquisition_to_customer
+    owner_domain: growth
     from: acquisition
     to: customer
     keys: [{ from: customer_id, to: customer_id }]
     cardinality: many_to_one
     fanout: safe
     crossDomain: true
+    imports: [commerce.customer_identity@1]
     status: certified
     certifiedAgainst:
       from: { grain: customer_id, keys: [customer_id] }
@@ -190,6 +213,13 @@ exports: [acquisition]
       unmatched_from: 0
       max_from_per_key: 1
       max_to_per_key: 1
+`);
+  writeYaml(projectRoot, 'domains/growth/modeling/interfaces.dql.yaml', `imports:
+  - id: growth_customer_identity
+    export: commerce.customer_identity@1
+    purpose: growth_attribution
+    status: certified
+    owner: growth@company.test
 `);
   return join(target, 'manifest.json');
 }

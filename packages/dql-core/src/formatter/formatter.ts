@@ -379,6 +379,8 @@ function formatDomain(node: DomainDeclNode, level: number, state: FormatState): 
   lines.push(...formatDecorators(node.decorators, level, state));
   lines.push(`${indent(level, state)}domain ${quote(node.name)} {`);
 
+  if (node.id) lines.push(`${indent(level + 1, state)}id = ${quote(node.id)}`);
+  if (node.parent) lines.push(`${indent(level + 1, state)}parent = ${quote(node.parent)}`);
   if (node.owner) lines.push(`${indent(level + 1, state)}owner = ${quote(node.owner)}`);
   if (node.businessOwner) lines.push(`${indent(level + 1, state)}businessOwner = ${quote(node.businessOwner)}`);
   if (node.boundedContext) lines.push(`${indent(level + 1, state)}boundedContext = ${quote(node.boundedContext)}`);
@@ -394,6 +396,14 @@ function formatDomain(node: DomainDeclNode, level: number, state: FormatState): 
   }
   if (node.businessOutcome) lines.push(`${indent(level + 1, state)}businessOutcome = ${quote(node.businessOutcome)}`);
   if (node.description) lines.push(`${indent(level + 1, state)}description = ${quote(node.description)}`);
+  if (node.inScope?.length) lines.push(`${indent(level + 1, state)}inScope = [${node.inScope.map(quote).join(', ')}]`);
+  if (node.outOfScope?.length) lines.push(`${indent(level + 1, state)}outOfScope = [${node.outOfScope.map(quote).join(', ')}]`);
+  if (node.dbtGroups?.length) lines.push(`${indent(level + 1, state)}dbtGroups = [${node.dbtGroups.map(quote).join(', ')}]`);
+  if (node.dbtPaths?.length) lines.push(`${indent(level + 1, state)}dbtPaths = [${node.dbtPaths.map(quote).join(', ')}]`);
+  if (node.dbtTags?.length) lines.push(`${indent(level + 1, state)}dbtTags = [${node.dbtTags.map(quote).join(', ')}]`);
+  if (node.semanticDomains?.length) lines.push(`${indent(level + 1, state)}semanticDomains = [${node.semanticDomains.map(quote).join(', ')}]`);
+  if (node.semanticTags?.length) lines.push(`${indent(level + 1, state)}semanticTags = [${node.semanticTags.map(quote).join(', ')}]`);
+  if (node.exports?.length) lines.push(`${indent(level + 1, state)}exports = [${node.exports.map(quote).join(', ')}]`);
 
   lines.push(`${indent(level, state)}}`);
   return lines.join('\n');

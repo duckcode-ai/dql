@@ -165,6 +165,7 @@ export interface DbtFirstModelingResponse {
   manifestVersion: 3;
   dbtProvenance: ManifestDbtProvenance;
   modeling: ManifestDbtFirstModeling;
+  domainAssets?: Record<string, Record<string, string[]>>;
   lineage: ManifestLineage;
   diagnostics: ManifestDiagnostic[];
 }

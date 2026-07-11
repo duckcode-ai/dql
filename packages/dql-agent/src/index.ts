@@ -486,6 +486,14 @@ export type {
 export { selectRelevantModels } from "./metadata/sql-retrieval.js";
 export type { SelectRelevantModelsOptions } from "./metadata/sql-retrieval.js";
 export {
+  planAnalyticalPath,
+  validateAnalyticalSql,
+  type AnalyticalPolicyCode,
+  type AnalyticalJoinPlanEdge,
+  type AnalyticalPathPlan,
+  type AnalyticalPathRequest,
+} from "./metadata/analytical-policy.js";
+export {
   deriveGeneratedDraftSlug,
   deriveSemanticDraftName,
   renderGeneratedSqlDqlArtifact,
@@ -812,6 +820,7 @@ export function agentProjectSourceVersion(projectRoot: string): string {
   // New OSS projects keep shared skills visible and Git-owned at `skills/`.
   // Watch the historical path as well until project migrations are complete.
   addSmallTreeState(join(root, 'skills'), tokens);
+  addSmallTreeState(join(root, 'domains'), tokens);
   addSmallTreeState(join(root, '.dql', 'skills'), tokens);
   addSmallTreeState(join(root, '.dql', 'hints'), tokens);
   return createHash('sha1').update(tokens.sort().join('\n')).digest('hex');
@@ -897,10 +906,26 @@ export async function reindexProject(
         nodeId: `skill:${s.id}`,
         kind: "skill",
         name: s.id,
+        domain: s.domain,
+        status: s.status,
+        owner: s.owner,
         description: s.description,
         llmContext: s.body,
         sourcePath: s.sourcePath,
+        sourceTier: "business_context",
+        provenance: "DQL domain skill",
+        payload: {
+          domains: s.domains ?? [],
+          triggers: s.triggers ?? [],
+          exclusions: s.exclusions ?? [],
+          requiredFilters: s.requiredFilters ?? [],
+          clarifyWhen: s.clarifyWhen ?? [],
+          sourceRefs: s.sourceRefs ?? [],
+        },
       });
+      for (const domain of s.domains ?? (s.domain ? [s.domain] : [])) {
+        edges.push({ src: `domain:${domain}`, dst: `skill:${s.id}`, kind: "contains" });
+      }
     }
   }
 

@@ -165,8 +165,7 @@ export function ActivityBar() {
     {
       label: 'Govern',
       items: [
-        { key: 'domains', title: 'Context', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'skills' },
-        { key: 'modeling', title: 'Modeling', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'modeling' },
+        { key: 'domains', title: 'Domains', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
       ],
     },

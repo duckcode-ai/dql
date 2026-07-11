@@ -296,12 +296,13 @@ export function buildKGFromManifest(manifest: DQLManifest): {
   // legacy domain strings so older projects still index cleanly.
   const domains = new Set<string>();
   for (const domain of Object.values(manifest.domains ?? {})) {
-    domains.add(domain.name);
+    const domainId = domain.id ?? domain.name;
+    domains.add(domainId);
     nodes.push({
-      nodeId: `domain:${domain.name}`,
+      nodeId: `domain:${domainId}`,
       kind: 'domain',
       name: domain.name,
-      domain: domain.name,
+      domain: domainId,
       owner: domain.owner,
       description: domain.description ?? domain.boundedContext,
       tags: domain.tags ?? [],
@@ -315,7 +316,9 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       sourceTier: 'business_context',
       certification: 'ai_generated',
       provenance: 'DQL domain',
+      payload: { id: domainId, parent: domain.parent, exports: domain.exports ?? [] },
     });
+    if (domain.parent) edges.push({ src: `domain:${domain.parent}`, dst: `domain:${domainId}`, kind: 'parent_domain' });
   }
   for (const term of Object.values(manifest.terms ?? {})) if (term.domain) domains.add(term.domain);
   for (const view of Object.values(manifest.businessViews ?? {})) if (view.domain) domains.add(view.domain);
@@ -351,7 +354,190 @@ export function buildKGFromManifest(manifest: DQLManifest): {
     if (m.domain) edges.push({ src: `domain:${m.domain}`, dst: `metric:${m.name}`, kind: 'contains' });
   }
 
+  appendDbtFirstModelingGraph(manifest, nodes, edges);
+
   return { nodes, edges };
+}
+
+function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edges: KGEdge[]): void {
+  const modeling = manifest.modeling;
+  if (manifest.manifestVersion !== 3 || !modeling) return;
+
+  for (const pkg of Object.values(modeling.packages)) {
+    if (!nodes.some((node) => node.nodeId === `domain:${pkg.id}`)) {
+      nodes.push({
+        nodeId: `domain:${pkg.id}`,
+        kind: 'domain',
+        name: pkg.id,
+        domain: pkg.id,
+        owner: pkg.owner,
+        sourcePath: pkg.filePath,
+        sourceTier: 'business_context',
+        provenance: 'DQL Domain Package',
+        payload: { parent: pkg.parent, exports: pkg.exports },
+      });
+    }
+    if (pkg.parent) edges.push({ src: `domain:${pkg.parent}`, dst: `domain:${pkg.id}`, kind: 'parent_domain' });
+  }
+
+  for (const entity of Object.values(modeling.entities)) {
+    const nodeId = `entity:${entity.id}`;
+    const dbtNode = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
+    nodes.push({
+      nodeId,
+      kind: 'entity',
+      name: entity.id,
+      domain: entity.domain,
+      status: entity.status,
+      grain: entity.grain,
+      entities: [entity.id],
+      sourcePath: entity.sourcePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(entity.status),
+      provenance: 'DQL analytical entity binding',
+      llmContext: [
+        `dbt unique id: ${entity.dbtUniqueId}`,
+        entity.grain ? `grain: ${entity.grain}` : '',
+        entity.keys.length ? `keys: ${entity.keys.join(', ')}` : '',
+        entity.analyticalRole ? `role: ${entity.analyticalRole}` : '',
+      ].filter(Boolean).join('\n'),
+      payload: { ...entity, relation: dbtNode?.relation },
+    });
+    edges.push({ src: `domain:${entity.domain}`, dst: nodeId, kind: 'contains' });
+    const dbtNodeId = `dbt_model:${entity.dbtUniqueId}`;
+    if (!nodes.some((node) => node.nodeId === dbtNodeId)) {
+      nodes.push({
+        nodeId: dbtNodeId,
+        kind: 'dbt_model',
+        name: dbtNode?.name ?? entity.dbtUniqueId,
+        sourcePath: dbtNode?.sourcePath,
+        sourceTier: 'dbt_manifest',
+        provenance: 'dbt manifest.json',
+        payload: dbtNode ? { ...dbtNode } : { uniqueId: entity.dbtUniqueId },
+      });
+    }
+    edges.push({ src: nodeId, dst: dbtNodeId, kind: 'binds_to' });
+  }
+
+  for (const relationship of Object.values(modeling.relationships)) {
+    const nodeId = `relationship:${relationship.id}`;
+    nodes.push({
+      nodeId,
+      kind: 'relationship',
+      name: relationship.id,
+      domain: relationship.ownerDomain,
+      status: relationship.staleCertification ? 'stale_certification' : relationship.status,
+      owner: relationship.owner,
+      description: relationship.description ?? relationship.rationale,
+      sourcePath: relationship.sourcePath,
+      sourceTier: 'business_context',
+      certification: relationship.automaticJoinAllowed ? 'certified' : certificationFromStatus(relationship.status),
+      provenance: 'DQL governed analytical relationship',
+      llmContext: [
+        `${relationship.from} -> ${relationship.to}`,
+        `keys: ${relationship.keys.map((key) => `${key.from}=${key.to}`).join(', ')}`,
+        `cardinality: ${relationship.cardinality}`,
+        `fanout: ${relationship.fanout}`,
+        `automatic join: ${relationship.automaticJoinAllowed ? 'allowed' : 'blocked'}`,
+      ].join('\n'),
+      payload: { ...relationship },
+    });
+    edges.push({ src: `entity:${relationship.from}`, dst: nodeId, kind: 'proves_join' });
+    edges.push({ src: nodeId, dst: `entity:${relationship.to}`, kind: 'proves_join' });
+  }
+
+  for (const contract of Object.values(modeling.contracts)) {
+    const nodeId = `contract:${contract.id}`;
+    nodes.push({
+      nodeId,
+      kind: 'contract',
+      name: contract.id,
+      domain: contract.domain,
+      status: contract.status,
+      owner: contract.owner,
+      grain: contract.grain,
+      dimensions: contract.dimensions,
+      allowedFilters: contract.allowedFilters,
+      sourcePath: contract.sourcePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(contract.status),
+      provenance: 'DQL analytical contract',
+      payload: { ...contract },
+    });
+    edges.push({ src: `domain:${contract.domain}`, dst: nodeId, kind: 'contains' });
+    for (const entity of contract.entities) edges.push({ src: `entity:${entity}`, dst: nodeId, kind: 'governed_by' });
+    for (const block of contract.blocks) edges.push({ src: nodeId, dst: `block:${block}`, kind: 'governed_by' });
+  }
+
+  for (const exported of Object.values(modeling.interfaces?.exports ?? {})) {
+    const ref = `${exported.id}@${exported.version}`;
+    const nodeId = `domain_export:${ref}`;
+    nodes.push({
+      nodeId,
+      kind: 'domain_export',
+      name: ref,
+      domain: exported.domain,
+      status: exported.status,
+      owner: exported.owner,
+      sourcePath: exported.sourcePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(exported.status),
+      provenance: 'DQL domain export interface',
+      payload: { ...exported },
+    });
+    edges.push({ src: `domain:${exported.domain}`, dst: nodeId, kind: 'exports' });
+    if (exported.entity) edges.push({ src: `entity:${exported.entity}`, dst: nodeId, kind: 'exports' });
+  }
+
+  for (const imported of Object.values(modeling.interfaces?.imports ?? {})) {
+    const nodeId = `domain_import:${imported.id}`;
+    nodes.push({
+      nodeId,
+      kind: 'domain_import',
+      name: imported.id,
+      domain: imported.domain,
+      status: imported.status,
+      owner: imported.owner,
+      sourcePath: imported.sourcePath,
+      sourceTier: 'business_context',
+      certification: certificationFromStatus(imported.status),
+      provenance: 'DQL domain import interface',
+      payload: { ...imported },
+    });
+    edges.push({ src: `domain:${imported.domain}`, dst: nodeId, kind: 'imports' });
+    edges.push({ src: `domain_export:${imported.exportRef}`, dst: nodeId, kind: 'imports' });
+  }
+
+  for (const declaration of Object.values(modeling.conformance)) {
+    const nodeId = `conformance:${declaration.id}`;
+    nodes.push({
+      nodeId,
+      kind: 'conformance',
+      name: declaration.id,
+      sourcePath: declaration.sourcePath,
+      sourceTier: 'business_context',
+      provenance: 'DQL conformance declaration',
+      llmContext: declaration.rule,
+      payload: { ...declaration },
+    });
+    for (const entity of declaration.entities) edges.push({ src: `entity:${entity}`, dst: nodeId, kind: 'conforms_with' });
+  }
+
+  for (const rule of Object.values(modeling.rules)) {
+    const nodeId = `policy:${rule.id}`;
+    nodes.push({
+      nodeId,
+      kind: 'policy',
+      name: rule.id,
+      domain: rule.domain,
+      sourcePath: rule.sourcePath,
+      sourceTier: 'business_context',
+      provenance: 'DQL analytical policy',
+      llmContext: rule.expression,
+      payload: { ...rule },
+    });
+    edges.push({ src: `domain:${rule.domain}`, dst: nodeId, kind: 'contains' });
+  }
 }
 
 function certificationFromStatus(status: string | undefined): KGCertification {

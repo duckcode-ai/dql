@@ -21,6 +21,8 @@ import {
   relationKeys,
   selectRelevantModels,
   validateSqlAgainstGrounding,
+  validateAnalyticalSql,
+  planAnalyticalPath,
   type DbtArtifacts,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLContext } from '../context.js';
@@ -98,7 +100,27 @@ export function getTableSchema(ctx: DQLContext, args: { table: string }) {
       rightRelation: join.rightRelation,
       rightColumn: join.rightColumn,
       reason: join.reason,
+      authorization: 'suggestion_only',
     })),
+    governedRelationships: Object.values(ctx.manifest.modeling?.relationships ?? {})
+      .filter((relationship) => {
+        const entities = ctx.manifest.modeling?.entities ?? {};
+        const fromNode = ctx.manifest.dbtProvenance?.nodes[entities[relationship.from]?.dbtUniqueId ?? ''];
+        const toNode = ctx.manifest.dbtProvenance?.nodes[entities[relationship.to]?.dbtUniqueId ?? ''];
+        return [fromNode?.name, fromNode?.relation, toNode?.name, toNode?.relation]
+          .filter(Boolean)
+          .some((value) => relationKeys(String(value)).some((key) => keys.includes(key)));
+      })
+      .map((relationship) => ({
+        id: relationship.id,
+        from: relationship.from,
+        to: relationship.to,
+        keys: relationship.keys,
+        cardinality: relationship.cardinality,
+        fanout: relationship.fanout,
+        automaticJoinAllowed: relationship.automaticJoinAllowed,
+        staleCertification: relationship.staleCertification,
+      })),
   };
 }
 
@@ -117,7 +139,18 @@ export async function validateSql(ctx: DQLContext, args: { sql: string; query?: 
   const grounding = buildSchemaGrounding(artifacts, relevant, { limit: 500 });
   const result = validateSqlAgainstGrounding(args.sql, grounding);
   if (result.ok) {
-    return { ok: true, warnings: result.warnings, referencedRelations: result.referencedRelations };
+    const analyticalPolicy = validateAnalyticalSql(args.sql, ctx.manifest);
+    if (!analyticalPolicy.safe) {
+      return {
+        ok: false,
+        code: analyticalPolicy.code,
+        error: analyticalPolicy.message,
+        warnings: result.warnings,
+        referencedRelations: result.referencedRelations,
+        analyticalPolicy,
+      };
+    }
+    return { ok: true, warnings: result.warnings, referencedRelations: result.referencedRelations, analyticalPolicy };
   }
   return {
     ok: false,
@@ -126,5 +159,46 @@ export async function validateSql(ctx: DQLContext, args: { sql: string; query?: 
     warnings: result.warnings,
     referencedRelations: result.referencedRelations,
     offending: result.offending ?? null,
+  };
+}
+
+export function resolveAnalyticalPath(ctx: DQLContext, args: {
+  entities: string[];
+  ownerDomain?: string;
+  purpose?: string;
+  measureEntities?: string[];
+  dimensionEntities?: string[];
+}) {
+  return planAnalyticalPath(ctx.manifest, {
+    entityIds: args.entities,
+    ownerDomain: args.ownerDomain,
+    purpose: args.purpose,
+    measureEntities: args.measureEntities,
+    dimensionEntities: args.dimensionEntities,
+  });
+}
+
+export function explainRelationshipProof(ctx: DQLContext, args: { relationshipId: string }) {
+  const relationship = ctx.manifest.modeling?.relationships[args.relationshipId];
+  if (!relationship) {
+    return { found: false, error: `Relationship "${args.relationshipId}" was not found in manifest v3.` };
+  }
+  const entities = ctx.manifest.modeling?.entities ?? {};
+  const from = entities[relationship.from];
+  const to = entities[relationship.to];
+  const exports = ctx.manifest.modeling?.interfaces?.exports ?? {};
+  const imports = ctx.manifest.modeling?.interfaces?.imports ?? {};
+  return {
+    found: true,
+    relationship,
+    endpoints: {
+      from: from ? { ...from, dbt: ctx.manifest.dbtProvenance?.nodes[from.dbtUniqueId] } : undefined,
+      to: to ? { ...to, dbt: ctx.manifest.dbtProvenance?.nodes[to.dbtUniqueId] } : undefined,
+    },
+    interfaces: (relationship.importRefs ?? []).map((exportRef) => ({
+      export: exports[exportRef],
+      imports: Object.values(imports).filter((value) => value.exportRef === exportRef),
+    })),
+    decision: relationship.automaticJoinAllowed ? 'automatic_join_allowed' : 'blocked_or_review_required',
   };
 }

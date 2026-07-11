@@ -167,15 +167,18 @@ export function loadAppDocument(filePath: string): AppDocumentLoadResult {
 export function findAppDocuments(projectRoot: string): string[] {
   const out: string[] = [];
   collectAppDocumentsFromAppsDir(join(projectRoot, 'apps'), out);
-  const domainsDir = join(projectRoot, 'domains');
-  if (existsSync(domainsDir)) {
-    for (const domainEntry of readdirSync(domainsDir, { withFileTypes: true })) {
-      if (!domainEntry.isDirectory()) continue;
-      if (domainEntry.name.startsWith('.') || domainEntry.name === 'node_modules') continue;
-      collectAppDocumentsFromAppsDir(join(domainsDir, domainEntry.name, 'apps'), out);
-    }
-  }
+  collectDomainAppDirectories(join(projectRoot, 'domains'), out);
   return Array.from(new Set(out)).sort();
+}
+
+function collectDomainAppDirectories(dir: string, out: string[]): void {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const child = join(dir, entry.name);
+    if (entry.name === 'apps') collectAppDocumentsFromAppsDir(child, out);
+    else collectDomainAppDirectories(child, out);
+  }
 }
 
 function collectAppDocumentsFromAppsDir(appsDir: string, out: string[]): void {

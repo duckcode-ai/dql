@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Boxes, CheckCircle2, FileCode2, GitBranch, Link2, Plus, RefreshCw, ShieldCheck, Table2, XCircle } from 'lucide-react';
 import type {
+  DomainExportAuthoringInput,
+  DomainImportAuthoringInput,
   DbtNodeAuthoringDetail,
   ManifestModelEntity,
   ManifestModelRelationship,
@@ -14,8 +16,14 @@ import { themes } from '../../themes/notebook-theme';
 import { DomainModelingCanvas } from './DomainModelingCanvas';
 
 type Theme = (typeof themes)['dark'];
-type Tab = 'diagram' | 'relationships' | 'contracts' | 'quality' | 'dbt';
-type Editor = { kind: 'domain' } | { kind: 'entity'; dbtUniqueId?: string } | { kind: 'relationship'; relationship?: ManifestModelRelationship } | { kind: 'contract' };
+type Tab = 'overview' | 'diagram' | 'relationships' | 'interfaces' | 'contracts' | 'quality' | 'dbt';
+type Editor =
+  | { kind: 'domain' }
+  | { kind: 'entity'; dbtUniqueId?: string }
+  | { kind: 'relationship'; relationship?: ManifestModelRelationship }
+  | { kind: 'contract' }
+  | { kind: 'export' }
+  | { kind: 'import' };
 
 export function DbtFirstModelingPage() {
   const { state } = useNotebook();
@@ -23,7 +31,7 @@ export function DbtFirstModelingPage() {
   const [data, setData] = useState<DbtFirstModelingResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('diagram');
+  const [tab, setTab] = useState<Tab>('overview');
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
@@ -64,7 +72,7 @@ export function DbtFirstModelingPage() {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'center' }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}><Boxes size={20} color={t.accent} /><h1 style={{ margin: 0, fontSize: 19 }}>Domain Studio</h1><Badge t={t}>Manifest v3</Badge></div>
-            <p style={{ margin: '5px 0 0 29px', color: t.textSecondary, fontSize: 12 }}>Design analytical entities, prove relationships, and govern cross-domain joins without copying dbt schema.</p>
+            <p style={{ margin: '5px 0 0 29px', color: t.textSecondary, fontSize: 12 }}>One Git-versioned workspace for domain context, dbt bindings, safe relationships, interfaces, contracts, blocks, skills, notebooks, and apps.</p>
           </div>
           <div style={{ display: 'flex', gap: 7 }}>
             <Button t={t} onClick={() => setEditor({ kind: 'domain' })}><Plus size={14} /> Domain</Button>
@@ -93,11 +101,13 @@ export function DbtFirstModelingPage() {
 
         <main style={{ minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <nav style={{ height: 42, display: 'flex', alignItems: 'end', gap: 2, padding: '0 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
-            {(['diagram', 'relationships', 'contracts', 'quality', 'dbt'] as Tab[]).map((value) => <button key={value} onClick={() => setTab(value)} style={tabButton(t, tab === value)}>{value === 'dbt' ? 'dbt sources' : value[0]!.toUpperCase() + value.slice(1)}</button>)}
+            {(['overview', 'diagram', 'relationships', 'interfaces', 'contracts', 'quality', 'dbt'] as Tab[]).map((value) => <button key={value} onClick={() => setTab(value)} style={tabButton(t, tab === value)}>{value === 'dbt' ? 'dbt sources' : value[0]!.toUpperCase() + value.slice(1)}</button>)}
           </nav>
           <div style={{ flex: 1, minHeight: 0 }}>
+            {tab === 'overview' && <DomainOverview data={data} domain={selectedDomain} t={t} />}
             {tab === 'diagram' && <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} theme={t} />}
             {tab === 'relationships' && <RelationshipTable relationships={domainRelationships} entities={data.modeling.entities} t={t} onSelect={setSelectedId} onEdit={(relationship) => setEditor({ kind: 'relationship', relationship })} />}
+            {tab === 'interfaces' && <InterfaceTable data={data} domain={selectedDomain} t={t} onCreateExport={() => setEditor({ kind: 'export' })} onCreateImport={() => setEditor({ kind: 'import' })} />}
             {tab === 'contracts' && <ContractTable data={data} domain={selectedDomain} t={t} onCreate={() => setEditor({ kind: 'contract' })} />}
             {tab === 'quality' && <QualityPanel data={data} relationships={domainRelationships} t={t} />}
             {tab === 'dbt' && <DbtInventory data={data} unbound={unboundNodes} t={t} onBind={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} />}
@@ -127,12 +137,36 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
   const [keys, setKeys] = useState('');
   const [from, setFrom] = useState(existing?.from ?? '');
   const [to, setTo] = useState(existing?.to ?? '');
-  const [fromKey, setFromKey] = useState(existing?.keys[0]?.from ?? '');
-  const [toKey, setToKey] = useState(existing?.keys[0]?.to ?? '');
+  const [keyPairs, setKeyPairs] = useState(existing?.keys.map((key) => `${key.from}=${key.to}`).join(', ') ?? '');
   const [cardinality, setCardinality] = useState<RelationshipAuthoringInput['cardinality']>(existing?.cardinality ?? 'many_to_one');
   const [fanout, setFanout] = useState<RelationshipAuthoringInput['fanout']>(existing?.fanout ?? 'safe');
   const [lifecycle, setLifecycle] = useState<RelationshipAuthoringInput['status']>(existing?.status ?? 'draft');
+  const [verb, setVerb] = useState(existing?.verb ?? '');
+  const [description, setDescription] = useState(existing?.description ?? '');
+  const [fromRole, setFromRole] = useState(existing?.roles?.from ?? '');
+  const [toRole, setToRole] = useState(existing?.roles?.to ?? '');
+  const [fromOptionality, setFromOptionality] = useState(existing?.optionality?.from ?? 'unknown');
+  const [toOptionality, setToOptionality] = useState(existing?.optionality?.to ?? 'unknown');
+  const [joinTypes, setJoinTypes] = useState(existing?.joinTypes?.join(', ') ?? 'left');
+  const [measureSources, setMeasureSources] = useState(existing?.aggregation?.measuresFrom.join(', ') ?? '');
+  const [dimensionSources, setDimensionSources] = useState(existing?.aggregation?.dimensionsFrom.join(', ') ?? '');
+  const [importRefs, setImportRefs] = useState(existing?.importRefs?.join(', ') ?? '');
+  const [attributionBlock, setAttributionBlock] = useState(existing?.attributionBlock ?? '');
+  const [evidenceExpiresAt, setEvidenceExpiresAt] = useState(existing?.evidenceExpiresAt ?? '');
   const [entities, setEntities] = useState('');
+  const [blocks, setBlocks] = useState('');
+  const [purpose, setPurpose] = useState('');
+  const [metrics, setMetrics] = useState('');
+  const [dimensions, setDimensions] = useState('');
+  const [allowedFilters, setAllowedFilters] = useState('');
+  const [requiredFilters, setRequiredFilters] = useState('');
+  const [evaluationRefs, setEvaluationRefs] = useState('');
+  const [exportEntity, setExportEntity] = useState('');
+  const [allowedKeys, setAllowedKeys] = useState('');
+  const [purposes, setPurposes] = useState('');
+  const [consumerDomains, setConsumerDomains] = useState('');
+  const [classification, setClassification] = useState('internal');
+  const [exportRef, setExportRef] = useState('');
   const [preview, setPreview] = useState<ModelingChangePreview | null>(null);
   const [change, setChange] = useState<ModelingAuthoringChange | null>(null);
   const [busy, setBusy] = useState(false);
@@ -142,9 +176,12 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
   const buildChange = (): ModelingAuthoringChange => {
     if (editor.kind === 'domain') return { operation: 'upsert_domain', value: { id, name: id, owner, parent: parent || undefined, exports: [] } };
     if (editor.kind === 'entity') return { operation: 'upsert_entity', value: { id, domain, dbtModel, grain: grain || undefined, keys: csv(keys) } };
-    if (editor.kind === 'contract') return { operation: 'upsert_contract', value: { id, domain, entities: csv(entities), status: 'draft', owner, requiredEvaluation: true } };
+    if (editor.kind === 'contract') return { operation: 'upsert_contract', value: { id, domain, entities: csv(entities), blocks: csv(blocks), status: 'draft', owner, requiredEvaluation: true, purpose: purpose || undefined, metricRefs: csv(metrics), dimensions: csv(dimensions), allowedFilters: csv(allowedFilters), requiredFilters: csv(requiredFilters), evaluationRefs: csv(evaluationRefs) } };
+    if (editor.kind === 'export') return { operation: 'upsert_export', value: { id, domain, entity: exportEntity || undefined, metrics: csv(metrics), blocks: csv(blocks), allowedKeys: csv(allowedKeys), allowedDimensions: csv(dimensions), allowedFilters: csv(allowedFilters), purposes: csv(purposes), consumerDomains: csv(consumerDomains), classification: classification || undefined, status: lifecycle, owner: owner || undefined } satisfies DomainExportAuthoringInput };
+    if (editor.kind === 'import') return { operation: 'upsert_import', value: { id: id || undefined, domain, exportRef, purpose, status: lifecycle, owner: owner || undefined } satisfies DomainImportAuthoringInput };
+    const parsedKeys = relationshipKeys(keyPairs);
     const unchanged = !existing || (
-      existing.from === from && existing.to === to && existing.keys[0]?.from === fromKey && existing.keys[0]?.to === toKey
+      existing.from === from && existing.to === to && JSON.stringify(existing.keys) === JSON.stringify(parsedKeys)
       && existing.cardinality === cardinality && existing.fanout === fanout
     );
     const currentValidation = unchanged ? validation : undefined;
@@ -152,8 +189,18 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
     const fromEntity = data.modeling.entities[from];
     const toEntity = data.modeling.entities[to];
     return { operation: 'upsert_relationship', value: {
-      id, domain, from, to, keys: [{ from: fromKey, to: toKey }], cardinality, fanout, status,
+      id, domain, from, to, keys: parsedKeys, cardinality, fanout, status,
       owner: owner || undefined,
+      ownerDomain: domain,
+      verb: verb || undefined,
+      description: description || undefined,
+      roles: fromRole || toRole ? { from: fromRole || undefined, to: toRole || undefined } : undefined,
+      optionality: { from: fromOptionality, to: toOptionality },
+      joinTypes: csv(joinTypes) as Array<'left' | 'inner'>,
+      aggregation: measureSources || dimensionSources ? { measuresFrom: csv(measureSources), dimensionsFrom: csv(dimensionSources), requiresPreAggregation: fanout !== 'safe' } : undefined,
+      attributionBlock: attributionBlock || undefined,
+      importRefs: csv(importRefs),
+      evidenceExpiresAt: evidenceExpiresAt || undefined,
       crossDomain: fromEntity?.domain !== toEntity?.domain,
       validation: currentValidation,
       certifiedAgainst: status === 'certified' && fromEntity?.grain && toEntity?.grain
@@ -182,16 +229,18 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   };
-  const title = editor.kind === 'domain' ? 'Create Domain Package' : editor.kind === 'entity' ? 'Bind dbt model' : editor.kind === 'contract' ? 'Create analytical contract' : existing ? 'Edit relationship' : 'Create relationship';
+  const title = editor.kind === 'domain' ? 'Create Domain Package' : editor.kind === 'entity' ? 'Bind dbt model' : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : editor.kind === 'import' ? 'Request domain import' : existing ? 'Edit relationship' : 'Create relationship';
   return <Modal title={title} t={t} onClose={onClose}>
     {!preview ? <div style={{ display: 'grid', gap: 12 }}>
       {editor.kind !== 'domain' && <Field label="Domain"><Select value={domain} onChange={setDomain} values={Object.keys(data.modeling.packages)} t={t} /></Field>}
-      <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'relationship' ? 'Relationship id' : editor.kind === 'contract' ? 'Contract id' : 'Domain id'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>
+      <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'relationship' ? 'Relationship id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : editor.kind === 'import' ? 'Import id (optional)' : 'Domain id'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>
       {editor.kind === 'domain' && <Field label="Parent domain (optional)"><Select value={parent} onChange={setParent} values={Object.keys(data.modeling.packages)} t={t} /></Field>}
       {editor.kind === 'entity' && <><Field label="dbt model"><Select value={dbtModel} onChange={setDbtModel} values={Object.keys(data.dbtProvenance.nodes)} labels={Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, `${node.name} · ${node.relation ?? node.uniqueId}`]))} t={t} /></Field><div style={twoColumns}><Field label="Grain override (optional)"><Input value={grain} onChange={setGrain} t={t} placeholder="Use dbt meta.dql by default" /></Field><Field label="Key overrides (optional)"><Input value={keys} onChange={setKeys} t={t} placeholder="customer_id, order_id" /></Field></div></>}
-      {editor.kind === 'relationship' && <><div style={twoColumns}><Field label="From entity"><Select value={from} onChange={setFrom} values={Object.keys(data.modeling.entities)} t={t} /></Field><Field label="To entity"><Select value={to} onChange={setTo} values={Object.keys(data.modeling.entities)} t={t} /></Field></div><div style={twoColumns}><Field label="From key"><Input value={fromKey} onChange={setFromKey} t={t} placeholder="customer_id" /></Field><Field label="To key"><Input value={toKey} onChange={setToKey} t={t} placeholder="customer_id" /></Field></div><div style={twoColumns}><Field label="Cardinality"><Select value={cardinality} onChange={(v) => setCardinality(v as RelationshipAuthoringInput['cardinality'])} values={['one_to_one', 'one_to_many', 'many_to_one', 'many_to_many']} t={t} /></Field><Field label="Fanout policy"><Select value={fanout} onChange={(v) => setFanout(v as RelationshipAuthoringInput['fanout'])} values={['safe', 'attribution_required', 'unsafe', 'unknown']} t={t} /></Field></div><Field label="Lifecycle"><Select value={lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'review', 'certified', 'deprecated']} t={t} /></Field>{validation && <Evidence evidence={validation} t={t} />}</>}
-      {editor.kind === 'contract' && <Field label="Covered entities"><Input value={entities} onChange={setEntities} t={t} placeholder="order, customer" /></Field>}
-      {(editor.kind === 'domain' || editor.kind === 'relationship' || editor.kind === 'contract') && <Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field>}
+      {editor.kind === 'relationship' && <><div style={twoColumns}><Field label="From entity"><Select value={from} onChange={setFrom} values={Object.keys(data.modeling.entities)} t={t} /></Field><Field label="To entity"><Select value={to} onChange={setTo} values={Object.keys(data.modeling.entities)} t={t} /></Field></div><Field label="Join key pairs"><Input value={keyPairs} onChange={setKeyPairs} t={t} placeholder="customer_id=customer_id, tenant_id=tenant_id" /></Field><div style={twoColumns}><Field label="Business verb"><Input value={verb} onChange={setVerb} t={t} placeholder="belongs to" /></Field><Field label="Allowed join types"><Input value={joinTypes} onChange={setJoinTypes} t={t} placeholder="left, inner" /></Field></div><Field label="Description"><Input value={description} onChange={setDescription} t={t} placeholder="Why this analytical relationship exists" /></Field><div style={twoColumns}><Field label="From role"><Input value={fromRole} onChange={setFromRole} t={t} placeholder="orders" /></Field><Field label="To role"><Input value={toRole} onChange={setToRole} t={t} placeholder="customer" /></Field></div><div style={twoColumns}><Field label="From optionality"><Select value={fromOptionality} onChange={(value) => setFromOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} /></Field><Field label="To optionality"><Select value={toOptionality} onChange={(value) => setToOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} /></Field></div><div style={twoColumns}><Field label="Cardinality"><Select value={cardinality} onChange={(v) => setCardinality(v as RelationshipAuthoringInput['cardinality'])} values={['one_to_one', 'one_to_many', 'many_to_one', 'many_to_many']} t={t} /></Field><Field label="Fanout policy"><Select value={fanout} onChange={(v) => setFanout(v as RelationshipAuthoringInput['fanout'])} values={['safe', 'attribution_required', 'unsafe', 'unknown']} t={t} /></Field></div><div style={twoColumns}><Field label="Measures allowed from"><Input value={measureSources} onChange={setMeasureSources} t={t} placeholder="order" /></Field><Field label="Dimensions allowed from"><Input value={dimensionSources} onChange={setDimensionSources} t={t} placeholder="customer" /></Field></div><div style={twoColumns}><Field label="Required import refs"><Input value={importRefs} onChange={setImportRefs} t={t} placeholder="commerce.customer@1" /></Field><Field label="Attribution block"><Input value={attributionBlock} onChange={setAttributionBlock} t={t} placeholder="growth.revenue_by_channel" /></Field></div><div style={twoColumns}><Field label="Evidence expires (ISO date)"><Input value={evidenceExpiresAt} onChange={setEvidenceExpiresAt} t={t} placeholder="2026-12-31" /></Field><Field label="Lifecycle"><Select value={lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'review', 'certified', 'deprecated']} t={t} /></Field></div>{validation && <Evidence evidence={validation} t={t} />}</>}
+      {editor.kind === 'contract' && <><Field label="Covered entities"><Input value={entities} onChange={setEntities} t={t} placeholder="order, customer" /></Field><Field label="Certified blocks"><Input value={blocks} onChange={setBlocks} t={t} placeholder="orders_360" /></Field><Field label="Decision purpose"><Input value={purpose} onChange={setPurpose} t={t} placeholder="Revenue reporting" /></Field><div style={twoColumns}><Field label="Metrics"><Input value={metrics} onChange={setMetrics} t={t} /></Field><Field label="Dimensions"><Input value={dimensions} onChange={setDimensions} t={t} /></Field></div><div style={twoColumns}><Field label="Allowed filters"><Input value={allowedFilters} onChange={setAllowedFilters} t={t} /></Field><Field label="Required filters"><Input value={requiredFilters} onChange={setRequiredFilters} t={t} /></Field></div><Field label="Evaluation refs"><Input value={evaluationRefs} onChange={setEvaluationRefs} t={t} placeholder="revenue_accuracy" /></Field></>}
+      {editor.kind === 'export' && <><Field label="Exported entity"><Select value={exportEntity} onChange={setExportEntity} values={Object.keys(data.modeling.entities).filter((entityId) => data.modeling.entities[entityId]?.domain === domain)} t={t} /></Field><div style={twoColumns}><Field label="Allowed keys"><Input value={allowedKeys} onChange={setAllowedKeys} t={t} /></Field><Field label="Allowed dimensions"><Input value={dimensions} onChange={setDimensions} t={t} /></Field></div><div style={twoColumns}><Field label="Metrics"><Input value={metrics} onChange={setMetrics} t={t} /></Field><Field label="Blocks"><Input value={blocks} onChange={setBlocks} t={t} /></Field></div><Field label="Allowed filters"><Input value={allowedFilters} onChange={setAllowedFilters} t={t} /></Field><div style={twoColumns}><Field label="Approved purposes"><Input value={purposes} onChange={setPurposes} t={t} placeholder="revenue reporting" /></Field><Field label="Consumer domains"><Input value={consumerDomains} onChange={setConsumerDomains} t={t} placeholder="growth" /></Field></div><div style={twoColumns}><Field label="Classification"><Input value={classification} onChange={setClassification} t={t} /></Field><Field label="Lifecycle"><Select value={lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'review', 'certified', 'deprecated']} t={t} /></Field></div></>}
+      {editor.kind === 'import' && <><Field label="Provider export"><Select value={exportRef} onChange={setExportRef} values={Object.values(data.modeling.interfaces?.exports ?? {}).map((item) => `${item.domain}.${item.id}@${item.version}`)} t={t} /></Field><Field label="Exact analytical purpose"><Input value={purpose} onChange={setPurpose} t={t} placeholder="Revenue by acquisition channel" /></Field><Field label="Lifecycle"><Select value={lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'review', 'certified', 'deprecated']} t={t} /></Field></>}
+      {editor.kind !== 'entity' && <Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field>}
       {message && <Message text={message} t={t} />}
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>{editor.kind === 'relationship' && <Button t={t} onClick={() => void validate()} disabled={busy}><ShieldCheck size={14} /> Validate in warehouse</Button>}<Button primary t={t} onClick={() => void previewChange()} disabled={busy}>Preview source change</Button></div>
     </div> : <div>
@@ -201,6 +250,43 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}><Button t={t} onClick={() => setPreview(null)}>Back</Button><Button primary t={t} onClick={() => void apply()} disabled={busy}>Apply to Domain Package</Button></div>
     </div>}
   </Modal>;
+}
+
+function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme }) {
+  const packages = Object.values(data.modeling.packages).filter((pkg) => !domain || pkg.id === domain || pkg.parent === domain);
+  const entities = Object.values(data.modeling.entities).filter((entity) => !domain || entity.domain === domain);
+  const relationships = Object.values(data.modeling.relationships).filter((relationship) => !domain || data.modeling.entities[relationship.from]?.domain === domain || data.modeling.entities[relationship.to]?.domain === domain);
+  const exports = Object.values(data.modeling.interfaces?.exports ?? {}).filter((item) => !domain || item.domain === domain);
+  const imports = Object.values(data.modeling.interfaces?.imports ?? {}).filter((item) => !domain || item.domain === domain);
+  const pkg = domain ? data.modeling.packages[domain] : undefined;
+  const assets = domain ? data.domainAssets?.[domain] ?? {} : Object.values(data.domainAssets ?? {}).reduce<Record<string, string[]>>((all, packageAssets) => { for (const [kind, paths] of Object.entries(packageAssets)) all[kind] = [...(all[kind] ?? []), ...paths]; return all; }, {});
+  return <ScrollPanel><PanelHeader title={pkg?.id ?? 'All Domain Packages'} detail="The Domain Package is the ownership and retrieval boundary. Everything below is source-controlled and compiled into one agent context graph." t={t} />
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(110px, 1fr))', gap: 10 }}><Metric value={packages.length} label="Packages" color={t.accent} t={t} /><Metric value={entities.length} label="dbt bindings" color="#377cc8" t={t} /><Metric value={relationships.length} label="join policies" color="#2e9b63" t={t} /><Metric value={exports.length} label="exports" color="#9a6b2f" t={t} /><Metric value={imports.length} label="imports" color="#8b5fc7" t={t} /></div>
+    <h3 style={sectionHeading(t)}>Unified package structure</h3>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(180px, 1fr))', gap: 10 }}>
+      {[
+        ['Context', 'domain.dql · terms/ · skills/', 'Business meaning, ownership, vocabulary, and reusable agent instructions.'],
+        ['Semantic model', 'modeling/ · views/', 'dbt bindings, relationship proof, contracts, conformance, exports, and imports.'],
+        ['Analytical products', 'blocks/ · notebooks/ · apps/', 'Certified building blocks, research evidence, and stakeholder experiences.'],
+      ].map(([title, path, detail]) => <div key={title} style={overviewCard(t)}><b>{title}</b><code style={{ display: 'block', color: t.accent, fontSize: 10, margin: '7px 0' }}>{path}</code><span style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.5 }}>{detail}</span></div>)}
+    </div>
+    <h3 style={sectionHeading(t)}>Package assets</h3>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(120px, 1fr))', gap: 8 }}>{['terms', 'skills', 'blocks', 'views', 'notebooks', 'apps', 'evaluations', 'tests'].map((kind) => <div key={kind} style={overviewCard(t)}><b style={{ textTransform: 'capitalize', fontSize: 11 }}>{kind}</b><div style={{ fontSize: 22, marginTop: 7 }}>{assets[kind]?.length ?? 0}</div><div style={{ color: t.textMuted, fontSize: 9, marginTop: 4 }}>{assets[kind]?.[0] ?? `domains/.../${kind}/`}</div></div>)}</div>
+    <h3 style={sectionHeading(t)}>Accuracy flow</h3>
+    <div style={flowRow(t)}>{['Question + user scope', 'Domain/skill retrieval', 'Certified block or metric', 'Safe relationship path', 'SQL policy validation', 'Answer + complete lineage'].map((item, index) => <React.Fragment key={item}><div style={flowStep(t)}><small>{index + 1}</small>{item}</div>{index < 5 && <span style={{ color: t.textMuted }}>→</span>}</React.Fragment>)}</div>
+    {pkg && <div style={{ marginTop: 18 }}><Property label="Canonical declaration" value={pkg.filePath} t={t} /><Property label="Parent" value={pkg.parent ?? 'Top-level domain'} t={t} /><Property label="Owner" value={pkg.owner ?? 'Not declared'} t={t} /></div>}
+  </ScrollPanel>;
+}
+
+function InterfaceTable({ data, domain, t, onCreateExport, onCreateImport }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme; onCreateExport: () => void; onCreateImport: () => void }) {
+  const exports = Object.values(data.modeling.interfaces?.exports ?? {}).filter((item) => !domain || item.domain === domain);
+  const imports = Object.values(data.modeling.interfaces?.imports ?? {}).filter((item) => !domain || item.domain === domain);
+  return <ScrollPanel><PanelHeader title="Cross-domain interfaces" detail="Domains never join through discovery alone. Providers certify a narrow export; consumers import it for an explicit purpose." t={t} action={<div style={{ display: 'flex', gap: 7 }}><Button t={t} onClick={onCreateImport}><Plus size={14} /> Import</Button><Button primary t={t} onClick={onCreateExport}><Plus size={14} /> Export</Button></div>} />
+    <h3 style={sectionHeading(t)}>Published exports</h3>
+    {exports.length ? <table style={tableStyle}><thead><tr><Th>Interface</Th><Th>Entity</Th><Th>Allowed surface</Th><Th>Consumers</Th><Th>Status</Th></tr></thead><tbody>{exports.map((item) => <tr key={`${item.domain}.${item.id}`}><Td><b>{item.domain}.{item.id}@{item.version}</b></Td><Td>{item.entity ?? '—'}</Td><Td>{[...item.metrics, ...item.blocks, ...item.allowedDimensions].join(', ') || 'keys only'}</Td><Td>{item.consumerDomains.join(', ') || 'none'}</Td><Td><Status status={item.status} t={t} /></Td></tr>)}</tbody></table> : <Blank title="No exports in this scope" detail="Publish only the entity, metrics, blocks, dimensions, keys, filters, purposes, and consumers another domain may use." t={t} />}
+    <h3 style={sectionHeading(t)}>Approved imports</h3>
+    {imports.length ? <table style={tableStyle}><thead><tr><Th>Import</Th><Th>Consumer</Th><Th>Provider export</Th><Th>Purpose</Th><Th>Status</Th></tr></thead><tbody>{imports.map((item) => <tr key={item.id}><Td><b>{item.id}</b></Td><Td>{item.domain}</Td><Td>{item.exportRef}</Td><Td>{item.purpose}</Td><Td><Status status={item.status} t={t} /></Td></tr>)}</tbody></table> : <Blank title="No imports in this scope" detail="A consumer import is required before an automatic cross-domain path can use the provider export." t={t} />}
+  </ScrollPanel>;
 }
 
 function RelationshipTable({ relationships, entities, t, onSelect, onEdit }: { relationships: ManifestModelRelationship[]; entities: Record<string, ManifestModelEntity>; t: Theme; onSelect: (id: string) => void; onEdit: (r: ManifestModelRelationship) => void }) {
@@ -269,6 +355,7 @@ function Message({ text, t }: { text: string; t: Theme }) { return <div style={{
 function Th({ children }: { children?: React.ReactNode }) { return <th style={{ textAlign: 'left', padding: '9px 10px', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.05em', opacity: .65 }}>{children}</th>; }
 function Td({ children }: { children: React.ReactNode }) { return <td style={{ padding: '11px 10px', borderTop: '1px solid var(--border-subtle)', fontSize: 11 }}>{children}</td>; }
 function csv(value: string): string[] { return value.split(',').map((item) => item.trim()).filter(Boolean); }
+function relationshipKeys(value: string): Array<{ from: string; to: string }> { return csv(value).map((pair) => { const [from, to] = pair.split('=').map((item) => item.trim()); if (!from || !to) throw new Error(`Invalid join key pair "${pair}". Use from_key=to_key.`); return { from, to }; }); }
 function domainDepth(id: string, packages: DbtFirstModelingResponse['modeling']['packages']): number { let depth = 0; let current = packages[id]?.parent; const seen = new Set<string>(); while (current && !seen.has(current)) { seen.add(current); depth += 1; current = packages[current]?.parent; } return depth; }
 function sortDomainPackages(packages: DbtFirstModelingResponse['modeling']['packages']) { return Object.values(packages).sort((a, b) => `${a.parent ?? ''}/${a.id}`.localeCompare(`${b.parent ?? ''}/${b.id}`)); }
 
@@ -283,3 +370,7 @@ const inventoryButton = (t: Theme): React.CSSProperties => ({ width: 'calc(100% 
 const tabButton = (t: Theme, active: boolean): React.CSSProperties => ({ height: 34, padding: '0 12px', border: 0, borderBottom: `2px solid ${active ? t.accent : 'transparent'}`, background: 'transparent', color: active ? t.textPrimary : t.textSecondary, fontSize: 11, fontWeight: active ? 700 : 500, cursor: 'pointer' });
 const linkButton = (t: Theme): React.CSSProperties => ({ border: 0, background: 'transparent', color: t.accent, fontSize: 10, fontWeight: 650, cursor: 'pointer' });
 const inspectorHeading = (t: Theme): React.CSSProperties => ({ margin: '18px 0 7px', paddingBottom: 7, borderBottom: `1px solid ${t.headerBorder}`, fontSize: 11, textTransform: 'uppercase', letterSpacing: '.05em', color: t.textMuted });
+const sectionHeading = (t: Theme): React.CSSProperties => ({ margin: '22px 0 10px', paddingBottom: 8, borderBottom: `1px solid ${t.headerBorder}`, fontSize: 12, color: t.textPrimary });
+const overviewCard = (t: Theme): React.CSSProperties => ({ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 9, padding: 14 });
+const flowRow = (t: Theme): React.CSSProperties => ({ display: 'flex', alignItems: 'center', gap: 7, overflowX: 'auto', border: `1px solid ${t.headerBorder}`, borderRadius: 9, padding: 12, background: t.cellBg });
+const flowStep = (t: Theme): React.CSSProperties => ({ minWidth: 118, display: 'grid', gap: 5, padding: 9, borderRadius: 7, background: t.appBg, color: t.textSecondary, fontSize: 10, lineHeight: 1.35 });

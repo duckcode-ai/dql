@@ -485,6 +485,7 @@ function rowToNode(row: {
     caveats: metadata.caveats,
     dataState: metadata.dataState,
     dataStateDetail: metadata.dataStateDetail,
+    payload: metadata.payload,
   };
 }
 
@@ -522,6 +523,7 @@ function nodeMetadata(node: KGNode): Partial<KGNode> {
     'caveats',
     'dataState',
     'dataStateDetail',
+    'payload',
   ] as const) {
     const value = node[key];
     if (value !== undefined) {

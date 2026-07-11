@@ -25,8 +25,10 @@
 3. Build the provenance index from dbt `manifest.json`, `catalog.json` and
    `semantic_manifest.json`. Persist only source paths, unique IDs, relation
    identifiers, availability references and stable fingerprints.
-4. Add a domain-package parser for `domain.dql.yaml` and sparse files under
-   `modeling/`. Bind entities only to known dbt unique IDs.
+4. Make `domain.dql` the canonical package declaration and parse sparse files
+   under `modeling/`. Legacy `domain.dql.yaml` is compatibility-only and a
+   conflicting dual declaration is a compile error. Bind entities only to
+   known dbt unique IDs.
 5. Add stable diagnostics for unresolved bindings, invalid key pairs, missing
    export contracts, unsafe cardinality, fanout policy, and stale certification.
 6. Make `collectInputFiles` include all selected dbt artifacts and domain
@@ -82,8 +84,9 @@ Acceptance tests:
 
 ## Workstream D — migration and modeling UI
 
-1. Add a Modeling page to the notebook app with explicit dbt-owned and
-   DQL-owned panels; no Cloud-specific CSS dependency.
+1. Add one Domains workspace to the notebook app with overview, context assets,
+   relationship diagram, interfaces, contracts, quality, and explicit dbt-owned
+   provenance; no Cloud-specific CSS dependency.
 2. Use source patch previews for dbt metadata changes. The patch must target
    the original dbt YAML and never write copied metadata to a DQL package.
 3. Store relationship, export and contract edits in the appropriate Domain

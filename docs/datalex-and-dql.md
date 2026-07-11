@@ -31,29 +31,36 @@ Each analytical domain is an ordinary Git folder:
 ```text
 domains/
   commerce/
-    domain.dql.yaml
+    domain.dql
     modeling/
       entities.dql.yaml
       relationships.dql.yaml
+      interfaces.dql.yaml
       contracts.dql.yaml
+      layouts/
+    terms/
     blocks/
     notebooks/
-    business-views/
+    views/
     skills/
     evaluations/
+    tests/
+    apps/
   growth/
-    domain.dql.yaml
+    domain.dql
     modeling/
       relationships.dql.yaml
+      interfaces.dql.yaml
     blocks/
-    business-views/
+    views/
     apps/
 ```
 
 Domains organize ownership and retrieval; they do **not** imply a safe join or
 automatic cross-domain access. A generated analytical join needs a DQL
 relationship with explicit keys, cardinality, fanout policy, lifecycle state,
-and—across a domain boundary—an export contract.
+and—across a domain boundary—a certified provider export plus a purpose-bound
+consumer import.
 
 ## Safe agent behavior
 

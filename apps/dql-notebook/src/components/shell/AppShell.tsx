@@ -224,9 +224,7 @@ export function AppShell() {
             <ReadinessPage />
           ) : state.mainView === 'skills' ? (
             <GovernedContextPage initialTab="skills" />
-          ) : state.mainView === 'domains' ? (
-            <GovernedContextPage />
-          ) : state.mainView === 'modeling' ? (
+          ) : state.mainView === 'domains' || state.mainView === 'modeling' ? (
             <DbtFirstModelingPage />
           ) : state.mainView === 'apps' ? (
             <AppsView />

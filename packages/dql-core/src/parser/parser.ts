@@ -811,6 +811,7 @@ export class Parser {
     const nameToken = this.expect(TokenType.StringLiteral);
     this.expect(TokenType.LeftBrace);
 
+    let id: string | undefined;
     let owner: string | undefined;
     let parent: string | undefined;
     let businessOwner: string | undefined;
@@ -828,6 +829,7 @@ export class Parser {
     let dbtTags: string[] | undefined;
     let semanticDomains: string[] | undefined;
     let semanticTags: string[] | undefined;
+    let exports: string[] | undefined;
 
     while (!this.check(TokenType.RightBrace) && !this.isAtEnd()) {
       if (this.check(TokenType.OwnerKeyword)) {
@@ -844,7 +846,8 @@ export class Parser {
         tags = this.parseStringArrayValues();
       } else if (
         this.check(TokenType.Identifier)
-        && (this.current().value === 'parent'
+        && (this.current().value === 'id'
+          || this.current().value === 'parent'
           || this.current().value === 'businessOwner'
           || this.current().value === 'boundedContext'
           || this.current().value === 'sourceSystems'
@@ -857,11 +860,14 @@ export class Parser {
           || this.current().value === 'dbtPaths'
           || this.current().value === 'dbtTags'
           || this.current().value === 'semanticDomains'
-          || this.current().value === 'semanticTags')
+          || this.current().value === 'semanticTags'
+          || this.current().value === 'exports')
       ) {
         const keyToken = this.advance();
         this.expect(TokenType.Equals);
-        if (keyToken.value === 'parent') {
+        if (keyToken.value === 'id') {
+          id = this.expect(TokenType.StringLiteral).value;
+        } else if (keyToken.value === 'parent') {
           parent = this.expect(TokenType.StringLiteral).value;
         } else if (keyToken.value === 'businessOwner') {
           businessOwner = this.expect(TokenType.StringLiteral).value;
@@ -889,12 +895,14 @@ export class Parser {
           semanticDomains = this.parseStringArrayValues();
         } else if (keyToken.value === 'semanticTags') {
           semanticTags = this.parseStringArrayValues();
+        } else if (keyToken.value === 'exports') {
+          exports = this.parseStringArrayValues();
         }
       } else if (this.check(TokenType.RightBrace)) {
         break;
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside domain. Expected 'owner', 'businessOwner', 'boundedContext', 'sourceSystems', 'primaryTerms', 'reviewCadence', 'tags', 'businessOutcome', 'description', or '}'.`,
+          `Unexpected token '${this.current().value}' inside domain. Expected 'id', 'parent', 'owner', 'businessOwner', 'boundedContext', 'sourceSystems', 'primaryTerms', 'reviewCadence', 'tags', 'businessOutcome', 'description', or '}'.`,
         );
         this.advance();
       }
@@ -905,6 +913,7 @@ export class Parser {
     return {
       kind: NodeKind.DomainDecl,
       name: nameToken.value,
+      id,
       parent,
       owner,
       businessOwner,
@@ -922,6 +931,7 @@ export class Parser {
       dbtTags,
       semanticDomains,
       semanticTags,
+      exports,
       decorators,
       span: this.makeSpan(start, this.previousSpan()),
     };

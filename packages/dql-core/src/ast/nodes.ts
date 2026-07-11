@@ -390,6 +390,8 @@ export interface BlockDeclNode extends BaseNode {
 export interface DomainDeclNode extends BaseNode {
   kind: NodeKind.DomainDecl;
   name: string;
+  /** Stable dot-qualified package id. Falls back to the normalized name for legacy declarations. */
+  id?: string;
   /** Stable parent-domain identifier. Domain / subdomain / microdomain are derived from depth. */
   parent?: string;
   owner?: string;
@@ -408,6 +410,8 @@ export interface DomainDeclNode extends BaseNode {
   dbtTags?: string[];
   semanticDomains?: string[];
   semanticTags?: string[];
+  /** Compatibility export ids; structured v3 interfaces are compiled separately. */
+  exports?: string[];
   decorators: DecoratorNode[];
 }
 

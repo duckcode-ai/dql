@@ -12,10 +12,20 @@ my-dql-project/
 ├─ domains/
 │   ├─ customer/
 │   │   ├─ domain.dql
+│   │   ├─ modeling/
+│   │   │   ├─ entities.dql.yaml
+│   │   │   ├─ relationships.dql.yaml
+│   │   │   ├─ interfaces.dql.yaml
+│   │   │   ├─ contracts.dql.yaml
+│   │   │   └─ layouts/
 │   │   ├─ terms/
+│   │   ├─ skills/
 │   │   ├─ blocks/
 │   │   │   └─ _drafts/
 │   │   ├─ views/
+│   │   ├─ notebooks/
+│   │   ├─ evaluations/
+│   │   ├─ tests/
 │   │   └─ apps/
 │   └─ revenue/
 ├─ skills/                  # shared, Git-tracked agent guidance
@@ -68,9 +78,14 @@ my-dql-project/
 
 ## What each directory holds
 
-- **`domains/<domain>/domain.dql`** — first-class domain metadata: owner,
-  business owner, bounded context, source systems, primary terms, cadence, and
-  tags. Domain folders can contain `terms/`, `blocks/`, `views/`, and `apps/`.
+- **`domains/<domain>/domain.dql`** — the only canonical package declaration:
+  stable id, parent, owner, business owner, bounded context, source systems,
+  primary terms, cadence, and tags. Domain folders recursively own
+  `modeling/`, `terms/`, `skills/`, `blocks/`, `views/`, `notebooks/`,
+  `evaluations/`, `tests/`, and `apps/`.
+- **`domains/<domain>/modeling/`** — sparse analytical identity, relationship
+  proof, cross-domain interfaces, contracts, conformance, and saved layouts.
+  It references dbt unique IDs and never copies dbt schema metadata.
 - **`blocks/`** — one `.dql` file per block. Governance fields (`domain`,
   `owner`) are required by default; the certification check runs on CI.
 - **`terms/`** — one `.dql` file per `term`. These define business vocabulary,

@@ -1,6 +1,4 @@
-// dql-format: 1
-
-domain "commerce" {
+domain "Commerce" {
+  id = "commerce"
   owner = "commerce@company.test"
-  boundedContext = "Orders and customer analytics"
 }

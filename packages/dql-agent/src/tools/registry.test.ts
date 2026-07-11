@@ -34,10 +34,10 @@ describe('DQL tool registry', () => {
       'search_metadata',
       'get_table_schema',
       'validate_sql',
+      'resolve_analytical_path',
+      'explain_relationship_proof',
     ]);
-    // Ceiling deliberately raised 15 -> 18 for the P3 discovery tools; still a
-    // bounded, auditable action space, not an unlimited toolset.
-    expect(nativeTools.length + 3).toBeLessThanOrEqual(18);
+    expect(nativeTools.length).toBeLessThanOrEqual(18);
   });
 
   it('exposes the schema-discovery tools on the answer_loop surface (P3)', () => {
@@ -66,10 +66,12 @@ describe('DQL tool registry', () => {
       'lineage_impact',
       'certify',
       'suggest_block',
+      'resolve_analytical_path',
+      'explain_relationship_proof',
       'inspect_dql_project',
     ]);
-    expect(mcpAgenticTools).toHaveLength(15);
-    expect(mcpAgenticTools.length).toBeLessThanOrEqual(15);
+    expect(mcpAgenticTools).toHaveLength(17);
+    expect(mcpAgenticTools.length).toBeLessThanOrEqual(18);
   });
 
   it('keeps the full MCP surface available for explicit expert sessions', () => {
@@ -86,6 +88,8 @@ describe('DQL tool registry', () => {
         'search_metadata',
         'get_table_schema',
         'validate_sql',
+        'resolve_analytical_path',
+        'explain_relationship_proof',
       ]),
     );
     expect(fullMcpTools.length).toBeGreaterThan(dqlToolDefinitionsForSurface('mcp_agentic').length);

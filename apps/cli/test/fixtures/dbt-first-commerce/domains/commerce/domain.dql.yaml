@@ -1,3 +1,0 @@
-id: commerce
-owner: commerce@company.test
-exports: [customer]

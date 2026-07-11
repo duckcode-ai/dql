@@ -72,6 +72,7 @@ describe('DataLex migration planner', () => {
     expect(overlay?.content).toContain('dbt_model: model.commerce.fct_orders');
     expect(overlay?.content).toContain('status: draft');
     expect(overlay?.content).not.toContain('A divergent DataLex field description');
+    expect(plan.files.find((file) => file.kind === 'domain_declaration')?.content).toContain('id = "commerce"');
     expect(plan.report.droppedDbtMirrors).toContainEqual({
       path: 'domains.commerce.entities.Order',
       fields: ['description', 'fields.order_id'],

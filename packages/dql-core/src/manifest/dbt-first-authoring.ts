@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
+import { loadDomainPackageRegistry } from './domain-package-registry.js';
 import type {
   ManifestFanoutPolicy,
   ManifestRelationshipCardinality,
@@ -40,6 +41,18 @@ export interface RelationshipAuthoringInput {
     to: { grain: string; keys: string[] };
   };
   validation?: ManifestRelationshipValidationEvidence;
+  ownerDomain?: string;
+  verb?: string;
+  description?: string;
+  rationale?: string;
+  roles?: { from?: string; to?: string };
+  optionality?: { from: 'required' | 'optional' | 'unknown'; to: 'required' | 'optional' | 'unknown' };
+  joinTypes?: Array<'left' | 'inner'>;
+  aggregation?: { measuresFrom: string[]; dimensionsFrom: string[]; requiresPreAggregation?: boolean };
+  temporal?: { factTime: string; validFrom: string; validTo?: string; openEnded?: boolean };
+  attributionBlock?: string;
+  importRefs?: string[];
+  evidenceExpiresAt?: string;
 }
 
 export interface ContractAuthoringInput {
@@ -50,13 +63,50 @@ export interface ContractAuthoringInput {
   status?: 'draft' | 'review' | 'certified' | 'deprecated';
   owner?: string;
   requiredEvaluation?: boolean;
+  version?: number;
+  grain?: string;
+  metricRefs?: string[];
+  dimensions?: string[];
+  allowedFilters?: string[];
+  requiredFilters?: string[];
+  purpose?: string;
+  evaluationRefs?: string[];
+}
+
+export interface DomainExportAuthoringInput {
+  id: string;
+  domain: string;
+  version?: number;
+  entity?: string;
+  metrics?: string[];
+  blocks?: string[];
+  allowedKeys?: string[];
+  allowedDimensions?: string[];
+  allowedFilters?: string[];
+  purposes?: string[];
+  consumerDomains?: string[];
+  classification?: string;
+  contract?: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+}
+
+export interface DomainImportAuthoringInput {
+  id?: string;
+  domain: string;
+  exportRef: string;
+  purpose: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
 }
 
 export type ModelingAuthoringChange =
   | { operation: 'upsert_domain'; value: DomainPackageAuthoringInput }
   | { operation: 'upsert_entity'; value: EntityBindingAuthoringInput }
   | { operation: 'upsert_relationship'; value: RelationshipAuthoringInput }
-  | { operation: 'upsert_contract'; value: ContractAuthoringInput };
+  | { operation: 'upsert_contract'; value: ContractAuthoringInput }
+  | { operation: 'upsert_export'; value: DomainExportAuthoringInput }
+  | { operation: 'upsert_import'; value: DomainImportAuthoringInput };
 
 export interface ModelingSourcePatch {
   path: string;
@@ -96,7 +146,11 @@ export function previewModelingChange(projectRoot: string, change: ModelingAutho
       ? [previewEntity(root, change.value)]
       : change.operation === 'upsert_relationship'
         ? [previewRelationship(root, change.value)]
-        : [previewContract(root, change.value)];
+        : change.operation === 'upsert_contract'
+          ? [previewContract(root, change.value)]
+          : change.operation === 'upsert_export'
+            ? [previewExport(root, change.value)]
+            : [previewImport(root, change.value)];
   return {
     operation: change.operation,
     patches,
@@ -171,17 +225,14 @@ export function loadDbtNodeAuthoringDetail(manifestPath: string, uniqueId: strin
 function previewDomain(projectRoot: string, value: DomainPackageAuthoringInput): ModelingSourcePatch[] {
   const id = requiredId(value.id, 'domain');
   const root = packageRootForWrite(projectRoot, id, value.parent);
-  const packagePath = relative(projectRoot, join(root, 'domain.dql.yaml')).replace(/\\/g, '/');
   const declarationPath = relative(projectRoot, join(root, 'domain.dql')).replace(/\\/g, '/');
-  const packageSource: UnknownRecord = {
-    id,
-    ...(value.parent ? { parent: value.parent } : {}),
-    ...(value.owner ? { owner: value.owner } : {}),
-    exports: cleanStrings(value.exports),
-  };
   return [
-    sourcePatch(projectRoot, packagePath, dumpYaml(packageSource)),
-    sourcePatch(projectRoot, declarationPath, renderDomainDeclaration({ ...value, name: value.name || id })),
+    sourcePatch(projectRoot, declarationPath, renderDomainDeclaration({
+      ...value,
+      id,
+      name: value.name || id.split('.').at(-1) || id,
+      exports: cleanStrings(value.exports),
+    })),
   ];
 }
 
@@ -215,6 +266,27 @@ function previewRelationship(projectRoot: string, value: RelationshipAuthoringIn
     status: value.status ?? 'draft',
     ...(value.crossDomain ? { crossDomain: true } : {}),
     ...(value.owner ? { owner: value.owner } : {}),
+    ...(value.ownerDomain ? { owner_domain: value.ownerDomain } : {}),
+    ...(value.verb ? { verb: value.verb } : {}),
+    ...(value.description ? { description: value.description } : {}),
+    ...(value.rationale ? { rationale: value.rationale } : {}),
+    ...(value.roles ? { roles: value.roles } : {}),
+    ...(value.optionality ? { optionality: value.optionality } : {}),
+    ...(value.joinTypes?.length ? { join_types: value.joinTypes } : {}),
+    ...(value.aggregation ? { aggregation: {
+      measures_from: cleanStrings(value.aggregation.measuresFrom),
+      dimensions_from: cleanStrings(value.aggregation.dimensionsFrom),
+      ...(value.aggregation.requiresPreAggregation ? { requires_pre_aggregation: true } : {}),
+    } } : {}),
+    ...(value.temporal ? { temporal: {
+      fact_time: value.temporal.factTime,
+      valid_from: value.temporal.validFrom,
+      ...(value.temporal.validTo ? { valid_to: value.temporal.validTo } : {}),
+      ...(value.temporal.openEnded ? { open_ended: true } : {}),
+    } } : {}),
+    ...(value.attributionBlock ? { attribution_block: value.attributionBlock } : {}),
+    ...(value.importRefs?.length ? { imports: cleanStrings(value.importRefs) } : {}),
+    ...(value.evidenceExpiresAt ? { evidence_expires_at: value.evidenceExpiresAt } : {}),
     ...(value.certifiedAgainst ? { certifiedAgainst: value.certifiedAgainst } : {}),
     ...(value.validation ? { validation: validationSource(value.validation) } : {}),
   };
@@ -231,8 +303,52 @@ function previewContract(projectRoot: string, value: ContractAuthoringInput): Mo
     status: value.status ?? 'draft',
     ...(value.owner ? { owner: value.owner } : {}),
     requiredEvaluation: value.requiredEvaluation !== false,
+    version: value.version ?? 1,
+    ...(value.grain ? { grain: value.grain } : {}),
+    ...(value.metricRefs?.length ? { metrics: cleanStrings(value.metricRefs) } : {}),
+    ...(value.dimensions?.length ? { dimensions: cleanStrings(value.dimensions) } : {}),
+    ...(value.allowedFilters?.length ? { allowed_filters: cleanStrings(value.allowedFilters) } : {}),
+    ...(value.requiredFilters?.length ? { required_filters: cleanStrings(value.requiredFilters) } : {}),
+    ...(value.purpose ? { purpose: value.purpose } : {}),
+    ...(value.evaluationRefs?.length ? { evaluations: cleanStrings(value.evaluationRefs) } : {}),
   };
   return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'contracts.dql.yaml'), 'contracts', 'id', contract);
+}
+
+function previewExport(projectRoot: string, value: DomainExportAuthoringInput): ModelingSourcePatch {
+  const id = requiredId(value.id, 'domain export');
+  const domain = requiredId(value.domain, 'domain');
+  const exported: UnknownRecord = {
+    id,
+    version: value.version ?? 1,
+    ...(value.entity ? { entity: value.entity } : {}),
+    metrics: cleanStrings(value.metrics),
+    blocks: cleanStrings(value.blocks),
+    allowed_keys: cleanStrings(value.allowedKeys),
+    allowed_dimensions: cleanStrings(value.allowedDimensions),
+    allowed_filters: cleanStrings(value.allowedFilters),
+    purposes: cleanStrings(value.purposes),
+    consumer_domains: cleanStrings(value.consumerDomains),
+    ...(value.classification ? { classification: value.classification } : {}),
+    ...(value.contract ? { contract: value.contract } : {}),
+    status: value.status ?? 'draft',
+    ...(value.owner ? { owner: value.owner } : {}),
+  };
+  return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'interfaces.dql.yaml'), 'exports', 'id', exported);
+}
+
+function previewImport(projectRoot: string, value: DomainImportAuthoringInput): ModelingSourcePatch {
+  const domain = requiredId(value.domain, 'domain');
+  const exportRef = requiredId(value.exportRef.replace('@', '.v'), 'domain export reference').replace(/\.v(\d+)$/, '@$1');
+  const id = value.id?.trim() || `${domain}:${exportRef}`;
+  const imported: UnknownRecord = {
+    id,
+    export: exportRef,
+    purpose: value.purpose,
+    status: value.status ?? 'draft',
+    ...(value.owner ? { owner: value.owner } : {}),
+  };
+  return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'interfaces.dql.yaml'), 'imports', 'id', imported);
 }
 
 function validationSource(value: ManifestRelationshipValidationEvidence): UnknownRecord {
@@ -295,25 +411,7 @@ function packageRootForWrite(projectRoot: string, id: string, parent?: string): 
 }
 
 function findPackageRoot(projectRoot: string, id: string): string | undefined {
-  const root = join(projectRoot, 'domains');
-  for (const file of scanYaml(root)) {
-    if (basename(file) !== 'domain.dql.yaml' && basename(file) !== 'domain.dql.yml') continue;
-    const source = asRecord(yaml.load(readFileSync(file, 'utf8')));
-    const sourceId = stringValue(source.id) ?? stringValue(source.domain) ?? basename(dirname(file));
-    if (sourceId === id) return dirname(file);
-  }
-  return undefined;
-}
-
-function scanYaml(root: string): string[] {
-  if (!existsSync(root)) return [];
-  const output: string[] = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) output.push(...scanYaml(path));
-    else if (entry.isFile() && statSync(path).size <= 1024 * 1024 && /\.ya?ml$/i.test(entry.name)) output.push(path);
-  }
-  return output.sort();
+  return loadDomainPackageRegistry(projectRoot).get(id)?.root;
 }
 
 function safeProjectPath(projectRoot: string, relativePath: string): string {
