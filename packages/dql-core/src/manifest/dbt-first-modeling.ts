@@ -25,6 +25,7 @@ import type {
   ManifestModelRelationship,
   ManifestModelRule,
   ManifestRelationshipCardinality,
+  ManifestRelationshipValidationEvidence,
 } from './types.js';
 
 type UnknownRecord = Record<string, unknown>;
@@ -71,6 +72,7 @@ interface RawRelationship {
   crossDomain?: unknown;
   owner?: unknown;
   certifiedAgainst?: unknown;
+  validation?: unknown;
 }
 
 /** Result of compiling the v3 overlay. The raw dbt facts never leave this module. */
@@ -367,6 +369,7 @@ function buildRelationships(
     const status = lifecycle(value.status);
     const crossDomain = value.crossDomain === true || fromEntity.domain !== toEntity.domain;
     const certificationFingerprint = certificationProof(value.certifiedAgainst, keys, cardinality, fanout);
+    const validation = validationEvidence(value.validation);
     const currentProof = fingerprint({
       from: { grain: fromEntity.grain, keys: [...fromEntity.keys].sort(), identity: fromEntity.identityFingerprint },
       to: { grain: toEntity.grain, keys: [...toEntity.keys].sort(), identity: toEntity.identityFingerprint },
@@ -401,8 +404,17 @@ function buildRelationships(
     const automaticJoinAllowed = status === 'certified'
       && !staleCertification
       && exported
+      && validation?.status === 'passed'
       && (cardinality === 'many_to_one' || cardinality === 'one_to_many' || cardinality === 'one_to_one')
       && fanout === 'safe';
+    if (status === 'certified' && validation?.status !== 'passed') {
+      diagnostics.push({
+        kind: 'modeling',
+        filePath: sourcePath,
+        severity: 'warning',
+        message: `certified relationship "${id}" has no passed warehouse validation evidence and cannot prove an automatic join`,
+      });
+    }
     relationships[id] = {
       id,
       from,
@@ -416,11 +428,35 @@ function buildRelationships(
       sourcePath,
       fingerprint: currentProof,
       certificationFingerprint,
+      validation,
       staleCertification,
       automaticJoinAllowed,
     };
   }
   return relationships;
+}
+
+function validationEvidence(value: unknown): ManifestRelationshipValidationEvidence | undefined {
+  const raw = asRecord(value);
+  const status = raw.status === 'passed' || raw.status === 'failed' || raw.status === 'error' ? raw.status : undefined;
+  const checkedAt = stringValue(raw.checked_at ?? raw.checkedAt);
+  const queryFingerprint = stringValue(raw.query_fingerprint ?? raw.queryFingerprint);
+  if (!status || !checkedAt || !queryFingerprint) return undefined;
+  const numberValue = (input: unknown): number => typeof input === 'number' && Number.isFinite(input) ? input : Number(input) || 0;
+  return {
+    status,
+    checkedAt,
+    queryFingerprint,
+    fromRows: numberValue(raw.from_rows ?? raw.fromRows),
+    toRows: numberValue(raw.to_rows ?? raw.toRows),
+    joinedRows: numberValue(raw.joined_rows ?? raw.joinedRows),
+    fromNullKeys: numberValue(raw.from_null_keys ?? raw.fromNullKeys),
+    toNullKeys: numberValue(raw.to_null_keys ?? raw.toNullKeys),
+    unmatchedFrom: numberValue(raw.unmatched_from ?? raw.unmatchedFrom),
+    maxFromPerKey: numberValue(raw.max_from_per_key ?? raw.maxFromPerKey),
+    maxToPerKey: numberValue(raw.max_to_per_key ?? raw.maxToPerKey),
+    message: stringValue(raw.message),
+  };
 }
 
 function certificationProof(

@@ -1,7 +1,17 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
 import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
-import type { ManifestDbtFirstModeling, ManifestDbtProvenance, ManifestDiagnostic, ManifestLineage } from '@duckcodeailabs/dql-core';
+import type {
+  ManifestDbtFirstModeling,
+  ManifestDbtProvenance,
+  ManifestDiagnostic,
+  ManifestLineage,
+  ModelingAuthoringChange,
+  ModelingChangePreview,
+  DbtNodeAuthoringDetail,
+  RelationshipAuthoringInput,
+  ManifestRelationshipValidationEvidence,
+} from '@duckcodeailabs/dql-core';
 import type { AgentAnswerCascade, AgentConversationContext, AgentConversationDqlArtifact } from '../llm/types';
 import type {
   Cell,
@@ -156,6 +166,12 @@ export interface DbtFirstModelingResponse {
   dbtProvenance: ManifestDbtProvenance;
   modeling: ManifestDbtFirstModeling;
   lineage: ManifestLineage;
+  diagnostics: ManifestDiagnostic[];
+}
+
+export interface ModelingApplyResponse {
+  applied: ModelingChangePreview;
+  modeling: ManifestDbtFirstModeling;
   diagnostics: ManifestDiagnostic[];
 }
 
@@ -1922,6 +1938,29 @@ export const api = {
     } catch {
       return null;
     }
+  },
+
+  async getDbtModelingNode(uniqueId: string): Promise<DbtNodeAuthoringDetail> {
+    return request<DbtNodeAuthoringDetail>(`/api/modeling/dbt-first/nodes/${encodeURIComponent(uniqueId)}`);
+  },
+
+  async previewModelingChange(change: ModelingAuthoringChange): Promise<ModelingChangePreview> {
+    return request<ModelingChangePreview>('/api/modeling/dbt-first/preview', {
+      method: 'POST', body: JSON.stringify({ change }),
+    });
+  },
+
+  async applyModelingChange(change: ModelingAuthoringChange, fingerprint: string): Promise<ModelingApplyResponse> {
+    return request<ModelingApplyResponse>('/api/modeling/dbt-first/apply', {
+      method: 'POST', body: JSON.stringify({ change, fingerprint }),
+    });
+  },
+
+  async validateModelingRelationship(relationship: RelationshipAuthoringInput): Promise<ManifestRelationshipValidationEvidence> {
+    const result = await request<{ evidence: ManifestRelationshipValidationEvidence }>('/api/modeling/dbt-first/relationships/validate', {
+      method: 'POST', body: JSON.stringify({ relationship }),
+    });
+    return result.evidence;
   },
 
   async getSettingsEnvStatus(): Promise<{ groups: SettingsEnvGroup[] }> {

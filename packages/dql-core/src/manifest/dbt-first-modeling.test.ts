@@ -143,6 +143,18 @@ exports: [customer]
     certifiedAgainst:
       from: { grain: order_id, keys: [customer_id] }
       to: { grain: customer_id, keys: [customer_id] }
+    validation:
+      status: passed
+      checked_at: '2026-07-11T00:00:00.000Z'
+      query_fingerprint: order-customer-proof
+      from_rows: 10
+      to_rows: 5
+      joined_rows: 10
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 5
+      max_to_per_key: 1
 `);
   writeYaml(projectRoot, 'domains/growth/domain.dql.yaml', `id: growth
 owner: growth@company.test
@@ -166,6 +178,18 @@ exports: [acquisition]
     certifiedAgainst:
       from: { grain: customer_id, keys: [customer_id] }
       to: { grain: customer_id, keys: [customer_id] }
+    validation:
+      status: passed
+      checked_at: '2026-07-11T00:00:00.000Z'
+      query_fingerprint: acquisition-customer-proof
+      from_rows: 5
+      to_rows: 5
+      joined_rows: 5
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 1
+      max_to_per_key: 1
 `);
   return join(target, 'manifest.json');
 }

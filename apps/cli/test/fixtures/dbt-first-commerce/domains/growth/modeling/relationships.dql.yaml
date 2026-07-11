@@ -11,6 +11,18 @@ relationships:
     certifiedAgainst:
       from: { grain: customer_id, keys: [customer_id] }
       to: { grain: customer_id, keys: [customer_id] }
+    validation:
+      status: passed
+      checked_at: '2026-07-11T00:00:00.000Z'
+      query_fingerprint: fixture-acquisition-customer-proof
+      from_rows: 5
+      to_rows: 5
+      joined_rows: 5
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 1
+      max_to_per_key: 1
   - id: touch_to_order_attribution
     from: campaign_touch
     to: order

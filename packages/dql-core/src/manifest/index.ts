@@ -17,6 +17,19 @@ export {
   type DbtFirstModelingLoadResult,
 } from './dbt-first-modeling.js';
 export {
+  previewModelingChange,
+  applyModelingChange,
+  loadDbtNodeAuthoringDetail,
+  type DomainPackageAuthoringInput,
+  type EntityBindingAuthoringInput,
+  type RelationshipAuthoringInput,
+  type ContractAuthoringInput,
+  type ModelingAuthoringChange,
+  type ModelingSourcePatch,
+  type ModelingChangePreview,
+  type DbtNodeAuthoringDetail,
+} from './dbt-first-authoring.js';
+export {
   planDataLexMigration,
   applyDataLexMigration,
   type DataLexMigrationInput,
@@ -63,6 +76,7 @@ export type {
   ManifestDomainPackage,
   ManifestModelEntity,
   ManifestModelRelationship,
+  ManifestRelationshipValidationEvidence,
   ManifestRelationshipCardinality,
   ManifestFanoutPolicy,
   ManifestModelContract,

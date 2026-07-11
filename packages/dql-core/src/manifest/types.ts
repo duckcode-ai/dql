@@ -837,9 +837,26 @@ export interface ManifestModelRelationship {
   sourcePath: string;
   fingerprint: string;
   certificationFingerprint?: string;
+  /** Warehouse-backed evidence captured before certification. */
+  validation?: ManifestRelationshipValidationEvidence;
   staleCertification: boolean;
   /** Only certified, fresh, exported, fanout-safe edges can prove a generated join. */
   automaticJoinAllowed: boolean;
+}
+
+export interface ManifestRelationshipValidationEvidence {
+  status: 'passed' | 'failed' | 'error';
+  checkedAt: string;
+  queryFingerprint: string;
+  fromRows: number;
+  toRows: number;
+  joinedRows: number;
+  fromNullKeys: number;
+  toNullKeys: number;
+  unmatchedFrom: number;
+  maxFromPerKey: number;
+  maxToPerKey: number;
+  message?: string;
 }
 
 export interface ManifestModelContract {

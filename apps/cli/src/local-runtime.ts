@@ -93,6 +93,12 @@ import {
   type DomainInput,
   type ManifestDomain,
   type DiffReport,
+  previewModelingChange,
+  applyModelingChange,
+  loadDbtNodeAuthoringDetail,
+  type ModelingAuthoringChange,
+  type RelationshipAuthoringInput,
+  type ManifestRelationshipValidationEvidence,
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
@@ -3580,7 +3586,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Manifest v3 modeling surface. This response intentionally contains dbt
     // provenance references and the sparse DQL overlay, never copied dbt YAML.
     if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
-      const { buildManifest, resolveDbtManifestPath } = await import('@duckcodeailabs/dql-core');
       const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
       const manifest = buildManifest({ projectRoot, dbtManifestPath });
       if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) {
@@ -3598,6 +3603,73 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         lineage: manifest.lineage,
         diagnostics: manifest.diagnostics ?? [],
       }));
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/modeling/dbt-first/nodes/')) {
+      const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+      const uniqueId = decodeURIComponent(path.slice('/api/modeling/dbt-first/nodes/'.length));
+      const detail = dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined;
+      if (!detail) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: `dbt node not found: ${uniqueId}` }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(detail));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/preview') {
+      try {
+        const body = await readJSON(req) as { change?: ModelingAuthoringChange };
+        if (!body.change) throw new Error('A modeling change is required.');
+        const preview = previewModelingChange(projectRoot, body.change);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(preview));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/apply') {
+      try {
+        const body = await readJSON(req) as { change?: ModelingAuthoringChange; fingerprint?: string };
+        if (!body.change) throw new Error('A modeling change is required.');
+        const applied = applyModelingChange(projectRoot, body.change, body.fingerprint);
+        await ensureMetadataCatalogFresh(projectRoot, { force: true }).catch(() => undefined);
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+        const manifest = buildManifest({ projectRoot, dbtManifestPath });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ applied, modeling: manifest.modeling, diagnostics: manifest.diagnostics ?? [] }));
+      } catch (error) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/relationships/validate') {
+      try {
+        const body = await readJSON(req) as { relationship?: RelationshipAuthoringInput };
+        if (!body.relationship) throw new Error('A relationship is required.');
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+        const manifest = buildManifest({ projectRoot, dbtManifestPath });
+        const activeConnection = requireActiveConnection();
+        const evidence = await validateModelingRelationship(
+          body.relationship,
+          manifest,
+          (sql) => executor.executeQuery(sql, [], {}, activeConnection),
+          (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ evidence }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
       return;
     }
 
@@ -9573,6 +9645,89 @@ table: ${table}${tagList}
       resolvePromise(address.port);
     });
   });
+}
+
+async function validateModelingRelationship(
+  relationship: RelationshipAuthoringInput,
+  manifest: DQLManifest,
+  execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
+  quoteIdentifier: (identifier: string) => string = quoteSqlIdentifier,
+): Promise<ManifestRelationshipValidationEvidence> {
+  const fromEntity = manifest.modeling?.entities[relationship.from];
+  const toEntity = manifest.modeling?.entities[relationship.to];
+  if (!fromEntity || !toEntity) throw new Error('Both relationship entities must be bound to dbt models before validation.');
+  const fromNode = manifest.dbtProvenance?.nodes[fromEntity.dbtUniqueId];
+  const toNode = manifest.dbtProvenance?.nodes[toEntity.dbtUniqueId];
+  if (!fromNode?.relation || !toNode?.relation) throw new Error('Both dbt models must expose warehouse relation names.');
+  if (!relationship.keys.length) throw new Error('At least one join key pair is required.');
+
+  const safeQuote = (identifier: string) => quoteIdentifier(assertSafeSqlIdentifier(identifier));
+  const fromRelation = quoteQualifiedIdentifier(fromNode.relation, safeQuote);
+  const toRelation = quoteQualifiedIdentifier(toNode.relation, safeQuote);
+  const fromNull = relationship.keys.map((key) => `f.${safeQuote(key.from)} IS NULL`).join(' OR ');
+  const toNull = relationship.keys.map((key) => `t.${safeQuote(key.to)} IS NULL`).join(' OR ');
+  const join = relationship.keys.map((key) => `f.${safeQuote(key.from)} = t.${safeQuote(key.to)}`).join(' AND ');
+  const fromKeys = relationship.keys.map((key) => safeQuote(key.from)).join(', ');
+  const toKeys = relationship.keys.map((key) => safeQuote(key.to)).join(', ');
+  const firstToKey = safeQuote(relationship.keys[0]!.to);
+  const sql = `WITH
+from_counts AS (SELECT COUNT(*) AS rows, SUM(CASE WHEN ${fromNull} THEN 1 ELSE 0 END) AS null_keys FROM ${fromRelation} f),
+to_counts AS (SELECT COUNT(*) AS rows, SUM(CASE WHEN ${toNull} THEN 1 ELSE 0 END) AS null_keys FROM ${toRelation} t),
+from_max AS (SELECT COALESCE(MAX(key_count), 0) AS max_per_key FROM (SELECT COUNT(*) AS key_count FROM ${fromRelation} GROUP BY ${fromKeys}) x),
+to_max AS (SELECT COALESCE(MAX(key_count), 0) AS max_per_key FROM (SELECT COUNT(*) AS key_count FROM ${toRelation} GROUP BY ${toKeys}) x),
+joined AS (SELECT COUNT(*) AS rows FROM ${fromRelation} f JOIN ${toRelation} t ON ${join}),
+unmatched AS (SELECT COUNT(*) AS rows FROM ${fromRelation} f LEFT JOIN ${toRelation} t ON ${join} WHERE t.${firstToKey} IS NULL)
+SELECT from_counts.rows AS from_rows, to_counts.rows AS to_rows, joined.rows AS joined_rows,
+  from_counts.null_keys AS from_null_keys, to_counts.null_keys AS to_null_keys,
+  unmatched.rows AS unmatched_from, from_max.max_per_key AS max_from_per_key, to_max.max_per_key AS max_to_per_key
+FROM from_counts, to_counts, joined, unmatched, from_max, to_max`;
+  const result = await execute(sql);
+  const row = result.rows[0] ?? {};
+  const maxFromPerKey = numericValue(row.max_from_per_key);
+  const maxToPerKey = numericValue(row.max_to_per_key);
+  const cardinalityPassed = relationship.cardinality === 'one_to_one'
+    ? maxFromPerKey <= 1 && maxToPerKey <= 1
+    : relationship.cardinality === 'one_to_many'
+      ? maxFromPerKey <= 1
+      : relationship.cardinality === 'many_to_one'
+        ? maxToPerKey <= 1
+        : false;
+  const policyPassed = relationship.fanout === 'safe' && cardinalityPassed;
+  return {
+    status: policyPassed ? 'passed' : 'failed',
+    checkedAt: new Date().toISOString(),
+    queryFingerprint: createHash('sha256').update(sql).digest('hex'),
+    fromRows: numericValue(row.from_rows),
+    toRows: numericValue(row.to_rows),
+    joinedRows: numericValue(row.joined_rows),
+    fromNullKeys: numericValue(row.from_null_keys),
+    toNullKeys: numericValue(row.to_null_keys),
+    unmatchedFrom: numericValue(row.unmatched_from),
+    maxFromPerKey,
+    maxToPerKey,
+    message: policyPassed
+      ? 'Warehouse evidence matches the declared cardinality and safe fanout policy.'
+      : 'Warehouse evidence does not prove the declared cardinality and safe fanout policy.',
+  };
+}
+
+function quoteQualifiedIdentifier(value: string, quote: (identifier: string) => string = quoteSqlIdentifier): string {
+  return value.split('.').map((part) => quote(assertSafeSqlIdentifier(part))).join('.');
+}
+
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function assertSafeSqlIdentifier(value: string): string {
+  if (!value || !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)) throw new Error(`Unsafe SQL identifier: ${value}`);
+  return value;
+}
+
+function numericValue(value: unknown): number {
+  if (typeof value === 'bigint') return Number(value);
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 export async function assertLocalQueryRuntimeReady(
