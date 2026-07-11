@@ -249,14 +249,18 @@ export function certifiedApplicabilityForObject(
     };
   }
 
+  const parameters = Array.isArray(object.payload?.parameters) ? object.payload.parameters : [];
+  const dynamicParameters = parameters.filter((entry) => entry && typeof entry === 'object' && (entry as { policy?: unknown }).policy === 'dynamic');
   const parameterPolicy = metadataString(object.payload?.parameterPolicy ?? object.payload?.parameter_policy);
-  if (parameterPolicy && /safe_filter|safe_group_by|template/i.test(parameterPolicy) && score >= 58 && directionCompatible) {
+  if ((dynamicParameters.length > 0 || (parameterPolicy && /safe_filter|safe_group_by|template/i.test(parameterPolicy))) && score >= 58 && directionCompatible) {
     return {
       objectKey: object.objectKey,
       name: object.name,
       kind: 'safe_parameterized',
       score,
-      reasons: [...reasons, `certified block declares parameter policy ${parameterPolicy}`],
+      reasons: [...reasons, dynamicParameters.length > 0
+        ? `certified block declares ${dynamicParameters.length} typed dynamic parameter${dynamicParameters.length === 1 ? '' : 's'}`
+        : `certified block declares parameter policy ${parameterPolicy}`],
     };
   }
 

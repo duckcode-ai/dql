@@ -26,7 +26,7 @@ export const queryViaBlockInput = zodInputShapeForTool('query_via_block');
  */
 export async function queryViaBlock(
   ctx: DQLContext,
-  args: { name: string; limit?: number; question?: string; serverUrl?: string },
+  args: { name: string; limit?: number; question?: string; parameters?: Record<string, unknown>; serverUrl?: string },
 ) {
   const block = ctx.manifest.blocks[args.name];
   if (!block) return { error: `No block named "${args.name}".` };
@@ -99,6 +99,7 @@ export async function queryViaBlock(
           source,
           title: args.name,
         },
+        parameters: args.parameters,
       }),
     });
   } catch (err) {
@@ -120,6 +121,14 @@ export async function queryViaBlock(
     invariantResults?: InvariantResult[];
     invariantViolation?: boolean;
     error?: string;
+    invocation?: {
+      resolvedParameters?: Array<{
+        name: string;
+        value: unknown;
+        source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+      }>;
+      auditId?: string;
+    };
   };
   if (payload.error) return { error: payload.error };
   const rows = payload.result?.rows ?? [];
@@ -168,6 +177,8 @@ export async function queryViaBlock(
     durationMs: payload.result?.executionTime ?? null,
     columns: payload.result?.columns ?? [],
     rows: returnedRows,
+    parameters: payload.invocation?.resolvedParameters ?? [],
+    auditId: payload.invocation?.auditId,
   };
 }
 

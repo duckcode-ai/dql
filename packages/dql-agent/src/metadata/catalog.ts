@@ -1982,6 +1982,7 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     dimensions: node.dimensions ?? [],
     allowedFilters: node.allowedFilters ?? [],
     parameterPolicy: node.parameterPolicy ?? [],
+    parameters: node.parameters ?? [],
     filterBindings: node.filterBindings ?? [],
     sourceSystems: node.sourceSystems ?? [],
     replacementFor: node.replacementFor ?? [],
@@ -2529,6 +2530,7 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
         blockType: block.blockType,
         tests: block.tests,
         parameterPolicy: block.parameterPolicy,
+        parameters: block.parameters,
         filterBindings: block.filterBindings,
         sqlFingerprints: buildBlockSqlFingerprints(block.sql),
         businessFingerprint: buildBlockBusinessFingerprint({
@@ -5935,4 +5937,3 @@ function scoreText(value: string, terms: string[]): number {
   const lower = value.toLowerCase();
   return terms.reduce((score, term) => score + (lower.includes(term) ? 1 : 0), 0);
 }
-

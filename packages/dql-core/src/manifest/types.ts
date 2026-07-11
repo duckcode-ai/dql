@@ -240,6 +240,8 @@ export interface ManifestBlock {
   allowedFilters?: string[];
   /** Parameter reuse policy per block parameter. */
   parameterPolicy?: ManifestBlockParameterPolicy[];
+  /** Typed runtime parameters, including defaults and safe execution bindings. */
+  parameters?: ManifestBlockParameter[];
   /** Business/app filter to physical column or expression bindings. */
   filterBindings?: ManifestBlockFilterBinding[];
   /** Business/source systems represented by this block. */
@@ -362,6 +364,15 @@ export interface ManifestBlockParameterPolicy {
 export interface ManifestBlockFilterBinding {
   filter: string;
   binding: string;
+}
+
+export interface ManifestBlockParameter {
+  name: string;
+  type: import('../ast/nodes.js').BlockParamType;
+  required: boolean;
+  default?: unknown;
+  policy: import('../blocks/parameters.js').BlockParameterPolicy;
+  binding?: import('../blocks/parameters.js').BlockParameterBinding;
 }
 
 // ---- Business Domains ----

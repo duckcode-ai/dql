@@ -3,12 +3,14 @@ import {
   expandGroundingFromCatalog,
   openMetadataCatalog,
   type AgentToolDefinition,
-} from '@duckcodeailabs/dql-agent';
-import { DQLContext } from '@duckcodeailabs/dql-mcp';
-import { spawn } from 'node:child_process';
-import { readdirSync, readFileSync, type Dirent } from 'node:fs';
-import { join, relative } from 'node:path';
-import { buildAgentTools } from './tools.js';
+} from "@duckcodeailabs/dql-agent";
+import { DQLContext } from "@duckcodeailabs/dql-mcp";
+import { spawn } from "node:child_process";
+import { readdirSync, readFileSync, type Dirent } from "node:fs";
+import { join, relative } from "node:path";
+import { buildAgentTools } from "./tools.js";
+import { QueryExecutor } from "@duckcodeailabs/dql-connectors";
+import { NotebookDatasetWorkspace } from "../notebook-datasets.js";
 
 export function createGroundingContextExpander(projectRoot: string) {
   return async (request: Parameters<typeof expandGroundingFromCatalog>[1]) => {
@@ -23,10 +25,252 @@ export function createGroundingContextExpander(projectRoot: string) {
 
 export function buildAnswerLoopTools(projectRoot: string): AgentToolDefinition[] {
   const ctx = new DQLContext({ projectRoot });
-  const allowed = new Set<string>(dqlToolNamesForSurface('answer_loop'));
-  const catalogTools = buildAgentTools(ctx)
-    .filter((tool) => allowed.has(tool.name));
-  return [...catalogTools, projectSourceSearchTool(projectRoot)];
+  const allowed = new Set<string>(dqlToolNamesForSurface("answer_loop"));
+  const catalogTools = buildAgentTools(ctx).filter((tool) =>
+    allowed.has(tool.name),
+  );
+  return [
+    ...catalogTools,
+    projectSourceSearchTool(projectRoot),
+    ...notebookDatasetTools(projectRoot),
+  ];
+}
+
+function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
+  const executor = new QueryExecutor();
+  const workspace = new NotebookDatasetWorkspace(projectRoot, executor, [
+    join(projectRoot, ".dql", "connectors"),
+    projectRoot,
+  ]);
+  const datasetByInput = (args: unknown) => {
+    const input = objectArgs(args);
+    const value =
+      typeof input.id === "string"
+        ? input.id
+        : typeof input.name === "string"
+          ? input.name
+          : "";
+    return workspace
+      .list()
+      .find(
+        (dataset) =>
+          dataset.id === value ||
+          dataset.alias.toLowerCase() === value.toLowerCase() ||
+          dataset.name.toLowerCase() === value.toLowerCase(),
+      );
+  };
+  return [
+    {
+      name: "list_notebook_datasets",
+      description:
+        "List imported and staged notebook datasets using metadata only. Use before proposing local or mixed-source analysis. Never returns complete file contents.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+      },
+      run: async () => ({
+        datasets: workspace.list().map((dataset) => ({
+          id: dataset.id,
+          name: dataset.name,
+          alias: dataset.alias,
+          storageMode: dataset.storageMode,
+          trustState: dataset.trustState,
+          rowCount: dataset.profile.rowCount,
+          refreshedAt: dataset.refreshedAt,
+          columns: dataset.profile.columns.map((column) => ({
+            name: column.name,
+            type: column.type,
+            flags: column.flags,
+          })),
+          lineage: dataset.lineage,
+        })),
+      }),
+    },
+    {
+      name: "describe_notebook_dataset",
+      description:
+        "Describe one local/project/staged notebook dataset including schema, bounded profile, freshness, lineage, and trust. Does not return raw rows.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id"],
+        properties: { id: { type: "string" } },
+      },
+      run: async (args) => {
+        const dataset = datasetByInput(args);
+        if (!dataset) return { found: false, error: "Dataset not found." };
+        return {
+          found: true,
+          dataset: {
+            ...dataset,
+            profile: {
+              ...dataset.profile,
+              preview: undefined,
+              columns: dataset.profile.columns.map((column) => ({
+                ...column,
+                sampleValues: undefined,
+              })),
+            },
+          },
+        };
+      },
+    },
+    {
+      name: "sample_notebook_dataset",
+      description:
+        "Return a strictly bounded, redacted sample from a notebook dataset. Use only when schema/profile is insufficient. Sensitive columns are always redacted.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id"],
+        properties: {
+          id: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 20 },
+        },
+      },
+      run: async (args) => {
+        const dataset = datasetByInput(args);
+        if (!dataset) return { found: false, error: "Dataset not found." };
+        const input = objectArgs(args);
+        const limit =
+          typeof input.limit === "number"
+            ? Math.max(1, Math.min(20, Math.floor(input.limit)))
+            : 5;
+        const sensitive = new Set(
+          dataset.profile.columns
+            .filter((column) => column.flags?.includes("sensitive"))
+            .map((column) => column.name),
+        );
+        return {
+          found: true,
+          dataset: dataset.alias,
+          rows: dataset.profile.preview
+            .slice(0, limit)
+            .map((row) =>
+              Object.fromEntries(
+                Object.entries(row).map(([key, value]) => [
+                  key,
+                  sensitive.has(key) ? "[REDACTED]" : value,
+                ]),
+              ),
+            ),
+          sampledRows: Math.min(limit, dataset.profile.preview.length),
+          totalRows: dataset.profile.rowCount,
+          warning:
+            "Bounded preview only. Never infer population aggregates from these rows.",
+        };
+      },
+    },
+    {
+      name: "propose_cross_source_join",
+      description:
+        "Compare dataset schemas and propose join keys/cardinality warnings. If multiple plausible keys or a many-to-many risk exists, returns clarificationRequired=true instead of guessing.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["left", "right"],
+        properties: { left: { type: "string" }, right: { type: "string" } },
+      },
+      run: async (args) => {
+        const input = objectArgs(args);
+        const all = workspace.list();
+        const find = (value: unknown) =>
+          all.find(
+            (dataset) =>
+              dataset.id === value ||
+              dataset.alias === value ||
+              dataset.name === value,
+          );
+        const left = find(input.left);
+        const right = find(input.right);
+        if (!left || !right)
+          return {
+            found: false,
+            error: "Both datasets must exist in the notebook workspace.",
+          };
+        const rightColumns = new Set(
+          right.profile.columns.map((column) => column.name.toLowerCase()),
+        );
+        const candidates = left.profile.columns.filter(
+          (column) =>
+            rightColumns.has(column.name.toLowerCase()) &&
+            /(^id$|_id$|^key$|_key$)/i.test(column.name),
+        );
+        const manyRisk = candidates.some((candidate) => {
+          const other = right.profile.columns.find(
+            (column) =>
+              column.name.toLowerCase() === candidate.name.toLowerCase(),
+          );
+          return (
+            (candidate.distinctCount ?? 0) < left.profile.sampledRows ||
+            (other?.distinctCount ?? 0) < right.profile.sampledRows
+          );
+        });
+        return {
+          found: true,
+          left: left.alias,
+          right: right.alias,
+          candidates: candidates.map((column) => column.name),
+          manyToManyRisk: manyRisk,
+          clarificationRequired: candidates.length !== 1 || manyRisk,
+          recommendation:
+            candidates.length === 1 && !manyRisk
+              ? `Join on ${candidates[0].name} after confirming business grain.`
+              : "Ask the user to confirm join key and expected cardinality.",
+          freshnessMismatch: {
+            left: left.refreshedAt,
+            right: right.refreshedAt,
+          },
+          trustLabel: "review_required",
+        };
+      },
+    },
+    {
+      name: "execute_local_analysis",
+      description:
+        "Execute bounded read-only SQL in the notebook DuckDB workspace over imported or staged datasets. Results are always review-required and never certified.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sql"],
+        properties: { sql: { type: "string" } },
+      },
+      run: async (args) => {
+        const input = objectArgs(args);
+        const sql =
+          typeof input.sql === "string"
+            ? input.sql.trim().replace(/;\s*$/, "")
+            : "";
+        if (
+          !/^(select|with)\b/i.test(sql) ||
+          /\b(insert|update|delete|drop|alter|create|copy|attach|install|load|pragma)\b/i.test(
+            sql,
+          )
+        ) {
+          return {
+            error:
+              "Local analysis only supports one read-only SELECT or WITH statement.",
+          };
+        }
+        await workspace.initialize();
+        const result = await executor.executeQuery(
+          `SELECT * FROM (${sql}) AS dql_local_analysis LIMIT 200`,
+          [],
+          {},
+          workspace.localConnection,
+        );
+        return {
+          trust: "review_required",
+          source: "notebook_local_workspace",
+          columns: result.columns,
+          rows: result.rows.slice(0, 200),
+          rowCount: result.rows.length,
+          warning: "Mixed or local analysis cannot be certified automatically.",
+        };
+      },
+    },
+  ];
 }
 
 function projectSourceSearchTool(projectRoot: string): AgentToolDefinition {

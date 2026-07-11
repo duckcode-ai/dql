@@ -46,15 +46,36 @@ describe('answer-loop tool surface', () => {
     const tools = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools');
     const names = tools.map((tool) => tool.name);
 
-    expect(names).toEqual([...dqlToolNamesForSurface('answer_loop'), 'search_project_files']);
-    expect(names).toEqual(expect.arrayContaining([
-      'expand_context',
-      'search_metadata',
-      'get_table_schema',
-      'validate_sql',
-      'search_project_files',
-    ]));
-    expect(names).not.toEqual(expect.arrayContaining(['ask_dql', 'query_via_metadata', 'query_via_block']));
+    expect(names).toEqual([
+      ...dqlToolNamesForSurface("answer_loop"),
+      "search_project_files",
+      "list_notebook_datasets",
+      "describe_notebook_dataset",
+      "sample_notebook_dataset",
+      "propose_cross_source_join",
+      "execute_local_analysis",
+    ]);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "expand_context",
+        "search_metadata",
+        "get_table_schema",
+        "validate_sql",
+        "search_project_files",
+        "list_notebook_datasets",
+        "describe_notebook_dataset",
+        "sample_notebook_dataset",
+        "propose_cross_source_join",
+        "execute_local_analysis",
+      ]),
+    );
+    expect(names).not.toEqual(
+      expect.arrayContaining([
+        "ask_dql",
+        "query_via_metadata",
+        "query_via_block",
+      ]),
+    );
   });
 });
 

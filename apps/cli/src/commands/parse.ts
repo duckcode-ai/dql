@@ -1,10 +1,38 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DataLexContractRegistry, Parser, SemanticAnalyzer, printAST, resolveDataLexManifestPath } from '@duckcodeailabs/dql-core';
+import { deserializeNotebook } from '@duckcodeailabs/dql-notebook';
 import type { CLIFlags } from '../args.js';
 
 export async function runParse(filePath: string, flags: CLIFlags): Promise<void> {
   const source = readFileSync(filePath, 'utf-8');
+  if (filePath.endsWith('.dqlnb')) {
+    try {
+      const notebook = deserializeNotebook(source);
+      if (flags.format === 'json') {
+        console.log(JSON.stringify({
+          file: filePath,
+          format: 'dqlnb',
+          version: notebook.dqlnbVersion,
+          title: notebook.metadata.title,
+          cells: notebook.cells.length,
+          cellTypes: notebook.cells.map((cell) => cell.type),
+          diagnostics: [],
+        }, null, 2));
+      } else {
+        console.log(`\n  ✓ Parsed notebook: ${filePath}`);
+        console.log(`    Cells: ${notebook.cells.length}`);
+        console.log('    Diagnostics: ✓ No errors, no warnings\n');
+      }
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (flags.format === 'json') console.log(JSON.stringify({ file: filePath, error: message }, null, 2));
+      else console.error(`\n  ✗ Notebook parse error: ${message}\n`);
+      process.exit(1);
+      return;
+    }
+  }
   const projectRoot = dirname(resolve(filePath));
   const datalexManifestPath = resolveDataLexManifestPath(projectRoot, flags.datalexManifestPath || undefined) ?? undefined;
   if (flags.datalexManifestPath && (!datalexManifestPath || !existsSync(datalexManifestPath))) {

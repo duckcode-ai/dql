@@ -210,6 +210,7 @@ export type {
   AgentIntent,
   AgentPriorResultReference,
   AgentResultPayload,
+  CertifiedBlockInvocationInput,
   AgentSchemaColumn,
   AgentSchemaTable,
   AnalysisDepth,

@@ -183,6 +183,8 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     ...stringArray(record.allowedFilters),
     ...filterBindingNames(payload.filterBindings),
     ...filterBindingNames(record.filterBindings),
+    ...parameterNames(payload.parameters),
+    ...parameterNames(record.parameters),
   ].map(canonicalToken).filter(Boolean));
   const grain = canonicalToken(stringValue(payload.grain) ?? stringValue(record.grain) ?? explicitDimensions[0] ?? '');
   const relevance = outputs.length + dimensions.length + measures.length;
@@ -197,6 +199,13 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     relevance,
     inferredContract: stringArray(payload.declaredOutputs).length === 0 && stringArray(record.declaredOutputs).length === 0,
   };
+}
+
+function parameterNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => item && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string'
+    ? [(item as { name: string }).name]
+    : []);
 }
 
 function inferredTextDimensions(text: string): string[] {

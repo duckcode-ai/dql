@@ -455,6 +455,18 @@ export type AgentRunStopReason =
   | 'human_review_required'
   | 'blocked';
 export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal';
+
+export interface MixedSourceNotebookPlan {
+  datasetId?: string;
+  datasetName?: string;
+  localDataset: string;
+  localAlias: string;
+  localKey: string;
+  warehouseKey: string;
+  warehouseExpression: string;
+  warehouseSql: string;
+  warehouseRelations?: string[];
+}
 export type AgentRunEvaluationSeverity = 'info' | 'warning' | 'blocking';
 
 export interface AgentRunSelectedObject {
@@ -876,6 +888,15 @@ export interface DashboardRunResponse {
     filters?: {
       applied: Array<{ filter: string; binding?: string; mode: 'parameter' | 'predicate'; paramNames: string[] }>;
       skipped: Array<{ filter: string; reason: string }>;
+    };
+    invocation?: {
+      resolvedParameters: Array<{
+        name: string;
+        value: unknown;
+        source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+      }>;
+      unresolvedParameters: string[];
+      auditId: string;
     };
     citation?: { kind: string; name: string; path?: string };
     error?: string;
@@ -1834,6 +1855,56 @@ export interface NotebookCellExecutionResponse {
   result: QueryResult | null;
 }
 
+export interface DatasetColumn {
+  name: string;
+  type: string;
+  nullable?: boolean;
+  nullCount?: number;
+  distinctCount?: number;
+  sampleValues?: unknown[];
+  flags?: string[];
+}
+
+export interface DatasetSource {
+  id: string;
+  name: string;
+  alias: string;
+  description?: string;
+  owner?: string;
+  tags: string[];
+  sourcePath: string;
+  storageMode: "local" | "project" | "staged";
+  format: "csv" | "parquet" | "json";
+  fileFingerprint: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  importedAt: string;
+  refreshedAt: string;
+  trustState:
+    | "local_ad_hoc"
+    | "project_controlled"
+    | "governed_snapshot"
+    | "review_required";
+  profile: {
+    rowCount: number;
+    sampledRows: number;
+    columns: DatasetColumn[];
+    warnings: string[];
+    preview: Array<Record<string, unknown>>;
+  };
+  linked?: boolean;
+  pinned?: boolean;
+  expiresAt?: string;
+  lineage?: Record<string, unknown>;
+  schemaDrift?: {
+    detectedAt: string;
+    added: string[];
+    removed: string[];
+    changed: Array<{ column: string; before: string; after: string }>;
+  };
+  schemaOverrides?: Record<string, string>;
+}
+
 export const api = {
   async getSettingsEnvStatus(): Promise<{ groups: SettingsEnvGroup[] }> {
     try {
@@ -2008,10 +2079,14 @@ export const api = {
     return raw.thread;
   },
 
-  async getAgentThread(id: string): Promise<{ thread: AgentConversationThread; turns: AgentConversationTurn[] }> {
-    return request<{ thread: AgentConversationThread; turns: AgentConversationTurn[] }>(
-      `/api/agent/threads/${encodeURIComponent(id)}`,
-    );
+  async getAgentThread(id: string): Promise<{
+    thread: AgentConversationThread;
+    turns: AgentConversationTurn[];
+  }> {
+    return request<{
+      thread: AgentConversationThread;
+      turns: AgentConversationTurn[];
+    }>(`/api/agent/threads/${encodeURIComponent(id)}`);
   },
 
   async archiveAgentThread(id: string): Promise<{ ok: boolean }> {
@@ -2269,10 +2344,10 @@ export const api = {
     });
   },
 
-  async runBlockStudio(source: string, path?: string | null): Promise<BlockStudioPreview> {
+  async runBlockStudio(source: string, path?: string | null, parameters?: Record<string, unknown>): Promise<BlockStudioPreview> {
     return request<BlockStudioPreview>('/api/block-studio/run', {
       method: 'POST',
-      body: JSON.stringify({ source, path }),
+      body: JSON.stringify({ source, path, parameters }),
     });
   },
 
@@ -2535,6 +2610,9 @@ export const api = {
     llmContext?: string;
     examples?: Array<{ question: string; sql?: string }>;
     invariants?: string[];
+    reviewRequired?: boolean;
+    datasetRefs?: Cell["datasetRefs"];
+    lineage?: Record<string, unknown>;
   }): Promise<{
     path: string;
     content: string;
@@ -2581,10 +2659,15 @@ export const api = {
     });
   },
 
-  async executeQuery(sql: string, signal?: AbortSignal, executionContext?: NotebookExecutionContext): Promise<QueryResult> {
-    const raw = await request<any>('/api/query', {
-      method: 'POST',
-      body: JSON.stringify({ sql, executionContext }),
+  async executeQuery(
+    sql: string,
+    signal?: AbortSignal,
+    executionContext?: NotebookExecutionContext,
+    executionTarget?: Cell["executionTarget"],
+  ): Promise<QueryResult> {
+    const raw = await request<any>("/api/query", {
+      method: "POST",
+      body: JSON.stringify({ sql, executionContext, executionTarget }),
       signal,
     });
     return normalizeQueryResultPayload(raw);
@@ -2614,6 +2697,8 @@ export const api = {
           title: cell.name,
           config: cell.chartConfig,
         },
+        executionTarget: cell.executionTarget,
+        parameters: cell.blockBinding?.parameterValues,
         executionContext,
       }),
       signal,
@@ -2629,24 +2714,136 @@ export const api = {
     };
   },
 
-  async listNotebookResearch(input?: string | {
-    path?: string;
-    sourceCellId?: string;
-    domain?: string;
+  async getDatasets(): Promise<{
+    datasets: DatasetSource[];
+    workspace?: { target: "local"; databasePath: string };
+  }> {
+    return request("/api/datasets");
+  },
+
+  async importDataset(input: {
+    filename?: string;
+    sourcePath?: string;
+    contentBase64?: string;
+    file?: File;
+    storageMode?: "local" | "project";
+    link?: boolean;
+    name?: string;
+    alias?: string;
+    description?: string;
     owner?: string;
-    intent?: NotebookResearchIntent;
-    search?: string;
-    status?: NotebookResearchStatus;
-    reviewStatus?: NotebookResearchReviewStatus;
-    promotionAction?: NotebookResearchDqlPromotionAction;
-    readiness?: NotebookResearchReadinessFilter;
-    age?: NotebookResearchAgeFilter;
-    nextAction?: NotebookResearchNextActionFilter;
-    activeOnly?: boolean;
-    sort?: NotebookResearchSort;
-    limit?: number;
-    offset?: number;
-  }): Promise<NotebookResearchListResponse> {
+    tags?: string[];
+  }): Promise<{ dataset: DatasetSource; duplicate: boolean }> {
+    if (input.file) {
+      const form = new FormData();
+      form.set("file", input.file, input.file.name);
+      for (const [key, value] of Object.entries(input)) {
+        if (key === "file" || value === undefined) continue;
+        form.set(key, Array.isArray(value) ? value.join(",") : String(value));
+      }
+      const response = await fetch(`${BASE}/api/datasets/import`, {
+        method: "POST",
+        body: form,
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatRequestError(response, text));
+      }
+      return response.json() as Promise<{
+        dataset: DatasetSource;
+        duplicate: boolean;
+      }>;
+    }
+    return request("/api/datasets/import", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async refreshDataset(id: string): Promise<{ dataset: DatasetSource }> {
+    return request(`/api/datasets/${encodeURIComponent(id)}/refresh`, {
+      method: "POST",
+    });
+  },
+
+  async updateDatasetSchema(
+    id: string,
+    overrides: Record<string, string>,
+  ): Promise<{ dataset: DatasetSource }> {
+    return request(`/api/datasets/${encodeURIComponent(id)}/schema`, {
+      method: "POST",
+      body: JSON.stringify({ overrides }),
+    });
+  },
+
+  async renameDataset(
+    id: string,
+    name: string,
+    alias?: string,
+  ): Promise<{ dataset: DatasetSource }> {
+    return request(`/api/datasets/${encodeURIComponent(id)}/rename`, {
+      method: "POST",
+      body: JSON.stringify({ name, alias }),
+    });
+  },
+
+  async pinDataset(
+    id: string,
+    pinned = true,
+  ): Promise<{ dataset: DatasetSource }> {
+    return request(`/api/datasets/${encodeURIComponent(id)}/pin`, {
+      method: "POST",
+      body: JSON.stringify({ pinned }),
+    });
+  },
+
+  async removeDataset(id: string): Promise<void> {
+    await request(`/api/datasets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  },
+
+  async stageDataset(input: {
+    sql: string;
+    connectionName?: string;
+    name?: string;
+    confirmed: boolean;
+    blockPath?: string;
+    filters?: Record<string, unknown>;
+    parameters?: Record<string, unknown>;
+  }): Promise<{
+    dataset: DatasetSource;
+    trustLabel: "review_required";
+    limits: Record<string, number>;
+  }> {
+    return request("/api/datasets/stage", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async listNotebookResearch(
+    input?:
+      | string
+      | {
+          path?: string;
+          sourceCellId?: string;
+          domain?: string;
+          owner?: string;
+          intent?: NotebookResearchIntent;
+          search?: string;
+          status?: NotebookResearchStatus;
+          reviewStatus?: NotebookResearchReviewStatus;
+          promotionAction?: NotebookResearchDqlPromotionAction;
+          readiness?: NotebookResearchReadinessFilter;
+          age?: NotebookResearchAgeFilter;
+          nextAction?: NotebookResearchNextActionFilter;
+          activeOnly?: boolean;
+          sort?: NotebookResearchSort;
+          limit?: number;
+          offset?: number;
+        },
+  ): Promise<NotebookResearchListResponse> {
     const params = new URLSearchParams();
     if (typeof input === 'string') {
       if (input) params.set('path', input);

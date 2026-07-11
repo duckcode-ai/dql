@@ -13,6 +13,7 @@ import type {
   BlockStudioImportCandidate,
   BlockStudioOpenPayload,
   BlockStudioDbtStatus,
+  BlockParameterDefinition,
 } from '../../store/types';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
@@ -33,24 +34,30 @@ import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload 
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
+  inferVisualParameterType,
   parseBlockFields,
+  parseVisualBlockParameters,
   getDqlSectionBody,
+  removeVisualBlockParameter,
   parseSemanticVisualFields,
   setSemanticArray,
   setSemanticMetrics,
+  setSemanticRuntimeFilters,
   setSemanticScalar,
   setBlockName,
   setBlockArray,
   setBlockStringField,
   setBlockTags,
   setDqlSectionBody,
+  upsertVisualBlockParameter,
   upsertSemanticSelection,
   upsertVisualizationConfig,
+  visualParameterDefaultText,
 } from '../../utils/block-studio';
 import { getTypeColor } from '../../utils/type-colors';
 
 type ExplorerTab = 'blocks' | 'semantic' | 'database';
-type ResultTab = 'results' | 'lineage' | 'save' | 'history';
+type ResultTab = 'results' | 'parameters' | 'lineage' | 'save' | 'history';
 type BlockStudioWorkspaceMode = 'start' | 'manual' | 'import';
 type BlockStudioEditorMode = 'visual' | 'source';
 
@@ -107,6 +114,7 @@ export function BlockStudio() {
   const [runError, setRunError] = useState<string | null>(null);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsedMs, setRunElapsedMs] = useState(0);
+  const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveIdentityOpen, setSaveIdentityOpen] = useState(false);
@@ -439,12 +447,13 @@ export function BlockStudio() {
     setRunElapsedMs(0);
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: null });
     try {
-      const preview = await api.runBlockStudio(state.blockStudioDraft, state.activeBlockPath);
+      const preview = await api.runBlockStudio(state.blockStudioDraft, state.activeBlockPath, parameterValues);
       dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview });
       setResultTab('results');
     } catch (error) {
-      setRunError(error instanceof Error ? error.message : String(error));
-      setResultTab('results');
+      const message = error instanceof Error ? error.message : String(error);
+      setRunError(message);
+      setResultTab(/required parameter|provide required parameter/i.test(message) ? 'parameters' : 'results');
     } finally {
       setRunning(false);
       setRunStartedAt(null);
@@ -497,6 +506,30 @@ export function BlockStudio() {
   };
 
   const handleSave = async (): Promise<boolean> => {
+    if (!state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) {
+      setSaveIdentityOpen(true);
+      return false;
+    }
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const sourceToSave = state.blockStudioMetadata.reviewStatus === 'certified' && state.blockStudioDirty
+        ? setBlockStringField(state.blockStudioDraft, 'status', 'draft')
+        : state.blockStudioDraft;
+      await persistBlockStudioDraft(sourceToSave);
+      setResultTab('save');
+      return true;
+    } catch (err: any) {
+      const msg = err?.message ?? 'Save failed';
+      setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
+      setTimeout(() => setSaveError(null), 5000);
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCertify = async (): Promise<boolean> => {
     if (!state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) {
       setSaveIdentityOpen(true);
       return false;
@@ -973,7 +1006,8 @@ export function BlockStudio() {
                 />
               )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-              <TemplateButton label="Save block" onClick={() => void handleSave()} busy={saving} />
+              <TemplateButton label="Save draft" onClick={() => void handleSave()} busy={saving} />
+              <TemplateButton label="Certify" Icon={ShieldCheck} onClick={() => void handleCertify()} busy={saving} />
             </>
           )}
           {saveError && (
@@ -1101,6 +1135,7 @@ export function BlockStudio() {
             Output
           </span>
           <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
+          <ExplorerTabButton active={resultTab === 'parameters'} onClick={() => setResultTab('parameters')} label={`Parameters${(state.blockStudioValidation?.parameters?.length ?? 0) > 0 ? ` (${state.blockStudioValidation!.parameters!.length})` : ''}`} />
           <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
           <span style={{ width: 1, height: 18, background: t.headerBorder, margin: '0 6px' }} />
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
@@ -1129,6 +1164,9 @@ export function BlockStudio() {
               <BlockStudioRunStatusCard elapsedMs={runElapsedMs} />
             ) : state.blockStudioPreview ? (
               <div style={{ display: 'grid', gap: 12, padding: 12 }}>
+                {state.blockStudioPreview.invocation?.resolvedParameters?.length ? (
+                  <BlockInvocationSnapshot values={state.blockStudioPreview.invocation.resolvedParameters} t={t} />
+                ) : null}
                 <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{state.blockStudioPreview.sql}</div>
                 {activeResultChartType === 'table' ? (
                   <TableOutput result={state.blockStudioPreview.result} themeMode={state.themeMode} />
@@ -1164,6 +1202,21 @@ export function BlockStudio() {
                   dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
                 }
               }}
+              t={t}
+            />
+          )}
+          {resultTab === 'parameters' && (
+            <BlockStudioParameterPanel
+              parameters={state.blockStudioValidation?.parameters ?? []}
+              values={parameterValues}
+              onChange={(name, value) => setParameterValues((current) => ({ ...current, [name]: value }))}
+              onReset={(name) => setParameterValues((current) => {
+                const next = { ...current };
+                delete next[name];
+                return next;
+              })}
+              onRun={() => void handleRun()}
+              running={running}
               t={t}
             />
           )}
@@ -1904,6 +1957,122 @@ function ContextTokenEditor({ label, hint, values, onChange, t }: { label: strin
   );
 }
 
+function VisualParameterEditor({
+  source,
+  kind,
+  onChange,
+  t,
+}: {
+  source: string;
+  kind: 'custom' | 'semantic';
+  onChange: (next: string) => void;
+  t: Theme;
+}) {
+  const parameters = useMemo(() => parseVisualBlockParameters(source), [source]);
+  const [name, setName] = useState('');
+  const [defaultText, setDefaultText] = useState('');
+  const [required, setRequired] = useState(true);
+  const [policy, setPolicy] = useState<'dynamic' | 'static' | 'business' | 'derived' | 'optional' | 'ambiguous_review_required'>('dynamic');
+  const [typeMode, setTypeMode] = useState<'auto' | 'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]' | 'date[]'>('auto');
+  const inferredType = inferVisualParameterType(defaultText, name);
+  const parameterType = typeMode === 'auto' ? inferredType : typeMode;
+  const input = importInputStyle(t);
+
+  const add = () => {
+    if (!name.trim()) return;
+    onChange(upsertVisualBlockParameter(source, {
+      name,
+      type: parameterType,
+      required: required && !defaultText.trim(),
+      defaultText,
+      policy,
+    }));
+    setName('');
+    setDefaultText('');
+    setRequired(true);
+    setPolicy('dynamic');
+    setTypeMode('auto');
+  };
+
+  return (
+    <PanelBox title="Runtime parameters" t={t}>
+      <div style={{ display: 'grid', gap: 10 }}>
+        <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.45 }}>
+          Add a values-only input once, then reuse this block for a different period, region, customer set, or limit.
+          {kind === 'custom'
+            ? <> Use <code>{'${parameter_name}'}</code> in SQL where the value belongs; DQL always binds it safely.</>
+            : ' Choose a semantic field above as a filter to create its governed parameter binding.'}
+        </div>
+        {parameters.length > 0 && (
+          <div style={{ display: 'grid', gap: 7 }}>
+            {parameters.map((parameter) => {
+              const currentDefault = visualParameterDefaultText(parameter);
+              const save = (next: Partial<{
+                type: typeof parameter.type;
+                required: boolean;
+                defaultText: string;
+                policy: typeof parameter.policy;
+              }>) => onChange(upsertVisualBlockParameter(source, {
+                name: parameter.name,
+                type: next.type ?? parameter.type,
+                required: next.required ?? parameter.required,
+                defaultText: next.defaultText ?? currentDefault,
+                policy: next.policy ?? parameter.policy,
+              }));
+              return (
+                <div key={parameter.name} style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) 122px minmax(150px, 1fr) 118px auto', gap: 7, alignItems: 'center', padding: 8, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.cellBg }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: t.textPrimary }}>{parameter.name}</div>
+                    <div style={{ fontSize: 10, color: t.textMuted }}>{parameter.binding?.kind ?? 'declared value'} · {parameter.required ? 'required' : 'has default'}</div>
+                  </div>
+                  <select aria-label={`${parameter.name} type`} value={parameter.type} onChange={(event) => save({ type: event.target.value as typeof parameter.type })} style={input}>
+                    {PARAMETER_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                  </select>
+                  {parameter.type === 'boolean' ? (
+                    <select aria-label={`${parameter.name} default`} value={currentDefault} onChange={(event) => save({ defaultText: event.target.value, required: false })} style={input}>
+                      <option value="">Required / no default</option><option value="true">True</option><option value="false">False</option>
+                    </select>
+                  ) : (
+                    <input aria-label={`${parameter.name} default`} value={currentDefault} onChange={(event) => {
+                      const nextDefault = event.target.value;
+                      const wasAutoTyped = parameter.type === inferVisualParameterType(currentDefault, parameter.name);
+                      save({
+                        defaultText: nextDefault,
+                        required: nextDefault.trim() ? false : parameter.required,
+                        ...(wasAutoTyped ? { type: inferVisualParameterType(nextDefault, parameter.name) } : {}),
+                      });
+                    }} placeholder={parameter.type.endsWith('[]') ? 'West, East' : parameter.required ? 'Required value' : 'Default value'} style={input} />
+                  )}
+                  <select aria-label={`${parameter.name} policy`} value={parameter.policy} onChange={(event) => save({ policy: event.target.value as typeof parameter.policy })} style={input}>
+                    {PARAMETER_POLICY_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                  </select>
+                  <button type="button" onClick={() => onChange(removeVisualBlockParameter(source, parameter.name))} title={`Remove ${parameter.name}`} style={{ border: 'none', background: 'transparent', color: t.error, cursor: 'pointer', fontSize: 16, padding: '3px 5px' }}>×</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) minmax(150px, 1.3fr) 150px 130px auto', gap: 7, alignItems: 'center', padding: 9, border: `1px dashed ${t.btnBorder}`, borderRadius: 7, background: t.appBg }}>
+          <input aria-label="New parameter name" value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); add(); } }} placeholder="region_set" style={input} />
+          <input aria-label="New parameter default" value={defaultText} onChange={(event) => { setDefaultText(event.target.value); if (event.target.value.trim()) setRequired(false); }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); add(); } }} placeholder="Central, East or 2026-01-01" style={input} />
+          <select aria-label="New parameter type" value={typeMode} onChange={(event) => setTypeMode(event.target.value as typeof typeMode)} style={input}>
+            <option value="auto">Auto · {inferredType}</option>
+            {PARAMETER_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textSecondary, fontSize: 11, whiteSpace: 'nowrap' }}>
+            <input type="checkbox" checked={required && !defaultText.trim()} onChange={(event) => setRequired(event.target.checked)} /> Required
+          </label>
+          <button type="button" onClick={add} disabled={!name.trim()} style={{ ...primaryImportButtonStyle(t), opacity: name.trim() ? 1 : .5 }}>Add</button>
+        </div>
+        <div style={{ fontSize: 10, color: t.textMuted }}>Type is inferred from a value you enter: <code>10</code> → number, <code>2026-01-01</code> → date, <code>West, East</code> → string[]. You can override it at any time.</div>
+      </div>
+    </PanelBox>
+  );
+}
+
+const PARAMETER_TYPE_OPTIONS = ['string', 'number', 'boolean', 'date', 'string[]', 'number[]', 'date[]'] as const;
+const PARAMETER_POLICY_OPTIONS = ['dynamic', 'static', 'business', 'derived', 'optional', 'ambiguous_review_required'] as const;
+
 function SemanticBlockBuilder({
   source,
   metadata,
@@ -2066,12 +2235,19 @@ function SemanticBlockBuilder({
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
           {Array.from(new Set([...values.dimensions, ...(values.timeDimension ? [values.timeDimension] : [])])).map((name) => {
             const selected = values.filters.includes(name);
-            return <button key={name} type="button" onClick={() => onChange(setSemanticArray(source, 'requested_filters', selected ? values.filters.filter((item) => item !== name) : [...values.filters, name]))} style={selectionChipStyle(t, selected)}>{dimensionByName.get(name)?.label || name}</button>;
+            return <button key={name} type="button" onClick={() => onChange(setSemanticRuntimeFilters(source, selected ? values.filters.filter((item) => item !== name) : [...values.filters, name]))} style={selectionChipStyle(t, selected)}>{dimensionByName.get(name)?.label || name}</button>;
           })}
         </div>
         <div style={{ fontSize: 10, color: t.textMuted, marginTop: 8 }}>{values.dimensions.length === 0 && !values.timeDimension ? 'Search and add a compatible dimension first, then choose whether it should also be a dynamic filter.' : 'Selected fields become governed runtime filters. Values stay dynamic rather than being hard-coded into SQL.'}</div>
         {values.filters.length > 0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>{values.filters.map((filter) => <span key={filter} style={selectionChipStyle(t, true)}>{businessLabel(filter)} · dynamic</span>)}</div>}
       </PanelBox>
+
+      <VisualParameterEditor
+        source={source}
+        kind="semantic"
+        onChange={onChange}
+        t={t}
+      />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
         <PanelBox title="Output contract" t={t}>
@@ -2198,7 +2374,6 @@ function SqlBlockVisualBuilder({
   const input = importInputStyle(t);
   const query = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1]?.trim() ?? '';
   const outputs = extractSelectAliases(query);
-  const parameters = Array.from(new Set(Array.from(query.matchAll(/\{\{\s*([a-zA-Z_][\w]*)\s*\}\}/g)).map((match) => match[1])));
   const testsBody = getDqlSectionBody(source, 'tests');
   const updateText = (field: 'name' | 'domain' | 'description' | 'owner', value: string) => {
     onMetadataChange({ [field]: value });
@@ -2235,11 +2410,7 @@ function SqlBlockVisualBuilder({
           {outputs.length > 0 ? outputs.map((output) => <span key={output} style={selectionChipStyle(t, true)}>{businessLabel(output)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Add aliases in DQL Source to expose business-friendly output names.</span>}
         </div>
       </PanelBox>
-      <PanelBox title="Dynamic parameters" t={t}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
-          {parameters.length > 0 ? parameters.map((parameter) => <span key={parameter} style={selectionChipStyle(t, true)}>{businessLabel(parameter)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>No dynamic parameters detected. Use {'{{ parameter_name }}'} in the query when a filter should remain configurable.</span>}
-        </div>
-      </PanelBox>
+      <VisualParameterEditor source={source} kind="custom" onChange={onChange} t={t} />
       <PanelBox title="Tests" t={t}>
         <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 82, resize: 'vertical', fontFamily: t.fontMono }} />
       </PanelBox>
@@ -4075,6 +4246,76 @@ function SavePanel({
       <input value={values.owner} onChange={(event) => onChange({ owner: event.target.value })} placeholder="Owner" style={inputStyle} />
       <input value={values.description} onChange={(event) => onChange({ description: event.target.value })} placeholder="Description" style={inputStyle} />
       <input value={values.tags.join(', ')} onChange={(event) => onChange({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) })} placeholder="Tags" style={inputStyle} />
+    </div>
+  );
+}
+
+function BlockStudioParameterPanel({
+  parameters,
+  values,
+  onChange,
+  onReset,
+  onRun,
+  running,
+  t,
+}: {
+  parameters: BlockParameterDefinition[];
+  values: Record<string, unknown>;
+  onChange: (name: string, value: unknown) => void;
+  onReset: (name: string) => void;
+  onRun: () => void;
+  running: boolean;
+  t: Theme;
+}) {
+  if (parameters.length === 0) return <EmptyPanel message="This block has no runtime parameters. Add typed params in DQL Source when scope should be configurable." />;
+  return (
+    <div style={{ padding: 14, display: 'grid', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: t.textPrimary }}>Test parameter values</div>
+          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 3 }}>These values affect only the preview. Save defaults in the block definition.</div>
+        </div>
+        <button type="button" onClick={onRun} disabled={running} style={primaryImportButtonStyle(t)}>{running ? 'Running…' : 'Run preview'}</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+        {parameters.map((parameter) => {
+          const hasOverride = Object.prototype.hasOwnProperty.call(values, parameter.name);
+          const value = hasOverride ? values[parameter.name] : parameter.default;
+          const isArray = parameter.type.endsWith('[]');
+          const inputType = parameter.type === 'number' ? 'number' : parameter.type === 'date' ? 'date' : 'text';
+          return (
+            <label key={parameter.name} style={{ display: 'grid', gap: 5, padding: 10, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.appBg }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 750, color: t.textPrimary }}>
+                {businessLabel(parameter.name)}
+                {parameter.required && <span style={{ color: '#f85149' }}>required</span>}
+              </span>
+              <span style={{ fontSize: 10, color: t.textMuted }}>{parameter.type} · {parameter.policy}{parameter.binding ? ` · ${parameter.binding.kind.replace('_', ' ')}` : ''}</span>
+              {parameter.type === 'boolean' ? (
+                <select value={String(value ?? '')} onChange={(event) => onChange(parameter.name, event.target.value)} style={importInputStyle(t)}>
+                  <option value="">Select…</option><option value="true">True</option><option value="false">False</option>
+                </select>
+              ) : (
+                <input
+                  type={inputType}
+                  value={Array.isArray(value) ? value.join(', ') : value == null ? '' : String(value)}
+                  placeholder={isArray ? 'Comma-separated values' : parameter.required ? 'Required value' : 'Use default'}
+                  onChange={(event) => onChange(parameter.name, event.target.value)}
+                  style={importInputStyle(t)}
+                />
+              )}
+              {hasOverride && <button type="button" onClick={() => onReset(parameter.name)} style={{ justifySelf: 'start', border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 10 }}>Reset to default</button>}
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BlockInvocationSnapshot({ values, t }: { values: Array<{ name: string; value: unknown; source: string }>; t: Theme }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      {values.map((item) => <span key={item.name} style={{ fontSize: 10, color: t.textSecondary, background: t.appBg, border: `1px solid ${t.cellBorder}`, borderRadius: 999, padding: '4px 7px' }}>{item.name} = {Array.isArray(item.value) ? item.value.join(', ') : String(item.value)} <span style={{ color: t.textMuted }}>({item.source})</span></span>)}
     </div>
   );
 }

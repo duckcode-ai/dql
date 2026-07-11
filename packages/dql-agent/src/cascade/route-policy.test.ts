@@ -45,6 +45,13 @@ describe('selectCascadeRunRoute', () => {
     }, answerDecision)).toBe('app_build');
   });
 
+  it('routes SQL error repair before incidental DQL block wording', () => {
+    expect(selectCascadeRunRoute({
+      question: 'Fix this SQL cell error. Check existing DQL blocks before proposing corrected SQL.',
+      requestedMode: 'ask',
+    }, answerDecision)).toBe('sql_cell');
+  });
+
   it('uses decision actions after question-shape authoring checks', () => {
     expect(selectCascadeRunRoute({
       question: 'what changed in revenue?',

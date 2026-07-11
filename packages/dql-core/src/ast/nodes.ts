@@ -438,9 +438,15 @@ export interface BlockParamsNode extends BaseNode {
   params: BlockParamEntry[];
 }
 
+/** Runtime-safe value types supported by reusable block parameters. */
+export type BlockParamType = 'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]' | 'date[]';
+
 export interface BlockParamEntry {
   name: string;
-  initializer: ExpressionNode;
+  /** Explicit type for new blocks. Legacy declarations infer this from the default. */
+  paramType?: BlockParamType;
+  /** Omitted means the invocation must supply a value. */
+  initializer?: ExpressionNode;
   span: SourceSpan;
 }
 

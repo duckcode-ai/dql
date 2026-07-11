@@ -44,6 +44,7 @@ export function selectCascadeRunRoute(
   if (decision.action === 'converse') return 'conversation';
 
   const question = request.question;
+  if (looksLikeSqlRepairRequest(question)) return 'sql_cell';
   if (looksLikeDqlBlockRequest(question)) return 'dql_block_draft';
   if (looksLikeSqlCellRequest(question)) return 'sql_cell';
   if (looksLikeComposeApp(question)) return 'app_build';
@@ -53,6 +54,10 @@ export function selectCascadeRunRoute(
   if (decision.action === 'clarify') return 'clarify';
 
   return 'generated_answer';
+}
+
+function looksLikeSqlRepairRequest(question: string): boolean {
+  return /\b(fix|repair|correct|debug|resolve)\b[\s\S]{0,120}\b(sql|query|cell|error)\b|\b(sql|query|cell)\b[\s\S]{0,120}\b(error|failed|failure)\b/i.test(question);
 }
 
 export function routeForCascadeAnswerTier(tier: CascadeAnswerRouteTier | undefined): CascadeRunRoute | undefined {

@@ -40,6 +40,7 @@ import {
   type AgentRunTrustState,
   type AgentThinkingMode,
   type AppBuildProposal,
+  type MixedSourceNotebookPlan,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import { ThinkingModeControl } from './ThinkingModeControl';
@@ -135,6 +136,7 @@ export interface InsertDqlPayload {
   result?: QueryResult;
   chartConfig?: CellChartConfig;
   title?: string;
+  mixedSourcePlan?: MixedSourceNotebookPlan;
 }
 
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
@@ -1190,8 +1192,11 @@ function RunCard({
   const isLlmPlan = run.plan?.source === 'llm';
   const evidence = evidenceFromRun(run);
   const trustNote = trustExplainer(run);
+  const hasMixedSourcePlan = run.artifacts.some((artifact) =>
+    Boolean(extractMixedSourceNotebookPlan(payloadOf(artifact))),
+  );
   // A result worth saving: a real answer or research artifact (not blocked/clarify).
-  const pinnable = run.status !== 'blocked' && run.status !== 'needs_clarification'
+  const pinnable = !hasMixedSourcePlan && run.status !== 'blocked' && run.status !== 'needs_clarification'
     && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
   // Offer a one-click deepening on quick answers (unless the agent already routed deep).
   const isAnswer = run.route === 'certified_answer' || run.route === 'generated_answer';
@@ -1664,6 +1669,7 @@ function ArtifactView({
   }
   const resultData = extractResult(payload);
   const dqlArtifact = resolveArtifactDqlView(payload);
+  const mixedSourcePlan = extractMixedSourceNotebookPlan(payload);
   const sql = typeof payload.sql === 'string'
     ? payload.sql
     : typeof payload.sqlPreview === 'string'
@@ -1839,10 +1845,18 @@ function ArtifactView({
               result: resultData,
               chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
               title: name,
+              mixedSourcePlan,
             })}
-            style={smallButtonStyle(t)}
+            style={mixedSourcePlan ? {
+              ...smallButtonStyle(t),
+              background: t.accent,
+              borderColor: t.accent,
+              color: '#fff',
+              fontWeight: 850,
+              padding: '7px 11px',
+            } : smallButtonStyle(t)}
           >
-            Insert as DQL cell
+            {mixedSourcePlan ? 'Add workflow to notebook' : dqlArtifact ? 'Insert as DQL cell' : 'Add SQL to notebook'}
           </button>
         ) : sql && onInsertSql ? (
           <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
@@ -2311,6 +2325,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
   for (const artifact of run.artifacts) {
     const payload = payloadOf(artifact);
     const result = extractResult(payload);
+    const mixedSourcePlan = extractMixedSourceNotebookPlan(payload);
     if (result) {
       return {
         sql,
@@ -2318,6 +2333,15 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         result,
         chartConfig: extractChartConfig(payload, result),
         title: dqlArtifact?.name ?? artifact.title ?? run.question,
+        mixedSourcePlan,
+      };
+    }
+    if (mixedSourcePlan) {
+      return {
+        sql,
+        dqlArtifact,
+        title: dqlArtifact?.name ?? artifact.title ?? run.question,
+        mixedSourcePlan,
       };
     }
   }
@@ -2325,6 +2349,27 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
     sql,
     dqlArtifact,
     title: dqlArtifact?.name ?? run.question,
+  };
+}
+
+function extractMixedSourceNotebookPlan(payload: Record<string, unknown>): MixedSourceNotebookPlan | undefined {
+  const value = payload.mixedSourcePlan;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const plan = value as Record<string, unknown>;
+  const required = ['localDataset', 'localAlias', 'localKey', 'warehouseKey', 'warehouseExpression', 'warehouseSql'] as const;
+  if (!required.every((key) => typeof plan[key] === 'string' && String(plan[key]).trim())) return undefined;
+  return {
+    datasetId: typeof plan.datasetId === 'string' ? plan.datasetId : undefined,
+    datasetName: typeof plan.datasetName === 'string' ? plan.datasetName : undefined,
+    localDataset: String(plan.localDataset),
+    localAlias: String(plan.localAlias),
+    localKey: String(plan.localKey),
+    warehouseKey: String(plan.warehouseKey),
+    warehouseExpression: String(plan.warehouseExpression),
+    warehouseSql: String(plan.warehouseSql),
+    warehouseRelations: Array.isArray(plan.warehouseRelations)
+      ? plan.warehouseRelations.filter((value): value is string => typeof value === 'string')
+      : undefined,
   };
 }
 

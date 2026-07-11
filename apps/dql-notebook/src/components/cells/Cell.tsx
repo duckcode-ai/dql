@@ -1,34 +1,56 @@
-import type { Theme } from '../../themes/notebook-theme';
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { Sparkles, ShieldCheck } from 'lucide-react';
-import { useNotebook } from '../../store/NotebookStore';
-import { themes } from '../../themes/notebook-theme';
-import { useQueryExecution } from '../../hooks/useQueryExecution';
-import { SQLCellEditor, type SQLCellEditorHandle } from './SQLCellEditor';
-import { MarkdownCellEditor } from './MarkdownCellEditor';
-import { ParamCell } from './ParamCell';
-import { PlaceholderCell } from './PlaceholderCell';
-import { DataframeChip } from './DataframeChip';
-import { ChartCell } from './ChartCell';
-import { FilterCell } from './FilterCell';
-import { SingleValueCell } from './SingleValueCell';
-import { PivotCell } from './PivotCell';
-import { TableCell } from './TableCell';
-import { ChatCell } from './ChatCell';
-import { SnippetPicker } from './SnippetPicker';
-import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
-import { deriveBlockSource, type DerivedBlockSource } from '../../utils/derive-block-source';
-import { TableOutput } from '../output/TableOutput';
-import { ChartOutput, detectChartType, resolveChartType, renderChart, CHART_TYPE_OPTIONS } from '../output/ChartOutput';
-import type { ChartType } from '../output/ChartOutput';
-import { ErrorOutput } from '../output/ErrorOutput';
-import { CellLineage } from './CellLineage';
-import type { Cell, BlockBinding } from '../../store/types';
-import type { CellResearchState } from '../../utils/notebook-research';
-import { format as formatSQL } from 'sql-formatter';
-import { api } from '../../api/client';
-import { extractSqlFromText } from '../../utils/block-studio';
-import { CellChrome } from '@duckcodeailabs/dql-ui';
+import type { Theme } from "../../themes/notebook-theme";
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
+import {
+  Database,
+  MessageSquarePlus,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
+import { makeCell, useNotebook } from "../../store/NotebookStore";
+import { themes } from "../../themes/notebook-theme";
+import { useQueryExecution } from "../../hooks/useQueryExecution";
+import { SQLCellEditor, type SQLCellEditorHandle } from "./SQLCellEditor";
+import { MarkdownCellEditor } from "./MarkdownCellEditor";
+import { ParamCell } from "./ParamCell";
+import { PlaceholderCell } from "./PlaceholderCell";
+import { DataframeChip } from "./DataframeChip";
+import { ChartCell } from "./ChartCell";
+import { FilterCell } from "./FilterCell";
+import { SingleValueCell } from "./SingleValueCell";
+import { PivotCell } from "./PivotCell";
+import { TableCell } from "./TableCell";
+import { ChatCell } from "./ChatCell";
+import { SnippetPicker } from "./SnippetPicker";
+import { SaveAsBlockModal } from "../modals/SaveAsBlockModal";
+import {
+  deriveBlockSource,
+  type DerivedBlockSource,
+} from "../../utils/derive-block-source";
+import { TableOutput } from "../output/TableOutput";
+import {
+  ChartOutput,
+  detectChartType,
+  resolveChartType,
+  renderChart,
+  CHART_TYPE_OPTIONS,
+} from "../output/ChartOutput";
+import type { ChartType } from "../output/ChartOutput";
+import { ErrorOutput } from "../output/ErrorOutput";
+import { CellLineage } from "./CellLineage";
+import type { Cell, BlockBinding, BlockParameterDefinition } from "../../store/types";
+import type { CellResearchState } from "../../utils/notebook-research";
+import { format as formatSQL } from "sql-formatter";
+import { api, type DatasetSource } from "../../api/client";
+import { extractSqlFromText } from "../../utils/block-studio";
+import { CellChrome } from "@duckcodeailabs/dql-ui";
+import { CombineDataPanel, type CombineDataRequest } from '../notebook/CombineDataPanel';
+import { buildCombinedDatasetCell, findDatasetReferences, findWarehouseReferences } from '../../utils/dataset-references';
 
 interface CellProps {
   cell: Cell;
@@ -128,19 +150,19 @@ function CellToolbarWrap({
 }
 
 const TYPE_LABELS: Record<string, string> = {
-  sql: 'SQL',
-  markdown: 'MD',
-  dql: 'DQL',
-  param: 'PARAM',
-  chart: 'CHART',
-  pivot: 'PIVOT',
-  single_value: 'SINGLE VALUE',
-  filter: 'FILTER',
-  table: 'TABLE',
-  map: 'MAP',
-  writeback: 'WRITEBACK',
-  python: 'PYTHON',
-  chat: 'CHAT',
+  sql: "QUERY",
+  markdown: "MD",
+  dql: "DQL",
+  param: "PARAM",
+  chart: "CHART",
+  pivot: "PIVOT",
+  single_value: "SINGLE VALUE",
+  filter: "FILTER",
+  table: "TABLE",
+  map: "MAP",
+  writeback: "WRITEBACK",
+  python: "PYTHON",
+  chat: "CHAT",
 };
 
 // v1.4 cell-type palette — ported from DQL New-UI handoff
@@ -198,10 +220,11 @@ const PLACEHOLDER_META: Partial<Record<string, PlaceholderMeta>> = {
     badge: 'v0.11',
   },
   python: {
-    title: 'Python',
-    subtitle: 'Python cell via Pyodide sidecar.',
-    color: '#3572a5',
-    badge: 'v0.11',
+    title: "Python (legacy)",
+    subtitle:
+      "This legacy cell is preserved for compatibility. Execution stays disabled until a secure kernel, dependency environment, cancellation, resource limits, and dataframe exchange are available.",
+    color: "#3572a5",
+    badge: "Unavailable",
   },
 };
 
@@ -373,6 +396,55 @@ function setBlockTags(content: string, tags: string[]): string {
   const tagStr = tags.map((t: string) => `"${t}"`).join(', ');
   const re = /(\btags\s*=\s*)\[[^\]]*\]/i;
   return re.test(content) ? content.replace(re, `$1[${tagStr}]`) : content;
+}
+
+function BoundBlockParameterControls({
+  binding,
+  t,
+  onChange,
+}: {
+  binding: BlockBinding;
+  t: Theme;
+  onChange: (values: Record<string, unknown>) => void;
+}) {
+  const [parameters, setParameters] = useState<BlockParameterDefinition[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.openBlockStudio(binding.path)
+      .then((payload) => { if (!cancelled) setParameters(payload.validation.parameters ?? []); })
+      .catch(() => { if (!cancelled) setParameters([]); });
+    return () => { cancelled = true; };
+  }, [binding.path]);
+
+  if (parameters.length === 0 || binding.state === 'forked') return null;
+  const current = binding.parameterValues ?? {};
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '8px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: t.appBg }}>
+      {parameters.map((parameter) => {
+        const value = Object.prototype.hasOwnProperty.call(current, parameter.name) ? current[parameter.name] : parameter.default;
+        const setValue = (next: unknown) => onChange({ ...current, [parameter.name]: next });
+        return (
+          <label key={parameter.name} style={{ display: 'grid', gap: 3, minWidth: 145 }}>
+            <span style={{ fontSize: 10, color: t.textMuted }}>{parameter.name}{parameter.required ? ' *' : ''}</span>
+            {parameter.type === 'boolean' ? (
+              <select value={String(value ?? '')} onChange={(event) => setValue(event.target.value)} style={{ ...binderBtnStyle(t, t.accent), width: '100%' }}>
+                <option value="">Select…</option><option value="true">True</option><option value="false">False</option>
+              </select>
+            ) : (
+              <input
+                type={parameter.type === 'number' ? 'number' : parameter.type === 'date' ? 'date' : 'text'}
+                value={Array.isArray(value) ? value.join(', ') : value == null ? '' : String(value)}
+                placeholder={parameter.type.endsWith('[]') ? 'a, b, c' : parameter.required ? 'Required' : 'Default'}
+                onChange={(event) => setValue(event.target.value)}
+                style={{ background: t.inputBg, border: `1px solid ${t.inputBorder}`, borderRadius: 4, color: t.textPrimary, padding: '4px 6px', fontSize: 11, fontFamily: t.font }}
+              />
+            )}
+          </label>
+        );
+      })}
+    </div>
+  );
 }
 
 function BlockBindingChip({
@@ -731,13 +803,39 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(cell.name ?? '');
   const [showOutput, setShowOutput] = useState(true);
-  const [viewMode, setViewMode] = useState<'chart' | 'table'>('table');
-  const [selectedChartType, setSelectedChartType] = useState<ChartType | null>(null);
+  const [viewMode, setViewMode] = useState<"chart" | "table" | "profile">(
+    "table",
+  );
+  const [selectedChartType, setSelectedChartType] = useState<ChartType | null>(
+    null,
+  );
   const [chartDropdownOpen, setChartDropdownOpen] = useState(false);
   const [chartConfigOpen, setChartConfigOpen] = useState(false);
   const [chartRecommendBusy, setChartRecommendBusy] = useState(false);
   const [chartRecommendNote, setChartRecommendNote] = useState<string | null>(null);
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [connectionNames, setConnectionNames] = useState<string[]>([]);
+  const [defaultConnection, setDefaultConnection] = useState("default");
+  const [staging, setStaging] = useState(false);
+  const [combineOpen, setCombineOpen] = useState(Boolean(cell.mixedSourcePlan));
+
+  useEffect(() => {
+    if (cell.type !== "sql" && cell.type !== "dql") return;
+    let cancelled = false;
+    void api
+      .getConnections()
+      .then((payload) => {
+        if (cancelled) return;
+        setConnectionNames(Object.keys(payload.connections ?? {}));
+        setDefaultConnection(payload.default || "default");
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [cell.type]);
 
   const derivedBlock = useMemo<DerivedBlockSource | null>(
     () => {
@@ -872,6 +970,96 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
     });
     setChartRecommendNote(`${response.display.component} · ${response.display.defaultVisualization}`);
   }, [cell.chartConfig, cell.content, cell.name, cell.result, onCellUpdate]);
+
+  const handleStageLocally = useCallback(async () => {
+    if (!cell.content.trim() || staging) return;
+    const previewRows = cell.result?.rowCount ?? cell.result?.rows.length ?? 0;
+    const confirmed = window.confirm(
+      `Copy a bounded warehouse result into the local analysis workspace?\n\nCurrent result: ${previewRows.toLocaleString()} rows\nLimits: 100,000 rows, 250 MB, 120 seconds\n\nThe staged snapshot is ignored by Git, records lineage, and expires after 7 days.`,
+    );
+    if (!confirmed) return;
+    setStaging(true);
+    try {
+      const response = await api.stageDataset({
+        sql: cell.content,
+        connectionName:
+          cell.executionTarget?.connectionName ?? defaultConnection,
+        name: `${cell.name ?? "warehouse_result"} snapshot`,
+        confirmed: true,
+        blockPath: cell.blockBinding?.path ?? cell.dqlArtifact?.sourcePath,
+      });
+      const dataset = response.dataset;
+      const next = makeLocalDatasetQueryCell(dataset);
+      dispatch({ type: "ADD_CELL", cell: next, afterId: cell.id });
+      dispatch({
+        type: "SET_SCHEMA",
+        tables: [
+          ...state.schemaTables.filter((table) => table.name !== dataset.alias),
+          {
+            name: dataset.alias,
+            path: dataset.sourcePath,
+            source: "file",
+            objectType: "staged_dataset",
+            columns: dataset.profile.columns.map((column) => ({
+              name: column.name,
+              type: column.type,
+            })),
+          },
+        ],
+      });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStaging(false);
+    }
+  }, [cell, defaultConnection, dispatch, staging, state.schemaTables]);
+
+  const handleCombineLocally = useCallback(async (request: CombineDataRequest) => {
+    if (!cell.content.trim() || staging) return;
+    setStaging(true);
+    try {
+      const response = await api.stageDataset({
+        sql: cell.content,
+        connectionName: cell.executionTarget?.connectionName ?? defaultConnection,
+        name: `${cell.name ?? 'warehouse_result'} snapshot`,
+        confirmed: true,
+        blockPath: cell.blockBinding?.path ?? cell.dqlArtifact?.sourcePath,
+      });
+      const staged = response.dataset;
+      const next = buildCombinedDatasetCell({
+        staged: { ...staged, columns: staged.profile.columns.map((column) => column.name) },
+        local: { ...request.dataset, columns: request.dataset.profile.columns.map((column) => column.name) },
+        warehouseKey: request.warehouseKey,
+        localKey: request.localKey,
+        joinType: request.joinType,
+        sourceCell: cell,
+      });
+      dispatch({ type: 'ADD_CELL', cell: next, afterId: cell.id });
+      dispatch({
+        type: 'SET_SCHEMA',
+        tables: [
+          ...state.schemaTables.filter((table) => table.name !== staged.alias),
+          {
+            name: staged.alias,
+            path: staged.sourcePath,
+            source: 'file',
+            objectType: 'staged_dataset',
+            datasetId: staged.id,
+            fileFingerprint: staged.fileFingerprint,
+            storageMode: staged.storageMode,
+            refreshedAt: staged.refreshedAt,
+            trustState: staged.trustState,
+            columns: staged.profile.columns.map((column) => ({ name: column.name, type: column.type })),
+          },
+        ],
+      });
+      setCombineOpen(false);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    } finally {
+      setStaging(false);
+    }
+  }, [cell, defaultConnection, dispatch, staging, state.schemaTables]);
 
   const handleDelete = () => {
     dispatch({ type: 'DELETE_CELL', id: cell.id });
@@ -1164,12 +1352,22 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
               />
             )}
 
-            {researchState && shouldShowAiHistoryBadge(researchState) && onStartResearch && (
-              <CellAiHistoryBadge
-                state={researchState}
-                t={t}
-                onClick={() => onStartResearch(cell.id)}
-              />
+            {researchState &&
+              shouldShowAiHistoryBadge(researchState) &&
+              onStartResearch && (
+                <CellAiHistoryBadge
+                  state={researchState}
+                  t={t}
+                  onClick={() => onStartResearch(cell.id)}
+                />
+              )}
+            {cell.stale && (
+              <span
+                title="An upstream cell changed. Run this cell again."
+                style={{ color: t.warning, fontSize: 10, fontWeight: 700 }}
+              >
+                stale
+              </span>
             )}
           </div>
 
@@ -1235,6 +1433,24 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
               </button>
             )}
 
+            {(cellHovered ||
+              notesOpen ||
+              (cell.annotations?.length ?? 0) > 0) && (
+              <button
+                type="button"
+                title="Add or review a cell note"
+                onClick={() => setNotesOpen((open) => !open)}
+                style={cellHeaderTextButtonStyle(
+                  t,
+                  notesOpen ? "accent" : undefined,
+                )}
+              >
+                <MessageSquarePlus size={11} aria-hidden="true" />
+                Note
+                {cell.annotations?.length ? ` ${cell.annotations.length}` : ""}
+              </button>
+            )}
+
             {cellHovered && !cell.name && !nameEditing && (
               <HeaderActionBtn
                 title="Name this cell"
@@ -1286,6 +1502,16 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
           </div>
         </div>
 
+        {(cell.type === "sql" || cell.type === "dql") && (
+          <QueryTargetBar
+            cell={cell}
+            connectionNames={connectionNames}
+            defaultConnection={defaultConnection}
+            t={t}
+            onChange={(executionTarget) => onCellUpdate({ executionTarget })}
+          />
+        )}
+
         {/* Governance bar — shown for DQL cells that contain a block declaration */}
         {cell.type === 'dql' && (
           <BlockGovernanceBar
@@ -1304,16 +1530,16 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
               if (!binding) return;
               try {
                 const payload = await api.openBlockStudio(binding.path);
-                const sqlBody = extractSqlFromText(payload.source) ?? payload.source;
+                const blockReference = `@block(${JSON.stringify(payload.metadata.name)})`;
                 dispatch({
                   type: 'UPDATE_CELL',
                   id: cell.id,
                   updates: {
-                    content: sqlBody,
-                    blockBinding: { ...binding, state: 'bound', originalContent: sqlBody },
+                    content: blockReference,
+                    blockBinding: { ...binding, state: 'bound', originalContent: blockReference },
                   },
                 });
-                editorRef.current?.resetTo(sqlBody);
+                editorRef.current?.resetTo(blockReference);
               } catch (error) {
                 console.error('Failed to revert bound cell', error);
               }
@@ -1321,6 +1547,18 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
             onUnbind={() => {
               dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { blockBinding: undefined } });
             }}
+          />
+        )}
+
+        {cell.blockBinding && (
+          <BoundBlockParameterControls
+            binding={cell.blockBinding}
+            t={t}
+            onChange={(parameterValues) => dispatch({
+              type: 'UPDATE_CELL',
+              id: cell.id,
+              updates: { blockBinding: { ...cell.blockBinding!, parameterValues } },
+            })}
           />
         )}
 
@@ -1366,6 +1604,37 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
             </summary>
             <pre style={{ margin: '6px 0 0', fontFamily: t.fontMono, fontSize: 11, whiteSpace: 'pre-wrap', color: t.textSecondary, maxHeight: 200, overflow: 'auto' }}>{cell.dqlArtifact.source}</pre>
           </details>
+        )}
+
+        {notesOpen && (
+          <CellNotes
+            cell={cell}
+            value={noteDraft}
+            onValueChange={setNoteDraft}
+            onAdd={() => {
+              const body = noteDraft.trim();
+              if (!body) return;
+              onCellUpdate({
+                annotations: [
+                  ...(cell.annotations ?? []),
+                  {
+                    id: `note_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                    body,
+                    createdAt: new Date().toISOString(),
+                  },
+                ],
+              });
+              setNoteDraft("");
+            }}
+            onRemove={(id) =>
+              onCellUpdate({
+                annotations: (cell.annotations ?? []).filter(
+                  (note) => note.id !== id,
+                ),
+              })
+            }
+            t={t}
+          />
         )}
 
         {/* Output area */}
@@ -1428,6 +1697,46 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                   Error
                 </span>
               )}
+              {cell.result &&
+                cell.type === "sql" &&
+                cell.executionTarget?.target !== "local" && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={staging}
+                      onClick={() => setCombineOpen((open) => !open)}
+                      title="Combine this warehouse result with an imported local dataset"
+                      style={{
+                        border: `1px solid ${combineOpen ? t.accent : t.btnBorder}`,
+                        background: combineOpen ? `${t.accent}18` : t.btnBg,
+                        color: combineOpen ? t.accent : t.textSecondary,
+                        borderRadius: 4,
+                        padding: "2px 7px",
+                        font: `800 10px ${t.font}`,
+                        cursor: staging ? "wait" : "pointer",
+                      }}
+                    >
+                      {cell.mixedSourcePlan ? "Finish CSV join" : "Combine with local data"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={staging}
+                      onClick={() => void handleStageLocally()}
+                      title="Copy this bounded warehouse result into the local analysis workspace"
+                      style={{
+                        border: `1px solid ${t.btnBorder}`,
+                        background: t.btnBg,
+                        color: t.textSecondary,
+                        borderRadius: 4,
+                        padding: "2px 7px",
+                        font: `700 10px ${t.font}`,
+                        cursor: staging ? "wait" : "pointer",
+                      }}
+                    >
+                      {staging ? "Staging…" : "Stage only"}
+                    </button>
+                  </>
+                )}
               <div style={{ flex: 1 }} />
 
               {/* Chart type selector + Table toggle */}
@@ -1445,6 +1754,28 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     }}
                   >
                     Table
+                  </button>
+                  <button
+                    onClick={() => {
+                      setViewMode("profile");
+                      setChartDropdownOpen(false);
+                    }}
+                    style={{
+                      padding: "1px 7px",
+                      fontSize: 10,
+                      fontFamily: t.font,
+                      borderRadius: 3,
+                      border: `1px solid ${viewMode === "profile" ? t.accent : t.btnBorder}`,
+                      background:
+                        viewMode === "profile"
+                          ? `${t.accent}20`
+                          : "transparent",
+                      color: viewMode === "profile" ? t.accent : t.textMuted,
+                      cursor: "pointer",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    Profile
                   </button>
                   {/* Chart type dropdown trigger */}
                   <div style={{ position: 'relative' }}>
@@ -1563,6 +1894,19 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
               </button>
             </div>
 
+            {combineOpen && cell.result && (
+              <CombineDataPanel
+                warehouseColumns={cell.result.columns}
+                warehouseRows={cell.result.rows as Array<Record<string, unknown>>}
+                warehouseRowCount={cell.result.rowCount ?? cell.result.rows.length}
+                busy={staging}
+                t={t}
+                onCancel={() => setCombineOpen(false)}
+                onCombine={(request) => void handleCombineLocally(request)}
+                suggestedPlan={cell.mixedSourcePlan}
+              />
+            )}
+
             {showOutput && (
               <>
                 {cell.status === 'running' && isExecutable && (
@@ -1579,13 +1923,16 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     themeMode={state.themeMode}
                     onFix={isExecutable ? handleFixAndRun : undefined}
                     onFixWithAi={cell.type === 'sql' && onStartResearch
-                      ? () => onStartResearch(cell.id, buildCellErrorAiPrompt(cell), { autoAsk: true })
+                      ? () => onStartResearch(cell.id, buildCellErrorAiPrompt(cell, state.schemaTables), { autoAsk: true })
                       : undefined}
                     schemaTables={state.schemaTables}
                   />
                 )}
-                {cell.result && !cell.error && (
-                  viewMode === 'chart' && selectedChartType ? (
+                {cell.result &&
+                  !cell.error &&
+                  (viewMode === "profile" ? (
+                    <ResultProfile cell={cell} t={t} />
+                  ) : viewMode === "chart" && selectedChartType ? (
                     <>
                       {renderChart(selectedChartType, cell.result, state.themeMode, cell.chartConfig)}
                       {chartConfigOpen && (
@@ -1638,19 +1985,295 @@ function normalizeNotebookChartType(value: string): ChartType {
   return match?.value ?? 'table';
 }
 
-function buildCellErrorAiPrompt(cell: Cell): string {
+function buildCellErrorAiPrompt(
+  cell: Cell,
+  schemaTables: import('../../store/types').SchemaTable[],
+): string {
+  const localDatasets = findDatasetReferences(cell.content, schemaTables);
+  const warehouseTables = findWarehouseReferences(cell.content, schemaTables);
+  const mixedSource = localDatasets.length > 0 && warehouseTables.length > 0;
   return [
-    'Fix this SQL cell error inside the notebook AI flow.',
-    'Use the selected SQL, dbt/semantic metadata, warehouse schema, and existing DQL blocks before proposing changes.',
-    'If a certified or draft DQL block should be reused instead of repairing raw SQL, recommend that outcome.',
-    'When repair is appropriate, return corrected read-only SQL plus business summary, grain, filters/parameters, lineage, and next action.',
+    'Fix this notebook SQL cell error.',
+    'Use the selected SQL, semantic metadata, certified answers, warehouse schema, and registered local datasets before proposing changes.',
+    mixedSource
+      ? `This is a mixed-source query: warehouse=${warehouseTables.join(', ')}; local=${localDatasets.map((dataset) => dataset.alias ?? dataset.id).join(', ')}. Do not treat the local dataset as a missing warehouse table and do not execute a direct cross-engine join. Return a warehouse-only extraction that retains the join key, then explain how to use Combine with local data.`
+      : 'When repair is appropriate, return corrected read-only SQL plus a concise explanation and next action.',
+    'Do not create or certify a governed asset during error repair.',
     cell.error ? `Current error: ${cell.error}` : '',
   ].filter(Boolean).join('\n');
 }
 
-function cellHeaderTextButtonStyle(t: Theme, tone: 'default' | 'accent' | 'danger' = 'default'): React.CSSProperties {
-  const isAccent = tone === 'accent';
-  const isDanger = tone === 'danger';
+function makeLocalDatasetQueryCell(dataset: DatasetSource): Cell {
+  const cell = makeCell(
+    "sql",
+    `SELECT *\nFROM "${dataset.alias.replace(/"/g, '""')}"\nLIMIT 100`,
+  );
+  cell.name = `${dataset.alias}_analysis`;
+  cell.executionTarget = { target: "local" };
+  cell.datasetRefs = [
+    {
+      id: dataset.id,
+      alias: dataset.alias,
+      role: "staged",
+      fingerprint: dataset.fileFingerprint,
+    },
+  ];
+  return cell;
+}
+
+function QueryTargetBar({
+  cell,
+  connectionNames,
+  defaultConnection,
+  t,
+  onChange,
+}: {
+  cell: Cell;
+  connectionNames: string[];
+  defaultConnection: string;
+  t: Theme;
+  onChange: (target: NonNullable<Cell["executionTarget"]>) => void;
+}) {
+  const current =
+    cell.executionTarget?.target === "local"
+      ? "local"
+      : `connection:${cell.executionTarget?.connectionName ?? defaultConnection}`;
+  const governedKind = cell.blockBinding
+    ? "Certified or draft block"
+    : /@(?:metric|dim)\s*\(/i.test(cell.content)
+      ? "Semantic query"
+      : cell.executionTarget?.target === "local"
+        ? "Local dataset SQL"
+        : "Warehouse SQL";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "5px 12px",
+        borderTop: `1px solid ${t.cellBorder}`,
+        background: `${t.tableHeaderBg}35`,
+      }}
+    >
+      <Database size={12} color={t.textMuted} aria-hidden="true" />
+      <span style={{ color: t.textMuted, fontSize: 10, fontWeight: 700 }}>
+        {governedKind}
+      </span>
+      <span style={{ color: t.textMuted, fontSize: 10 }}>runs on</span>
+      <select
+        aria-label="Query execution target"
+        value={current}
+        onChange={(event) => {
+          if (event.target.value === "local") onChange({ target: "local" });
+          else
+            onChange({
+              target: "connection",
+              connectionName: event.target.value.slice("connection:".length),
+            });
+        }}
+        style={{
+          background: t.inputBg,
+          color: t.textSecondary,
+          border: `1px solid ${t.inputBorder}`,
+          borderRadius: 5,
+          padding: "2px 6px",
+          font: `10px ${t.font}`,
+        }}
+      >
+        <option value="local">Local analysis workspace</option>
+        {connectionNames.map((name) => (
+          <option key={name} value={`connection:${name}`}>
+            {name}
+            {name === defaultConnection ? " (default)" : ""}
+          </option>
+        ))}
+        {connectionNames.length === 0 && (
+          <option value={`connection:${defaultConnection}`}>
+            {defaultConnection}
+          </option>
+        )}
+      </select>
+      {cell.datasetRefs?.length ? (
+        <span style={{ marginLeft: "auto", color: t.textMuted, fontSize: 10 }}>
+          {cell.datasetRefs.length} dataset
+          {cell.datasetRefs.length === 1 ? "" : "s"}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function CellNotes({
+  cell,
+  value,
+  onValueChange,
+  onAdd,
+  onRemove,
+  t,
+}: {
+  cell: Cell;
+  value: string;
+  onValueChange: (value: string) => void;
+  onAdd: () => void;
+  onRemove: (id: string) => void;
+  t: Theme;
+}) {
+  return (
+    <div
+      style={{
+        borderTop: `1px solid ${t.cellBorder}`,
+        background: `${t.tableHeaderBg}30`,
+        padding: "9px 12px",
+        display: "grid",
+        gap: 8,
+      }}
+    >
+      {(cell.annotations ?? []).map((note) => (
+        <div
+          key={note.id}
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
+            color: t.textSecondary,
+            fontSize: 11,
+          }}
+        >
+          <div style={{ flex: 1 }}>
+            <div style={{ whiteSpace: "pre-wrap" }}>{note.body}</div>
+            <div style={{ color: t.textMuted, fontSize: 9, marginTop: 3 }}>
+              {note.author ? `${note.author} · ` : ""}
+              {new Date(note.updatedAt ?? note.createdAt).toLocaleString()}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onRemove(note.id)}
+            style={{
+              border: 0,
+              background: "transparent",
+              color: t.textMuted,
+              cursor: "pointer",
+              fontSize: 10,
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 6 }}>
+        <textarea
+          aria-label="Cell note"
+          value={value}
+          onChange={(event) => onValueChange(event.target.value)}
+          placeholder="Record an assumption, validation note, or takeaway…"
+          rows={2}
+          style={{
+            flex: 1,
+            resize: "vertical",
+            background: t.inputBg,
+            color: t.textPrimary,
+            border: `1px solid ${t.inputBorder}`,
+            borderRadius: 6,
+            padding: "6px 8px",
+            font: `11px ${t.font}`,
+          }}
+        />
+        <button
+          type="button"
+          onClick={onAdd}
+          disabled={!value.trim()}
+          style={{
+            alignSelf: "flex-end",
+            border: `1px solid ${t.accent}`,
+            background: `${t.accent}14`,
+            color: t.accent,
+            borderRadius: 5,
+            padding: "5px 9px",
+            font: `700 10px ${t.font}`,
+            cursor: value.trim() ? "pointer" : "not-allowed",
+            opacity: value.trim() ? 1 : 0.5,
+          }}
+        >
+          Add note
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ResultProfile({ cell, t }: { cell: Cell; t: Theme }) {
+  const result = cell.result;
+  if (!result) return null;
+  const sample = result.rows.slice(0, 500);
+  return (
+    <div
+      style={{
+        padding: 12,
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+        gap: 8,
+      }}
+    >
+      {result.columns.map((column) => {
+        const values = sample.map((row) => row[column]);
+        const nonNull = values.filter(
+          (value) => value !== null && value !== undefined && value !== "",
+        );
+        const unique = new Set(nonNull.map((value) => String(value))).size;
+        const numeric = nonNull.filter(
+          (value) =>
+            typeof value === "number" ||
+            (typeof value === "string" &&
+              value.trim() !== "" &&
+              Number.isFinite(Number(value))),
+        );
+        return (
+          <div
+            key={column}
+            style={{
+              border: `1px solid ${t.cellBorder}`,
+              borderRadius: 7,
+              padding: 9,
+              background: t.cellBg,
+            }}
+          >
+            <div
+              style={{
+                color: t.textPrimary,
+                font: `700 11px ${t.fontMono}`,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {column}
+            </div>
+            <div style={{ color: t.textMuted, fontSize: 10, marginTop: 6 }}>
+              {sample.length - nonNull.length} null · {unique} distinct in
+              preview
+            </div>
+            {numeric.length === nonNull.length && numeric.length > 0 && (
+              <div
+                style={{ color: t.textSecondary, fontSize: 10, marginTop: 3 }}
+              >
+                min {Math.min(...numeric.map(Number)).toLocaleString()} · max{" "}
+                {Math.max(...numeric.map(Number)).toLocaleString()}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function cellHeaderTextButtonStyle(
+  t: Theme,
+  tone: "default" | "accent" | "danger" = "default",
+): React.CSSProperties {
+  const isAccent = tone === "accent";
+  const isDanger = tone === "danger";
   return {
     height: 24,
     display: 'inline-flex',

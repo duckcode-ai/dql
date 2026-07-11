@@ -132,6 +132,9 @@ export function SaveAsBlockModal({
         llmContext: llmContext.trim() || undefined,
         examples: exampleList.length > 0 ? exampleList : undefined,
         invariants: invariantsList.length > 0 ? invariantsList : undefined,
+        reviewRequired: Boolean(cell.datasetRefs?.length),
+        datasetRefs: cell.datasetRefs,
+        lineage: cell.dqlArtifact?.lineage,
       });
       const file = {
         name: `${slugify(name) || 'new-block'}.dql`,
@@ -470,11 +473,13 @@ export function SaveAsBlockModal({
             justifyContent: 'flex-end',
             gap: 10,
           }}
-          >
-            <span style={{ fontSize: 11.5, color: t.textMuted, marginRight: 'auto', alignSelf: 'center' }}>
-              DQL will certify this block now when its local checks pass; otherwise it is saved as a draft.
-            </span>
-            <button
+        >
+          <span style={{ fontSize: 11.5, color: t.textMuted, marginRight: 'auto', alignSelf: 'center' }}>
+            {cell.datasetRefs?.length
+              ? 'This analysis uses imported or staged data, so it will be saved as a review-required draft. Certification requires project-controlled, contracted, tested, reproducible sources.'
+              : 'DQL will certify this block now when its local checks pass; otherwise it is saved as a draft.'}
+          </span>
+          <button
             onClick={onClose}
             style={{
               background: t.btnBg,

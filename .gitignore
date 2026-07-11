@@ -17,6 +17,7 @@ jaffle-shop/
 .codex/
 .cursor/
 .mcp.json
+.playwright-cli/
 *.dqlnb.run.json
 *.dql.run.json
 .dql/runs/
@@ -24,4 +25,8 @@ jaffle-shop/
 .dql/local/
 .dql/imports/
 .dql/docker-starter/
+**/.dql/cache/
+**/.dql/local/
+**/.dql/imports/
+**/.dql/connectors/
 output/

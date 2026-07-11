@@ -13,10 +13,11 @@
  * - Convenience hooks (`useCells`, `useFiles`, `useSemantic`, `useActiveFile`,
  *   `useInspector`) cover the common slicing patterns.
  */
-import React, { createContext, useContext, type ReactNode } from 'react';
-import { create, type StoreApi, type UseBoundStore } from 'zustand';
-import { useShallow } from 'zustand/react/shallow';
-import type { NotebookState, NotebookAction, Cell } from './types';
+import React, { createContext, useContext, type ReactNode } from "react";
+import { create, type StoreApi, type UseBoundStore } from "zustand";
+import { useShallow } from "zustand/react/shallow";
+import type { NotebookState, NotebookAction, Cell } from "./types";
+import { downstreamCellIds } from "../utils/notebook-dependencies";
 
 // Apps now live in the sidebar, so the notebook shell always starts in the
 // full authoring surface. Clear the legacy mode preference so users do not get
@@ -339,10 +340,21 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return { ...state, cells: newCells, notebookDirty: true };
     }
 
-    case 'UPDATE_CELL': {
-      const cells = state.cells.map((c) =>
-        c.id === action.id ? { ...c, ...action.updates } : c
-      );
+    case "UPDATE_CELL": {
+      const invalidatesDependents =
+        action.updates.content !== undefined ||
+        action.updates.name !== undefined ||
+        action.updates.executionTarget !== undefined ||
+        action.updates.datasetRefs !== undefined ||
+        action.updates.dependencies !== undefined;
+      const downstream = invalidatesDependents
+        ? downstreamCellIds(action.id, state.cells)
+        : new Set<string>();
+      const cells = state.cells.map((c) => {
+        if (c.id === action.id) return { ...c, ...action.updates };
+        if (downstream.has(c.id) && c.result) return { ...c, stale: true };
+        return c;
+      });
       const executionCounter =
         action.updates.executionCount !== undefined
           ? state.executionCounter + 1

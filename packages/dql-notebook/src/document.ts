@@ -1,4 +1,19 @@
-export type NotebookCellType = 'markdown' | 'sql' | 'dql' | 'chart';
+import { canonicalizeNotebook } from "@duckcodeailabs/dql-core/format";
+
+export type NotebookCellType =
+  | "markdown"
+  | "sql"
+  | "dql"
+  | "param"
+  | "chart"
+  | "pivot"
+  | "single_value"
+  | "filter"
+  | "table"
+  | "map"
+  | "writeback"
+  | "python"
+  | "chat";
 
 export interface NotebookMetadata {
   title: string;
@@ -23,9 +38,41 @@ export interface NotebookCell {
   title?: string;
   source: string;
   config?: NotebookChartConfig;
+  executionTarget?: { target: "connection" | "local"; connectionName?: string };
+  datasetRefs?: Array<{
+    id: string;
+    alias?: string;
+    role?: "source" | "staged" | "output";
+    fingerprint?: string;
+  }>;
+  dependencies?: Array<{ cellId: string; output?: string }>;
+  annotations?: Array<{
+    id: string;
+    body: string;
+    createdAt: string;
+    updatedAt?: string;
+    author?: string;
+  }>;
+  mixedSourcePlan?: {
+    datasetId?: string;
+    datasetName?: string;
+    localDataset: string;
+    localAlias: string;
+    localKey: string;
+    warehouseKey: string;
+    warehouseExpression: string;
+    warehouseSql: string;
+    warehouseRelations?: string[];
+  };
+  dqlArtifact?: Record<string, unknown>;
+  chatConfig?: Record<string, unknown>;
+  kernel?: Record<string, unknown>;
+  /** Future cell metadata is intentionally retained by the document reader. */
+  [key: string]: unknown;
 }
 
 export interface NotebookDocument {
+  dqlnbVersion: 2;
   version: 1;
   metadata: NotebookMetadata;
   cells: NotebookCell[];
@@ -37,6 +84,7 @@ export function createNotebookDocument(
   metadata: Partial<NotebookMetadata> = {},
 ): NotebookDocument {
   return {
+    dqlnbVersion: 2,
     version: 1,
     metadata: {
       title,
@@ -48,30 +96,58 @@ export function createNotebookDocument(
 }
 
 export function serializeNotebook(document: NotebookDocument): string {
-  return JSON.stringify(document, null, 2);
+  const { title, ...metadata } = document.metadata;
+  return canonicalizeNotebook(
+    JSON.stringify({
+      dqlnbVersion: 2,
+      version: 1,
+      title,
+      metadata,
+      cells: document.cells.map((cell) => {
+        const { source, title: cellTitle, config, ...rest } = cell;
+        return {
+          ...rest,
+          ...(cellTitle ? { name: cellTitle } : {}),
+          content: source,
+          ...(config ? { chartConfig: config } : {}),
+        };
+      }),
+    }),
+  );
 }
 
 export function deserializeNotebook(raw: string): NotebookDocument {
   const parsed = JSON.parse(raw) as Partial<NotebookDocument>;
-  if (parsed.version !== 1 || !parsed.metadata?.title || !Array.isArray(parsed.cells)) {
-    throw new Error('Invalid .dqlnb document.');
+  const parsedRecord = parsed as Partial<NotebookDocument> & { title?: string };
+  const documentTitle = parsed.metadata?.title ?? parsedRecord.title;
+  if (parsed.version !== 1 || !documentTitle || !Array.isArray(parsed.cells)) {
+    throw new Error("Invalid .dqlnb document.");
   }
 
   return {
+    dqlnbVersion: 2,
     version: 1,
     metadata: {
-      title: parsed.metadata.title,
-      description: parsed.metadata.description,
-      createdWith: 'dql',
-      template: parsed.metadata.template,
+      title: documentTitle,
+      description: parsed.metadata?.description,
+      createdWith: "dql",
+      template: parsed.metadata?.template,
     },
-    cells: parsed.cells.map((cell, index) => ({
-      id: cell.id ?? `cell-${index + 1}`,
-      type: cell.type ?? 'markdown',
-      title: cell.title,
-      source: cell.source ?? '',
-      config: cell.config,
-    })),
+    cells: parsed.cells.map((cell, index) => {
+      const raw = cell as NotebookCell & {
+        content?: string;
+        name?: string;
+        chartConfig?: NotebookChartConfig;
+      };
+      return {
+        ...cell,
+        id: cell.id ?? `cell-${index + 1}`,
+        type: cell.type ?? "markdown",
+        title: cell.title ?? raw.name,
+        source: cell.source ?? raw.content ?? "",
+        config: cell.config ?? raw.chartConfig,
+      };
+    }),
   };
 }
 

@@ -1,7 +1,7 @@
 // v1.3.2 — three Luna themes (obsidian dark, paper warm light, white plain light).
 // `dark`/`light`/`midnight`/`arctic` kept as aliases so persisted state from
 // earlier v1.3 releases still loads; normalize in the reducer / App effect.
-import type { AgentRun } from '../api/client';
+import type { AgentRun, MixedSourceNotebookPlan } from '../api/client';
 
 export type ThemeMode = 'obsidian' | 'paper' | 'white' | 'dark' | 'light' | 'midnight' | 'arctic';
 
@@ -540,6 +540,8 @@ export interface BlockBinding {
   path: string;
   commitSha?: string;
   version?: string;
+  /** Ephemeral values for the bound block's typed runtime parameters. */
+  parameterValues?: Record<string, unknown>;
   state: 'bound' | 'forked';
   originalContent?: string;
 }
@@ -557,6 +559,43 @@ export interface CellDqlArtifact {
   kind?: string;           // artifact kind (e.g. semantic_block, sql_block)
   metrics?: string[];
   dimensions?: string[];
+  routeEvidence?: Array<Record<string, unknown>>;
+  lineage?: Record<string, unknown>;
+  reviewState?: "certified" | "draft" | "review_required";
+}
+
+export interface ExecutionTarget {
+  target: "connection" | "local";
+  /** Named project connection. Credentials remain in project connection storage. */
+  connectionName?: string;
+}
+
+export interface DatasetReference {
+  id: string;
+  alias?: string;
+  role?: "source" | "staged" | "output";
+  fingerprint?: string;
+}
+
+export interface CellDependency {
+  cellId: string;
+  /** Named result handle consumed by this cell. Defaults to the source cell name. */
+  output?: string;
+}
+
+export interface CellAnnotation {
+  id: string;
+  body: string;
+  createdAt: string;
+  updatedAt?: string;
+  author?: string;
+}
+
+export interface CellKernelMetadata {
+  language?: "python";
+  environment?: string;
+  requirements?: string[];
+  resourcePolicy?: Record<string, unknown>;
 }
 
 export interface Cell {
@@ -570,16 +609,25 @@ export interface Cell {
   executionCount?: number;
   paramConfig?: ParamConfig;
   paramValue?: string;
-  chartConfig?: CellChartConfig;      // Chart cell binding (also used for SQL-cell chart view)
-  filterConfig?: FilterCellConfig;    // Filter cell
-  pivotConfig?: PivotCellConfig;      // Pivot cell
-  singleValueConfig?: SingleValueCellConfig;  // Single-value cell
-  tableConfig?: TableCellConfig;      // Table cell
-  chatConfig?: ChatCellConfig;        // Chat cell (v1.2 Track C)
-  upstream?: string;                   // Dataframe handle this cell consumes
-  blockBinding?: BlockBinding;         // Present when cell references a .dql block file
-  dqlArtifact?: CellDqlArtifact;       // Governed DQL provenance for AI/Explore-generated cells
-  fromSnapshot?: boolean;              // Result was hydrated from .run.json, not executed this session
+  chartConfig?: CellChartConfig; // Chart cell binding (also used for SQL-cell chart view)
+  filterConfig?: FilterCellConfig; // Filter cell
+  pivotConfig?: PivotCellConfig; // Pivot cell
+  singleValueConfig?: SingleValueCellConfig; // Single-value cell
+  tableConfig?: TableCellConfig; // Table cell
+  chatConfig?: ChatCellConfig; // Chat cell (v1.2 Track C)
+  upstream?: string; // Dataframe handle this cell consumes
+  blockBinding?: BlockBinding; // Present when cell references a .dql block file
+  dqlArtifact?: CellDqlArtifact; // Governed DQL provenance for AI/Explore-generated cells
+  executionTarget?: ExecutionTarget; // Named warehouse connection or local DuckDB workspace
+  datasetRefs?: DatasetReference[]; // Imported or staged datasets used by the cell
+  dependencies?: CellDependency[]; // Explicit, stable cell dependency graph
+  annotations?: CellAnnotation[]; // OSS cell notes (not collaborative threads)
+  mixedSourcePlan?: MixedSourceNotebookPlan; // AI-authored warehouse -> local dataset handoff
+  kernel?: CellKernelMetadata; // Reserved until a supportable Python runtime ships
+  stale?: boolean; // A dependency changed after this result was produced
+  /** Unrecognised v2+ fields retained verbatim during read-edit-save. */
+  preservedFields?: Record<string, unknown>;
+  fromSnapshot?: boolean; // Result was hydrated from .run.json, not executed this session
 }
 
 export interface NotebookFile {
@@ -604,6 +652,11 @@ export interface SchemaTable {
   expanded?: boolean;
   source?: 'file' | 'database';
   objectType?: string;
+  datasetId?: string;
+  fileFingerprint?: string;
+  storageMode?: 'local' | 'project' | 'staged';
+  refreshedAt?: string;
+  trustState?: string;
   governance?: {
     status?: GovernanceStatus;
     owner?: string;
@@ -800,12 +853,27 @@ export interface BlockStudioValidation {
   };
   chartConfig?: CellChartConfig;
   executableSql?: string | null;
+  parameters?: BlockParameterDefinition[];
 }
+
+export type BlockParameterDefinition = {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]' | 'date[]';
+  required: boolean;
+  default?: unknown;
+  policy: 'dynamic' | 'static' | 'business' | 'derived' | 'optional' | 'ambiguous_review_required';
+  binding?: { kind: 'sql_value' | 'semantic_filter' | 'limit'; field?: string; operator?: 'equals' | 'in' | 'gte' | 'lte' };
+};
 
 export interface BlockStudioPreview {
   sql: string;
   result: QueryResult;
   chartConfig?: CellChartConfig;
+  invocation?: {
+    resolvedParameters: Array<{ name: string; value: unknown; source: 'explicit' | 'question' | 'default' }>;
+    unresolvedParameters: string[];
+    auditId: string;
+  };
 }
 
 export interface BlockStudioMetadata {

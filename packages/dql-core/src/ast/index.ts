@@ -38,6 +38,7 @@ export {
   type BusinessViewDeclNode,
   type BusinessViewIncludeNode,
   type BlockParamsNode,
+  type BlockParamType,
   type BlockParamEntry,
   type BlockVisualizationNode,
   type BlockTestNode,

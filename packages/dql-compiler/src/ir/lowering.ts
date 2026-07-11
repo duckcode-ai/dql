@@ -831,12 +831,12 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
     const config = lowerBlockVisualizationConfig(node);
     const paramIRs: ParamIR[] = (node.params?.params ?? []).map((p) => ({
       name: p.name,
-      paramType: inferParamType(p.initializer),
-      defaultValue: evaluateExpression(p.initializer),
+      paramType: p.paramType?.replace('[]', '') as ParamIR['paramType'] ?? (p.initializer ? inferParamType(p.initializer) : 'string'),
+      defaultValue: p.initializer ? evaluateExpression(p.initializer) : undefined,
     }));
     const variables: Record<string, unknown> = {};
     for (const p of node.params?.params ?? []) {
-      variables[p.name] = evaluateExpression(p.initializer);
+      if (p.initializer) variables[p.name] = evaluateExpression(p.initializer);
     }
 
     const rlsApplied = applyRLSDecorators(node.decorators, composed.sql, []);
@@ -879,13 +879,13 @@ function lowerBlockDecl(node: BlockDeclNode, _options: LoweringOptions): Dashboa
 
   const paramIRs: ParamIR[] = (node.params?.params ?? []).map((p) => ({
     name: p.name,
-    paramType: inferParamType(p.initializer),
-    defaultValue: evaluateExpression(p.initializer),
+    paramType: p.paramType?.replace('[]', '') as ParamIR['paramType'] ?? (p.initializer ? inferParamType(p.initializer) : 'string'),
+    defaultValue: p.initializer ? evaluateExpression(p.initializer) : undefined,
   }));
 
   const variables: Record<string, unknown> = {};
   for (const p of node.params?.params ?? []) {
-    variables[p.name] = evaluateExpression(p.initializer);
+    if (p.initializer) variables[p.name] = evaluateExpression(p.initializer);
   }
 
   return {

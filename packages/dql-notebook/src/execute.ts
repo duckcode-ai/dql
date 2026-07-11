@@ -84,7 +84,9 @@ export function buildExecutionPlan(
   );
   const chartConfig = block.visualization ? lowerChartConfig(block.visualization.properties) : undefined;
   const variables = Object.fromEntries(
-    (block.params?.params ?? []).map((param) => [param.name, evaluateExpression(param.initializer)]),
+    (block.params?.params ?? [])
+      .filter((param) => param.initializer)
+      .map((param) => [param.name, evaluateExpression(param.initializer!)]),
   );
 
   return {
@@ -188,6 +190,7 @@ function buildSemanticPlan(
 
   // Also extract dimensions/metrics from block params if they reference names
   for (const param of block.params?.params ?? []) {
+    if (!param.initializer) continue;
     const val = evaluateExpression(param.initializer);
     if (param.name === 'dimensions' && Array.isArray(val)) {
       dimensions.push(...val.map(String));
@@ -213,7 +216,9 @@ function buildSemanticPlan(
 
   const chartConfig = block.visualization ? lowerChartConfig(block.visualization.properties) : undefined;
   const variables = Object.fromEntries(
-    (block.params?.params ?? []).map((param) => [param.name, evaluateExpression(param.initializer)]),
+    (block.params?.params ?? [])
+      .filter((param) => param.initializer)
+      .map((param) => [param.name, evaluateExpression(param.initializer!)]),
   );
 
   const processed = applyRLSDecorators(block.decorators, { sql: composed.sql, params: [] });
