@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Boxes, CheckCircle2, Columns3, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
+import { Boxes, CheckCircle2, Columns3, Download, EyeOff, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
 import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type ContextBootstrapSession, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
-import { DomainModelingCanvas, type ColumnDisplayMode, type ModelingLayer, type RelationshipDraft } from './DomainModelingCanvas';
+import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingLayer, type RelationshipDraft } from './DomainModelingCanvas';
 
 type Theme = (typeof themes)['dark'];
 type Tab = 'overview' | 'diagram' | 'relationships' | 'interfaces' | 'contracts' | 'skills' | 'assets' | 'ai' | 'quality' | 'dbt';
@@ -33,10 +33,19 @@ export function DbtFirstModelingPage() {
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [detailsByDbtId, setDetailsByDbtId] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
   const [modelingLayer, setModelingLayer] = useState<ModelingLayer>('analytical');
-  const [columnMode, setColumnMode] = useState<ColumnDisplayMode>('relevant');
+  const savedDiagramPreferences = useMemo(() => readDiagramPreferences(), []);
+  const [columnMode, setColumnMode] = useState<ColumnDisplayMode>(savedDiagramPreferences.columnMode ?? 'relevant');
   const [diagramSearch, setDiagramSearch] = useState('');
   const [resetLayoutToken, setResetLayoutToken] = useState(0);
+  const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>(savedDiagramPreferences.layoutMode ?? 'auto');
+  const [diagramDensity, setDiagramDensity] = useState<DiagramDensity>(savedDiagramPreferences.density ?? 'normal');
+  const [visibleLimit, setVisibleLimit] = useState(savedDiagramPreferences.visibleLimit ?? 0);
+  const [dimUnrelated, setDimUnrelated] = useState(savedDiagramPreferences.dimUnrelated ?? true);
+  const [showEdgeLabels, setShowEdgeLabels] = useState(savedDiagramPreferences.showEdgeLabels ?? true);
+  const [showLegend, setShowLegend] = useState(false);
+  const [diagramFullscreen, setDiagramFullscreen] = useState(false);
   const [editor, setEditor] = useState<Editor | null>(null);
+  useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
 
   const refresh = async () => {
     setLoading(true);
@@ -243,16 +252,18 @@ export function DbtFirstModelingPage() {
           <div style={{ flex: 1, minHeight: 0 }}>
             {tab === 'overview' && <DomainOverview data={data} domain={selectedDomain} t={t} />}
             {tab === 'diagram' && (
-              <div
+              <div id="dql-modeling-diagram"
                 style={{
                   height: '100%',
                   display: 'flex',
                   flexDirection: 'column',
+                  ...(diagramFullscreen ? { position: 'fixed', inset: 0, zIndex: 90, background: t.appBg } : {}),
                 }}
               >
-                <LayerToolbar layer={modelingLayer} columnMode={columnMode} search={diagramSearch} onChange={setModelingLayer} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
+                <LayerToolbar layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onChange={setModelingLayer} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
+                {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} columnMode={columnMode} search={diagramSearch} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); setTab('ai'); }} theme={t} />
                 </div>
               </div>
             )}
@@ -261,7 +272,7 @@ export function DbtFirstModelingPage() {
             {tab === 'contracts' && <ContractTable data={data} domain={selectedDomain} t={t} onCreate={() => setEditor({ kind: 'contract' })} />}
             {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} />}
             {tab === 'assets' && <DomainAssetsPanel data={data} domain={selectedDomain} t={t} />}
-            {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} data={data} t={t} onOpenSkills={() => setTab('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship' })} />}
+            {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} selectedId={selectedId} data={data} t={t} onOpenSkills={() => setTab('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship', draft: selectedEntity ? { from: selectedEntity.id, to: '' } : undefined })} />}
             {tab === 'quality' && <QualityPanel data={data} relationships={domainRelationships} t={t} />}
             {tab === 'dbt' && <DbtInventory data={data} unbound={unboundNodes} t={t} onBind={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} />}
           </div>
@@ -862,7 +873,7 @@ function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; d
   );
 }
 
-function LayerToolbar({ layer, columnMode, search, onChange, onColumnMode, onSearch, onReset, t }: { layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; onChange: (layer: ModelingLayer) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onReset: () => void; t: Theme }) {
+function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onChange, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onChange: (layer: ModelingLayer) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
   const copy: Record<ModelingLayer, string> = {
     conceptual: 'Business concepts and verbs. No columns or executable joins.',
     analytical: 'Editable agent-safe entities, dbt key references, cardinality, grain, and fanout policy.',
@@ -874,10 +885,11 @@ function LayerToolbar({ layer, columnMode, search, onChange, onColumnMode, onSea
         display: 'flex',
         alignItems: 'center',
         gap: 6,
-        minHeight: 43,
+        minHeight: 76,
         padding: '0 12px',
         borderBottom: `1px solid ${t.headerBorder}`,
         background: t.cellBg,
+        flexWrap: 'wrap',
       }}
     >
       {(['conceptual', 'analytical', 'physical'] as ModelingLayer[]).map((value) => (
@@ -897,12 +909,35 @@ function LayerToolbar({ layer, columnMode, search, onChange, onColumnMode, onSea
           {value === 'physical' ? 'Physical dbt' : value}
         </button>
       ))}
-      <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: 1 }}>{copy[layer]}</span>
+      <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: '1 1 260px' }}>{copy[layer]}</span>
       {layer !== 'conceptual' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <label style={{ position: 'relative', width: 150 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
+      <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
+      <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9 }}>Show <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 52, padding: '5px' }} /></label>
+      <button title="Dim unrelated models" onClick={() => onDimUnrelated(!dimUnrelated)} style={{ ...iconButtonStyle(t), color: dimUnrelated ? t.accent : t.textMuted }}><EyeOff size={14} /></button>
+      <button title="Toggle relationship labels" onClick={() => onEdgeLabels(!showEdgeLabels)} style={{ ...iconButtonStyle(t), color: showEdgeLabels ? t.accent : t.textMuted }}><Link2 size={14} /></button>
+      <button title="Relationship legend" onClick={() => onLegend(!showLegend)} style={{ ...iconButtonStyle(t), color: showLegend ? t.accent : t.textMuted }}><Boxes size={14} /></button>
+      <button title="Export diagram as SVG" onClick={onExport} style={iconButtonStyle(t)}><Download size={14} /></button>
+      <button title={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} onClick={onFullscreen} style={iconButtonStyle(t)}>{fullscreen ? <XCircle size={14} /> : <Maximize2 size={14} />}</button>
       <button title="Reset to automatic layout" onClick={onReset} style={iconButtonStyle(t)}><RotateCcw size={14} /></button>
     </div>
   );
+}
+
+function DiagramLegend({ t }: { t: Theme }) { return <div style={{ display: 'flex', gap: 14, padding: '7px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 9.5 }}>{[['Safe certified', '#2e9b63'], ['Validated review', '#5b73d6'], ['Attribution / draft', '#9a6b2f'], ['Stale certification', '#d47822']].map(([label, color]) => <span key={label} style={{ display: 'flex', gap: 5, alignItems: 'center' }}><i style={{ display: 'inline-block', width: 18, height: 3, background: color, borderRadius: 2 }} />{label}</span>)}<span style={{ marginLeft: 'auto' }}>1:1 · 1:N · N:1 · N:N</span></div>; }
+
+function exportDiagramSvg() {
+  const source = document.querySelector('#dql-modeling-diagram .react-flow__renderer');
+  if (!(source instanceof HTMLElement)) return;
+  const clone = source.cloneNode(true) as HTMLElement;
+  const rect = source.getBoundingClientRect();
+  const serialized = new XMLSerializer().serializeToString(clone);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(rect.width)}" height="${Math.ceil(rect.height)}"><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml">${serialized}</div></foreignObject></svg>`;
+  const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = 'dql-domain-model.svg'; anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function DomainAssetsPanel({ data, domain, t }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme }) {
@@ -954,7 +989,7 @@ function DomainAssetsPanel({ data, domain, t }: { data: DbtFirstModelingResponse
   );
 }
 
-function ModelingAiPanel({ domain, data, t, onOpenSkills, onDraftRelationship }: { domain: string | null; data: DbtFirstModelingResponse; t: Theme; onOpenSkills: () => void; onDraftRelationship: () => void }) {
+function ModelingAiPanel({ domain, selectedId, data, t, onOpenSkills, onDraftRelationship }: { domain: string | null; selectedId: string | null; data: DbtFirstModelingResponse; t: Theme; onOpenSkills: () => void; onDraftRelationship: () => void }) {
   const [session, setSession] = useState<ContextBootstrapSession | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1028,7 +1063,7 @@ function ModelingAiPanel({ domain, data, t, onOpenSkills, onDraftRelationship }:
           }
         />
       </div>
-      <Message text={`Active scope: ${domain ?? 'all domains'} · ${Object.keys(data.modeling.entities).length} bindings · ${Object.keys(data.modeling.relationships).length} governed relationships. AI proposals never treat dbt lineage as join proof and never auto-certify.`} t={t} />
+    <Message text={`Active scope: ${domain ?? 'all domains'}${selectedId ? ` · focused object: ${selectedId}` : ''} · ${Object.keys(data.modeling.entities).length} bindings · ${Object.keys(data.modeling.relationships).length} governed relationships. AI proposals never treat dbt lineage as join proof and never auto-certify.`} t={t} />
       {session && (
         <div style={{ marginTop: 16 }}>
           <h3 style={sectionHeading(t)}>Review proposal pack</h3>
@@ -1792,6 +1827,10 @@ function relationshipKeys(value: string): Array<{ from: string; to: string }> {
     if (!from || !to) throw new Error(`Invalid join key pair "${pair}". Use from_key=to_key.`);
     return { from, to };
   });
+}
+function readDiagramPreferences(): Partial<{ columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }> {
+  try { return JSON.parse(localStorage.getItem('dql-modeling-preferences') ?? '{}') as Partial<{ columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }>; }
+  catch { return {}; }
 }
 function domainDepth(id: string, packages: DbtFirstModelingResponse['modeling']['packages']): number {
   let depth = 0;
