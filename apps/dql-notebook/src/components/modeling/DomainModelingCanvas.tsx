@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, type Connection, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Dagre from '@dagrejs/dagre';
@@ -6,6 +6,7 @@ import type { DbtNodeAuthoringDetail, ManifestDbtFirstModeling, ManifestModelEnt
 import { themes } from '../../themes/notebook-theme';
 
 export type ModelingLayer = 'conceptual' | 'analytical' | 'physical';
+export type ColumnDisplayMode = 'keys' | 'relevant' | 'all';
 export type RelationshipDraft = {
   from: string;
   to: string;
@@ -20,11 +21,20 @@ type EntityNodeData = {
   relation?: string;
   selected: boolean;
   layer: ModelingLayer;
+  columnMode: ColumnDisplayMode;
   theme: Theme;
 };
 
-export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, onSelectEntity, onSelectRelationship, onDraftRelationship, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedId: string | null; layer: ModelingLayer; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; theme: Theme }) {
-  const { nodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, theme]);
+export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, resetLayoutToken, onSelectEntity, onSelectRelationship, onDraftRelationship, onDropDbtModel, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedId: string | null; layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; resetLayoutToken: number; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onDropDbtModel: (uniqueId: string) => void; theme: Theme }) {
+  const layoutKey = `dql-model-layout:${selectedDomain ?? 'all'}:${layer}`;
+  const [savedPositions, setSavedPositions] = useState<Record<string, { x: number; y: number }>>(() => readPositions(layoutKey));
+  useEffect(() => setSavedPositions(readPositions(layoutKey)), [layoutKey]);
+  useEffect(() => {
+    if (!resetLayoutToken) return;
+    localStorage.removeItem(layoutKey);
+    setSavedPositions({});
+  }, [resetLayoutToken]);
+  const { nodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, savedPositions, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, savedPositions, theme]);
   if (!nodes.length)
     return (
       <div
@@ -35,7 +45,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
           color: theme.textMuted,
         }}
       >
-        Bind a dbt model to this domain to begin the analytical graph.
+        {search.trim() ? `No models or columns match “${search.trim()}”.` : 'Bind a dbt model to this domain to begin the analytical graph.'}
       </div>
     );
   const handleConnect = (connection: Connection) => {
@@ -48,7 +58,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
     });
   };
   return (
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable={layer === 'analytical'} onConnect={handleConnect} onNodeClick={(_, node) => onSelectEntity(node.id)} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable={layer === 'analytical'} onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
       <Background color={theme.headerBorder} gap={20} size={1} />
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable nodeColor={(node) => domainColor(String((node.data as EntityNodeData).entity.domain))} maskColor={`${theme.appBg}bb`} />
@@ -57,11 +67,11 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
 }
 
 function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
-  const { entity, detail, relation, selected, layer, theme } = data;
+  const { entity, detail, relation, selected, layer, columnMode, theme } = data;
   const color = domainColor(entity.domain);
   const columns = detail?.columns ?? [];
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
-  const visibleColumns = layer === 'conceptual' ? [] : layer === 'analytical' ? columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10) : columns.slice(0, 16);
+  const visibleColumns = layer === 'conceptual' ? [] : layer === 'physical' || columnMode === 'all' ? columns.slice(0, 16) : columnMode === 'keys' ? columns.filter((column) => keys.has(column.name)).slice(0, 10) : columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10);
   const concepts = entity.conceptRefs?.length ? entity.conceptRefs.join(', ') : titleCase(entity.id);
   return (
     <div
@@ -180,7 +190,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   );
 }
 
-function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedId: string | null, layer: ModelingLayer, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
+function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedId: string | null, layer: ModelingLayer, columnMode: ColumnDisplayMode, search: string, savedPositions: Record<string, { x: number; y: number }>, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
   const visibleRelationships = Object.values(modeling.relationships).filter((relationship) => {
     if (!selectedDomain) return true;
     const from = modeling.entities[relationship.from];
@@ -188,7 +198,13 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
     return from?.domain === selectedDomain || to?.domain === selectedDomain;
   });
   const relatedIds = new Set(visibleRelationships.flatMap((relationship) => [relationship.from, relationship.to]));
-  const entities = Object.values(modeling.entities).filter((entity) => !selectedDomain || entity.domain === selectedDomain || relatedIds.has(entity.id));
+  const normalizedSearch = search.trim().toLowerCase();
+  const entities = Object.values(modeling.entities).filter((entity) => {
+    if (selectedDomain && entity.domain !== selectedDomain && !relatedIds.has(entity.id)) return false;
+    if (!normalizedSearch) return true;
+    const detail = detailsByDbtId[entity.dbtUniqueId];
+    return [entity.id, entity.domain, detail?.relation, ...(detail?.columns.map((column) => column.name) ?? [])].some((value) => String(value ?? '').toLowerCase().includes(normalizedSearch));
+  });
   const domains = [...new Set(entities.map((entity) => entity.domain))].sort();
   const nodes: Node<EntityNodeData>[] = [];
   domains.forEach((domain, domainIndex) =>
@@ -197,7 +213,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
       .sort((a, b) => a.id.localeCompare(b.id))
       .forEach((entity, index) => {
         const detail = detailsByDbtId[entity.dbtUniqueId];
-        const columnCount = layer === 'conceptual' ? 0 : layer === 'physical' ? Math.min(detail?.columns.length ?? 0, 16) : Math.min(detail?.columns.filter((c) => entity.keys.includes(c.name) || c.tests.length > 0).length ?? 0, 10);
+        const columnCount = visibleColumnCount(entity, detail, layer, columnMode);
         nodes.push({
           id: entity.id,
           type: 'entity',
@@ -208,6 +224,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
             relation: relationByDbtId[entity.dbtUniqueId],
             selected: selectedId === entity.id,
             layer,
+            columnMode,
             theme,
           },
           style: { height: 92 + columnCount * 29 },
@@ -260,6 +277,8 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
   edges.forEach((edge) => graph.setEdge(edge.source, edge.target));
   Dagre.layout(graph);
   nodes.forEach((node) => {
+    const saved = savedPositions[node.id];
+    if (saved) { node.position = saved; return; }
     const p = graph.node(node.id) as { x: number; y: number } | undefined;
     if (p)
       node.position = {
@@ -268,6 +287,20 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
       };
   });
   return { nodes, edges };
+}
+
+function visibleColumnCount(entity: ManifestModelEntity, detail: DbtNodeAuthoringDetail | undefined, layer: ModelingLayer, mode: ColumnDisplayMode): number {
+  if (layer === 'conceptual') return 0;
+  const columns = detail?.columns ?? [];
+  if (layer === 'physical' || mode === 'all') return Math.min(columns.length, 16);
+  const keys = new Set(entity.keys.length ? entity.keys : detail?.dqlMeta?.keys ?? []);
+  if (mode === 'keys') return Math.min(columns.filter((column) => keys.has(column.name)).length, 10);
+  return Math.min(columns.filter((column) => keys.has(column.name) || column.tests.length > 0).length, 10);
+}
+
+function readPositions(key: string): Record<string, { x: number; y: number }> {
+  try { const value = JSON.parse(localStorage.getItem(key) ?? '{}') as Record<string, { x?: unknown; y?: unknown }>; return Object.fromEntries(Object.entries(value).filter(([, point]) => typeof point.x === 'number' && typeof point.y === 'number')) as Record<string, { x: number; y: number }>; }
+  catch { return {}; }
 }
 
 function parseColumnHandle(handle: string | null): string | undefined {

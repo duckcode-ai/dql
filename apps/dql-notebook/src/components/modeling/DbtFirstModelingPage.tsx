@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Boxes, CheckCircle2, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Plus, RefreshCw, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
+import { Boxes, CheckCircle2, Columns3, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
 import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type ContextBootstrapSession, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
-import { DomainModelingCanvas, type ModelingLayer, type RelationshipDraft } from './DomainModelingCanvas';
+import { DomainModelingCanvas, type ColumnDisplayMode, type ModelingLayer, type RelationshipDraft } from './DomainModelingCanvas';
 
 type Theme = (typeof themes)['dark'];
 type Tab = 'overview' | 'diagram' | 'relationships' | 'interfaces' | 'contracts' | 'skills' | 'assets' | 'ai' | 'quality' | 'dbt';
@@ -33,6 +33,9 @@ export function DbtFirstModelingPage() {
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [detailsByDbtId, setDetailsByDbtId] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
   const [modelingLayer, setModelingLayer] = useState<ModelingLayer>('analytical');
+  const [columnMode, setColumnMode] = useState<ColumnDisplayMode>('relevant');
+  const [diagramSearch, setDiagramSearch] = useState('');
+  const [resetLayoutToken, setResetLayoutToken] = useState(0);
   const [editor, setEditor] = useState<Editor | null>(null);
 
   const refresh = async () => {
@@ -204,7 +207,7 @@ export function DbtFirstModelingPage() {
           <SideHeading t={t}>dbt inventory</SideHeading>
           <div style={{ padding: '0 10px 12px', fontSize: 11, color: t.textMuted }}>{unboundNodes.length} unbound models</div>
           {unboundNodes.slice(0, 12).map((node) => (
-            <button key={node.uniqueId} onClick={() => setEditor({ kind: 'entity', dbtUniqueId: node.uniqueId })} style={inventoryButton(t)}>
+            <button key={node.uniqueId} draggable onDragStart={(event) => { event.dataTransfer.setData('application/x-dql-dbt-model', node.uniqueId); event.dataTransfer.effectAllowed = 'copy'; }} title="Drag onto the Diagram or click to bind" onClick={() => setEditor({ kind: 'entity', dbtUniqueId: node.uniqueId })} style={{ ...inventoryButton(t), cursor: 'grab' }}>
               <FileCode2 size={12} />
               <span>{node.name}</span>
               <Plus size={12} />
@@ -247,9 +250,9 @@ export function DbtFirstModelingPage() {
                   flexDirection: 'column',
                 }}
               >
-                <LayerToolbar layer={modelingLayer} onChange={setModelingLayer} t={t} />
+                <LayerToolbar layer={modelingLayer} columnMode={columnMode} search={diagramSearch} onChange={setModelingLayer} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} columnMode={columnMode} search={diagramSearch} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} theme={t} />
                 </div>
               </div>
             )}
@@ -859,7 +862,7 @@ function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; d
   );
 }
 
-function LayerToolbar({ layer, onChange, t }: { layer: ModelingLayer; onChange: (layer: ModelingLayer) => void; t: Theme }) {
+function LayerToolbar({ layer, columnMode, search, onChange, onColumnMode, onSearch, onReset, t }: { layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; onChange: (layer: ModelingLayer) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onReset: () => void; t: Theme }) {
   const copy: Record<ModelingLayer, string> = {
     conceptual: 'Business concepts and verbs. No columns or executable joins.',
     analytical: 'Editable agent-safe entities, dbt key references, cardinality, grain, and fanout policy.',
@@ -894,7 +897,10 @@ function LayerToolbar({ layer, onChange, t }: { layer: ModelingLayer; onChange: 
           {value === 'physical' ? 'Physical dbt' : value}
         </button>
       ))}
-      <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5 }}>{copy[layer]}</span>
+      <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: 1 }}>{copy[layer]}</span>
+      {layer !== 'conceptual' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
+      <label style={{ position: 'relative', width: 150 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
+      <button title="Reset to automatic layout" onClick={onReset} style={iconButtonStyle(t)}><RotateCcw size={14} /></button>
     </div>
   );
 }
