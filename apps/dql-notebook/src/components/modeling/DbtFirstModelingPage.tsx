@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Boxes, CheckCircle2, Columns3, Download, EyeOff, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
+import { Boxes, CheckCircle2, Columns3, Download, EyeOff, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
 import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type ContextBootstrapSession, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -43,6 +43,7 @@ export function DbtFirstModelingPage() {
   const [showEdgeLabels, setShowEdgeLabels] = useState(savedDiagramPreferences.showEdgeLabels ?? true);
   const [showLegend, setShowLegend] = useState(false);
   const [diagramFullscreen, setDiagramFullscreen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [editor, setEditor] = useState<Editor | null>(null);
   useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
 
@@ -160,7 +161,7 @@ export function DbtFirstModelingPage() {
           flex: 1,
           minHeight: 0,
           display: 'grid',
-          gridTemplateColumns: 'clamp(190px, 15vw, 232px) minmax(460px, 1fr) clamp(270px, 22vw, 380px)',
+          gridTemplateColumns: inspectorOpen ? 'clamp(190px, 15vw, 232px) minmax(460px, 1fr) clamp(270px, 22vw, 380px)' : 'clamp(190px, 15vw, 232px) minmax(460px, 1fr)',
         }}
       >
         <aside
@@ -241,6 +242,9 @@ export function DbtFirstModelingPage() {
                 {value === 'dbt' ? 'dbt sources' : value === 'ai' ? 'AI setup' : value === 'diagram' ? 'Domain Model' : value[0]!.toUpperCase() + value.slice(1)}
               </button>
             ))}
+            <button title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={() => setInspectorOpen((value) => !value)} style={{ ...iconButtonStyle(t), marginLeft: 'auto', marginBottom: 5 }}>
+              {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+            </button>
           </nav>
           <div style={{ flex: 1, minHeight: 0 }}>
             {tab === 'overview' && <DomainOverview data={data} domain={selectedDomain} t={t} />}
@@ -270,7 +274,7 @@ export function DbtFirstModelingPage() {
           </div>
         </main>
 
-        <aside
+        {inspectorOpen && <aside
           style={{
             borderLeft: `1px solid ${t.headerBorder}`,
             overflow: 'auto',
@@ -305,7 +309,7 @@ export function DbtFirstModelingPage() {
           ) : (
             <StudioSummary data={data} domainEntities={domainEntities} domainRelationships={domainRelationships} t={t} onSelectRelationship={setSelectedId} />
           )}
-        </aside>
+        </aside>}
       </div>
       {editor && (
         <ModelingEditor

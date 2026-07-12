@@ -102,7 +102,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
         width: '100%',
         minWidth: 240,
         borderRadius: 10,
-        overflow: 'hidden',
+        overflow: 'visible',
         border: `1px solid ${selected ? theme.accent : theme.headerBorder}`,
         boxShadow: selected ? `0 0 0 2px ${theme.accent}2b` : '0 8px 24px #00000012',
         background: theme.cellBg,
@@ -110,9 +110,9 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
       }}
     >
       <NodeResizeControl position="bottom-right" resizeDirection="horizontal" minWidth={240} maxWidth={620} onResizeEnd={(_, params) => onResize(entity.id, params.width)} style={{ width: 16, height: 16, border: 0, background: 'transparent', color: theme.textMuted }}><span title="Drag to resize model" style={{ display: 'grid', placeItems: 'center' }}><Maximize2 size={12} /></span></NodeResizeControl>
-      <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />
+      {collapsed && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
       <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: entity.id }); }} style={{ position: 'absolute', right: -11, top: 18, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: '2px solid #fff', background: color, color: '#fff', cursor: 'pointer', boxShadow: `0 0 0 1px ${color}66` }}><Plus size={12} /></button>
-      <div style={{ height: 5, background: color }} />
+      <div style={{ height: 5, background: color, borderRadius: '9px 9px 0 0' }} />
       <div style={{ padding: '10px 12px 9px' }}>
         <div
           style={{
@@ -208,7 +208,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           )}
         </div>
       )}
-      <Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} />
+      {collapsed && <Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} />}
     </div>
   );
 }
