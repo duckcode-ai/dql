@@ -8,7 +8,7 @@ import { SkillsPage } from '../skills/SkillsPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type RelationshipDraft } from './DomainModelingCanvas';
 
 type Theme = (typeof themes)['dark'];
-type Tab = 'overview' | 'diagram' | 'interfaces' | 'contracts' | 'skills' | 'assets' | 'ai' | 'quality' | 'dbt';
+type Tab = 'overview' | 'diagram' | 'skills' | 'assets' | 'ai' | 'readiness' | 'dbt';
 type Editor =
   | { kind: 'domain' }
   | { kind: 'entity'; dbtUniqueId?: string; relationshipFrom?: { from: string; fromColumn?: string } }
@@ -237,7 +237,7 @@ export function DbtFirstModelingPage() {
               background: t.cellBg,
             }}
           >
-            {(['overview', 'diagram', 'interfaces', 'contracts', 'skills', 'assets', 'ai', 'quality', 'dbt'] as Tab[]).map((value) => (
+            {(['overview', 'diagram', 'skills', 'assets', 'readiness', 'ai', 'dbt'] as Tab[]).map((value) => (
               <button key={value} onClick={() => setTab(value)} style={tabButton(t, tab === value)}>
                 {value === 'dbt' ? 'dbt sources' : value === 'ai' ? 'AI setup' : value === 'diagram' ? 'Domain Model' : value[0]!.toUpperCase() + value.slice(1)}
               </button>
@@ -264,12 +264,10 @@ export function DbtFirstModelingPage() {
                 </div>
               </div>
             )}
-            {tab === 'interfaces' && <InterfaceTable data={data} domain={selectedDomain} t={t} onCreateExport={() => setEditor({ kind: 'export' })} onCreateImport={() => setEditor({ kind: 'import' })} />}
-            {tab === 'contracts' && <ContractTable data={data} domain={selectedDomain} t={t} onCreate={() => setEditor({ kind: 'contract' })} />}
             {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} />}
             {tab === 'assets' && <DomainAssetsPanel data={data} domain={selectedDomain} t={t} />}
             {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} selectedId={selectedId} data={data} t={t} onOpenSkills={() => setTab('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship', draft: selectedEntity ? { from: selectedEntity.id, to: '' } : undefined })} />}
-            {tab === 'quality' && <QualityPanel data={data} relationships={domainRelationships} t={t} />}
+            {tab === 'readiness' && <ReadinessPanel data={data} domain={selectedDomain} relationships={domainRelationships} t={t} onCreateExport={() => setEditor({ kind: 'export' })} onCreateImport={() => setEditor({ kind: 'import' })} onCreateContract={() => setEditor({ kind: 'contract' })} onEditRelationship={(relationship) => setEditor({ kind: 'relationship', relationship })} />}
             {tab === 'dbt' && <DbtInventory data={data} unbound={unboundNodes} t={t} onBind={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} />}
           </div>
         </main>
@@ -1281,35 +1279,42 @@ function ContractTable({ data, domain, t, onCreate }: { data: DbtFirstModelingRe
   );
 }
 
-function QualityPanel({ data, relationships, t }: { data: DbtFirstModelingResponse; relationships: ManifestModelRelationship[]; t: Theme }) {
+function ReadinessPanel({ data, domain, relationships, t, onCreateExport, onCreateImport, onCreateContract, onEditRelationship }: { data: DbtFirstModelingResponse; domain: string | null; relationships: ManifestModelRelationship[]; t: Theme; onCreateExport: () => void; onCreateImport: () => void; onCreateContract: () => void; onEditRelationship: (relationship: ManifestModelRelationship) => void }) {
   const safe = relationships.filter((r) => r.automaticJoinAllowed).length;
   const stale = relationships.filter((r) => r.staleCertification).length;
   const unvalidated = relationships.filter((r) => !r.validation).length;
+  const blocking = data.diagnostics.filter((d) => d.severity === 'error').length;
+  const exports = Object.values(data.modeling.interfaces?.exports ?? {}).filter((item) => !domain || item.domain === domain);
+  const imports = Object.values(data.modeling.interfaces?.imports ?? {}).filter((item) => !domain || item.domain === domain);
+  const contracts = Object.values(data.modeling.contracts).filter((contract) => !domain || contract.domain === domain);
+  const crossDomain = relationships.filter((relationship) => data.modeling.entities[relationship.from]?.domain !== data.modeling.entities[relationship.to]?.domain);
+  const score = Math.max(0, 100 - blocking * 25 - stale * 15 - unvalidated * 10 - crossDomain.filter((relationship) => !relationship.importRefs?.length).length * 15);
   return (
     <ScrollPanel>
-      <PanelHeader title="Model quality" detail="Trust gates for agentic SQL: identity, warehouse proof, fanout policy, freshness, and cross-domain exports." t={t} />
+      <PanelHeader title={`${domain ?? 'Domain'} readiness`} detail="What must be resolved before agents can execute, reuse, or cross domain boundaries safely." t={t} />
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, minmax(130px, 1fr))',
+          gridTemplateColumns: 'repeat(5, minmax(120px, 1fr))',
           gap: 12,
         }}
       >
+        <Metric value={score} label="Readiness score" color={score >= 80 ? '#2e9b63' : score >= 60 ? '#d47822' : '#c94b55'} t={t} />
         <Metric value={safe} label="Safe join proofs" color="#2e9b63" t={t} />
         <Metric value={stale} label="Stale certifications" color="#d47822" t={t} />
         <Metric value={unvalidated} label="Need validation" color="#9a6b2f" t={t} />
-        <Metric value={data.diagnostics.filter((d) => d.severity === 'error').length} label="Blocking diagnostics" color="#c94b55" t={t} />
+        <Metric value={blocking} label="Blocking diagnostics" color="#c94b55" t={t} />
       </div>
+      <h3 style={sectionHeading(t)}>Next actions</h3>
       <div
         style={{
-          marginTop: 18,
           border: `1px solid ${t.headerBorder}`,
           borderRadius: 9,
           overflow: 'hidden',
         }}
       >
-        {data.diagnostics.length ? (
-          data.diagnostics.map((d, i) => (
+        {data.diagnostics.length || unvalidated ? (
+          <>{data.diagnostics.map((d, i) => (
             <div
               key={i}
               style={{
@@ -1327,7 +1332,7 @@ function QualityPanel({ data, relationships, t }: { data: DbtFirstModelingRespon
               </b>{' '}
               · {d.message}
             </div>
-          ))
+          ))}{relationships.filter((relationship) => !relationship.validation).map((relationship) => <button key={relationship.id} onClick={() => onEditRelationship(relationship)} style={{ display: 'block', width: '100%', border: 0, borderBottom: `1px solid ${t.headerBorder}`, background: 'transparent', color: t.textPrimary, padding: '10px 12px', textAlign: 'left', cursor: 'pointer', fontSize: 12 }}><b style={{ color: '#9a6b2f' }}>validate</b> · Prove {relationship.from} → {relationship.to} before agents may use this route.</button>)}</>
         ) : (
           <div style={{ padding: 18, color: '#2e9b63', fontSize: 13 }}>
             <CheckCircle2 size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} />
@@ -1335,8 +1340,26 @@ function QualityPanel({ data, relationships, t }: { data: DbtFirstModelingRespon
           </div>
         )}
       </div>
+      <div style={{ display: 'flex', alignItems: 'center', marginTop: 22, gap: 8 }}><h3 style={{ ...sectionHeading(t), flex: 1, margin: 0 }}>Cross-domain access</h3><Button t={t} onClick={onCreateImport}><Plus size={13} /> Request access</Button><Button t={t} onClick={onCreateExport}><Plus size={13} /> Publish access</Button></div>
+      <p style={{ color: t.textSecondary, fontSize: 11, margin: '7px 0 12px' }}>Only needed when another domain consumes an approved entity, key, metric, or block.</p>
+      {exports.length || imports.length ? <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))' }}>
+        {exports.map((item) => <ReadinessCard key={`${item.domain}.${item.id}`} title={domainExportRef(item.domain, item.id, item.version)} badge="Published" detail={`${item.entity ?? 'Shared analytics'} · ${item.consumerDomains.join(', ') || 'no consumers'}`} status={item.status} t={t} />)}
+        {imports.map((item) => <ReadinessCard key={item.id} title={item.exportRef} badge="Imported" detail={`${item.domain} · ${item.purpose}`} status={item.status} t={t} />)}
+      </div> : <Blank title="No cross-domain access needed" detail="DQL will prompt for an export/import when a relationship crosses a domain boundary." t={t} />}
+      <div style={{ display: 'flex', alignItems: 'center', marginTop: 22, gap: 8 }}><h3 style={{ ...sectionHeading(t), flex: 1, margin: 0 }}>Certified analytics</h3><Button primary t={t} onClick={onCreateContract}><Plus size={13} /> Certify use case</Button></div>
+      <p style={{ color: t.textSecondary, fontSize: 11, margin: '7px 0 12px' }}>Bind a proven analytical purpose to its approved entities, blocks, filters, and evaluations.</p>
+      {contracts.length ? <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))' }}>{contracts.map((contract) => <ReadinessCard key={contract.id} title={contract.id} badge="Use case" detail={`${contract.entities.join(', ') || 'No entities'} · ${contract.blocks.join(', ') || 'No certified blocks'}`} status={contract.status} t={t} />)}</div> : <Blank title="No certified use cases yet" detail="Start from a validated block or notebook, then certify it for repeatable agent use." t={t} />}
     </ScrollPanel>
   );
+}
+
+function ReadinessCard({ title, badge, detail, status, t }: { title: string; badge: string; detail: string; status: string; t: Theme }) {
+  return <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: 11, background: t.cellBg }}><div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><b style={{ fontSize: 12, flex: 1 }}>{title}</b><Badge t={t}>{badge}</Badge></div><p style={{ color: t.textSecondary, fontSize: 10.5, margin: '7px 0 9px' }}>{detail}</p><Status status={status} t={t} /></div>;
+}
+
+function domainExportRef(domain: string, id: string, version: number): string {
+  const qualified = id.startsWith(`${domain}.`) ? id : `${domain}.${id}`;
+  return qualified.includes('@') ? qualified : `${qualified}@${version}`;
 }
 
 function DbtInventory({ data, unbound, t, onBind }: { data: DbtFirstModelingResponse; unbound: DbtFirstModelingResponse['dbtProvenance']['nodes'][string][]; t: Theme; onBind: (id: string) => void }) {
