@@ -149,12 +149,6 @@ export function DbtFirstModelingPage() {
             <Button t={t} onClick={() => setEditor({ kind: 'domain' })}>
               <Plus size={14} /> Domain
             </Button>
-            <Button t={t} onClick={() => setEditor({ kind: 'entity' })}>
-              <Plus size={14} /> Bind model
-            </Button>
-            <Button primary t={t} onClick={() => setEditor({ kind: 'relationship' })}>
-              <Link2 size={14} /> Relationship
-            </Button>
             <IconButton t={t} title="Recompile" onClick={() => void refresh()}>
               <RefreshCw size={15} />
             </IconButton>
@@ -260,7 +254,7 @@ export function DbtFirstModelingPage() {
                   ...(diagramFullscreen ? { position: 'fixed', inset: 0, zIndex: 90, background: t.appBg } : {}),
                 }}
               >
-                <LayerToolbar layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onChange={setModelingLayer} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
+                <LayerToolbar layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onChange={setModelingLayer} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
                   <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); setTab('ai'); }} theme={t} />
@@ -378,6 +372,11 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [validation, setValidation] = useState(existing?.validation);
+  const [showAdvancedRelationship, setShowAdvancedRelationship] = useState(Boolean(existing && (existing.roles || existing.aggregation || existing.importRefs?.length || existing.attributionBlock || existing.evidenceExpiresAt)));
+  useEffect(() => {
+    if (editor.kind !== 'relationship' || existing || id || !from || !to) return;
+    setId(`${from}_to_${to}`.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase());
+  }, [editor.kind, existing, from, to, id]);
 
   const buildChange = (): ModelingAuthoringChange => {
     if (editor.kind === 'domain')
@@ -550,9 +549,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
               <Select value={domain} onChange={setDomain} values={Object.keys(data.modeling.packages)} t={t} />
             </Field>
           )}
-          <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'relationship' ? 'Relationship id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : editor.kind === 'import' ? 'Import id (optional)' : 'Domain id'}>
-            <Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" />
-          </Field>
+          {editor.kind !== 'relationship' && <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : editor.kind === 'import' ? 'Import id (optional)' : 'Domain id'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>}
           {editor.kind === 'domain' && (
             <Field label="Parent domain (optional)">
               <Select value={parent} onChange={setParent} values={Object.keys(data.modeling.packages)} t={t} />
@@ -575,6 +572,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
           )}
           {editor.kind === 'relationship' && (
             <>
+              <Message text="Choose the two analytical entities and their join keys. DQL keeps the relationship in draft until warehouse validation passes." t={t} />
               <div style={twoColumns}>
                 <Field label="From entity">
                   <Select value={from} onChange={setFrom} values={Object.keys(data.modeling.entities)} t={t} />
@@ -586,33 +584,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
               <Field label="Join key pairs">
                 <Input value={keyPairs} onChange={setKeyPairs} t={t} placeholder="customer_id=customer_id, tenant_id=tenant_id" />
               </Field>
-              <div style={twoColumns}>
-                <Field label="Business verb">
-                  <Input value={verb} onChange={setVerb} t={t} placeholder="belongs to" />
-                </Field>
-                <Field label="Allowed join types">
-                  <Input value={joinTypes} onChange={setJoinTypes} t={t} placeholder="left, inner" />
-                </Field>
-              </div>
-              <Field label="Description">
-                <Input value={description} onChange={setDescription} t={t} placeholder="Why this analytical relationship exists" />
-              </Field>
-              <div style={twoColumns}>
-                <Field label="From role">
-                  <Input value={fromRole} onChange={setFromRole} t={t} placeholder="orders" />
-                </Field>
-                <Field label="To role">
-                  <Input value={toRole} onChange={setToRole} t={t} placeholder="customer" />
-                </Field>
-              </div>
-              <div style={twoColumns}>
-                <Field label="From optionality">
-                  <Select value={fromOptionality} onChange={(value) => setFromOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} />
-                </Field>
-                <Field label="To optionality">
-                  <Select value={toOptionality} onChange={(value) => setToOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} />
-                </Field>
-              </div>
+              {id && <div style={{ color: t.textMuted, fontSize: 9.5 }}>Relationship id: <code>{id}</code></div>}
               <div style={twoColumns}>
                 <Field label="Cardinality">
                   <Select value={cardinality} onChange={(v) => setCardinality(v as RelationshipAuthoringInput['cardinality'])} values={['one_to_one', 'one_to_many', 'many_to_one', 'many_to_many']} t={t} />
@@ -622,29 +594,23 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
                 </Field>
               </div>
               <div style={twoColumns}>
-                <Field label="Measures allowed from">
-                  <Input value={measureSources} onChange={setMeasureSources} t={t} placeholder="order" />
+                <Field label="Business verb (optional)">
+                  <Input value={verb} onChange={setVerb} t={t} placeholder="belongs to" />
                 </Field>
-                <Field label="Dimensions allowed from">
-                  <Input value={dimensionSources} onChange={setDimensionSources} t={t} placeholder="customer" />
-                </Field>
-              </div>
-              <div style={twoColumns}>
-                <Field label="Required import refs">
-                  <Input value={importRefs} onChange={setImportRefs} t={t} placeholder="commerce.customer@1" />
-                </Field>
-                <Field label="Attribution block">
-                  <Input value={attributionBlock} onChange={setAttributionBlock} t={t} placeholder="growth.revenue_by_channel" />
+                <Field label="Description (optional)">
+                  <Input value={description} onChange={setDescription} t={t} placeholder="Why this relationship exists" />
                 </Field>
               </div>
-              <div style={twoColumns}>
-                <Field label="Evidence expires (ISO date)">
-                  <Input value={evidenceExpiresAt} onChange={setEvidenceExpiresAt} t={t} placeholder="2026-12-31" />
-                </Field>
-                <Field label="Lifecycle">
-                  <Select value={lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'review', 'certified', 'deprecated']} t={t} />
-                </Field>
-              </div>
+              {from && to && data.modeling.entities[from]?.domain !== data.modeling.entities[to]?.domain && <Message text="This is a cross-domain relationship. Add the approved provider import in Advanced governance before certification." t={t} />}
+              <button type="button" onClick={() => setShowAdvancedRelationship((value) => !value)} style={{ ...linkButton(t), justifySelf: 'start', padding: '6px 0' }}>{showAdvancedRelationship ? 'Hide advanced governance' : 'Advanced governance and aggregation'}</button>
+              {showAdvancedRelationship && <div style={{ display: 'grid', gap: 12, padding: 12, border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg }}>
+                <div style={twoColumns}><Field label="Allowed join types"><Input value={joinTypes} onChange={setJoinTypes} t={t} placeholder="left, inner" /></Field><Field label="Lifecycle"><Select value={lifecycle ?? 'draft'} onChange={(v) => setLifecycle(v as RelationshipAuthoringInput['status'])} values={['draft', 'review', 'certified', 'deprecated']} t={t} /></Field></div>
+                <div style={twoColumns}><Field label="From role"><Input value={fromRole} onChange={setFromRole} t={t} /></Field><Field label="To role"><Input value={toRole} onChange={setToRole} t={t} /></Field></div>
+                <div style={twoColumns}><Field label="From optionality"><Select value={fromOptionality} onChange={(value) => setFromOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} /></Field><Field label="To optionality"><Select value={toOptionality} onChange={(value) => setToOptionality(value as 'required' | 'optional' | 'unknown')} values={['required', 'optional', 'unknown']} t={t} /></Field></div>
+                <div style={twoColumns}><Field label="Measures allowed from"><Input value={measureSources} onChange={setMeasureSources} t={t} placeholder="order" /></Field><Field label="Dimensions allowed from"><Input value={dimensionSources} onChange={setDimensionSources} t={t} placeholder="customer" /></Field></div>
+                <div style={twoColumns}><Field label="Required import refs"><Input value={importRefs} onChange={setImportRefs} t={t} placeholder="commerce.customer@1" /></Field><Field label="Attribution block"><Input value={attributionBlock} onChange={setAttributionBlock} t={t} placeholder="growth.revenue_by_channel" /></Field></div>
+                <div style={twoColumns}><Field label="Evidence expires"><Input value={evidenceExpiresAt} onChange={setEvidenceExpiresAt} t={t} placeholder="2026-12-31" /></Field><Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field></div>
+              </div>}
               {validation && <Evidence evidence={validation} t={t} />}
             </>
           )}
@@ -735,7 +701,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
               </Field>
             </>
           )}
-          {editor.kind !== 'entity' && (
+          {editor.kind !== 'entity' && editor.kind !== 'relationship' && (
             <Field label="Owner">
               <Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" />
             </Field>
@@ -873,7 +839,7 @@ function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; d
   );
 }
 
-function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onChange, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onChange: (layer: ModelingLayer) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
+function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onBindModel, onRelationship, onChange, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onBindModel: () => void; onRelationship: () => void; onChange: (layer: ModelingLayer) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
   const copy: Record<ModelingLayer, string> = {
     conceptual: 'Business concepts and verbs. No columns or executable joins.',
     analytical: 'Editable agent-safe entities, dbt key references, cardinality, grain, and fanout policy.',
@@ -909,6 +875,7 @@ function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleL
           {value === 'physical' ? 'Physical dbt' : value}
         </button>
       ))}
+      {layer === 'analytical' && <><Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button><Button primary t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button></>}
       <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: '1 1 260px' }}>{copy[layer]}</span>
       {layer !== 'conceptual' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <label style={{ position: 'relative', width: 150 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
