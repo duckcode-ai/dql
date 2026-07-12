@@ -11,7 +11,7 @@ type Theme = (typeof themes)['dark'];
 type Tab = 'overview' | 'diagram' | 'interfaces' | 'contracts' | 'skills' | 'assets' | 'ai' | 'quality' | 'dbt';
 type Editor =
   | { kind: 'domain' }
-  | { kind: 'entity'; dbtUniqueId?: string }
+  | { kind: 'entity'; dbtUniqueId?: string; relationshipFrom?: { from: string; fromColumn?: string } }
   | {
       kind: 'relationship';
       relationship?: ManifestModelRelationship;
@@ -161,7 +161,7 @@ export function DbtFirstModelingPage() {
           flex: 1,
           minHeight: 0,
           display: 'grid',
-          gridTemplateColumns: '232px minmax(500px, 1fr) 310px',
+          gridTemplateColumns: 'clamp(190px, 15vw, 232px) minmax(460px, 1fr) clamp(270px, 22vw, 380px)',
         }}
       >
         <aside
@@ -257,7 +257,7 @@ export function DbtFirstModelingPage() {
                 <LayerToolbar layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onChange={setModelingLayer} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); setTab('ai'); }} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} layer={modelingLayer} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); setTab('ai'); }} theme={t} />
                 </div>
               </div>
             )}
@@ -276,6 +276,7 @@ export function DbtFirstModelingPage() {
             borderLeft: `1px solid ${t.headerBorder}`,
             overflow: 'auto',
             background: t.cellBg,
+            minWidth: 0,
           }}
         >
           <SideHeading t={t}>Inspector</SideHeading>
@@ -314,9 +315,12 @@ export function DbtFirstModelingPage() {
           selectedDomain={selectedDomain}
           t={t}
           onClose={() => setEditor(null)}
-          onApplied={async () => {
+          onApplied={async (applied) => {
             setEditor(null);
             await refresh();
+            if (editor.kind === 'entity' && editor.relationshipFrom && applied.operation === 'upsert_entity') {
+              setEditor({ kind: 'relationship', draft: { ...editor.relationshipFrom, to: applied.value.id } });
+            }
           }}
         />
       )}
@@ -324,7 +328,7 @@ export function DbtFirstModelingPage() {
   );
 }
 
-function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }: { editor: Editor; data: DbtFirstModelingResponse; selectedDomain: string | null; t: Theme; onClose: () => void; onApplied: () => Promise<void> }) {
+function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }: { editor: Editor; data: DbtFirstModelingResponse; selectedDomain: string | null; t: Theme; onClose: () => void; onApplied: (change: ModelingAuthoringChange) => Promise<void> }) {
   const existing = editor.kind === 'relationship' ? editor.relationship : undefined;
   const relationshipDraft = editor.kind === 'relationship' ? editor.draft : undefined;
   const [domain, setDomain] = useState(selectedDomain ?? Object.keys(data.modeling.packages)[0] ?? '');
@@ -376,6 +380,11 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
     if (editor.kind !== 'relationship' || existing || id || !from || !to) return;
     setId(`${from}_to_${to}`.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase());
   }, [editor.kind, existing, from, to, id]);
+  useEffect(() => {
+    if (editor.kind !== 'entity' || id || !dbtModel) return;
+    const name = data.dbtProvenance.nodes[dbtModel]?.name;
+    if (name) setId(name.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase());
+  }, [editor.kind, id, dbtModel, data.dbtProvenance.nodes]);
 
   const buildChange = (): ModelingAuthoringChange => {
     if (editor.kind === 'domain')
@@ -531,7 +540,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
     try {
       setBusy(true);
       await api.applyModelingChange(change, preview.fingerprint);
-      await onApplied();
+      await onApplied(change);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -850,11 +859,13 @@ function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleL
         display: 'flex',
         alignItems: 'center',
         gap: 6,
-        minHeight: 76,
-        padding: '0 12px',
+        minHeight: 50,
+        padding: '0 10px',
         borderBottom: `1px solid ${t.headerBorder}`,
         background: t.cellBg,
-        flexWrap: 'wrap',
+        flexWrap: 'nowrap',
+        overflowX: 'auto',
+        scrollbarWidth: 'thin',
       }}
     >
       <span style={{ color: t.textMuted, fontSize: 9, fontWeight: 700, textTransform: 'uppercase' }}>Detail</span>
@@ -875,10 +886,10 @@ function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleL
           {value === 'implementation' ? '+ dbt implementation' : value === 'analytics' ? '+ Analytics' : 'Business'}
         </button>
       ))}
-      {layer !== 'business' && <><Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button><Button t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button><span style={{ color: t.textMuted, fontSize: 9 }}>or drag between column dots</span></>}
-      <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: '1 1 260px' }}>{copy[layer]}</span>
+      {layer !== 'business' && <><IconButton t={t} title="Bind dbt model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton></>}
+      <span title={copy[layer]} style={{ marginLeft: 4, color: t.textMuted, fontSize: 10, maxWidth: 245, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{copy[layer]}</span>
       {layer !== 'business' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
-      <label style={{ position: 'relative', width: 150 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
+      <label style={{ position: 'relative', width: 138, flex: '0 0 138px' }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
       <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
       <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9 }}>Show <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 52, padding: '5px' }} /></label>
@@ -1404,6 +1415,11 @@ function EntityInspector({ entity, detail, t, onEdit }: { entity: ManifestModelE
       <Button t={t} onClick={onEdit}>
         Edit binding
       </Button>
+      <h3 style={inspectorHeading(t)}>Business context</h3>
+      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{detail?.description || `Add a business definition for ${entity.id} in dbt, then enrich its agent guidance with domain skills.`}</p>
+      <Property label="concepts" value={entity.conceptRefs?.join(', ') || 'Not mapped'} t={t} />
+      <Property label="analytical role" value={entity.analyticalRole ?? 'Not declared'} t={t} />
+      <h3 style={inspectorHeading(t)}>Analytics identity</h3>
       <Property label="dbt unique id" value={entity.dbtUniqueId} t={t} />
       <Property label="relation" value={detail?.relation ?? 'Loading…'} t={t} />
       <Property label="grain" value={entity.grain ?? detail?.dqlMeta?.grain ?? 'Not declared'} t={t} />
@@ -1437,10 +1453,16 @@ function RelationshipInspector({ relationship, t, onEdit }: { relationship: Mani
       <Button primary t={t} onClick={onEdit}>
         Validate / edit
       </Button>
+      <h3 style={inspectorHeading(t)}>Business meaning</h3>
+      <Property label="verb" value={relationship.verb ?? 'Not described'} t={t} />
+      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{relationship.description || `${relationship.from} relates to ${relationship.to}. Add a business description so agents can distinguish this route from similarly shaped joins.`}</p>
+      <h3 style={inspectorHeading(t)}>Join route</h3>
       <Property label="cardinality" value={relationship.cardinality} t={t} />
       <Property label="fanout" value={relationship.fanout} t={t} />
       <Property label="lifecycle" value={relationship.status} t={t} />
       <Property label="join keys" value={relationship.keys.map((key) => `${key.from} = ${key.to}`).join(', ')} t={t} />
+      <Property label="endpoint roles" value={[relationship.roles?.from, relationship.roles?.to].filter(Boolean).join(' → ') || 'Not declared'} t={t} />
+      <Property label="allowed joins" value={relationship.joinTypes?.join(', ') || 'left'} t={t} />
       <Property label="automatic agent join" value={relationship.automaticJoinAllowed ? 'Allowed' : 'Blocked'} t={t} />
       {relationship.validation ? <Evidence evidence={relationship.validation} t={t} /> : <Message text="No warehouse proof has been captured. This edge cannot authorize automatic SQL joins." t={t} />}
     </Inspector>

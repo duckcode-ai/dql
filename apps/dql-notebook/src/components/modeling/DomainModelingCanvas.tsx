@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, useNodesState, type Connection, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Dagre from '@dagrejs/dagre';
-import { KeyRound, Link2, ShieldCheck } from 'lucide-react';
+import { KeyRound, Link2, Plus, ShieldCheck } from 'lucide-react';
 import type { DbtNodeAuthoringDetail, ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
 import { themes } from '../../themes/notebook-theme';
 
@@ -28,9 +28,10 @@ type EntityNodeData = {
   columnMode: ColumnDisplayMode;
   density: DiagramDensity;
   theme: Theme;
+  onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void;
 };
 
-export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onSelectEntity, onSelectRelationship, onDraftRelationship, onDropDbtModel, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedId: string | null; layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onDropDbtModel: (uniqueId: string) => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
+export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onSelectEntity, onSelectRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedId: string | null; layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
   const layoutKey = `dql-model-layout:${selectedDomain ?? 'all'}:${layer}`;
   const [savedPositions, setSavedPositions] = useState<Record<string, { x: number; y: number }>>(() => readPositions(layoutKey));
   useEffect(() => setSavedPositions(readPositions(layoutKey)), [layoutKey]);
@@ -40,20 +41,25 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
     setSavedPositions({});
   }, [resetLayoutToken]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
-  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, theme]);
+  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, onAddRelatedModel, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, onAddRelatedModel, theme]);
   const [nodes, setNodes, onNodesChange] = useNodesState(graphNodes);
   useEffect(() => setNodes(graphNodes), [graphNodes, setNodes]);
   if (!graphNodes.length)
     return (
       <div
         style={{
-          display: 'grid',
+          display: 'flex',
+          flexDirection: 'column',
           placeItems: 'center',
+          justifyContent: 'center',
+          alignItems: 'center',
+          gap: 12,
           height: '100%',
           color: theme.textMuted,
         }}
       >
-        {search.trim() ? `No models or columns match “${search.trim()}”.` : 'Bind a dbt model to begin this Domain Model.'}
+        <strong style={{ color: theme.textPrimary }}>{search.trim() ? `No models or columns match “${search.trim()}”.` : 'Start your Domain Model'}</strong>
+        {!search.trim() && <><span>Bind a dbt model, then connect its columns to define governed analytical relationships.</span><div style={{ display: 'flex', gap: 8 }}><button onClick={onCreateDomain} style={emptyAction(theme)}><Plus size={13} /> Create domain</button><button onClick={() => onDropDbtModel('')} style={emptyAction(theme, true)}><Link2 size={13} /> Bind first model</button></div></>}
       </div>
     );
   const handleConnect = (connection: Connection) => {
@@ -78,7 +84,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
 }
 
 function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
-  const { entity, detail, relation, selected, layer, columnMode, density, theme } = data;
+  const { entity, detail, relation, selected, layer, columnMode, density, theme, onAddRelatedModel } = data;
   const [collapsed, setCollapsed] = useState(density === 'compact');
   const color = domainColor(entity.domain);
   const columns = detail?.columns ?? [];
@@ -88,6 +94,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   return (
     <div
       style={{
+        position: 'relative',
         width: layer === 'business' ? 250 : 292,
         borderRadius: 10,
         overflow: 'hidden',
@@ -98,6 +105,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
       }}
     >
       {layer !== 'business' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
+      {layer !== 'business' && <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: entity.id }); }} style={{ position: 'absolute', right: -11, top: 18, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: '2px solid #fff', background: color, color: '#fff', cursor: 'pointer', boxShadow: `0 0 0 1px ${color}66` }}><Plus size={12} /></button>}
       <div style={{ height: 5, background: color }} />
       <div style={{ padding: '10px 12px 9px' }}>
         <div
@@ -108,7 +116,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
             alignItems: 'center',
           }}
         >
-          <strong style={{ fontSize: 13 }}>{layer === 'business' ? concepts : entity.id}</strong><button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>
+          <strong style={{ fontSize: 13 }}>{layer === 'business' ? concepts : titleCase(entity.id)}</strong><button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>
           <span
             style={{
               fontSize: 9,
@@ -124,7 +132,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           </span>
         </div>
         {layer === 'business' ? (
-          <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 8 }}>Business concept backed by {entity.id}</div>
+          <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 8, lineHeight: 1.45 }}>{detail?.description || `Business concept backed by ${entity.id}`}</div>
         ) : (
           <>
             <div
@@ -202,7 +210,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   );
 }
 
-function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedId: string | null, layer: ModelingLayer, columnMode: ColumnDisplayMode, search: string, layoutMode: DiagramLayoutMode, density: DiagramDensity, visibleLimit: number, dimUnrelated: boolean, showEdgeLabels: boolean, savedPositions: Record<string, { x: number; y: number }>, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
+function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedId: string | null, layer: ModelingLayer, columnMode: ColumnDisplayMode, search: string, layoutMode: DiagramLayoutMode, density: DiagramDensity, visibleLimit: number, dimUnrelated: boolean, showEdgeLabels: boolean, savedPositions: Record<string, { x: number; y: number }>, onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
   const visibleRelationships = Object.values(modeling.relationships).filter((relationship) => {
     if (!selectedDomain) return true;
     const from = modeling.entities[relationship.from];
@@ -244,6 +252,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
             columnMode,
             density,
             theme,
+            onAddRelatedModel,
           },
           style: { height: 92 + columnCount * 29 },
         });
@@ -255,12 +264,21 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
     .map((relationship) => {
       const passed = relationship.validation?.status === 'passed';
       const color = relationship.automaticJoinAllowed ? '#2e9b63' : relationship.staleCertification ? '#d47822' : passed ? '#5b73d6' : '#9a6b2f';
-      const label = layer === 'business' ? relationship.verb || relationship.description || relationship.id : layer === 'implementation' ? relationship.keys.map((key) => `${key.from} = ${key.to}`).join(', ') : `${relationship.cardinality.replace(/_/g, ' ')} · ${relationship.fanout} · ${relationship.status}`;
+      const keyLabel = relationship.keys.map((key) => `${key.from} → ${key.to}`).join(', ');
+      const firstKey = relationship.keys[0];
+      const fromEntity = modeling.entities[relationship.from];
+      const toEntity = modeling.entities[relationship.to];
+      const fromColumns = fromEntity ? visibleColumnNames(fromEntity, detailsByDbtId[fromEntity.dbtUniqueId], layer, columnMode) : new Set<string>();
+      const toColumns = toEntity ? visibleColumnNames(toEntity, detailsByDbtId[toEntity.dbtUniqueId], layer, columnMode) : new Set<string>();
+      const label = layer === 'business' ? `${relationship.verb || relationship.description || titleCase(relationship.id)} · ${keyLabel}` : layer === 'implementation' ? `${keyLabel} · ${relationship.status}` : `${keyLabel} · ${relationship.fanout}`;
       return {
         id: relationship.id,
         source: relationship.from,
         target: relationship.to,
-        label: showEdgeLabels ? `${cardinalitySymbol(relationship.cardinality)} ${label}` : undefined,
+        sourceHandle: firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : undefined,
+        targetHandle: firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
+        type: 'smoothstep',
+        label: showEdgeLabels ? `${cardinalitySymbol(relationship.cardinality)}  ${label}` : undefined,
         animated: relationship.status === 'review',
         markerEnd: { type: MarkerType.ArrowClosed, color },
         style: {
@@ -281,7 +299,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
   const graph = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   graph.setGraph({
     rankdir: 'LR',
-    ranksep: density === 'compact' ? 70 : density === 'wide' ? 165 : 115,
+    ranksep: density === 'compact' ? 105 : density === 'wide' ? 230 : 170,
     nodesep: density === 'compact' ? 35 : density === 'wide' ? 90 : 60,
     marginx: 35,
     marginy: 35,
@@ -329,12 +347,16 @@ function ConstraintBadge({ label, color, icon }: { label: string; color: string;
 function MenuAction({ label, onClick, theme }: { label: string; onClick: () => void; theme: Theme }) { return <button onClick={onClick} style={{ width: '100%', textAlign: 'left', border: 0, borderRadius: 4, padding: '7px 8px', background: 'transparent', color: theme.textPrimary, fontSize: 11, cursor: 'pointer' }}>{label}</button>; }
 
 function visibleColumnCount(entity: ManifestModelEntity, detail: DbtNodeAuthoringDetail | undefined, layer: ModelingLayer, mode: ColumnDisplayMode): number {
-  if (layer === 'business') return 0;
+  return visibleColumnNames(entity, detail, layer, mode).size;
+}
+
+function visibleColumnNames(entity: ManifestModelEntity, detail: DbtNodeAuthoringDetail | undefined, layer: ModelingLayer, mode: ColumnDisplayMode): Set<string> {
+  if (layer === 'business') return new Set();
   const columns = detail?.columns ?? [];
-  if (layer === 'implementation' || mode === 'all') return Math.min(columns.length, 16);
+  if (layer === 'implementation' || mode === 'all') return new Set(columns.slice(0, 16).map((column) => column.name));
   const keys = new Set(entity.keys.length ? entity.keys : detail?.dqlMeta?.keys ?? []);
-  if (mode === 'keys') return Math.min(columns.filter((column) => keys.has(column.name)).length, 10);
-  return Math.min(columns.filter((column) => keys.has(column.name) || column.tests.length > 0).length, 10);
+  if (mode === 'keys') return new Set(columns.filter((column) => keys.has(column.name)).slice(0, 10).map((column) => column.name));
+  return new Set(columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10).map((column) => column.name));
 }
 
 function readPositions(key: string): Record<string, { x: number; y: number }> {
@@ -347,6 +369,9 @@ function parseColumnHandle(handle: string | null): string | undefined {
 }
 function handleStyle(color: string): React.CSSProperties {
   return { background: color, border: '2px solid #fff', width: 12, height: 12, boxShadow: `0 0 0 1px ${color}66`, cursor: 'crosshair' };
+}
+function emptyAction(theme: Theme, primary = false): React.CSSProperties {
+  return { display: 'inline-flex', alignItems: 'center', gap: 6, border: `1px solid ${primary ? theme.accent : theme.headerBorder}`, borderRadius: 6, padding: '7px 10px', color: primary ? theme.accent : theme.textSecondary, background: primary ? `${theme.accent}12` : theme.cellBg, cursor: 'pointer', fontSize: 11, fontWeight: 650 };
 }
 function titleCase(value: string): string {
   return value.replace(/[._-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
