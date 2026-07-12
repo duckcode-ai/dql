@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { applyModelingChange, previewModelingChange } from './dbt-first-authoring.js';
+import { applyModelingChange, loadDbtNodeAuthoringDetail, previewModelingChange } from './dbt-first-authoring.js';
 
 describe('dbt-first Domain Package authoring', () => {
   let root: string;
@@ -58,5 +58,21 @@ describe('dbt-first Domain Package authoring', () => {
     const source = readFileSync(join(root, 'domains', 'commerce', 'modeling', 'relationships.dql.yaml'), 'utf8');
     expect(source).toContain('query_fingerprint: proof');
     expect(source).toContain('max_to_per_key: 1');
+  });
+
+  it('attaches dbt generic test constraints to their columns', () => {
+    const target = join(root, 'target');
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, 'manifest.json'), JSON.stringify({
+      nodes: {
+        'model.shop.orders': { unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders', columns: { order_id: {} } },
+        'test.shop.unique_orders_order_id': { unique_id: 'test.shop.unique_orders_order_id', resource_type: 'test', name: 'unique_orders_order_id', column_name: 'order_id', test_metadata: { name: 'unique', kwargs: { column_name: 'order_id' } } },
+        'test.shop.not_null_orders_order_id': { unique_id: 'test.shop.not_null_orders_order_id', resource_type: 'test', name: 'not_null_orders_order_id', column_name: 'order_id', test_metadata: { name: 'not_null', kwargs: { column_name: 'order_id' } } },
+      },
+      sources: {},
+      child_map: { 'model.shop.orders': ['test.shop.unique_orders_order_id', 'test.shop.not_null_orders_order_id'] },
+    }));
+    const detail = loadDbtNodeAuthoringDetail(join(target, 'manifest.json'), 'model.shop.orders');
+    expect(detail?.columns[0]?.tests).toEqual(['not_null', 'unique']);
   });
 });

@@ -190,11 +190,21 @@ export function loadDbtNodeAuthoringDetail(manifestPath: string, uniqueId: strin
   const childMap = asRecord(manifest.child_map);
   const childIds = Array.isArray(childMap[uniqueId]) ? childMap[uniqueId] as unknown[] : [];
   const testNodes = asRecord(manifest.nodes);
-  const modelTests = childIds
+  const childTests = childIds
     .map((id) => asRecord(testNodes[String(id)]))
-    .filter((node) => node.resource_type === 'test')
+    .filter((node) => node.resource_type === 'test');
+  const modelTests = childTests
     .map((node) => String(node.name ?? node.unique_id ?? 'test'))
     .sort();
+  const testsByColumn = new Map<string, string[]>();
+  for (const node of childTests) {
+    const metadata = asRecord(node.test_metadata);
+    const kwargs = asRecord(metadata.kwargs);
+    const columnName = stringValue(node.column_name) ?? stringValue(kwargs.column_name);
+    if (!columnName) continue;
+    const name = stringValue(metadata.name) ?? stringValue(node.name) ?? 'test';
+    testsByColumn.set(columnName, [...(testsByColumn.get(columnName) ?? []), name]);
+  }
   const names = new Set([...Object.keys(manifestColumns), ...Object.keys(catalogColumns)]);
   const columns = [...names].sort().map((name) => {
     const manifestColumn = asRecord(manifestColumns[name]);
@@ -203,7 +213,7 @@ export function loadDbtNodeAuthoringDetail(manifestPath: string, uniqueId: strin
       name,
       type: stringValue(catalogColumn.type),
       description: stringValue(manifestColumn.description),
-      tests: stringArray(manifestColumn.tests),
+      tests: [...new Set([...stringArray(manifestColumn.tests), ...(testsByColumn.get(name) ?? [])])].sort(),
     };
   });
   const dqlMeta = asRecord(asRecord(raw.meta).dql);

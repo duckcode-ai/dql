@@ -8,7 +8,7 @@ import { SkillsPage } from '../skills/SkillsPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingLayer, type RelationshipDraft } from './DomainModelingCanvas';
 
 type Theme = (typeof themes)['dark'];
-type Tab = 'overview' | 'diagram' | 'relationships' | 'interfaces' | 'contracts' | 'skills' | 'assets' | 'ai' | 'quality' | 'dbt';
+type Tab = 'overview' | 'diagram' | 'interfaces' | 'contracts' | 'skills' | 'assets' | 'ai' | 'quality' | 'dbt';
 type Editor =
   | { kind: 'domain' }
   | { kind: 'entity'; dbtUniqueId?: string }
@@ -237,7 +237,7 @@ export function DbtFirstModelingPage() {
               background: t.cellBg,
             }}
           >
-            {(['overview', 'diagram', 'relationships', 'interfaces', 'contracts', 'skills', 'assets', 'ai', 'quality', 'dbt'] as Tab[]).map((value) => (
+            {(['overview', 'diagram', 'interfaces', 'contracts', 'skills', 'assets', 'ai', 'quality', 'dbt'] as Tab[]).map((value) => (
               <button key={value} onClick={() => setTab(value)} style={tabButton(t, tab === value)}>
                 {value === 'dbt' ? 'dbt sources' : value === 'ai' ? 'AI setup' : value[0]!.toUpperCase() + value.slice(1)}
               </button>
@@ -261,7 +261,6 @@ export function DbtFirstModelingPage() {
                 </div>
               </div>
             )}
-            {tab === 'relationships' && <RelationshipTable relationships={domainRelationships} entities={data.modeling.entities} t={t} onSelect={setSelectedId} onEdit={(relationship) => setEditor({ kind: 'relationship', relationship })} />}
             {tab === 'interfaces' && <InterfaceTable data={data} domain={selectedDomain} t={t} onCreateExport={() => setEditor({ kind: 'export' })} onCreateImport={() => setEditor({ kind: 'import' })} />}
             {tab === 'contracts' && <ContractTable data={data} domain={selectedDomain} t={t} onCreate={() => setEditor({ kind: 'contract' })} />}
             {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} />}
@@ -304,7 +303,7 @@ export function DbtFirstModelingPage() {
               }
             />
           ) : (
-            <StudioSummary data={data} domainEntities={domainEntities} domainRelationships={domainRelationships} t={t} />
+            <StudioSummary data={data} domainEntities={domainEntities} domainRelationships={domainRelationships} t={t} onSelectRelationship={setSelectedId} />
           )}
         </aside>
       </div>
@@ -875,7 +874,7 @@ function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleL
           {value === 'physical' ? 'Physical dbt' : value}
         </button>
       ))}
-      {layer === 'analytical' && <><Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button><Button primary t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button></>}
+      {layer === 'analytical' && <><Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button><Button t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button><span style={{ color: t.textMuted, fontSize: 9 }}>or drag between column dots</span></>}
       <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: '1 1 260px' }}>{copy[layer]}</span>
       {layer !== 'conceptual' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <label style={{ position: 'relative', width: 150 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
@@ -1447,13 +1446,15 @@ function RelationshipInspector({ relationship, t, onEdit }: { relationship: Mani
   );
 }
 
-function StudioSummary({ data, domainEntities, domainRelationships, t }: { data: DbtFirstModelingResponse; domainEntities: ManifestModelEntity[]; domainRelationships: ManifestModelRelationship[]; t: Theme }) {
+function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectRelationship }: { data: DbtFirstModelingResponse; domainEntities: ManifestModelEntity[]; domainRelationships: ManifestModelRelationship[]; t: Theme; onSelectRelationship: (id: string) => void }) {
   return (
     <Inspector t={t}>
-      <InspectorTitle title="Domain overview" subtitle="Select a node or edge to inspect it." t={t} />
+      <InspectorTitle title="Domain overview" subtitle="Select a model or relationship to inspect it." t={t} />
       <Metric value={domainEntities.length} label="Analytical entities" color={t.accent} t={t} />
       <div style={{ height: 8 }} />
       <Metric value={domainRelationships.length} label="Relationships" color="#377cc8" t={t} />
+      <h3 style={inspectorHeading(t)}>Relationships</h3>
+      {domainRelationships.length ? domainRelationships.map((relationship) => <button key={relationship.id} onClick={() => onSelectRelationship(relationship.id)} style={{ width: '100%', textAlign: 'left', border: 0, borderBottom: `1px solid ${t.headerBorder}`, background: 'transparent', color: t.textPrimary, padding: '8px 2px', cursor: 'pointer', fontSize: 10.5 }}><b>{relationship.id}</b><span style={{ display: 'block', color: t.textMuted, marginTop: 3 }}>{relationship.from} → {relationship.to} · {relationship.cardinality.replace(/_/g, ' ')}</span></button>) : <p style={{ color: t.textMuted, fontSize: 10.5 }}>Drag between two column handles to create the first relationship.</p>}
       <div style={{ height: 8 }} />
       <Metric value={Object.keys(data.modeling.contracts).length} label="Contracts" color="#2e9b63" t={t} />
       <h3 style={inspectorHeading(t)}>Ownership boundary</h3>

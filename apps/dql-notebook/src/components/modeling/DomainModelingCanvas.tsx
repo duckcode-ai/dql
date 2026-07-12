@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, type Connection, type Edge, type Node, type NodeProps } from '@xyflow/react';
+import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, useNodesState, type Connection, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Dagre from '@dagrejs/dagre';
+import { KeyRound, Link2, ShieldCheck } from 'lucide-react';
 import type { DbtNodeAuthoringDetail, ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
 import { themes } from '../../themes/notebook-theme';
 
@@ -38,8 +39,10 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
     setSavedPositions({});
   }, [resetLayoutToken]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
-  const { nodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, theme]);
-  if (!nodes.length)
+  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, layer, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, theme]);
+  const [nodes, setNodes, onNodesChange] = useNodesState(graphNodes);
+  useEffect(() => setNodes(graphNodes), [graphNodes, setNodes]);
+  if (!graphNodes.length)
     return (
       <div
         style={{
@@ -63,7 +66,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   };
   return (
     <div style={{ height: '100%', position: 'relative' }} onClick={() => setContextMenu(null)}>
-    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable={layer === 'analytical'} onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable={layer === 'analytical'} onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
       <Background color={theme.headerBorder} gap={20} size={1} />
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable nodeColor={(node) => domainColor(String((node.data as EntityNodeData).entity.domain))} maskColor={`${theme.appBg}bb`} />
@@ -173,11 +176,10 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
               }}
             >
               {layer === 'analytical' && <Handle id={`target:${column.name}`} type="target" position={Position.Left} style={{ ...handleStyle(color), top: '50%' }} />}
-              <span style={{ fontWeight: keys.has(column.name) ? 700 : 500 }}>
-                {keys.has(column.name) ? '🔑 ' : ''}
-                {column.name}
+              <span style={{ fontWeight: keys.has(column.name) ? 700 : 500, display: 'flex', gap: 5, alignItems: 'center' }}>
+                {keys.has(column.name) ? <KeyRound size={10} color="#d49a22" /> : null}{column.name}
               </span>
-              <span style={{ color: theme.textMuted }}>{column.type ?? (column.tests.length ? column.tests[0] : '')}</span>
+              <span style={{ color: theme.textMuted, display: 'flex', gap: 3, alignItems: 'center' }}>{column.type ?? ''}{constraintBadges(column.tests, keys.has(column.name))}</span>
               {layer === 'analytical' && <Handle id={`source:${column.name}`} type="source" position={Position.Right} style={{ ...handleStyle(color), top: '50%' }} />}
             </div>
           ))}
@@ -313,6 +315,16 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
 
 function cardinalitySymbol(value: string): string { return value === 'one_to_one' ? '1:1' : value === 'one_to_many' ? '1:N' : value === 'many_to_one' ? 'N:1' : value === 'many_to_many' ? 'N:N' : '?'; }
 function NodeBadge({ text, color }: { text: string; color: string }) { return <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '2px 5px', fontSize: 8, fontWeight: 700 }}>{text}</span>; }
+function constraintBadges(tests: string[], primary: boolean): React.ReactNode {
+  const normalized = tests.map((test) => test.toLowerCase());
+  const badges: React.ReactNode[] = [];
+  if (primary) badges.push(<ConstraintBadge key="pk" label="PK" color="#d49a22" icon={<KeyRound size={7} />} />);
+  if (normalized.some((test) => test.includes('relationship'))) badges.push(<ConstraintBadge key="fk" label="FK" color="#7b61d1" icon={<Link2 size={7} />} />);
+  if (normalized.some((test) => test.includes('unique'))) badges.push(<ConstraintBadge key="uq" label="UQ" color="#2c8f9e" icon={<ShieldCheck size={7} />} />);
+  if (normalized.some((test) => test.includes('not_null'))) badges.push(<ConstraintBadge key="nn" label="NN" color="#c9515d" />);
+  return badges;
+}
+function ConstraintBadge({ label, color, icon }: { label: string; color: string; icon?: React.ReactNode }) { return <span title={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 1, color, border: `1px solid ${color}55`, background: `${color}12`, borderRadius: 3, padding: '1px 2px', fontSize: 7, fontWeight: 800 }}>{icon}{label}</span>; }
 function MenuAction({ label, onClick, theme }: { label: string; onClick: () => void; theme: Theme }) { return <button onClick={onClick} style={{ width: '100%', textAlign: 'left', border: 0, borderRadius: 4, padding: '7px 8px', background: 'transparent', color: theme.textPrimary, fontSize: 11, cursor: 'pointer' }}>{label}</button>; }
 
 function visibleColumnCount(entity: ManifestModelEntity, detail: DbtNodeAuthoringDetail | undefined, layer: ModelingLayer, mode: ColumnDisplayMode): number {
@@ -333,7 +345,7 @@ function parseColumnHandle(handle: string | null): string | undefined {
   return handle?.includes(':') ? handle.slice(handle.indexOf(':') + 1) : undefined;
 }
 function handleStyle(color: string): React.CSSProperties {
-  return { background: color, border: '1px solid #fff', width: 9, height: 9 };
+  return { background: color, border: '2px solid #fff', width: 12, height: 12, boxShadow: `0 0 0 1px ${color}66`, cursor: 'crosshair' };
 }
 function titleCase(value: string): string {
   return value.replace(/[._-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
