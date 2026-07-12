@@ -9,15 +9,15 @@ not maintain a second `schema.yml`.
 
 ## One source of truth, one sparse overlay
 
-| Concern | Owner | DQL behavior |
-| --- | --- | --- |
-| Model SQL, columns, descriptions, dbt tests | dbt | Read from dbt artifacts; edit through a previewed dbt YAML patch |
-| Transformation lineage | dbt | Import as provenance and transformation lineage |
-| MetricFlow models, measures, dimensions and formulas | dbt / MetricFlow | Compose from the dbt semantic artifact |
-| Domain/subdomain/microdomain organization | DQL | Git-versioned Domain Packages |
-| Entity binding, relationship cardinality, fanout, export policy | DQL | Sparse analytical overlay only where dbt is insufficient |
-| Business contracts, conformance, reusable blocks and apps | DQL | Version, review and certify in the DQL project |
-| Agent hints and evaluations | DQL | Draft → evaluate → review → approved retrieval |
+| Concern                                                         | Owner            | DQL behavior                                                     |
+| --------------------------------------------------------------- | ---------------- | ---------------------------------------------------------------- |
+| Model SQL, columns, descriptions, dbt tests                     | dbt              | Read from dbt artifacts; edit through a previewed dbt YAML patch |
+| Transformation lineage                                          | dbt              | Import as provenance and transformation lineage                  |
+| MetricFlow models, measures, dimensions and formulas            | dbt / MetricFlow | Compose from the dbt semantic artifact                           |
+| Domain/subdomain/microdomain organization                       | DQL              | Git-versioned Domain Packages                                    |
+| Entity binding, relationship cardinality, fanout, export policy | DQL              | Sparse analytical overlay only where dbt is insufficient         |
+| Business contracts, conformance, reusable blocks and apps       | DQL              | Version, review and certify in the DQL project                   |
+| Agent hints and evaluations                                     | DQL              | Draft → evaluate → review → approved retrieval                   |
 
 The compiler records dbt **provenance**—unique IDs, artifact paths,
 fingerprints and availability—not a serialized copy of physical columns,
@@ -33,10 +33,7 @@ domains/
   commerce/
     domain.dql
     modeling/
-      entities.dql.yaml
-      relationships.dql.yaml
-      interfaces.dql.yaml
-      contracts.dql.yaml
+      model.dql.yaml
       layouts/
     terms/
     blocks/
@@ -49,12 +46,15 @@ domains/
   growth/
     domain.dql
     modeling/
-      relationships.dql.yaml
-      interfaces.dql.yaml
+      model.dql.yaml
     blocks/
     views/
     apps/
 ```
+
+The model file is unified by default: entities, relationships, contracts, and
+cross-domain interfaces are sections of the same Git-versioned Domain Model.
+Split files remain an optional organization choice for large domains.
 
 Domains organize ownership and retrieval; they do **not** imply a safe join or
 automatic cross-domain access. A generated analytical join needs a DQL

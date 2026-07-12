@@ -1,5 +1,0 @@
-entities:
-  - id: acquisition
-    dbt_model: model.dbt_first_commerce.dim_customer_acquisition
-  - id: campaign_touch
-    dbt_model: model.dbt_first_commerce.fct_campaign_touches

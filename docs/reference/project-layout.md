@@ -13,10 +13,7 @@ my-dql-project/
 │   ├─ customer/
 │   │   ├─ domain.dql
 │   │   ├─ modeling/
-│   │   │   ├─ entities.dql.yaml
-│   │   │   ├─ relationships.dql.yaml
-│   │   │   ├─ interfaces.dql.yaml
-│   │   │   ├─ contracts.dql.yaml
+│   │   │   ├─ model.dql.yaml       # entities, relationships, contracts, interfaces
 │   │   │   └─ layouts/
 │   │   ├─ terms/
 │   │   ├─ skills/
@@ -35,6 +32,10 @@ my-dql-project/
 ├─ semantic-layer/          # optional local semantic source
 └─ .dql/cache/
 ```
+
+`model.dql.yaml` is the simple default. A large domain may split its sections
+into multiple `*.dql.yaml` files under `modeling/`; both layouts compile into
+the same Domain Model and manifest.
 
 The compiler scans both layouts and emits one manifest. Use:
 

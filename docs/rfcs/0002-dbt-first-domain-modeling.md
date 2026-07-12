@@ -1,21 +1,21 @@
 # RFC 0002: dbt-first domain modeling for DuckCode DQL
 
-| Field | Value |
-|---|---|
-| **Author(s)** | @KKranthi6881 |
-| **Status** | Accepted for implementation |
-| **Created** | 2026-07-10 |
-| **Targets** | DQL `>= 2.0` (opt-in in the v1 compatibility window) |
-| **Discussion** | TBD |
-| **Implementation** | `codex/dql-2-dbt-first-modeling` |
-| **Supersedes** | The DataLex federation model for analytics modeling |
+| Field              | Value                                                |
+| ------------------ | ---------------------------------------------------- |
+| **Author(s)**      | @KKranthi6881                                        |
+| **Status**         | Accepted for implementation                          |
+| **Created**        | 2026-07-10                                           |
+| **Targets**        | DQL `>= 2.0` (opt-in in the v1 compatibility window) |
+| **Discussion**     | TBD                                                  |
+| **Implementation** | `codex/dql-2-dbt-first-modeling`                     |
+| **Supersedes**     | The DataLex federation model for analytics modeling  |
 
 ## Summary
 
 DQL 2.0 makes DQL the single open-source, dbt-first governed analytics
 workspace. dbt remains the authoritative owner of physical models, columns,
 tests, descriptions, model-level lineage, and MetricFlow formulas. DQL adds a
-*small analytical overlay*: domain selection, business identity where dbt does
+_small analytical overlay_: domain selection, business identity where dbt does
 not express it, explicit relationship safety, cross-domain contracts,
 conformance rules, certified blocks, notebooks, stakeholder apps, skills,
 evaluations, and approved learning hints.
@@ -53,15 +53,15 @@ The design therefore has two non-negotiable truths:
 
 ## Terminology and ownership
 
-| Object | Owner | Stored as |
-| --- | --- | --- |
-| Model SQL, physical columns, descriptions, tests, dbt model lineage | dbt | dbt project + artifacts |
-| MetricFlow semantic model, measures, dimensions, metrics and formulas | dbt / MetricFlow | dbt YAML + semantic artifact |
-| Domain, subdomain and microdomain selection | DQL | Domain Package |
-| dbt entity binding, grain declaration when not supplied by dbt | DQL | sparse overlay |
-| Relationship/cardinality/fanout and cross-domain export policy | DQL | Domain Package |
-| Business contract, conformance rule, skill, evaluation and approved hint | DQL | Domain Package |
-| Reusable analytical block, notebook, business view and stakeholder app | DQL | DQL project |
+| Object                                                                   | Owner            | Stored as                    |
+| ------------------------------------------------------------------------ | ---------------- | ---------------------------- |
+| Model SQL, physical columns, descriptions, tests, dbt model lineage      | dbt              | dbt project + artifacts      |
+| MetricFlow semantic model, measures, dimensions, metrics and formulas    | dbt / MetricFlow | dbt YAML + semantic artifact |
+| Domain, subdomain and microdomain selection                              | DQL              | Domain Package               |
+| dbt entity binding, grain declaration when not supplied by dbt           | DQL              | sparse overlay               |
+| Relationship/cardinality/fanout and cross-domain export policy           | DQL              | Domain Package               |
+| Business contract, conformance rule, skill, evaluation and approved hint | DQL              | Domain Package               |
+| Reusable analytical block, notebook, business view and stakeholder app   | DQL              | DQL project                  |
 
 A **Domain Package** is a Git-versioned folder under `domains/`. It groups a
 domain's analytical intent without creating a copy of dbt source metadata:
@@ -71,11 +71,7 @@ domains/
   commerce/
     domain.dql
     modeling/
-      entities.dql.yaml
-      relationships.dql.yaml
-      interfaces.dql.yaml
-      contracts.dql.yaml
-      rules.dql.yaml
+      model.dql.yaml
       layouts/
     terms/
     blocks/
@@ -88,8 +84,7 @@ domains/
   growth/
     domain.dql
     modeling/
-      relationships.dql.yaml
-      interfaces.dql.yaml
+      model.dql.yaml
     blocks/
     views/
 ```
@@ -137,12 +132,14 @@ that patch is an explicit source-control action, not a DQL overlay write.
 
 ### 3. Sparse overlay source
 
-Domain Packages may use YAML initially so that relationship and contract files
-are concise and easy to review. The source grammar is versioned and parsed by
-the compiler; the manifest is the generated result. A representative package:
+Each Domain Package has one logical Domain Model. New projects store its sparse
+overlay in `model.dql.yaml`; large projects may split sections into multiple
+YAML files without changing the compiled graph. The source grammar is versioned
+and parsed by the compiler; the manifest is the generated result. A
+representative package:
 
 ```yaml
-# domains/commerce/modeling/entities.dql.yaml
+# domains/commerce/modeling/model.dql.yaml
 entities:
   - id: commerce.orders.order
     dbt_model: model.jaffle_shop.fct_orders
@@ -152,10 +149,6 @@ entities:
     dbt_model: model.jaffle_shop.dim_customers
     domain: commerce.customers
     grain: customer_id
-```
-
-```yaml
-# domains/commerce/modeling/relationships.dql.yaml
 relationships:
   - id: order_to_customer
     from: commerce.orders.order
@@ -166,6 +159,11 @@ relationships:
     status: certified
     owner: analytics@company.test
 ```
+
+The UI and compiler treat these sections as one model. Existing
+`entities.dql.yaml`, `relationships.dql.yaml`, `interfaces.dql.yaml`, and
+`contracts.dql.yaml` sources remain supported for compatibility and optional
+large-domain decomposition.
 
 An entity binding is valid only if its `dbt_model` resolves to a dbt unique ID.
 `grain` is optional when trustworthy dbt/MetricFlow identity metadata exists;

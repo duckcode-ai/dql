@@ -21,7 +21,7 @@ describe('dbt-first Domain Package authoring', () => {
       value: { id: 'order', domain: 'commerce', dbtModel: 'model.shop.orders', grain: 'order_id', keys: ['order_id'] },
     };
     const preview = previewModelingChange(root, change);
-    expect(preview.patches[0]).toMatchObject({ path: 'domains/commerce/modeling/entities.dql.yaml', changed: true });
+    expect(preview.patches[0]).toMatchObject({ path: 'domains/commerce/modeling/model.dql.yaml', changed: true });
     expect(preview.patches[0]?.after).toContain('dbt_model: model.shop.orders');
     expect(preview.patches[0]?.after).not.toContain('columns:');
 
@@ -55,9 +55,20 @@ describe('dbt-first Domain Package authoring', () => {
       },
     };
     applyModelingChange(root, change);
-    const source = readFileSync(join(root, 'domains', 'commerce', 'modeling', 'relationships.dql.yaml'), 'utf8');
+    const source = readFileSync(join(root, 'domains', 'commerce', 'modeling', 'model.dql.yaml'), 'utf8');
     expect(source).toContain('query_fingerprint: proof');
     expect(source).toContain('max_to_per_key: 1');
+  });
+
+  it('edits an existing split source in place during compatibility migration', () => {
+    const modeling = join(root, 'domains', 'commerce', 'modeling');
+    mkdirSync(modeling, { recursive: true });
+    writeFileSync(join(modeling, 'entities.dql.yaml'), 'entities:\n  - id: order\n    dbt_model: model.shop.old_orders\n');
+    const preview = previewModelingChange(root, {
+      operation: 'upsert_entity',
+      value: { id: 'order', domain: 'commerce', dbtModel: 'model.shop.orders' },
+    });
+    expect(preview.patches[0]?.path).toBe('domains/commerce/modeling/entities.dql.yaml');
   });
 
   it('attaches dbt generic test constraints to their columns', () => {

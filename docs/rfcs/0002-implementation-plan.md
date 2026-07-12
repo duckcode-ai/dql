@@ -25,8 +25,10 @@
 3. Build the provenance index from dbt `manifest.json`, `catalog.json` and
    `semantic_manifest.json`. Persist only source paths, unique IDs, relation
    identifiers, availability references and stable fingerprints.
-4. Make `domain.dql` the canonical package declaration and parse sparse files
-   under `modeling/`. Legacy `domain.dql.yaml` is compatibility-only and a
+4. Make `domain.dql` the canonical package declaration and use
+   `modeling/model.dql.yaml` as the single sparse Domain Model default. Parse
+   optional split files under `modeling/` for large-domain compatibility.
+   Legacy `domain.dql.yaml` is compatibility-only and a
    conflicting dual declaration is a compile error. Bind entities only to
    known dbt unique IDs.
 5. Add stable diagnostics for unresolved bindings, invalid key pairs, missing

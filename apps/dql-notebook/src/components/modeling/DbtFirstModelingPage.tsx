@@ -32,7 +32,7 @@ export function DbtFirstModelingPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [detailsByDbtId, setDetailsByDbtId] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
-  const [modelingLayer, setModelingLayer] = useState<ModelingLayer>('analytical');
+  const [modelingLayer, setModelingLayer] = useState<ModelingLayer>('analytics');
   const savedDiagramPreferences = useMemo(() => readDiagramPreferences(), []);
   const [columnMode, setColumnMode] = useState<ColumnDisplayMode>(savedDiagramPreferences.columnMode ?? 'relevant');
   const [diagramSearch, setDiagramSearch] = useState('');
@@ -210,7 +210,7 @@ export function DbtFirstModelingPage() {
           <SideHeading t={t}>dbt inventory</SideHeading>
           <div style={{ padding: '0 10px 12px', fontSize: 11, color: t.textMuted }}>{unboundNodes.length} unbound models</div>
           {unboundNodes.slice(0, 12).map((node) => (
-            <button key={node.uniqueId} draggable onDragStart={(event) => { event.dataTransfer.setData('application/x-dql-dbt-model', node.uniqueId); event.dataTransfer.effectAllowed = 'copy'; }} title="Drag onto the Diagram or click to bind" onClick={() => setEditor({ kind: 'entity', dbtUniqueId: node.uniqueId })} style={{ ...inventoryButton(t), cursor: 'grab' }}>
+            <button key={node.uniqueId} draggable onDragStart={(event) => { event.dataTransfer.setData('application/x-dql-dbt-model', node.uniqueId); event.dataTransfer.effectAllowed = 'copy'; }} title="Drag onto the Domain Model or click to bind" onClick={() => setEditor({ kind: 'entity', dbtUniqueId: node.uniqueId })} style={{ ...inventoryButton(t), cursor: 'grab' }}>
               <FileCode2 size={12} />
               <span>{node.name}</span>
               <Plus size={12} />
@@ -239,7 +239,7 @@ export function DbtFirstModelingPage() {
           >
             {(['overview', 'diagram', 'interfaces', 'contracts', 'skills', 'assets', 'ai', 'quality', 'dbt'] as Tab[]).map((value) => (
               <button key={value} onClick={() => setTab(value)} style={tabButton(t, tab === value)}>
-                {value === 'dbt' ? 'dbt sources' : value === 'ai' ? 'AI setup' : value[0]!.toUpperCase() + value.slice(1)}
+                {value === 'dbt' ? 'dbt sources' : value === 'ai' ? 'AI setup' : value === 'diagram' ? 'Domain Model' : value[0]!.toUpperCase() + value.slice(1)}
               </button>
             ))}
           </nav>
@@ -840,9 +840,9 @@ function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; d
 
 function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onBindModel, onRelationship, onChange, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { layer: ModelingLayer; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onBindModel: () => void; onRelationship: () => void; onChange: (layer: ModelingLayer) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
   const copy: Record<ModelingLayer, string> = {
-    conceptual: 'Business concepts and verbs. No columns or executable joins.',
-    analytical: 'Editable agent-safe entities, dbt key references, cardinality, grain, and fanout policy.',
-    physical: 'Read-only dbt implementation detail. Edit dbt-owned metadata in dbt source files.',
+    business: 'Business meaning for the same entities and relationships.',
+    analytics: 'Adds agent-safe grain, keys, cardinality, fanout, and governed relationship authoring.',
+    implementation: 'Adds read-only dbt columns, types, tests, lineage, and physical join evidence.',
   };
   return (
     <div
@@ -857,7 +857,8 @@ function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleL
         flexWrap: 'wrap',
       }}
     >
-      {(['conceptual', 'analytical', 'physical'] as ModelingLayer[]).map((value) => (
+      <span style={{ color: t.textMuted, fontSize: 9, fontWeight: 700, textTransform: 'uppercase' }}>Detail</span>
+      {(['business', 'analytics', 'implementation'] as ModelingLayer[]).map((value) => (
         <button
           key={value}
           onClick={() => onChange(value)}
@@ -871,12 +872,12 @@ function LayerToolbar({ layer, columnMode, search, layoutMode, density, visibleL
             textTransform: 'capitalize',
           }}
         >
-          {value === 'physical' ? 'Physical dbt' : value}
+          {value === 'implementation' ? '+ dbt implementation' : value === 'analytics' ? '+ Analytics' : 'Business'}
         </button>
       ))}
-      {layer === 'analytical' && <><Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button><Button t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button><span style={{ color: t.textMuted, fontSize: 9 }}>or drag between column dots</span></>}
+      {layer !== 'business' && <><Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button><Button t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button><span style={{ color: t.textMuted, fontSize: 9 }}>or drag between column dots</span></>}
       <span style={{ marginLeft: 6, color: t.textMuted, fontSize: 10.5, flex: '1 1 260px' }}>{copy[layer]}</span>
-      {layer !== 'conceptual' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
+      {layer !== 'business' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <label style={{ position: 'relative', width: 150 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
       <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>

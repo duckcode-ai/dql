@@ -6,7 +6,8 @@ import { KeyRound, Link2, ShieldCheck } from 'lucide-react';
 import type { DbtNodeAuthoringDetail, ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
 import { themes } from '../../themes/notebook-theme';
 
-export type ModelingLayer = 'conceptual' | 'analytical' | 'physical';
+/** Progressive detail for one Domain Model, never separate model graphs. */
+export type ModelingLayer = 'business' | 'analytics' | 'implementation';
 export type ColumnDisplayMode = 'keys' | 'relevant' | 'all';
 export type DiagramLayoutMode = 'auto' | 'grid' | 'star';
 export type DiagramDensity = 'compact' | 'normal' | 'wide';
@@ -52,11 +53,11 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
           color: theme.textMuted,
         }}
       >
-        {search.trim() ? `No models or columns match “${search.trim()}”.` : 'Bind a dbt model to this domain to begin the analytical graph.'}
+        {search.trim() ? `No models or columns match “${search.trim()}”.` : 'Bind a dbt model to begin this Domain Model.'}
       </div>
     );
   const handleConnect = (connection: Connection) => {
-    if (layer !== 'analytical' || !connection.source || !connection.target) return;
+    if (layer === 'business' || !connection.source || !connection.target) return;
     onDraftRelationship({
       from: connection.source,
       to: connection.target,
@@ -66,12 +67,12 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   };
   return (
     <div style={{ height: '100%', position: 'relative' }} onClick={() => setContextMenu(null)}>
-    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable={layer === 'analytical'} onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable={layer !== 'business'} onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
       <Background color={theme.headerBorder} gap={20} size={1} />
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable nodeColor={(node) => domainColor(String((node.data as EntityNodeData).entity.domain))} maskColor={`${theme.appBg}bb`} />
     </ReactFlow>
-    {contextMenu && <div style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 50, width: 178, border: `1px solid ${theme.headerBorder}`, borderRadius: 7, background: theme.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }} onClick={(event) => event.stopPropagation()}><MenuAction label="Inspect entity" onClick={() => { onSelectEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Edit analytical binding" onClick={() => { onEditEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Ask AI about entity" onClick={() => { onOpenAi(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Start relationship" onClick={() => { onDraftRelationship({ from: contextMenu.nodeId, to: '' }); setContextMenu(null); }} theme={theme} /></div>}
+    {contextMenu && <div style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 50, width: 178, border: `1px solid ${theme.headerBorder}`, borderRadius: 7, background: theme.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }} onClick={(event) => event.stopPropagation()}><MenuAction label="Inspect entity" onClick={() => { onSelectEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Edit Domain Model binding" onClick={() => { onEditEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Ask AI about entity" onClick={() => { onOpenAi(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Start relationship" onClick={() => { onDraftRelationship({ from: contextMenu.nodeId, to: '' }); setContextMenu(null); }} theme={theme} /></div>}
     </div>
   );
 }
@@ -82,12 +83,12 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   const color = domainColor(entity.domain);
   const columns = detail?.columns ?? [];
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
-  const visibleColumns = collapsed || layer === 'conceptual' ? [] : layer === 'physical' || columnMode === 'all' ? columns.slice(0, 16) : columnMode === 'keys' ? columns.filter((column) => keys.has(column.name)).slice(0, 10) : columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10);
+  const visibleColumns = collapsed || layer === 'business' ? [] : layer === 'implementation' || columnMode === 'all' ? columns.slice(0, 16) : columnMode === 'keys' ? columns.filter((column) => keys.has(column.name)).slice(0, 10) : columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10);
   const concepts = entity.conceptRefs?.length ? entity.conceptRefs.join(', ') : titleCase(entity.id);
   return (
     <div
       style={{
-        width: layer === 'conceptual' ? 250 : 292,
+        width: layer === 'business' ? 250 : 292,
         borderRadius: 10,
         overflow: 'hidden',
         border: `1px solid ${selected ? theme.accent : theme.headerBorder}`,
@@ -96,7 +97,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
         color: theme.textPrimary,
       }}
     >
-      {layer === 'analytical' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
+      {layer !== 'business' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
       <div style={{ height: 5, background: color }} />
       <div style={{ padding: '10px 12px 9px' }}>
         <div
@@ -107,7 +108,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
             alignItems: 'center',
           }}
         >
-          <strong style={{ fontSize: 13 }}>{layer === 'conceptual' ? concepts : entity.id}</strong><button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>
+          <strong style={{ fontSize: 13 }}>{layer === 'business' ? concepts : entity.id}</strong><button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>
           <span
             style={{
               fontSize: 9,
@@ -122,7 +123,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
             {entity.domain}
           </span>
         </div>
-        {layer === 'conceptual' ? (
+        {layer === 'business' ? (
           <div style={{ fontSize: 11, color: theme.textSecondary, marginTop: 8 }}>Business concept backed by {entity.id}</div>
         ) : (
           <>
@@ -175,12 +176,12 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
                 fontSize: 10,
               }}
             >
-              {layer === 'analytical' && <Handle id={`target:${column.name}`} type="target" position={Position.Left} style={{ ...handleStyle(color), top: '50%' }} />}
+              {layer !== 'business' && <Handle id={`target:${column.name}`} type="target" position={Position.Left} style={{ ...handleStyle(color), top: '50%' }} />}
               <span style={{ fontWeight: keys.has(column.name) ? 700 : 500, display: 'flex', gap: 5, alignItems: 'center' }}>
                 {keys.has(column.name) ? <KeyRound size={10} color="#d49a22" /> : null}{column.name}
               </span>
               <span style={{ color: theme.textMuted, display: 'flex', gap: 3, alignItems: 'center' }}>{column.type ?? ''}{constraintBadges(column.tests, keys.has(column.name))}</span>
-              {layer === 'analytical' && <Handle id={`source:${column.name}`} type="source" position={Position.Right} style={{ ...handleStyle(color), top: '50%' }} />}
+              {layer !== 'business' && <Handle id={`source:${column.name}`} type="source" position={Position.Right} style={{ ...handleStyle(color), top: '50%' }} />}
             </div>
           ))}
           {columns.length > visibleColumns.length && (
@@ -196,7 +197,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           )}
         </div>
       )}
-      {layer === 'analytical' && <Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} />}
+      {layer !== 'business' && <Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} />}
     </div>
   );
 }
@@ -254,7 +255,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
     .map((relationship) => {
       const passed = relationship.validation?.status === 'passed';
       const color = relationship.automaticJoinAllowed ? '#2e9b63' : relationship.staleCertification ? '#d47822' : passed ? '#5b73d6' : '#9a6b2f';
-      const label = layer === 'conceptual' ? relationship.verb || relationship.description || relationship.id : layer === 'physical' ? relationship.keys.map((key) => `${key.from} = ${key.to}`).join(', ') : `${relationship.cardinality.replace(/_/g, ' ')} · ${relationship.fanout} · ${relationship.status}`;
+      const label = layer === 'business' ? relationship.verb || relationship.description || relationship.id : layer === 'implementation' ? relationship.keys.map((key) => `${key.from} = ${key.to}`).join(', ') : `${relationship.cardinality.replace(/_/g, ' ')} · ${relationship.fanout} · ${relationship.status}`;
       return {
         id: relationship.id,
         source: relationship.from,
@@ -287,7 +288,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
   });
   nodes.forEach((node) =>
     graph.setNode(node.id, {
-      width: layer === 'conceptual' ? 250 : 292,
+      width: layer === 'business' ? 250 : 292,
       height: Number(node.style?.height ?? 100),
     }),
   );
@@ -301,7 +302,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
     const p = graph.node(node.id) as { x: number; y: number } | undefined;
     if (p)
       node.position = {
-        x: p.x - (layer === 'conceptual' ? 125 : 146),
+        x: p.x - (layer === 'business' ? 125 : 146),
         y: p.y - Number(node.style?.height ?? 100) / 2,
       };
   });
@@ -328,9 +329,9 @@ function ConstraintBadge({ label, color, icon }: { label: string; color: string;
 function MenuAction({ label, onClick, theme }: { label: string; onClick: () => void; theme: Theme }) { return <button onClick={onClick} style={{ width: '100%', textAlign: 'left', border: 0, borderRadius: 4, padding: '7px 8px', background: 'transparent', color: theme.textPrimary, fontSize: 11, cursor: 'pointer' }}>{label}</button>; }
 
 function visibleColumnCount(entity: ManifestModelEntity, detail: DbtNodeAuthoringDetail | undefined, layer: ModelingLayer, mode: ColumnDisplayMode): number {
-  if (layer === 'conceptual') return 0;
+  if (layer === 'business') return 0;
   const columns = detail?.columns ?? [];
-  if (layer === 'physical' || mode === 'all') return Math.min(columns.length, 16);
+  if (layer === 'implementation' || mode === 'all') return Math.min(columns.length, 16);
   const keys = new Set(entity.keys.length ? entity.keys : detail?.dqlMeta?.keys ?? []);
   if (mode === 'keys') return Math.min(columns.filter((column) => keys.has(column.name)).length, 10);
   return Math.min(columns.filter((column) => keys.has(column.name) || column.tests.length > 0).length, 10);

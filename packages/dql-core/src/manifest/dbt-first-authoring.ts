@@ -250,7 +250,7 @@ function previewEntity(projectRoot: string, value: EntityBindingAuthoringInput):
   const id = requiredId(value.id, 'entity');
   const domain = requiredId(value.domain, 'domain');
   const dbtModel = requiredId(value.dbtModel, 'dbt model');
-  const path = modelingFile(projectRoot, domain, 'entities.dql.yaml');
+  const path = modelingSourceFile(projectRoot, domain, 'entities.dql.yaml', 'entities', 'id', id);
   const entity: UnknownRecord = {
     id,
     dbt_model: dbtModel,
@@ -300,7 +300,7 @@ function previewRelationship(projectRoot: string, value: RelationshipAuthoringIn
     ...(value.certifiedAgainst ? { certifiedAgainst: value.certifiedAgainst } : {}),
     ...(value.validation ? { validation: validationSource(value.validation) } : {}),
   };
-  return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'relationships.dql.yaml'), 'relationships', 'id', relationship);
+  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'relationships.dql.yaml', 'relationships', 'id', id), 'relationships', 'id', relationship);
 }
 
 function previewContract(projectRoot: string, value: ContractAuthoringInput): ModelingSourcePatch {
@@ -322,7 +322,7 @@ function previewContract(projectRoot: string, value: ContractAuthoringInput): Mo
     ...(value.purpose ? { purpose: value.purpose } : {}),
     ...(value.evaluationRefs?.length ? { evaluations: cleanStrings(value.evaluationRefs) } : {}),
   };
-  return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'contracts.dql.yaml'), 'contracts', 'id', contract);
+  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'contracts.dql.yaml', 'contracts', 'id', id), 'contracts', 'id', contract);
 }
 
 function previewExport(projectRoot: string, value: DomainExportAuthoringInput): ModelingSourcePatch {
@@ -344,7 +344,7 @@ function previewExport(projectRoot: string, value: DomainExportAuthoringInput): 
     status: value.status ?? 'draft',
     ...(value.owner ? { owner: value.owner } : {}),
   };
-  return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'interfaces.dql.yaml'), 'exports', 'id', exported);
+  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'interfaces.dql.yaml', 'exports', 'id', id), 'exports', 'id', exported);
 }
 
 function previewImport(projectRoot: string, value: DomainImportAuthoringInput): ModelingSourcePatch {
@@ -358,7 +358,7 @@ function previewImport(projectRoot: string, value: DomainImportAuthoringInput): 
     status: value.status ?? 'draft',
     ...(value.owner ? { owner: value.owner } : {}),
   };
-  return upsertListPatch(projectRoot, modelingFile(projectRoot, domain, 'interfaces.dql.yaml'), 'imports', 'id', imported);
+  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'interfaces.dql.yaml', 'imports', 'id', id), 'imports', 'id', imported);
 }
 
 function validationSource(value: ManifestRelationshipValidationEvidence): UnknownRecord {
@@ -403,10 +403,19 @@ function sourcePatch(projectRoot: string, path: string, after: string): Modeling
   return { path, before, after, changed: before !== after };
 }
 
-function modelingFile(projectRoot: string, domain: string, name: string): string {
+/** Use one Domain Model source by default while editing existing split objects in place. */
+function modelingSourceFile(projectRoot: string, domain: string, legacyName: string, listKey: string, identityKey: string, identityValue: string): string {
   const root = findPackageRoot(projectRoot, domain);
   if (!root) throw new Error(`Domain Package "${domain}" does not exist. Create the domain first.`);
-  return relative(projectRoot, join(root, 'modeling', name)).replace(/\\/g, '/');
+  const unified = join(root, 'modeling', 'model.dql.yaml');
+  const legacy = join(root, 'modeling', legacyName);
+  for (const candidate of [unified, legacy]) {
+    if (!existsSync(candidate)) continue;
+    const document = asRecord(yaml.load(readFileSync(candidate, 'utf8')));
+    const list = Array.isArray(document[listKey]) ? document[listKey] as unknown[] : [];
+    if (list.some((entry) => asRecord(entry)[identityKey] === identityValue)) return relative(projectRoot, candidate).replace(/\\/g, '/');
+  }
+  return relative(projectRoot, unified).replace(/\\/g, '/');
 }
 
 function packageRootForWrite(projectRoot: string, id: string, parent?: string): string {
