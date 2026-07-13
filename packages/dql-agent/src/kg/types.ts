@@ -192,6 +192,8 @@ export interface KGSearchOptions {
   kinds?: KGNodeKind[];
   /** Restrict to a domain. */
   domain?: string;
+  /** Restrict to one of several server-authorized domains. */
+  domains?: string[];
   /** Maximum hits to return. */
   limit?: number;
 }

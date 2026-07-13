@@ -66,6 +66,9 @@ const HELP = `
     dql migrate datalex --input <manifest.json> [--dry-run|--apply]
                                     Convert DataLex-only business semantics into
                                     draft dbt-first Domain Package overlays
+    dql migrate modeling --to dbt-first --dry-run|--apply
+                                    Explicitly adopt manifest v3, consolidate
+                                    modeling, and relocate legacy shared products
     dql import sql <path>           Generate AI import drafts from SQL files/folders
     dql import sql <path> --save    Compatibility alias; drafts autosave before certification
     dql propose [path]              Draft a ranked governance layer from dbt evidence
@@ -86,8 +89,12 @@ const HELP = `
     dql notebook [path]             Launch the browser-first notebook for a project
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql compile [path]              Generate project manifest (dql-manifest.json)
-    dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
+    dql sync dbt [path]             Diff, compile, and reindex dbt-backed DQL state
+    dql sync dbt --check [path]     Report dbt/DQL drift without writing
     dql model list|validate [path]  Inspect or validate dbt-first Domain Packages
+    dql model discover [path]       Preview deterministic dbt domain proposals
+    dql model apply-discovery [path] --apply
+                                    Write reviewed sparse Domain Package proposals
     dql model explain <id> [path]   Explain whether a relationship is automatic join proof
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql lineage cross-domain        Show cross-domain lineage flows (--domain filters)

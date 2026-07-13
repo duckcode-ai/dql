@@ -15,16 +15,17 @@
  *   - Parses the dbt manifest for a quick model/source/metric count
  *   - In --watch mode, re-runs the diff whenever manifest.json mtime moves
  *
- * This never rebuilds the DQL manifest itself — it only tells the user whether
- * the next `dql compile` will be a cache hit or a rebuild. Use `dql compile`
- * to actually rebuild.
+ * Default mode atomically refreshes the compiled manifest, metadata catalog,
+ * and agent index. `--check` preserves the historical report-only behavior.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { collectInputFiles, loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
+import { defaultKgPath, reindexProject } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import { manifestCacheTrackedFiles, readCliDqlVersion } from './compile.js';
+import { runCompile } from './compile.js';
 
 interface DbtManifestShape {
   nodes?: Record<string, { resource_type?: string }>;
@@ -62,6 +63,7 @@ export async function runSync(
 
   const watch = allArgs.includes('--watch');
   const clear = allArgs.includes('--clear');
+  const check = allArgs.includes('--check');
 
   // First non-flag, non-value arg is the project root
   const skip = new Set<string>();
@@ -125,19 +127,31 @@ export async function runSync(
     return;
   }
 
-  const runOnce = () => reportDiff({ projectRoot, dbtManifestPath: dbtManifestPath!, cachePath });
-  runOnce();
+  const runOnce = async () => {
+    reportDiff({ projectRoot, dbtManifestPath: dbtManifestPath!, cachePath });
+    if (check) return;
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    await runCompile(projectRoot, ['--dbt-manifest', dbtManifestPath!], { ...flags, format: 'text' });
+    if (process.exitCode) return;
+    const indexed = await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
+    console.log(`  ✓ dbt sync complete — manifest, metadata, and agent index share the refreshed project state (${indexed.nodes} indexed object(s)).`);
+    process.exitCode = previousExitCode;
+  };
+  await runOnce();
 
   if (!watch) return;
 
   console.log(`\n  Watching ${relative(projectRoot, dbtManifestPath)} for changes (Ctrl-C to stop)...`);
   let lastMtime = safeMtime(dbtManifestPath);
+  let refreshing = false;
   const interval = setInterval(() => {
     const current = safeMtime(dbtManifestPath!);
-    if (current !== null && current !== lastMtime) {
+    if (!refreshing && current !== null && current !== lastMtime) {
       lastMtime = current;
       console.log(`\n  [${new Date().toISOString()}] Manifest changed — re-syncing.`);
-      runOnce();
+      refreshing = true;
+      void runOnce().finally(() => { refreshing = false; });
     }
   }, 1000);
 

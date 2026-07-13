@@ -4,7 +4,7 @@
  *   dql agent ask "what was revenue last week?"
  *     [--provider claude|openai|gemini|ollama]
  *     [--user alice@acme.com]   (filters Skills + records feedback as this user)
- *     [--domain growth]         (scopes KG search)
+ *     [--domain growth] [--purpose growth_attribution]
  *     [--format json]           (emits structured JSON instead of prose)
  *     [--thread <id>]           (continue a persisted conversation thread: the
  *                                question runs through the runtime's agent-run
@@ -34,6 +34,7 @@ import {
   loadSkills,
   pickProvider,
   answer,
+  resolveDomainContextEnvelope,
   buildAnalysisQuestionPlan,
   buildLocalContextPack,
   coerceReasoningEffort,
@@ -205,7 +206,7 @@ export async function runAgent(
     default:
       throw new Error(
         'Usage: dql agent <ask|threads|reindex|feedback|eval> [args]\n' +
-            '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>] [--thread <id>]\n' +
+            '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>] [--purpose <approved-purpose>] [--thread <id>]\n' +
       '  dql agent threads [--runtime-url <url>]\n' +
       '  dql agent reindex [path]\n' +
       '  dql agent feedback up|down --block <id> --question "..."\n' +
@@ -231,6 +232,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const providerName = (flags as { provider?: string }).provider as ProviderName | undefined;
   const userId = (flags as { user?: string }).user;
   const domain = (flags as { domain?: string }).domain;
+  const purpose = flags.purpose || undefined;
   const format = (flags as { format?: string }).format;
   const reasoningEffort = cliReasoningEffort(flags);
   const requestedDepth = cliAnalysisDepth(flags);
@@ -255,6 +257,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       reasoningEffort,
     });
     const manifest = buildManifest({ projectRoot, dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined });
+    const domainContext = domain ? resolveDomainContextEnvelope({ manifest, activeDomain: domain, purpose, source: 'explicit_api' }) : undefined;
     const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
     closeRuntime = close;
     const schemaContext = await fetchRuntimeSchemaContext(runtimeBase);
@@ -264,6 +267,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       surface: 'cli',
       strictness: contextBudget.strictness,
       limit: contextBudget.limit,
+      domainContext,
       runtimeSchemaSnapshot: schemaContext.length > 0
         ? {
             source: 'direct CLI runtime schema',
@@ -280,6 +284,7 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       skills,
       userId,
       domain,
+      domainContext,
       memoryContext,
       semanticLayer,
       schemaContext,
@@ -748,6 +753,9 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       const result = await answer({
         question: testCase.question,
         domain: testCase.domain,
+        domainContext: testCase.domain && manifest
+          ? resolveDomainContextEnvelope({ manifest, activeDomain: testCase.domain, source: 'explicit_api' })
+          : undefined,
         provider,
         kg,
         manifest: manifest ?? undefined,

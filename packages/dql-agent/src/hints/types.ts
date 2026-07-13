@@ -9,6 +9,7 @@
  * Source of truth = Git:
  *   - `.dql/traces/*.trace.json`  — raw correction traces (what was wrong + the fix)
  *   - `.dql/hints/*.hint.yaml`     — candidate/approved/rejected hints
+ *   - `.dql/evaluations/*.hint-evaluation.yaml` — required evaluation results
  *   - `.dql/reviews/*.review.yaml` — human review decisions
  *
  * `.dql/cache/agent-kg.sqlite` carries a rebuildable FTS index of approved hints
@@ -36,6 +37,34 @@ export interface HintScope {
 }
 
 export type HintStatus = 'candidate' | 'approved' | 'rejected';
+export type HintEvaluationStatus = 'passed' | 'failed';
+
+/** One deterministic check executed by the required correction evaluation. */
+export interface HintEvaluationCheck {
+  name: string;
+  passed: boolean;
+  /** Git-reviewable evidence, such as an eval case, assertion, or result reference. */
+  evidence?: string;
+}
+
+/**
+ * Git-authoritative result for a candidate hint's required evaluation.
+ * Approval is permitted only when the referenced evaluation passed on the same
+ * immutable snapshot that produced the correction.
+ */
+export interface HintEvaluation {
+  id: string;
+  hintId: string;
+  traceId?: string;
+  snapshotId: string;
+  evaluation: string;
+  status: HintEvaluationStatus;
+  checks: HintEvaluationCheck[];
+  evidence: string[];
+  evaluator: string;
+  note?: string;
+  createdAt: string;
+}
 
 /**
  * A raw correction trace recorded when a Tier-2 generated answer is corrected.
@@ -60,6 +89,14 @@ export interface CorrectionTrace {
   author?: string;
   /** contextPackId / blockId the correction was anchored to, when known. */
   anchorObjectKey?: string;
+  /** Failed governed route or tool path, when known. */
+  failedRoute?: string;
+  /** Human- or tool-provided evidence supporting the correction. */
+  evidence?: string[];
+  /** Immutable project snapshot against which the correction was recorded. */
+  snapshotId?: string;
+  /** Stable evaluation name that must pass before approval. */
+  requiredEvaluation?: string;
   /** id of the hint derived from this trace, once created. */
   derivedHintId?: string;
 }
@@ -90,6 +127,12 @@ export interface Hint {
   author?: string;
   /** Who approved/rejected (set by the review). */
   reviewer?: string;
+  /** Immutable project snapshot against which the candidate was created. */
+  snapshotId?: string;
+  /** Stable evaluation name that must pass before approval. */
+  requiredEvaluation?: string;
+  /** Latest Git-authoritative evaluation artifact for this candidate. */
+  evaluationId?: string;
   /** ISO-8601. */
   createdAt: string;
   /** ISO-8601. */

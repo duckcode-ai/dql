@@ -53,6 +53,7 @@ import {
   loadDashboardDocument,
   extractDashboardBlockRefs,
   appFolderRelPath,
+  normalizeProductDomainContext,
   type AppDocument,
   type DashboardDocument,
 } from '../apps/index.js';
@@ -1227,9 +1228,14 @@ function scanNotebooks(
         }
 
         if (cells.length > 0) {
+          const productContext = normalizeProductDomainContext(
+            doc.metadata ?? {},
+            stringOrUndefined(doc.metadata?.domain),
+          );
           notebooks[relPath] = {
             title: doc.metadata?.title ?? doc.title ?? relPath,
             filePath: relPath,
+            ...productContext,
             cells,
           };
         }
@@ -1246,6 +1252,16 @@ function scanNotebooks(
   }
 
   return notebooks;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = [...new Set(value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))];
+  return items.length > 0 ? items : undefined;
 }
 
 /** Extract blocks declared inside notebook DQL cells into the blocks map. */
@@ -1970,6 +1986,11 @@ function appDocumentToManifest(
     businessRules: app.businessRules,
     caveats: app.caveats,
     domain: app.domain,
+    ownerDomain: app.ownerDomain ?? app.domain,
+    usesDomains: app.usesDomains,
+    purpose: app.purpose,
+    requiredExports: app.requiredExports,
+    classification: app.classification,
     subdomain: app.subdomain,
     groups: app.groups ?? [],
     audience: app.audience,

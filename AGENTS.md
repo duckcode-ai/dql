@@ -39,3 +39,18 @@ cloud — these are just stability guarantees on the names the cloud depends on.
 - Notebook app: `apps/dql-notebook`. Build:
   `pnpm --filter @duckcodeailabs/dql-notebook-app build`.
 - See `CONTRIBUTING.md` for setup, tests, and the OSS-readiness checklist.
+
+## DQL 2.0 domain-context implementation
+
+The normative implementation pack is
+`docs/specs/dql-2-domain-context/README.md`, with decisions in RFC 0002 and RFC
+0003. Git-tracked specs take precedence over chat history, Codex memory, issues,
+or ignored planning files. Every implementation change in this program must
+name its stable acceptance IDs and follow the workstream dependency/ownership
+rules in that pack.
+
+An implementer may report a requirement as `implemented`; only a different
+verifier or the integration owner may mark it `verified`. UI verification must
+run the built `dql notebook` CLI against the designated fixture—Vite-only proof
+does not satisfy acceptance. Do not commit generated evidence, caches, local
+connector/runtime state, or Playwright artifacts.

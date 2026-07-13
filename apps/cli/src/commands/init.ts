@@ -1,10 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-notebook';
 import { resolveLocalOwner, seedDefaultSkills, seedDomainSkills } from '@duckcodeailabs/dql-agent';
 import { buildManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
-import { performSemanticImport } from '../semantic-import.js';
 import { runNotebook } from './notebook.js';
 
 export async function runInit(targetArg: string | null, flags: CLIFlags): Promise<void> {
@@ -41,17 +40,13 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
       }
     }
   }
-  const hasDbtSemanticDefinitions = dbtProjectDir
-    ? containsDbtSemanticDefinitions(join(dbtProjectDir, 'models'))
-    : false;
-
   // Detect DuckDB file — in the workspace OR the dbt project dir (common layout:
   // the .duckdb lives next to dbt_project.yml, a level up from the DQL workspace).
   const duckdbPath = detectDuckDBFile(targetDir, dbtProjectDir);
 
   // Don't overwrite existing dql.config.json
   const configPath = join(targetDir, 'dql.config.json');
-  if (!existsSync(configPath)) {
+  if (!alreadyInitialized) {
     // Resolve the local OSS owner up front (git user.email → $USER → guest@local)
     // and persist it as identity.owner so drafts are never born "Missing owner".
     const owner = resolveLocalOwner(targetDir, { persist: false });
@@ -73,6 +68,31 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     }
   }
 
+  // `--force` on an initialized project is intentionally a directory repair,
+  // not an implicit migration. Leave config and every existing or missing
+  // content file alone; explicit migration commands own format changes.
+  if (alreadyInitialized) {
+    if (flags.format === 'json') {
+      console.log(JSON.stringify({
+        project: projectName,
+        path: targetDir,
+        created: false,
+        patchedDirectories: true,
+      }, null, 2));
+    } else {
+      console.log(`\n  ✓ Patched missing DQL directories: ${projectName}`);
+      console.log('    Existing config and content files were not changed.');
+    }
+    return;
+  }
+
+  const projectConfig = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+    manifestVersion?: number;
+    modeling?: { mode?: string };
+    defaultConnectionName?: string;
+    connections?: Record<string, { driver?: string }>;
+  };
+
   // Create .gitignore for DQL artifacts
   const gitignorePath = join(targetDir, '.gitignore');
   const dqlIgnoreEntries =
@@ -89,32 +109,18 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   // Create welcome notebook with driver-aware SQL
   const notebookPath = join(targetDir, 'notebooks', 'welcome.dqlnb');
   if (!existsSync(notebookPath)) {
-    const configJson = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf-8')) : {};
-    const defaultConnectionName = typeof configJson?.defaultConnectionName === 'string'
-      ? configJson.defaultConnectionName
+    const defaultConnectionName = typeof projectConfig.defaultConnectionName === 'string'
+      ? projectConfig.defaultConnectionName
       : 'default';
-    const driver = configJson?.connections?.[defaultConnectionName]?.driver
-      ?? configJson?.connections?.default?.driver;
+    const driver = projectConfig.connections?.[defaultConnectionName]?.driver
+      ?? projectConfig.connections?.default?.driver;
     const nb = createWelcomeNotebook(isDbt ? 'dbt' : 'default', projectName, driver);
     writeFileSync(notebookPath, serializeNotebook(nb), 'utf-8');
   }
 
-  let importedSemanticCatalog = false;
-  if (isDbt && hasDbtSemanticDefinitions && !existsSync(join(targetDir, 'semantic-layer', 'imports', 'manifest.json'))) {
-    await performSemanticImport({
-      targetProjectRoot: targetDir,
-      provider: 'dbt',
-      sourceConfig: {
-        provider: 'dbt',
-        projectPath: dbtProjectDir ? relativePath(targetDir, dbtProjectDir) : '.',
-      },
-    });
-    importedSemanticCatalog = true;
-  }
-
   // Seed the editable starter skills into skills/ (idempotent — never
-  // clobbers user edits). The metrics glossary reflects the semantic layer, so
-  // this runs AFTER any semantic import above.
+  // clobbers user edits). For dbt-first projects these skills read dbt-owned
+  // semantic metadata through the manifest; init never copies it locally.
   let seededSkills = 0;
   try {
     seededSkills = seedDefaultSkills(targetDir).created.length;
@@ -135,6 +141,8 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
       path: targetDir,
       created: true,
       dbt: isDbt,
+      manifestVersion: projectConfig.manifestVersion ?? 2,
+      modelingMode: projectConfig.modeling?.mode ?? null,
       duckdb: duckdbPath ?? null,
       seededSkills,
     }, null, 2));
@@ -152,19 +160,20 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   }
   console.log(`    DuckDB file: ${duckdbPath ?? 'none'}`);
   if (isDbt) {
-    console.log(`    Semantic layer: ${importedSemanticCatalog ? 'imported dbt catalog into semantic-layer/' : hasDbtSemanticDefinitions ? 'dbt project with semantic definitions detected' : 'dbt project detected (no semantic definitions imported)'}`);
+    if (projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first') {
+      console.log('    Modeling: manifest v3, dbt-first (dbt artifacts remain read-only)');
+    } else {
+      console.log(`    Modeling: preserved existing manifest v${projectConfig.manifestVersion ?? 2} configuration`);
+    }
   }
   console.log('');
   console.log('  Created:');
   console.log('    dql.config.json');
-  console.log('    domains/ (domain-first blocks, terms, views, and apps)');
+  console.log('    domains/ (domain-owned modeling, knowledge, governance, and assets)');
   console.log('    skills/ (shared agent guidance)');
   console.log('    tests/');
-  console.log('    apps/');
-  console.log('    notebooks/welcome.dqlnb');
-  if (importedSemanticCatalog) {
-    console.log('    semantic-layer/ (imported local semantic catalog)');
-  }
+  console.log('    apps/ (shared products)');
+  console.log('    notebooks/welcome.dqlnb (shared research workspace)');
   if (seededSkills > 0) {
     console.log(`    skills/ (${seededSkills} editable starter skill${seededSkills === 1 ? '' : 's'})`);
   }
@@ -175,65 +184,14 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log(`    ${step + 1}. dql doctor`);
   console.log(`    ${step + 2}. dql notebook`);
   if (isDbt) {
-    if (!importedSemanticCatalog && hasDbtSemanticDefinitions) {
-      console.log(`    ${step + 3}. dql semantic import dbt .`);
-      console.log(`    ${step + 4}. dql compile .`);
-      console.log(`    ${step + 5}. dql sync dbt .`);
-    } else {
-      console.log(`    ${step + 3}. dql compile .`);
-      console.log(`    ${step + 4}. dql sync dbt .`);
-    }
+    console.log(`    ${step + 3}. dql compile .`);
+    console.log(`    ${step + 4}. dql sync dbt .`);
   }
   console.log('');
 
   if (flags.open) {
     await runNotebook(targetDir, flags);
   }
-}
-
-function containsDbtSemanticDefinitions(root: string): boolean {
-  if (!existsSync(root)) return false;
-
-  const stack = [root];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current) continue;
-
-    let entries: string[];
-    try {
-      entries = readdirSync(current);
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      const fullPath = join(current, entry);
-      let stats;
-      try {
-        stats = statSync(fullPath);
-      } catch {
-        continue;
-      }
-
-      if (stats.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-
-      if (!entry.endsWith('.yml') && !entry.endsWith('.yaml')) continue;
-
-      try {
-        const contents = readFileSync(fullPath, 'utf-8');
-        if (contents.includes('semantic_models:') || contents.includes('\nmetrics:') || contents.startsWith('metrics:')) {
-          return true;
-        }
-      } catch {
-        // Ignore unreadable files during best-effort detection.
-      }
-    }
-  }
-
-  return false;
 }
 
 function detectDuckDBFile(workspaceDir: string, dbtProjectDir: string | null): string | null {
@@ -320,6 +278,8 @@ function buildConfig(
       provider: 'dbt',
       projectPath,
     };
+    config.manifestVersion = 3;
+    config.modeling = { mode: 'dbt-first' };
     // Tell `dql sync dbt` and `dql compile` where to find target/manifest.json
     // without requiring --dbt-manifest on every invocation.
     config.dbt = {

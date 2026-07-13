@@ -23,6 +23,10 @@ import { loadDomainPackageRegistry } from '@duckcodeailabs/dql-core';
 
 export interface Skill {
   id: string;
+  /** Author-facing id, retained when `id` is used by legacy callers. */
+  localId?: string;
+  /** Collision-free identity used by manifests, retrieval, and the KG. */
+  qualifiedId?: string;
   /**
    * Skill scope. PROJECT skills (`user` empty) are shared with everyone;
    * PERSONAL skills (`user` set) are bound to a single user. Derived from
@@ -68,19 +72,25 @@ export interface SkillLoadResult {
  * Misformed files are reported in `errors`; valid Skills still come back.
  */
 export function loadSkills(projectRoot: string): SkillLoadResult {
-  const domainRoots = loadDomainPackageRegistry(projectRoot).values().map((pkg) => join(pkg.root, 'skills'));
-  const roots = [...domainRoots, skillsDir(projectRoot), legacySkillsDir(projectRoot)];
+  const domainRoots = loadDomainPackageRegistry(projectRoot).values().map((pkg) => ({ root: join(pkg.root, 'skills'), inferredDomain: pkg.id }));
+  const roots: Array<{ root: string; inferredDomain?: string }> = [
+    ...domainRoots,
+    { root: skillsDir(projectRoot), inferredDomain: undefined },
+    { root: legacySkillsDir(projectRoot), inferredDomain: undefined },
+  ];
   const skills: Skill[] = [];
   const errors: Array<{ path: string; message: string }> = [];
   const seen = new Set<string>();
 
-  for (const root of roots) {
+  for (const { root, inferredDomain } of roots) {
     for (const f of walkMd(root)) {
       try {
         const raw = readFileSync(f, 'utf-8');
-        const skill = parseSkill(raw, f);
-        if (skill && !seen.has(skill.id)) {
-          seen.add(skill.id);
+        const parsed = parseSkill(raw, f);
+        const skill = parsed ? qualifySkill(parsed, inferredDomain) : null;
+        const identity = skill?.qualifiedId ?? skill?.id;
+        if (skill && identity && !seen.has(identity)) {
+          seen.add(identity);
           skills.push(skill);
         }
       } catch (err) {
@@ -119,6 +129,7 @@ export function parseSkill(raw: string, path: string): Skill | null {
   const starter = meta.starter;
   return {
     id,
+    localId: id,
     scope: user ? 'personal' : 'project',
     user,
     domain: pickString(meta.domain),
@@ -140,6 +151,28 @@ export function parseSkill(raw: string, path: string): Skill | null {
     body,
     sourcePath: path,
     isStarter: starter === true || starter === 'true' || starter === 'yes' ? true : undefined,
+  };
+}
+
+function qualifySkill(skill: Skill, inferredDomain?: string): Skill {
+  const declaredDomains = [...new Set((skill.domains ?? (skill.domain ? [skill.domain] : []))
+    .map((value) => value.trim())
+    .filter(Boolean))];
+  const domains = declaredDomains.length > 0 ? declaredDomains : (inferredDomain ? [inferredDomain] : []);
+  const domain = skill.domain?.trim() || (domains.length === 1 ? domains[0] : undefined);
+  const ownerScope = domains.length === 1
+    ? domains[0]
+    : domains.length > 1
+      ? `cross_domain_${domains.slice().sort().join('_')}`
+      : skill.user
+        ? `user_${skill.user.trim().toLowerCase()}`
+        : 'global';
+  return {
+    ...skill,
+    localId: skill.localId ?? skill.id,
+    qualifiedId: `${ownerScope}::skill::${skill.localId ?? skill.id}`,
+    domain,
+    domains,
   };
 }
 
@@ -538,7 +571,7 @@ function skillTokens(text: string): string[] {
   return (text.toLowerCase().match(SKILL_TOKEN_RE) ?? []).filter((t) => t.length > 1);
 }
 
-/** Searchable text for a skill: domain, id, preferences, vocabulary, and body. */
+/** Searchable positive text for a skill. Exclusions are policy, not keywords. */
 function skillSearchText(skill: Skill): string {
   return [
     skill.id,
@@ -546,7 +579,6 @@ function skillSearchText(skill: Skill): string {
     ...(skill.domains ?? []),
     skill.description ?? '',
     ...(skill.triggers ?? []),
-    ...(skill.exclusions ?? []),
     ...skill.preferredMetrics,
     ...skill.preferredBlocks,
     ...(skill.preferredDimensions ?? []),
@@ -556,6 +588,15 @@ function skillSearchText(skill: Skill): string {
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+function matchesSkillExclusion(skill: Skill, question: string): boolean {
+  const normalizedQuestion = skillTokens(question).join(' ');
+  if (!normalizedQuestion) return false;
+  return (skill.exclusions ?? []).some((exclusion) => {
+    const normalizedExclusion = skillTokens(exclusion).join(' ');
+    return normalizedExclusion.length > 0 && normalizedQuestion.includes(normalizedExclusion);
+  });
 }
 
 /**
@@ -583,6 +624,9 @@ export function selectRelevantSkills(
   const pinned: Skill[] = [];
   const rest: Array<{ skill: Skill; score: number }> = [];
   for (const skill of inScope) {
+    // Exclusions are a negative eligibility boundary. They are evaluated before
+    // pinning so a conventions skill cannot silently apply outside its scope.
+    if (matchesSkillExclusion(skill, question)) continue;
     if (pinnedIds.has(skill.id.toLowerCase())) {
       pinned.push(skill);
       continue;

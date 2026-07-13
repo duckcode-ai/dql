@@ -362,6 +362,7 @@ export function buildKGFromManifest(manifest: DQLManifest): {
 function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edges: KGEdge[]): void {
   const modeling = manifest.modeling;
   if (manifest.manifestVersion !== 3 || !modeling) return;
+  const entityNodeId = (reference: string): string => `entity:${modeling.entities[reference]?.qualifiedId ?? modeling.entities[reference]?.id ?? reference}`;
 
   for (const pkg of Object.values(modeling.packages)) {
     if (!nodes.some((node) => node.nodeId === `domain:${pkg.id}`)) {
@@ -381,16 +382,16 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
   }
 
   for (const entity of Object.values(modeling.entities)) {
-    const nodeId = `entity:${entity.id}`;
+    const nodeId = `entity:${entity.qualifiedId ?? entity.id}`;
     const dbtNode = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
     nodes.push({
       nodeId,
       kind: 'entity',
-      name: entity.id,
+      name: entity.localId ?? entity.id,
       domain: entity.domain,
       status: entity.status,
       grain: entity.grain,
-      entities: [entity.id],
+      entities: [entity.qualifiedId ?? entity.id],
       sourcePath: entity.sourcePath,
       sourceTier: 'business_context',
       certification: certificationFromStatus(entity.status),
@@ -420,11 +421,11 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
   }
 
   for (const relationship of Object.values(modeling.relationships)) {
-    const nodeId = `relationship:${relationship.id}`;
+    const nodeId = `relationship:${relationship.qualifiedId ?? relationship.id}`;
     nodes.push({
       nodeId,
       kind: 'relationship',
-      name: relationship.id,
+      name: relationship.localId ?? relationship.id,
       domain: relationship.ownerDomain,
       status: relationship.staleCertification ? 'stale_certification' : relationship.status,
       owner: relationship.owner,
@@ -442,16 +443,16 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
       ].join('\n'),
       payload: { ...relationship },
     });
-    edges.push({ src: `entity:${relationship.from}`, dst: nodeId, kind: 'proves_join' });
-    edges.push({ src: nodeId, dst: `entity:${relationship.to}`, kind: 'proves_join' });
+    edges.push({ src: entityNodeId(relationship.from), dst: nodeId, kind: 'proves_join' });
+    edges.push({ src: nodeId, dst: entityNodeId(relationship.to), kind: 'proves_join' });
   }
 
   for (const contract of Object.values(modeling.contracts)) {
-    const nodeId = `contract:${contract.id}`;
+    const nodeId = `contract:${contract.qualifiedId ?? contract.id}`;
     nodes.push({
       nodeId,
       kind: 'contract',
-      name: contract.id,
+      name: contract.localId ?? contract.id,
       domain: contract.domain,
       status: contract.status,
       owner: contract.owner,
@@ -465,12 +466,12 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
       payload: { ...contract },
     });
     edges.push({ src: `domain:${contract.domain}`, dst: nodeId, kind: 'contains' });
-    for (const entity of contract.entities) edges.push({ src: `entity:${entity}`, dst: nodeId, kind: 'governed_by' });
+    for (const entity of contract.entities) edges.push({ src: entityNodeId(entity), dst: nodeId, kind: 'governed_by' });
     for (const block of contract.blocks) edges.push({ src: nodeId, dst: `block:${block}`, kind: 'governed_by' });
   }
 
   for (const exported of Object.values(modeling.interfaces?.exports ?? {})) {
-    const ref = `${exported.id}@${exported.version}`;
+    const ref = `${exported.domain}.${exported.localId}@${exported.version}`;
     const nodeId = `domain_export:${ref}`;
     nodes.push({
       nodeId,
@@ -486,15 +487,15 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
       payload: { ...exported },
     });
     edges.push({ src: `domain:${exported.domain}`, dst: nodeId, kind: 'exports' });
-    if (exported.entity) edges.push({ src: `entity:${exported.entity}`, dst: nodeId, kind: 'exports' });
+    if (exported.entity) edges.push({ src: entityNodeId(exported.entity), dst: nodeId, kind: 'exports' });
   }
 
   for (const imported of Object.values(modeling.interfaces?.imports ?? {})) {
-    const nodeId = `domain_import:${imported.id}`;
+    const nodeId = `domain_import:${imported.qualifiedId ?? imported.id}`;
     nodes.push({
       nodeId,
       kind: 'domain_import',
-      name: imported.id,
+      name: imported.localId ?? imported.id,
       domain: imported.domain,
       status: imported.status,
       owner: imported.owner,
@@ -509,26 +510,27 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
   }
 
   for (const declaration of Object.values(modeling.conformance)) {
-    const nodeId = `conformance:${declaration.id}`;
+    const nodeId = `conformance:${declaration.qualifiedId ?? declaration.id}`;
     nodes.push({
       nodeId,
       kind: 'conformance',
-      name: declaration.id,
+      name: declaration.localId ?? declaration.id,
+      domain: declaration.domain,
       sourcePath: declaration.sourcePath,
       sourceTier: 'business_context',
       provenance: 'DQL conformance declaration',
       llmContext: declaration.rule,
       payload: { ...declaration },
     });
-    for (const entity of declaration.entities) edges.push({ src: `entity:${entity}`, dst: nodeId, kind: 'conforms_with' });
+    for (const entity of declaration.entities) edges.push({ src: entityNodeId(entity), dst: nodeId, kind: 'conforms_with' });
   }
 
   for (const rule of Object.values(modeling.rules)) {
-    const nodeId = `policy:${rule.id}`;
+    const nodeId = `policy:${rule.qualifiedId ?? rule.id}`;
     nodes.push({
       nodeId,
       kind: 'policy',
-      name: rule.id,
+      name: rule.localId ?? rule.id,
       domain: rule.domain,
       sourcePath: rule.sourcePath,
       sourceTier: 'business_context',
@@ -611,7 +613,13 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
     if (metric.cube) edges.push({ src: nodeId, dst: `semantic_model:${metric.cube}`, kind: 'depends_on' });
   }
 
-  for (const dimension of layer.listDimensions()) {
+  const semanticDimensions = layer.listDimensions();
+  // PERF-001: dbt fallback semantics may expose every physical column as a
+  // synthetic dimension. At enterprise scale the model nodes already retain
+  // their bounded column lists; duplicating 300k dimensions into KG + FTS is
+  // both semantically noisy and several gigabytes of local state.
+  const indexedDimensions = semanticDimensions.length <= 50_000 ? semanticDimensions : [];
+  for (const dimension of indexedDimensions) {
     const nodeId = `dimension:${qualifiedSemanticName(dimension.cube, dimension.name)}`;
     nodes.push({
       nodeId,

@@ -287,6 +287,32 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+  it('keeps synthetic physical dimensions model-scoped above the PERF-001 threshold', () => {
+    const dimensions = Array.from({ length: 50_001 }, (_, index) => ({
+      name: `column_${index}`,
+      cube: 'large_model',
+      table: 'large_model',
+      type: 'string' as const,
+    }));
+    const layer = {
+      listMetrics: () => [],
+      listDimensions: () => dimensions,
+      listMeasures: () => [],
+      listEntities: () => [],
+      listSemanticModels: () => [{
+        name: 'large_model', table: 'large_model', model: 'large_model',
+        entities: [], measures: [], dimensions: dimensions.map((item) => item.name), timeDimensions: [],
+      }],
+      listSavedQueries: () => [],
+    } as unknown as SemanticLayer;
+
+    const graph = buildKGFromSemanticLayer(layer);
+    expect(graph.nodes.filter((node) => node.kind === 'dimension')).toHaveLength(0);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'semantic_model:large_model' }),
+    ]));
+  });
+
   it('maps app and dashboard lifecycle into KG certification', () => {
     const manifest = {
       manifestVersion: 2,

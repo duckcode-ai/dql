@@ -93,4 +93,31 @@ describe('DataLex migration planner', () => {
     expect(existsSync(join(root, 'migrations', 'datalex', 'commerce.dbt-schema.patch.yaml'))).toBe(true);
     expect(readFileSync(join(root, 'migrations', 'datalex', 'report.json'), 'utf8')).toContain('autoCertified');
   });
+
+  it('reports ambiguous dbt evidence and refuses to write', () => {
+    writeFileSync(dbtManifestPath, JSON.stringify({
+      nodes: {
+        'model.commerce.fct_orders': {
+          resource_type: 'model', name: 'fct_orders', alias: 'fct_orders', database: 'analytics', schema: 'commerce',
+        },
+        'model.legacy.fct_orders': {
+          resource_type: 'model', name: 'fct_orders', alias: 'fct_orders', database: 'legacy', schema: 'commerce',
+        },
+        'model.commerce.dim_customers': {
+          resource_type: 'model', name: 'dim_customers', alias: 'dim_customers', database: 'analytics', schema: 'commerce',
+        },
+      },
+      sources: {},
+    }));
+
+    const plan = planDataLexMigration({ projectRoot: root, datalexManifestPath, dbtManifestPath });
+
+    expect(plan.report.ambiguities).toContainEqual(expect.objectContaining({
+      path: 'domains.commerce.entities.Order',
+      reference: 'fct_orders',
+      candidates: ['model.commerce.fct_orders', 'model.legacy.fct_orders'],
+    }));
+    expect(() => applyDataLexMigration(root, plan)).toThrow(/blocked by ambiguous dbt bindings/);
+    expect(existsSync(join(root, 'domains', 'commerce', 'domain.dql'))).toBe(false);
+  });
 });

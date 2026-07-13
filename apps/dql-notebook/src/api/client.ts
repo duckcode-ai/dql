@@ -9,6 +9,8 @@ import type {
   ModelingAuthoringChange,
   ModelingChangePreview,
   DbtNodeAuthoringDetail,
+  DbtSourceAuthoringInput,
+  DbtSourcePatchPreview,
   RelationshipAuthoringInput,
   ManifestRelationshipValidationEvidence,
 } from '@duckcodeailabs/dql-core';
@@ -162,15 +164,190 @@ export type DashboardDisplayMetadata = {
 };
 
 export interface DbtFirstModelingResponse {
+  requestId?: string;
+  snapshotId: string;
   manifestVersion: 3;
   dbtProvenance: ManifestDbtProvenance;
   modeling: ManifestDbtFirstModeling;
   domainAssets?: Record<string, Record<string, string[]>>;
   lineage: ManifestLineage;
   diagnostics: ManifestDiagnostic[];
+  snapshot?: { id: string; stale: boolean; error?: string };
+}
+
+export interface DomainWorkspaceSummary {
+  id: string;
+  parent?: string;
+  owner?: string;
+  filePath?: string;
+  readiness: 'ready' | 'attention' | 'setup';
+  counts: Record<string, number>;
+}
+
+export interface RelatedDomainProducts {
+  domain: string;
+  apps: Array<{ id: string; name: string; filePath: string; ownerDomain?: string; usesDomains: string[]; purpose?: string; requiredExports: string[]; classification?: string; lifecycle?: string }>;
+  notebooks: Array<{ id: string; title: string; filePath: string; ownerDomain?: string; usesDomains: string[]; purpose?: string; requiredExports: string[]; classification?: string }>;
+  snapshotId: string;
+}
+
+// ── dbt-first onboarding API contracts ──────────────────────────────────
+
+export type OnboardingCapability = {
+  available: boolean;
+  optional?: boolean;
+  message?: string;
+};
+
+export type OnboardingCapabilities = {
+  dbt?: OnboardingCapability | boolean;
+  warehouse?: OnboardingCapability | boolean;
+  ai?: OnboardingCapability | boolean;
+};
+
+export type DbtOnboardingErrorCode =
+  | 'DBT_PROJECT_NOT_FOUND'
+  | 'DBT_MANIFEST_MISSING'
+  | 'DBT_ARTIFACT_INVALID'
+  | 'DBT_PARSE_FAILED'
+  | 'SOURCE_CHANGED'
+  | 'SNAPSHOT_BUILD_FAILED'
+  | 'DOMAIN_COLLISION'
+  | 'DOMAIN_MEMBERSHIP_AMBIGUOUS'
+  | 'WAREHOUSE_UNAVAILABLE'
+  | 'AI_PROVIDER_UNAVAILABLE';
+
+export interface DbtOnboardingStatusResponse {
+  requestId?: string;
+  snapshotId?: string;
+  dbt?: {
+    configured?: boolean;
+    projectDir?: string;
+    manifestPath?: string;
+    projectFound?: boolean;
+    manifestFound?: boolean;
+    artifactState?: 'missing' | 'ready' | 'stale' | 'invalid' | 'building';
+  };
+  modeling?: {
+    enabled?: boolean;
+    manifestVersion?: number;
+    mode?: string;
+    snapshotState?: 'missing' | 'building' | 'ready' | 'stale' | 'failed';
+  };
+  domains?: {
+    count?: number;
+    draftCount?: number;
+    state?: 'none' | 'draft' | 'ready';
+  };
+  capabilities?: OnboardingCapabilities;
+  readiness?: Record<string, unknown>;
+}
+
+export interface DbtOnboardingPreviewRequest {
+  projectDir?: string;
+  manifestPath?: string;
+  catalogPath?: string;
+  semanticManifestPath?: string;
+}
+
+export interface DbtOnboardingPreviewResponse {
+  requestId?: string;
+  snapshotId?: string;
+  projectDir: string;
+  manifestPath: string;
+  fingerprint: string;
+  projectName?: string;
+  counts: { models: number; sources: number; metrics: number; [key: string]: number };
+  artifacts: {
+    manifest: string | null;
+    catalog?: string | null;
+    semanticManifest?: string | null;
+  };
+  commands?: string[];
+  capabilities?: OnboardingCapabilities;
+}
+
+export interface DbtOnboardingApplyResponse {
+  requestId?: string;
+  snapshotId?: string;
+  jobId?: string;
+  id?: string;
+  status?: string;
+  applied?: boolean;
+  fingerprint?: string;
+  config?: Record<string, unknown>;
+}
+
+export interface DbtOnboardingJob {
+  id: string;
+  kind?: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  stage?: string;
+  progress?: number;
+  message?: string;
+  diagnostics?: Array<{ code?: string; message: string; level?: string }>;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface DbtOnboardingJobResponse {
+  requestId?: string;
+  snapshotId?: string;
+  job?: DbtOnboardingJob;
+  id?: string;
+  kind?: string;
+  status?: DbtOnboardingJob['status'];
+  stage?: string;
+  progress?: number;
+  message?: string;
+  diagnostics?: DbtOnboardingJob['diagnostics'];
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface DomainDiscoveryEvidence {
+  kind: string;
+  value: string;
+  source?: string;
+  dbtUniqueId?: string;
+}
+
+export interface DomainDiscoveryProposal {
+  id: string;
+  name: string;
+  description?: string;
+  parent?: string;
+  confidence: 'high' | 'medium' | 'low' | number;
+  score?: number;
+  evidence: DomainDiscoveryEvidence[];
+  conflicts?: string[];
+  requiresHumanDecision?: boolean;
+  members?: Array<{ dbtUniqueId: string; evidence?: DomainDiscoveryEvidence[] }>;
+  lifecycle?: 'draft';
+  targetFile?: string;
+}
+
+export interface DomainDiscoveryResponse {
+  requestId?: string;
+  snapshotId?: string;
+  sourceFingerprint?: string;
+  proposals: DomainDiscoveryProposal[];
+  capabilities?: OnboardingCapabilities;
+  warnings?: string[];
+}
+
+export interface DomainDiscoveryApplyResponse {
+  requestId?: string;
+  snapshotId?: string;
+  jobId?: string;
+  applied?: boolean;
+  domains?: Array<{ id: string; filePath?: string; lifecycle?: string }>;
+  preview?: Array<{ path: string; operation: string; summary?: string }>;
 }
 
 export interface ModelingApplyResponse {
+  requestId?: string;
+  snapshotId: string;
   applied: ModelingChangePreview;
   modeling: ManifestDbtFirstModeling;
   diagnostics: ManifestDiagnostic[];
@@ -948,6 +1125,10 @@ export interface AppBlockRecommendation {
 export interface CreateAppRequest {
   name: string;
   domain: string;
+  ownerDomain?: string;
+  usesDomains?: string[];
+  requiredExports?: string[];
+  classification?: string;
   dashboardTitle?: string;
   subdomain?: string;
   groups?: string[];
@@ -1411,17 +1592,62 @@ export interface AgentMemory {
 
 const BASE = window.location.origin;
 
-function formatRequestError(res: Response, text: string): string {
+export class DqlApiError extends Error {
+  readonly status: number;
+  readonly code?: DbtOnboardingErrorCode | string;
+  readonly recoverable?: boolean;
+  readonly details?: unknown;
+  readonly nextActions?: string[];
+  readonly requestId?: string;
+  readonly snapshotId?: string;
+
+  constructor(input: {
+    message: string;
+    status: number;
+    code?: DbtOnboardingErrorCode | string;
+    recoverable?: boolean;
+    details?: unknown;
+    nextActions?: string[];
+    requestId?: string;
+    snapshotId?: string;
+  }) {
+    super(input.message);
+    this.name = 'DqlApiError';
+    this.status = input.status;
+    this.code = input.code;
+    this.recoverable = input.recoverable;
+    this.details = input.details;
+    this.nextActions = input.nextActions;
+    this.requestId = input.requestId;
+    this.snapshotId = input.snapshotId;
+  }
+}
+
+function formatRequestError(res: Response, text: string): DqlApiError {
   const fallback = text.trim() || res.statusText || `HTTP ${res.status}`;
-  if (!text.trim()) return fallback;
+  if (!text.trim()) return new DqlApiError({ message: fallback, status: res.status });
   try {
     const payload = JSON.parse(text);
-    if (typeof payload?.error === 'string' && payload.error.trim()) return payload.error;
-    if (typeof payload?.message === 'string' && payload.message.trim()) return payload.message;
+    const message = typeof payload?.message === 'string' && payload.message.trim()
+      ? payload.message
+      : typeof payload?.error === 'string' && payload.error.trim()
+        ? payload.error
+        : fallback;
+    return new DqlApiError({
+      message,
+      status: res.status,
+      code: typeof payload?.code === 'string' ? payload.code : undefined,
+      recoverable: typeof payload?.recoverable === 'boolean' ? payload.recoverable : undefined,
+      details: payload?.details,
+      nextActions: Array.isArray(payload?.nextActions)
+        ? payload.nextActions.filter((item: unknown): item is string => typeof item === 'string')
+        : undefined,
+      requestId: typeof payload?.requestId === 'string' ? payload.requestId : undefined,
+      snapshotId: typeof payload?.snapshotId === 'string' ? payload.snapshotId : undefined,
+    });
   } catch {
-    // Keep the original response text when the server did not return JSON.
+    return new DqlApiError({ message: fallback, status: res.status });
   }
-  return fallback;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -1438,7 +1664,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(formatRequestError(res, text));
+    throw formatRequestError(res, text);
   }
   // 204 No Content
   if (res.status === 204) return undefined as T;
@@ -1945,23 +2171,56 @@ export const api = {
     return request<DbtNodeAuthoringDetail>(`/api/modeling/dbt-first/nodes/${encodeURIComponent(uniqueId)}`);
   },
 
-  async previewModelingChange(change: ModelingAuthoringChange): Promise<ModelingChangePreview> {
+  async getDbtModelingNodes(uniqueIds: string[]): Promise<{ details: DbtNodeAuthoringDetail[]; snapshotId: string }> {
+    return request('/api/modeling/dbt-first/nodes/batch', { method: 'POST', body: JSON.stringify({ uniqueIds }) });
+  },
+
+  async getDbtModelInventory(options: { q?: string; domain?: string; cursor?: number; limit?: number } = {}): Promise<{ items: Array<Record<string, unknown>>; nextCursor: number | null; total: number; snapshotId: string }> {
+    const query = new URLSearchParams();
+    if (options.q) query.set('q', options.q);
+    if (options.domain) query.set('domain', options.domain);
+    if (options.cursor !== undefined) query.set('cursor', String(options.cursor));
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    return request(`/api/modeling/dbt-first/inventory?${query.toString()}`);
+  },
+
+  async getDomainWorkspaces(): Promise<{ domains: DomainWorkspaceSummary[]; unassignedModels: number; snapshot: { id: string; stale: boolean; error?: string } }> {
+    return request('/api/domain-workspaces');
+  },
+
+  async getRelatedDomainProducts(domain: string): Promise<RelatedDomainProducts> {
+    return request(`/api/domain-workspaces/${encodeURIComponent(domain)}/related-products`);
+  },
+
+  async previewModelingChange(change: ModelingAuthoringChange, expectedSnapshotId: string): Promise<ModelingChangePreview> {
     return request<ModelingChangePreview>('/api/modeling/dbt-first/preview', {
-      method: 'POST', body: JSON.stringify({ change }),
+      method: 'POST', body: JSON.stringify({ change, expectedSnapshotId }),
     });
   },
 
-  async applyModelingChange(change: ModelingAuthoringChange, fingerprint: string): Promise<ModelingApplyResponse> {
+  async applyModelingChange(change: ModelingAuthoringChange, fingerprint: string, expectedSnapshotId: string): Promise<ModelingApplyResponse> {
     return request<ModelingApplyResponse>('/api/modeling/dbt-first/apply', {
-      method: 'POST', body: JSON.stringify({ change, fingerprint }),
+      method: 'POST', body: JSON.stringify({ change, fingerprint, expectedSnapshotId }),
     });
   },
 
-  async validateModelingRelationship(relationship: RelationshipAuthoringInput): Promise<ManifestRelationshipValidationEvidence> {
+  async validateModelingRelationship(relationship: RelationshipAuthoringInput, expectedSnapshotId: string): Promise<ManifestRelationshipValidationEvidence> {
     const result = await request<{ evidence: ManifestRelationshipValidationEvidence }>('/api/modeling/dbt-first/relationships/validate', {
-      method: 'POST', body: JSON.stringify({ relationship }),
+      method: 'POST', body: JSON.stringify({ relationship, expectedSnapshotId }),
     });
     return result.evidence;
+  },
+
+  async previewDbtSourcePatch(change: DbtSourceAuthoringInput, expectedSnapshotId: string): Promise<DbtSourcePatchPreview & { requestId?: string; snapshotId: string }> {
+    return request('/api/modeling/dbt-first/dbt-source/preview', {
+      method: 'POST', body: JSON.stringify({ change, expectedSnapshotId }),
+    });
+  },
+
+  async applyDbtSourcePatch(change: DbtSourceAuthoringInput, expectedFingerprint: string, expectedSnapshotId: string): Promise<{ requestId?: string; snapshotId: string; applied: DbtSourcePatchPreview }> {
+    return request('/api/modeling/dbt-first/dbt-source/apply', {
+      method: 'POST', body: JSON.stringify({ change, expectedFingerprint, expectedSnapshotId }),
+    });
   },
 
   async getSettingsEnvStatus(): Promise<{ groups: SettingsEnvGroup[] }> {
@@ -2094,7 +2353,7 @@ export const api = {
     }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(formatRequestError(res, text));
+      throw formatRequestError(res, text);
     }
     return streamAgentRunResponse(res, onMessage);
   },
@@ -2805,7 +3064,7 @@ export const api = {
       });
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        throw new Error(formatRequestError(response, text));
+        throw formatRequestError(response, text);
       }
       return response.json() as Promise<{
         dataset: DatasetSource;
@@ -3337,6 +3596,68 @@ export const api = {
 
   async getSemanticObject(id: string): Promise<SemanticObjectDetail> {
     return request<SemanticObjectDetail>(`/api/semantic-layer/object/${encodeURIComponent(id)}`);
+  },
+
+  async getOnboardingStatus(): Promise<DbtOnboardingStatusResponse> {
+    return request<DbtOnboardingStatusResponse>('/api/onboarding/status');
+  },
+
+  async previewDbtOnboarding(payload: DbtOnboardingPreviewRequest): Promise<DbtOnboardingPreviewResponse> {
+    return request<DbtOnboardingPreviewResponse>('/api/onboarding/dbt/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async applyDbtOnboarding(payload: DbtOnboardingPreviewRequest & {
+    expectedFingerprint?: string;
+    buildArtifacts?: boolean;
+  }): Promise<DbtOnboardingApplyResponse> {
+    return request<DbtOnboardingApplyResponse>('/api/onboarding/dbt/apply', {
+      method: 'POST',
+      // `fingerprint` keeps compatibility with the first local-runtime
+      // implementation; `expectedFingerprint` is the normative API name.
+      body: JSON.stringify({ ...payload, fingerprint: payload.expectedFingerprint }),
+    });
+  },
+
+  async refreshDbtOnboarding(payload: {
+    expectedFingerprint?: string;
+    buildArtifacts?: boolean;
+  } = {}): Promise<DbtOnboardingApplyResponse> {
+    return request<DbtOnboardingApplyResponse>('/api/onboarding/refresh', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getOnboardingJob(jobId: string): Promise<DbtOnboardingJobResponse> {
+    return request<DbtOnboardingJobResponse>(`/api/onboarding/jobs/${encodeURIComponent(jobId)}`);
+  },
+
+  async cancelOnboardingJob(jobId: string): Promise<void> {
+    return request<void>(`/api/onboarding/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+  },
+
+  async discoverOnboardingDomains(payload: {
+    snapshotId?: string;
+    useAi?: boolean;
+  } = {}): Promise<DomainDiscoveryResponse> {
+    return request<DomainDiscoveryResponse>('/api/onboarding/domains/discover', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async applyOnboardingDomains(payload: {
+    proposals: DomainDiscoveryProposal[];
+    expectedSourceFingerprint?: string;
+    mode?: 'preview' | 'apply';
+  }): Promise<DomainDiscoveryApplyResponse> {
+    return request<DomainDiscoveryApplyResponse>('/api/onboarding/domains/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   },
 
   async importSemanticLayer(payload: {

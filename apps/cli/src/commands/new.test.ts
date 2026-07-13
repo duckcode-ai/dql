@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -412,7 +412,10 @@ describe('runNew', () => {
       expect(existsSync(join(projectDir, 'domains', 'customer', 'views'))).toBe(true);
       expect(existsSync(join(projectDir, 'domains', 'customer', 'modeling'))).toBe(true);
       expect(existsSync(join(projectDir, 'domains', 'customer', 'skills'))).toBe(true);
-      expect(existsSync(join(projectDir, 'domains', 'customer', 'notebooks'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'notebooks'))).toBe(false);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'apps'))).toBe(false);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'contracts'))).toBe(true);
+      expect(existsSync(join(projectDir, 'domains', 'customer', 'interfaces'))).toBe(true);
       expect(existsSync(join(projectDir, 'domains', 'customer', 'evaluations'))).toBe(true);
       expect(existsSync(blockPath)).toBe(true);
       expect(existsSync(viewPath)).toBe(true);
@@ -507,6 +510,28 @@ describe('runNew', () => {
       expect(existsSync(metricPath)).toBe(true);
       expect(existsSync(companionPath)).toBe(true);
       expect(readFileSync(companionPath, 'utf-8')).toContain('domain: revenue');
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('rejects local semantic metric scaffolding in manifest v3 dbt-first projects', async () => {
+    const originalCwd = process.cwd();
+    const projectDir = mkdtempSync(join(tmpdir(), 'dql-new-dbt-first-semantic-'));
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({
+      project: 'dbt-first',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+    }), 'utf-8');
+    try {
+      process.chdir(projectDir);
+      await expect(runNew('semantic-block', ['Duplicate Revenue'], {
+        check: false, chart: '', domain: 'commerce', format: 'json', help: false,
+        open: null, input: '', outDir: '', owner: 'analytics', port: null,
+        queryOnly: false, template: '', connection: '', verbose: false,
+        skipTests: false, version: false,
+      })).rejects.toThrow(/DQL_MODELING_DBT_OWNED/);
+      expect(existsSync(join(projectDir, 'semantic-layer'))).toBe(false);
     } finally {
       process.chdir(originalCwd);
     }

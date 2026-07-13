@@ -9,7 +9,9 @@ import type {
   KGNode,
   LocalContextPack,
   ReasoningEffort,
+  DomainContextEnvelope,
 } from '@duckcodeailabs/dql-agent';
+import type { DQLManifest } from '@duckcodeailabs/dql-core';
 
 export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'codex' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
@@ -129,6 +131,12 @@ export interface AgentRunRequest {
   /** Context/prompt depth for governed Ask AI. Research routes pass deep. */
   analysisDepth?: AnalysisDepth;
   projectRoot: string;
+  /** Server-resolved domain and purpose scope; clients never supply imports. */
+  domainContext?: DomainContextEnvelope;
+  /** Immutable server-owned manifest used for the entire governed answer. */
+  projectSnapshot?: { snapshotId: string; manifest: DQLManifest };
+  /** Final guard invoked before execution and answer publication. */
+  assertProjectSnapshot?: (snapshotId: string) => void;
   executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;

@@ -22,6 +22,11 @@ export interface NotebookDocMetadata {
   author?: string;
   createdAt?: string;
   modifiedAt?: string;
+  ownerDomain?: string;
+  usesDomains?: string[];
+  purpose?: string;
+  requiredExports?: string[];
+  classification?: string;
 }
 
 export type CellType =
@@ -204,6 +209,11 @@ export interface AppSummary {
   name: string;
   filePath?: string;
   domain: string;
+  ownerDomain?: string;
+  usesDomains: string[];
+  purpose?: string;
+  requiredExports: string[];
+  classification?: string;
   subdomain?: string;
   groups?: string[];
   description?: string;

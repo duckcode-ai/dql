@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
@@ -11,6 +11,19 @@ import type {
 } from './types.js';
 
 type UnknownRecord = Record<string, unknown>;
+
+const dbtJsonArtifactCache = new Map<string, { version: string; value: UnknownRecord }>();
+let dbtJsonArtifactReads = 0;
+
+/** PERF-001 instrumentation: physical dbt JSON parses since the last reset. */
+export function resetDbtArtifactReadCount(): void {
+  dbtJsonArtifactReads = 0;
+}
+
+/** PERF-001 instrumentation used by the ignored scale evidence harness. */
+export function dbtArtifactReadCount(): number {
+  return dbtJsonArtifactReads;
+}
 
 export interface DomainPackageAuthoringInput extends DomainInput {
   id: string;
@@ -138,6 +151,86 @@ export interface DbtNodeAuthoringDetail {
   dqlMeta?: { grain?: string; keys: string[] };
 }
 
+/** A dbt-owned documentation/test edit. DQL only plans and applies a source
+ * YAML patch; it never mutates manifest.json or mirrors these fields into a
+ * Domain Package. */
+export interface DbtSourceAuthoringInput {
+  uniqueId: string;
+  description?: string;
+  columns?: Array<{ name: string; description?: string; tests?: string[] }>;
+}
+
+export interface DbtSourcePatchPreview {
+  uniqueId: string;
+  patch: ModelingSourcePatch;
+  fingerprint: string;
+}
+
+export function previewDbtSourcePatch(
+  dbtProjectRoot: string,
+  manifestPath: string,
+  input: DbtSourceAuthoringInput,
+): DbtSourcePatchPreview {
+  const root = resolve(dbtProjectRoot);
+  const manifest = readJson(assertContainedPath(root, manifestPath, 'dbt manifest'));
+  const raw = asRecord(asRecord(manifest.nodes)[input.uniqueId]);
+  if (raw.resource_type !== 'model') throw new Error(`dbt model not found: ${input.uniqueId}`);
+  const name = requiredId(stringValue(raw.name), 'dbt model');
+  const patchPath = dbtPatchRelativePath(raw, name);
+  const absolute = assertContainedPath(root, patchPath, 'dbt source patch');
+  const before = existsSync(absolute) ? readFileSync(absolute, 'utf8') : '';
+  const document = before.trim() ? asRecord(yaml.load(before)) : { version: 2 };
+  const models = Array.isArray(document.models) ? [...document.models as unknown[]] : [];
+  const index = models.findIndex((entry) => asRecord(entry).name === name);
+  const model: UnknownRecord = index >= 0 ? { ...asRecord(models[index]) } : { name };
+  if (input.description !== undefined) model.description = input.description;
+  if (input.columns) {
+    const columns = Array.isArray(model.columns) ? [...model.columns as unknown[]] : [];
+    for (const requested of input.columns) {
+      const columnName = requiredId(requested.name, 'dbt column');
+      const columnIndex = columns.findIndex((entry) => asRecord(entry).name === columnName);
+      const column: UnknownRecord = columnIndex >= 0 ? { ...asRecord(columns[columnIndex]) } : { name: columnName };
+      if (requested.description !== undefined) column.description = requested.description;
+      if (requested.tests !== undefined) column.data_tests = cleanStrings(requested.tests);
+      if (columnIndex >= 0) columns[columnIndex] = column;
+      else columns.push(column);
+    }
+    model.columns = columns;
+  }
+  if (index >= 0) models[index] = model;
+  else models.push(model);
+  document.version = typeof document.version === 'number' ? document.version : 2;
+  document.models = models;
+  const after = dumpYaml(document);
+  const patch = { path: patchPath, before, after, changed: before !== after };
+  return {
+    uniqueId: input.uniqueId,
+    patch,
+    fingerprint: hash({ uniqueId: input.uniqueId, path: patchPath, before, after }),
+  };
+}
+
+export function applyDbtSourcePatch(
+  dbtProjectRoot: string,
+  manifestPath: string,
+  input: DbtSourceAuthoringInput,
+  expectedFingerprint: string,
+): DbtSourcePatchPreview {
+  const preview = previewDbtSourcePatch(dbtProjectRoot, manifestPath, input);
+  if (!expectedFingerprint || preview.fingerprint !== expectedFingerprint) {
+    throw new Error('dbt source changed after the preview. Refresh the source patch before applying.');
+  }
+  if (preview.patch.changed) {
+    const absolute = assertContainedPath(dbtProjectRoot, preview.patch.path, 'dbt source patch');
+    mkdirSync(dirname(absolute), { recursive: true });
+    // Re-check after mkdir so a concurrently-created symlink cannot redirect
+    // the final write outside the dbt project.
+    assertContainedPath(dbtProjectRoot, preview.patch.path, 'dbt source patch');
+    writeFileSync(absolute, preview.patch.after, 'utf8');
+  }
+  return preview;
+}
+
 export function previewModelingChange(projectRoot: string, change: ModelingAuthoringChange): ModelingChangePreview {
   const root = resolve(projectRoot);
   const patches = change.operation === 'upsert_domain'
@@ -171,6 +264,7 @@ export function applyModelingChange(
     if (!patch.changed) continue;
     const absolute = safeProjectPath(projectRoot, patch.path);
     mkdirSync(dirname(absolute), { recursive: true });
+    safeProjectPath(projectRoot, patch.path);
     writeFileSync(absolute, patch.after, 'utf8');
   }
   return preview;
@@ -366,6 +460,7 @@ function validationSource(value: ManifestRelationshipValidationEvidence): Unknow
     status: value.status,
     checked_at: value.checkedAt,
     query_fingerprint: value.queryFingerprint,
+    ...(value.proofFingerprint ? { proof_fingerprint: value.proofFingerprint } : {}),
     from_rows: value.fromRows,
     to_rows: value.toRows,
     joined_rows: value.joinedRows,
@@ -434,11 +529,37 @@ function findPackageRoot(projectRoot: string, id: string): string | undefined {
 }
 
 function safeProjectPath(projectRoot: string, relativePath: string): string {
-  const root = resolve(projectRoot);
-  const path = resolve(root, relativePath);
-  if (path !== root && !path.startsWith(`${root}${sep}`)) throw new Error('Modeling path escapes the project root.');
   if (!relativePath.replace(/\\/g, '/').startsWith('domains/')) throw new Error('Modeling writes are restricted to domains/.');
-  return path;
+  return assertContainedPath(projectRoot, relativePath, 'Modeling path');
+}
+
+function dbtPatchRelativePath(raw: UnknownRecord, name: string): string {
+  const patchPath = stringValue(raw.patch_path);
+  if (patchPath) {
+    const separator = patchPath.indexOf('://');
+    const relativePath = separator >= 0 ? patchPath.slice(separator + 3) : patchPath;
+    if (!relativePath.endsWith('.yml') && !relativePath.endsWith('.yaml')) throw new Error('dbt patch_path must point to a YAML source file.');
+    return relativePath.replace(/\\/g, '/');
+  }
+  const original = stringValue(raw.original_file_path) ?? stringValue(raw.path);
+  if (!original) throw new Error(`dbt model ${name} does not declare a source path.`);
+  return join(dirname(original), `${name}.yml`).replace(/\\/g, '/');
+}
+
+/** Resolve lexical and real paths so existing symlink ancestors cannot escape
+ * the intended project root. Missing leaf segments are allowed for previews. */
+function assertContainedPath(projectRoot: string, inputPath: string, label: string): string {
+  const root = resolve(projectRoot);
+  const canonicalRoot = existsSync(root) ? realpathSync(root) : root;
+  const absolute = resolve(root, inputPath);
+  if (absolute !== root && !absolute.startsWith(`${root}${sep}`)) throw new Error(`${label} escapes the project root.`);
+  let existing = absolute;
+  while (!existsSync(existing) && existing !== root) existing = dirname(existing);
+  const canonicalExisting = existsSync(existing) ? realpathSync(existing) : canonicalRoot;
+  if (canonicalExisting !== canonicalRoot && !canonicalExisting.startsWith(`${canonicalRoot}${sep}`)) {
+    throw new Error(`${label} escapes the project root through a symlink.`);
+  }
+  return absolute;
 }
 
 function dumpYaml(value: unknown): string {
@@ -446,7 +567,14 @@ function dumpYaml(value: unknown): string {
 }
 
 function readJson(path: string): UnknownRecord {
-  return asRecord(JSON.parse(readFileSync(path, 'utf8')));
+  const stat = statSync(path);
+  const version = `${stat.size}:${stat.mtimeMs}`;
+  const cached = dbtJsonArtifactCache.get(path);
+  if (cached?.version === version) return cached.value;
+  const value = asRecord(JSON.parse(readFileSync(path, 'utf8')));
+  dbtJsonArtifactReads += 1;
+  dbtJsonArtifactCache.set(path, { version, value });
+  return value;
 }
 
 function relationName(raw: UnknownRecord): string | undefined {

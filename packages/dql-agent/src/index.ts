@@ -78,6 +78,8 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
+export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
+export type { DomainContextEnvelope, ResolveDomainContextInput } from './domain-context.js';
 export {
   stampTrustLabel,
   trustLabelIdForAnswer,
@@ -486,12 +488,14 @@ export type {
 export { selectRelevantModels } from "./metadata/sql-retrieval.js";
 export type { SelectRelevantModelsOptions } from "./metadata/sql-retrieval.js";
 export {
+  assessAnalyticalRelationship,
   planAnalyticalPath,
   validateAnalyticalSql,
   type AnalyticalPolicyCode,
   type AnalyticalJoinPlanEdge,
   type AnalyticalPathPlan,
   type AnalyticalPathRequest,
+  type AnalyticalRelationshipDecision,
 } from "./metadata/analytical-policy.js";
 export {
   deriveGeneratedDraftSlug,
@@ -619,6 +623,7 @@ export type {
 } from "./hints/store.js";
 export {
   recordCorrectionTrace,
+  evaluateHint,
   reviewHint,
   reindexHints,
   listHintsFromGit,
@@ -626,9 +631,15 @@ export {
   writeHintFile,
   readHintFile,
   hintsDir,
+  evaluationsDir,
   tracesDir,
   reviewsDir,
   defaultHintIndexPath,
+  hintEvaluationFilePath,
+  readHintEvaluationFile,
+  getHintEvaluationFromGit,
+  listHintEvaluationsFromGit,
+  HintLifecycleError,
 } from "./hints/git-store.js";
 export {
   buildCorrectionEvalCase,
@@ -646,6 +657,8 @@ export {
 export type {
   RecordCorrectionTraceInput,
   RecordCorrectionTraceResult,
+  EvaluateHintInput,
+  EvaluateHintResult,
   ReviewHintInput,
   ReviewHintResult,
 } from "./hints/git-store.js";
@@ -664,6 +677,9 @@ export {
 export type {
   CorrectionTrace,
   Hint,
+  HintEvaluation,
+  HintEvaluationCheck,
+  HintEvaluationStatus,
   HintReview,
   HintScope,
   HintStatus,
@@ -902,8 +918,9 @@ export async function reindexProject(
     const result = loadSkills(projectRoot);
     skills = result.skills;
     for (const s of skills) {
+      const skillIdentity = s.qualifiedId ?? s.id;
       nodes.push({
-        nodeId: `skill:${s.id}`,
+        nodeId: `skill:${skillIdentity}`,
         kind: "skill",
         name: s.id,
         domain: s.domain,
@@ -924,7 +941,7 @@ export async function reindexProject(
         },
       });
       for (const domain of s.domains ?? (s.domain ? [s.domain] : [])) {
-        edges.push({ src: `domain:${domain}`, dst: `skill:${s.id}`, kind: "contains" });
+        edges.push({ src: `domain:${domain}`, dst: `skill:${skillIdentity}`, kind: "contains" });
       }
     }
   }

@@ -7,6 +7,8 @@
  * and external tools (DataHub, Atlan, etc.).
  */
 
+import type { ProductDomainContext } from '../apps/product-domain-context.js';
+
 // ---- Top-level manifest ----
 
 export interface DQLManifest {
@@ -475,7 +477,7 @@ export interface ManifestBusinessView {
 
 // ---- Notebooks ----
 
-export interface ManifestNotebook {
+export interface ManifestNotebook extends ProductDomainContext {
   /** Notebook title */
   title: string;
   /** Relative path from project root */
@@ -594,7 +596,7 @@ export interface ManifestLineageEdge {
 
 // ---- Apps & Dashboards (consumption layer) ----
 
-export interface ManifestApp {
+export interface ManifestApp extends ProductDomainContext {
   id: string;
   name: string;
   description?: string;
@@ -818,6 +820,10 @@ export interface ManifestDomainPackage {
 
 export interface ManifestModelEntity {
   id: string;
+  /** Author-written id inside the owning Domain Package. */
+  localId: string;
+  /** Stable globally unique identity (`<domain>::entity::<localId>`). */
+  qualifiedId: string;
   domain: string;
   dbtUniqueId: string;
   /** Analytical identity assertion; omitted when dbt `meta.dql` supplies it. */
@@ -851,6 +857,8 @@ export interface ManifestRelationshipTemporalPolicy {
 
 export interface ManifestModelRelationship {
   id: string;
+  localId: string;
+  qualifiedId: string;
   from: string;
   to: string;
   keys: Array<{ from: string; to: string }>;
@@ -885,6 +893,8 @@ export interface ManifestRelationshipValidationEvidence {
   status: 'passed' | 'failed' | 'error';
   checkedAt: string;
   queryFingerprint: string;
+  /** Fingerprint of relations, keys, cardinality and fanout validated by the query. */
+  proofFingerprint?: string;
   fromRows: number;
   toRows: number;
   joinedRows: number;
@@ -898,6 +908,8 @@ export interface ManifestRelationshipValidationEvidence {
 
 export interface ManifestModelContract {
   id: string;
+  localId: string;
+  qualifiedId: string;
   domain: string;
   entities: string[];
   blocks: string[];
@@ -917,6 +929,8 @@ export interface ManifestModelContract {
 
 export interface ManifestDomainExport {
   id: string;
+  localId: string;
+  qualifiedId: string;
   domain: string;
   version: number;
   entity?: string;
@@ -937,6 +951,8 @@ export interface ManifestDomainExport {
 
 export interface ManifestDomainImport {
   id: string;
+  localId: string;
+  qualifiedId: string;
   domain: string;
   exportRef: string;
   purpose: string;
@@ -947,6 +963,9 @@ export interface ManifestDomainImport {
 
 export interface ManifestConformanceDeclaration {
   id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
   entities: string[];
   rule: string;
   sourcePath: string;
@@ -954,6 +973,8 @@ export interface ManifestConformanceDeclaration {
 
 export interface ManifestModelRule {
   id: string;
+  localId: string;
+  qualifiedId: string;
   domain: string;
   kind: 'fanout' | 'export' | 'contract' | 'custom';
   expression: string;

@@ -25,6 +25,7 @@ import type { CompletePathResult } from '../lineage/lineage-constants';
 import { TableOutput } from '../output/TableOutput';
 import { BlockLibraryPanel } from '../panels/BlockLibraryPanel';
 import { BuildSidebar } from '../panels/BuildSidebar';
+import { blockDomainOptions } from './domain-options';
 import { MetricDetailPanel } from '../panels/MetricDetailPanel';
 import { SemanticSearchBar } from '../panels/SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
@@ -83,7 +84,7 @@ export function BlockStudio() {
   const [resultTab, setResultTab] = useState<ResultTab>('results');
   const [query, setQuery] = useState('');
   const [providerFilter, setProviderFilter] = useState('');
-  const [domainFilter, setDomainFilter] = useState('');
+  const [domainFilter, setDomainFilter] = useState(() => readBlockStudioDomain());
   const [cubeFilter, setCubeFilter] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [tagFilter, setTagFilter] = useState('');
@@ -339,6 +340,16 @@ export function BlockStudio() {
   }, [aiDockWidth]);
 
   useEffect(() => {
+    if (!domainFilter) return;
+    try { window.localStorage.setItem('dql.block-studio.domain', domainFilter); } catch { /* best effort */ }
+  }, [domainFilter]);
+
+  useEffect(() => {
+    const activeDomain = state.blockStudioMetadata?.domain?.trim();
+    if (activeDomain && activeDomain !== 'uncategorized') setDomainFilter(activeDomain);
+  }, [state.activeBlockPath, state.blockStudioMetadata?.domain]);
+
+  useEffect(() => {
     if (!state.blockStudioImportOpen) return;
     setWorkspaceMode('import');
     dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
@@ -419,14 +430,16 @@ export function BlockStudio() {
 
   const beginManualDraft = (type: 'custom' | 'semantic') => {
     const name = type === 'semantic' ? 'new_semantic_block' : 'new_sql_block';
-    const source = type === 'semantic' ? buildSemanticSkeleton(name) : buildCustomSkeleton(name);
+    const draftDomain = domainFilter || 'uncategorized';
+    const skeleton = type === 'semantic' ? buildSemanticSkeleton(name) : buildCustomSkeleton(name);
+    const source = setBlockStringField(skeleton, 'domain', draftDomain);
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft: source });
     dispatch({
       type: 'SET_BLOCK_STUDIO_METADATA',
       metadata: {
         name,
         path: null,
-        domain: 'uncategorized',
+        domain: draftDomain,
         description: '',
         owner: '',
         tags: [],
@@ -922,6 +935,8 @@ export function BlockStudio() {
           <BuildSidebar
             tabs={['blocks', 'semantic', 'database']}
             defaultTab={explorerTab}
+            blockDomain={domainFilter}
+            onBlockDomainChange={setDomainFilter}
             onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
             onSeedBlock={(ref, label) => openAskAi({
               kind: 'build',
@@ -1007,7 +1022,6 @@ export function BlockStudio() {
               )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
               <TemplateButton label="Save draft" onClick={() => void handleSave()} busy={saving} />
-              <TemplateButton label="Certify" Icon={ShieldCheck} onClick={() => void handleCertify()} busy={saving} />
             </>
           )}
           {saveError && (
@@ -1038,7 +1052,7 @@ export function BlockStudio() {
               onRefreshSessions={refreshImportSessions}
               onSelectCandidate={handleImportCandidateSelect}
               onSavedCandidate={handleImportCandidateSaved}
-              defaultDomain={state.blockStudioMetadata?.domain ?? ''}
+              defaultDomain={state.blockStudioMetadata?.domain ?? domainFilter}
               defaultOwner={state.blockStudioMetadata?.owner ?? ''}
               themeMode={state.themeMode}
               t={t}
@@ -1062,6 +1076,7 @@ export function BlockStudio() {
               source={state.blockStudioDraft}
               metadata={state.blockStudioMetadata}
               semanticLayer={state.semanticLayer}
+              domainOptions={state.semanticLayer.domains}
               chartConfig={currentChart}
               onChange={handleDraftChange}
               onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
@@ -1072,6 +1087,7 @@ export function BlockStudio() {
               <SqlBlockVisualBuilder
                 source={state.blockStudioDraft}
                 metadata={state.blockStudioMetadata}
+                domainOptions={state.semanticLayer.domains}
                 chartConfig={currentChart}
                 onChange={handleDraftChange}
                 onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
@@ -1139,7 +1155,7 @@ export function BlockStudio() {
           <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
           <span style={{ width: 1, height: 18, background: t.headerBorder, margin: '0 6px' }} />
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
-            Governance
+            Details
           </span>
           <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
             setResultTab('history');
@@ -1512,12 +1528,13 @@ function selectionChipStyle(t: Theme, selected: boolean): React.CSSProperties {
     alignItems: 'center',
     background: selected ? `${t.accent}18` : t.btnBg,
     border: `1px solid ${selected ? t.accent : t.btnBorder}`,
-    borderRadius: 999,
+    borderRadius: 6,
     color: selected ? t.accent : t.textSecondary,
     cursor: 'pointer',
-    fontSize: 11,
+    fontSize: 10.5,
     fontFamily: t.font,
-    padding: '5px 9px',
+    lineHeight: 1.2,
+    padding: '4px 7px',
   };
 }
 
@@ -1656,7 +1673,7 @@ function BlockStudioStartPage({
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
         <PrimaryStartAction
           title="Ask AI"
-          detail="Describe the business asset you need. DQL checks certified blocks and semantic metrics before drafting anything new."
+          detail="Describe the business asset you need. DQL uses this domain's blocks, models, and semantic metrics to draft it."
           label="Describe block"
           Icon={Bot}
           onClick={onBuildDql}
@@ -1701,7 +1718,6 @@ function BlockStudioStartPage({
         <ReadinessChip Icon={Database} label={projectLabel ? `${projectLabel} dbt` : 'dbt context'} value={sourceSummary} tone={dbtReady ? 'success' : 'neutral'} t={t} />
         <ReadinessChip Icon={Database} label="Database" value={`${databaseStats.tables} tables`} tone={databaseStats.tables > 0 ? 'success' : 'neutral'} t={t} />
         <ReadinessChip Icon={Blocks} label="DQL semantic layer" value={`${semanticObjectCount} objects`} tone={semanticObjectCount > 0 ? 'success' : 'neutral'} t={t} />
-        <ReadinessChip Icon={ShieldCheck} label="Governance" value="Run · validate · certify" tone="neutral" t={t} />
       </section>
     </div>
   );
@@ -2077,6 +2093,7 @@ function SemanticBlockBuilder({
   source,
   metadata,
   semanticLayer,
+  domainOptions,
   chartConfig,
   onChange,
   onMetadataChange,
@@ -2086,6 +2103,7 @@ function SemanticBlockBuilder({
   source: string;
   metadata: BlockStudioOpenPayload['metadata'] | null;
   semanticLayer: SemanticLayerState;
+  domainOptions: string[];
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
   onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
@@ -2112,7 +2130,7 @@ function SemanticBlockBuilder({
   }, [semanticLayer.dimensions, values.metrics.join('|')]);
   const compatibleNames = new Set(compatibleDimensions.map((dimension) => dimension.name));
   const allDimensions = Array.from(new Map([...semanticLayer.dimensions, ...semanticLayer.timeDimensions].map((dimension) => [dimension.name, dimension])).values());
-  const inputStyle = importInputStyle(t);
+  const compactInput = compactBuilderInputStyle(t);
   const [metricSearch, setMetricSearch] = useState('');
   const [dimensionSearch, setDimensionSearch] = useState('');
   const metricByName = useMemo(() => new Map(semanticLayer.metrics.map((metric) => [metric.name, metric])), [semanticLayer.metrics]);
@@ -2140,15 +2158,13 @@ function SemanticBlockBuilder({
   };
   return (
     <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
-      <PanelBox title="Business identity" t={t}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 9 }}>
-          <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => updateText('name', event.target.value)} style={inputStyle} /></FieldLabel>
-          <FieldLabel label="Domain" t={t}><input value={metadata?.domain ?? ''} onChange={(event) => updateText('domain', event.target.value)} style={inputStyle} /></FieldLabel>
-          <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => updateText('owner', event.target.value)} placeholder="Required to save" style={inputStyle} /></FieldLabel>
-          <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => updateText('description', event.target.value)} style={inputStyle} /></FieldLabel>
-          <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => { const tags = event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean); onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }} placeholder="finance, executive" style={inputStyle} /></FieldLabel>
-        </div>
-      </PanelBox>
+      <CompactBlockIdentity
+        metadata={metadata}
+        domains={domainOptions}
+        onTextChange={updateText}
+        onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
+        t={t}
+      />
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
         <PanelBox title="Metric and grain" t={t}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -2168,7 +2184,7 @@ function SemanticBlockBuilder({
           />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
             <FieldLabel label="Time dimension" t={t}>
-              <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={inputStyle}>
+              <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={compactInput}>
                 <option value="">None</option>
                 {semanticLayer.timeDimensions.filter((dimension) => values.metrics.length === 0 || compatibleNames.has(dimension.name)).map((dimension) => (
                   <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
@@ -2176,7 +2192,7 @@ function SemanticBlockBuilder({
               </select>
             </FieldLabel>
             <FieldLabel label="Grain" t={t}>
-              <select value={values.granularity} onChange={(event) => onChange(setSemanticScalar(source, 'granularity', event.target.value))} style={inputStyle}>
+              <select value={values.granularity} onChange={(event) => onChange(setSemanticScalar(source, 'granularity', event.target.value))} style={compactInput}>
                 <option value="">None</option>
                 {['day', 'week', 'month', 'quarter', 'year'].map((grain) => <option key={grain} value={grain}>{grain}</option>)}
               </select>
@@ -2195,17 +2211,17 @@ function SemanticBlockBuilder({
 
         <PanelBox title="Chart intent" t={t}>
           <FieldLabel label="Chart type" t={t}>
-            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={inputStyle}>
+            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={compactInput}>
               <option value="table">Table</option>
               {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </FieldLabel>
           <FieldLabel label="Title" t={t}>
-            <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={inputStyle} />
+            <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={compactInput} />
           </FieldLabel>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={inputStyle}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
-            <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={inputStyle}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
+            <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={compactInput}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
+            <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={compactInput}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
           </div>
         </PanelBox>
       </div>
@@ -2249,19 +2265,53 @@ function SemanticBlockBuilder({
         t={t}
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
-        <PanelBox title="Output contract" t={t}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{outputFields.length > 0 ? outputFields.map((field) => <span key={field} style={selectionChipStyle(t, true)}>{businessLabel(field)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Select metrics and dimensions to define business outputs.</span>}</div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12, alignItems: 'start' }}>
+        <PanelBox title={`Output fields${outputFields.length ? ` · ${outputFields.length}` : ''}`} t={t}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>{outputFields.length > 0 ? outputFields.map((field) => <span key={field} style={selectionChipStyle(t, true)}>{businessLabel(field)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Select metrics and dimensions to define outputs.</span>}</div>
         </PanelBox>
         <PanelBox title="Tests" t={t}>
-          <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...inputStyle, minHeight: 82, resize: 'vertical', fontFamily: t.fontMono }} />
+          <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...compactInput, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
         </PanelBox>
       </div>
 
-      <PanelBox title="Generated DQL" t={t}>
-        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono }}>{source}</pre>
-      </PanelBox>
+      <details style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg, padding: '8px 10px', color: t.textSecondary, fontFamily: t.font }}>
+        <summary style={{ cursor: 'pointer', fontSize: 11, fontWeight: 750 }}>Generated DQL preview</summary>
+        <pre style={{ maxHeight: 240, overflow: 'auto', margin: '10px 0 0', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono }}>{source}</pre>
+      </details>
     </div>
+  );
+}
+
+function CompactBlockIdentity({
+  metadata,
+  domains,
+  onTextChange,
+  onTagsChange,
+  t,
+}: {
+  metadata: BlockStudioOpenPayload['metadata'] | null;
+  domains: string[];
+  onTextChange: (field: 'name' | 'domain' | 'description' | 'owner', value: string) => void;
+  onTagsChange: (tags: string[]) => void;
+  t: Theme;
+}) {
+  const options = blockDomainOptions(metadata?.domain, domains);
+  const input = compactBuilderInputStyle(t);
+  return (
+    <PanelBox title="Block details" t={t}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 8 }}>
+        <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => onTextChange('name', event.target.value)} style={input} /></FieldLabel>
+        <FieldLabel label="Domain" t={t}>
+          <select aria-label="Block domain" value={metadata?.domain ?? ''} onChange={(event) => onTextChange('domain', event.target.value)} style={input}>
+            <option value="">Select domain…</option>
+            {options.map((domain) => <option key={domain} value={domain}>{domain}</option>)}
+          </select>
+        </FieldLabel>
+        <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => onTextChange('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
+        <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => onTextChange('description', event.target.value)} placeholder="What this answers" style={input} /></FieldLabel>
+      </div>
+      <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => onTagsChange(event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="finance, executive" style={input} /></FieldLabel>
+    </PanelBox>
   );
 }
 
@@ -2315,7 +2365,7 @@ function EnterpriseSemanticPicker({
       {selected.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {selected.map((name) => (
-            <button key={name} type="button" onClick={() => onToggle(name)} title={`Remove ${resolveLabel(name)}`} style={{ ...selectionChipStyle(t, true), display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <button key={name} type="button" onClick={() => onToggle(name)} title={`Remove ${resolveLabel(name)}`} style={{ ...selectionChipStyle(t, true), display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <CheckSquare size={12} aria-hidden="true" /> {resolveLabel(name)} <X size={11} aria-hidden="true" />
             </button>
           ))}
@@ -2328,7 +2378,7 @@ function EnterpriseSemanticPicker({
           disabled={disabled}
           onChange={(event) => onSearchChange(event.target.value)}
           placeholder={disabled ? emptyHint : `Search ${total.toLocaleString()} ${label} by name, domain, or description…`}
-          style={{ ...importInputStyle(t), width: '100%', paddingLeft: 30, opacity: disabled ? 0.62 : 1 }}
+          style={{ ...compactBuilderInputStyle(t), width: '100%', paddingLeft: 30, opacity: disabled ? 0.62 : 1 }}
         />
         {search && <button type="button" onClick={() => onSearchChange('')} title="Clear search" style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', display: 'inline-flex', border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', padding: 2 }}><X size={12} /></button>}
       </label>
@@ -2359,6 +2409,7 @@ function EnterpriseSemanticPicker({
 function SqlBlockVisualBuilder({
   source,
   metadata,
+  domainOptions,
   chartConfig,
   onChange,
   onMetadataChange,
@@ -2366,12 +2417,13 @@ function SqlBlockVisualBuilder({
 }: {
   source: string;
   metadata: BlockStudioOpenPayload['metadata'] | null;
+  domainOptions: string[];
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
   onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
   t: Theme;
 }) {
-  const input = importInputStyle(t);
+  const input = compactBuilderInputStyle(t);
   const query = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1]?.trim() ?? '';
   const outputs = extractSelectAliases(query);
   const testsBody = getDqlSectionBody(source, 'tests');
@@ -2381,30 +2433,26 @@ function SqlBlockVisualBuilder({
   };
   return (
     <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
-        <PanelBox title="Business identity" t={t}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 9 }}>
-            <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => updateText('name', event.target.value)} style={input} /></FieldLabel>
-            <FieldLabel label="Domain" t={t}><input value={metadata?.domain ?? ''} onChange={(event) => updateText('domain', event.target.value)} style={input} /></FieldLabel>
-            <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => updateText('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
-            <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => updateText('description', event.target.value)} style={input} /></FieldLabel>
-            <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => { const tags = event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean); onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }} placeholder="finance, executive" style={input} /></FieldLabel>
-          </div>
-        </PanelBox>
-        <PanelBox title="Chart intent" t={t}>
-          <FieldLabel label="Chart type" t={t}>
-            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={input}>
-              <option value="table">Table</option>
-              {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          </FieldLabel>
-          <FieldLabel label="Title" t={t}><input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} style={input} /></FieldLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
-            <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
-          </div>
-        </PanelBox>
-      </div>
+      <CompactBlockIdentity
+        metadata={metadata}
+        domains={domainOptions}
+        onTextChange={updateText}
+        onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
+        t={t}
+      />
+      <PanelBox title="Chart intent" t={t}>
+        <FieldLabel label="Chart type" t={t}>
+          <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={input}>
+            <option value="table">Table</option>
+            {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </FieldLabel>
+        <FieldLabel label="Title" t={t}><input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} style={input} /></FieldLabel>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
+          <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
+        </div>
+      </PanelBox>
       <PanelBox title="Business outputs" t={t}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
           {outputs.length > 0 ? outputs.map((output) => <span key={output} style={selectionChipStyle(t, true)}>{businessLabel(output)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Add aliases in DQL Source to expose business-friendly output names.</span>}
@@ -2412,7 +2460,7 @@ function SqlBlockVisualBuilder({
       </PanelBox>
       <VisualParameterEditor source={source} kind="custom" onChange={onChange} t={t} />
       <PanelBox title="Tests" t={t}>
-        <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 82, resize: 'vertical', fontFamily: t.fontMono }} />
+        <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
       </PanelBox>
       <PanelBox title="SQL preview" t={t}>
         <pre style={{ margin: 0, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.5, fontFamily: t.fontMono }}>{query || 'Open DQL Source to add a SELECT query.'}</pre>
@@ -3979,6 +4027,16 @@ function importInputStyle(t: Theme): React.CSSProperties {
   };
 }
 
+function compactBuilderInputStyle(t: Theme): React.CSSProperties {
+  return {
+    ...importInputStyle(t),
+    boxSizing: 'border-box',
+    fontSize: 11.5,
+    minHeight: 32,
+    padding: '6px 8px',
+  };
+}
+
 function secondaryImportButtonStyle(t: Theme): React.CSSProperties {
   return {
     background: t.btnBg,
@@ -4970,6 +5028,11 @@ SELECT 1 AS value
 
 function makeBlockStudioDraftId(): string {
   return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function readBlockStudioDomain(): string {
+  if (typeof window === 'undefined') return '';
+  try { return window.localStorage.getItem('dql.block-studio.domain')?.trim() ?? ''; } catch { return ''; }
 }
 
 function readBlockStudioBoolean(key: string, fallback: boolean): boolean {

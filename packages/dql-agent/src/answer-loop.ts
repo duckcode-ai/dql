@@ -32,6 +32,7 @@ import { buildSkillBlockHints, buildSkillMetricHints, buildSkillsPrompt, expandQ
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { ConversationSnapshot } from './conversation/snapshot.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
+import { domainContextSearchDomains, type DomainContextEnvelope } from './domain-context.js';
 import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
 import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metadata/drafts.js';
 import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan } from './metadata/analysis-planner.js';
@@ -391,6 +392,8 @@ export interface AgentAnswer {
   provenanceFooter?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
+  /** Server-resolved domain/purpose scope used before retrieval. */
+  domainContext?: DomainContextEnvelope;
   validationWarnings?: string[];
   selectedEvidence?: LocalContextPack['evidenceRoles'];
   citations: AgentCitation[];
@@ -461,6 +464,8 @@ export interface AnswerLoopInput {
   userId?: string;
   /** Domain to scope the search. Optional. */
   domain?: string;
+  /** Server-resolved governed scope. Prefer this over the v2 `domain` alias. */
+  domainContext?: DomainContextEnvelope;
   /** Caller-supplied provider; the answer-loop never picks one itself. */
   provider: AgentProvider;
   /** Live KG store. */
@@ -563,7 +568,7 @@ const EXECUTABLE_ARTIFACT_KINDS: KGNodeKind[] = ['block', 'dashboard', 'app', 'n
 // be cited, but they never produce the row-level answer to an analytical question,
 // so they must not terminate a data ask as a "certified answer" with no data.
 const NAVIGATION_ARTIFACT_KINDS: KGNodeKind[] = ['dashboard', 'app', 'notebook'];
-const BUSINESS_CONTEXT_KINDS: KGNodeKind[] = ['term', 'business_view'];
+const BUSINESS_CONTEXT_KINDS: KGNodeKind[] = ['term', 'business_view', 'domain', 'skill', 'relationship', 'contract', 'domain_export', 'domain_import', 'conformance', 'evaluation'];
 const ARTIFACT_KINDS: KGNodeKind[] = [...EXECUTABLE_ARTIFACT_KINDS, ...BUSINESS_CONTEXT_KINDS];
 const SEMANTIC_KINDS: KGNodeKind[] = ['metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query'];
 const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
@@ -669,6 +674,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const trustLabelInfo = stampTrustLabel(result);
   return {
     ...publicResult,
+    domainContext: input.domainContext,
     intentDecision,
     trustLabelInfo,
     provenanceFooter: buildProvenanceFooter(result, trustLabelInfo),
@@ -693,6 +699,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       selectRelevantSkills(input.skills ?? [], input.question, {
         userId: input.userId ?? null,
         domains: Array.from(new Set([
+          ...domainContextSearchDomains(input.domainContext),
           ...(input.domain ? [input.domain] : []),
           ...(input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
         ])),
@@ -757,7 +764,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // Select the RELEVANT skills (not all) for this question; keep pinned project
   // skills (SQL conventions). Block hints still come from the full set so a
   // preferred-block mapping is never lost.
+  const authorizedDomains = domainContextSearchDomains(input.domainContext);
   const inferredDomains = Array.from(new Set([
+    ...authorizedDomains,
     ...(domain ? [domain] : []),
     ...(input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
   ]));
@@ -780,11 +789,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? new Set([followUpSourceBlock.nodeId])
     : undefined;
 
-  const executableArtifactHits = kg.search({ query: question, domain, kinds: EXECUTABLE_ARTIFACT_KINDS, limit: 10 });
-  const businessHits = kg.search({ query: question, domain, kinds: BUSINESS_CONTEXT_KINDS, limit: 10 });
+  const searchScope = authorizedDomains.length > 0 ? { domains: authorizedDomains } : { domain };
+  const executableArtifactHits = kg.search({ query: question, ...searchScope, kinds: EXECUTABLE_ARTIFACT_KINDS, limit: 10 });
+  const businessHits = kg.search({ query: question, ...searchScope, kinds: BUSINESS_CONTEXT_KINDS, limit: 10 });
   const artifactHits = mergeHits(executableArtifactHits, businessHits).slice(0, 12);
-  const semanticHits = kg.search({ query: question, domain, kinds: SEMANTIC_KINDS, limit: 12 });
-  const manifestHits = kg.search({ query: question, domain, kinds: MANIFEST_KINDS, limit: 12 });
+  const semanticHits = kg.search({ query: question, ...searchScope, kinds: SEMANTIC_KINDS, limit: 12 });
+  const manifestHits = kg.search({ query: question, ...searchScope, kinds: MANIFEST_KINDS, limit: 12 });
   const considered = mergeHits(
     artifactHits,
     semanticHits,
@@ -1163,6 +1173,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const analyticalPlan = input.manifest
     ? planAnalyticalPath(input.manifest, {
         entityIds: inferAnalyticalEntityIds(question, contextNodes, input.manifest),
+        ownerDomain: input.domainContext?.activeDomain ?? input.domain,
+        purpose: input.domainContext?.purpose,
+        domainContext: input.domainContext,
       })
     : undefined;
   const analyticalPlanPrompt = renderAnalyticalPlanPrompt(analyticalPlan);
@@ -1801,7 +1814,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   }
 
   const dbtFirstJoinSafety = input.manifest
-    ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest)
+    ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest, input.domainContext?.purpose, input.domainContext)
     : undefined;
   if (dbtFirstJoinSafety && !dbtFirstJoinSafety.safe) {
     const text = dbtFirstJoinSafety.message
@@ -2235,17 +2248,17 @@ function inferAnalyticalEntityIds(question: string, contextNodes: KGNode[], mani
   if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) return [];
   const normalizedQuestion = question.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
   const contextIds = new Set(contextNodes.map((node) => node.nodeId.toLowerCase()));
-  const scored = Object.values(manifest.modeling.entities).map((entity) => {
+  const scored = Object.entries(manifest.modeling.entities).map(([key, entity]) => {
     const dbt = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
-    const tokens = [entity.id, dbt?.name]
+    const tokens = [entity.localId ?? entity.id, dbt?.name]
       .filter((value): value is string => Boolean(value))
       .flatMap((value) => value.toLowerCase().replace(/^(fct|dim|stg)_/, '').split(/[^a-z0-9]+/))
       .filter((token) => token.length > 2);
     const direct = tokens.some((token) => normalizedQuestion.includes(token));
-    const inContext = contextIds.has(`entity:${entity.id}`.toLowerCase())
+    const inContext = contextIds.has(`entity:${entity.qualifiedId ?? entity.id}`.toLowerCase())
       || contextIds.has(`dbt_model:${entity.dbtUniqueId}`.toLowerCase())
       || contextNodes.some((node) => node.kind === 'dbt_model' && node.name === dbt?.name);
-    return { id: entity.id, score: direct ? 2 : inContext ? 1 : 0 };
+    return { id: key, score: direct ? 2 : inContext ? 1 : 0 };
   });
   return scored.filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, 5).map((entry) => entry.id);
 }

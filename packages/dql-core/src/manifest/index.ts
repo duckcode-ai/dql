@@ -14,12 +14,17 @@ export { detectOutputDrift } from './output-drift.js';
 export {
   loadDbtFirstModeling,
   siblingDbtArtifact,
+  relationshipValidationProofFingerprint,
   type DbtFirstModelingLoadResult,
 } from './dbt-first-modeling.js';
 export {
   previewModelingChange,
   applyModelingChange,
+  previewDbtSourcePatch,
+  applyDbtSourcePatch,
   loadDbtNodeAuthoringDetail,
+  resetDbtArtifactReadCount,
+  dbtArtifactReadCount,
   type DomainPackageAuthoringInput,
   type EntityBindingAuthoringInput,
   type RelationshipAuthoringInput,
@@ -30,6 +35,8 @@ export {
   type ModelingSourcePatch,
   type ModelingChangePreview,
   type DbtNodeAuthoringDetail,
+  type DbtSourceAuthoringInput,
+  type DbtSourcePatchPreview,
 } from './dbt-first-authoring.js';
 export {
   planDataLexMigration,
@@ -37,6 +44,7 @@ export {
   type DataLexMigrationInput,
   type DataLexMigrationFile,
   type DataLexMigrationLoss,
+  type DataLexMigrationAmbiguity,
   type DataLexMigrationReport,
   type DataLexMigrationPlan,
 } from './datalex-migration.js';
@@ -54,6 +62,23 @@ export {
   type DomainPackageRecord,
   type DomainPackageRegistryResult,
 } from './domain-package-registry.js';
+export {
+  discoverDbtDomains,
+  type DiscoverDbtDomainsOptions,
+  type DomainDiscoveryEvidenceKind,
+  type DomainDiscoveryEvidence,
+  type DomainMembershipProposal,
+  type DomainProposal,
+  type UnassignedDbtModel,
+  type RelationshipDraftCandidate,
+  type SkillDraftCandidate,
+  type DomainDiscoveryReport,
+} from './domain-discovery.js';
+export {
+  ProjectSnapshotService,
+  ProjectSnapshotMismatchError,
+  type ProjectSnapshot,
+} from './project-snapshot.js';
 export {
   loadDbtRunState,
   applyBlockDataState,

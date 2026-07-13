@@ -1,0 +1,686 @@
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { loadDomainPackageRegistry, type DomainPackageRecord } from './domain-package-registry.js';
+
+type UnknownRecord = Record<string, unknown>;
+
+export type DomainDiscoveryEvidenceKind =
+  | 'explicit_meta'
+  | 'dbt_group'
+  | 'metricflow_semantic_domain'
+  | 'exposure_owner_scope'
+  | 'dbt_tag'
+  | 'configured_selector'
+  | 'model_path';
+
+export interface DomainDiscoveryEvidence {
+  kind: DomainDiscoveryEvidenceKind;
+  domain: string;
+  value: string;
+  rank: number;
+  confidence: number;
+  sourceUniqueId: string;
+  sourcePath?: string;
+  owner?: string;
+  selector?: string;
+}
+
+export interface DomainMembershipProposal {
+  dbtUniqueId: string;
+  modelName: string;
+  sourcePath?: string;
+  proposedDomain: string | null;
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  owner?: string;
+  evidence: DomainDiscoveryEvidence[];
+  conflicts: string[];
+  requiresReview: boolean;
+}
+
+export interface DomainProposal {
+  id: string;
+  name: string;
+  owner?: string;
+  proposedParent?: string;
+  matchedDbtUniqueIds: string[];
+  confidence: 'high' | 'medium' | 'low';
+  confidenceScore: number;
+  evidence: DomainDiscoveryEvidence[];
+  requiresReview: boolean;
+}
+
+export interface UnassignedDbtModel {
+  dbtUniqueId: string;
+  modelName: string;
+  sourcePath?: string;
+  reason: 'no_evidence' | 'ambiguous_membership';
+  candidateDomains: string[];
+  evidence: DomainDiscoveryEvidence[];
+}
+
+export interface RelationshipDraftCandidate {
+  id: string;
+  lifecycle: 'draft';
+  requiresReview: true;
+  automaticJoinAllowed: false;
+  fromDbtUniqueId: string;
+  toDbtUniqueId: string;
+  fromDomain: string;
+  toDomain: string;
+  keys: Array<{ from: string; to: string }>;
+  evidence: Array<{ dbtUniqueId: string; sourcePath?: string; kind: 'dbt_relationship_test' }>;
+}
+
+export interface SkillDraftCandidate {
+  id: string;
+  domain: string;
+  lifecycle: 'draft';
+  requiresReview: true;
+  certificationAllowed: false;
+  suggestedScope: string;
+  evidenceDbtUniqueIds: string[];
+}
+
+export interface DomainDiscoveryReport {
+  version: 1;
+  sourceFingerprint: string;
+  generator: 'deterministic';
+  proposals: DomainProposal[];
+  memberships: DomainMembershipProposal[];
+  unassignedModels: UnassignedDbtModel[];
+  relationshipDraftCandidates: RelationshipDraftCandidate[];
+  skillDraftCandidates: SkillDraftCandidate[];
+}
+
+export interface DiscoverDbtDomainsOptions {
+  projectRoot: string;
+  dbtManifestPath: string;
+  semanticManifestPath?: string;
+}
+
+interface ModelRecord {
+  uniqueId: string;
+  name: string;
+  sourcePath?: string;
+  raw: UnknownRecord;
+}
+
+interface EvidenceIndex {
+  semantic: Map<string, DomainDiscoveryEvidence[]>;
+  exposures: Map<string, DomainDiscoveryEvidence[]>;
+  semanticDomains: Map<string, string[]>;
+  semanticTags: Map<string, string[]>;
+}
+
+/**
+ * AGT-002 / API-001 — evidence-bounded, deterministic dbt domain discovery.
+ *
+ * Resolve dbt model membership without writes or AI inference.
+ *
+ * Evidence is evaluated in the locked order below. If the strongest available
+ * evidence names more than one domain, the model remains unassigned. Lower
+ * ranked disagreement is retained as a review conflict but cannot silently
+ * override stronger evidence.
+ */
+export function discoverDbtDomains(options: DiscoverDbtDomainsOptions): DomainDiscoveryReport {
+  const rawSource = readFileSync(options.dbtManifestPath, 'utf8');
+  const manifest = asRecord(JSON.parse(rawSource));
+  const semanticPath = options.semanticManifestPath
+    ?? siblingIfPresent(options.dbtManifestPath, 'semantic_manifest.json');
+  const semanticSource = semanticPath ? readFileSync(semanticPath, 'utf8') : '';
+  const semanticManifest = semanticSource ? asRecord(JSON.parse(semanticSource)) : {};
+  const registry = loadDomainPackageRegistry(options.projectRoot);
+  const packages = registry.values();
+  const models = collectModels(manifest);
+  const indexes = buildEvidenceIndexes(manifest, semanticManifest, models);
+  const groupOwners = collectGroupOwners(manifest);
+
+  const memberships = models.map((model) => resolveMembership(
+    model,
+    packages,
+    indexes,
+    groupOwners,
+  ));
+  const assigned = new Map(memberships
+    .filter((membership): membership is DomainMembershipProposal & { proposedDomain: string } => Boolean(membership.proposedDomain))
+    .map((membership) => [membership.dbtUniqueId, membership]));
+
+  const proposals = buildDomainProposals(memberships, packages);
+  const unassignedModels = memberships
+    .filter((membership) => !membership.proposedDomain)
+    .map((membership): UnassignedDbtModel => ({
+      dbtUniqueId: membership.dbtUniqueId,
+      modelName: membership.modelName,
+      sourcePath: membership.sourcePath,
+      reason: membership.evidence.length === 0 ? 'no_evidence' : 'ambiguous_membership',
+      candidateDomains: unique(membership.evidence.map((item) => item.domain)),
+      evidence: membership.evidence,
+    }));
+
+  return {
+    version: 1,
+    sourceFingerprint: discoveryFingerprint(rawSource, semanticSource, packages),
+    generator: 'deterministic',
+    proposals,
+    memberships,
+    unassignedModels,
+    relationshipDraftCandidates: collectRelationshipDrafts(manifest, assigned),
+    skillDraftCandidates: proposals.map((proposal) => ({
+      id: `${proposal.id.replace(/\./g, '_')}_analyst`,
+      domain: proposal.id,
+      lifecycle: 'draft',
+      requiresReview: true,
+      certificationAllowed: false,
+      suggestedScope: `Use reviewed ${proposal.name} vocabulary, policies, and certified assets only.`,
+      evidenceDbtUniqueIds: proposal.matchedDbtUniqueIds,
+    })),
+  };
+}
+
+function discoveryFingerprint(
+  manifestSource: string,
+  semanticSource: string,
+  packages: DomainPackageRecord[],
+): string {
+  const selectors = packages.map((pkg) => ({
+    id: pkg.id,
+    parent: pkg.parent,
+    owner: pkg.owner,
+    dbtGroups: pkg.domain.dbtGroups ?? [],
+    dbtPaths: pkg.domain.dbtPaths ?? [],
+    dbtTags: pkg.domain.dbtTags ?? [],
+    semanticDomains: pkg.domain.semanticDomains ?? [],
+    semanticTags: pkg.domain.semanticTags ?? [],
+  }));
+  return createHash('sha256')
+    .update(manifestSource)
+    .update('\0')
+    .update(semanticSource)
+    .update('\0')
+    .update(JSON.stringify(selectors))
+    .digest('hex');
+}
+
+function resolveMembership(
+  model: ModelRecord,
+  packages: DomainPackageRecord[],
+  indexes: EvidenceIndex,
+  groupOwners: Map<string, string>,
+): DomainMembershipProposal {
+  const evidence = collectModelEvidence(model, packages, indexes, groupOwners);
+  const strongestRank = evidence[0]?.rank;
+  const strongest = strongestRank === undefined
+    ? []
+    : evidence.filter((item) => item.rank === strongestRank);
+  const strongestDomains = unique(strongest.map((item) => item.domain));
+  const proposedDomain = strongestDomains.length === 1 ? strongestDomains[0] : null;
+  const winningEvidence = proposedDomain
+    ? strongest.filter((item) => item.domain === proposedDomain)
+    : [];
+  const confidenceScore = winningEvidence.length > 0
+    ? Math.max(...winningEvidence.map((item) => item.confidence))
+    : 0;
+  const conflicts = proposedDomain
+    ? unique(evidence.filter((item) => item.domain !== proposedDomain).map((item) => item.domain))
+    : strongestDomains;
+  const owners = unique(winningEvidence.map((item) => item.owner).filter(isString));
+
+  return {
+    dbtUniqueId: model.uniqueId,
+    modelName: model.name,
+    sourcePath: model.sourcePath,
+    proposedDomain,
+    confidence: confidenceLabel(confidenceScore),
+    confidenceScore,
+    owner: owners.length === 1 ? owners[0] : undefined,
+    evidence,
+    conflicts,
+    requiresReview: !proposedDomain || conflicts.length > 0,
+  };
+}
+
+function collectModelEvidence(
+  model: ModelRecord,
+  packages: DomainPackageRecord[],
+  indexes: EvidenceIndex,
+  groupOwners: Map<string, string>,
+): DomainDiscoveryEvidence[] {
+  const output: DomainDiscoveryEvidence[] = [];
+  const raw = model.raw;
+  const dqlMeta = asRecord(asRecord(raw.meta).dql);
+  const explicitDomains = domainValues(dqlMeta.domain);
+  for (const domain of explicitDomains) {
+    output.push(evidence('explicit_meta', domain, String(dqlMeta.domain), 1, 1, model));
+  }
+
+  const group = stringValue(raw.group) ?? stringValue(asRecord(raw.config).group);
+  if (group) {
+    const domain = normalizeDomainId(group);
+    if (domain) output.push(evidence('dbt_group', domain, group, 2, 0.95, model, groupOwners.get(group)));
+  }
+
+  output.push(...(indexes.semantic.get(model.uniqueId) ?? []));
+  output.push(...(indexes.exposures.get(model.uniqueId) ?? []));
+
+  const tags = unique([
+    ...stringArray(raw.tags),
+    ...stringArray(asRecord(raw.config).tags),
+  ]);
+  for (const tag of tags) {
+    const domain = domainFromTag(tag, packages);
+    if (domain) output.push(evidence('dbt_tag', domain, tag, 5, 0.72, model));
+  }
+
+  for (const pkg of packages) {
+    for (const match of matchingSelectors(model, raw, tags, pkg, indexes)) {
+      output.push(evidence('configured_selector', pkg.id, match.value, 6, 0.68, model, pkg.owner, match.selector));
+    }
+  }
+
+  const pathDomain = domainFromPath(model.sourcePath);
+  if (pathDomain) output.push(evidence('model_path', pathDomain, model.sourcePath ?? '', 7, 0.55, model));
+
+  return dedupeEvidence(output).sort(compareEvidence);
+}
+
+function buildEvidenceIndexes(
+  manifest: UnknownRecord,
+  semanticManifest: UnknownRecord,
+  models: ModelRecord[],
+): EvidenceIndex {
+  const modelIds = new Set(models.map((model) => model.uniqueId));
+  const semantic = new Map<string, DomainDiscoveryEvidence[]>();
+  const semanticDomains = new Map<string, string[]>();
+  const semanticTags = new Map<string, string[]>();
+  const semanticModelDependencies = new Map<string, string[]>();
+  const semanticRecords = [
+    ...recordEntries(manifest.semantic_models, 'semantic_model.manifest'),
+    ...recordEntries(semanticManifest.semantic_models, 'semantic_model.semantic_manifest'),
+  ].sort(([a], [b]) => a.localeCompare(b));
+  for (const [uniqueId, value] of semanticRecords) {
+    const raw = asRecord(value);
+    const dqlMeta = asRecord(asRecord(raw.meta).dql);
+    const config = asRecord(raw.config);
+    const configDql = asRecord(asRecord(config.meta).dql);
+    const domains = unique([
+      ...domainValues(dqlMeta.domain),
+      ...domainValues(configDql.domain),
+      ...domainValues(raw.domain),
+      ...domainValues(config.domain),
+    ]);
+    const tags = unique([...stringArray(raw.tags), ...stringArray(config.tags)]);
+    const dependencies = dependentModelIds(raw, modelIds, models);
+    const semanticName = stringValue(raw.name) ?? uniqueId;
+    semanticModelDependencies.set(semanticName, dependencies);
+    for (const modelId of dependencies) {
+      const target = models.find((model) => model.uniqueId === modelId);
+      if (!target) continue;
+      appendStrings(semanticDomains, modelId, domains);
+      appendStrings(semanticTags, modelId, tags);
+      for (const domain of domains) appendEvidence(semantic, modelId, evidence(
+        'metricflow_semantic_domain', domain, semanticName,
+        3, 0.88, target, stringValue(asRecord(raw.owner).email) ?? stringValue(asRecord(raw.owner).name), uniqueId,
+      ));
+    }
+  }
+
+  const metricRecords = [
+    ...recordEntries(manifest.metrics, 'metric.manifest'),
+    ...recordEntries(semanticManifest.metrics, 'metric.semantic_manifest'),
+  ].sort(([a], [b]) => a.localeCompare(b));
+  for (const [uniqueId, value] of metricRecords) {
+    const raw = asRecord(value);
+    const config = asRecord(raw.config);
+    const dqlMeta = asRecord(asRecord(raw.meta).dql);
+    const configDql = asRecord(asRecord(config.meta).dql);
+    const domains = unique([
+      ...domainValues(dqlMeta.domain),
+      ...domainValues(configDql.domain),
+      ...domainValues(raw.domain),
+      ...domainValues(config.domain),
+    ]);
+    if (domains.length === 0) continue;
+    const semanticName = stringValue(raw.semantic_model)
+      ?? stringValue(raw.semantic_model_name)
+      ?? stringValue(asRecord(raw.type_params).semantic_model);
+    if (!semanticName) continue;
+    for (const modelId of semanticModelDependencies.get(semanticName) ?? []) {
+      const target = models.find((model) => model.uniqueId === modelId);
+      if (!target) continue;
+      appendStrings(semanticDomains, modelId, domains);
+      for (const domain of domains) appendEvidence(semantic, modelId, evidence(
+        'metricflow_semantic_domain', domain, stringValue(raw.name) ?? uniqueId,
+        3, 0.88, target, stringValue(asRecord(raw.owner).email) ?? stringValue(asRecord(raw.owner).name), uniqueId,
+      ));
+    }
+  }
+
+  const exposures = new Map<string, DomainDiscoveryEvidence[]>();
+  for (const [uniqueId, value] of Object.entries(asRecord(manifest.exposures)).sort(([a], [b]) => a.localeCompare(b))) {
+    const raw = asRecord(value);
+    const meta = asRecord(raw.meta);
+    const dqlMeta = asRecord(meta.dql);
+    const domains = unique([
+      ...domainValues(dqlMeta.domain),
+      ...domainValues(dqlMeta.scope),
+      ...domainValues(meta.domain),
+      ...domainValues(meta.scope),
+      ...domainValues(raw.domain),
+      ...domainValues(raw.group),
+    ]);
+    if (domains.length === 0) continue;
+    const ownerRaw = asRecord(raw.owner);
+    const owner = stringValue(ownerRaw.email) ?? stringValue(ownerRaw.name);
+    for (const modelId of dependentModelIds(raw, modelIds, models)) {
+      const target = models.find((model) => model.uniqueId === modelId);
+      if (!target) continue;
+      for (const domain of domains) appendEvidence(exposures, modelId, evidence(
+        'exposure_owner_scope', domain, stringValue(raw.name) ?? uniqueId,
+        4, 0.8, target, owner, uniqueId,
+      ));
+    }
+  }
+
+  return { semantic, exposures, semanticDomains, semanticTags };
+}
+
+function buildDomainProposals(
+  memberships: DomainMembershipProposal[],
+  packages: DomainPackageRecord[],
+): DomainProposal[] {
+  const packageById = new Map(packages.map((pkg) => [pkg.id, pkg]));
+  const byDomain = new Map<string, DomainMembershipProposal[]>();
+  for (const membership of memberships) {
+    if (!membership.proposedDomain) continue;
+    const values = byDomain.get(membership.proposedDomain) ?? [];
+    values.push(membership);
+    byDomain.set(membership.proposedDomain, values);
+  }
+  return [...byDomain.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([id, values]) => {
+    const existing = packageById.get(id);
+    const owners = unique([
+      ...(existing?.owner ? [existing.owner] : []),
+      ...values.map((value) => value.owner).filter(isString),
+    ]);
+    const confidenceScore = Math.min(...values.map((value) => value.confidenceScore));
+    return {
+      id,
+      name: existing?.name ?? displayName(id),
+      owner: owners.length === 1 ? owners[0] : undefined,
+      proposedParent: existing?.parent ?? parentDomain(id),
+      matchedDbtUniqueIds: values.map((value) => value.dbtUniqueId).sort(),
+      confidence: confidenceLabel(confidenceScore),
+      confidenceScore,
+      evidence: dedupeEvidence(values.flatMap((value) => value.evidence.filter((item) => item.domain === id))).sort(compareEvidence),
+      requiresReview: values.some((value) => value.requiresReview) || !existing,
+    };
+  });
+}
+
+function collectRelationshipDrafts(
+  manifest: UnknownRecord,
+  assigned: Map<string, DomainMembershipProposal & { proposedDomain: string }>,
+): RelationshipDraftCandidate[] {
+  const output: RelationshipDraftCandidate[] = [];
+  for (const [testUniqueId, value] of Object.entries(asRecord(manifest.nodes)).sort(([a], [b]) => a.localeCompare(b))) {
+    const raw = asRecord(value);
+    if (raw.resource_type !== 'test') continue;
+    const metadata = asRecord(raw.test_metadata);
+    const testName = stringValue(metadata.name) ?? stringValue(raw.name);
+    if (!testName || !testName.toLowerCase().includes('relationship')) continue;
+    const dependencies = stringArray(asRecord(raw.depends_on).nodes).filter((id) => assigned.has(id));
+    const attached = stringValue(raw.attached_node);
+    const from = attached && assigned.has(attached) ? attached : dependencies[0];
+    const to = dependencies.find((id) => id !== from);
+    if (!from || !to) continue;
+    const kwargs = asRecord(metadata.kwargs);
+    const fromColumn = stringValue(raw.column_name) ?? stringValue(kwargs.column_name) ?? 'unknown';
+    const toColumn = stringValue(kwargs.field) ?? stringValue(kwargs.to_field) ?? 'unknown';
+    const fromMembership = assigned.get(from)!;
+    const toMembership = assigned.get(to)!;
+    output.push({
+      id: `${safeId(from)}_to_${safeId(to)}_${safeId(fromColumn)}`,
+      lifecycle: 'draft',
+      requiresReview: true,
+      automaticJoinAllowed: false,
+      fromDbtUniqueId: from,
+      toDbtUniqueId: to,
+      fromDomain: fromMembership.proposedDomain,
+      toDomain: toMembership.proposedDomain,
+      keys: [{ from: fromColumn, to: toColumn }],
+      evidence: [{
+        dbtUniqueId: testUniqueId,
+        sourcePath: stringValue(raw.original_file_path) ?? stringValue(raw.path),
+        kind: 'dbt_relationship_test',
+      }],
+    });
+  }
+  return output.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function matchingSelectors(
+  model: ModelRecord,
+  raw: UnknownRecord,
+  tags: string[],
+  pkg: DomainPackageRecord,
+  indexes: EvidenceIndex,
+): Array<{ selector: string; value: string }> {
+  const output: Array<{ selector: string; value: string }> = [];
+  const group = stringValue(raw.group) ?? stringValue(asRecord(raw.config).group);
+  if (group && (pkg.domain.dbtGroups ?? []).includes(group)) output.push({ selector: 'dbt_group', value: group });
+  for (const tag of tags) {
+    if ((pkg.domain.dbtTags ?? []).includes(tag)) output.push({ selector: 'dbt_tag', value: tag });
+  }
+  for (const domain of indexes.semanticDomains.get(model.uniqueId) ?? []) {
+    if ((pkg.domain.semanticDomains ?? []).map(normalizeDomainId).includes(domain)) {
+      output.push({ selector: 'semantic_domain', value: domain });
+    }
+  }
+  for (const tag of indexes.semanticTags.get(model.uniqueId) ?? []) {
+    if ((pkg.domain.semanticTags ?? []).includes(tag)) output.push({ selector: 'semantic_tag', value: tag });
+  }
+  for (const pattern of pkg.domain.dbtPaths ?? []) {
+    if (model.sourcePath && globMatches(model.sourcePath, pattern)) output.push({ selector: 'dbt_path', value: pattern });
+  }
+  return output;
+}
+
+function collectModels(manifest: UnknownRecord): ModelRecord[] {
+  return Object.entries(asRecord(manifest.nodes))
+    .filter(([, value]) => asRecord(value).resource_type === 'model')
+    .map(([uniqueId, value]) => {
+      const raw = asRecord(value);
+      return {
+        uniqueId,
+        name: stringValue(raw.alias) ?? stringValue(raw.name) ?? uniqueId,
+        sourcePath: stringValue(raw.original_file_path) ?? stringValue(raw.path),
+        raw,
+      };
+    })
+    .sort((a, b) => a.uniqueId.localeCompare(b.uniqueId));
+}
+
+function collectGroupOwners(manifest: UnknownRecord): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const [, value] of Object.entries(asRecord(manifest.groups)).sort(([a], [b]) => a.localeCompare(b))) {
+    const group = asRecord(value);
+    const name = stringValue(group.name);
+    const owner = stringValue(asRecord(group.owner).email) ?? stringValue(asRecord(group.owner).name);
+    if (name && owner) owners.set(name, owner);
+  }
+  return owners;
+}
+
+function dependentModelIds(raw: UnknownRecord, modelIds: Set<string>, models: ModelRecord[]): string[] {
+  const direct = stringArray(asRecord(raw.depends_on).nodes).filter((id) => modelIds.has(id));
+  const model = stringValue(raw.model);
+  if (model && modelIds.has(model)) direct.push(model);
+  const refName = model?.match(/ref\(['"]([^'"]+)['"]\)/)?.[1]
+    ?? stringValue(asRecord(raw.node_relation).alias)
+    ?? stringValue(asRecord(raw.node_relation).name);
+  if (refName) {
+    const matches = models.filter((candidate) => candidate.name === refName);
+    if (matches.length === 1) direct.push(matches[0].uniqueId);
+  }
+  return unique(direct);
+}
+
+function domainFromTag(tag: string, packages: DomainPackageRecord[]): string | undefined {
+  const explicit = tag.match(/^domain[:/_-](.+)$/i)?.[1];
+  if (explicit) return normalizeDomainId(explicit);
+  const normalized = normalizeDomainId(tag);
+  if (!normalized || GENERIC_TAGS.has(normalized)) return undefined;
+  const existing = packages.find((pkg) => pkg.id === normalized || normalizeDomainId(pkg.name) === normalized);
+  return existing?.id ?? normalized;
+}
+
+function domainFromPath(sourcePath: string | undefined): string | undefined {
+  if (!sourcePath) return undefined;
+  const parts = sourcePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const modelsAt = parts.lastIndexOf('models');
+  const folders = parts.slice(modelsAt >= 0 ? modelsAt + 1 : 0, -1)
+    .map(normalizeDomainId)
+    .filter((part): part is string => typeof part === 'string' && !GENERIC_PATHS.has(part));
+  if (folders.length === 0) return undefined;
+  return folders.slice(0, 3).join('.');
+}
+
+function domainValues(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+  return unique(values.map((item) => normalizeDomainId(String(item))).filter(isString));
+}
+
+function normalizeDomainId(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase()
+    .replace(/[\\/]+/g, '.')
+    .replace(/[^a-z0-9.]+/g, '_')
+    .replace(/\.{2,}/g, '.')
+    .replace(/^[_\.]+|[_\.]+$/g, '');
+  return normalized || undefined;
+}
+
+function evidence(
+  kind: DomainDiscoveryEvidenceKind,
+  domain: string,
+  value: string,
+  rank: number,
+  confidence: number,
+  model: ModelRecord,
+  owner?: string,
+  selector?: string,
+): DomainDiscoveryEvidence {
+  return {
+    kind,
+    domain,
+    value,
+    rank,
+    confidence,
+    sourceUniqueId: model.uniqueId,
+    sourcePath: model.sourcePath,
+    owner,
+    selector,
+  };
+}
+
+function appendEvidence(
+  index: Map<string, DomainDiscoveryEvidence[]>,
+  uniqueId: string,
+  item: DomainDiscoveryEvidence,
+): void {
+  const values = index.get(uniqueId) ?? [];
+  values.push(item);
+  index.set(uniqueId, values);
+}
+
+function appendStrings(index: Map<string, string[]>, uniqueId: string, items: string[]): void {
+  index.set(uniqueId, unique([...(index.get(uniqueId) ?? []), ...items]));
+}
+
+function recordEntries(value: unknown, prefix: string): Array<[string, unknown]> {
+  if (Array.isArray(value)) {
+    return value.map((item, index): [string, unknown] => {
+      const raw = asRecord(item);
+      return [stringValue(raw.unique_id) ?? stringValue(raw.name) ?? `${prefix}.${index}`, item];
+    });
+  }
+  return Object.entries(asRecord(value));
+}
+
+function dedupeEvidence(values: DomainDiscoveryEvidence[]): DomainDiscoveryEvidence[] {
+  const output = new Map<string, DomainDiscoveryEvidence>();
+  for (const value of values) {
+    const key = [value.kind, value.domain, value.value, value.sourceUniqueId, value.selector ?? ''].join('|');
+    if (!output.has(key)) output.set(key, value);
+  }
+  return [...output.values()];
+}
+
+function compareEvidence(a: DomainDiscoveryEvidence, b: DomainDiscoveryEvidence): number {
+  return a.rank - b.rank
+    || a.domain.localeCompare(b.domain)
+    || a.sourceUniqueId.localeCompare(b.sourceUniqueId)
+    || a.value.localeCompare(b.value);
+}
+
+function confidenceLabel(value: number): 'high' | 'medium' | 'low' {
+  if (value >= 0.85) return 'high';
+  if (value >= 0.65) return 'medium';
+  return 'low';
+}
+
+function displayName(id: string): string {
+  const local = id.split('.').at(-1) ?? id;
+  return local.split('_').filter(Boolean).map((part) => `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}`).join(' ');
+}
+
+function parentDomain(id: string): string | undefined {
+  const parts = id.split('.');
+  return parts.length > 1 ? parts.slice(0, -1).join('.') : undefined;
+}
+
+function safeId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+}
+
+function globMatches(value: string, pattern: string): boolean {
+  const normalizedValue = value.replace(/\\/g, '/');
+  const normalizedPattern = pattern.replace(/\\/g, '/');
+  const marker = '\u0000';
+  const source = normalizedPattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, marker)
+    .replace(/\*/g, '[^/]*')
+    .replace(new RegExp(marker, 'g'), '.*')
+    .replace(/\?/g, '[^/]');
+  return new RegExp(`^${source}$`).test(normalizedValue);
+}
+
+function siblingIfPresent(manifestPath: string, name: string): string | undefined {
+  const candidate = join(dirname(manifestPath), name);
+  return existsSync(candidate) ? candidate : undefined;
+}
+
+function asRecord(value: unknown): UnknownRecord {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as UnknownRecord : {};
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(isString) : [];
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+const GENERIC_PATHS = new Set(['staging', 'stage', 'marts', 'mart', 'intermediate', 'base', 'core', 'sources', 'source']);
+const GENERIC_TAGS = new Set(['daily', 'hourly', 'weekly', 'pii', 'published', 'mart', 'marts', 'staging', 'intermediate']);

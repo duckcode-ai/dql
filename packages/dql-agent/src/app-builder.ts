@@ -583,7 +583,7 @@ export function generateAppFromPlan(
     );
   }
 
-  const appDir = resolveAppPackageDir(projectRoot, plan.domain, plan.appId);
+  const appDir = resolveAppPackageDir(projectRoot, plan.appId);
   if (existsSync(appDir) && !options.overwrite) {
     throw new Error(`App already exists: ${relative(projectRoot, appDir)}`);
   }
@@ -603,6 +603,9 @@ export function generateAppFromPlan(
     ],
     caveats: plan.caveats,
     visibility: "shared",
+    ownerDomain: plan.domain,
+    usesDomains: [plan.domain],
+    requiredExports: [],
     domain: plan.domain,
     audience: plan.audience,
     lifecycle: plan.lifecycle,
@@ -2166,12 +2169,7 @@ function slugify(input: string): string {
     .replace(/-{2,}/g, "-");
 }
 
-function resolveAppPackageDir(projectRoot: string, domain: string, appId: string): string {
-  const domainSlug = slugify(domain);
-  const domainDir = domainSlug ? join(projectRoot, "domains", domainSlug) : "";
-  if (domainDir && existsSync(domainDir)) {
-    return join(domainDir, "apps", appId);
-  }
+function resolveAppPackageDir(projectRoot: string, appId: string): string {
   return join(projectRoot, "apps", appId);
 }
 

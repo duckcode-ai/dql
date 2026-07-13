@@ -19,6 +19,7 @@ relationships:
       status: passed
       checked_at: "2026-07-11T00:00:00.000Z"
       query_fingerprint: fixture-order-customer-proof
+      proof_fingerprint: 5b4ccb4990be9c2b158cd4d644c02c19f264b20c750e3558d7916d0646a835fc
       from_rows: 8
       to_rows: 5
       joined_rows: 8
@@ -36,6 +37,7 @@ exports:
     consumer_domains: [growth]
     status: certified
     owner: commerce@company.test
+    contract: customer_identity_contract
   - id: order_analytics
     version: 1
     entity: order
@@ -45,3 +47,17 @@ exports:
     consumer_domains: [growth]
     status: certified
     owner: commerce@company.test
+    contract: order_analytics_contract
+contracts:
+  - id: customer_identity_contract
+    entities: [customer]
+    purpose: growth_attribution
+    status: certified
+    owner: commerce@company.test
+    required_evaluation: false
+  - id: order_analytics_contract
+    entities: [order]
+    purpose: growth_attribution
+    status: certified
+    owner: commerce@company.test
+    required_evaluation: false

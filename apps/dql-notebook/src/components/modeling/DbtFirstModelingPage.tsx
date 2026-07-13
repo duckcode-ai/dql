@@ -1,14 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Boxes, CheckCircle2, Columns3, Download, EyeOff, FileCode2, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, Table2, XCircle } from 'lucide-react';
-import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, XCircle } from 'lucide-react';
+import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type ContextBootstrapSession, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type RelationshipDraft } from './DomainModelingCanvas';
+import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 
 type Theme = (typeof themes)['dark'];
-type Tab = 'overview' | 'diagram' | 'skills' | 'assets' | 'ai' | 'readiness' | 'dbt';
+type Tab = DomainStudioSection;
 type Editor =
   | { kind: 'domain' }
   | { kind: 'entity'; dbtUniqueId?: string; relationshipFrom?: { from: string; fromColumn?: string } }
@@ -22,16 +23,19 @@ type Editor =
   | { kind: 'import' };
 
 export function DbtFirstModelingPage() {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [data, setData] = useState<DbtFirstModelingResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('overview');
-  const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
+  const initialLocation = useMemo(() => readDomainStudioLocation(), []);
+  const [tab, setTab] = useState<Tab>(initialLocation.section);
+  const [selectedDomain, setSelectedDomain] = useState<string | null>(initialLocation.domain);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [detailsByDbtId, setDetailsByDbtId] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
+  const detailRequests = useRef(new Map<string, Promise<DbtNodeAuthoringDetail | undefined>>());
+  const loadedDetailIds = useRef(new Set<string>());
   const savedDiagramPreferences = useMemo(() => readDiagramPreferences(), []);
   const [columnMode, setColumnMode] = useState<ColumnDisplayMode>(savedDiagramPreferences.columnMode ?? 'relevant');
   const [diagramSearch, setDiagramSearch] = useState('');
@@ -44,15 +48,68 @@ export function DbtFirstModelingPage() {
   const [showLegend, setShowLegend] = useState(false);
   const [diagramFullscreen, setDiagramFullscreen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [narrowLayout, setNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 980);
+  const inspectorToggleRef = useRef<HTMLButtonElement>(null);
+  const inspectorRef = useRef<HTMLElement>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
+  const [dbtSourceEntity, setDbtSourceEntity] = useState<ManifestModelEntity | null>(null);
   useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
+  useEffect(() => {
+    const onResize = () => setNarrowLayout(window.innerWidth < 980);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const toggleInspector = useCallback(() => {
+    setInspectorOpen((open) => {
+      const next = !open;
+      if (next) window.requestAnimationFrame(() => inspectorRef.current?.focus());
+      else window.requestAnimationFrame(() => inspectorToggleRef.current?.focus());
+      return next;
+    });
+  }, []);
+
+  const selectSection = useCallback((section: Tab) => {
+    if (section === 'blocks' && selectedDomain) {
+      try { window.localStorage.setItem('dql.block-studio.domain', selectedDomain); } catch { /* best effort */ }
+      dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' });
+      return;
+    }
+    setTab(section);
+    writeDomainStudioLocation(selectedDomain, section);
+  }, [dispatch, selectedDomain]);
+  const selectDomain = useCallback((domain: string | null) => {
+    setSelectedDomain(domain);
+    setSelectedId(null);
+    const nextSection = domain ? tab : 'overview';
+    setTab(nextSection);
+    writeDomainStudioLocation(domain, nextSection);
+  }, [tab]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = readDomainStudioLocation();
+      setSelectedDomain(next.domain);
+      setSelectedId(null);
+      setTab(next.section);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const refresh = async () => {
     setLoading(true);
     const result = await api.getDbtFirstModeling();
     setData(result);
     setError(result ? null : 'dbt-first modeling is not enabled or the local server could not compile manifest v3.');
-    if (result && selectedDomain === null) setSelectedDomain(Object.keys(result.modeling.packages).sort()[0] ?? null);
+    if (result) {
+      const nextDomain = selectedDomain && result.modeling.packages[selectedDomain]
+        ? selectedDomain
+        : (Object.keys(result.modeling.packages).sort()[0] ?? null);
+      if (nextDomain !== selectedDomain) {
+        setSelectedDomain(nextDomain);
+        writeDomainStudioLocation(nextDomain, tab, true);
+      }
+    }
     setLoading(false);
   };
   useEffect(() => {
@@ -61,47 +118,65 @@ export function DbtFirstModelingPage() {
 
   const selectedEntity = data?.modeling.entities[selectedId ?? ''];
   const selectedRelationship = data?.modeling.relationships[selectedId ?? ''];
+  const loadNodeDetail = useCallback((uniqueId: string): Promise<DbtNodeAuthoringDetail | undefined> => {
+    const active = detailRequests.current.get(uniqueId);
+    if (active) return active;
+    if (loadedDetailIds.current.has(uniqueId)) return Promise.resolve(undefined);
+    const request = api
+      .getDbtModelingNode(uniqueId)
+      .then((detail) => {
+        loadedDetailIds.current.add(uniqueId);
+        setDetailsByDbtId((current) => ({ ...current, [uniqueId]: detail }));
+        return detail;
+      })
+      .catch(() => {
+        loadedDetailIds.current.add(uniqueId);
+        return undefined;
+      })
+      .finally(() => detailRequests.current.delete(uniqueId));
+    detailRequests.current.set(uniqueId, request);
+    return request;
+  }, []);
   useEffect(() => {
     if (!selectedEntity) {
       setNodeDetail(null);
       return;
     }
-    void api
-      .getDbtModelingNode(selectedEntity.dbtUniqueId)
-      .then(setNodeDetail)
-      .catch(() => setNodeDetail(null));
-  }, [selectedEntity?.dbtUniqueId]);
-  useEffect(() => {
-    if (!data) return;
+    const cached = detailsByDbtId[selectedEntity.dbtUniqueId];
+    if (cached) {
+      setNodeDetail(cached);
+      return;
+    }
     let cancelled = false;
-    const ids = Object.values(data.modeling.entities).map((entity) => entity.dbtUniqueId);
-    void Promise.all(
-      ids.map(async (uniqueId) => {
-        try {
-          return [uniqueId, await api.getDbtModelingNode(uniqueId)] as const;
-        } catch {
-          return [uniqueId, undefined] as const;
-        }
-      }),
-    ).then((entries) => {
-      if (!cancelled) setDetailsByDbtId(Object.fromEntries(entries));
+    void loadNodeDetail(selectedEntity.dbtUniqueId).then((detail) => {
+      if (!cancelled) setNodeDetail(detail ?? null);
     });
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
+  }, [detailsByDbtId, loadNodeDetail, selectedEntity?.dbtUniqueId]);
+  useEffect(() => {
+    detailRequests.current.clear();
+    loadedDetailIds.current.clear();
+    setDetailsByDbtId({});
   }, [data?.dbtProvenance.manifestFingerprint]);
+
+  const loadVisibleNodeDetails = useCallback((uniqueIds: string[]) => {
+    // A graph may contain thousands of dbt models. Hydrate only a small visible
+    // window; selecting any other node loads it immediately through the same cache.
+    for (const uniqueId of uniqueIds.slice(0, 24)) void loadNodeDetail(uniqueId);
+  }, [loadNodeDetail]);
 
   if (loading && !data) return <EmptyState t={t} title="Loading Domain Studio…" detail="Compiling dbt provenance and the sparse DQL analytical overlay." />;
   if (!data) return <EmptyState t={t} title="Domain Studio is unavailable" detail={error ?? 'Enable manifestVersion 3 and dbt-first modeling.'} />;
 
   const relationByDbtId = Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, node.relation]));
-  const domainEntities = Object.values(data.modeling.entities).filter((entity) => !selectedDomain || entity.domain === selectedDomain);
+  const domainEntities = domainEntityRecords(data.modeling, selectedDomain);
   const domainRelationships = Object.values(data.modeling.relationships).filter((relationship) => {
     const from = data.modeling.entities[relationship.from];
     const to = data.modeling.entities[relationship.to];
     return !selectedDomain || from?.domain === selectedDomain || to?.domain === selectedDomain;
   });
   const unboundNodes = Object.values(data.dbtProvenance.nodes).filter((node) => !Object.values(data.modeling.entities).some((entity) => entity.dbtUniqueId === node.uniqueId));
+  const inspectorVisible = inspectorOpen && tab === 'diagram';
 
   return (
     <div
@@ -116,38 +191,41 @@ export function DbtFirstModelingPage() {
     >
       <header
         style={{
-          padding: '17px 20px 13px',
+          minHeight: 52,
+          padding: '0 14px',
           borderBottom: `1px solid ${t.headerBorder}`,
-          background: t.cellBg,
+          background: t.headerBg,
+          display: 'flex',
+          alignItems: 'center',
         }}
       >
         <div
           style={{
             display: 'flex',
             justifyContent: 'space-between',
-            gap: 18,
+            gap: 12,
             alignItems: 'center',
+            width: '100%',
           }}
         >
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-              <Boxes size={20} color={t.accent} />
-              <h1 style={{ margin: 0, fontSize: 19 }}>Domain Studio</h1>
-              <Badge t={t}>Manifest v3</Badge>
-            </div>
-            <p
-              style={{
-                margin: '5px 0 0 29px',
-                color: t.textSecondary,
-                fontSize: 12,
-              }}
-            >
-              One Git-versioned workspace for domain context, dbt bindings, safe relationships, interfaces, contracts, blocks, skills, notebooks, and apps.
-            </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            <Boxes size={16} color={t.accent} />
+            <h1 style={{ margin: 0, fontSize: 12, fontWeight: 800, whiteSpace: 'nowrap' }}>Domain workspace</h1>
+            <span style={{ color: t.textMuted, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selectedDomain ? `/${selectedDomain}` : '/all domains'}
+            </span>
           </div>
           <div style={{ display: 'flex', gap: 7 }}>
+            {selectedDomain && (
+              <Button t={t} onClick={() => {
+                try { window.sessionStorage.setItem('dql-ask-domain-context', JSON.stringify({ domain: selectedDomain })); } catch { /* best effort */ }
+                dispatch({ type: 'SET_MAIN_VIEW', view: 'ask' });
+              }}>
+                <MessageCircle size={14} /> Ask
+              </Button>
+            )}
             <Button t={t} onClick={() => setEditor({ kind: 'domain' })}>
-              <Plus size={14} /> Domain
+              <Plus size={14} /> New domain
             </Button>
             <IconButton t={t} title="Recompile" onClick={() => void refresh()}>
               <RefreshCw size={15} />
@@ -161,61 +239,35 @@ export function DbtFirstModelingPage() {
           flex: 1,
           minHeight: 0,
           display: 'grid',
-          gridTemplateColumns: inspectorOpen ? 'clamp(190px, 15vw, 232px) minmax(460px, 1fr) clamp(270px, 22vw, 380px)' : 'clamp(190px, 15vw, 232px) minmax(460px, 1fr)',
+          gridTemplateColumns: inspectorVisible && !narrowLayout ? 'clamp(190px, 15vw, 232px) minmax(460px, 1fr) clamp(270px, 22vw, 380px)' : 'clamp(190px, 15vw, 232px) minmax(0, 1fr)',
         }}
       >
         <aside
           style={{
             borderRight: `1px solid ${t.headerBorder}`,
             overflow: 'auto',
-            background: t.cellBg,
+            // This is the domain workspace context rail, not the global app
+            // navigation. Keep it on the canvas surface so Paper remains warm
+            // and visually continuous from the header into the workspace.
+            background: t.appBg,
           }}
         >
-          <SideHeading t={t}>Domain packages</SideHeading>
-          <button
-            onClick={() => {
-              setSelectedDomain(null);
-              setSelectedId(null);
-            }}
-            style={treeButton(t, selectedDomain === null)}
-          >
-            <GitBranch size={14} /> All domains
-          </button>
-          {sortDomainPackages(data.modeling.packages).map((pkg) => {
-            const entities = Object.values(data.modeling.entities).filter((entity) => entity.domain === pkg.id);
-            return (
-              <div key={pkg.id}>
-                <button
-                  onClick={() => {
-                    setSelectedDomain(pkg.id);
-                    setSelectedId(null);
-                  }}
-                  style={{
-                    ...treeButton(t, selectedDomain === pkg.id),
-                    paddingLeft: 7 + domainDepth(pkg.id, data.modeling.packages) * 14,
-                  }}
-                >
-                  <Boxes size={14} /> <span style={{ flex: 1 }}>{pkg.id.split('.').pop()}</span>
-                  <small>{entities.length}</small>
-                </button>
-                {selectedDomain === pkg.id &&
-                  entities.map((entity) => (
-                    <button key={entity.id} onClick={() => setSelectedId(entity.id)} style={entityTreeButton(t, selectedId === entity.id)}>
-                      <Table2 size={12} /> {entity.id}
-                    </button>
-                  ))}
-              </div>
-            );
-          })}
-          <SideHeading t={t}>dbt inventory</SideHeading>
-          <div style={{ padding: '0 10px 12px', fontSize: 11, color: t.textMuted }}>{unboundNodes.length} unbound models</div>
-          {unboundNodes.slice(0, 12).map((node) => (
-            <button key={node.uniqueId} draggable onDragStart={(event) => { event.dataTransfer.setData('application/x-dql-dbt-model', node.uniqueId); event.dataTransfer.effectAllowed = 'copy'; }} title="Drag onto the Domain Model or click to bind" onClick={() => setEditor({ kind: 'entity', dbtUniqueId: node.uniqueId })} style={{ ...inventoryButton(t), cursor: 'grab' }}>
-              <FileCode2 size={12} />
-              <span>{node.name}</span>
-              <Plus size={12} />
-            </button>
-          ))}
+          <div style={{ padding: '12px 10px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
+            <label style={{ display: 'grid', gap: 6, color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+              Domain
+              <select aria-label="Active domain" value={selectedDomain ?? ''} onChange={(event) => selectDomain(event.target.value || null)} style={{ ...inputStyle(t), minHeight: 32, padding: '6px 8px' }}>
+                <option value="">All domains</option>
+                {sortDomainPackages(data.modeling.packages).map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.id}</option>)}
+              </select>
+            </label>
+          </div>
+          <DomainWorkspaceNavigation
+            data={data}
+            domain={selectedDomain}
+            active={tab}
+            onSelect={selectSection}
+            t={t}
+          />
         </aside>
 
         <main
@@ -226,28 +278,27 @@ export function DbtFirstModelingPage() {
             flexDirection: 'column',
           }}
         >
-          <nav
+          <div
             style={{
-              height: 42,
+              minHeight: 42,
               display: 'flex',
-              alignItems: 'end',
-              gap: 2,
-              padding: '0 12px',
+              alignItems: 'center',
+              gap: 7,
+              padding: '0 10px 0 14px',
               borderBottom: `1px solid ${t.headerBorder}`,
-              background: t.cellBg,
+              background: t.headerBg,
             }}
           >
-            {(['overview', 'diagram', 'skills', 'assets', 'readiness', 'ai', 'dbt'] as Tab[]).map((value) => (
-              <button key={value} onClick={() => setTab(value)} style={tabButton(t, tab === value)}>
-                {value === 'dbt' ? 'dbt sources' : value === 'ai' ? 'AI setup' : value === 'diagram' ? 'Domain Model' : value[0]!.toUpperCase() + value.slice(1)}
-              </button>
-            ))}
-            <button title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={() => setInspectorOpen((value) => !value)} style={{ ...iconButtonStyle(t), marginLeft: 'auto', marginBottom: 5 }}>
+            {domainSectionIcon(tab, 14, t)}
+            <strong style={{ fontSize: 11 }}>{domainStudioSectionLabel(tab)}</strong>
+            <span style={{ width: 1, height: 15, background: t.headerBorder }} />
+            <span style={{ color: t.textMuted, fontSize: 10 }}>{selectedDomain ?? 'All domains'}</span>
+            {tab === 'diagram' && <button ref={inspectorToggleRef} aria-expanded={inspectorOpen} aria-controls="domain-studio-inspector" aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={toggleInspector} style={{ ...iconButtonStyle(t), marginLeft: 'auto' }}>
               {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-            </button>
-          </nav>
+            </button>}
+          </div>
           <div style={{ flex: 1, minHeight: 0 }}>
-            {tab === 'overview' && <DomainOverview data={data} domain={selectedDomain} t={t} />}
+            {tab === 'overview' && <DomainOverview data={data} domain={selectedDomain} t={t} onOpen={selectSection} />}
             {tab === 'diagram' && (
               <div id="dql-modeling-diagram"
                 style={{
@@ -260,24 +311,39 @@ export function DbtFirstModelingPage() {
                 <LayerToolbar columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); setTab('ai'); }} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
                 </div>
               </div>
             )}
+            {tab === 'terms' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['terms']} title="Domain terms" detail="Business vocabulary owned by this domain and available to governed retrieval." t={t} />}
             {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} />}
-            {tab === 'assets' && <DomainAssetsPanel data={data} domain={selectedDomain} t={t} />}
-            {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} selectedId={selectedId} data={data} t={t} onOpenSkills={() => setTab('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship', draft: selectedEntity ? { from: selectedEntity.id, to: '' } : undefined })} />}
-            {tab === 'readiness' && <ReadinessPanel data={data} domain={selectedDomain} relationships={domainRelationships} t={t} onCreateExport={() => setEditor({ kind: 'export' })} onCreateImport={() => setEditor({ kind: 'import' })} onCreateContract={() => setEditor({ kind: 'contract' })} onEditRelationship={(relationship) => setEditor({ kind: 'relationship', relationship })} />}
-            {tab === 'dbt' && <DbtInventory data={data} unbound={unboundNodes} t={t} onBind={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} />}
+            {tab === 'blocks' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['blocks']} title="Certified blocks" detail="Reusable analytical building blocks governed by this domain." t={t} />}
+            {tab === 'views' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['views']} title="Business views" detail="Domain-owned business views that compose governed models and blocks." t={t} />}
+            {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} selectedId={selectedId} data={data} t={t} onOpenSkills={() => selectSection('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship', draft: selectedEntity && selectedId ? { from: selectedId, to: '' } : undefined })} />}
+            {tab === 'join-proofs' && <RelationshipTable relationships={domainRelationships} entities={data.modeling.entities} t={t} onSelect={(relationship) => setSelectedId(relationshipRecordKey(data.modeling.relationships, relationship))} onEdit={(relationship) => setEditor({ kind: 'relationship', relationship })} />}
+            {tab === 'contracts' && <ContractTable data={data} domain={selectedDomain} t={t} onCreate={() => setEditor({ kind: 'contract' })} />}
+            {tab === 'interfaces' && <InterfaceTable data={data} domain={selectedDomain} t={t} onCreateExport={() => setEditor({ kind: 'export' })} onCreateImport={() => setEditor({ kind: 'import' })} />}
+            {tab === 'evaluations' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['evaluations', 'tests']} title="Evaluations" detail="Evidence and regression checks required before governed assets guide agents." t={t} />}
+            {tab === 'notebooks' && <RelatedProductsPanel data={data} domain={selectedDomain} kind="notebooks" t={t} />}
+            {tab === 'apps' && <RelatedProductsPanel data={data} domain={selectedDomain} kind="apps" t={t} />}
+            {tab === 'dbt' && <DbtInventory data={data} domain={selectedDomain} unbound={unboundNodes} t={t} onBind={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} />}
           </div>
         </main>
 
-        {inspectorOpen && <aside
+        {inspectorVisible && <aside
+          id="domain-studio-inspector"
+          ref={inspectorRef}
+          role="complementary"
+          aria-label="Domain Studio inspector"
+          tabIndex={-1}
+          onKeyDown={(event) => { if (event.key === 'Escape') toggleInspector(); }}
           style={{
             borderLeft: `1px solid ${t.headerBorder}`,
             overflow: 'auto',
-            background: t.cellBg,
+            // The inspector is part of the same domain workspace context.
+            background: t.appBg,
             minWidth: 0,
+            ...(narrowLayout ? { position: 'fixed', inset: '0 0 0 auto', width: 'min(90vw, 380px)', zIndex: 95, boxShadow: '-12px 0 30px rgba(0,0,0,.18)' } : {}),
           }}
         >
           <SideHeading t={t}>Inspector</SideHeading>
@@ -292,6 +358,7 @@ export function DbtFirstModelingPage() {
                   dbtUniqueId: selectedEntity.dbtUniqueId,
                 })
               }
+              onEditDbtSource={() => setDbtSourceEntity(selectedEntity)}
             />
           ) : selectedRelationship ? (
             <RelationshipInspector
@@ -305,7 +372,7 @@ export function DbtFirstModelingPage() {
               }
             />
           ) : (
-            <StudioSummary data={data} domainEntities={domainEntities} domainRelationships={domainRelationships} t={t} onSelectRelationship={setSelectedId} />
+            <StudioSummary data={data} domainEntities={domainEntities.map(({ entity }) => entity)} domainRelationships={domainRelationships} t={t} onSelectRelationship={(relationship) => setSelectedId(relationshipRecordKey(data.modeling.relationships, relationship))} />
           )}
         </aside>}
       </div>
@@ -325,8 +392,86 @@ export function DbtFirstModelingPage() {
           }}
         />
       )}
+      {dbtSourceEntity && nodeDetail && (
+        <DbtSourceEditor
+          entity={dbtSourceEntity}
+          detail={nodeDetail}
+          snapshotId={data.snapshotId}
+          t={t}
+          onClose={() => setDbtSourceEntity(null)}
+          onApplied={async () => { setDbtSourceEntity(null); await refresh(); }}
+        />
+      )}
     </div>
   );
+}
+
+function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data: DbtFirstModelingResponse; domain: string | null; active: Tab; onSelect: (section: Tab) => void; t: Theme }) {
+  const assets = domain ? (data.domainAssets?.[domain] ?? {}) : {};
+  const entities = domainEntityRecords(data.modeling, domain);
+  const relationships = Object.values(data.modeling.relationships).filter((relationship) => {
+    if (!domain) return true;
+    return data.modeling.entities[relationship.from]?.domain === domain || data.modeling.entities[relationship.to]?.domain === domain;
+  });
+  const counts: Partial<Record<Tab, number>> = {
+    diagram: entities.length,
+    skills: assets.skills?.length ?? 0,
+    blocks: assets.blocks?.length ?? 0,
+  };
+  return (
+    <nav aria-label={domain ? `${domain} workspace` : 'All domains workspace'} style={{ padding: '10px 7px 14px' }}>
+      <div style={{ padding: '0 8px 6px', color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>Workspace</div>
+      {DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items).map((item) => (
+        <button
+          key={item.id}
+          onClick={() => onSelect(item.id)}
+          aria-current={active === item.id ? 'page' : undefined}
+          style={workspaceNavButton(t, active === item.id, false)}
+        >
+          {domainSectionIcon(item.id, 14, t, active === item.id)}
+          <span style={{ flex: 1 }}>{item.label}</span>
+          {counts[item.id] !== undefined && <small style={{ color: active === item.id ? t.accent : t.textMuted }}>{counts[item.id]}</small>}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function domainSectionIcon(section: Tab, size: number, t: Theme, active = false) {
+  const Icon = section === 'blocks' ? Blocks : section === 'diagram' ? GitBranch : section === 'skills' ? GraduationCap : Boxes;
+  return <Icon size={size} color={active ? t.accent : t.textMuted} />;
+}
+
+function domainStudioSectionLabel(section: Tab): string {
+  if (section === 'ai') return 'Draft context';
+  return DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items).find((item) => item.id === section)?.label ?? section;
+}
+
+function readDomainStudioLocation(): { domain: string | null; section: Tab } {
+  if (typeof window === 'undefined') return { domain: null, section: 'overview' };
+  const params = new URL(window.location.href).searchParams;
+  const section = params.get('domainSection');
+  return {
+    domain: params.get('domain'),
+    section: isDomainStudioSection(section) ? section : 'overview',
+  };
+}
+
+function writeDomainStudioLocation(domain: string | null, section: Tab, replace = false) {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (domain) url.searchParams.set('domain', domain);
+  else url.searchParams.delete('domain');
+  url.searchParams.set('domainSection', section);
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  if (replace) window.history.replaceState(window.history.state, '', next);
+  else window.history.pushState(window.history.state, '', next);
+}
+
+function relationshipRecordKey(relationships: Record<string, ManifestModelRelationship>, relationship: ManifestModelRelationship): string {
+  const exact = Object.entries(relationships).find(([, value]) => value === relationship);
+  if (exact) return exact[0];
+  return relationship.qualifiedId ?? relationship.id;
 }
 
 function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }: { editor: Editor; data: DbtFirstModelingResponse; selectedDomain: string | null; t: Theme; onClose: () => void; onApplied: (change: ModelingAuthoringChange) => Promise<void> }) {
@@ -513,7 +658,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
       setMessage(null);
       const next = buildChange();
       setChange(next);
-      setPreview(await api.previewModelingChange(next));
+      setPreview(await api.previewModelingChange(next, data.snapshotId));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -526,7 +671,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
       setMessage(null);
       const next = buildChange();
       if (next.operation !== 'upsert_relationship') return;
-      const evidence = await api.validateModelingRelationship(next.value);
+      const evidence = await api.validateModelingRelationship(next.value, data.snapshotId);
       setValidation(evidence);
       setMessage(evidence.status === 'passed' ? 'Warehouse proof passed. Preview the source change to save it.' : (evidence.message ?? 'Validation failed.'));
       setPreview(null);
@@ -540,7 +685,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
     if (!preview || !change) return;
     try {
       setBusy(true);
-      await api.applyModelingChange(change, preview.fingerprint);
+      await api.applyModelingChange(change, preview.fingerprint, data.snapshotId);
       await onApplied(change);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -700,7 +845,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
           {editor.kind === 'import' && (
             <>
               <Field label="Provider export">
-                <Select value={exportRef} onChange={setExportRef} values={Object.values(data.modeling.interfaces?.exports ?? {}).map((item) => `${item.domain}.${item.id}@${item.version}`)} t={t} />
+                <Select value={exportRef} onChange={setExportRef} values={Object.values(data.modeling.interfaces?.exports ?? {}).map((item) => `${item.domain}.${item.localId}@${item.version}`)} t={t} />
               </Field>
               <Field label="Exact analytical purpose">
                 <Input value={purpose} onChange={setPurpose} t={t} placeholder="Revenue by acquisition channel" />
@@ -751,12 +896,8 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
   );
 }
 
-function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme }) {
-  const packages = Object.values(data.modeling.packages).filter((pkg) => !domain || pkg.id === domain || pkg.parent === domain);
+function DomainOverview({ data, domain, t, onOpen }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme; onOpen: (section: Tab) => void }) {
   const entities = Object.values(data.modeling.entities).filter((entity) => !domain || entity.domain === domain);
-  const relationships = Object.values(data.modeling.relationships).filter((relationship) => !domain || data.modeling.entities[relationship.from]?.domain === domain || data.modeling.entities[relationship.to]?.domain === domain);
-  const exports = Object.values(data.modeling.interfaces?.exports ?? {}).filter((item) => !domain || item.domain === domain);
-  const imports = Object.values(data.modeling.interfaces?.imports ?? {}).filter((item) => !domain || item.domain === domain);
   const pkg = domain ? data.modeling.packages[domain] : undefined;
   const assets = domain
     ? (data.domainAssets?.[domain] ?? {})
@@ -766,85 +907,45 @@ function DomainOverview({ data, domain, t }: { data: DbtFirstModelingResponse; d
       }, {});
   return (
     <ScrollPanel>
-      <PanelHeader title={pkg?.id ?? 'All Domain Packages'} detail="The Domain Package is the ownership and retrieval boundary. Everything below is source-controlled and compiled into one agent context graph." t={t} />
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(5, minmax(110px, 1fr))',
-          gap: 10,
-        }}
-      >
-        <Metric value={packages.length} label="Packages" color={t.accent} t={t} />
-        <Metric value={entities.length} label="dbt bindings" color="#377cc8" t={t} />
-        <Metric value={relationships.length} label="join policies" color="#2e9b63" t={t} />
-        <Metric value={exports.length} label="exports" color="#9a6b2f" t={t} />
-        <Metric value={imports.length} label="imports" color="#8b5fc7" t={t} />
-      </div>
-      <h3 style={sectionHeading(t)}>Unified package structure</h3>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, minmax(180px, 1fr))',
-          gap: 10,
-        }}
-      >
-        {[
-          ['Context', 'domain.dql · terms/ · skills/', 'Business meaning, ownership, vocabulary, and reusable agent instructions.'],
-          ['Semantic model', 'modeling/ · views/', 'dbt bindings, relationship proof, contracts, conformance, exports, and imports.'],
-          ['Analytical products', 'blocks/ · notebooks/ · apps/', 'Certified building blocks, research evidence, and stakeholder experiences.'],
-        ].map(([title, path, detail]) => (
-          <div key={title} style={overviewCard(t)}>
-            <b>{title}</b>
-            <code
-              style={{
-                display: 'block',
-                color: t.accent,
-                fontSize: 10,
-                margin: '7px 0',
-              }}
-            >
-              {path}
-            </code>
-            <span style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.5 }}>{detail}</span>
-          </div>
-        ))}
-      </div>
-      <h3 style={sectionHeading(t)}>Package assets</h3>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, minmax(120px, 1fr))',
-          gap: 8,
-        }}
-      >
-        {['terms', 'skills', 'blocks', 'views', 'notebooks', 'apps', 'evaluations', 'tests'].map((kind) => (
-          <div key={kind} style={overviewCard(t)}>
-            <b style={{ textTransform: 'capitalize', fontSize: 11 }}>{kind}</b>
-            <div style={{ fontSize: 22, marginTop: 7 }}>{assets[kind]?.length ?? 0}</div>
-            <div style={{ color: t.textMuted, fontSize: 9, marginTop: 4 }}>{assets[kind]?.[0] ?? `domains/.../${kind}/`}</div>
-          </div>
-        ))}
-      </div>
-      <h3 style={sectionHeading(t)}>Accuracy flow</h3>
-      <div style={flowRow(t)}>
-        {['Question + user scope', 'Domain/skill retrieval', 'Certified block or metric', 'Safe relationship path', 'SQL policy validation', 'Answer + complete lineage'].map((item, index) => (
-          <React.Fragment key={item}>
-            <div style={flowStep(t)}>
-              <small>{index + 1}</small>
-              {item}
-            </div>
-            {index < 5 && <span style={{ color: t.textMuted }}>→</span>}
-          </React.Fragment>
-        ))}
-      </div>
+      <PanelHeader title={pkg?.id ?? 'Domains'} detail={pkg ? 'Business context for reusable blocks, safe models, and agent instructions.' : 'Choose a domain to work with its blocks, modeling, and skills.'} t={t} />
       {pkg && (
-        <div style={{ marginTop: 18 }}>
-          <Property label="Canonical declaration" value={pkg.filePath} t={t} />
-          <Property label="Parent" value={pkg.parent ?? 'Top-level domain'} t={t} />
-          <Property label="Owner" value={pkg.owner ?? 'Not declared'} t={t} />
+        <div style={{ display: 'grid', gap: 16, maxWidth: 980 }}>
+          <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))' }}>
+            <DomainFact label="Owner" value={pkg.owner ?? 'Not declared'} t={t} />
+            <DomainFact label="Parent" value={pkg.parent ?? 'Top-level domain'} t={t} />
+            <DomainFact label="Source" value={pkg.filePath} t={t} />
+          </section>
+          <section>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <h3 style={{ margin: 0, fontSize: 12 }}>Continue building</h3>
+              <span style={{ color: t.textMuted, fontSize: 10 }}>Everything here is scoped to {pkg.id}.</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 8 }}>
+              {[
+                { id: 'blocks' as const, title: 'Blocks', count: assets.blocks?.length ?? 0, detail: 'Reusable analytics.', icon: <Blocks size={16} /> },
+                { id: 'diagram' as const, title: 'Modeling', count: entities.length, detail: 'Models and relationships.', icon: <GitBranch size={16} /> },
+                { id: 'skills' as const, title: 'Skills', count: assets.skills?.length ?? 0, detail: 'Agent instructions.', icon: <GraduationCap size={16} /> },
+              ].map((item) => (
+                <button key={item.id} type="button" onClick={() => onOpen(item.id)} style={domainActionCard(t)}>
+                  <span style={{ display: 'grid', placeItems: 'center', width: 28, height: 28, borderRadius: 6, color: t.accent, background: `${t.accent}12` }}>{item.icon}</span>
+                  <span style={{ flex: 1, minWidth: 0, display: 'grid', gap: 2, textAlign: 'left' }}><b style={{ fontSize: 11 }}>{item.title}</b><span style={{ color: t.textSecondary, fontSize: 10 }}>{item.detail}</span></span>
+                  <strong style={{ color: t.accent, fontSize: 16 }}>{item.count}</strong>
+                </button>
+              ))}
+            </div>
+          </section>
         </div>
       )}
     </ScrollPanel>
+  );
+}
+
+function DomainFact({ label, value, t }: { label: string; value: string; t: Theme }) {
+  return (
+    <div style={{ minWidth: 0, padding: '10px 12px', borderRight: `1px solid ${t.headerBorder}` }}>
+      <div style={{ color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em' }}>{label}</div>
+      <div title={value} style={{ marginTop: 4, color: t.textSecondary, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
+    </div>
   );
 }
 
@@ -858,7 +959,7 @@ function LayerToolbar({ columnMode, search, layoutMode, density, visibleLimit, t
         minHeight: 50,
         padding: '0 10px',
         borderBottom: `1px solid ${t.headerBorder}`,
-        background: t.cellBg,
+        background: t.headerBg,
         flexWrap: 'nowrap',
         overflowX: 'auto',
         scrollbarWidth: 'thin',
@@ -870,17 +971,17 @@ function LayerToolbar({ columnMode, search, layoutMode, density, visibleLimit, t
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
       <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
       <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9 }}>Show <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 52, padding: '5px' }} /></label>
-      <button title="Dim unrelated models" onClick={() => onDimUnrelated(!dimUnrelated)} style={{ ...iconButtonStyle(t), color: dimUnrelated ? t.accent : t.textMuted }}><EyeOff size={14} /></button>
-      <button title="Toggle relationship labels" onClick={() => onEdgeLabels(!showEdgeLabels)} style={{ ...iconButtonStyle(t), color: showEdgeLabels ? t.accent : t.textMuted }}><Link2 size={14} /></button>
-      <button title="Relationship legend" onClick={() => onLegend(!showLegend)} style={{ ...iconButtonStyle(t), color: showLegend ? t.accent : t.textMuted }}><Boxes size={14} /></button>
-      <button title="Export diagram as SVG" onClick={onExport} style={iconButtonStyle(t)}><Download size={14} /></button>
-      <button title={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} onClick={onFullscreen} style={iconButtonStyle(t)}>{fullscreen ? <XCircle size={14} /> : <Maximize2 size={14} />}</button>
-      <button title="Reset to automatic layout" onClick={onReset} style={iconButtonStyle(t)}><RotateCcw size={14} /></button>
+      <button aria-label="Dim unrelated models" title="Dim unrelated models" onClick={() => onDimUnrelated(!dimUnrelated)} style={{ ...iconButtonStyle(t), color: dimUnrelated ? t.accent : t.textMuted }}><EyeOff size={14} /></button>
+      <button aria-label="Toggle relationship labels" title="Toggle relationship labels" onClick={() => onEdgeLabels(!showEdgeLabels)} style={{ ...iconButtonStyle(t), color: showEdgeLabels ? t.accent : t.textMuted }}><Link2 size={14} /></button>
+      <button aria-label="Relationship legend" title="Relationship legend" onClick={() => onLegend(!showLegend)} style={{ ...iconButtonStyle(t), color: showLegend ? t.accent : t.textMuted }}><Boxes size={14} /></button>
+      <button aria-label="Export diagram as SVG" title="Export diagram as SVG" onClick={onExport} style={iconButtonStyle(t)}><Download size={14} /></button>
+      <button aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} onClick={onFullscreen} style={iconButtonStyle(t)}>{fullscreen ? <XCircle size={14} /> : <Maximize2 size={14} />}</button>
+      <button aria-label="Reset to automatic layout" title="Reset to automatic layout" onClick={onReset} style={iconButtonStyle(t)}><RotateCcw size={14} /></button>
     </div>
   );
 }
 
-function DiagramLegend({ t }: { t: Theme }) { return <div style={{ display: 'flex', gap: 14, padding: '7px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 9.5 }}>{[['Safe certified', '#2e9b63'], ['Validated review', '#5b73d6'], ['Attribution / draft', '#9a6b2f'], ['Stale certification', '#d47822']].map(([label, color]) => <span key={label} style={{ display: 'flex', gap: 5, alignItems: 'center' }}><i style={{ display: 'inline-block', width: 18, height: 3, background: color, borderRadius: 2 }} />{label}</span>)}<span style={{ marginLeft: 'auto' }}>1:1 · 1:N · N:1 · N:N</span></div>; }
+function DiagramLegend({ t }: { t: Theme }) { return <div style={{ display: 'flex', gap: 14, padding: '7px 12px', borderBottom: `1px solid ${t.headerBorder}`, background: t.headerBg, color: t.textSecondary, fontSize: 9.5 }}>{[['Safe certified', '#2e9b63'], ['Validated review', '#5b73d6'], ['Attribution / draft', '#9a6b2f'], ['Stale certification', '#d47822']].map(([label, color]) => <span key={label} style={{ display: 'flex', gap: 5, alignItems: 'center' }}><i style={{ display: 'inline-block', width: 18, height: 3, background: color, borderRadius: 2 }} />{label}</span>)}<span style={{ marginLeft: 'auto' }}>1:1 · 1:N · N:1 · N:N</span></div>; }
 
 function exportDiagramSvg() {
   const source = document.querySelector('#dql-modeling-diagram .react-flow__renderer');
@@ -895,7 +996,7 @@ function exportDiagramSvg() {
   URL.revokeObjectURL(url);
 }
 
-function DomainAssetsPanel({ data, domain, t }: { data: DbtFirstModelingResponse; domain: string | null; t: Theme }) {
+function DomainAssetsPanel({ data, domain, kinds, title, detail, t }: { data: DbtFirstModelingResponse; domain: string | null; kinds: string[]; title: string; detail: string; t: Theme }) {
   const assets = domain
     ? (data.domainAssets?.[domain] ?? {})
     : Object.values(data.domainAssets ?? {}).reduce<Record<string, string[]>>((all, current) => {
@@ -904,7 +1005,7 @@ function DomainAssetsPanel({ data, domain, t }: { data: DbtFirstModelingResponse
       }, {});
   return (
     <ScrollPanel>
-      <PanelHeader title="Domain assets" detail="Blocks, views, notebooks, apps, tests, and evaluations live inside the selected Domain Package and compile into the same governed context graph." t={t} />
+      <PanelHeader title={title} detail={detail} t={t} />
       <div
         style={{
           display: 'grid',
@@ -912,7 +1013,7 @@ function DomainAssetsPanel({ data, domain, t }: { data: DbtFirstModelingResponse
           gap: 12,
         }}
       >
-        {['terms', 'blocks', 'views', 'notebooks', 'apps', 'evaluations', 'tests'].map((kind) => (
+        {kinds.map((kind) => (
           <section key={kind} style={overviewCard(t)}>
             <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
               <FolderTree size={14} color={t.accent} />
@@ -940,6 +1041,71 @@ function DomainAssetsPanel({ data, domain, t }: { data: DbtFirstModelingResponse
           </section>
         ))}
       </div>
+    </ScrollPanel>
+  );
+}
+
+function RelatedProductsPanel({ data, domain, kind, t }: { data: DbtFirstModelingResponse; domain: string | null; kind: 'notebooks' | 'apps'; t: Theme }) {
+  const [products, setProducts] = useState<Array<Record<string, unknown>>>([]);
+  const [loading, setLoading] = useState(Boolean(domain));
+  useEffect(() => {
+    let active = true;
+    if (!domain) {
+      setProducts([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void api.getRelatedDomainProducts(domain)
+      .then((result) => { if (active) setProducts(result[kind] as unknown as Array<Record<string, unknown>>); })
+      .catch(() => { if (active) setProducts([]); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [domain, kind]);
+  const legacyPaths = domain
+    ? (data.domainAssets?.[domain]?.[kind] ?? [])
+    : Object.values(data.domainAssets ?? {}).flatMap((assets) => assets[kind] ?? []);
+  const label = kind === 'notebooks' ? 'Notebooks' : 'Apps';
+  return (
+    <ScrollPanel>
+      <PanelHeader
+        title={`Related ${label}`}
+        detail={`${label} are global shared products. This view is a backlink from their owner/uses-domain metadata; it does not create a second copy inside the Domain Package.`}
+        t={t}
+      />
+      {loading ? <Blank title={`Loading related ${label.toLowerCase()}…`} detail="Resolving global product backlinks from the compiled project snapshot." t={t} /> : products.length ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          {products.map((product) => {
+            const id = String(product.id ?? product.filePath ?? product.title ?? 'product');
+            const usesDomains = Array.isArray(product.usesDomains) ? product.usesDomains.map(String) : [];
+            return <div key={id} style={overviewCard(t)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <FolderTree size={14} color={t.accent} />
+                <b>{String(product.name ?? product.title ?? id)}</b>
+                {product.lifecycle ? <Badge t={t}>{String(product.lifecycle)}</Badge> : null}
+              </div>
+              <p style={{ color: t.textSecondary, fontSize: 11, margin: '7px 0 0' }}>{String(product.purpose ?? 'No analytical purpose declared yet.')}</p>
+              <code style={{ display: 'block', marginTop: 7, color: t.textMuted, fontSize: 10 }}>{String(product.filePath ?? '')}</code>
+              <div style={{ marginTop: 7, color: t.textMuted, fontSize: 10 }}>Owner: {String(product.ownerDomain ?? 'Shared')} · Uses: {usesDomains.join(', ') || 'none declared'}</div>
+            </div>;
+          })}
+        </div>
+      ) : legacyPaths.length ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <Message text="These paths use the legacy domain-local layout. They remain readable during migration, but new products should be global and declare ownerDomain / usesDomains." t={t} />
+          {legacyPaths.map((path) => (
+            <div key={path} style={overviewCard(t)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <FolderTree size={14} color={t.accent} />
+                <code style={{ color: t.textPrimary, fontSize: 11 }}>{path}</code>
+              </div>
+              <p style={{ color: t.textMuted, fontSize: 10, margin: '7px 0 0' }}>Legacy backlink · migrate without duplicating the product.</p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <Blank title={`No related ${label.toLowerCase()} yet`} detail={`Create the ${kind === 'notebooks' ? 'notebook' : 'app'} from the global ${label} surface, then declare this domain in its product context to make the backlink appear here.`} t={t} />
+      )}
     </ScrollPanel>
   );
 }
@@ -1124,10 +1290,10 @@ function InterfaceTable({ data, domain, t, onCreateExport, onCreateImport }: { d
           </thead>
           <tbody>
             {exports.map((item) => (
-              <tr key={`${item.domain}.${item.id}`}>
+              <tr key={item.qualifiedId}>
                 <Td>
                   <b>
-                    {item.domain}.{item.id}@{item.version}
+                    {item.domain}.{item.localId}@{item.version}
                   </b>
                 </Td>
                 <Td>{item.entity ?? '—'}</Td>
@@ -1159,7 +1325,7 @@ function InterfaceTable({ data, domain, t, onCreateExport, onCreateImport }: { d
             {imports.map((item) => (
               <tr key={item.id}>
                 <Td>
-                  <b>{item.id}</b>
+                  <b>{item.localId}</b>
                 </Td>
                 <Td>{item.domain}</Td>
                 <Td>{item.exportRef}</Td>
@@ -1178,11 +1344,11 @@ function InterfaceTable({ data, domain, t, onCreateExport, onCreateImport }: { d
   );
 }
 
-function RelationshipTable({ relationships, entities, t, onSelect, onEdit }: { relationships: ManifestModelRelationship[]; entities: Record<string, ManifestModelEntity>; t: Theme; onSelect: (id: string) => void; onEdit: (r: ManifestModelRelationship) => void }) {
+function RelationshipTable({ relationships, entities, t, onSelect, onEdit }: { relationships: ManifestModelRelationship[]; entities: Record<string, ManifestModelEntity>; t: Theme; onSelect: (relationship: ManifestModelRelationship) => void; onEdit: (r: ManifestModelRelationship) => void }) {
   return (
     <ScrollPanel>
       <PanelHeader title="Analytical relationships" detail="Transformation lineage is context; only these governed edges can prove an analytical join." t={t} />
-      <table style={tableStyle}>
+      {relationships.length ? <table style={tableStyle}>
         <thead>
           <tr>
             <Th>Relationship</Th>
@@ -1196,9 +1362,9 @@ function RelationshipTable({ relationships, entities, t, onSelect, onEdit }: { r
         </thead>
         <tbody>
           {relationships.map((r) => (
-            <tr key={r.id} onClick={() => onSelect(r.id)} style={{ cursor: 'pointer' }}>
+            <tr key={r.qualifiedId ?? r.id} onClick={() => onSelect(r)} style={{ cursor: 'pointer' }}>
               <Td>
-                <b>{r.id}</b>
+                <b>{r.localId}</b>
               </Td>
               <Td>
                 {r.from} <span style={{ color: t.textMuted }}>→</span> {r.to}
@@ -1224,7 +1390,7 @@ function RelationshipTable({ relationships, entities, t, onSelect, onEdit }: { r
             </tr>
           ))}
         </tbody>
-      </table>
+      </table> : <Blank title="No join proofs in this domain" detail="Drag from a source column handle to a target column handle in Domain Model to create a draft, then validate its cardinality and fanout." t={t} />}
     </ScrollPanel>
   );
 }
@@ -1343,12 +1509,12 @@ function ReadinessPanel({ data, domain, relationships, t, onCreateExport, onCrea
       <div style={{ display: 'flex', alignItems: 'center', marginTop: 22, gap: 8 }}><h3 style={{ ...sectionHeading(t), flex: 1, margin: 0 }}>Cross-domain access</h3><Button t={t} onClick={onCreateImport}><Plus size={13} /> Request access</Button><Button t={t} onClick={onCreateExport}><Plus size={13} /> Publish access</Button></div>
       <p style={{ color: t.textSecondary, fontSize: 11, margin: '7px 0 12px' }}>Only needed when another domain consumes an approved entity, key, metric, or block.</p>
       {exports.length || imports.length ? <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))' }}>
-        {exports.map((item) => <ReadinessCard key={`${item.domain}.${item.id}`} title={domainExportRef(item.domain, item.id, item.version)} badge="Published" detail={`${item.entity ?? 'Shared analytics'} · ${item.consumerDomains.join(', ') || 'no consumers'}`} status={item.status} t={t} />)}
+        {exports.map((item) => <ReadinessCard key={item.qualifiedId} title={domainExportRef(item.domain, item.localId, item.version)} badge="Published" detail={`${item.entity ?? 'Shared analytics'} · ${item.consumerDomains.join(', ') || 'no consumers'}`} status={item.status} t={t} />)}
         {imports.map((item) => <ReadinessCard key={item.id} title={item.exportRef} badge="Imported" detail={`${item.domain} · ${item.purpose}`} status={item.status} t={t} />)}
       </div> : <Blank title="No cross-domain access needed" detail="DQL will prompt for an export/import when a relationship crosses a domain boundary." t={t} />}
       <div style={{ display: 'flex', alignItems: 'center', marginTop: 22, gap: 8 }}><h3 style={{ ...sectionHeading(t), flex: 1, margin: 0 }}>Certified analytics</h3><Button primary t={t} onClick={onCreateContract}><Plus size={13} /> Certify use case</Button></div>
       <p style={{ color: t.textSecondary, fontSize: 11, margin: '7px 0 12px' }}>Bind a proven analytical purpose to its approved entities, blocks, filters, and evaluations.</p>
-      {contracts.length ? <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))' }}>{contracts.map((contract) => <ReadinessCard key={contract.id} title={contract.id} badge="Use case" detail={`${contract.entities.join(', ') || 'No entities'} · ${contract.blocks.join(', ') || 'No certified blocks'}`} status={contract.status} t={t} />)}</div> : <Blank title="No certified use cases yet" detail="Start from a validated block or notebook, then certify it for repeatable agent use." t={t} />}
+      {contracts.length ? <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'repeat(2, minmax(240px, 1fr))' }}>{contracts.map((contract) => <ReadinessCard key={contract.qualifiedId} title={contract.localId} badge="Use case" detail={`${contract.entities.join(', ') || 'No entities'} · ${contract.blocks.join(', ') || 'No certified blocks'}`} status={contract.status} t={t} />)}</div> : <Blank title="No certified use cases yet" detail="Start from a validated block or notebook, then certify it for repeatable agent use." t={t} />}
     </ScrollPanel>
   );
 }
@@ -1362,11 +1528,24 @@ function domainExportRef(domain: string, id: string, version: number): string {
   return qualified.includes('@') ? qualified : `${qualified}@${version}`;
 }
 
-function DbtInventory({ data, unbound, t, onBind }: { data: DbtFirstModelingResponse; unbound: DbtFirstModelingResponse['dbtProvenance']['nodes'][string][]; t: Theme; onBind: (id: string) => void }) {
+function DbtInventory({ data, domain, unbound, t, onBind }: { data: DbtFirstModelingResponse; domain: string | null; unbound: DbtFirstModelingResponse['dbtProvenance']['nodes'][string][]; t: Theme; onBind: (id: string) => void }) {
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const pageSize = 50;
+  const boundIds = new Set(domainEntityRecords(data.modeling, domain).map(({ entity }) => entity.dbtUniqueId));
+  const normalizedSearch = search.trim().toLowerCase();
+  const nodes = Object.values(data.dbtProvenance.nodes).filter((node) => {
+    if (domain && !boundIds.has(node.uniqueId)) return false;
+    if (!normalizedSearch) return true;
+    return [node.name, node.uniqueId, node.relation, node.sourcePath].some((value) => String(value ?? '').toLowerCase().includes(normalizedSearch));
+  });
+  const pageCount = Math.max(1, Math.ceil(nodes.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const visibleNodes = nodes.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   return (
     <ScrollPanel>
-      <PanelHeader title="dbt-owned sources" detail={`Read on demand from ${data.dbtProvenance.manifestPath}. Columns, descriptions, tests, and MetricFlow formulas remain dbt-owned.`} t={t} />
-      <table style={tableStyle}>
+      <PanelHeader title="dbt-owned scope" detail={`Read on demand from ${data.dbtProvenance.manifestPath}. Columns, descriptions, tests, and MetricFlow formulas remain dbt-owned.${domain ? ' This view shows dbt models already bound to this domain.' : ''}`} t={t} action={<label style={{ position: 'relative', width: 230 }}><Search size={13} style={{ position: 'absolute', top: 9, left: 8, color: t.textMuted }} /><input aria-label="Search dbt scope" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Find model, relation, or path" style={{ ...inputStyle(t), paddingLeft: 27 }} /></label>} />
+      {visibleNodes.length ? <><table style={tableStyle}>
         <thead>
           <tr>
             <Th>dbt model</Th>
@@ -1377,7 +1556,7 @@ function DbtInventory({ data, unbound, t, onBind }: { data: DbtFirstModelingResp
           </tr>
         </thead>
         <tbody>
-          {Object.values(data.dbtProvenance.nodes).map((node) => {
+          {visibleNodes.map((node) => {
             const isUnbound = unbound.some((item) => item.uniqueId === node.uniqueId);
             return (
               <tr key={node.uniqueId}>
@@ -1406,19 +1585,24 @@ function DbtInventory({ data, unbound, t, onBind }: { data: DbtFirstModelingResp
           })}
         </tbody>
       </table>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, color: t.textMuted, fontSize: 10 }}>
+        <span>{nodes.length} models · page {currentPage + 1} of {pageCount}</span>
+        <div style={{ display: 'flex', gap: 6 }}><Button t={t} disabled={currentPage === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>Previous</Button><Button t={t} disabled={currentPage >= pageCount - 1} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))}>Next</Button></div>
+      </div></> : <Blank title={search ? 'No dbt models match this search' : domain ? 'No dbt models are bound to this domain' : 'No dbt models found'} detail={domain ? 'Use Bind model in Domain Model to add a dbt model without copying its schema.' : 'Compile the dbt project, then refresh Domain Studio.'} t={t} />}
     </ScrollPanel>
   );
 }
 
-function EntityInspector({ entity, detail, t, onEdit }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; t: Theme; onEdit: () => void }) {
+function EntityInspector({ entity, detail, t, onEdit, onEditDbtSource }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; t: Theme; onEdit: () => void; onEditDbtSource: () => void }) {
   return (
     <Inspector t={t}>
-      <InspectorTitle title={entity.id} subtitle={entity.domain} t={t} />
-      <Button t={t} onClick={onEdit}>
-        Edit binding
-      </Button>
+      <InspectorTitle title={entity.localId} subtitle={entity.domain} t={t} />
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        <Button t={t} onClick={onEdit}>Edit DQL binding</Button>
+        <Button t={t} onClick={onEditDbtSource}>Preview dbt source patch</Button>
+      </div>
       <h3 style={inspectorHeading(t)}>Business context</h3>
-      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{detail?.description || `Add a business definition for ${entity.id} in dbt, then enrich its agent guidance with domain skills.`}</p>
+      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{detail?.description || `Add a business definition for ${entity.localId} in dbt, then enrich its agent guidance with domain skills.`}</p>
       <Property label="concepts" value={entity.conceptRefs?.join(', ') || 'Not mapped'} t={t} />
       <Property label="analytical role" value={entity.analyticalRole ?? 'Not declared'} t={t} />
       <h3 style={inspectorHeading(t)}>Analytics identity</h3>
@@ -1448,10 +1632,92 @@ function EntityInspector({ entity, detail, t, onEdit }: { entity: ManifestModelE
   );
 }
 
+function DbtSourceEditor({ entity, detail, snapshotId, t, onClose, onApplied }: {
+  entity: ManifestModelEntity;
+  detail: DbtNodeAuthoringDetail;
+  snapshotId: string;
+  t: Theme;
+  onClose: () => void;
+  onApplied: () => Promise<void>;
+}) {
+  const initialTests = detail.columns
+    .filter((column) => column.tests.length > 0)
+    .map((column) => `${column.name}: ${column.tests.join(', ')}`)
+    .join('\n');
+  const [description, setDescription] = useState(detail.description ?? '');
+  const [tests, setTests] = useState(initialTests);
+  const [preview, setPreview] = useState<(DbtSourcePatchPreview & { snapshotId: string }) | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const change = (): DbtSourceAuthoringInput => ({
+    uniqueId: entity.dbtUniqueId,
+    description,
+    columns: tests.split(/\r?\n/).flatMap((line) => {
+      const separator = line.indexOf(':');
+      if (separator < 1) return [];
+      const name = line.slice(0, separator).trim();
+      const dataTests = csv(line.slice(separator + 1));
+      return name ? [{ name, tests: dataTests }] : [];
+    }),
+  });
+  const previewPatch = async () => {
+    try {
+      setBusy(true);
+      setMessage(null);
+      setPreview(await api.previewDbtSourcePatch(change(), snapshotId));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const applyPatch = async () => {
+    if (!preview) return;
+    try {
+      setBusy(true);
+      setMessage(null);
+      await api.applyDbtSourcePatch(change(), preview.fingerprint, preview.snapshotId);
+      await onApplied();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title={`Edit dbt source · ${detail.name}`} t={t} onClose={onClose}>
+      <Message text="dbt owns descriptions and tests. DQL will preview a guarded patch to the dbt YAML source; no dbt metadata is copied into the Domain Package." t={t} />
+      {!preview ? <div style={{ display: 'grid', gap: 12 }}>
+        <Field label="Model description">
+          <textarea aria-label="Model description" value={description} onChange={(event) => setDescription(event.target.value)} rows={5} style={{ ...inputStyle(t), resize: 'vertical' }} />
+        </Field>
+        <Field label="Column tests (one column per line)">
+          <textarea aria-label="Column tests" value={tests} onChange={(event) => setTests(event.target.value)} rows={6} placeholder="order_id: unique, not_null" style={{ ...inputStyle(t), resize: 'vertical', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }} />
+        </Field>
+        <p style={{ margin: 0, color: t.textMuted, fontSize: 10 }}>Descriptions/tests stay in dbt YAML. Business meaning, relationships, contracts, and policies stay in the DQL Domain Package.</p>
+        {message && <Message text={message} t={t} />}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 7 }}><Button t={t} onClick={onClose}>Cancel</Button><Button primary t={t} disabled={busy} onClick={() => void previewPatch()}>Preview source patch</Button></div>
+      </div> : <div style={{ display: 'grid', gap: 10 }}>
+        <div style={{ color: t.textSecondary, fontSize: 11 }}>Source: <code>{preview.patch.path}</code></div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <SourcePreview title="Current dbt YAML" source={preview.patch.before || '# New dbt schema YAML'} t={t} />
+          <SourcePreview title="Proposed dbt YAML" source={preview.patch.after} t={t} />
+        </div>
+        {message && <Message text={message} t={t} />}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 7 }}><Button t={t} onClick={() => setPreview(null)}>Back</Button><Button primary t={t} disabled={busy || !preview.patch.changed} onClick={() => void applyPatch()}>{preview.patch.changed ? 'Apply dbt source patch' : 'No changes'}</Button></div>
+      </div>}
+    </Modal>
+  );
+}
+
+function SourcePreview({ title, source, t }: { title: string; source: string; t: Theme }) {
+  return <section><strong style={{ fontSize: 10 }}>{title}</strong><pre tabIndex={0} style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre-wrap', background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: 10, fontSize: 9.5, color: t.textSecondary }}>{source}</pre></section>;
+}
+
 function RelationshipInspector({ relationship, t, onEdit }: { relationship: ManifestModelRelationship; t: Theme; onEdit: () => void }) {
   return (
     <Inspector t={t}>
-      <InspectorTitle title={relationship.id} subtitle={`${relationship.from} → ${relationship.to}`} t={t} />
+      <InspectorTitle title={relationship.localId} subtitle={`${relationship.from} → ${relationship.to}`} t={t} />
       <Button primary t={t} onClick={onEdit}>
         Validate / edit
       </Button>
@@ -1471,7 +1737,7 @@ function RelationshipInspector({ relationship, t, onEdit }: { relationship: Mani
   );
 }
 
-function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectRelationship }: { data: DbtFirstModelingResponse; domainEntities: ManifestModelEntity[]; domainRelationships: ManifestModelRelationship[]; t: Theme; onSelectRelationship: (id: string) => void }) {
+function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectRelationship }: { data: DbtFirstModelingResponse; domainEntities: ManifestModelEntity[]; domainRelationships: ManifestModelRelationship[]; t: Theme; onSelectRelationship: (relationship: ManifestModelRelationship) => void }) {
   return (
     <Inspector t={t}>
       <InspectorTitle title="Domain overview" subtitle="Select a model or relationship to inspect it." t={t} />
@@ -1479,11 +1745,11 @@ function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectR
       <div style={{ height: 8 }} />
       <Metric value={domainRelationships.length} label="Relationships" color="#377cc8" t={t} />
       <h3 style={inspectorHeading(t)}>Relationships</h3>
-      {domainRelationships.length ? domainRelationships.map((relationship) => <button key={relationship.id} onClick={() => onSelectRelationship(relationship.id)} style={{ width: '100%', textAlign: 'left', border: 0, borderBottom: `1px solid ${t.headerBorder}`, background: 'transparent', color: t.textPrimary, padding: '8px 2px', cursor: 'pointer', fontSize: 10.5 }}><b>{relationship.id}</b><span style={{ display: 'block', color: t.textMuted, marginTop: 3 }}>{relationship.from} → {relationship.to} · {relationship.cardinality.replace(/_/g, ' ')}</span></button>) : <p style={{ color: t.textMuted, fontSize: 10.5 }}>Drag between two column handles to create the first relationship.</p>}
+      {domainRelationships.length ? domainRelationships.map((relationship) => <button key={relationship.qualifiedId} onClick={() => onSelectRelationship(relationship)} style={{ width: '100%', textAlign: 'left', border: 0, borderBottom: `1px solid ${t.headerBorder}`, background: 'transparent', color: t.textPrimary, padding: '8px 2px', cursor: 'pointer', fontSize: 10.5 }}><b>{relationship.localId}</b><span style={{ display: 'block', color: t.textMuted, marginTop: 3 }}>{relationship.from} → {relationship.to} · {relationship.cardinality.replace(/_/g, ' ')}</span></button>) : <p style={{ color: t.textMuted, fontSize: 10.5 }}>Drag between two column handles to create the first relationship.</p>}
       <div style={{ height: 8 }} />
       <Metric value={Object.keys(data.modeling.contracts).length} label="Contracts" color="#2e9b63" t={t} />
       <h3 style={inspectorHeading(t)}>Ownership boundary</h3>
-      <p style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>dbt owns tables, columns, descriptions, tests, and metrics. DQL owns domain membership, analytical identity, safe relationship proof, contracts, blocks, apps, and agent policy.</p>
+      <p style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>dbt owns tables, columns, descriptions, tests, and metrics. DQL owns domain membership, analytical identity, safe relationship proof, contracts, certified blocks, and agent policy. Shared apps and notebooks reference this domain without moving inside it.</p>
     </Inspector>
   );
 }
@@ -1549,6 +1815,11 @@ function Modal({ title, t, onClose, children }: { title: string; t: Theme; onClo
       }}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
+        onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}
         style={{
           width: 'min(720px, 94vw)',
           maxHeight: '88vh',
@@ -1568,7 +1839,7 @@ function Modal({ title, t, onClose, children }: { title: string; t: Theme; onClo
           }}
         >
           <strong>{title}</strong>
-          <button onClick={onClose} style={iconButtonStyle(t)}>
+          <button aria-label={`Close ${title}`} title="Close" onClick={onClose} style={iconButtonStyle(t)}>
             <XCircle size={17} />
           </button>
         </div>
@@ -1627,7 +1898,7 @@ function Button({ children, t, onClick, primary, disabled }: { children: React.R
 }
 function IconButton({ children, title, t, onClick }: { children: React.ReactNode; title: string; t: Theme; onClick: () => void }) {
   return (
-    <button title={title} onClick={onClick} style={iconButtonStyle(t)}>
+    <button aria-label={title} title={title} onClick={onClick} style={iconButtonStyle(t)}>
       {children}
     </button>
   );
@@ -1895,44 +2166,20 @@ const treeButton = (t: Theme, active: boolean): React.CSSProperties => ({
   textAlign: 'left',
   cursor: 'pointer',
 });
-const entityTreeButton = (t: Theme, active: boolean): React.CSSProperties => ({
-  width: 'calc(100% - 26px)',
-  margin: '1px 6px 1px 20px',
-  padding: '6px 8px',
+const workspaceNavButton = (t: Theme, active: boolean, nested: boolean): React.CSSProperties => ({
+  width: '100%',
+  minHeight: 30,
+  padding: nested ? '6px 8px 6px 14px' : '7px 8px',
   display: 'flex',
-  gap: 6,
   alignItems: 'center',
+  gap: 7,
   border: 0,
-  background: 'transparent',
+  borderRadius: 6,
+  background: active ? `${t.accent}18` : 'transparent',
   color: active ? t.accent : t.textSecondary,
-  fontSize: 10,
-  textAlign: 'left',
-  cursor: 'pointer',
-});
-const inventoryButton = (t: Theme): React.CSSProperties => ({
-  width: 'calc(100% - 12px)',
-  margin: '1px 6px',
-  padding: '6px 7px',
-  display: 'grid',
-  gridTemplateColumns: '14px 1fr 14px',
-  gap: 5,
-  alignItems: 'center',
-  border: 0,
-  background: 'transparent',
-  color: t.textSecondary,
-  fontSize: 10,
-  textAlign: 'left',
-  cursor: 'pointer',
-});
-const tabButton = (t: Theme, active: boolean): React.CSSProperties => ({
-  height: 34,
-  padding: '0 12px',
-  border: 0,
-  borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
-  background: 'transparent',
-  color: active ? t.textPrimary : t.textSecondary,
-  fontSize: 11,
+  fontSize: 10.5,
   fontWeight: active ? 700 : 500,
+  textAlign: 'left',
   cursor: 'pointer',
 });
 const linkButton = (t: Theme): React.CSSProperties => ({
@@ -1964,6 +2211,19 @@ const overviewCard = (t: Theme): React.CSSProperties => ({
   background: t.cellBg,
   borderRadius: 9,
   padding: 14,
+});
+const domainActionCard = (t: Theme): React.CSSProperties => ({
+  display: 'flex',
+  alignItems: 'center',
+  gap: 9,
+  minHeight: 58,
+  border: `1px solid ${t.headerBorder}`,
+  background: t.cellBg,
+  borderRadius: 8,
+  padding: '9px 10px',
+  color: t.textPrimary,
+  cursor: 'pointer',
+  fontFamily: t.font,
 });
 const flowRow = (t: Theme): React.CSSProperties => ({
   display: 'flex',

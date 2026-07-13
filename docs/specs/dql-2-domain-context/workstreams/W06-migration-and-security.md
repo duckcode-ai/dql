@@ -1,0 +1,36 @@
+# W06 — Migration, compatibility, and runtime security
+
+## Goal
+
+Provide safe explicit adoption for existing DQL/DataLex projects and fail-closed
+serving outside loopback.
+
+Acceptance IDs: `CFG-002`, `MIG-001`, `MIG-002`, `SEC-001`.
+Dependencies: verified W01–W03 source/config/snapshot contracts.
+
+## Required implementation
+
+- Implement modeling migration dry-run/apply for v3 config, qualified IDs,
+  unified model sources, and domain-local product relocation/context metadata.
+- Implement deterministic DataLex matching, omission/patch/draft conversion,
+  explicit loss report, lifecycle preservation, and idempotency.
+- Keep v2 consumers/config/API and legacy product/modeling readers tested
+  through DQL 3.x; new authoring uses canonical paths.
+- Enforce non-loopback authentication and origin allowlist at startup; remove
+  wildcard CORS there while retaining documented loopback local mode.
+- Add path confinement, source fingerprint/CSRF protections as applicable,
+  secret redaction, and structured audit events for mutations.
+
+## Suggested ownership
+
+Owned: migration modules/CLI/tests, compatibility readers/fixtures, runtime
+server security/config tests. Coordinate shared source writers with W01 and API
+routes with W03. Prohibited: Domain Studio layout, agent ranking/routing, theme
+tokens.
+
+## Required tests/evidence
+
+Dry-run no writes; apply twice no changes; complete loss report; ambiguous
+mapping refusal; no lifecycle upgrade; v2 fixture compile/run; legacy paths;
+non-loopback no-auth/invalid-origin failure; authenticated allowlist success;
+path traversal/symlink escape rejection; secrets absent from logs/responses.

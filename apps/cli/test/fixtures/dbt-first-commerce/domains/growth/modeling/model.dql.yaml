@@ -22,6 +22,7 @@ relationships:
       status: passed
       checked_at: "2026-07-11T00:00:00.000Z"
       query_fingerprint: fixture-acquisition-customer-proof
+      proof_fingerprint: 73484d7e25d5d5987f28d7e02668558384867204420ee9a52961978d73b6c0b7
       from_rows: 5
       to_rows: 5
       joined_rows: 5

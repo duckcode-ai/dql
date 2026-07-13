@@ -12,6 +12,7 @@
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, relative } from 'node:path';
+import { normalizeProductDomainContext, type ProductDomainContext } from './product-domain-context.js';
 
 export type AppRole = {
   id: string;
@@ -85,7 +86,7 @@ export type AppNotebookRef = {
   visibility: AppVisibility;
 };
 
-export interface AppDocument {
+export interface AppDocument extends ProductDomainContext {
   /** Schema version for forward compatibility. */
   version: 1;
   id: string;
@@ -99,6 +100,7 @@ export interface AppDocument {
   caveats?: string[];
   /** OSS organization metadata. Not an access-control boundary. */
   visibility?: AppVisibility;
+  /** v2 compatibility alias for ownerDomain. */
   domain: string;
   subdomain?: string;
   groups?: string[];
@@ -248,7 +250,10 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
 
   const id = stringField(obj, 'id', err);
   const name = stringField(obj, 'name', err);
-  const domain = stringField(obj, 'domain', err);
+  const legacyDomain = optionalString(obj, 'domain', err);
+  const ownerDomain = optionalString(obj, 'ownerDomain', err) ?? legacyDomain;
+  if (!ownerDomain) err('expected ownerDomain (or legacy domain) to be a non-empty string');
+  const domain = ownerDomain ?? '';
 
   if (!id || !name || !domain) {
     return { document: null, errors };
@@ -275,6 +280,9 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
   const groups = obj.groups === undefined ? [] : stringArray(obj, 'groups', err);
   const audience = optionalString(obj, 'audience', err);
   const lifecycle = enumField(obj, 'lifecycle', ['draft', 'review', 'certified', 'deprecated'] as const, err, 'draft');
+  if (obj.usesDomains !== undefined) stringArray(obj, 'usesDomains', err);
+  if (obj.requiredExports !== undefined) stringArray(obj, 'requiredExports', err);
+  const productContext = normalizeProductDomainContext(obj, domain);
 
   const members = readMembers(obj.members, err);
   const roles = readRoles(obj.roles, err);
@@ -317,6 +325,7 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
     businessRules,
     caveats,
     visibility,
+    ...productContext,
     domain,
     subdomain,
     groups,

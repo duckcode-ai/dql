@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { applyModelingChange, loadDbtNodeAuthoringDetail, previewModelingChange } from './dbt-first-authoring.js';
+import { applyDbtSourcePatch, applyModelingChange, dbtArtifactReadCount, loadDbtNodeAuthoringDetail, previewDbtSourcePatch, previewModelingChange, resetDbtArtifactReadCount } from './dbt-first-authoring.js';
 
 describe('dbt-first Domain Package authoring', () => {
   let root: string;
@@ -85,5 +85,69 @@ describe('dbt-first Domain Package authoring', () => {
     }));
     const detail = loadDbtNodeAuthoringDetail(join(target, 'manifest.json'), 'model.shop.orders');
     expect(detail?.columns[0]?.tests).toEqual(['not_null', 'unique']);
+    resetDbtArtifactReadCount();
+    loadDbtNodeAuthoringDetail(join(target, 'manifest.json'), 'model.shop.orders');
+    expect(dbtArtifactReadCount()).toBe(0);
+  });
+
+  it('previews and applies dbt-owned descriptions/tests to dbt YAML only', () => {
+    const target = join(root, 'target');
+    mkdirSync(target, { recursive: true });
+    mkdirSync(join(root, 'models'), { recursive: true });
+    writeFileSync(join(root, 'models', 'orders.yml'), 'version: 2\nmodels:\n  - name: orders\n    description: Old description\n');
+    writeFileSync(join(target, 'manifest.json'), JSON.stringify({
+      nodes: {
+        'model.shop.orders': {
+          unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders',
+          patch_path: 'shop://models/orders.yml', original_file_path: 'models/orders.sql',
+        },
+      },
+      sources: {},
+    }));
+    const input = {
+      uniqueId: 'model.shop.orders',
+      description: 'One row per order.',
+      columns: [{ name: 'order_id', description: 'Order key.', tests: ['unique', 'not_null'] }],
+    };
+    const preview = previewDbtSourcePatch(root, join(target, 'manifest.json'), input);
+    expect(preview.patch.path).toBe('models/orders.yml');
+    expect(preview.patch.after).toContain('description: One row per order.');
+    expect(preview.patch.after).toContain('data_tests:');
+    applyDbtSourcePatch(root, join(target, 'manifest.json'), input, preview.fingerprint);
+    expect(readFileSync(join(root, 'models', 'orders.yml'), 'utf8')).toBe(preview.patch.after);
+    expect(() => applyDbtSourcePatch(root, join(target, 'manifest.json'), { ...input, description: 'Changed' }, preview.fingerprint)).toThrow(/changed after the preview/);
+  });
+
+  it('rejects Domain Package writes redirected through a symlink', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'dql-authoring-outside-'));
+    writeFileSync(join(outside, 'domain.dql'), 'domain "Commerce" { id = "commerce" }\n');
+    rmSync(join(root, 'domains', 'commerce'), { recursive: true, force: true });
+    symlinkSync(outside, join(root, 'domains', 'commerce'), 'dir');
+    try {
+      expect(() => previewModelingChange(root, {
+        operation: 'upsert_domain',
+        value: { id: 'commerce', name: 'Commerce' },
+      })).toThrow(/symlink/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects dbt source patches redirected through a symlink', () => {
+    const outside = mkdtempSync(join(tmpdir(), 'dql-dbt-source-outside-'));
+    rmSync(join(root, 'models'), { recursive: true, force: true });
+    symlinkSync(outside, join(root, 'models'), 'dir');
+    mkdirSync(join(root, 'target'), { recursive: true });
+    writeFileSync(join(root, 'target', 'manifest.json'), JSON.stringify({
+      nodes: { 'model.shop.orders': { resource_type: 'model', name: 'orders', patch_path: 'shop://models/orders.yml' } },
+      sources: {},
+    }));
+    try {
+      expect(() => previewDbtSourcePatch(root, join(root, 'target', 'manifest.json'), {
+        uniqueId: 'model.shop.orders', description: 'Unsafe redirect',
+      })).toThrow(/symlink/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

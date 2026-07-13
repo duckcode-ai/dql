@@ -61,6 +61,20 @@ Body content.`;
 });
 
 describe('loadSkills', () => {
+  it('keeps the same local skill id in different Domain Packages collision-free', () => {
+    for (const domain of ['commerce', 'growth']) {
+      mkdirSync(join(root, 'domains', domain, 'skills'), { recursive: true });
+      writeFileSync(join(root, 'domains', domain, 'domain.dql'), `domain "${domain}" {\n  id = "${domain}"\n}\n`);
+      writeFileSync(join(root, 'domains', domain, 'skills', 'analyst.skill.md'), '---\nid: analyst\n---\nDomain guidance', 'utf-8');
+    }
+
+    const matches = loadSkills(root).skills.filter((skill) => skill.id === 'analyst');
+    expect(matches.map((skill) => skill.qualifiedId).sort()).toEqual([
+      'commerce::skill::analyst',
+      'growth::skill::analyst',
+    ]);
+  });
+
   it('keeps legacy .dql/skills files readable during the OSS layout migration', () => {
     writeFileSync(
       join(root, '.dql', 'skills', 'a.skill.md'),
@@ -283,5 +297,26 @@ describe('selectRelevantSkills (spec 16)', () => {
       preferredMetrics: ['recognized_revenue'], preferredBlocks: [], vocabulary: {}, body: 'Use recognized revenue.', sourcePath: '',
     };
     expect(selectRelevantSkills([draft], 'revenue', { domains: ['Revenue'] })).toEqual([]);
+  });
+
+  it('treats exclusions as negative eligibility and never as positive search tokens', () => {
+    const excluded: Skill = {
+      id: 'recognized-revenue', scope: 'project', description: 'Recognized revenue reporting',
+      exclusions: ['cash bookings'], preferredMetrics: ['recognized_revenue'], preferredBlocks: [],
+      vocabulary: {}, body: 'Use recognized revenue for finance reporting.', sourcePath: '',
+    };
+
+    expect(selectRelevantSkills([excluded], 'show recognized revenue')).toEqual([excluded]);
+    expect(selectRelevantSkills([excluded], 'show cash bookings')).toEqual([]);
+    expect(selectRelevantSkills([excluded], 'cash bookings by month', { domains: ['Finance'] })).toEqual([]);
+  });
+
+  it('lets an exclusion withdraw an otherwise pinned skill', () => {
+    const pinned: Skill = {
+      ...sqlConventions,
+      exclusions: ['python notebook'],
+    };
+
+    expect(selectRelevantSkills([pinned], 'write a python notebook')).toEqual([]);
   });
 });

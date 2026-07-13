@@ -29,6 +29,21 @@ const STORAGE_KEY = 'dql-ask-conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
 const MAX_CONVERSATIONS = 40;
 
+function consumePendingDomainContext(): { domain: string; purpose?: string } | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const raw = window.sessionStorage.getItem('dql-ask-domain-context');
+    window.sessionStorage.removeItem('dql-ask-domain-context');
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return typeof parsed.domain === 'string' && parsed.domain.trim()
+      ? { domain: parsed.domain.trim(), purpose: typeof parsed.purpose === 'string' ? parsed.purpose : undefined }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function makeConversationId(): string {
   return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -131,6 +146,7 @@ function relativeTime(iso: string): string {
 export function AnalyticsHome() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  const [domainContext] = useState(() => consumePendingDomainContext());
 
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
   // Keep the selected thread across a page remount/reload. The panel's pending-run
@@ -261,7 +277,8 @@ export function AnalyticsHome() {
               key={activeId}
               themeMode={state.themeMode}
               title="Analytics copilot"
-              scopeHint="Ask a question or request deep research"
+              scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
+              workspaceContext={domainContext}
               audience="stakeholder"
               initialMode="auto"
               initialItems={activeItems}

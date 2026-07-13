@@ -229,10 +229,6 @@ export function loadDbtFirstModeling(
         diagnostics.push(modelingError(relPath, 'each entity requires `id` and `dbt_model`'));
         continue;
       }
-      if (entities[id]) {
-        diagnostics.push(modelingError(relPath, `duplicate entity "${id}" also declared in ${entities[id].sourcePath}`));
-        continue;
-      }
       const dbt = nodeFacts.get(dbtUniqueId);
       if (!dbt || dbt.resourceType !== 'model') {
         diagnostics.push(modelingError(relPath, `entity "${id}" references unknown dbt model "${dbtUniqueId}"`));
@@ -242,9 +238,13 @@ export function loadDbtFirstModeling(
       const explicitKeys = stringArray(rawEntity.keys);
       const grain = explicitGrain ?? dbt.grain;
       const keys = explicitKeys.length > 0 ? explicitKeys : dbt.keys;
-      entities[id] = {
-        id,
-        domain: stringValue(rawEntity.domain) ?? domain,
+      const entityDomain = stringValue(rawEntity.domain) ?? domain;
+      const qualifiedId = qualifiedObjectId(entityDomain, 'entity', id);
+      const entity: ManifestModelEntity = {
+        id: qualifiedId,
+        localId: id,
+        qualifiedId,
+        domain: entityDomain,
         dbtUniqueId,
         grain,
         keys,
@@ -258,6 +258,9 @@ export function loadDbtFirstModeling(
           keys: [...keys].sort(),
         }),
       };
+      if (!insertScopedRecord(entities, entity)) {
+        diagnostics.push(modelingError(relPath, `duplicate entity "${entity.qualifiedId}" in the same Domain Package`));
+      }
     }
 
     for (const rawRelationship of arrayOfRecords(source.relationships) as RawRelationship[]) {
@@ -270,13 +273,13 @@ export function loadDbtFirstModeling(
         diagnostics.push(modelingError(relPath, 'each contract requires `id`'));
         continue;
       }
-      if (contracts[id]) {
-        diagnostics.push(modelingError(relPath, `duplicate contract "${id}" also declared in ${contracts[id].sourcePath}`));
-        continue;
-      }
-      contracts[id] = {
-        id,
-        domain: stringValue(rawContract.domain) ?? domain,
+      const contractDomain = stringValue(rawContract.domain) ?? domain;
+      const qualifiedId = qualifiedObjectId(contractDomain, 'contract', id);
+      const contract: ManifestModelContract = {
+        id: qualifiedId,
+        localId: id,
+        qualifiedId,
+        domain: contractDomain,
         entities: stringArray(rawContract.entities),
         blocks: stringArray(rawContract.blocks),
         status: lifecycle(rawContract.status),
@@ -292,6 +295,7 @@ export function loadDbtFirstModeling(
         purpose: stringValue(rawContract.purpose),
         evaluationRefs: stringArray(rawContract.evaluations ?? rawContract.evaluation_refs ?? rawContract.evaluationRefs),
       };
+      if (!insertScopedRecord(contracts, contract)) diagnostics.push(modelingError(relPath, `duplicate contract "${contract.qualifiedId}" in the same Domain Package`));
     }
 
     for (const rawDeclaration of arrayOfRecords(source.conformance)) {
@@ -301,7 +305,17 @@ export function loadDbtFirstModeling(
         diagnostics.push(modelingError(relPath, 'each conformance declaration requires `id` and `rule`'));
         continue;
       }
-      conformance[id] = { id, entities: stringArray(rawDeclaration.entities), rule, sourcePath: relPath };
+      const qualifiedId = qualifiedObjectId(domain, 'conformance', id);
+      const declaration: ManifestConformanceDeclaration = {
+        id: qualifiedId,
+        localId: id,
+        qualifiedId,
+        domain,
+        entities: stringArray(rawDeclaration.entities),
+        rule,
+        sourcePath: relPath,
+      };
+      if (!insertScopedRecord(conformance, declaration)) diagnostics.push(modelingError(relPath, `duplicate conformance declaration "${declaration.qualifiedId}" in the same Domain Package`));
     }
 
     for (const rawRule of arrayOfRecords(source.rules)) {
@@ -311,13 +325,18 @@ export function loadDbtFirstModeling(
         diagnostics.push(modelingError(relPath, 'each rule requires `id` and `expression`'));
         continue;
       }
-      rules[id] = {
-        id,
-        domain: stringValue(rawRule.domain) ?? domain,
+      const ruleDomain = stringValue(rawRule.domain) ?? domain;
+      const qualifiedId = qualifiedObjectId(ruleDomain, 'rule', id);
+      const ruleValue: ManifestModelRule = {
+        id: qualifiedId,
+        localId: id,
+        qualifiedId,
+        domain: ruleDomain,
         kind: ruleKind(rawRule.kind),
         expression,
         sourcePath: relPath,
       };
+      if (!insertScopedRecord(rules, ruleValue)) diagnostics.push(modelingError(relPath, `duplicate rule "${ruleValue.qualifiedId}" in the same Domain Package`));
     }
 
     for (const rawExport of arrayOfRecords(source.exports)) {
@@ -333,9 +352,13 @@ export function loadDbtFirstModeling(
         diagnostics.push(modelingError(relPath, `duplicate domain export "${ref}"`));
         continue;
       }
+      const exportDomain = stringValue(rawExport.domain) ?? domain;
+      const qualifiedId = qualifiedObjectId(exportDomain, 'export', localId);
       const value: ManifestDomainExport = {
-        id,
-        domain: stringValue(rawExport.domain) ?? domain,
+        id: qualifiedId,
+        localId,
+        qualifiedId,
+        domain: exportDomain,
         version,
         entity: stringValue(rawExport.entity),
         metrics: stringArray(rawExport.metrics ?? rawExport.allowed_metrics ?? rawExport.allowedMetrics),
@@ -362,14 +385,18 @@ export function loadDbtFirstModeling(
         diagnostics.push(modelingError(relPath, 'each domain import requires `export`'));
         continue;
       }
-      const id = stringValue(rawImport.id) ?? `${domain}:${exportRef}`;
-      if (domainImports[id]) {
-        diagnostics.push(modelingError(relPath, `duplicate domain import "${id}"`));
+      const localId = stringValue(rawImport.id) ?? exportRef.replace(/[^A-Za-z0-9_-]+/g, '_');
+      const importDomain = stringValue(rawImport.domain ?? rawImport.consumer_domain ?? rawImport.consumerDomain) ?? domain;
+      const qualifiedId = qualifiedObjectId(importDomain, 'import', localId);
+      if (domainImports[qualifiedId]) {
+        diagnostics.push(modelingError(relPath, `duplicate domain import "${localId}"`));
         continue;
       }
-      domainImports[id] = {
-        id,
-        domain: stringValue(rawImport.domain ?? rawImport.consumer_domain ?? rawImport.consumerDomain) ?? domain,
+      domainImports[qualifiedId] = {
+        id: qualifiedId,
+        localId,
+        qualifiedId,
+        domain: importDomain,
         exportRef,
         purpose: stringValue(rawImport.purpose) ?? '',
         status: lifecycle(rawImport.status),
@@ -380,8 +407,8 @@ export function loadDbtFirstModeling(
   }
 
   validateInterfaces(domainExports, domainImports, entities, diagnostics);
-  const relationships = buildRelationships(rawRelationships, entities, nodeFacts, domainSources, domainExports, domainImports, diagnostics);
   validateContracts(contracts, entities, diagnostics);
+  const relationships = buildRelationships(rawRelationships, entities, nodeFacts, domainSources, domainExports, domainImports, contracts, diagnostics);
   validateConformance(conformance, entities, diagnostics);
   const packages = Object.fromEntries([...domainSources.values()]
     .map((source): [string, ManifestDomainPackage] => [source.id, {
@@ -395,7 +422,7 @@ export function loadDbtFirstModeling(
   const domainLineage = Object.values(relationships)
     .filter((relationship) => entities[relationship.from] && entities[relationship.to])
     .map((relationship): ManifestDomainRelationshipLineage => ({
-      relationship: relationship.id,
+      relationship: relationship.qualifiedId,
       fromDomain: entities[relationship.from].domain,
       toDomain: entities[relationship.to].domain,
       automaticJoinAllowed: relationship.automaticJoinAllowed,
@@ -430,6 +457,7 @@ function buildRelationships(
   packages: Map<string, DomainSource>,
   domainExports: Record<string, ManifestDomainExport>,
   domainImports: Record<string, ManifestDomainImport>,
+  contracts: Record<string, ManifestModelContract>,
   diagnostics: ManifestDiagnostic[],
 ): Record<string, ManifestModelRelationship> {
   const relationships: Record<string, ManifestModelRelationship> = {};
@@ -441,12 +469,10 @@ function buildRelationships(
       diagnostics.push(modelingError(sourcePath, 'each relationship requires `id`, `from`, and `to`'));
       continue;
     }
-    if (relationships[id]) {
-      diagnostics.push(modelingError(sourcePath, `duplicate relationship "${id}" also declared in ${relationships[id].sourcePath}`));
-      continue;
-    }
-    const fromEntity = entities[from];
-    const toEntity = entities[to];
+    const fromKey = resolveScopedKey(entities, from, domain);
+    const toKey = resolveScopedKey(entities, to, domain);
+    const fromEntity = fromKey ? entities[fromKey] : undefined;
+    const toEntity = toKey ? entities[toKey] : undefined;
     if (!fromEntity || !toEntity) {
       diagnostics.push(modelingError(sourcePath, `relationship "${id}" references unknown entity "${!fromEntity ? from : toEntity ? to : `${from}" and "${to}`}`));
       continue;
@@ -458,11 +484,14 @@ function buildRelationships(
     }
     const fromFacts = nodeFacts.get(fromEntity.dbtUniqueId);
     const toFacts = nodeFacts.get(toEntity.dbtUniqueId);
+    let keyColumnsValid = true;
     for (const pair of keys) {
       if (fromFacts && !fromFacts.columns.has(pair.from.toLowerCase())) {
+        keyColumnsValid = false;
         diagnostics.push(modelingError(sourcePath, `relationship "${id}" key "${pair.from}" is not a column of ${fromEntity.dbtUniqueId}`));
       }
       if (toFacts && !toFacts.columns.has(pair.to.toLowerCase())) {
+        keyColumnsValid = false;
         diagnostics.push(modelingError(sourcePath, `relationship "${id}" key "${pair.to}" is not a column of ${toEntity.dbtUniqueId}`));
       }
     }
@@ -476,8 +505,21 @@ function buildRelationships(
     const interfacesGranted = !crossDomain || (structuredInterfaces
       ? crossDomainInterfacesGranted(ownerDomain, [fromEntity, toEntity], importRefs, domainExports, domainImports, sourcePath, id, diagnostics)
       : packages.get(fromEntity.domain)?.exports.includes(from) === true);
+    const contractsGranted = !crossDomain || (structuredInterfaces
+      && crossDomainContractsGranted(ownerDomain, importRefs, domainExports, domainImports, contracts, sourcePath, id, diagnostics));
     const certificationFingerprint = certificationProof(value.certifiedAgainst, keys, cardinality, fanout);
     const validation = validationEvidence(value.validation);
+    const validationProof = relationshipValidationProofFingerprint({
+      fromRelation: fromFacts?.relation,
+      toRelation: toFacts?.relation,
+      keys,
+      cardinality,
+      fanout,
+      queryFingerprint: validation?.queryFingerprint ?? '',
+    });
+    const validationMatches = Boolean(validation?.proofFingerprint && validation.proofFingerprint === validationProof);
+    const evidenceExpiresAt = stringValue(value.evidence_expires_at ?? value.evidenceExpiresAt);
+    const evidenceExpired = Boolean(evidenceExpiresAt && Number.isFinite(Date.parse(evidenceExpiresAt)) && Date.parse(evidenceExpiresAt) <= Date.now());
     const currentProof = fingerprint({
       from: { grain: fromEntity.grain, keys: [...fromEntity.keys].sort(), identity: fromEntity.identityFingerprint },
       to: { grain: toEntity.grain, keys: [...toEntity.keys].sort(), identity: toEntity.identityFingerprint },
@@ -510,8 +552,12 @@ function buildRelationships(
     }
     const automaticJoinAllowed = status === 'certified'
       && !staleCertification
+      && keyColumnsValid
+      && !evidenceExpired
       && interfacesGranted
+      && contractsGranted
       && validation?.status === 'passed'
+      && validationMatches
       && (cardinality === 'many_to_one' || cardinality === 'one_to_many' || cardinality === 'one_to_one')
       && fanout === 'safe';
     if (status === 'certified' && validation?.status !== 'passed') {
@@ -522,10 +568,19 @@ function buildRelationships(
         message: `certified relationship "${id}" has no passed warehouse validation evidence and cannot prove an automatic join`,
       });
     }
-    relationships[id] = {
-      id,
-      from,
-      to,
+    if (status === 'certified' && evidenceExpired) {
+      diagnostics.push({ kind: 'modeling', filePath: sourcePath, severity: 'warning', message: `relationship "${id}" validation evidence expired at ${evidenceExpiresAt}` });
+    }
+    if (status === 'certified' && !validationMatches) {
+      diagnostics.push({ kind: 'modeling', filePath: sourcePath, severity: 'warning', message: `relationship "${id}" validation proof no longer matches its relations, keys, cardinality, or fanout policy` });
+    }
+    const qualifiedId = qualifiedObjectId(ownerDomain, 'relationship', id);
+    const relationship: ManifestModelRelationship = {
+      id: qualifiedId,
+      localId: id,
+      qualifiedId,
+      from: fromKey!,
+      to: toKey!,
       keys,
       cardinality,
       fanout,
@@ -543,7 +598,7 @@ function buildRelationships(
       temporal: relationshipTemporal(value.temporal),
       attributionBlock: stringValue(value.attribution_block ?? value.attributionBlock),
       importRefs,
-      evidenceExpiresAt: stringValue(value.evidence_expires_at ?? value.evidenceExpiresAt),
+      evidenceExpiresAt,
       sourcePath,
       fingerprint: currentProof,
       certificationFingerprint,
@@ -551,6 +606,9 @@ function buildRelationships(
       staleCertification,
       automaticJoinAllowed,
     };
+    if (!insertScopedRecord(relationships, relationship)) {
+      diagnostics.push(modelingError(sourcePath, `duplicate relationship "${relationship.qualifiedId}" in the same Domain Package`));
+    }
   }
   return relationships;
 }
@@ -560,12 +618,14 @@ function validationEvidence(value: unknown): ManifestRelationshipValidationEvide
   const status = raw.status === 'passed' || raw.status === 'failed' || raw.status === 'error' ? raw.status : undefined;
   const checkedAt = stringValue(raw.checked_at ?? raw.checkedAt);
   const queryFingerprint = stringValue(raw.query_fingerprint ?? raw.queryFingerprint);
+  const proofFingerprint = stringValue(raw.proof_fingerprint ?? raw.proofFingerprint);
   if (!status || !checkedAt || !queryFingerprint) return undefined;
   const numberValue = (input: unknown): number => typeof input === 'number' && Number.isFinite(input) ? input : Number(input) || 0;
   return {
     status,
     checkedAt,
     queryFingerprint,
+    proofFingerprint,
     fromRows: numberValue(raw.from_rows ?? raw.fromRows),
     toRows: numberValue(raw.to_rows ?? raw.toRows),
     joinedRows: numberValue(raw.joined_rows ?? raw.joinedRows),
@@ -576,6 +636,59 @@ function validationEvidence(value: unknown): ManifestRelationshipValidationEvide
     maxToPerKey: numberValue(raw.max_to_per_key ?? raw.maxToPerKey),
     message: stringValue(raw.message),
   };
+}
+
+function qualifiedObjectId(domain: string, kind: string, localId: string): string {
+  const prefix = `${domain}::${kind}::`;
+  return localId.startsWith(prefix) ? localId : `${prefix}${localId}`;
+}
+
+export function relationshipValidationProofFingerprint(input: {
+  fromRelation?: string;
+  toRelation?: string;
+  keys: Array<{ from: string; to: string }>;
+  cardinality: ManifestRelationshipCardinality;
+  fanout: ManifestFanoutPolicy;
+  queryFingerprint: string;
+}): string {
+  return fingerprint({
+    fromRelation: input.fromRelation,
+    toRelation: input.toRelation,
+    keys: input.keys,
+    cardinality: input.cardinality,
+    fanout: input.fanout,
+    queryFingerprint: input.queryFingerprint,
+  });
+}
+
+type ScopedManifestObject = {
+  localId: string;
+  qualifiedId: string;
+  domain?: string;
+  ownerDomain?: string;
+};
+
+/**
+ * Manifest v3 always uses canonical qualified keys. Source-local ids are kept
+ * only for display and package-local authoring references.
+ */
+function insertScopedRecord<T extends ScopedManifestObject>(record: Record<string, T>, value: T): boolean {
+  if (record[value.qualifiedId]) return false;
+  record[value.qualifiedId] = value;
+  return true;
+}
+
+function resolveScopedKey<T extends ScopedManifestObject>(record: Record<string, T>, reference: string, ownerDomain?: string): string | undefined {
+  if (record[reference]) return reference;
+  if (ownerDomain) {
+    const kind = Object.values(record)[0]?.qualifiedId.split('::')[1];
+    const localQualified = kind ? qualifiedObjectId(ownerDomain, kind, reference) : undefined;
+    if (localQualified && record[localQualified]) return localQualified;
+  }
+  const matches = Object.entries(record).filter(([, item]) => item.localId === reference
+    || item.qualifiedId === reference
+    || `${item.domain ?? item.ownerDomain}:${item.localId}` === reference);
+  return matches.length === 1 ? matches[0]![0] : undefined;
 }
 
 function certificationProof(
@@ -608,8 +721,10 @@ function validateInterfaces(
   diagnostics: ManifestDiagnostic[],
 ): void {
   for (const value of Object.values(exports)) {
-    if (value.entity && !entities[value.entity]) {
-      diagnostics.push(modelingError(value.sourcePath, `domain export "${value.id}@${value.version}" references unknown entity "${value.entity}"`));
+    if (value.entity) {
+      const key = resolveScopedKey(entities, value.entity, value.domain);
+      if (key) value.entity = key;
+      else diagnostics.push(modelingError(value.sourcePath, `domain export "${value.id}@${value.version}" references unknown or ambiguous entity "${value.entity}"`));
     }
     if (value.status === 'certified' && !value.owner) {
       diagnostics.push(modelingError(value.sourcePath, `certified domain export "${value.id}@${value.version}" requires an owner`));
@@ -647,7 +762,7 @@ function crossDomainInterfacesGranted(
       .filter((value): value is ManifestDomainImport => Boolean(value))
       .find((value) => {
         const exported = exports[value.exportRef];
-        return exported?.domain === endpoint.domain && (!exported.entity || exported.entity === endpoint.id);
+        return exported?.domain === endpoint.domain && (!exported.entity || [endpoint.id, endpoint.localId, endpoint.qualifiedId].includes(exported.entity));
       });
     const exported = matching ? exports[matching.exportRef] : undefined;
     if (!matching || matching.status !== 'certified' || !exported || exported.status !== 'certified') {
@@ -656,6 +771,41 @@ function crossDomainInterfacesGranted(
     }
   }
   return granted;
+}
+
+function crossDomainContractsGranted(
+  ownerDomain: string,
+  importRefs: string[],
+  exports: Record<string, ManifestDomainExport>,
+  imports: Record<string, ManifestDomainImport>,
+  contracts: Record<string, ManifestModelContract>,
+  sourcePath: string,
+  relationshipId: string,
+  diagnostics: ManifestDiagnostic[],
+): boolean {
+  let granted = true;
+  for (const exportRef of importRefs) {
+    const imported = Object.values(imports).find((value) =>
+      value.domain === ownerDomain && value.exportRef === exportRef && value.status === 'certified');
+    const exported = exports[exportRef];
+    const contract = exported?.contract
+      ? Object.values(contracts).find((value) => value.qualifiedId === exported.contract
+        || value.id === exported.contract
+        || (value.domain === exported.domain && value.localId === exported.contract))
+      : undefined;
+    const compatible = Boolean(
+      imported?.purpose
+      && exported?.status === 'certified'
+      && contract?.status === 'certified'
+      && (!contract.purpose || contract.purpose === imported.purpose)
+      && (!exported.entity || contract.entities.includes(exported.entity)),
+    );
+    if (!compatible) {
+      diagnostics.push(modelingError(sourcePath, `cross-domain relationship "${relationshipId}" requires export "${exportRef}" to have a compatible certified contract and explicit import purpose`));
+      granted = false;
+    }
+  }
+  return granted && importRefs.length > 0;
 }
 
 function relationshipRoles(value: unknown): { from?: string; to?: string } | undefined {
@@ -706,9 +856,12 @@ function validateContracts(
   diagnostics: ManifestDiagnostic[],
 ): void {
   for (const contract of Object.values(contracts)) {
-    for (const entity of contract.entities) {
-      if (!entities[entity]) diagnostics.push(modelingError(contract.sourcePath, `contract "${contract.id}" references unknown entity "${entity}"`));
-    }
+    contract.entities = contract.entities.flatMap((entity) => {
+      const key = resolveScopedKey(entities, entity, contract.domain);
+      if (key) return [key];
+      diagnostics.push(modelingError(contract.sourcePath, `contract "${contract.id}" references unknown or ambiguous entity "${entity}"`));
+      return [];
+    });
   }
 }
 
@@ -721,9 +874,12 @@ function validateConformance(
     if (declaration.entities.length < 2) {
       diagnostics.push(modelingError(declaration.sourcePath, `conformance "${declaration.id}" must name at least two entities`));
     }
-    for (const entity of declaration.entities) {
-      if (!entities[entity]) diagnostics.push(modelingError(declaration.sourcePath, `conformance "${declaration.id}" references unknown entity "${entity}"`));
-    }
+    declaration.entities = declaration.entities.flatMap((entity) => {
+      const key = resolveScopedKey(entities, entity, declaration.domain);
+      if (key) return [key];
+      diagnostics.push(modelingError(declaration.sourcePath, `conformance "${declaration.id}" references unknown or ambiguous entity "${entity}"`));
+      return [];
+    });
   }
 }
 

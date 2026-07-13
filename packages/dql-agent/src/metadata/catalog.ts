@@ -34,6 +34,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
+import type { DomainContextEnvelope } from '../domain-context.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import {
   buildAnalysisQuestionPlan,
@@ -193,6 +194,14 @@ export interface BuildLocalContextPackRequest {
   reusePolicy?: 'off' | 'seed' | 'reuse_on_refinement';
   /** How the conversation layer classified this question vs the ongoing topic. */
   conversationTopicRelation?: 'continuation' | 'refinement' | 'shift' | 'return';
+  /** Server-resolved domain scope applied before retrieval and graph expansion. */
+  domainContext?: DomainContextEnvelope;
+  /**
+   * Fingerprint returned by `ensureAgentProjectReady` for this same immutable
+   * project snapshot. When it still matches the catalog, retrieval skips the
+   * expensive snapshot reconstruction and performs zero dbt artifact reads.
+   */
+  preparedMetadataFingerprint?: string;
 }
 
 export interface CertifiedFitConfirmationRequest {
@@ -697,7 +706,16 @@ export async function buildLocalContextPack(
   projectRoot: string,
   request: BuildLocalContextPackRequest,
 ): Promise<LocalContextPack> {
-  await ensureMetadataCatalogFresh(projectRoot);
+  let prepared = false;
+  if (request.preparedMetadataFingerprint) {
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      prepared = catalog.state('fingerprint') === request.preparedMetadataFingerprint;
+    } finally {
+      catalog.close();
+    }
+  }
+  if (!prepared) await ensureMetadataCatalogFresh(projectRoot);
   const catalog = openMetadataCatalog(projectRoot);
   try {
     const mode = request.mode ?? 'question';
@@ -711,7 +729,7 @@ export async function buildLocalContextPack(
     // candidates only; a SHIFT ignores it. A metadata fingerprint mismatch
     // always disqualifies reuse.
     const reusePolicy = request.reusePolicy ?? 'seed';
-    const priorPack = reusePolicy !== 'off'
+    const priorPack = !request.domainContext && reusePolicy !== 'off'
       && request.priorContextPackId
       && request.conversationTopicRelation
       && request.conversationTopicRelation !== 'shift'
@@ -767,20 +785,22 @@ export async function buildLocalContextPack(
       buildFollowUpSearchQuery(request.question, followUp),
       ...questionPlan.searchQueries,
     ]);
-    const searchRows = mergeObjects(searchQueries.flatMap((query) =>
+    const scopeObjects = (rows: MetadataObject[]) => filterMetadataObjectsByDomainContext(rows, request.domainContext);
+    const searchRows = scopeObjects(mergeObjects(searchQueries.flatMap((query) =>
       catalog.searchObjects({
         query,
         objectTypes: request.objectTypes,
         limit: Math.max(request.limit ?? 80, 20),
       })
-    ));
+    )));
     const schemaShapeCandidates = schemaShapeCandidateObjects(catalog, questionPlan, request, mergeObjects([...runtimeObjects, ...runtimeValueObjects]));
     const schemaShapeObjects = schemaShapeCandidates.map((candidate) => candidate.object);
-    const exact = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
+    const exactCandidate = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
+    const exact = exactCandidate && scopeObjects([exactCandidate]).length > 0 ? exactCandidate : null;
     const ranked = rankMetadataObjects({
-      rows: mergeObjects(exact
+      rows: scopeObjects(mergeObjects(exact
         ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]
-        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]),
+        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects])),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 80,
@@ -794,9 +814,9 @@ export async function buildLocalContextPack(
     const focusObjectKey = request.focusObjectKey ?? selected[0]?.objectKey ?? null;
     const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
-    const graphObjects = catalog.getObjectsByKeys(edgeObjectKeys);
+    const graphObjects = scopeObjects(catalog.getObjectsByKeys(edgeObjectKeys));
     const rankedObjects = rankMetadataObjects({
-      rows: mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects]),
+      rows: scopeObjects(mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects])),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 120,
@@ -810,17 +830,18 @@ export async function buildLocalContextPack(
     // entire relation set ("send everything, let the agent decide"). Only when the
     // whole catalog fits comfortably in context — otherwise we keep ranked selection.
     const fullCatalogObjects = request.strictness === 'exploratory'
-      ? collectFullCatalogObjects(catalog)
+      ? scopeObjects(collectFullCatalogObjects(catalog) ?? [])
       : undefined;
     const usedFullCatalog = Boolean(fullCatalogObjects);
     const objects = fullCatalogObjects
       ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects])
       : mergeObjects([...rankedObjects, ...sqlParentObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
+    const allowedObjectKeys = new Set(objectKeys);
     const contextEdges = mergeMetadataEdges([
       ...edgeWalk,
       ...catalog.edgesForKeys(objectKeys, 2),
-    ]);
+    ]).filter((edge) => allowedObjectKeys.has(edge.fromKey) && allowedObjectKeys.has(edge.toKey));
     const queryRuns = catalog.queryRunsForObjectKeys(objectKeys, 20);
     const diagnostics = catalog.diagnostics();
     const warnings = buildWarnings(diagnostics, objects);
@@ -843,7 +864,7 @@ export async function buildLocalContextPack(
     const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext, contextEdges);
     const evidenceRoles = buildEvidenceRoles(objects, queryRuns);
     const reranked = rankMetadataObjects({
-      rows: mergeObjects([...searchRows, ...schemaShapeObjects, ...objects]),
+      rows: scopeObjects(mergeObjects([...searchRows, ...schemaShapeObjects, ...objects])),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 120,
@@ -2177,6 +2198,18 @@ function addRawDbtManifestCatalogObjects(
   const catalogColumns = loadRawDbtCatalogColumns(join(dirname(manifestPath), 'catalog.json'));
   const uniqueColumnsByModel = extractDbtUniqueColumns(raw.nodes ?? {});
   const entries: RawDbtCatalogEntry[] = [];
+  // PERF-001: at enterprise scale, keep columns in their model payload and
+  // load full node detail lazily from the immutable dbt artifact cache. A
+  // separate FTS row + graph edge for every column makes a 300k-column project
+  // consume gigabytes without improving the bounded model-first route.
+  const rawEntries = [...Object.values(raw.nodes ?? {}), ...Object.values(raw.sources ?? {})];
+  const totalColumnCount = rawEntries.reduce((sum, node) => {
+    const columns = node.columns;
+    return sum + (columns && typeof columns === 'object' && !Array.isArray(columns)
+      ? Object.keys(columns as Record<string, unknown>).length
+      : 0);
+  }, 0);
+  const includeColumnObjects = totalColumnCount <= 50_000;
   for (const [uniqueId, node] of Object.entries(raw.nodes ?? {})) {
     if (node.resource_type !== 'model') continue;
     const name = rawDbtName(node);
@@ -2200,6 +2233,7 @@ function addRawDbtManifestCatalogObjects(
       ...entry,
       objects,
       edges,
+      includeColumnObjects,
     });
   }
 
@@ -2224,6 +2258,7 @@ function addRawDbtManifestCatalogObjects(
       ...entry,
       objects,
       edges,
+      includeColumnObjects,
     });
   }
 
@@ -2237,6 +2272,7 @@ function addRawDbtManifestCatalogObjects(
 function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
   objects: Map<string, MetadataObject>;
   edges: Map<string, MetadataEdge>;
+  includeColumnObjects: boolean;
 }): void {
   const existing = input.objects.get(input.objectKey);
   const database = input.database ?? stringValue(input.node.database);
@@ -2272,7 +2308,7 @@ function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
     }),
   }));
 
-  for (const column of columns) {
+  if (input.includeColumnObjects) for (const column of columns) {
     const columnKey = `dbt:column:${input.name}.${column.name}`;
     const existingColumn = input.objects.get(columnKey);
     input.objects.set(columnKey, mergeObject(existingColumn, {
@@ -5709,6 +5745,16 @@ function reasonForObject(row: MetadataObject): string {
   if (row.objectType.startsWith('dbt_') || row.objectType === 'warehouse_table' || row.objectType === 'warehouse_column') return 'dbt or warehouse metadata supplies physical context';
   if (row.objectType === 'app' || row.objectType === 'dashboard') return 'Published consumption context';
   return 'Relevant project metadata';
+}
+
+function filterMetadataObjectsByDomainContext(rows: MetadataObject[], context?: DomainContextEnvelope): MetadataObject[] {
+  if (!context?.activeDomain) return rows;
+  const domains = new Set([
+    context.activeDomain,
+    ...context.ancestors,
+    ...context.allowedImports.map((item) => item.providerDomain),
+  ]);
+  return rows.filter((row) => !row.domain || domains.has(row.domain));
 }
 
 function mergeObjects(rows: MetadataObject[]): MetadataObject[] {

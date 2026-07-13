@@ -23,6 +23,8 @@ import {
   validateSqlAgainstGrounding,
   validateAnalyticalSql,
   planAnalyticalPath,
+  assessAnalyticalRelationship,
+  resolveDomainContextEnvelope,
   type DbtArtifacts,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLContext } from '../context.js';
@@ -111,16 +113,22 @@ export function getTableSchema(ctx: DQLContext, args: { table: string }) {
           .filter(Boolean)
           .some((value) => relationKeys(String(value)).some((key) => keys.includes(key)));
       })
-      .map((relationship) => ({
-        id: relationship.id,
-        from: relationship.from,
-        to: relationship.to,
-        keys: relationship.keys,
-        cardinality: relationship.cardinality,
-        fanout: relationship.fanout,
-        automaticJoinAllowed: relationship.automaticJoinAllowed,
-        staleCertification: relationship.staleCertification,
-      })),
+      .map((relationship) => {
+        const decision = assessAnalyticalRelationship(relationship, ctx.manifest);
+        return {
+          id: relationship.id,
+          from: relationship.from,
+          to: relationship.to,
+          keys: relationship.keys,
+          cardinality: relationship.cardinality,
+          fanout: relationship.fanout,
+          automaticJoinAllowed: relationship.automaticJoinAllowed,
+          executableJoin: decision.executable,
+          policyCode: decision.code ?? null,
+          policyReason: decision.message,
+          staleCertification: relationship.staleCertification,
+        };
+      }),
   };
 }
 
@@ -169,17 +177,30 @@ export function resolveAnalyticalPath(ctx: DQLContext, args: {
   measureEntities?: string[];
   dimensionEntities?: string[];
 }) {
+  const domainContext = args.ownerDomain
+    ? resolveDomainContextEnvelope({
+        manifest: ctx.manifest,
+        activeDomain: args.ownerDomain,
+        purpose: args.purpose,
+        source: 'explicit_api',
+      })
+    : undefined;
   return planAnalyticalPath(ctx.manifest, {
     entityIds: args.entities,
     ownerDomain: args.ownerDomain,
     purpose: args.purpose,
+    domainContext,
     measureEntities: args.measureEntities,
     dimensionEntities: args.dimensionEntities,
   });
 }
 
 export function explainRelationshipProof(ctx: DQLContext, args: { relationshipId: string }) {
-  const relationship = ctx.manifest.modeling?.relationships[args.relationshipId];
+  const relationships = ctx.manifest.modeling?.relationships ?? {};
+  const direct = relationships[args.relationshipId];
+  const matches = direct ? [direct] : Object.values(relationships).filter((value) =>
+    value.qualifiedId === args.relationshipId || value.localId === args.relationshipId);
+  const relationship = matches.length === 1 ? matches[0] : undefined;
   if (!relationship) {
     return { found: false, error: `Relationship "${args.relationshipId}" was not found in manifest v3.` };
   }
@@ -188,6 +209,7 @@ export function explainRelationshipProof(ctx: DQLContext, args: { relationshipId
   const to = entities[relationship.to];
   const exports = ctx.manifest.modeling?.interfaces?.exports ?? {};
   const imports = ctx.manifest.modeling?.interfaces?.imports ?? {};
+  const policy = assessAnalyticalRelationship(relationship, ctx.manifest);
   return {
     found: true,
     relationship,
@@ -199,6 +221,7 @@ export function explainRelationshipProof(ctx: DQLContext, args: { relationshipId
       export: exports[exportRef],
       imports: Object.values(imports).filter((value) => value.exportRef === exportRef),
     })),
-    decision: relationship.automaticJoinAllowed ? 'automatic_join_allowed' : 'blocked_or_review_required',
+    decision: policy.executable ? 'automatic_join_allowed' : 'blocked_or_review_required',
+    policy,
   };
 }

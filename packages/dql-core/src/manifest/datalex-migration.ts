@@ -8,7 +8,8 @@
  * catalog.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import * as yaml from 'js-yaml';
 import type { DataLexManifest, DataLexEntity, DataLexRelationship } from '../contracts/types.js';
@@ -31,17 +32,26 @@ export interface DataLexMigrationLoss {
   reason: string;
 }
 
+export interface DataLexMigrationAmbiguity {
+  path: string;
+  reference: string;
+  candidates: string[];
+  reason: string;
+}
+
 export interface DataLexMigrationReport {
   matchedEntities: Array<{ datalex: string; dbtUniqueId: string; dqlEntity: string }>;
   droppedDbtMirrors: Array<{ path: string; fields: string[] }>;
   draftedObjects: Array<{ kind: 'relationship' | 'contract' | 'conformance'; id: string }>;
   losses: DataLexMigrationLoss[];
+  ambiguities: DataLexMigrationAmbiguity[];
   suggestedDbtPatches: string[];
   autoCertified: 0;
 }
 
 export interface DataLexMigrationPlan {
   version: 1;
+  sourceFingerprint: string;
   datalexManifestPath: string;
   dbtManifestPath: string;
   files: DataLexMigrationFile[];
@@ -74,6 +84,7 @@ export function planDataLexMigration(input: DataLexMigrationInput): DataLexMigra
     droppedDbtMirrors: [],
     draftedObjects: [],
     losses: [],
+    ambiguities: [],
     suggestedDbtPatches: [],
     autoCertified: 0,
   };
@@ -92,7 +103,12 @@ export function planDataLexMigration(input: DataLexMigrationInput): DataLexMigra
     const overlay = overlayFor(overlays, domainId);
     for (const entity of domain.entities ?? []) {
       const path = `domains.${domainId}.entities.${entity.name}`;
-      const matched = matchDbtEntity(entity, dbt);
+      const match = matchDbtEntity(entity, dbt);
+      if (match.ambiguity) {
+        report.ambiguities.push({ path, ...match.ambiguity });
+        continue;
+      }
+      const matched = match.node;
       if (!matched) {
         report.losses.push({ path, reason: 'No unambiguous dbt unique ID, relation, or model name matched the DataLex binding.' });
         continue;
@@ -196,6 +212,7 @@ export function planDataLexMigration(input: DataLexMigrationInput): DataLexMigra
   report.droppedDbtMirrors.sort((a, b) => a.path.localeCompare(b.path));
   report.draftedObjects.sort((a, b) => `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`));
   report.losses.sort((a, b) => `${a.path}:${a.reason}`.localeCompare(`${b.path}:${b.reason}`));
+  report.ambiguities.sort((a, b) => `${a.path}:${a.reference}`.localeCompare(`${b.path}:${b.reference}`));
   files.push({
     path: 'migrations/datalex/report.json',
     content: `${JSON.stringify(report, null, 2)}\n`,
@@ -204,6 +221,7 @@ export function planDataLexMigration(input: DataLexMigrationInput): DataLexMigra
 
   return {
     version: 1,
+    sourceFingerprint: dataLexSourceFingerprint(input.datalexManifestPath, input.dbtManifestPath),
     datalexManifestPath: input.datalexManifestPath,
     dbtManifestPath: input.dbtManifestPath,
     files: files.sort((a, b) => a.path.localeCompare(b.path)),
@@ -217,19 +235,61 @@ export function planDataLexMigration(input: DataLexMigrationInput): DataLexMigra
  * `migrations/datalex/` for explicit review and application.
  */
 export function applyDataLexMigration(projectRoot: string, plan: DataLexMigrationPlan): { written: string[]; unchanged: string[] } {
+  if (plan.report.ambiguities.length > 0) {
+    throw new Error('DataLex migration is blocked by ambiguous dbt bindings; no files were written.');
+  }
+  const currentFingerprint = dataLexSourceFingerprint(plan.datalexManifestPath, plan.dbtManifestPath);
+  if (currentFingerprint !== plan.sourceFingerprint) {
+    throw new Error('SOURCE_CHANGED: DataLex or dbt artifacts changed after preview; create a new migration plan.');
+  }
   const written: string[] = [];
   const unchanged: string[] = [];
-  for (const file of plan.files) {
+  const changed = plan.files.filter((file) => {
     const absolute = join(projectRoot, file.path);
     if (existsSync(absolute) && readFileSync(absolute, 'utf8') === file.content) {
       unchanged.push(file.path);
-      continue;
+      return false;
     }
-    mkdirSync(dirname(absolute), { recursive: true });
-    writeFileSync(absolute, file.content, 'utf8');
-    written.push(file.path);
+    return true;
+  });
+  if (changed.length === 0) return { written, unchanged };
+
+  const stageRoot = join(projectRoot, '.dql', 'migration-staging', `datalex-${randomUUID()}`);
+  const installed: string[] = [];
+  const backedUp: string[] = [];
+  try {
+    for (const file of changed) {
+      const staged = join(stageRoot, 'after', file.path);
+      mkdirSync(dirname(staged), { recursive: true });
+      writeFileSync(staged, file.content, 'utf8');
+    }
+    for (const file of changed) {
+      const absolute = join(projectRoot, file.path);
+      if (existsSync(absolute)) {
+        const backup = join(stageRoot, 'before', file.path);
+        mkdirSync(dirname(backup), { recursive: true });
+        renameSync(absolute, backup);
+        backedUp.push(file.path);
+      }
+      mkdirSync(dirname(absolute), { recursive: true });
+      renameSync(join(stageRoot, 'after', file.path), absolute);
+      installed.push(file.path);
+      written.push(file.path);
+    }
+    rmSync(stageRoot, { recursive: true, force: true });
+    return { written, unchanged };
+  } catch (error) {
+    for (const path of [...installed].reverse()) rmSync(join(projectRoot, path), { recursive: true, force: true });
+    for (const path of [...backedUp].reverse()) {
+      const backup = join(stageRoot, 'before', path);
+      if (existsSync(backup)) {
+        mkdirSync(dirname(join(projectRoot, path)), { recursive: true });
+        renameSync(backup, join(projectRoot, path));
+      }
+    }
+    rmSync(stageRoot, { recursive: true, force: true });
+    throw error;
   }
-  return { written, unchanged };
 }
 
 function migrateRelationship(
@@ -314,16 +374,38 @@ function readDbtNodes(path: string): DbtMigrationNode[] {
   return nodes.sort((a, b) => a.uniqueId.localeCompare(b.uniqueId));
 }
 
-function matchDbtEntity(entity: DataLexEntity, nodes: DbtMigrationNode[]): DbtMigrationNode | undefined {
+function matchDbtEntity(entity: DataLexEntity, nodes: DbtMigrationNode[]): {
+  node?: DbtMigrationNode;
+  ambiguity?: Omit<DataLexMigrationAmbiguity, 'path'>;
+} {
   const ref = entity.binding?.ref;
-  const candidates = [ref, entity.name]
-    .filter((value): value is string => typeof value === 'string')
-    .map(normalizeRef);
-  for (const candidate of candidates) {
-    const matches = nodes.filter((node) => [node.uniqueId, node.name, node.relation].map(normalizeRef).includes(candidate));
-    if (matches.length === 1) return matches[0];
+  const candidate = normalizeRef(ref || entity.name);
+  const exactId = nodes.filter((node) => normalizeRef(node.uniqueId) === candidate);
+  if (exactId.length === 1) return { node: exactId[0] };
+  const evidence = nodes.filter((node) => [node.name, node.relation].map(normalizeRef).includes(candidate));
+  if (evidence.length === 1) return { node: evidence[0] };
+  const matches = exactId.length > 1 ? exactId : evidence;
+  if (matches.length > 1) {
+    return {
+      ambiguity: {
+        reference: ref || entity.name,
+        candidates: matches.map((node) => node.uniqueId).sort(),
+        reason: 'Reference matches multiple dbt nodes; use an exact dbt unique_id.',
+      },
+    };
   }
-  return undefined;
+  return {};
+}
+
+function dataLexSourceFingerprint(datalexManifestPath: string, dbtManifestPath: string): string {
+  const hash = createHash('sha256');
+  for (const path of [datalexManifestPath, dbtManifestPath]) {
+    hash.update(path);
+    hash.update('\0');
+    hash.update(readFileSync(path));
+    hash.update('\0');
+  }
+  return `sha256:${hash.digest('hex')}`;
 }
 
 function mirroredDbtFields(entity: DataLexEntity, dbt: DbtMigrationNode): string[] {

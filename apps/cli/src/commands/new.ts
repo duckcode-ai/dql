@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import type { CLIFlags } from '../args.js';
-import { findProjectRoot } from '../local-runtime.js';
+import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
 
 type ScaffoldKind = 'block' | 'dashboard' | 'workbook' | 'semantic-block' | 'notebook' | 'business-view' | 'term' | 'domain';
 
@@ -15,6 +15,10 @@ export async function runNew(subject: string | null, rest: string[], flags: CLIF
   const domainFirst = existsSync(join(projectRoot, 'domains'));
   // Detect available data files for smarter notebook templates
   const availableDataFiles = detectAvailableDataFiles(projectRoot);
+
+  if (kind === 'semantic-block' && isDbtFirstProject(projectRoot)) {
+    throw new Error('DQL_MODELING_DBT_OWNED: dbt-first projects use dbt/MetricFlow as the metric source of truth. Create or edit the metric in dbt, then build a DQL block that references it; local semantic-layer metric scaffolding is disabled.');
+  }
 
   // Notebooks use .dqlnb extension and their own creation path
   if (kind === 'notebook') {
@@ -709,7 +713,7 @@ async function runNewDomain(opts: {
   mkdirSync(domainDir, { recursive: true });
   const packageFolders = [
     'modeling', 'modeling/layouts', 'terms', 'skills', 'blocks', 'blocks/_drafts',
-    'views', 'notebooks', 'apps', 'evaluations', 'tests',
+    'views', 'contracts', 'interfaces', 'evaluations', 'tests',
   ];
   for (const child of packageFolders) {
     mkdirSync(join(domainDir, child), { recursive: true });
@@ -766,7 +770,19 @@ async function runNewNotebook(opts: {
 
   const template = flags.chart || 'blank'; // reuse --chart flag as template selector
   const cells = buildNotebookCells(title, template, usingStarterData, availableDataFiles);
-  const content = JSON.stringify({ version: 1, title, cells }, null, 2);
+  const ownerDomain = flags.domain.trim() || undefined;
+  const content = JSON.stringify({
+    dqlnbVersion: 2,
+    version: 1,
+    title,
+    metadata: {
+      createdWith: 'dql',
+      ...(ownerDomain ? { ownerDomain } : {}),
+      usesDomains: ownerDomain ? [ownerDomain] : [],
+      requiredExports: [],
+    },
+    cells,
+  }, null, 2);
   writeFileSync(filePath, content, 'utf-8');
 
   const relativePath = relativeToProject(projectRoot, filePath);
@@ -945,4 +961,9 @@ function toLabel(value: string): string {
     .filter(Boolean)
     .map((part) => `${part[0]?.toUpperCase() || ''}${part.slice(1)}`)
     .join(' ');
+}
+
+function isDbtFirstProject(projectRoot: string): boolean {
+  const config = loadProjectConfig(projectRoot);
+  return config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
 }

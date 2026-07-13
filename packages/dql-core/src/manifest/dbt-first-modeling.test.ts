@@ -32,27 +32,31 @@ describe('manifest v3 dbt-first modeling', () => {
       name: 'gross_revenue',
       semanticModel: 'orders',
     });
-    expect(manifest.modeling?.entities.order).toMatchObject({
+    expect(manifest.modeling?.entities['commerce::entity::order']).toMatchObject({
+      id: 'commerce::entity::order',
+      localId: 'order',
       dbtUniqueId: 'model.commerce.fct_orders',
       grain: 'order_id',
       keys: ['customer_id'],
     });
-    expect(manifest.modeling?.relationships.order_to_customer).toMatchObject({
+    expect(manifest.modeling?.relationships['commerce::relationship::order_to_customer']).toMatchObject({
+      id: 'commerce::relationship::order_to_customer',
+      localId: 'order_to_customer',
       status: 'certified',
       cardinality: 'many_to_one',
       fanout: 'safe',
       staleCertification: false,
       automaticJoinAllowed: true,
     });
-    expect(manifest.modeling?.relationships.acquisition_to_customer).toMatchObject({
+    expect(manifest.modeling?.relationships['growth::relationship::acquisition_to_customer']).toMatchObject({
       crossDomain: true,
       automaticJoinAllowed: true,
     });
     expect(manifest.modeling?.interfaces?.exports['commerce.customer_identity@1']).toMatchObject({
-      entity: 'customer',
+      entity: 'commerce::entity::customer',
       status: 'certified',
     });
-    expect(manifest.modeling?.interfaces?.imports.growth_customer_identity).toMatchObject({
+    expect(manifest.modeling?.interfaces?.imports['growth::import::growth_customer_identity']).toMatchObject({
       exportRef: 'commerce.customer_identity@1',
       domain: 'growth',
     });
@@ -77,9 +81,56 @@ describe('manifest v3 dbt-first modeling', () => {
     writeFileSync(dbtManifestPath, JSON.stringify(raw));
 
     const manifest = buildManifest({ projectRoot, dbtManifestPath });
-    expect(manifest.modeling?.relationships.order_to_customer.staleCertification).toBe(true);
-    expect(manifest.modeling?.relationships.order_to_customer.automaticJoinAllowed).toBe(false);
+    expect(manifest.modeling?.relationships['commerce::relationship::order_to_customer'].staleCertification).toBe(true);
+    expect(manifest.modeling?.relationships['commerce::relationship::order_to_customer'].automaticJoinAllowed).toBe(false);
     expect(manifest.diagnostics?.some((diagnostic) => diagnostic.kind === 'modeling' && diagnostic.message.includes('stale'))).toBe(true);
+  });
+
+  it('qualifies duplicate local entity ids across domains without guessing', () => {
+    const growthEntities = join(projectRoot, 'domains', 'growth', 'modeling', 'entities.dql.yaml');
+    writeFileSync(growthEntities, `${readFileSync(growthEntities, 'utf8')}  - id: order\n    dbt_model: model.growth.fct_campaign_touches\n`);
+    const growthRelationships = join(projectRoot, 'domains', 'growth', 'modeling', 'relationships.dql.yaml');
+    writeFileSync(growthRelationships, readFileSync(growthRelationships, 'utf8').replace('    to: customer\n', '    to: commerce:customer\n'));
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+    expect(manifest.modeling?.entities.order).toBeUndefined();
+    expect(manifest.modeling?.entities['commerce::entity::order']).toMatchObject({ id: 'commerce::entity::order', localId: 'order', qualifiedId: 'commerce::entity::order', domain: 'commerce' });
+    expect(manifest.modeling?.entities['growth::entity::order']).toMatchObject({ id: 'growth::entity::order', localId: 'order', qualifiedId: 'growth::entity::order', domain: 'growth' });
+    expect(manifest.modeling?.relationships['growth::relationship::acquisition_to_customer'].to).toBe('commerce::entity::customer');
+  });
+
+  it('withdraws automatic joins when warehouse evidence is expired', () => {
+    const relationshipPath = join(projectRoot, 'domains', 'commerce', 'modeling', 'relationships.dql.yaml');
+    writeFileSync(relationshipPath, readFileSync(relationshipPath, 'utf8').replace('    validation:\n', "    evidence_expires_at: '2000-01-01'\n    validation:\n"));
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+    expect(manifest.modeling?.relationships['commerce::relationship::order_to_customer'].automaticJoinAllowed).toBe(false);
+    expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('expired'))).toBe(true);
+  });
+
+  it.each([
+    ['its validation query fingerprint changes', (source: string) => source.replace('query_fingerprint: order-customer-proof', 'query_fingerprint: changed-query')],
+    ['legacy evidence has no bound proof fingerprint', (source: string) => source.replace(/^\s*proof_fingerprint:.*\n/m, '')],
+  ])('withdraws automatic joins when %s', (_label, mutate) => {
+    const relationshipPath = join(projectRoot, 'domains', 'commerce', 'modeling', 'relationships.dql.yaml');
+    writeFileSync(relationshipPath, mutate(readFileSync(relationshipPath, 'utf8')));
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+    expect(manifest.modeling?.relationships['commerce::relationship::order_to_customer'].automaticJoinAllowed).toBe(false);
+    expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('validation proof'))).toBe(true);
+  });
+
+  it('does not compile a cross-domain automatic join without a compatible certified export contract', () => {
+    const interfacePath = join(projectRoot, 'domains', 'commerce', 'modeling', 'interfaces.dql.yaml');
+    writeFileSync(interfacePath, readFileSync(interfacePath, 'utf8').replace('    contract: customer_identity_contract\n', ''));
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+    expect(manifest.modeling?.relationships['growth::relationship::acquisition_to_customer'].automaticJoinAllowed).toBe(false);
+    expect(manifest.diagnostics?.some((diagnostic) => diagnostic.message.includes('compatible certified contract'))).toBe(true);
   });
 
   it('keeps v2 projects on the compatibility path unless both v3 settings are present', () => {
@@ -157,6 +208,7 @@ function writeProject(projectRoot: string): string {
       status: passed
       checked_at: '2026-07-11T00:00:00.000Z'
       query_fingerprint: order-customer-proof
+      proof_fingerprint: abd9109395c4eea1588b28cfad8465923886163ab5d393216954613c861ae25a
       from_rows: 10
       to_rows: 5
       joined_rows: 10
@@ -175,6 +227,14 @@ function writeProject(projectRoot: string): string {
     consumer_domains: [growth]
     status: certified
     owner: commerce@company.test
+    contract: customer_identity_contract
+contracts:
+  - id: customer_identity_contract
+    entities: [customer]
+    purpose: growth_attribution
+    status: certified
+    owner: commerce@company.test
+    required_evaluation: false
 `);
   writeYaml(projectRoot, 'domains/growth/domain.dql', `domain "Growth" {
   id = "growth"
@@ -205,6 +265,7 @@ function writeProject(projectRoot: string): string {
       status: passed
       checked_at: '2026-07-11T00:00:00.000Z'
       query_fingerprint: acquisition-customer-proof
+      proof_fingerprint: b4437e3b0773955d15e7c77d368031099650f16d17c297f65f86a1c549dc1720
       from_rows: 5
       to_rows: 5
       joined_rows: 5

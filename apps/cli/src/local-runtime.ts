@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   watch,
@@ -57,6 +58,7 @@ import {
   blockParameterDefinitions,
   buildLineageGraph,
   buildManifest,
+  collectInputFiles,
   findAppDocuments,
   findDashboardsForApp,
   isBlockIdRef,
@@ -93,11 +95,19 @@ import {
   type DiffReport,
   previewModelingChange,
   applyModelingChange,
+  previewDbtSourcePatch,
+  applyDbtSourcePatch,
   loadDomainPackageRegistry,
   loadDbtNodeAuthoringDetail,
   type ModelingAuthoringChange,
+  type DbtNodeAuthoringDetail,
+  type DbtSourceAuthoringInput,
   type RelationshipAuthoringInput,
   type ManifestRelationshipValidationEvidence,
+  relationshipValidationProofFingerprint,
+  discoverDbtDomains,
+  renderDomainDeclaration,
+  ProjectSnapshotService,
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
@@ -178,6 +188,7 @@ import {
   type BuildFromPromptResult,
   reindexProject,
   invalidateAgentProjectState,
+  resolveDomainContextEnvelope,
   defaultKgPath,
   planApp,
   planResearch,
@@ -302,6 +313,8 @@ const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 
 export interface ProjectConfig {
   project?: string;
+  manifestVersion?: 1 | 2 | 3;
+  modeling?: { mode?: 'dbt-first' };
   layout?: { version?: number; mode?: string; skillsPath?: string };
   defaultConnection?: ConnectionConfig;
   defaultConnectionName?: string;
@@ -394,6 +407,10 @@ export interface LocalServerOptions {
    * port is reachable from the host. Honours `DQL_HOST` env var when unset.
    */
   host?: string;
+  /** Required for non-loopback bindings. Defaults to `DQL_SERVER_TOKEN`. */
+  authToken?: string;
+  /** Exact browser origins allowed for non-loopback API access. */
+  allowedOrigins?: string[];
   /**
    * Receives the underlying HTTP server once created, so short-lived callers
    * (e.g. `dql agent ask` starting an ephemeral runtime) can `close()` it and
@@ -683,16 +700,137 @@ function conversationStringArray(value: unknown): string[] | undefined {
   return values.length > 0 ? values : undefined;
 }
 
+function isLoopbackOrigin(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 function compactConversationRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
   const entries = Object.entries(record).filter(([, value]) => value !== undefined && value !== null);
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+function apiRequestId(scope: string): string {
+  return `${scope}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function apiErrorEnvelope(input: {
+  requestId: string;
+  code: string;
+  message: string;
+  snapshotId?: string;
+  recoverable?: boolean;
+  details?: unknown;
+  nextActions?: string[];
+}) {
+  return {
+    requestId: input.requestId,
+    ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+    code: input.code,
+    message: input.message,
+    // Retain the legacy field during the compatibility window.
+    error: input.message,
+    recoverable: input.recoverable ?? input.code !== 'DOMAIN_COLLISION',
+    ...(input.details !== undefined ? { details: input.details } : {}),
+    ...(input.nextActions?.length ? { nextActions: input.nextActions } : {}),
+  };
+}
+
+function apiErrorCode(error: unknown, fallback: string): string {
+  return typeof error === 'object' && error && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : fallback;
+}
+
+function apiErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
+  const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
+  const authToken = opts.authToken ?? process.env.DQL_SERVER_TOKEN;
+  const allowedOrigins = new Set((opts.allowedOrigins ?? (process.env.DQL_ALLOWED_ORIGINS ?? '').split(','))
+    .map((value) => value.trim().replace(/\/$/, ''))
+    .filter(Boolean));
+  if (!loopback && !authToken) {
+    throw new Error('Non-loopback DQL server binding requires DQL_SERVER_TOKEN (or LocalServerOptions.authToken).');
+  }
+  if (!loopback && allowedOrigins.size === 0) {
+    throw new Error('Non-loopback DQL server binding requires DQL_ALLOWED_ORIGINS (or LocalServerOptions.allowedOrigins).');
+  }
   let connection = rawConnection ? normalizeProjectConnection(rawConnection, projectRoot) : null;
   let projectConfig = loadProjectConfig(projectRoot);
+  const projectSnapshots = new ProjectSnapshotService<DQLManifest>();
+  const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
+  const onboardingJobs = new Map<string, { id: string; kind: string; status: 'completed' | 'failed' | 'cancelled'; createdAt: string; result?: unknown; error?: string }>();
+  const projectSnapshot = () => {
+    const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+    const inputs = collectInputFiles({ projectRoot, dbtManifestPath });
+    const signatureHash = createHash('sha256');
+    for (const input of inputs.sort()) {
+      try {
+        const stats = statSync(input);
+        signatureHash.update(`${input}\0${stats.size}\0${stats.mtimeMs}\n`);
+      } catch {
+        signatureHash.update(`${input}\0missing\n`);
+      }
+    }
+    const signature = signatureHash.digest('hex');
+    const previousId = projectSnapshots.current()?.snapshotId;
+    const snapshot = projectSnapshots.refresh(signature, () => buildManifest({ projectRoot, dbtManifestPath }));
+    if (snapshot.snapshotId !== previousId) dbtNodeDetailCache.clear();
+    return {
+      signature: snapshot.sourceVersion,
+      snapshotId: snapshot.snapshotId,
+      manifest: snapshot.value,
+      stale: snapshot.stale,
+      error: snapshot.error,
+    };
+  };
+  const onboardingDbtPaths = (body: Record<string, unknown> = {}) => {
+    const projectDirInput = typeof body.projectDir === 'string' ? body.projectDir : projectConfig.dbt?.projectDir ?? '.';
+    const dbtProjectDir = resolve(projectRoot, projectDirInput);
+    const manifestInput = typeof body.manifestPath === 'string' ? body.manifestPath : projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
+    const manifestPath = resolve(dbtProjectDir, manifestInput);
+    if (!(manifestPath === dbtProjectDir || manifestPath.startsWith(`${dbtProjectDir}/`))) {
+      throw Object.assign(new Error('dbt manifestPath must stay inside dbt projectDir.'), { code: 'DBT_ARTIFACT_INVALID' });
+    }
+    return { dbtProjectDir, manifestPath, projectDirInput, manifestInput };
+  };
+  const previewDbtOnboarding = (body: Record<string, unknown> = {}) => {
+    const paths = onboardingDbtPaths(body);
+    if (!existsSync(join(paths.dbtProjectDir, 'dbt_project.yml'))) throw Object.assign(new Error('dbt_project.yml was not found.'), { code: 'DBT_PROJECT_NOT_FOUND' });
+    if (!existsSync(paths.manifestPath)) throw Object.assign(new Error(`dbt manifest is missing at ${paths.manifestPath}. Run dbt parse, then retry.`), { code: 'DBT_MANIFEST_MISSING' });
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(readFileSync(paths.manifestPath, 'utf8')) as Record<string, unknown>;
+    } catch (error) {
+      throw Object.assign(new Error(`dbt manifest is invalid: ${error instanceof Error ? error.message : String(error)}`), { code: 'DBT_ARTIFACT_INVALID' });
+    }
+    const fingerprint = createHash('sha256').update(readFileSync(paths.manifestPath)).digest('hex');
+    return {
+      projectDir: relative(projectRoot, paths.dbtProjectDir).replace(/\\/g, '/') || '.',
+      manifestPath: relative(paths.dbtProjectDir, paths.manifestPath).replace(/\\/g, '/'),
+      fingerprint,
+      projectName: typeof (raw.metadata as Record<string, unknown> | undefined)?.project_name === 'string' ? (raw.metadata as Record<string, unknown>).project_name : undefined,
+      counts: {
+        models: Object.keys((raw.nodes as Record<string, unknown> | undefined) ?? {}).filter((id) => id.startsWith('model.')).length,
+        sources: Object.keys((raw.sources as Record<string, unknown> | undefined) ?? {}).length,
+        metrics: Object.keys((raw.metrics as Record<string, unknown> | undefined) ?? {}).length,
+      },
+      artifacts: {
+        manifest: paths.manifestPath,
+        catalog: existsSync(join(dirname(paths.manifestPath), 'catalog.json')) ? join(dirname(paths.manifestPath), 'catalog.json') : null,
+        semanticManifest: existsSync(join(dirname(paths.manifestPath), 'semantic_manifest.json')) ? join(dirname(paths.manifestPath), 'semantic_manifest.json') : null,
+      },
+    };
+  };
   const datasetWorkspace = new NotebookDatasetWorkspace(
     projectRoot,
     executor,
@@ -1126,6 +1264,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     } catch {
       semanticDriver = undefined;
     }
+    const requestedDomain = agentRunWorkspaceValue(request, 'domain');
+    const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
+    const runProjectSnapshot = projectSnapshot();
+    const domainContext = requestedDomain
+      ? resolveDomainContextEnvelope({
+          manifest: runProjectSnapshot.manifest,
+          activeDomain: requestedDomain,
+          purpose: requestedPurpose,
+          source: 'explicit_ui',
+          snapshotId: runProjectSnapshot.snapshotId,
+        })
+      : undefined;
     await runner.run(
       {
         provider: resolvedProvider,
@@ -1141,6 +1291,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
         projectRoot,
+        domainContext,
+        projectSnapshot: { snapshotId: runProjectSnapshot.snapshotId, manifest: runProjectSnapshot.manifest },
+        assertProjectSnapshot: (snapshotId) => {
+          // Refresh the service from current source state before the final guard.
+          projectSnapshot();
+          projectSnapshots.assertCurrent(snapshotId);
+        },
         ...(semanticDriver ? { semanticDriver } : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -3593,14 +3750,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const url = new URL(requestUrl, 'http://127.0.0.1');
     const path = url.pathname || '/';
 
-    // CORS — needed for dql-notebook SPA dev mode
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Exact-origin CORS. Loopback dev origins are accepted; remote serving
+    // requires an explicit allowlist and bearer token.
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.replace(/\/$/, '') : undefined;
+    const loopbackOrigin = requestOrigin ? isLoopbackOrigin(requestOrigin) : false;
+    const originAllowed = !requestOrigin || (loopback ? loopbackOrigin : allowedOrigins.has(requestOrigin));
+    if (requestOrigin && originAllowed) res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (!originAllowed && path.startsWith('/api/')) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ error: 'Origin is not allowed.' }));
+      return;
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
+    }
+    if (!loopback && path.startsWith('/api/') && path !== '/api/health') {
+      const authorization = req.headers.authorization ?? '';
+      if (authorization !== `Bearer ${authToken}`) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8', 'WWW-Authenticate': 'Bearer' });
+        res.end(serializeJSON({ error: 'A valid DQL server bearer token is required.' }));
+        return;
+      }
     }
 
     if (req.method === 'GET' && path === '/api/health') {
@@ -3609,9 +3784,269 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/onboarding/status') {
+      const requestId = apiRequestId('onboarding-status');
+      const dbtProjectDir = resolve(projectRoot, projectConfig.dbt?.projectDir ?? '.');
+      const manifestPath = resolve(dbtProjectDir, projectConfig.dbt?.manifestPath ?? 'target/manifest.json');
+      const registry = loadDomainPackageRegistry(projectRoot);
+      const manifestFound = existsSync(manifestPath);
+      let snapshotId: string | undefined;
+      let snapshotError: string | undefined;
+      if (manifestFound) {
+        try {
+          snapshotId = projectSnapshot().snapshotId;
+        } catch (error) {
+          snapshotError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        snapshotId,
+        dbt: {
+          configured: Boolean(projectConfig.dbt),
+          projectDir: projectConfig.dbt?.projectDir,
+          manifestPath: projectConfig.dbt?.manifestPath,
+          projectFound: existsSync(join(dbtProjectDir, 'dbt_project.yml')),
+          manifestFound,
+        },
+        modeling: {
+          enabled: projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first',
+          manifestVersion: projectConfig.manifestVersion ?? 2,
+          mode: projectConfig.modeling?.mode,
+        },
+        domains: { count: registry.values().length, diagnostics: registry.diagnostics },
+        snapshot: { id: snapshotId, error: snapshotError },
+        capabilities: {
+          warehouse: Boolean(connection),
+          ai: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GEMINI_API_KEY || process.env.OLLAMA_BASE_URL),
+        },
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/dbt/preview') {
+      const requestId = apiRequestId('onboarding-dbt-preview');
+      try {
+        const preview = previewDbtOnboarding(await readJSON(req) as Record<string, unknown>);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, ...preview }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Verify the dbt project and artifact paths, then preview again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/dbt/apply') {
+      const requestId = apiRequestId('onboarding-dbt-apply');
+      try {
+        const body = await readJSON(req) as Record<string, unknown>;
+        let preview;
+        try {
+          preview = previewDbtOnboarding(body);
+        } catch (error) {
+          const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : '';
+          if (code !== 'DBT_MANIFEST_MISSING' || body.buildArtifacts !== true) throw error;
+          const { dbtProjectDir } = onboardingDbtPaths(body);
+          try {
+            execFileSync('dbt', ['parse', '--project-dir', dbtProjectDir], {
+              cwd: dbtProjectDir,
+              timeout: 120_000,
+              maxBuffer: 1024 * 1024,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe'],
+              env: { ...process.env, DBT_LOG_FORMAT: 'text' },
+            });
+          } catch (parseError) {
+            throw Object.assign(new Error(`dbt parse failed. Run it in ${dbtProjectDir} to inspect the project error, then retry.`), { code: 'DBT_PARSE_FAILED', cause: parseError });
+          }
+          preview = previewDbtOnboarding(body);
+        }
+        const expectedFingerprint = typeof body.fingerprint === 'string'
+          ? body.fingerprint
+          : typeof body.expectedFingerprint === 'string' ? body.expectedFingerprint : undefined;
+        if ((!expectedFingerprint && body.buildArtifacts !== true) || (expectedFingerprint && expectedFingerprint !== preview.fingerprint)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SOURCE_CHANGED', message: 'dbt artifacts changed after preview. Review the refreshed preview before applying.', nextActions: ['Refresh the preview and review the new diff.'] })));
+          return;
+        }
+        const nextConfig: ProjectConfig = {
+          ...projectConfig,
+          manifestVersion: 3,
+          modeling: { mode: 'dbt-first' },
+          dbt: { projectDir: preview.projectDir, manifestPath: preview.manifestPath },
+          semanticLayer: { provider: 'dbt', projectPath: preview.projectDir },
+        };
+        const configPath = join(projectRoot, 'dql.config.json');
+        const previousConfigSource = readFileSync(configPath, 'utf8');
+        const previousProjectConfig = projectConfig;
+        const tempPath = `${configPath}.tmp-${process.pid}`;
+        writeFileSync(tempPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+        renameSync(tempPath, configPath);
+        projectConfig = nextConfig;
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        let snapshotId: string;
+        try {
+          snapshotId = projectSnapshot().snapshotId;
+        } catch (error) {
+          const rollbackPath = `${configPath}.rollback-${process.pid}`;
+          writeFileSync(rollbackPath, previousConfigSource, { encoding: 'utf8', mode: 0o600 });
+          renameSync(rollbackPath, configPath);
+          projectConfig = previousProjectConfig;
+          projectSnapshots.invalidate();
+          invalidateAgentProjectState(projectRoot);
+          throw Object.assign(new Error(`dbt-first configuration did not compile and was rolled back: ${error instanceof Error ? error.message : String(error)}`), { code: 'SNAPSHOT_BUILD_FAILED' });
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId, applied: true, config: { manifestVersion: 3, modeling: nextConfig.modeling, dbt: nextConfig.dbt }, fingerprint: preview.fingerprint }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Fix the reported dbt issue and run preview again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/refresh') {
+      const requestId = apiRequestId('onboarding-refresh');
+      const id = `dbt-refresh-${Date.now().toString(36)}`;
+      try {
+        const body = await readJSON(req) as { expectedFingerprint?: string };
+        const currentArtifact = previewDbtOnboarding({});
+        if (!body.expectedFingerprint || body.expectedFingerprint !== currentArtifact.fingerprint) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SOURCE_CHANGED', message: 'dbt artifacts changed before refresh. Review the current artifact preview.', nextActions: ['Return to the dbt preview step and review the refreshed fingerprint.'] })));
+          return;
+        }
+        projectSnapshots.invalidate();
+        const snapshot = projectSnapshot();
+        invalidateAgentProjectState(projectRoot);
+        await reindexProject(projectRoot, { manifest: snapshot.manifest, kgPath: defaultKgPath(projectRoot) });
+        const job = { id, kind: 'dbt_refresh', status: 'completed' as const, createdAt: new Date().toISOString(), result: { snapshotId: snapshot.snapshotId, diagnostics: snapshot.manifest.diagnostics ?? [] } };
+        onboardingJobs.set(id, job);
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, jobId: id, ...job }));
+      } catch (error) {
+        const job = { id, kind: 'dbt_refresh', status: 'failed' as const, createdAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) };
+        onboardingJobs.set(id, job);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ...apiErrorEnvelope({ requestId, code: 'SNAPSHOT_BUILD_FAILED', message: job.error, nextActions: ['Keep using the previous snapshot while fixing compile diagnostics.'] }), jobId: id, ...job }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/onboarding/jobs/')) {
+      const requestId = apiRequestId('onboarding-job');
+      const id = decodeURIComponent(path.slice('/api/onboarding/jobs/'.length));
+      const job = onboardingJobs.get(id);
+      res.writeHead(job ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      const jobSnapshotId = typeof (job?.result as { snapshotId?: unknown } | undefined)?.snapshotId === 'string'
+        ? String((job?.result as { snapshotId: string }).snapshotId)
+        : undefined;
+      res.end(serializeJSON(job ? { requestId, ...(jobSnapshotId ? { snapshotId: jobSnapshotId } : {}), ...job } : apiErrorEnvelope({ requestId, code: 'ONBOARDING_JOB_NOT_FOUND', message: `onboarding job not found: ${id}`, recoverable: false })));
+      return;
+    }
+
+    if (req.method === 'DELETE' && path.startsWith('/api/onboarding/jobs/')) {
+      const requestId = apiRequestId('onboarding-job-cancel');
+      const id = decodeURIComponent(path.slice('/api/onboarding/jobs/'.length));
+      const job = onboardingJobs.get(id);
+      if (job) onboardingJobs.set(id, { ...job, status: 'cancelled' });
+      res.writeHead(job ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(job ? { requestId, ...job, status: 'cancelled' } : apiErrorEnvelope({ requestId, code: 'ONBOARDING_JOB_NOT_FOUND', message: `onboarding job not found: ${id}`, recoverable: false })));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/domains/discover') {
+      const requestId = apiRequestId('domain-discovery');
+      try {
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+        if (!dbtManifestPath || !existsSync(dbtManifestPath)) throw Object.assign(new Error('No dbt manifest found. Run dbt parse or connect the project first.'), { code: 'DBT_MANIFEST_MISSING' });
+        const report = discoverDbtDomains({ projectRoot, dbtManifestPath });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          requestId,
+          snapshotId: projectSnapshot().snapshotId,
+          ...report,
+          capabilities: { aiEnrichment: false, deterministic: true },
+        }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Build a valid dbt manifest and retry discovery.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/domains/apply') {
+      const requestId = apiRequestId('domain-apply');
+      try {
+        const body = await readJSON(req) as { sourceFingerprint?: string; expectedSourceFingerprint?: string; selectedDomains?: unknown; domains?: unknown; proposals?: unknown; mode?: string };
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+        if (!dbtManifestPath || !existsSync(dbtManifestPath)) throw Object.assign(new Error('No dbt manifest found.'), { code: 'DBT_MANIFEST_MISSING' });
+        const report = discoverDbtDomains({ projectRoot, dbtManifestPath });
+        const expectedFingerprint = body.sourceFingerprint ?? body.expectedSourceFingerprint;
+        if (!expectedFingerprint || expectedFingerprint !== report.sourceFingerprint) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: projectSnapshot().snapshotId, code: 'SOURCE_CHANGED', message: 'dbt/domain evidence changed after discovery. Review the refreshed proposals before applying.', nextActions: ['Run domain discovery again and review the updated evidence.'] })));
+          return;
+        }
+        const proposalIds = Array.isArray(body.proposals) ? body.proposals.flatMap((value) => typeof value === 'object' && value && 'id' in value && typeof (value as { id?: unknown }).id === 'string' ? [(value as { id: string }).id] : []) : [];
+        const requested = proposalIds.length > 0 ? proposalIds : Array.isArray(body.selectedDomains) ? body.selectedDomains : Array.isArray(body.domains) ? body.domains : report.proposals.map((proposal) => proposal.id);
+        const selected = new Set(requested.filter((value): value is string => typeof value === 'string'));
+        if (body.mode === 'preview') {
+          const preview = report.proposals.filter((proposal) => selected.has(proposal.id)).map((proposal) => ({ path: join('domains', ...proposal.id.split('.'), 'domain.dql').replace(/\\/g, '/'), operation: 'create_or_retain', summary: `${proposal.matchedDbtUniqueIds.length} dbt model(s); review required` }));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ requestId, snapshotId: projectSnapshot().snapshotId, applied: false, preview }));
+          return;
+        }
+        const existing = loadDomainPackageRegistry(projectRoot);
+        const applied: Array<{ id: string; status: string; path?: string; message: string }> = [];
+        for (const proposal of report.proposals.filter((value) => selected.has(value.id))) {
+          if (existing.get(proposal.id)) {
+            applied.push({ id: proposal.id, status: 'existing', message: 'Existing Domain Package retained unchanged.' });
+            continue;
+          }
+          const segments = proposal.id.split('.');
+          if (segments.length === 0 || segments.some((segment) => !/^[a-z0-9_]+$/.test(segment))) {
+            applied.push({ id: proposal.id, status: 'blocked', message: 'Domain id is not a safe normalized path.' });
+            continue;
+          }
+          const sourcePath = join('domains', ...segments, 'domain.dql').replace(/\\/g, '/');
+          const absolute = join(projectRoot, sourcePath);
+          mkdirSync(dirname(absolute), { recursive: true });
+          const dbtPaths = [...new Set(report.memberships.filter((membership) => membership.proposedDomain === proposal.id).flatMap((membership) => membership.sourcePath ? [membership.sourcePath] : []))].sort();
+          const source = renderDomainDeclaration({
+            id: proposal.id,
+            name: proposal.name,
+            parent: proposal.proposedParent,
+            owner: proposal.owner,
+            dbtPaths,
+            description: 'Draft domain boundary proposed from cited dbt evidence; review before governance use.',
+          });
+          const temp = `${absolute}.tmp-${process.pid}`;
+          writeFileSync(temp, source, { encoding: 'utf8', mode: 0o600 });
+          renameSync(temp, absolute);
+          applied.push({ id: proposal.id, status: 'created', path: sourcePath, message: 'Review-required domain boundary created; no relationships or skills were certified.' });
+        }
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: projectSnapshot().snapshotId, applied: true, results: applied, domains: loadDomainPackageRegistry(projectRoot).values().map((pkg) => ({ id: pkg.id, filePath: pkg.declarationPath, lifecycle: 'draft' })) }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DOMAIN_COLLISION';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Resolve the collision or invalid proposal and preview again.'] })));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/domain-packages') {
-      const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
-      const manifest = buildManifest({ projectRoot, dbtManifestPath });
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
       const registry = loadDomainPackageRegistry(projectRoot);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
@@ -3631,85 +4066,264 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         dbtProvenance: manifest.dbtProvenance,
         domainAssets: collectDomainPackageAssets(projectRoot, registry),
         diagnostics: manifest.diagnostics ?? [],
+        snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
       }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/domain-workspaces') {
+      const requestId = apiRequestId('domain-workspaces');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const packages = Object.values(manifest.modeling?.packages ?? {});
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        snapshotId: snapshot.snapshotId,
+        snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
+        domains: packages.map((pkg) => domainWorkspaceSummary(manifest, pkg.id)),
+        unassignedModels: Object.values(manifest.dbtProvenance?.nodes ?? {}).filter((node) =>
+          !Object.values(manifest.modeling?.entities ?? {}).some((entity) => entity.dbtUniqueId === node.uniqueId)
+        ).length,
+      }));
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/domain-workspaces/')) {
+      const requestId = apiRequestId('domain-workspace');
+      const suffix = decodeURIComponent(path.slice('/api/domain-workspaces/'.length));
+      const relatedSuffix = '/related-products';
+      const domainId = suffix.endsWith(relatedSuffix) ? suffix.slice(0, -relatedSuffix.length) : suffix;
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      if (!manifest.modeling?.packages[domainId]) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DOMAIN_NOT_FOUND', message: `domain workspace not found: ${domainId}`, recoverable: false })));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(suffix.endsWith(relatedSuffix)
+        ? { requestId, domain: domainId, ...relatedProductsForDomain(manifest, domainId), snapshotId: snapshot.snapshotId }
+        : {
+            requestId,
+            snapshotId: snapshot.snapshotId,
+            ...domainWorkspaceSummary(manifest, domainId),
+            relatedProducts: relatedProductsForDomain(manifest, domainId),
+            snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
+          }));
       return;
     }
 
     // Manifest v3 modeling surface. This response intentionally contains dbt
     // provenance references and the sparse DQL overlay, never copied dbt YAML.
     if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
-      const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
-      const manifest = buildManifest({ projectRoot, dbtManifestPath });
+      const requestId = apiRequestId('modeling-dbt-first');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
       if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({
-          error: 'dbt-first modeling is not enabled. Set manifestVersion: 3 and modeling.mode: "dbt-first" in dql.config.json.',
-        }));
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DBT_FIRST_NOT_ENABLED', message: 'dbt-first modeling is not enabled. Set manifestVersion: 3 and modeling.mode: "dbt-first" in dql.config.json.', nextActions: ['Use Setup to connect dbt and enable dbt-first modeling.'] })));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
+        requestId,
+        snapshotId: snapshot.snapshotId,
         manifestVersion: manifest.manifestVersion,
         dbtProvenance: manifest.dbtProvenance,
         modeling: manifest.modeling,
         domainAssets: collectDomainPackageAssets(projectRoot, loadDomainPackageRegistry(projectRoot)),
         lineage: manifest.lineage,
         diagnostics: manifest.diagnostics ?? [],
+        snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
       }));
       return;
     }
 
     if (req.method === 'GET' && path.startsWith('/api/modeling/dbt-first/nodes/')) {
+      const requestId = apiRequestId('modeling-node');
       const dbtManifestPath = resolveDbtManifestPath(projectRoot);
       const uniqueId = decodeURIComponent(path.slice('/api/modeling/dbt-first/nodes/'.length));
-      const detail = dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined;
+      const snapshot = projectSnapshot();
+      const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
+      if (!dbtNodeDetailCache.has(cacheKey)) {
+        dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
+      }
+      const detail = dbtNodeDetailCache.get(cacheKey);
       if (!detail) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: `dbt node not found: ${uniqueId}` }));
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DBT_NODE_NOT_FOUND', message: `dbt node not found: ${uniqueId}`, recoverable: false })));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON(detail));
+      res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...detail }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first/inventory') {
+      const requestId = apiRequestId('modeling-inventory');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
+      const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      const domain = (url.searchParams.get('domain') ?? '').trim();
+      const boundByDbtId = new Map(Object.values(manifest.modeling?.entities ?? {}).map((entity) => [entity.dbtUniqueId, entity]));
+      const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {})
+        .filter((node) => !query || `${node.name} ${node.relation ?? ''} ${node.sourcePath ?? ''}`.toLowerCase().includes(query))
+        .filter((node) => !domain || boundByDbtId.get(node.uniqueId)?.domain === domain)
+        .sort((a, b) => a.uniqueId.localeCompare(b.uniqueId));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        items: nodes.slice(cursor, cursor + limit).map((node) => ({ ...node, binding: boundByDbtId.get(node.uniqueId) })),
+        nextCursor: cursor + limit < nodes.length ? cursor + limit : null,
+        total: nodes.length,
+        snapshotId: snapshot.snapshotId,
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/nodes/batch') {
+      const requestId = apiRequestId('modeling-node-batch');
+      const body = await readJSON(req) as { uniqueIds?: unknown };
+      const uniqueIds = Array.isArray(body.uniqueIds) ? body.uniqueIds.filter((value): value is string => typeof value === 'string').slice(0, 100) : [];
+      const snapshot = projectSnapshot();
+      const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+      const details = uniqueIds.map((uniqueId) => {
+        const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
+        if (!dbtNodeDetailCache.has(cacheKey)) dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
+        return dbtNodeDetailCache.get(cacheKey);
+      }).filter(Boolean);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ requestId, details, snapshotId: snapshot.snapshotId }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first/neighborhood') {
+      const requestId = apiRequestId('modeling-neighborhood');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const entityRef = url.searchParams.get('entity') ?? '';
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+      const entities = manifest.modeling?.entities ?? {};
+      const relationships = manifest.modeling?.relationships ?? {};
+      const entityKey = entities[entityRef] ? entityRef : Object.entries(entities).find(([, entity]) => entity.qualifiedId === entityRef)?.[0];
+      if (!entityKey) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'MODELING_ENTITY_NOT_FOUND', message: `modeling entity not found: ${entityRef}`, recoverable: false })));
+        return;
+      }
+      const edges = Object.values(relationships).filter((relationship) => relationship.from === entityKey || relationship.to === entityKey).slice(0, limit);
+      const keys = new Set([entityKey, ...edges.flatMap((edge) => [edge.from, edge.to])]);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        entities: Object.fromEntries([...keys].flatMap((key) => entities[key] ? [[key, entities[key]]] : [])),
+        relationships: Object.fromEntries(edges.map((edge) => [edge.qualifiedId, edge])),
+        snapshotId: snapshot.snapshotId,
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/dbt-source/preview') {
+      const requestId = apiRequestId('modeling-dbt-source-preview');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { change?: DbtSourceAuthoringInput; expectedSnapshotId?: string };
+        if (!body.change) throw Object.assign(new Error('A dbt source change is required.'), { code: 'INVALID_REQUEST' });
+        if (body.expectedSnapshotId && body.expectedSnapshotId !== snapshot.snapshotId) {
+          throw Object.assign(new Error('Project sources changed after the model was loaded.'), { code: 'SOURCE_CHANGED' });
+        }
+        const { dbtProjectDir, manifestPath } = onboardingDbtPaths({});
+        const preview = previewDbtSourcePatch(dbtProjectDir, manifestPath, body.change);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...preview }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'DBT_SOURCE_PATCH_INVALID');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the model and review the dbt YAML source patch again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/dbt-source/apply') {
+      const requestId = apiRequestId('modeling-dbt-source-apply');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { change?: DbtSourceAuthoringInput; fingerprint?: string; expectedFingerprint?: string; expectedSnapshotId?: string };
+        if (!body.change) throw Object.assign(new Error('A dbt source change is required.'), { code: 'INVALID_REQUEST' });
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) {
+          throw Object.assign(new Error('Project sources changed after the source patch preview.'), { code: 'SOURCE_CHANGED' });
+        }
+        const expectedFingerprint = body.expectedFingerprint ?? body.fingerprint;
+        if (!expectedFingerprint) throw Object.assign(new Error('The reviewed source patch fingerprint is required.'), { code: 'SOURCE_CHANGED' });
+        const { dbtProjectDir, manifestPath } = onboardingDbtPaths({});
+        const applied = applyDbtSourcePatch(dbtProjectDir, manifestPath, body.change, expectedFingerprint);
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        const nextSnapshot = projectSnapshot();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: nextSnapshot.snapshotId, applied }));
+      } catch (error) {
+        const inferred = /changed after the preview/i.test(apiErrorMessage(error)) ? 'SOURCE_CHANGED' : 'DBT_SOURCE_PATCH_INVALID';
+        const code = apiErrorCode(error, inferred);
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the source patch preview before applying.'] })));
+      }
       return;
     }
 
     if (req.method === 'POST' && path === '/api/modeling/dbt-first/preview') {
+      const requestId = apiRequestId('modeling-preview');
+      const snapshot = projectSnapshot();
       try {
-        const body = await readJSON(req) as { change?: ModelingAuthoringChange };
+        const body = await readJSON(req) as { change?: ModelingAuthoringChange; expectedSnapshotId?: string };
         if (!body.change) throw new Error('A modeling change is required.');
+        if (body.expectedSnapshotId && body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed after the model was loaded.'), { code: 'SOURCE_CHANGED' });
         const preview = previewModelingChange(projectRoot, body.change);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(preview));
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...preview }));
       } catch (error) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const code = apiErrorCode(error, 'MODELING_CHANGE_INVALID');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh Domain Studio and preview the change again.'] })));
       }
       return;
     }
 
     if (req.method === 'POST' && path === '/api/modeling/dbt-first/apply') {
+      const requestId = apiRequestId('modeling-apply');
+      const snapshot = projectSnapshot();
       try {
-        const body = await readJSON(req) as { change?: ModelingAuthoringChange; fingerprint?: string };
+        const body = await readJSON(req) as { change?: ModelingAuthoringChange; fingerprint?: string; expectedSnapshotId?: string };
         if (!body.change) throw new Error('A modeling change is required.');
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed after the modeling preview.'), { code: 'SOURCE_CHANGED' });
+        if (!body.fingerprint) throw Object.assign(new Error('The reviewed modeling source fingerprint is required.'), { code: 'SOURCE_CHANGED' });
         const applied = applyModelingChange(projectRoot, body.change, body.fingerprint);
-        const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
-        const manifest = buildManifest({ projectRoot, dbtManifestPath });
+        projectSnapshots.invalidate();
+        const nextSnapshot = projectSnapshot();
+        const manifest = nextSnapshot.manifest;
         await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ applied, modeling: manifest.modeling, diagnostics: manifest.diagnostics ?? [] }));
+        res.end(serializeJSON({ requestId, snapshotId: nextSnapshot.snapshotId, applied, modeling: manifest.modeling, diagnostics: manifest.diagnostics ?? [] }));
       } catch (error) {
-        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const inferred = /changed after the preview/i.test(apiErrorMessage(error)) ? 'SOURCE_CHANGED' : 'MODELING_APPLY_FAILED';
+        const code = apiErrorCode(error, inferred);
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh Domain Studio and review the latest source diff.'] })));
       }
       return;
     }
 
     if (req.method === 'POST' && path === '/api/modeling/dbt-first/relationships/validate') {
+      const requestId = apiRequestId('modeling-relationship-validate');
+      const snapshot = projectSnapshot();
       try {
-        const body = await readJSON(req) as { relationship?: RelationshipAuthoringInput };
+        const body = await readJSON(req) as { relationship?: RelationshipAuthoringInput; expectedSnapshotId?: string };
         if (!body.relationship) throw new Error('A relationship is required.');
-        const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
-        const manifest = buildManifest({ projectRoot, dbtManifestPath });
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed before relationship validation.'), { code: 'SOURCE_CHANGED' });
+        const manifest = snapshot.manifest;
         const activeConnection = requireActiveConnection();
         const evidence = await validateModelingRelationship(
           body.relationship,
@@ -3718,10 +4332,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
         );
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ evidence }));
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, evidence }));
       } catch (error) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const code = apiErrorCode(error, 'RELATIONSHIP_VALIDATION_FAILED');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the model or configure a warehouse connection, then retry validation.'] })));
       }
       return;
     }
@@ -6006,6 +6621,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Missing block name' }));
           return;
         }
+        if (dbtFirstOwnsSemanticAuthoring(projectConfig)
+          && (blockType === 'semantic' || /\btype\s*=\s*["']semantic["']/i.test(content ?? ''))) {
+          sendDbtOwnedSemanticAuthoringError(res);
+          return;
+        }
         const created = createBlockArtifacts(projectRoot, {
           name,
           domain,
@@ -6072,6 +6692,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!name || typeof name !== 'string' || !content || typeof content !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'name and content are required' }));
+          return;
+        }
+        if (dbtFirstOwnsSemanticAuthoring(projectConfig) && /\btype\s*=\s*["']semantic["']/i.test(content)) {
+          sendDbtOwnedSemanticAuthoringError(res);
           return;
         }
         // OSS keeps the save flow deliberately small: the person saving the
@@ -9164,6 +9788,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'name and at least one metric are required.' }));
           return;
         }
+        if (blockType === 'semantic' && dbtFirstOwnsSemanticAuthoring(projectConfig)) {
+          sendDbtOwnedSemanticAuthoringError(res);
+          return;
+        }
         const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
         const composed = composeRuntimeSemanticQuery({
           metrics,
@@ -9631,6 +10259,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Create a new metric YAML file in semantic-layer/metrics/
     if (req.method === 'POST' && path === '/api/semantic-layer/metric') {
       try {
+        if (dbtFirstOwnsSemanticAuthoring(projectConfig)) {
+          sendDbtOwnedSemanticAuthoringError(res);
+          return;
+        }
         const body = await readJSON(req);
         const { name, label, description, domain, sql, type, table, tags } = body as {
           name: string; label: string; description: string; domain: string;
@@ -9756,10 +10388,19 @@ FROM from_counts, to_counts, joined, unmatched, from_max, to_max`;
         ? maxToPerKey <= 1
         : false;
   const policyPassed = relationship.fanout === 'safe' && cardinalityPassed;
+  const queryFingerprint = createHash('sha256').update(sql).digest('hex');
   return {
     status: policyPassed ? 'passed' : 'failed',
     checkedAt: new Date().toISOString(),
-    queryFingerprint: createHash('sha256').update(sql).digest('hex'),
+    queryFingerprint,
+    proofFingerprint: relationshipValidationProofFingerprint({
+      fromRelation: fromNode.relation,
+      toRelation: toNode.relation,
+      keys: relationship.keys,
+      cardinality: relationship.cardinality,
+      fanout: relationship.fanout,
+      queryFingerprint,
+    }),
     fromRows: numericValue(row.from_rows),
     toRows: numericValue(row.to_rows),
     joinedRows: numericValue(row.joined_rows),
@@ -9771,6 +10412,67 @@ FROM from_counts, to_counts, joined, unmatched, from_max, to_max`;
     message: policyPassed
       ? 'Warehouse evidence matches the declared cardinality and safe fanout policy.'
       : 'Warehouse evidence does not prove the declared cardinality and safe fanout policy.',
+  };
+}
+
+function relatedProductsForDomain(manifest: DQLManifest, domainId: string): {
+  apps: Array<Record<string, unknown>>;
+  notebooks: Array<Record<string, unknown>>;
+} {
+  const apps = Object.values(manifest.apps ?? {})
+    .filter((app) => app.ownerDomain === domainId || app.usesDomains.includes(domainId))
+    .map((app) => ({
+      id: app.id,
+      name: app.name,
+      filePath: app.filePath,
+      ownerDomain: app.ownerDomain ?? app.domain,
+      usesDomains: app.usesDomains,
+      purpose: app.purpose,
+      requiredExports: app.requiredExports,
+      classification: app.classification,
+      lifecycle: app.lifecycle,
+      legacyLayout: app.filePath.startsWith('domains/'),
+    }));
+  const notebooks = Object.entries(manifest.notebooks)
+    .filter(([, notebook]) => notebook.ownerDomain === domainId || notebook.usesDomains.includes(domainId))
+    .map(([id, notebook]) => ({
+      id,
+      title: notebook.title,
+      filePath: notebook.filePath,
+      ownerDomain: notebook.ownerDomain,
+      usesDomains: notebook.usesDomains,
+      purpose: notebook.purpose,
+      requiredExports: notebook.requiredExports,
+      classification: notebook.classification,
+      legacyLayout: notebook.filePath.startsWith('domains/'),
+    }));
+  return { apps, notebooks };
+}
+
+function domainWorkspaceSummary(manifest: DQLManifest, domainId: string): Record<string, unknown> {
+  const pkg = manifest.modeling?.packages[domainId];
+  const entities = Object.values(manifest.modeling?.entities ?? {}).filter((entity) => entity.domain === domainId);
+  const entityKeys = new Set(Object.entries(manifest.modeling?.entities ?? {}).filter(([, entity]) => entity.domain === domainId).map(([key]) => key));
+  const relationships = Object.values(manifest.modeling?.relationships ?? {}).filter((relationship) => entityKeys.has(relationship.from) || entityKeys.has(relationship.to));
+  const contracts = Object.values(manifest.modeling?.contracts ?? {}).filter((contract) => contract.domain === domainId);
+  const imports = Object.values(manifest.modeling?.interfaces?.imports ?? {}).filter((value) => value.domain === domainId);
+  const exports = Object.values(manifest.modeling?.interfaces?.exports ?? {}).filter((value) => value.domain === domainId);
+  return {
+    id: domainId,
+    parent: pkg?.parent,
+    owner: pkg?.owner,
+    filePath: pkg?.filePath,
+    counts: {
+      entities: entities.length,
+      relationships: relationships.length,
+      safeRelationships: relationships.filter((relationship) => relationship.automaticJoinAllowed).length,
+      staleRelationships: relationships.filter((relationship) => relationship.staleCertification).length,
+      contracts: contracts.length,
+      imports: imports.length,
+      exports: exports.length,
+      relatedProducts: Object.values(relatedProductsForDomain(manifest, domainId)).reduce((sum, values) => sum + values.length, 0),
+    },
+    readiness: relationships.some((relationship) => relationship.staleCertification) ? 'attention' : entities.length > 0 ? 'ready' : 'setup',
   };
 }
 
@@ -10695,6 +11397,22 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   }
 
   return config;
+}
+
+function dbtFirstOwnsSemanticAuthoring(config: ProjectConfig): boolean {
+  return config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
+}
+
+function sendDbtOwnedSemanticAuthoringError(res: {
+  writeHead(statusCode: number, headers: Record<string, string>): unknown;
+  end(chunk?: string): unknown;
+}): void {
+  res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(serializeJSON({
+    error: 'dbt-first projects use dbt/MetricFlow as the physical and metric source of truth. Edit the dbt project and refresh artifacts instead of creating duplicate local semantic definitions.',
+    code: 'DQL_MODELING_DBT_OWNED',
+    nextAction: 'Create or edit the metric in dbt/MetricFlow, run dbt parse or dbt build, then run dql sync dbt.',
+  }));
 }
 
 /**

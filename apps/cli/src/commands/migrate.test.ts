@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CLIFlags } from '../args.js';
-import { runMigrate } from './migrate.js';
+import { applyModelingMigration, planModelingMigration, runMigrate } from './migrate.js';
 
 const tempDirs: string[] = [];
 
@@ -43,11 +43,139 @@ function tempProject(): string {
 }
 
 afterEach(() => {
+  process.exitCode = 0;
   vi.restoreAllMocks();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function modelingProject(options: { missingBinding?: boolean; targetCollision?: boolean } = {}): string {
+  const root = mkdtempSync(join(tmpdir(), 'dql-modeling-migrate-'));
+  tempDirs.push(root);
+  writeFileSync(join(root, 'dql.config.json'), `${JSON.stringify({ project: 'commerce', manifestVersion: 2 }, null, 2)}\n`);
+  mkdirSync(join(root, 'target'), { recursive: true });
+  writeFileSync(join(root, 'target', 'manifest.json'), JSON.stringify({
+    nodes: {
+      'model.shop.fct_orders': {
+        resource_type: 'model', name: 'fct_orders', alias: 'fct_orders', database: 'analytics', schema: 'commerce',
+      },
+    },
+    sources: {},
+  }));
+  const domainRoot = join(root, 'domains', 'commerce');
+  mkdirSync(join(domainRoot, 'modeling'), { recursive: true });
+  mkdirSync(join(domainRoot, 'apps', 'revenue-review'), { recursive: true });
+  mkdirSync(join(domainRoot, 'notebooks'), { recursive: true });
+  writeFileSync(join(domainRoot, 'domain.dql'), '// dql-format: 1\n\ndomain "Commerce" {\n  id = "commerce"\n}\n');
+  writeFileSync(join(domainRoot, 'modeling', 'entities.dql.yaml'), `# legacy split source\nentities:\n  - id: order\n    dbt_model: ${options.missingBinding ? 'missing_orders' : 'fct_orders'}\n    grain: order_id\n`);
+  writeFileSync(join(domainRoot, 'modeling', 'relationships.dql.yaml'), 'relationships:\n  - id: order_self\n    from: order\n    to: order\n    status: review\n');
+  writeFileSync(join(domainRoot, 'apps', 'revenue-review', 'dql.app.json'), `${JSON.stringify({
+    version: 1,
+    id: 'revenue-review',
+    name: 'Revenue review',
+    domain: 'commerce',
+    lifecycle: 'review',
+    owners: ['analytics@example.com'],
+    members: [], roles: [], policies: [],
+  }, null, 2)}\n`);
+  writeFileSync(join(domainRoot, 'notebooks', 'orders.dqlnb'), `${JSON.stringify({
+    dqlnbVersion: 2,
+    version: 1,
+    title: 'Orders',
+    metadata: { lifecycle: 'review', createdWith: 'dql' },
+    cells: [],
+  }, null, 2)}\n`);
+  if (options.targetCollision) {
+    mkdirSync(join(root, 'apps', 'revenue-review'), { recursive: true });
+    writeFileSync(join(root, 'apps', 'revenue-review', 'dql.app.json'), '{}\n');
+  }
+  return root;
+}
+
+describe('runMigrate modeling (CFG-002, MIG-001, MIG-002)', () => {
+  it('dry-run is fingerprinted and writes nothing', async () => {
+    const projectRoot = modelingProject();
+    const beforeConfig = readFileSync(join(projectRoot, 'dql.config.json'), 'utf8');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await runMigrate('modeling', baseFlags({ input: projectRoot, to: 'dbt-first', dryRun: true }));
+
+    const report = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report).toMatchObject({ mode: 'dry-run', status: 'ready' });
+    expect(report.fingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(report.productMoves).toHaveLength(2);
+    expect(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8')).toBe(beforeConfig);
+    expect(existsSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'entities.dql.yaml'))).toBe(true);
+    expect(existsSync(join(projectRoot, 'apps', 'revenue-review'))).toBe(false);
+  });
+
+  it('applies atomically and a second apply is a no-op', async () => {
+    const projectRoot = modelingProject();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await runMigrate('modeling', baseFlags({ input: projectRoot, to: 'dbt-first', apply: true }));
+    const first = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(first.status).toBe('applied');
+    expect(JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8'))).toMatchObject({
+      project: 'commerce',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+    });
+    const model = readFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'model.dql.yaml'), 'utf8');
+    expect(model).toContain('dbt_model: model.shop.fct_orders');
+    expect(model).toContain('status: review');
+    expect(existsSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'entities.dql.yaml'))).toBe(false);
+    const app = JSON.parse(readFileSync(join(projectRoot, 'apps', 'revenue-review', 'dql.app.json'), 'utf8'));
+    expect(app).toMatchObject({ lifecycle: 'review', ownerDomain: 'commerce', usesDomains: ['commerce'] });
+    const notebook = JSON.parse(readFileSync(join(projectRoot, 'notebooks', 'orders.dqlnb'), 'utf8'));
+    expect(notebook.metadata).toMatchObject({ lifecycle: 'review', ownerDomain: 'commerce', usesDomains: ['commerce'] });
+
+    await runMigrate('modeling', baseFlags({ input: projectRoot, to: 'dbt-first', apply: true }));
+    const second = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(second).toMatchObject({ mode: 'applied', status: 'noop', written: [], removed: [] });
+  });
+
+  it('stops on ambiguous target collisions before any write', async () => {
+    const projectRoot = modelingProject({ targetCollision: true });
+    const beforeConfig = readFileSync(join(projectRoot, 'dql.config.json'), 'utf8');
+    const beforeLegacy = readFileSync(join(projectRoot, 'domains', 'commerce', 'apps', 'revenue-review', 'dql.app.json'), 'utf8');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await runMigrate('modeling', baseFlags({ input: projectRoot, to: 'dbt-first', apply: true }));
+
+    const report = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.status).toBe('blocked');
+    expect(report.ambiguities).toContainEqual(expect.objectContaining({ code: 'TARGET_COLLISION', path: 'apps/revenue-review' }));
+    expect(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8')).toBe(beforeConfig);
+    expect(readFileSync(join(projectRoot, 'domains', 'commerce', 'apps', 'revenue-review', 'dql.app.json'), 'utf8')).toBe(beforeLegacy);
+    expect(existsSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'model.dql.yaml'))).toBe(false);
+  });
+
+  it('reports every known lossy field while preserving unresolved semantics', async () => {
+    const projectRoot = modelingProject({ missingBinding: true });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await runMigrate('modeling', baseFlags({ input: projectRoot, to: 'dbt-first', dryRun: true }));
+
+    const report = JSON.parse(String(log.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.losses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'MISSING_DBT_BINDING' }),
+      expect.objectContaining({ code: 'YAML_COMMENTS' }),
+    ]));
+    expect(readFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'entities.dql.yaml'), 'utf8')).toContain('missing_orders');
+  });
+
+  it('rejects an approved plan when its source fingerprint changes', () => {
+    const projectRoot = modelingProject();
+    const plan = planModelingMigration(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), `${JSON.stringify({ project: 'changed-after-preview', manifestVersion: 2 }, null, 2)}\n`);
+
+    expect(() => applyModelingMigration(projectRoot, plan)).toThrow(/SOURCE_CHANGED/);
+    expect(existsSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'model.dql.yaml'))).toBe(false);
+    expect(existsSync(join(projectRoot, 'apps', 'revenue-review'))).toBe(false);
+  });
 });
 
 describe('runMigrate layout', () => {
