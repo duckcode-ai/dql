@@ -109,7 +109,7 @@ const METRIC_WORDS = [
   'amount', 'arr', 'average', 'avg', 'balance', 'bookings', 'churn', 'conversion', 'cost',
   'count', 'duration', 'expense', 'growth', 'kpi', 'margin', 'metric', 'mrr', 'orders',
   'points', 'profit', 'quantity', 'rate', 'revenue', 'sales', 'score', 'scorer', 'scoring', 'spend', 'stats',
-  'statistics', 'total', 'usage', 'value', 'volume',
+  'statistics', 'tax', 'total', 'usage', 'value', 'volume',
 ];
 
 const DIMENSION_WORDS = [
@@ -140,8 +140,9 @@ export function buildAnalysisQuestionPlan(
   const timeTerms = extractTimeTerms(cleanQuestion);
   const mode = inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
   const routeIntent = routeIntentForMode(mode);
-  const outputShape = outputShapeForMode(mode, lower);
-  const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities);
+  const outputShape = outputShapeForMode(mode, lower, dimensionTerms);
+  const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities)
+    && !(mode === 'general_analysis' && definitionPhraseCarriesAnalyticalShape({ lower, metricTerms, dimensionTerms }));
   const needsGeneratedSql = generatedSqlIsLikely(mode, shouldConsiderCertifiedExact);
   const needsResearchWorkspace = researchWorkspaceIsLikely(mode, lower);
   const requestedShape = buildRequestedAnswerShape(cleanQuestion, {
@@ -605,7 +606,13 @@ function inferQuestionMode(input: {
   if (followUpKind(input.followUp) === 'drilldown') return 'entity_drilldown';
   if (/^\s*(run|execute|open)\b/i.test(lower)) return 'exact_lookup';
   if (/\b(trust|rely|certif|certified|lineage|owner|caveat|gap|governance|can .* trust)\b/i.test(lower)) return 'trust_review';
-  if (/\b(define|definition|meaning of|what is|what are|what does .+ mean)\b/i.test(lower)) return 'definition';
+  // "What is" is not, by itself, a definition request. Questions such as
+  // "what is revenue by customer and product?" carry an explicit analytical
+  // shape and must reach the data cascade. Keep genuine single-concept meaning
+  // questions on the fast definition path while treating multi-dimensional or
+  // explicitly grouped measure requests as analysis (AGT-001).
+  if (/\b(define|definition|meaning of|what is|what are|what does .+ mean)\b/i.test(lower)
+    && !definitionPhraseCarriesAnalyticalShape(input)) return 'definition';
   if (/\b(anomal|exception|outlier|spike|dip)\b/i.test(lower)) return 'anomaly';
   if (/\b(compare|versus|vs\.?|cohort)\b/i.test(lower)) return 'comparison';
   if (/\b(why|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|what happened)\b/i.test(lower)) return 'diagnose_change';
@@ -624,6 +631,17 @@ function inferQuestionMode(input: {
   // instead of a fast direct answer.
   if (input.dimensionTerms.length > 0 || input.metricTerms.length > 0) return 'general_analysis';
   return 'clarify';
+}
+
+function definitionPhraseCarriesAnalyticalShape(input: {
+  lower: string;
+  metricTerms: string[];
+  dimensionTerms: string[];
+}): boolean {
+  if (input.metricTerms.length === 0) return false;
+  if (input.dimensionTerms.length >= 2) return true;
+  return input.dimensionTerms.length > 0
+    && /\b(by|per|for each|group(?:ed)? by|split by|break(?:down| down)|info for|details for)\b/i.test(input.lower);
 }
 
 function routeIntentForMode(mode: AnalysisQuestionMode): MetadataAgentIntent {
@@ -660,10 +678,15 @@ function researchWorkspaceIsLikely(mode: AnalysisQuestionMode, lower: string): b
     || /\b(deep\s+research|research|reserach|investigate|investigation|root cause)\b/i.test(lower);
 }
 
-function outputShapeForMode(mode: AnalysisQuestionMode, lower: string): AnalysisQuestionPlan['outputShape'] {
+function outputShapeForMode(
+  mode: AnalysisQuestionMode,
+  lower: string,
+  dimensionTerms: string[],
+): AnalysisQuestionPlan['outputShape'] {
   if (mode === 'entity_profile') return 'profile';
   if (mode === 'definition' || mode === 'trust_review') return 'narrative';
   if (/\b(chart|graph|visual|plot)\b/i.test(lower) || mode === 'trend') return 'chart';
+  if (dimensionTerms.length >= 2 || /\b(info for|details for|for each|group(?:ed)? by|split by|break(?:down| down))\b/i.test(lower)) return 'table';
   if (/\b(table|list|show all|complete|full)\b/i.test(lower) || mode === 'ranking' || mode === 'entity_drilldown') return 'table';
   if (/\bwhat is|how many|how much|total|count|kpi|metric\b/i.test(lower)) return 'value';
   return 'narrative';
@@ -809,7 +832,7 @@ function buildRequestedAnswerShape(
     ...input.dimensionTerms.map(canonicalShapeTerm),
     ...followUpDimensionsForRequestedShape(input.followUp, followUpReferences),
   ].filter(Boolean));
-  const dimensions = scalarValueQuestionUsesEntitiesAsMeasures(input.mode, input.lower)
+  const dimensions = scalarValueQuestionUsesEntitiesAsMeasures(input.mode, input.lower, rawDimensions)
     ? []
     : rawDimensions;
   const measures = uniqueStrings(input.metricTerms.map(canonicalShapeTerm).filter(Boolean));
@@ -838,8 +861,13 @@ function buildRequestedAnswerShape(
   };
 }
 
-function scalarValueQuestionUsesEntitiesAsMeasures(mode: AnalysisQuestionMode, lower: string): boolean {
+function scalarValueQuestionUsesEntitiesAsMeasures(
+  mode: AnalysisQuestionMode,
+  lower: string,
+  dimensions: string[],
+): boolean {
   if (mode !== 'exact_lookup' && mode !== 'general_analysis') return false;
+  if (dimensions.length >= 2 || /\b(info for|details for|for each|group(?:ed)? by|split by|break(?:down| down))\b/.test(lower)) return false;
   return /\b(how many|how much|what is|what was|total|count|number of)\b/.test(lower)
     && !/\b(by|per|each|every|top|bottom|rank|ranking|list|which|who|break\s*down|breakdown|split|segment|trend|over time)\b/.test(lower);
 }

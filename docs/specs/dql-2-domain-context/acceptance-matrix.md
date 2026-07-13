@@ -23,9 +23,12 @@ integrator sets `verified`.
 | SKILL-002 | Exclusions veto/lower retrieval and never add positive tokens. | 04, 06 | W04 | specified | — |
 | CTX-001 | UI/API/CLI/MCP resolve the same envelope for equivalent requests. | 06, 07 | W04 | specified | — |
 | CTX-002 | Snapshot change cannot mix retrieval/tool/guard records in one answer. | 06, 07 | W02/W04 | specified | — |
-| AGT-001 | Route order is block, MetricFlow, governed SQL, clarify/refuse. | 06 | W04 | specified | — |
+| AGT-001 | Route order is compatible block, compatible MetricFlow, governed SQL, bounded exploratory DBT-grounded SQL when safe, then clarify/refuse. | 06 | W04 | specified | — |
 | AGT-002 | AI discoveries are cited drafts and cannot certify. | 03, 04 | W03 | specified | — |
-| AGT-003 | No-domain Ask is limited/review-required and refuses unsafe generation. | 01, 06 | W04/W05 | specified | — |
+| AGT-003 | No-domain Ask checks global blocks and semantic models first, may use bounded DBT-grounded exploration when safe, and refuses unsafe generation. | 01, 06 | W04/W05 | specified | — |
+| AGT-004 | Candidate entity scope follows the question; unrelated retrieved cross-domain policy failures retain their exact code and do not trigger retries or a misleading clarification. | 06 | W04 | specified | — |
+| EXP-001 | Exploratory DBT-grounded SQL is read-only, bounded, single-domain, provenance-recorded, review-required, and never treated as governed relationship proof. | 06 | W04 | specified | — |
+| EXP-002 | Exploratory answers offer only explicit provenance-backed draft creation; they never auto-write, promote, or certify blocks or modeling. | 03, 06 | W03/W04 | specified | — |
 | API-001 | Stable APIs return request/snapshot IDs, codes, bounds, and conflict guards. | 03, 07 | W02/W03 | specified | — |
 | UI-001 | Global rail/context sidebar/deep links and canvas UX pass CLI-backed browser tests. | 05 | W05 | specified | — |
 | UI-002 | dbt edits use previewed source patches; DQL edits touch package source only. | 04, 05 | W05 | specified | — |

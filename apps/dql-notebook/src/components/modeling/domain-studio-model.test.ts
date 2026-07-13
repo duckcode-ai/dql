@@ -22,7 +22,7 @@ function modeling(entities: Record<string, ManifestModelEntity>): Pick<ManifestD
 describe('Domain Studio navigation', () => {
   it('keeps the locked contextual information architecture', () => {
     expect(DOMAIN_STUDIO_NAVIGATION.map((group) => [group.label, group.items.map((item) => item.label)])).toEqual([
-      [undefined, ['Domain', 'Blocks', 'Modeling', 'Skills']],
+      [undefined, ['Model', 'Skills']],
     ]);
   });
 });

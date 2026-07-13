@@ -3,6 +3,8 @@ import {
   buildAgentValueProbeSql,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
+  buildExploratoryJoinProbeSql,
+  repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
   buildDbtStatus,
   buildProposeReadiness,
@@ -517,6 +519,21 @@ describe('agent run runtime API', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'no_answer',
       text: 'Need more context.',
+    })).toBe(false);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'uncertified',
+      certification: 'analyst_review_required',
+      text: 'Exploratory result at a declared grain.',
+      exploratoryCandidate: {
+        kind: 'dbt_grounded_exploration',
+        reason: 'unbound_relation',
+        sql: 'select 1',
+        message: 'Missing modeled relationship coverage.',
+        modeledEntityIds: [],
+        relationshipIds: [],
+        executionStatus: 'not_executed',
+      },
     })).toBe(false);
   });
 
@@ -1882,6 +1899,118 @@ describe('buildAgentPreviewSql', () => {
   it('rejects generated SQL that is not a single read-only statement', () => {
     expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');
     expect(() => buildAgentPreviewSql('DELETE FROM orders')).toThrow('read-only SELECT or WITH');
+  });
+});
+
+describe('EXP-001 exploratory join probes', () => {
+  it('repairs a uniquely resolvable relation qualifier and preserves lifetime measures at owner grain', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT
+        customer_name,
+        products.product_description,
+        SUM(lifetime_spend) AS lifetime_spend
+      FROM dev.customers
+      LEFT JOIN jaffle_shop.dev.orders ON customers.customer_id = orders.customer_id
+      LEFT JOIN jaffle_shop.dev.order_items ON orders.order_id = order_items.order_id
+      LEFT JOIN jaffle_shop.dev.products ON order_item.product_id = products.product_id
+      GROUP BY customer_name, products.product_description
+    `, [
+      {
+        relation: 'dev.customers',
+        name: 'customers',
+        columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_spend' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.order_items',
+        name: 'order_items',
+        columns: [{ name: 'order_id' }, { name: 'product_id' }],
+      },
+    ]);
+
+    expect(result.blockedReason).toBeUndefined();
+    expect(result.sql).toContain('order_items.product_id = products.product_id');
+    expect(result.sql).toContain('MAX(lifetime_spend) AS lifetime_spend');
+    expect(result.repairs).toHaveLength(2);
+  });
+
+  it('qualifies inspected tables and uses an available lifetime measure for a lifespan request', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT c.customer_name, p.product_description, SUM(o.tax_paid) AS tax_paid
+      FROM orders AS o
+      JOIN customers AS c ON o.customer_id = c.customer_id
+      JOIN order_items AS oi ON o.order_id = oi.order_id
+      JOIN products AS p ON oi.product_id = p.product_id
+      GROUP BY c.customer_name, p.product_description
+    `, [
+      {
+        relation: 'jaffle_shop.dev.orders',
+        name: 'orders',
+        columns: [{ name: 'order_id' }, { name: 'customer_id' }, { name: 'tax_paid' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.customers',
+        name: 'customers',
+        columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_tax_paid' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.order_items',
+        name: 'order_items',
+        columns: [{ name: 'order_id' }, { name: 'product_id' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.products',
+        name: 'products',
+        columns: [{ name: 'product_id' }, { name: 'product_description' }],
+      },
+    ], 'what is the tax and product info for customer life span?');
+
+    expect(result.blockedReason).toBeUndefined();
+    expect(result.sql).toContain('FROM jaffle_shop.dev.orders AS o');
+    expect(result.sql).toContain('JOIN jaffle_shop.dev.order_items AS oi');
+    expect(result.sql).toContain('MAX(c.lifetime_tax_paid) AS tax_paid');
+    expect(result.repairs).toEqual(expect.arrayContaining([
+      expect.stringContaining('Qualified exploratory relation orders'),
+      expect.stringContaining('Used lifetime_tax_paid'),
+    ]));
+  });
+
+  it('blocks a non-additive parent measure when the owning entity is not retained', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT p.product_name, SUM(c.lifetime_tax_paid) AS lifetime_tax_paid
+      FROM customers AS c
+      JOIN orders AS o ON c.customer_id = o.customer_id
+      JOIN products AS p ON o.product_id = p.product_id
+      GROUP BY p.product_name
+    `, [{
+      relation: 'customers',
+      name: 'customers',
+      columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_tax_paid' }],
+    }]);
+
+    expect(result.blockedReason).toContain('allocation policy');
+    expect(result.sql).toContain('SUM(c.lifetime_tax_paid)');
+  });
+
+  it('uses safely quoted identifiers and fixed bounded samples', () => {
+    const sql = buildExploratoryJoinProbeSql({
+      leftRelation: 'analytics.orders',
+      leftColumn: 'customer_id',
+      rightRelation: 'analytics.customers',
+      rightColumn: 'id',
+    });
+    expect(sql).toContain('FROM "analytics"."orders"');
+    expect(sql).toContain('FROM "analytics"."customers"');
+    expect(sql.match(/LIMIT 5000/g)).toHaveLength(2);
+    expect(sql).toContain('max_matches_per_left_key');
+  });
+
+  it('rejects identifiers that cannot be safely rendered into a probe', () => {
+    expect(() => buildExploratoryJoinProbeSql({
+      leftRelation: 'analytics.orders; DROP TABLE customers',
+      leftColumn: 'customer_id',
+      rightRelation: 'analytics.customers',
+      rightColumn: 'id',
+    })).toThrow('safe physical identifier');
   });
 });
 

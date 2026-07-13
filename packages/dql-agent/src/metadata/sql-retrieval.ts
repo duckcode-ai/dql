@@ -20,6 +20,8 @@ export interface SelectRelevantModelsOptions {
   /** Vector-similarity weight in [0,1]; 0 (default) = pure lexical, offline-stable. */
   alpha?: number;
   provider?: EmbeddingProvider;
+  /** dbt unique ids that a focused Model Area owns or explicitly references. */
+  preferredModelIds?: string[];
 }
 
 export const DEFAULT_SQL_RETRIEVAL_EMBEDDING_ALPHA = 0.18;
@@ -111,5 +113,9 @@ export async function selectRelevantModels(
       })
       .slice(0, topK);
   }
-  return chosen.map((r) => r.item.name);
+  const preferred = new Set((options.preferredModelIds ?? []).map((id) => id.trim()).filter(Boolean));
+  const preferredNames = artifacts.models
+    .filter((model) => preferred.has(model.uniqueId))
+    .map((model) => model.name);
+  return [...new Set([...preferredNames, ...chosen.map((r) => r.item.name)])].slice(0, topK);
 }

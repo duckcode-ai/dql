@@ -108,6 +108,7 @@ import {
   discoverDbtDomains,
   renderDomainDeclaration,
   ProjectSnapshotService,
+  analyzeSqlReferences,
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
@@ -518,9 +519,14 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
   };
 }
 
-export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'dqlArtifact'>): boolean {
+export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
   if (governedAnswer.kind === 'no_answer') return false;
   if (governedAnswer.kind === 'certified' || governedAnswer.certification === 'certified') return false;
+  // EXP-001: exploratory prose is part of the trust boundary. A free-form
+  // synthesis pass can accidentally relabel an entity-level lifetime measure
+  // as a child-level allocation or total repeated values. Keep the host's
+  // deterministic grain statement instead.
+  if (governedAnswer.exploratoryCandidate) return false;
   const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
   if (governedAnswer.dqlArtifact && finalText) return false;
   return true;
@@ -1121,6 +1127,46 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     formatAgentRunInfrastructureError(error, 'Notebook research storage')
   );
 
+  /**
+   * CTX-001 / SKILL-001 — Build surfaces receive the same server-resolved,
+   * snapshot-bound domain envelope and compact evidence pack as Ask. The pack
+   * is a retrieval boundary, never an authorization bypass.
+   */
+  const buildDirectBuildContext = async (input: {
+    question: string;
+    domain?: string;
+    purpose?: string;
+    modelAreaId?: string;
+    surface: 'notebook' | 'block';
+    selectedContext?: Record<string, unknown>;
+  }) => {
+    const snapshot = projectSnapshot();
+    const domainContext = resolveDomainContextEnvelope({
+      manifest: snapshot.manifest,
+      activeDomain: input.domain,
+      purpose: input.purpose,
+      modelAreaId: input.modelAreaId,
+      source: input.domain ? 'explicit_ui' : 'inferred',
+      snapshotId: snapshot.snapshotId,
+    });
+    const contextPack = await buildLocalContextPack(projectRoot, {
+      question: input.question,
+      mode: 'build',
+      surface: input.surface,
+      selectedContext: {
+        activeSurface: input.surface,
+        domain: input.domain,
+        purpose: input.purpose,
+        modelAreaId: input.modelAreaId,
+        ...input.selectedContext,
+      },
+      domainContext,
+      strictness: 'balanced',
+      limit: 120,
+    });
+    return { domainContext, contextPack };
+  };
+
   const buildAgentPromptArtifact = async (
     request: AgentRunRequest,
     target: 'cell' | 'block',
@@ -1140,6 +1186,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const prompt = isRepair
       ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}`
       : request.question;
+    const domain = target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined;
+    const modelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
+    const purpose = agentRunWorkspaceValue(request, 'purpose');
+    const { domainContext, contextPack } = await buildDirectBuildContext({
+      question: prompt,
+      domain,
+      purpose,
+      modelAreaId,
+      surface: target === 'cell' ? 'notebook' : 'block',
+      selectedContext: { target, mode },
+    });
     return buildFromPrompt({
       projectRoot,
       prompt,
@@ -1156,7 +1213,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : undefined)
         : undefined,
       owner: agentRunWorkspaceValue(request, 'owner'),
-      domain: target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined,
+      domain,
+      modelAreaId,
+      contextPack,
+      domainContext,
       userId: agentRunWorkspaceValue(request, 'userId'),
       skills,
       dbtManifestPath: resolveDbtManifestPath(projectRoot, projectConfig),
@@ -1266,12 +1326,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     const requestedDomain = agentRunWorkspaceValue(request, 'domain');
     const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
+    const requestedModelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
     const runProjectSnapshot = projectSnapshot();
     const domainContext = requestedDomain
       ? resolveDomainContextEnvelope({
           manifest: runProjectSnapshot.manifest,
           activeDomain: requestedDomain,
           purpose: requestedPurpose,
+          modelAreaId: requestedModelAreaId,
           source: 'explicit_ui',
           snapshotId: runProjectSnapshot.snapshotId,
         })
@@ -1281,7 +1343,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         provider: resolvedProvider,
         messages: [
           ...(request.history ?? []).map((message) => ({ role: message.role, content: message.text })),
-          { role: 'user', content: isRepair ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}` : request.question },
+          ...(isRepair
+            ? [{ role: 'assistant' as const, content: `The prior attempt needs repair without changing the original question or requested output grain: ${repair?.repairHint}` }]
+            : []),
+          { role: 'user', content: request.question },
         ],
         conversationContext: request.conversationContext,
         upstream: {
@@ -1414,6 +1479,87 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       if (!governedAnswer.appliedHints) {
         governedAnswer.appliedHints = governedAnswer.contextPack?.appliedHints;
       }
+      // EXP-001 — a missing modeled relationship is not the same as an unsafe
+      // relationship. The answer loop exposes a non-executed candidate only for
+      // that narrow case; the host owns bounded probe/execution and never
+      // weakens the final governed-SQL guard.
+      if (governedAnswer.exploratoryCandidate) {
+        const explorationSchema = governedAnswer.contextPack?.allowedSqlContext.relations.map((table) => ({
+          relation: table.relation,
+          name: table.name,
+          columns: table.columns.map((column) => ({ ...column })),
+          source: table.source,
+        } satisfies AgentSchemaTable))
+          ?? governedAnswer.analysisPlan?.candidateTables.map((table) => ({
+            relation: table.relation,
+            name: table.relation.split('.').at(-1) ?? table.relation,
+            columns: table.columns.map((name) => ({ name })),
+            source: 'answer analysis plan',
+          } satisfies AgentSchemaTable));
+        const exploration = await executeExploratoryCandidate(
+          governedAnswer.exploratoryCandidate,
+          explorationSchema,
+          request.question,
+        );
+        const probeSummary = exploration.proofs.length > 0
+          ? `${exploration.proofs.length} bounded join probe${exploration.proofs.length === 1 ? '' : 's'} completed.`
+          : 'No join probe was required for this query.';
+        const baseWarnings = governedAnswer.validationWarnings ?? [];
+        const evidence = governedAnswer.evidence ?? {
+          route: [], lineage: [], businessContext: [], selectedAssets: [], sourceTables: [], semanticObjects: [], citations: [],
+        };
+        governedAnswer.evidence = evidence;
+        evidence.route.push({
+          tool: 'explore_dbt_grounded_sql',
+          status: exploration.result ? 'checked' : 'failed',
+          label: exploration.result ? 'Executed bounded DBT-grounded exploration' : 'DBT-grounded exploration could not execute',
+          detail: exploration.error ?? probeSummary,
+        });
+        if (exploration.proofs.length > 0) {
+          evidence.businessContext.push({
+            label: 'Exploratory join probes',
+            value: exploration.proofs.map((proof) => proof.summary).join('; '),
+            source: 'bounded DBT-grounded validation',
+          });
+        }
+        const repairedExploratoryCandidate = exploration.sql !== governedAnswer.exploratoryCandidate.sql
+          ? { ...governedAnswer.exploratoryCandidate, sql: exploration.sql }
+          : governedAnswer.exploratoryCandidate;
+        const lifetimeGrainRepair = exploration.repairs.find((repair) => repair.startsWith('Used lifetime_'));
+        const explorationAnswer = exploration.result
+          ? lifetimeGrainRepair
+            ? `Exploratory DBT-grounded query executed and returned ${exploration.result.rowCount} row${exploration.result.rowCount === 1 ? '' : 's'}. Each row is an owning-entity and joined-dimension pair. The lifetime measure remains an entity-level attribute repeated across that dimension; it is not allocated to the joined dimension. ${lifetimeGrainRepair}`
+            : `Exploratory DBT-grounded query executed and returned ${exploration.result.rowCount} row${exploration.result.rowCount === 1 ? '' : 's'}. Review the inferred join evidence before reusing this analysis.`
+          : `DQL found a DBT-grounded exploratory path, but the bounded validation could not run: ${exploration.error ?? 'unknown execution error'}.`;
+        governedAnswer = {
+          ...governedAnswer,
+          kind: 'uncertified',
+          sourceTier: 'dbt_manifest',
+          certification: 'analyst_review_required',
+          reviewStatus: 'analyst_review_required',
+          confidence: exploration.result ? 0.58 : 0.2,
+          result: exploration.result,
+          proposedSql: exploration.sql,
+          sql: exploration.sql,
+          exploratoryCandidate: repairedExploratoryCandidate,
+          executionError: exploration.error,
+          text: explorationAnswer,
+          answer: explorationAnswer,
+          trustLabel: 'Exploratory · DBT-grounded',
+          route: {
+            tier: 'generated_sql',
+            label: exploration.result
+              ? 'Exploratory · DBT-grounded answer (review required).'
+              : 'Exploratory · DBT-grounded query needs review before execution.',
+          },
+          validationWarnings: [
+            ...baseWarnings,
+            probeSummary,
+            ...exploration.repairs,
+            ...(exploration.error ? [`Exploratory execution: ${exploration.error}`] : []),
+          ],
+        };
+      }
       applySmartVisualization(governedAnswer, request.question);
     } catch (error) {
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
@@ -1452,8 +1598,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       || governedAnswer.sourceCertifiedBlock
       || governedAnswer.dqlArtifact?.kind === 'certified_block'
     ));
-    const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
+    const isExploratory = Boolean(governedAnswer.exploratoryCandidate);
+    const isGroundingGap = governedAnswer.kind === 'no_answer'
+      && governedAnswer.refusalCode === 'grounding_gap'
+      && !isExploratory;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
+    // AGT-004: a rejected attribution/export/proof policy is a deliberate
+    // governance boundary, not an ambiguous user question and not a repairable
+    // retrieval miss. Keep the precise policy detail visible, but never burn two
+    // more provider calls retrying the same incompatible candidate.
+    const isPolicyBlocked = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked';
     // The model tried to compose a governed query and declined despite having usable
     // context (e.g. it wasn't confident about a multi-table join). That is NOT a
     // question for the USER to clarify — it's a case to retry harder: escalate to a
@@ -1468,9 +1622,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // grounding gap or a model decline is retried/escalated by the engine, and a
     // provider outage is surfaced as blocked so the UI offers a retry.
     const needsClarification = governedAnswer.kind === 'no_answer'
-      && !isGroundingGap && !isProviderError && !isModelDeclined;
+      && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
-    const runnableSql = governedAnswer.kind === 'no_answer' ? undefined : sql;
+    const runnableSql = governedAnswer.kind === 'no_answer' || (isExploratory && !governedAnswer.result)
+      ? undefined
+      : sql;
     // Synthesis is a legacy polish pass. Certified/no-answer paths and lanes
     // that already produced DQL-first final prose keep the fast path.
     let synthesizedAnswer: string | undefined;
@@ -1521,18 +1677,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ? 'not_applicable'
         : isCertified
           ? 'certified'
-          : isSemantic
-            ? 'governed'
-            : 'review_required';
+            : isSemantic
+              ? 'governed'
+              : 'review_required';
     const stopReason: AgentRunStopReason = isProviderError
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
         : isCertified
           ? 'certified_answer_found'
-          : isSemantic
-            ? 'governed_semantic_answer'
-            : 'human_review_required';
+            : isSemantic
+              ? 'governed_semantic_answer'
+              : 'human_review_required';
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
       : [
@@ -1544,7 +1700,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       resolvedRoute,
       answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
-      summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
+      summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
       trustState,
@@ -1564,10 +1720,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : [])
         : [agentRunArtifact(
             'answer',
-            isCertified ? 'Certified answer' : isSemantic ? 'Governed semantic answer' : 'Review-required answer',
+            isCertified ? 'Certified answer' : isSemantic ? 'Governed semantic answer' : isExploratory ? 'Exploratory DBT-grounded answer' : 'Review-required answer',
             governedAnswer,
             governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
-            isCertified ? 'certified' : isSemantic ? 'governed' : 'review_required',
+          isCertified ? 'certified' : isSemantic ? 'governed' : 'review_required',
           )],
       evaluations: [
         agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.', {
@@ -1602,8 +1758,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ? 'The answer came from certified DQL context.'
             : isSemantic
               ? 'The answer was compiled and executed from governed semantic definitions; it is not a human-certified reusable block.'
-              : needsClarification
+            : needsClarification
               ? 'The answer loop needs more context before producing a governed answer.'
+              : isPolicyBlocked
+                ? `DQL blocked the generated path under its relationship policy: ${governedAnswer.refusalDetails?.message ?? 'the relationship is not authorized for this analysis.'}`
+              : isExploratory
+                ? 'The answer used bounded DBT/schema evidence because no certified modeled relationship path covered the request. It is review-required and was not certified.'
               : 'The answer is generated or semantic-layer backed and remains review-required.',
           governedAnswer.route,
         ),
@@ -1644,6 +1804,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             suggestedRepair: declinedRepairHint,
             repairAction: { kind: 'escalate' as const, route: 'research' as const, hint: declinedRepairHint },
           },
+        ] : []),
+        ...(isPolicyBlocked ? [
+          agentRunEvaluation(
+            'relationship-policy',
+            'Relationship policy',
+            false,
+            'warning',
+            governedAnswer.refusalDetails?.message
+              ?? 'The selected relationship is not authorized for this analysis.',
+            {
+              refusalCode: governedAnswer.refusalCode,
+              refusalDetails: governedAnswer.refusalDetails,
+              validationWarnings: governedAnswer.validationWarnings,
+              route: governedAnswer.route,
+            },
+          ),
         ] : []),
         ...(governedAnswer.executionError ? [
           agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
@@ -2538,6 +2714,69 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       executionTime: normalized.executionTime,
       sql: prepared.sql,
     };
+  };
+
+  /**
+   * EXP-001: execution host for the deliberately narrow non-governed lane.
+   * It does not reinterpret dbt lineage or shared names as relationship proof.
+   * Instead it validates the generated equality predicates against bounded
+   * samples, records the result as exploratory evidence, then executes the
+   * existing read-only 200-row preview. Any malformed, broad, or unsupported
+   * candidate remains review-required and is not executed automatically.
+   */
+  const executeExploratoryCandidate = async (
+    candidate: NonNullable<AgentAnswer['exploratoryCandidate']>,
+    schemaContext: AgentSchemaTable[] = [],
+    question = '',
+  ): Promise<{
+    result?: AgentResultPayload;
+    proofs: Array<{ summary: string }>;
+    sql: string;
+    repairs: string[];
+    error?: string;
+  }> => {
+    const preflight = repairExploratorySqlBeforeExecution(candidate.sql, schemaContext, question);
+    if (preflight.blockedReason) {
+      return {
+        proofs: [],
+        sql: preflight.sql,
+        repairs: preflight.repairs,
+        error: preflight.blockedReason,
+      };
+    }
+    const analysis = analyzeSqlReferences(preflight.sql);
+    if (!analysis.parsed) {
+      return { proofs: [], sql: preflight.sql, repairs: preflight.repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
+    }
+    // A normal customer → order → order-item → product question needs three
+    // joins. Keep the lane bounded, but do not reject this common dbt-star path
+    // solely because the old two-join demo limit was too small.
+    if (analysis.joins.length > 4) {
+      return { proofs: [], sql: preflight.sql, repairs: preflight.repairs, error: 'This exploratory query has more than four joins and requires an analyst to review the relationship path.' };
+    }
+    if (analysis.joins.some((join) => !join.leftRelation || !join.rightRelation)) {
+      return { proofs: [], sql: preflight.sql, repairs: preflight.repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
+    }
+
+    const activeConnection = requireActiveConnection();
+    const proofs: Array<{ summary: string }> = [];
+    try {
+      for (const join of analysis.joins) {
+        const proofSql = buildExploratoryJoinProbeSql({
+          leftRelation: join.leftRelation!,
+          leftColumn: join.leftColumn,
+          rightRelation: join.rightRelation!,
+          rightColumn: join.rightColumn,
+        });
+        const prepared = prepareLocalExecution(proofSql, activeConnection, projectRoot, projectConfig);
+        const raw = await executor.executeQuery(prepared.sql, [], runtimeVariables({}), prepared.connection);
+        proofs.push({ summary: summarizeExploratoryJoinProbe(raw.rows, join.leftRelation!, join.leftColumn, join.rightRelation!, join.rightColumn) });
+      }
+      const result = await executeGeneratedSqlForAgent(preflight.sql);
+      return { result, proofs, sql: preflight.sql, repairs: preflight.repairs };
+    } catch (error) {
+      return { proofs, sql: preflight.sql, repairs: preflight.repairs, error: error instanceof Error ? error.message : String(error) };
+    }
   };
 
   const getSchemaContextForAgent = async (question: string, preparedContextPack?: LocalContextPack): Promise<AgentSchemaTable[]> => {
@@ -4720,6 +4959,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           context?: { cellSql?: unknown; selection?: unknown };
           target?: unknown;
           owner?: unknown;
+          domain?: unknown;
+          modelAreaId?: unknown;
           mode?: unknown;
           blockPath?: unknown;
         };
@@ -4740,6 +4981,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           selection: typeof body?.context?.selection === 'string' ? body.context.selection : undefined,
         };
         const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const domain = typeof body?.domain === 'string' && body.domain.trim() ? body.domain.trim() : undefined;
+        const modelAreaId = typeof body?.modelAreaId === 'string' && body.modelAreaId.trim() ? body.modelAreaId.trim() : undefined;
+        const purpose = typeof (body as { purpose?: unknown })?.purpose === 'string'
+          ? (body as { purpose?: string }).purpose?.trim() || undefined
+          : undefined;
         const userId = typeof (body as { userId?: unknown })?.userId === 'string'
           ? (body as { userId?: string }).userId
           : undefined;
@@ -4763,6 +5009,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } catch {
           // Best-effort: a failed reindex falls back to whatever KG exists (or none).
         }
+        const { domainContext, contextPack } = await buildDirectBuildContext({
+          question: prompt,
+          domain,
+          purpose,
+          modelAreaId,
+          surface: target === 'cell' ? 'notebook' : 'block',
+          selectedContext: { target, mode, blockPath, owner },
+        });
         // Inject user-authored Skills as business context; the engine selects the
         // relevant subset and stamps `appliedSkills` on the result.
         const skills = loadSkills(projectRoot).skills;
@@ -4774,6 +5028,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           mode,
           blockPath,
           owner,
+          domain,
+          modelAreaId,
+          contextPack,
+          domainContext,
           userId,
           skills,
           dbtManifestPath: resolveDbtManifestPath(projectRoot, loadProjectConfig(projectRoot)),
@@ -10868,6 +11126,7 @@ function serializeSkill(skill: Skill): {
   user?: string;
   domain?: string;
   domains?: string[];
+  modelAreaRefs?: string[];
   kind?: Skill['kind'];
   status?: Skill['status'];
   owner?: string;
@@ -10892,6 +11151,7 @@ function serializeSkill(skill: Skill): {
     user: undefined,
     domain: skill.domain,
     domains: skill.domains,
+    modelAreaRefs: skill.modelAreaRefs,
     kind: skill.kind,
     status: skill.status,
     owner: skill.owner,
@@ -10941,6 +11201,7 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
     user: undefined,
     domain: typeof skill.domain === 'string' && skill.domain.trim() ? skill.domain.trim() : undefined,
     domains: asStrings(skill.domains),
+    modelAreaRefs: asStrings(skill.modelAreaRefs),
     kind: skill.kind === 'domain_reference' || skill.kind === 'metric_policy' || skill.kind === 'glossary' || skill.kind === 'analysis_pattern' || skill.kind === 'sql_policy' ? skill.kind : 'custom',
     status: skill.status === 'draft' || skill.status === 'deprecated' ? skill.status : 'active',
     owner: typeof skill.owner === 'string' ? skill.owner : undefined,
@@ -13114,6 +13375,305 @@ export function buildAgentPreviewSql(sql: string): string {
   const readOnlyError = readOnlySqlValidationError(withoutTrailingSemicolon, 'Generated SQL preview');
   if (readOnlyError) throw new Error(readOnlyError);
   return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
+}
+
+export interface ExploratorySqlPreflightResult {
+  sql: string;
+  repairs: string[];
+  blockedReason?: string;
+}
+
+/**
+ * EXP-001 preflight for model-authored exploratory SQL.
+ *
+ * This is deliberately narrow and deterministic: it repairs a singular/plural
+ * qualifier typo only when it resolves to exactly one relation already present
+ * in the query, and it changes SUM to MAX for a non-additive parent attribute
+ * only when the owning entity is retained in GROUP BY. It never invents a
+ * relation, join key, or allocation rule.
+ */
+export function repairExploratorySqlBeforeExecution(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  question = '',
+): ExploratorySqlPreflightResult {
+  const repairs: string[] = [];
+  let repairedSql = qualifyExploratoryRelationsFromSchema(sql, schemaContext, repairs);
+  repairedSql = repairExploratoryRelationQualifiers(repairedSql, repairs);
+  repairedSql = repairExploratoryLifetimeMeasureSelection(repairedSql, schemaContext, question, repairs);
+  const grainRepair = repairExploratoryNonAdditiveAggregates(repairedSql, schemaContext, repairs);
+  repairedSql = grainRepair.sql;
+  return {
+    sql: repairedSql,
+    repairs,
+    ...(grainRepair.blockedReason ? { blockedReason: grainRepair.blockedReason } : {}),
+  };
+}
+
+function qualifyExploratoryRelationsFromSchema(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  repairs: string[],
+): string {
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed) return sql;
+  let repaired = sql;
+  for (const relation of analysis.tables) {
+    const cleanRelation = relation.replace(/["`\[\]]/g, '');
+    if (cleanRelation.includes('.')) continue;
+    const basename = cleanRelation.toLowerCase();
+    const candidates = schemaContext
+      .map((table) => table.relation)
+      .filter((candidate) => (candidate.split('.').at(-1) ?? candidate).toLowerCase() === basename)
+      .filter((candidate, index, values) => values.indexOf(candidate) === index);
+    if (candidates.length === 0) continue;
+    const compatible = candidates.every((candidate) => candidates.every((other) =>
+      candidate.toLowerCase() === other.toLowerCase()
+      || candidate.toLowerCase().endsWith(`.${other.toLowerCase()}`)
+      || other.toLowerCase().endsWith(`.${candidate.toLowerCase()}`)
+    ));
+    if (!compatible) continue;
+    const replacement = [...candidates].sort((left, right) => right.split('.').length - left.split('.').length)[0]!;
+    if (replacement.toLowerCase() === basename) continue;
+    repaired = repaired.replace(
+      new RegExp(`\\b(from|join)\\s+${escapeExploratoryRegex(cleanRelation)}\\b`, 'gi'),
+      (_match, keyword: string) => `${keyword} ${replacement}`,
+    );
+    repairs.push(`Qualified exploratory relation ${cleanRelation} as inspected relation ${replacement}.`);
+  }
+  return repaired;
+}
+
+function repairExploratoryRelationQualifiers(sql: string, repairs: string[]): string {
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed) return sql;
+  const declared = Object.entries(analysis.aliasToRelation).map(([qualifier, relation]) => ({
+    qualifier,
+    subject: normalizeExploratoryRelationSubject(relation.split('.').at(-1) ?? relation),
+  }));
+  let repaired = sql;
+  const unresolved = analysis.columns
+    .filter((column) => column.tableAlias && column.relation === column.tableAlias && !analysis.aliasToRelation[column.tableAlias])
+    .map((column) => column.tableAlias!)
+    .filter((value, index, values) => values.indexOf(value) === index);
+  for (const qualifier of unresolved) {
+    const subject = normalizeExploratoryRelationSubject(qualifier);
+    const matches = declared.filter((candidate) => candidate.subject === subject);
+    if (matches.length !== 1 || matches[0]!.qualifier === qualifier) continue;
+    const replacement = matches[0]!.qualifier;
+    repaired = repaired.replace(
+      new RegExp(`\\b${escapeExploratoryRegex(qualifier)}\\s*\\.`, 'gi'),
+      `${replacement}.`,
+    );
+    repairs.push(`Corrected unresolved SQL qualifier ${qualifier} to the inspected relation alias ${replacement}.`);
+  }
+  return repaired;
+}
+
+function repairExploratoryLifetimeMeasureSelection(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  question: string,
+  repairs: string[],
+): string {
+  if (!/\b(lifetime|life\s*span|lifespan|customer\s+life)\b/i.test(question)) return sql;
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed || analysis.joins.length === 0) return sql;
+  const groupClause = sql.match(/\bgroup\s+by\s+([\s\S]*?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i)?.[1] ?? '';
+  let repaired = sql;
+  for (const aggregate of analysis.aggregates) {
+    if (aggregate.func.toLowerCase() !== 'sum' || !aggregate.column) continue;
+    const lifetimeColumn = `lifetime_${aggregate.column.toLowerCase()}`;
+    const owner = resolveUniqueExploratoryColumnOwner(schemaContext, lifetimeColumn);
+    if (!owner) continue;
+    const ownerAliases = Object.entries(analysis.aliasToRelation)
+      .filter(([, relation]) => exploratoryRelationsMatch(relation, owner.relation))
+      .map(([alias]) => alias);
+    const ownerRetained = owner.columns.some((ownerColumn) =>
+      new RegExp(`(?:^|[^A-Za-z0-9_$])${escapeExploratoryRegex(ownerColumn.name)}(?:[^A-Za-z0-9_$]|$)`, 'i').test(groupClause)
+    );
+    if (!ownerRetained || ownerAliases.length === 0) continue;
+    const sourcePattern = new RegExp(
+      `\\bsum\\s*\\(\\s*(?:[A-Za-z_][A-Za-z0-9_$]*\\s*\\.\\s*)?${escapeExploratoryRegex(aggregate.column)}\\s*\\)`,
+      'gi',
+    );
+    if (!sourcePattern.test(repaired)) continue;
+    repaired = repaired.replace(sourcePattern, `MAX(${ownerAliases[0]}.${lifetimeColumn})`);
+    repairs.push(`Used ${lifetimeColumn} from ${owner.name} at the retained entity grain instead of multiplying ${aggregate.column} across lower-grain joined rows.`);
+  }
+  return repaired;
+}
+
+function repairExploratoryNonAdditiveAggregates(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  repairs: string[],
+): { sql: string; blockedReason?: string } {
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed || analysis.joins.length === 0) return { sql };
+  const risky = analysis.aggregates.filter((aggregate) =>
+    aggregate.func.toLowerCase() === 'sum'
+    && Boolean(aggregate.column)
+    && /(^|_)(lifetime|cumulative|balance|snapshot|rate|ratio|average|avg)(_|$)/i.test(aggregate.column!),
+  );
+  if (risky.length === 0) return { sql };
+
+  const groupClause = sql.match(/\bgroup\s+by\s+([\s\S]*?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i)?.[1] ?? '';
+  let repaired = sql;
+  for (const aggregate of risky) {
+    const column = aggregate.column!;
+    const owner = resolveUniqueExploratoryColumnOwner(schemaContext, column);
+    if (!owner) {
+      return {
+        sql: repaired,
+        blockedReason: `The exploratory query sums non-additive measure ${column} after a join, but DQL cannot prove its owning grain. Clarify the desired allocation or keep the owning entity in the result.`,
+      };
+    }
+    const ownerAliases = Object.entries(analysis.aliasToRelation)
+      .filter(([, relation]) => exploratoryRelationsMatch(relation, owner.relation))
+      .map(([alias]) => alias);
+    const ownerRetained = owner.columns.some((ownerColumn) => {
+      const name = escapeExploratoryRegex(ownerColumn.name);
+      if (new RegExp(`(?:^|[^A-Za-z0-9_$])${name}(?:[^A-Za-z0-9_$]|$)`, 'i').test(groupClause)) return true;
+      return ownerAliases.some((alias) => new RegExp(`\\b${escapeExploratoryRegex(alias)}\\s*\\.\\s*${name}\\b`, 'i').test(groupClause));
+    });
+    if (!ownerRetained) {
+      return {
+        sql: repaired,
+        blockedReason: `The exploratory query would allocate non-additive measure ${column} below its owning ${owner.name} grain. Keep ${owner.name} in the output or provide an allocation policy.`,
+      };
+    }
+    const sumPattern = new RegExp(
+      `\\bsum\\s*\\(\\s*((?:[A-Za-z_][A-Za-z0-9_$]*\\s*\\.\\s*)?${escapeExploratoryRegex(column)})\\s*\\)`,
+      'gi',
+    );
+    if (!sumPattern.test(repaired)) continue;
+    repaired = repaired.replace(sumPattern, 'MAX($1)');
+    repairs.push(`Preserved non-additive ${column} at ${owner.name} grain instead of summing repeated values after the join.`);
+  }
+  return { sql: repaired };
+}
+
+function resolveUniqueExploratoryColumnOwner(
+  schemaContext: AgentSchemaTable[],
+  column: string,
+): AgentSchemaTable | undefined {
+  const candidates = schemaContext.filter((table) =>
+    table.columns.some((candidate) => candidate.name.toLowerCase() === column.toLowerCase())
+  );
+  if (candidates.length === 0) return undefined;
+  const compatible = candidates.every((candidate) => candidates.every((other) =>
+    exploratoryRelationsMatch(candidate.relation, other.relation)
+  ));
+  if (!compatible) return undefined;
+  const preferred = [...candidates].sort((left, right) =>
+    right.relation.split('.').length - left.relation.split('.').length
+  )[0]!;
+  const columns = new Map<string, AgentSchemaTable['columns'][number]>();
+  for (const candidate of candidates) {
+    for (const candidateColumn of candidate.columns) columns.set(candidateColumn.name.toLowerCase(), candidateColumn);
+  }
+  return { ...preferred, columns: [...columns.values()] };
+}
+
+function normalizeExploratoryRelationSubject(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (normalized.endsWith('ies') && normalized.length > 4) return `${normalized.slice(0, -3)}y`;
+  if (normalized.endsWith('s') && normalized.length > 3) return normalized.slice(0, -1);
+  return normalized;
+}
+
+function exploratoryRelationsMatch(left: string, right: string): boolean {
+  const leftLower = left.toLowerCase();
+  const rightLower = right.toLowerCase();
+  return leftLower === rightLower
+    || leftLower.endsWith(`.${rightLower}`)
+    || rightLower.endsWith(`.${leftLower}`)
+    || normalizeExploratoryRelationSubject(leftLower.split('.').at(-1) ?? leftLower)
+      === normalizeExploratoryRelationSubject(rightLower.split('.').at(-1) ?? rightLower);
+}
+
+function escapeExploratoryRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Render parser-derived physical identifiers only; exploratory probes never interpolate arbitrary SQL. */
+function quoteExploratoryIdentifier(value: string, label: string): string {
+  const parts = value
+    .replace(/["`\[\]]/g, '')
+    .split('.')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(part))) {
+    throw new Error(`Exploratory ${label} is not a safe physical identifier.`);
+  }
+  return parts.map((part) => `"${part.replace(/"/g, '""')}"`).join('.');
+}
+
+/** One bounded, sampled relationship observation per inferred equality join. */
+export function buildExploratoryJoinProbeSql(input: {
+  leftRelation: string;
+  leftColumn: string;
+  rightRelation: string;
+  rightColumn: string;
+}): string {
+  const leftRelation = quoteExploratoryIdentifier(input.leftRelation, 'left relation');
+  const leftColumn = quoteExploratoryIdentifier(input.leftColumn, 'left column');
+  const rightRelation = quoteExploratoryIdentifier(input.rightRelation, 'right relation');
+  const rightColumn = quoteExploratoryIdentifier(input.rightColumn, 'right column');
+  return `WITH
+  left_sample AS (
+    SELECT ${leftColumn} AS join_key
+    FROM ${leftRelation}
+    WHERE ${leftColumn} IS NOT NULL
+    LIMIT 5000
+  ),
+  right_sample AS (
+    SELECT ${rightColumn} AS join_key
+    FROM ${rightRelation}
+    WHERE ${rightColumn} IS NOT NULL
+    LIMIT 5000
+  ),
+  matches AS (
+    SELECT l.join_key AS left_key, r.join_key AS right_key
+    FROM left_sample AS l
+    INNER JOIN right_sample AS r ON l.join_key = r.join_key
+  ),
+  left_counts AS (
+    SELECT left_key, COUNT(*) AS match_count
+    FROM matches
+    GROUP BY left_key
+  ),
+  right_counts AS (
+    SELECT right_key, COUNT(*) AS match_count
+    FROM matches
+    GROUP BY right_key
+  )
+SELECT
+  (SELECT COUNT(*) FROM left_sample) AS left_sample_rows,
+  (SELECT COUNT(*) FROM right_sample) AS right_sample_rows,
+  (SELECT COUNT(*) FROM matches) AS joined_rows,
+  (SELECT COUNT(*) FROM left_sample AS l WHERE NOT EXISTS (SELECT 1 FROM right_sample AS r WHERE r.join_key = l.join_key)) AS unmatched_left_sample_rows,
+  (SELECT COUNT(*) FROM right_sample AS r WHERE NOT EXISTS (SELECT 1 FROM left_sample AS l WHERE l.join_key = r.join_key)) AS unmatched_right_sample_rows,
+  (SELECT COALESCE(MAX(match_count), 0) FROM left_counts) AS max_matches_per_left_key,
+  (SELECT COALESCE(MAX(match_count), 0) FROM right_counts) AS max_matches_per_right_key`;
+}
+
+function summarizeExploratoryJoinProbe(
+  rows: unknown[],
+  leftRelation: string,
+  leftColumn: string,
+  rightRelation: string,
+  rightColumn: string,
+): string {
+  const row = Array.isArray(rows) && rows[0] && typeof rows[0] === 'object'
+    ? rows[0] as Record<string, unknown>
+    : {};
+  const number = (key: string) => {
+    const value = Number(row[key]);
+    return Number.isFinite(value) ? value : 0;
+  };
+  return `${leftRelation}.${leftColumn} ↔ ${rightRelation}.${rightColumn}: sample left=${number('left_sample_rows')}, right=${number('right_sample_rows')}, joined=${number('joined_rows')}, unmatched left/right=${number('unmatched_left_sample_rows')}/${number('unmatched_right_sample_rows')}, max matches left/right=${number('max_matches_per_left_key')}/${number('max_matches_per_right_key')}`;
 }
 
 function readOnlySqlValidationError(sql: string, subject: string): string | null {

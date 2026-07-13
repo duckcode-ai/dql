@@ -9,6 +9,8 @@ domains/
     domain.dql
     modeling/
       model.dql.yaml
+      areas/
+        <area-id>.dql.yaml
       layouts/
     terms/
     skills/
@@ -57,6 +59,8 @@ interface DomainContextEnvelope {
     purpose: string;
   }>;
   purpose?: string;
+  /** Optional focused Model Area; a ranking hint inside activeDomain only. */
+  modelAreaId?: string;
   source: "explicit_ui" | "explicit_api" | "inferred";
   confidence: "high" | "medium" | "low";
   snapshotId: string;
@@ -108,6 +112,11 @@ evidence. Ambiguous membership remains unresolved until reviewed.
   certified blocks/views, evaluations, and lifecycle.
 - A global skill describes reusable execution technique. A domain skill carries
   vocabulary/policy for one domain and participates in that domain context.
+- A Model Area is one small, Git-backed source section under
+  `modeling/areas/<area-id>.dql.yaml`. Areas compile into the same canonical
+  domain graph: they are source ownership, diagram, and retrieval-ranking
+  hints, never a second semantic model or authorization boundary. An entity has
+  one owning area; another area may show it only as a read-only reference.
 - Product ownership is stewardship only; authorization remains a runtime/Cloud
   concern.
 

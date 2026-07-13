@@ -66,6 +66,7 @@ import type { QuestionScope } from '../hints/types.js';
 import { buildFtsMatch, sanitizeFtsQuery } from '../memory/fts-query.js';
 import { envEmbeddingProvider } from '../embeddings/provider.js';
 import { matchExampleParaphrase } from './example-match.js';
+import { loadSkills, selectRelevantSkills, type Skill } from '../skills/loader.js';
 
 /** An approved scoped hint folded into a context pack (after certified routing). */
 export interface AppliedContextHint {
@@ -158,6 +159,8 @@ export interface MetadataDomainShard {
 export interface EnsureMetadataCatalogOptions {
   manifest?: DQLManifest;
   semanticLayer?: SemanticLayer | null;
+  /** Parsed skills from the same project read used to prepare the KG. */
+  skills?: Skill[];
   force?: boolean;
 }
 
@@ -404,6 +407,34 @@ export interface PlanAgentAnswerResult {
   freshness: LocalContextPack['freshness'];
 }
 
+/** Compact skill payload selected for one context-pack snapshot. */
+export interface LocalContextSkill {
+  objectKey: string;
+  id: string;
+  qualifiedId?: string;
+  domain?: string;
+  domains: string[];
+  modelAreaRefs: string[];
+  kind?: Skill['kind'];
+  status?: Skill['status'];
+  owner?: string;
+  description?: string;
+  triggers: string[];
+  exclusions: string[];
+  preferredMetrics: string[];
+  preferredBlocks: string[];
+  preferredDimensions: string[];
+  requiredFilters: string[];
+  clarifyWhen: string[];
+  vocabulary: Record<string, string>;
+  /** Bounded prompt-safe guidance; the full source remains fingerprinted in the catalog. */
+  guidance: string;
+  guidanceTruncated: boolean;
+  sourceRefs: string[];
+  provenance: string;
+  sourcePath?: string;
+}
+
 export interface LocalContextPack {
   id: string;
   question: string;
@@ -415,6 +446,12 @@ export interface LocalContextPack {
   /** Canonical shared trust vocabulary; additive companion to legacy `trustLabel`. */
   trustLabelInfo?: ResolvedTrustLabel;
   objects: MetadataObject[];
+  /**
+   * Bounded, in-scope guidance selected from the immutable catalog snapshot.
+   * This is separate from generic retrieved objects so hosts can render the
+   * exact skill provenance without re-reading mutable files mid-run.
+   */
+  skills: LocalContextSkill[];
   edges: MetadataEdge[];
   queryRuns: QueryRunSummary[];
   citations: Array<{
@@ -650,7 +687,8 @@ export async function ensureMetadataCatalogFresh(
     ? options.semanticLayer ?? undefined
     : loadAgentSemanticLayer(projectRoot);
   const manifest = options.manifest ?? loadAgentManifest(projectRoot);
-  const snapshot = buildMetadataSnapshot(projectRoot, manifest, semanticLayer);
+  const skills = options.skills ?? loadSkills(projectRoot).skills;
+  const snapshot = buildMetadataSnapshot(projectRoot, manifest, semanticLayer, skills);
   const catalog = openMetadataCatalog(projectRoot);
   try {
     const existing = catalog.state('fingerprint');
@@ -786,7 +824,11 @@ export async function buildLocalContextPack(
       ...questionPlan.searchQueries,
     ]);
     const scopeObjects = (rows: MetadataObject[]) => filterMetadataObjectsByDomainContext(rows, request.domainContext);
-    const searchRows = scopeObjects(mergeObjects(searchQueries.flatMap((query) =>
+    // Skill guidance is injected only through selectContextPackSkills below.
+    // Leaving it in generic FTS results would bypass status/domain/area/exclusion
+    // eligibility simply because a word in its body matched the question.
+    const retrievalObjects = (rows: MetadataObject[]) => scopeObjects(rows).filter((row) => row.objectType !== 'skill');
+    const searchRows = retrievalObjects(mergeObjects(searchQueries.flatMap((query) =>
       catalog.searchObjects({
         query,
         objectTypes: request.objectTypes,
@@ -796,9 +838,9 @@ export async function buildLocalContextPack(
     const schemaShapeCandidates = schemaShapeCandidateObjects(catalog, questionPlan, request, mergeObjects([...runtimeObjects, ...runtimeValueObjects]));
     const schemaShapeObjects = schemaShapeCandidates.map((candidate) => candidate.object);
     const exactCandidate = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
-    const exact = exactCandidate && scopeObjects([exactCandidate]).length > 0 ? exactCandidate : null;
+    const exact = exactCandidate && retrievalObjects([exactCandidate]).length > 0 ? exactCandidate : null;
     const ranked = rankMetadataObjects({
-      rows: scopeObjects(mergeObjects(exact
+      rows: retrievalObjects(mergeObjects(exact
         ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]
         : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects])),
       question: searchQueries.join(' '),
@@ -814,9 +856,9 @@ export async function buildLocalContextPack(
     const focusObjectKey = request.focusObjectKey ?? selected[0]?.objectKey ?? null;
     const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
     const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
-    const graphObjects = scopeObjects(catalog.getObjectsByKeys(edgeObjectKeys));
+    const graphObjects = retrievalObjects(catalog.getObjectsByKeys(edgeObjectKeys));
     const rankedObjects = rankMetadataObjects({
-      rows: scopeObjects(mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects])),
+      rows: retrievalObjects(mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects])),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 120,
@@ -830,12 +872,21 @@ export async function buildLocalContextPack(
     // entire relation set ("send everything, let the agent decide"). Only when the
     // whole catalog fits comfortably in context — otherwise we keep ranked selection.
     const fullCatalogObjects = request.strictness === 'exploratory'
-      ? scopeObjects(collectFullCatalogObjects(catalog) ?? [])
+      ? retrievalObjects(collectFullCatalogObjects(catalog) ?? [])
       : undefined;
     const usedFullCatalog = Boolean(fullCatalogObjects);
+    // Skills are selected from the catalog snapshot with the same hard domain,
+    // area, status, and exclusion gates as the loader. They are not left to FTS
+    // chance or re-read from disk after the snapshot has been fingerprinted.
+    const selectedSkills = selectContextPackSkills(
+      catalog.listObjects({ objectTypes: ['skill'], limit: 500 }),
+      request.question,
+      request.domainContext,
+    );
+    const selectedSkillObjects = selectedSkills.map((item) => item.object);
     const objects = fullCatalogObjects
-      ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects])
-      : mergeObjects([...rankedObjects, ...sqlParentObjects]);
+      ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects, ...selectedSkillObjects])
+      : mergeObjects([...rankedObjects, ...sqlParentObjects, ...selectedSkillObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
     const allowedObjectKeys = new Set(objectKeys);
     const contextEdges = mergeMetadataEdges([
@@ -864,7 +915,7 @@ export async function buildLocalContextPack(
     const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext, contextEdges);
     const evidenceRoles = buildEvidenceRoles(objects, queryRuns);
     const reranked = rankMetadataObjects({
-      rows: scopeObjects(mergeObjects([...searchRows, ...schemaShapeObjects, ...objects])),
+      rows: retrievalObjects(mergeObjects([...searchRows, ...schemaShapeObjects, ...objects])),
       question: searchQueries.join(' '),
       questionPlan,
       limit: request.limit ?? 120,
@@ -908,6 +959,7 @@ export async function buildLocalContextPack(
       trustLabel,
       trustLabelInfo: metadataTrustLabelInfo(trustLabel),
       objects,
+      skills: selectedSkills.map((item) => item.skill),
       edges: contextEdges,
       queryRuns,
       citations,
@@ -1009,6 +1061,7 @@ export function buildMetadataSnapshot(
   projectRoot: string,
   manifest: DQLManifest,
   semanticLayer?: SemanticLayer,
+  skills: Skill[] = loadSkills(projectRoot).skills,
 ): MetadataSnapshot {
   const manifestGraph = buildKGFromManifest(manifest);
   const semanticGraph = buildKGFromSemanticLayer(semanticLayer);
@@ -1035,6 +1088,7 @@ export function buildMetadataSnapshot(
   }
 
   addManifestBlockDetails(manifest, objects);
+  addSkillObjects(skills, objects, edges);
   addDbtDagObjects(manifest, objects, edges, diagnostics);
   addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
   addBlockDependencyEdges(manifest, edges);
@@ -2089,6 +2143,78 @@ function normalizeEdge(edge: KGEdge, fromKey: string, toKey: string): MetadataEd
     confidence: edge.weight ?? 1,
     payload: { kgSource: edge.src, kgTarget: edge.dst },
   };
+}
+
+/**
+ * Skills are source-owned context, not a prompt-only side channel. Persist their
+ * parsed fields in the catalog snapshot so selection, provenance, and
+ * fingerprinting all observe the same immutable project state.
+ */
+function addSkillObjects(
+  skills: Skill[],
+  objects: Map<string, MetadataObject>,
+  edges: Map<string, MetadataEdge>,
+): void {
+  for (const skill of skills) {
+    const identity = skill.qualifiedId ?? skill.id;
+    const objectKey = `skill:${identity}`;
+    const domains = uniqueNonBlank([skill.domain, ...(skill.domains ?? [])]);
+    const object: MetadataObject = {
+      objectKey,
+      objectType: 'skill',
+      name: skill.id,
+      fullName: skill.qualifiedId ?? skill.id,
+      domain: skill.domain,
+      owner: skill.owner,
+      status: skill.status ?? 'active',
+      description: skill.description ?? compactSkillDescription(skill.body),
+      sourcePath: skill.sourcePath,
+      sourceSystem: 'DQL domain skill',
+      payload: compactObject({
+        skillId: skill.id,
+        localId: skill.localId ?? skill.id,
+        qualifiedId: skill.qualifiedId,
+        scope: skill.scope,
+        user: skill.user,
+        domains,
+        modelAreaRefs: skill.modelAreaRefs ?? [],
+        kind: skill.kind,
+        triggers: skill.triggers ?? [],
+        exclusions: skill.exclusions ?? [],
+        preferredMetrics: skill.preferredMetrics,
+        preferredBlocks: skill.preferredBlocks,
+        preferredDimensions: skill.preferredDimensions ?? [],
+        requiredFilters: skill.requiredFilters ?? [],
+        clarifyWhen: skill.clarifyWhen ?? [],
+        examples: skill.examples ?? [],
+        sourceRefs: skill.sourceRefs ?? [],
+        vocabulary: skill.vocabulary,
+        body: skill.body,
+        isStarter: skill.isStarter,
+        provenance: 'DQL domain skill',
+      }),
+    };
+    objects.set(objectKey, object);
+    for (const domain of domains) {
+      const edge: MetadataEdge = {
+        edgeType: 'contains',
+        fromKey: `domain:${domain}`,
+        toKey: objectKey,
+        confidence: 1,
+        payload: { provenance: 'DQL domain skill' },
+      };
+      edges.set(`${edge.edgeType}\u0000${edge.fromKey}\u0000${edge.toKey}`, edge);
+    }
+  }
+}
+
+function compactSkillDescription(body: string): string | undefined {
+  const normalized = body.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, 480) : undefined;
+}
+
+function uniqueNonBlank(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
 }
 
 function addDbtDagObjects(
@@ -3197,9 +3323,40 @@ async function planContextPackRoute(input: {
   const exactByApplicability = [...applicabilityByKey.values()]
     .filter((item) => item.kind === 'exact_answer' || item.kind === 'safe_parameterized')
     .sort((a, b) => b.score - a.score)[0];
+  // Analytical questions intentionally keep certified applicability conservative:
+  // a lexical/content match alone must not terminate the cascade. A certified
+  // block whose declared/inferred output contract fully covers the requested
+  // answer shape is different, however — that is a proven Tier 1 answer even
+  // when the planner also knows how to generate SQL. Promote only exact/trim-safe
+  // contract fits here; near matches remain context for Tier 2.
+  const exactByContract = input.objects
+    .filter((object) =>
+      object.objectType === 'dql_block'
+      && isCertifiedMetadataObject(object)
+      && hasCompatibleMetadataRankingDirection(input.request.question, object)
+    )
+    .map((object) => ({
+      object,
+      fit: evaluateCertifiedBlockFit({
+        question: input.request.question,
+        plan: input.questionPlan,
+        block: object,
+        exactExampleMatch: hasExactExampleQuestion(input.request.question, object),
+        definitionLookup: intent === 'definition_lookup',
+      }),
+      applicabilityScore: applicabilityByKey.get(object.objectKey)?.score ?? 0,
+    }))
+    .filter(({ fit }) =>
+      (fit.kind === 'exact' || fit.kind === 'trim_safe')
+      && (fit.confidence === 'high' || fit.confidence === 'medium')
+    )
+    .sort((a, b) =>
+      (b.fit.confidence === 'high' ? 1 : 0) - (a.fit.confidence === 'high' ? 1 : 0)
+      || b.applicabilityScore - a.applicabilityScore
+    )[0]?.object;
   let exact = exactByApplicability
     ? input.objects.find((object) => object.objectKey === exactByApplicability.objectKey)
-    : findExactCertifiedObject(input.request.question, intent, input.objects);
+    : findExactCertifiedObject(input.request.question, intent, input.objects) ?? exactByContract;
   const contextApplicability = [...applicabilityByKey.values()]
     .filter((item) => item.kind === 'context_only')
     .sort((a, b) => b.score - a.score)[0];
@@ -3217,6 +3374,13 @@ async function planContextPackRoute(input: {
       exact = candidate;
       paraphraseExampleMatch = true;
     }
+  }
+  // Keep the strongest context-only certified candidate attached to the route
+  // so the contract and grain gates can explain exactly why it is demoted.
+  // This does not promote a loose match: both gates still have to pass before
+  // Tier 1 is possible.
+  if (!exact && contextApplicability) {
+    exact = input.objects.find((object) => object.objectKey === contextApplicability.objectKey);
   }
   const certifiedApplicability = exact
     ? applicabilityByKey.get(exact.objectKey) ?? certifiedApplicabilityForObject(exact, input.questionPlan)
@@ -3290,6 +3454,7 @@ async function planContextPackRoute(input: {
     || intent === 'definition_lookup'
     || exactExampleMatch
     || paraphraseExampleMatch
+    || (blockFit && certifiedFitAllowsTier1(blockFit) && hasCompatibleMetadataRankingDirection(input.request.question, exact))
     || (intent === 'ad_hoc_ranking' && objectNameInQuestion(input.request.question, exact))
   )) {
     return {
@@ -3317,7 +3482,7 @@ async function planContextPackRoute(input: {
       route: 'generated_sql',
       intent: isGeneratedMetadataIntent(intent) ? intent : 'ad_hoc_ranking',
       reason: `Certified block "${exact.name}" is close but answers a different grain than the question, so it is context only and SQL is generated for the requested grain.`,
-      routeReason: grainGate.reason,
+      routeReason: `${grainGate.reason}; routed to Tier 2 generated SQL`,
       grainGate: grainGateInfo,
       blockFit,
       trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
@@ -3336,7 +3501,7 @@ async function planContextPackRoute(input: {
       route: 'generated_sql',
       intent: isGeneratedMetadataIntent(intent) ? intent : 'ad_hoc_ranking',
       reason: `Certified block "${exact.name}" is relevant but does not satisfy the requested answer shape, so it is context only and SQL is generated for the requested result.`,
-      routeReason: blockFit.reasons.join('; '),
+      routeReason: `${blockFit.reasons.join('; ')}; routed to Tier 2 generated SQL`,
       grainGate: grainGateInfo,
       blockFit,
       trustLabel: input.trustLabel === 'certified' ? 'mixed' : input.trustLabel,
@@ -3731,7 +3896,8 @@ function hasCompatibleMetadataRankingDirection(question: string, object: Metadat
   const objectDirection = rankingDirection([
     object.name,
     object.description ?? '',
-    JSON.stringify(object.payload ?? {}),
+    Array.isArray(object.payload?.tags) ? object.payload.tags.join(' ') : '',
+    typeof object.payload?.sql === 'string' ? object.payload.sql : '',
   ].join(' '));
   if (!objectDirection) return true;
   return questionDirection === objectDirection;
@@ -5755,6 +5921,119 @@ function filterMetadataObjectsByDomainContext(rows: MetadataObject[], context?: 
     ...context.allowedImports.map((item) => item.providerDomain),
   ]);
   return rows.filter((row) => !row.domain || domains.has(row.domain));
+}
+
+function selectContextPackSkills(
+  objects: MetadataObject[],
+  question: string,
+  context?: DomainContextEnvelope,
+): Array<{ object: MetadataObject; skill: LocalContextSkill }> {
+  const byIdentity = new Map<string, MetadataObject>();
+  const parsed = objects.flatMap((object) => {
+    const skill = skillFromMetadataObject(object);
+    if (!skill) return [];
+    const identity = skill.qualifiedId ?? skill.id;
+    byIdentity.set(identity, object);
+    return [skill];
+  });
+  const domains = context?.activeDomain
+    ? [context.activeDomain, ...context.ancestors, ...context.allowedImports.map((item) => item.providerDomain)]
+    : [];
+  const selected = selectRelevantSkills(parsed, question, {
+    domains,
+    modelAreaIds: context?.modelAreaId ? [context.modelAreaId] : [],
+  });
+  return selected.flatMap((skill) => {
+    const object = byIdentity.get(skill.qualifiedId ?? skill.id);
+    return object ? [{ object, skill: localContextSkillFromParsed(skill, object) }] : [];
+  });
+}
+
+function skillFromMetadataObject(object: MetadataObject): Skill | null {
+  if (object.objectType !== 'skill') return null;
+  const payload = object.payload ?? {};
+  const scope = payload.scope === 'personal' ? 'personal' : 'project';
+  const status = payload.status === 'draft' || payload.status === 'deprecated' || payload.status === 'active'
+    ? payload.status
+    : object.status === 'draft' || object.status === 'deprecated' || object.status === 'active'
+      ? object.status
+      : 'active';
+  return {
+    id: stringPayload(payload.skillId) ?? object.name,
+    localId: stringPayload(payload.localId) ?? object.name,
+    qualifiedId: stringPayload(payload.qualifiedId) ?? object.fullName,
+    scope,
+    user: stringPayload(payload.user),
+    domain: object.domain,
+    domains: stringArrayPayload(payload.domains),
+    modelAreaRefs: stringArrayPayload(payload.modelAreaRefs),
+    kind: skillKindPayload(payload.kind),
+    status,
+    owner: object.owner,
+    triggers: stringArrayPayload(payload.triggers),
+    exclusions: stringArrayPayload(payload.exclusions),
+    description: object.description,
+    preferredMetrics: stringArrayPayload(payload.preferredMetrics),
+    preferredBlocks: stringArrayPayload(payload.preferredBlocks),
+    preferredDimensions: stringArrayPayload(payload.preferredDimensions),
+    requiredFilters: stringArrayPayload(payload.requiredFilters),
+    clarifyWhen: stringArrayPayload(payload.clarifyWhen),
+    examples: stringArrayPayload(payload.examples),
+    sourceRefs: stringArrayPayload(payload.sourceRefs),
+    vocabulary: stringRecordPayload(payload.vocabulary),
+    body: stringPayload(payload.body) ?? '',
+    sourcePath: object.sourcePath ?? '',
+    isStarter: payload.isStarter === true,
+  };
+}
+
+function localContextSkillFromParsed(skill: Skill, object: MetadataObject): LocalContextSkill {
+  const guidance = skill.body.slice(0, 4_000);
+  return {
+    objectKey: object.objectKey,
+    id: skill.id,
+    qualifiedId: skill.qualifiedId,
+    domain: skill.domain,
+    domains: [...(skill.domains ?? [])],
+    modelAreaRefs: [...(skill.modelAreaRefs ?? [])],
+    kind: skill.kind,
+    status: skill.status,
+    owner: skill.owner,
+    description: skill.description,
+    triggers: [...(skill.triggers ?? [])],
+    exclusions: [...(skill.exclusions ?? [])],
+    preferredMetrics: [...skill.preferredMetrics],
+    preferredBlocks: [...skill.preferredBlocks],
+    preferredDimensions: [...(skill.preferredDimensions ?? [])],
+    requiredFilters: [...(skill.requiredFilters ?? [])],
+    clarifyWhen: [...(skill.clarifyWhen ?? [])],
+    vocabulary: { ...skill.vocabulary },
+    guidance,
+    guidanceTruncated: guidance.length < skill.body.length,
+    sourceRefs: [...(skill.sourceRefs ?? [])],
+    provenance: stringPayload(object.payload?.provenance) ?? object.sourceSystem ?? 'DQL domain skill',
+    sourcePath: object.sourcePath,
+  };
+}
+
+function stringPayload(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function stringArrayPayload(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())) : [];
+}
+
+function stringRecordPayload(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+}
+
+function skillKindPayload(value: unknown): Skill['kind'] | undefined {
+  return value === 'domain_reference' || value === 'metric_policy' || value === 'glossary'
+    || value === 'analysis_pattern' || value === 'sql_policy' || value === 'custom'
+    ? value
+    : undefined;
 }
 
 function mergeObjects(rows: MetadataObject[]): MetadataObject[] {

@@ -13,6 +13,13 @@ describe('resolveDomainContextEnvelope', () => {
         growth: { id: 'growth', filePath: 'domains/growth/domain.dql', parent: 'company', exports: [] },
         commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] },
       },
+      areas: {
+        'growth::model_area::acquisition': {
+          id: 'growth::model_area::acquisition', localId: 'acquisition', qualifiedId: 'growth::model_area::acquisition',
+          domain: 'growth', name: 'Acquisition', intentExamples: [], entityIds: [], relationshipIds: [], referencedEntityIds: [],
+          sourcePath: 'domains/growth/modeling/areas/acquisition.dql.yaml',
+        },
+      },
       entities: {}, relationships: {}, contracts: {
         'commerce::contract::customer_contract': {
           id: 'commerce::contract::customer_contract', localId: 'customer_contract', qualifiedId: 'commerce::contract::customer_contract',
@@ -54,5 +61,11 @@ describe('resolveDomainContextEnvelope', () => {
 
   it('rejects unknown domains instead of falling back', () => {
     expect(() => resolveDomainContextEnvelope({ manifest, activeDomain: 'unknown' })).toThrow('Unknown domain');
+  });
+
+  it('accepts a focused area only within the active domain', () => {
+    const context = resolveDomainContextEnvelope({ manifest, activeDomain: 'growth', modelAreaId: 'growth::model_area::acquisition' });
+    expect(context.modelAreaId).toBe('growth::model_area::acquisition');
+    expect(() => resolveDomainContextEnvelope({ manifest, activeDomain: 'commerce', modelAreaId: 'acquisition' })).toThrow('does not belong');
   });
 });

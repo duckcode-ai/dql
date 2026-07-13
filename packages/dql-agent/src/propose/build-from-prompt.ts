@@ -29,6 +29,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { Certifier } from '@duckcodeailabs/dql-governance';
+import { buildManifest, type ManifestModelArea, type ManifestModelEntity } from '@duckcodeailabs/dql-core';
 import type { BlockRecord, BlockStatus } from '@duckcodeailabs/dql-project';
 import {
   reflectAndReviseBlock,
@@ -55,6 +56,8 @@ import {
 import { selectRelevantModels } from '../metadata/sql-retrieval.js';
 import type { Skill } from '../skills/loader.js';
 import { buildSkillsPrompt, expandQuestionWithSkillVocabulary, loadSkills, selectRelevantSkills } from '../skills/loader.js';
+import type { LocalContextPack, LocalContextSkill } from '../metadata/catalog.js';
+import { domainContextSearchDomains, type DomainContextEnvelope } from '../domain-context.js';
 import { pickProvider } from '../providers/index.js';
 import type { AgentProvider } from '../providers/types.js';
 import { loadDbtArtifacts, type DbtArtifacts } from './dbt-artifacts.js';
@@ -76,6 +79,11 @@ export interface BuildFromPromptContext {
 
 /** Build mode (spec 17, part A). `edit` updates an existing block in place. */
 export type BuildMode = 'create' | 'edit';
+
+type FocusedModelAreaContext = {
+  area: ManifestModelArea;
+  entities: ManifestModelEntity[];
+};
 
 /** The chosen route surfaced on the build response (spec 17, part C). */
 export interface BuildRoute {
@@ -117,6 +125,16 @@ export interface BuildFromPromptOptions {
   dbtManifestPath?: string;
   /** Domain for a built block draft. Defaults to `misc`. */
   domain?: string;
+  /** Focused Model Area used to rank skills inside the selected domain. */
+  modelAreaId?: string;
+  /**
+   * Immutable, server-built evidence envelope shared with Ask and other AI
+   * surfaces. When supplied it is the only metadata/skill scope this direct
+   * build may consume; mutable on-disk retrieval must not widen it.
+   */
+  contextPack?: LocalContextPack;
+  /** Server-resolved domain authorization for this build request. */
+  domainContext?: DomainContextEnvelope;
   /** Active user, for personal-skill selection. */
   userId?: string;
   /**
@@ -141,7 +159,24 @@ export interface BuildFromPromptOptions {
 /** The Skills that shaped this build (stamped on both targets). */
 export interface AppliedSkill {
   id: string;
+  qualifiedId?: string;
   description?: string;
+  /** Immutable context-pack or source-file provenance for UI/audit display. */
+  provenance?: string;
+}
+
+/** Direct Build returns an editable proposal, never an answer certification. */
+export interface BuildTrustDiagnostics {
+  sourceTrust: 'governed_semantic_source' | 'exploratory_dbt_grounded';
+  reviewRequired: true;
+  contextPackId?: string;
+  snapshotId?: string;
+  activeDomain?: string;
+  selectedSkillIds: string[];
+  selectedSkillProvenance: Array<{ id: string; qualifiedId?: string; provenance?: string }>;
+  allowedRelations: string[];
+  joinPolicy: 'semantic_definition' | 'dbt_hints_are_not_governed_proof';
+  warnings: string[];
 }
 
 export interface BuildCellResult {
@@ -150,6 +185,7 @@ export interface BuildCellResult {
   explanation?: string;
   /** Skills that shaped the answer, for UI transparency. */
   appliedSkills?: AppliedSkill[];
+  diagnostics?: BuildTrustDiagnostics;
 }
 
 export interface BuildBlockResult {
@@ -178,6 +214,7 @@ export interface BuildBlockResult {
    * auto-fixed (output contract, governance gaps), and what remains for the human.
    */
   reflection?: BlockReflection;
+  diagnostics?: BuildTrustDiagnostics;
 }
 
 export type BuildFromPromptResult = BuildCellResult | BuildBlockResult;
@@ -194,14 +231,14 @@ const CELL_SYSTEM_PROMPT =
   'Use ONLY the relations and columns provided. Reference each table by its ' +
   'fully-qualified relation (database.schema.table) EXACTLY as shown — never a ' +
   'bare model name, never a table or column not in the grounding. Use the ' +
-  'listed join keys to connect tables. ' +
+  'listed join keys only as schema-grounded hypotheses; dbt DAG lineage and shared column names are NOT governed relationship proof. Any joined SQL is review-required exploratory SQL unless it is compiled by the semantic layer. ' +
   'Respond with ONLY a JSON object — no prose, no markdown fences.';
 
 const BLOCK_SYSTEM_PROMPT =
   'You design a reusable, governed analytics block from a natural-language request. ' +
   'Use ONLY the relations and columns provided; do not invent tables or columns. ' +
   "Reference each table by its {{ ref('<model>') }} form EXACTLY as shown (DQL " +
-  'resolves it at execution). Use the listed join keys to connect tables. ' +
+  'resolves it at execution). Use listed join keys only as schema-grounded hypotheses; dbt DAG lineage and shared column names are NOT governed relationship proof. Any joined SQL remains a review-required exploratory draft unless it is compiled by the semantic layer. ' +
   'Respond with ONLY a JSON object — no prose, no markdown fences.';
 
 /** Best-effort load of dbt artifacts for schema grounding. Never throws. */
@@ -329,8 +366,14 @@ function safeJsonArray(raw: string | null): string[] {
 }
 
 /** Match the request to a governed metric and resolve its executable definition. */
-async function matchGovernedMetric(projectRoot: string, prompt: string): Promise<MatchedGovernedMetric | undefined> {
-  const metrics = loadSemanticMetrics(projectRoot);
+async function matchGovernedMetric(
+  projectRoot: string,
+  prompt: string,
+  allowedMetricNames?: ReadonlySet<string>,
+): Promise<MatchedGovernedMetric | undefined> {
+  const metrics = loadSemanticMetrics(projectRoot).filter((metric) =>
+    !allowedMetricNames || allowedMetricNames.has(metric.name.toLowerCase()),
+  );
   if (metrics.length === 0) return undefined;
   const match = await matchSemanticMetric(prompt, metrics).catch(() => null);
   if (!match) return undefined;
@@ -340,6 +383,123 @@ async function matchGovernedMetric(projectRoot: string, prompt: string): Promise
   if (!def) return undefined;
   // Display the metric the USER recognizes; use the resolved measure's executable def.
   return { name: match.metric.name, expr: def.expr, table: def.table, sql: resolved.sql };
+}
+
+interface BuildScope {
+  domain?: string;
+  modelAreaId?: string;
+  eligibleDomains: string[];
+}
+
+function resolveBuildScope(options: BuildFromPromptOptions): BuildScope {
+  const context = options.domainContext;
+  const explicitDomain = options.domain?.trim() || undefined;
+  const explicitArea = options.modelAreaId?.trim() || undefined;
+  if (context?.activeDomain && explicitDomain && context.activeDomain !== explicitDomain) {
+    throw new Error(`Build domain "${explicitDomain}" does not match the server-resolved domain "${context.activeDomain}".`);
+  }
+  if (context?.modelAreaId && explicitArea && context.modelAreaId !== explicitArea) {
+    throw new Error(`Build Model Area "${explicitArea}" does not match the server-resolved Model Area "${context.modelAreaId}".`);
+  }
+  const domain = context?.activeDomain ?? explicitDomain;
+  return {
+    domain: domain ?? undefined,
+    modelAreaId: context?.modelAreaId ?? explicitArea,
+    eligibleDomains: context ? domainContextSearchDomains(context) : domain ? [domain] : [],
+  };
+}
+
+function normalizeRelation(value: string): string {
+  return value.replace(/["`]/g, '').replace(/\s*\.\s*/g, '.').trim().toLowerCase();
+}
+
+/** Restrict artifact grounding to the immutable pack; never backfill from disk. */
+function restrictArtifactsToContextPack(
+  artifacts: DbtArtifacts | undefined,
+  contextPack: LocalContextPack | undefined,
+): DbtArtifacts | undefined {
+  if (!artifacts || !contextPack) return artifacts;
+  const allowed = new Set(contextPack.allowedSqlContext.relations.map((item) => normalizeRelation(item.relation)));
+  const allows = (name: string, relation: string, alias?: string) =>
+    allowed.has(normalizeRelation(relation)) || allowed.has(normalizeRelation(name)) || Boolean(alias && allowed.has(normalizeRelation(alias)));
+  const models = artifacts.models.filter((model) => allows(model.name, model.qualifiedRelation, model.alias));
+  const sources = artifacts.sources.filter((source) => allows(source.name, source.qualifiedRelation));
+  const ids = new Set([...models, ...sources].map((item) => item.uniqueId));
+  return {
+    ...artifacts,
+    models,
+    sources,
+    catalogColumns: new Map([...artifacts.catalogColumns].filter(([id]) => ids.has(id))),
+    runCounts: new Map([...artifacts.runCounts].filter(([id]) => ids.has(id))),
+  };
+}
+
+function skillFromContextPack(skill: LocalContextSkill): Skill {
+  return {
+    id: skill.id,
+    localId: skill.id,
+    qualifiedId: skill.qualifiedId,
+    scope: 'project',
+    domain: skill.domain,
+    domains: skill.domains,
+    modelAreaRefs: skill.modelAreaRefs,
+    kind: skill.kind,
+    status: skill.status ?? 'active',
+    owner: skill.owner,
+    triggers: skill.triggers,
+    exclusions: skill.exclusions,
+    description: skill.description,
+    preferredMetrics: skill.preferredMetrics,
+    preferredBlocks: skill.preferredBlocks,
+    preferredDimensions: skill.preferredDimensions,
+    requiredFilters: skill.requiredFilters,
+    clarifyWhen: skill.clarifyWhen,
+    sourceRefs: skill.sourceRefs,
+    vocabulary: skill.vocabulary,
+    body: skill.guidance,
+    sourcePath: skill.sourcePath ?? skill.provenance,
+  };
+}
+
+function contextPackPrompt(contextPack: LocalContextPack | undefined): string {
+  if (!contextPack) return '';
+  const evidence = contextPack.evidenceRoles.slice(0, 8)
+    .map((item) => `- ${item.name} (${item.role}): ${item.reason}`)
+    .join('\n');
+  return [
+    '## Immutable request context',
+    `Context pack: ${contextPack.id}`,
+    `Route evidence: ${contextPack.routeDecision.route} / ${contextPack.routeDecision.intent}`,
+    evidence ? `Selected evidence:\n${evidence}` : '',
+    'This is a bounded snapshot. Do not assume unrelated dbt models, joins, or skills beyond the supplied grounding.',
+  ].filter(Boolean).join('\n');
+}
+
+function buildTrustDiagnostics(input: {
+  options: BuildFromPromptOptions;
+  scope: BuildScope;
+  skills: AppliedSkill[];
+  grounding: SchemaGrounding;
+  matchedMetric?: MatchedGovernedMetric;
+}): BuildTrustDiagnostics {
+  const allowedRelations = input.options.contextPack
+    ? input.options.contextPack.allowedSqlContext.relations.map((item) => item.relation)
+    : input.grounding.tables.map((table) => table.qualifiedRelation);
+  const exploratory = !input.matchedMetric;
+  return {
+    sourceTrust: exploratory ? 'exploratory_dbt_grounded' : 'governed_semantic_source',
+    reviewRequired: true,
+    contextPackId: input.options.contextPack?.id,
+    snapshotId: input.options.domainContext?.snapshotId ?? input.options.contextPack?.freshness.fingerprint ?? undefined,
+    activeDomain: input.scope.domain,
+    selectedSkillIds: input.skills.map((skill) => skill.id),
+    selectedSkillProvenance: input.skills.map(({ id, qualifiedId, provenance }) => ({ id, qualifiedId, provenance })),
+    allowedRelations,
+    joinPolicy: exploratory ? 'dbt_hints_are_not_governed_proof' : 'semantic_definition',
+    warnings: exploratory && input.grounding.joinKeys.length > 0
+      ? ['dbt DAG lineage and shared-column join keys are exploratory schema hints, not governed relationship proof. Review before reuse or certification.']
+      : [],
+  };
 }
 
 /** Output column names that name a non-negative measure (safe for a `>= 0` guard). */
@@ -479,6 +639,7 @@ async function buildCell(
   provider: AgentProvider | undefined,
   skillsPrompt: string,
   appliedSkills: AppliedSkill[],
+  diagnostics: BuildTrustDiagnostics,
   matchedMetric?: MatchedGovernedMetric,
 ): Promise<BuildCellResult> {
   if (!provider) {
@@ -490,6 +651,7 @@ async function buildCell(
         ? `Used the governed metric \`${matchedMetric.name}\` (${matchedMetric.expr}). Set a provider to tailor it further.`
         : 'No AI provider is configured. Returned a starter query — edit it, or set a provider to generate SQL from your prompt.',
       appliedSkills,
+      diagnostics,
     };
   }
 
@@ -536,6 +698,7 @@ async function buildCell(
           ? (parsed ? asString(parsed.explanation) : undefined)
           : grounded.message,
         appliedSkills,
+        diagnostics,
       };
     }
   } catch {
@@ -549,6 +712,7 @@ async function buildCell(
       ? `Answered from the governed metric \`${matchedMetric.name}\` (${matchedMetric.expr}).`
       : 'Could not generate SQL from the prompt; returned a starter query to refine.',
     appliedSkills,
+    diagnostics,
   };
 }
 
@@ -677,6 +841,7 @@ async function buildBlock(
   provider: AgentProvider | undefined,
   skillsPrompt: string,
   appliedSkills: AppliedSkill[],
+  diagnostics: BuildTrustDiagnostics,
   matchedMetric?: MatchedGovernedMetric,
 ): Promise<BuildBlockResult> {
   const { projectRoot } = options;
@@ -825,6 +990,7 @@ async function buildBlock(
     certifierVerdict: verdict,
     reflection,
     appliedSkills,
+    diagnostics,
     edited: false,
     route: matchedMetric
       ? { tier: 'semantic_metric', label: `Based on governed metric ${matchedMetric.name}`, ref: matchedMetric.name }
@@ -915,6 +1081,7 @@ async function editBlock(
   provider: AgentProvider | undefined,
   skillsPrompt: string,
   appliedSkills: AppliedSkill[],
+  diagnostics: BuildTrustDiagnostics,
 ): Promise<BuildBlockResult> {
   if (!options.blockPath) {
     throw new Error("Edit mode requires { blockPath } to the block being modified.");
@@ -1028,6 +1195,7 @@ async function editBlock(
     examples: [],
     certifierVerdict: verdictFrom(evaluation),
     appliedSkills,
+    diagnostics,
     previousSql,
     edited: true,
     route: {
@@ -1050,12 +1218,25 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   if (!options.prompt || !options.prompt.trim()) {
     throw new Error('buildFromPrompt requires a non-empty prompt.');
   }
-  const artifacts = tryLoadArtifacts(options.projectRoot, options.dbtManifestPath);
+  const scope = resolveBuildScope(options);
+  const scopedOptions: BuildFromPromptOptions = {
+    ...options,
+    domain: scope.domain,
+    modelAreaId: scope.modelAreaId,
+  };
+  const artifacts = restrictArtifactsToContextPack(
+    tryLoadArtifacts(options.projectRoot, options.dbtManifestPath),
+    options.contextPack,
+  );
   const provider = await resolveProvider(options);
+  const focusedArea = loadFocusedModelArea(scopedOptions);
 
   // Retrieval (spec 15.3): pick the RELEVANT tables for this request, not all of
   // them. Deterministic + offline by default.
-  const relevantModels = await selectRelevantModels(artifacts, options.prompt, { topK: 12 });
+  const relevantModels = await selectRelevantModels(artifacts, options.prompt, {
+    topK: 12,
+    preferredModelIds: focusedArea?.entities.map((entity) => entity.dbtUniqueId),
+  });
 
   // Shared grounding (spec 15.2): qualified relations + {{ ref() }} forms +
   // columns/types + join keys. Used by BOTH targets.
@@ -1063,31 +1244,95 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
 
   // Skills (spec 16): select the SELECTED skills (not all), inject as context,
   // and record which applied. Project (pinned) skills always kept.
-  const allSkills = options.skills ?? loadSkills(options.projectRoot).skills;
-  const selectedSkills = selectRelevantSkills(allSkills, options.prompt, {
-    userId: options.userId ?? null,
-    domains: options.domain ? [options.domain] : [],
+  // A context pack already contains the server-selected, snapshot-bound skills.
+  // Never re-read mutable files or broaden that selection on the direct Build path.
+  const selectedSkills = options.contextPack
+    ? options.contextPack.skills.map(skillFromContextPack)
+    : selectRelevantSkills(options.skills ?? loadSkills(options.projectRoot).skills, options.prompt, {
+      userId: options.userId ?? null,
+      domains: scope.eligibleDomains,
+      modelAreaIds: scope.modelAreaId ? [scope.modelAreaId] : [],
+    });
+  const packSkillsById = new Map(options.contextPack?.skills.map((skill) => [skill.qualifiedId ?? skill.id, skill]));
+  const appliedSkills: AppliedSkill[] = selectedSkills.map((skill) => {
+    const packed = packSkillsById.get(skill.qualifiedId ?? skill.id);
+    return {
+      id: skill.id,
+      qualifiedId: skill.qualifiedId,
+      description: skill.description,
+      provenance: packed?.provenance ?? skill.sourcePath,
+    };
   });
-  const skillsPrompt = buildSkillsPrompt(selectedSkills, options.userId ?? null);
-  const appliedSkills: AppliedSkill[] = selectedSkills.map((s) => ({ id: s.id, description: s.description }));
+  const skillsPrompt = [
+    contextPackPrompt(options.contextPack),
+    buildFocusedModelAreaPrompt(focusedArea),
+    buildSkillsPrompt(selectedSkills, options.userId ?? null),
+  ].filter(Boolean).join('\n');
 
   // Semantic-metric routing (spec 17, part C) for the Build path: if a governed
   // metric already answers this request, build ON its certified definition instead
   // of letting the model invent a formula. Skipped for edit mode (a different intent).
+  const allowedMetricNames = options.contextPack
+    ? new Set(options.contextPack.objects
+      .filter((object) => object.objectType === 'semantic_metric')
+      .map((object) => object.name.toLowerCase()))
+    : undefined;
   const matchedMetric = options.mode === 'edit'
     ? undefined
     : await matchGovernedMetric(
       options.projectRoot,
       expandQuestionWithSkillVocabulary(options.prompt, selectedSkills, options.userId ?? null),
+      allowedMetricNames,
     );
+  const diagnostics = buildTrustDiagnostics({ options, scope, skills: appliedSkills, grounding, matchedMetric });
 
   if (options.target === 'cell') {
-    return buildCell(options, grounding, provider, skillsPrompt, appliedSkills, matchedMetric);
+    return buildCell(scopedOptions, grounding, provider, skillsPrompt, appliedSkills, diagnostics, matchedMetric);
   }
   // target: 'block' — edit an existing block in place, or create a new draft.
   return options.mode === 'edit'
-    ? editBlock(options, grounding, provider, skillsPrompt, appliedSkills)
-    : buildBlock(options, grounding, provider, skillsPrompt, appliedSkills, matchedMetric);
+    ? editBlock(scopedOptions, grounding, provider, skillsPrompt, appliedSkills, diagnostics)
+    : buildBlock(scopedOptions, grounding, provider, skillsPrompt, appliedSkills, diagnostics, matchedMetric);
+}
+
+/**
+ * Model Areas are optional retrieval hints. The manifest remains the source of
+ * truth: a missing/stale area simply falls back to normal grounded retrieval.
+ */
+function loadFocusedModelArea(options: BuildFromPromptOptions): FocusedModelAreaContext | undefined {
+  if (!options.modelAreaId?.trim()) return undefined;
+  try {
+    const manifest = buildManifest({ projectRoot: options.projectRoot, dbtManifestPath: options.dbtManifestPath });
+    const modeling = manifest.modeling;
+    if (!modeling) return undefined;
+    const requested = options.modelAreaId.trim();
+    const area = modeling.areas[requested] ?? Object.values(modeling.areas).find((candidate) => candidate.localId === requested);
+    if (!area || (options.domain && area.domain !== options.domain)) return undefined;
+    const entityIds = new Set([...area.entityIds, ...area.referencedEntityIds]);
+    return {
+      area,
+      entities: [...entityIds].flatMap((id) => modeling.entities[id] ? [modeling.entities[id]] : []),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function buildFocusedModelAreaPrompt(context: FocusedModelAreaContext | undefined): string {
+  if (!context) return '';
+  const entities = context.entities.map((entity) => {
+    const business = [entity.businessName, entity.businessContext].filter(Boolean).join(': ');
+    return `- ${entity.localId} (${entity.dbtUniqueId})${business ? ` — ${business}` : ''}`;
+  });
+  return [
+    '## Focused Model Area',
+    '',
+    `Use the selected area "${context.area.name}" as a retrieval priority inside domain "${context.area.domain}". It does not authorize joins or override certification policy.`,
+    context.area.description ? `Business scope: ${context.area.description}` : '',
+    context.area.intentExamples.length ? `Example questions: ${context.area.intentExamples.join('; ')}` : '',
+    entities.length ? `Entities in this area:\n${entities.join('\n')}` : '',
+    '',
+  ].filter(Boolean).join('\n');
 }
 
 // Re-export so callers can reuse the slugifier when needed.

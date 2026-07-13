@@ -932,12 +932,23 @@ export async function reindexProject(
         sourceTier: "business_context",
         provenance: "DQL domain skill",
         payload: {
+          localId: s.localId ?? s.id,
+          qualifiedId: s.qualifiedId,
+          scope: s.scope,
+          user: s.user,
           domains: s.domains ?? [],
+          modelAreaRefs: s.modelAreaRefs ?? [],
+          kind: s.kind,
           triggers: s.triggers ?? [],
           exclusions: s.exclusions ?? [],
+          preferredMetrics: s.preferredMetrics,
+          preferredBlocks: s.preferredBlocks,
+          preferredDimensions: s.preferredDimensions ?? [],
           requiredFilters: s.requiredFilters ?? [],
           clarifyWhen: s.clarifyWhen ?? [],
+          examples: s.examples ?? [],
           sourceRefs: s.sourceRefs ?? [],
+          vocabulary: s.vocabulary,
         },
       });
       for (const domain of s.domains ?? (s.domain ? [s.domain] : [])) {
@@ -962,6 +973,10 @@ export async function reindexProject(
   const metadataRefresh = await ensureMetadataCatalogFresh(projectRoot, {
     manifest,
     semanticLayer,
+    // `loadSkills: false` preserves the historical KG opt-out, while the
+    // metadata catalog still owns a complete immutable snapshot for context
+    // retrieval and will load its source-owned skill records itself.
+    skills: opts.loadSkills === false ? undefined : skills,
     force: opts.forceMetadataCatalog,
   });
   // Rebuild the approved-hint index (Git authoritative; SQLite is a view). Safe

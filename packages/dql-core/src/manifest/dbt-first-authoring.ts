@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
@@ -30,10 +30,32 @@ export interface DomainPackageAuthoringInput extends DomainInput {
   exports?: string[];
 }
 
+/**
+ * A Model Area is one focused, reviewable source file inside a Domain Package.
+ * It is intentionally not a second semantic model: entities and relationships
+ * still compile into the domain-wide graph.
+ */
+export interface ModelAreaAuthoringInput {
+  id: string;
+  domain: string;
+  name: string;
+  description?: string;
+  intentExamples?: string[];
+  references?: string[];
+}
+
 export interface EntityBindingAuthoringInput {
   id: string;
   domain: string;
   dbtModel: string;
+  /** Optional focused source area. Omit only for legacy/default model files. */
+  areaId?: string;
+  businessName?: string;
+  businessContext?: string;
+  conceptRefs?: string[];
+  analyticalRole?: 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown';
+  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
   grain?: string;
   keys?: string[];
 }
@@ -41,6 +63,8 @@ export interface EntityBindingAuthoringInput {
 export interface RelationshipAuthoringInput {
   id: string;
   domain: string;
+  /** Optional focused source area that owns this relationship. */
+  areaId?: string;
   from: string;
   to: string;
   keys: Array<{ from: string; to: string }>;
@@ -115,6 +139,7 @@ export interface DomainImportAuthoringInput {
 
 export type ModelingAuthoringChange =
   | { operation: 'upsert_domain'; value: DomainPackageAuthoringInput }
+  | { operation: 'upsert_area'; value: ModelAreaAuthoringInput }
   | { operation: 'upsert_entity'; value: EntityBindingAuthoringInput }
   | { operation: 'upsert_relationship'; value: RelationshipAuthoringInput }
   | { operation: 'upsert_contract'; value: ContractAuthoringInput }
@@ -235,15 +260,17 @@ export function previewModelingChange(projectRoot: string, change: ModelingAutho
   const root = resolve(projectRoot);
   const patches = change.operation === 'upsert_domain'
     ? previewDomain(root, change.value)
-    : change.operation === 'upsert_entity'
-      ? [previewEntity(root, change.value)]
-      : change.operation === 'upsert_relationship'
-        ? [previewRelationship(root, change.value)]
-        : change.operation === 'upsert_contract'
-          ? [previewContract(root, change.value)]
-          : change.operation === 'upsert_export'
-            ? [previewExport(root, change.value)]
-            : [previewImport(root, change.value)];
+    : change.operation === 'upsert_area'
+      ? [previewArea(root, change.value)]
+      : change.operation === 'upsert_entity'
+        ? [previewEntity(root, change.value)]
+        : change.operation === 'upsert_relationship'
+          ? [previewRelationship(root, change.value)]
+          : change.operation === 'upsert_contract'
+            ? [previewContract(root, change.value)]
+            : change.operation === 'upsert_export'
+              ? [previewExport(root, change.value)]
+              : [previewImport(root, change.value)];
   return {
     operation: change.operation,
     patches,
@@ -340,14 +367,41 @@ function previewDomain(projectRoot: string, value: DomainPackageAuthoringInput):
   ];
 }
 
+function previewArea(projectRoot: string, value: ModelAreaAuthoringInput): ModelingSourcePatch {
+  const id = requiredId(value.id, 'model area');
+  const domain = requiredId(value.domain, 'domain');
+  const path = modelAreaSourceFile(projectRoot, domain, id);
+  const absolute = safeProjectPath(projectRoot, path);
+  const before = existsSync(absolute) ? readFileSync(absolute, 'utf8') : '';
+  const document = before.trim() ? asRecord(yaml.load(before)) : {};
+  const existing = asRecord(document.area);
+  document.domain = domain;
+  document.area = {
+    ...existing,
+    id,
+    name: value.name.trim() || id,
+    ...(value.description?.trim() ? { description: value.description.trim() } : {}),
+    ...(cleanStrings(value.intentExamples).length > 0 ? { intent_examples: cleanStrings(value.intentExamples) } : {}),
+    ...(cleanStrings(value.references).length > 0 ? { references: cleanStrings(value.references) } : {}),
+  };
+  const after = dumpYaml(document);
+  return { path, before, after, changed: before !== after };
+}
+
 function previewEntity(projectRoot: string, value: EntityBindingAuthoringInput): ModelingSourcePatch {
   const id = requiredId(value.id, 'entity');
   const domain = requiredId(value.domain, 'domain');
   const dbtModel = requiredId(value.dbtModel, 'dbt model');
-  const path = modelingSourceFile(projectRoot, domain, 'entities.dql.yaml', 'entities', 'id', id);
+  const path = modelingSourceFile(projectRoot, domain, 'entities.dql.yaml', 'entities', 'id', id, value.areaId);
   const entity: UnknownRecord = {
     id,
     dbt_model: dbtModel,
+    ...(value.businessName?.trim() ? { business_name: value.businessName.trim() } : {}),
+    ...(value.businessContext?.trim() ? { business_context: value.businessContext.trim() } : {}),
+    ...(cleanStrings(value.conceptRefs).length > 0 ? { concept_refs: cleanStrings(value.conceptRefs) } : {}),
+    ...(value.analyticalRole ? { analytical_role: value.analyticalRole } : {}),
+    ...(value.status ? { status: value.status } : {}),
+    ...(value.owner?.trim() ? { owner: value.owner.trim() } : {}),
     ...(value.grain ? { grain: value.grain } : {}),
     ...(cleanStrings(value.keys).length > 0 ? { keys: cleanStrings(value.keys) } : {}),
   };
@@ -394,7 +448,7 @@ function previewRelationship(projectRoot: string, value: RelationshipAuthoringIn
     ...(value.certifiedAgainst ? { certifiedAgainst: value.certifiedAgainst } : {}),
     ...(value.validation ? { validation: validationSource(value.validation) } : {}),
   };
-  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'relationships.dql.yaml', 'relationships', 'id', id), 'relationships', 'id', relationship);
+  return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'relationships.dql.yaml', 'relationships', 'id', id, value.areaId), 'relationships', 'id', relationship);
 }
 
 function previewContract(projectRoot: string, value: ContractAuthoringInput): ModelingSourcePatch {
@@ -485,7 +539,10 @@ function upsertListPatch(
   const document = before.trim() ? asRecord(yaml.load(before)) : {};
   const list = Array.isArray(document[listKey]) ? [...document[listKey] as unknown[]] : [];
   const index = list.findIndex((entry) => asRecord(entry)[identityKey] === value[identityKey]);
-  if (index >= 0) list[index] = value;
+  // Preserve fields the focused UI does not currently edit. This keeps an
+  // entity or relationship authored in a small Model Area from losing its
+  // advanced DQL policy when a user updates its business context or keys.
+  if (index >= 0) list[index] = { ...asRecord(list[index]), ...value };
   else list.push(value);
   list.sort((left, right) => String(asRecord(left)[identityKey] ?? '').localeCompare(String(asRecord(right)[identityKey] ?? '')));
   document[listKey] = list;
@@ -499,9 +556,25 @@ function sourcePatch(projectRoot: string, path: string, after: string): Modeling
 }
 
 /** Use one Domain Model source by default while editing existing split objects in place. */
-function modelingSourceFile(projectRoot: string, domain: string, legacyName: string, listKey: string, identityKey: string, identityValue: string): string {
+function modelingSourceFile(projectRoot: string, domain: string, legacyName: string, listKey: string, identityKey: string, identityValue: string, areaId?: string): string {
   const root = findPackageRoot(projectRoot, domain);
   if (!root) throw new Error(`Domain Package "${domain}" does not exist. Create the domain first.`);
+  if (areaId?.trim()) {
+    const areaPath = modelAreaSourceFile(projectRoot, domain, areaId);
+    if (!existsSync(safeProjectPath(projectRoot, areaPath))) {
+      throw new Error(`Model Area "${areaId}" does not exist. Create the area before adding modeling objects.`);
+    }
+    return areaPath;
+  }
+  // New area files are nested under modeling/areas/. Find the true owner
+  // before falling back to the historical unified/typed files.
+  for (const candidate of modelingYamlFiles(join(root, 'modeling'))) {
+    const document = asRecord(yaml.load(readFileSync(candidate, 'utf8')));
+    const list = Array.isArray(document[listKey]) ? document[listKey] as unknown[] : [];
+    if (list.some((entry) => asRecord(entry)[identityKey] === identityValue)) {
+      return relative(projectRoot, candidate).replace(/\\/g, '/');
+    }
+  }
   const unified = join(root, 'modeling', 'model.dql.yaml');
   const legacy = join(root, 'modeling', legacyName);
   for (const candidate of [unified, legacy]) {
@@ -511,6 +584,25 @@ function modelingSourceFile(projectRoot: string, domain: string, legacyName: str
     if (list.some((entry) => asRecord(entry)[identityKey] === identityValue)) return relative(projectRoot, candidate).replace(/\\/g, '/');
   }
   return relative(projectRoot, unified).replace(/\\/g, '/');
+}
+
+function modelAreaSourceFile(projectRoot: string, domain: string, id: string): string {
+  const root = findPackageRoot(projectRoot, domain);
+  if (!root) throw new Error(`Domain Package "${domain}" does not exist. Create the domain first.`);
+  const localId = requiredId(id, 'model area');
+  return relative(projectRoot, join(root, 'modeling', 'areas', `${localId}.dql.yaml`)).replace(/\\/g, '/');
+}
+
+function modelingYamlFiles(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...modelingYamlFiles(fullPath));
+    else if (entry.isFile() && (entry.name.endsWith('.yaml') || entry.name.endsWith('.yml'))) files.push(fullPath);
+  }
+  return files.sort();
 }
 
 function packageRootForWrite(projectRoot: string, id: string, parent?: string): string {

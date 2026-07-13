@@ -10,32 +10,22 @@ Build      Notebooks · Blocks · Lineage
 Govern     Domains · Source control
 ```
 
-Domains opens a domain list/health overview. Selecting a domain opens a
-contextual vertical sidebar:
+Domains opens a focused Domain Workspace. OSS v1 deliberately avoids asking a
+new user to construct every governance object up front. Selecting a domain
+opens a domain selector plus two contextual tabs:
 
 ```text
-Overview
-Domain Model
-Knowledge
-  Terms
-  Skills
-Certified Assets
-  Blocks
-  Business views
-Readiness
-  Join proofs
-  Contracts
-  Interfaces
-  Evaluations
-Related Products
-  Notebooks
-  Apps
-dbt Scope
+Model
+Skills
 ```
 
-The URL identifies the domain and section so refresh/back/deep links work.
-Mobile/narrow layouts collapse the contextual sidebar into an accessible
-drawer. Global Apps/Ask/Notebooks behavior is unchanged (`UI-001`).
+The Model tab begins with an Area selector (`All domain` plus focused Model
+Areas), a business/data view switch, and compact actions to add a dbt model,
+connect a relationship, create an Area, auto-layout, fit, and inspect. Skills
+is the only parallel tab. Terms, business views, join proofs, contracts,
+interfaces, evaluations, related products, and dbt scope are contextual
+inspector/readiness details—not top-level authoring destinations in this first
+OSS workflow. Global Apps/Ask/Notebooks behavior is unchanged (`UI-001`).
 
 ## Overview
 
@@ -65,6 +55,11 @@ The canvas is the unified analytical model from
   PK/unique/not-null/foreign-key signals with accessible labels;
 - edges show cardinality, key mapping, safety/attribution state, lifecycle, and
   cross-domain/export state without labels covering nodes.
+- Business view is the default: business name/context, concepts, role, grain,
+  and relationship meaning lead the interaction. Data view exposes the dbt
+  relation, columns, tests, keys, and column-to-column relationship handles.
+- First-run guidance creates an Area (name, business question, example
+  questions, and optional boundary entities), then adds dbt-backed entities.
 
 ## Inspectors and editing
 

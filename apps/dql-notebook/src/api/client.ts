@@ -2318,6 +2318,7 @@ export const api = {
     mode?: AiBuildMode;
     blockPath?: string;
     domain?: string;
+    modelAreaId?: string;
   }): Promise<AiBuildResult> {
     return request<AiBuildResult>('/api/ai/build', {
       method: 'POST',

@@ -2,7 +2,7 @@
 
 ## Context resolution
 
-Ask accepts optional `domain` and `purpose` hints. The server validates them
+Ask accepts optional `domain`, `purpose`, and focused `modelAreaId` hints. The server validates them
 against the active snapshot and builds `DomainContextEnvelope`; clients never
 send `ancestors` or `allowedImports` as trusted values. Explicit valid scope is
 preferred. Inference is allowed only when evidence is unambiguous; otherwise
@@ -13,6 +13,11 @@ context request. The same `snapshotId` is used by retrieval, prompt assembly,
 tool selection, SQL generation, final guard, and provenance (`CTX-001`,
 `CTX-002`). A snapshot change during a run causes retry or `SOURCE_CHANGED`,
 never mixed-snapshot execution.
+
+`modelAreaId` is resolved from the same server-owned manifest. It may prioritize
+the Area's entities and matching skills only after active-domain/import/lifecycle
+eligibility is established; it cannot authorize an import, relationship, tool,
+or generated join.
 
 ## Context pack contents
 
@@ -40,6 +45,14 @@ freshness, and source confidence. Cross-domain candidates not present in
 or veto rank (`SKILL-002`). Candidate records retain qualified IDs to prevent
 same-local-ID collisions.
 
+Before relationship planning, a no-domain question derives its candidate entity
+set from lexical/semantic evidence in the question. Retrieved context may
+complete that set only when the question has no direct entity evidence; it may
+not introduce a second cross-domain entity solely because an unrelated block,
+skill, or relationship ranked in the context window. A rejected candidate keeps
+its exact policy code and is terminal for that candidate: it is neither a
+generic grounding retry nor a misleading user clarification (`AGT-004`).
+
 ## Governed answer cascade
 
 The route order is mandatory (`AGT-001`):
@@ -47,13 +60,28 @@ The route order is mandatory (`AGT-001`):
 1. compatible certified DQL block/business view;
 2. compatible MetricFlow query;
 3. governed SQL generation using certified relationship paths;
-4. clarify or refuse.
+4. bounded exploratory DBT-grounded SQL when governed coverage is absent but
+   safe discovery and execution are available; or
+5. clarify or refuse.
 
 Candidate join-path planning must use typed manifest-v3 relationship proof, not
 dbt lineage or heuristic shared-column joins. The final SQL guard independently
 checks every table/column/relationship/export/contract against the same
 snapshot. Certified blocks do not bypass parameter, purpose, export, contract,
 or freshness checks.
+
+The exploratory lane is distinct from governed SQL. It may use dbt catalog,
+schema, tests, lineage, and descriptions to propose a bounded single-domain
+join hypothesis, but none of those facts is relationship proof and it must not
+infer a cross-domain path. Before an exploratory answer, the runtime validates
+read-only SQL, enforces connector/project execution limits, runs bounded
+source/join checks, and records the source models, inferred join evidence, SQL,
+snapshot, result bounds, and warnings. Its answer is labeled
+`Exploratory · DBT-grounded` and review-required; it is never presented as a
+certified block, governed semantic query, or governed SQL answer (`EXP-001`).
+An exploratory answer may offer an explicit draft-block action with that
+provenance, but never writes, certifies, or promotes an asset automatically
+(`EXP-002`).
 
 ## Ambiguity and unsafe questions
 
@@ -64,14 +92,22 @@ is absent, many-to-many fanout has no approved attribution, or the current
 runtime cannot enforce a required policy. Structured reasons distinguish
 `missing_domain`, `ambiguous_domain`, `missing_attribution`, `unsafe_fanout`,
 `stale_proof`, `missing_export`, `contract_failed`, and `policy_unenforced`.
+Missing governed relationship coverage is a `modeling_gap`, not a generic
+repair loop: the agent may enter the exploratory lane only when its bounded
+single-domain checks are available. Explicit policy denials, failed contracts,
+restricted access, unsafe fanout, missing attribution, and missing exports do
+not fall through to exploration.
 
 ## Progressive Ask
 
 With no configured domain, Ask may answer from a certified globally compatible
-block or MetricFlow. Governed generated SQL is labeled limited-context and
+block or MetricFlow. If neither fully expresses the request, it may run bounded
+single-domain exploratory DBT-grounded SQL when source discovery and execution
+limits are enforceable. Governed generated SQL is labeled limited-context and
 review-required; unsafe multi-model/cross-domain generation clarifies or
 refuses. The UI explains that domain setup unlocks trusted relationship and
-business-context routing (`AGT-003`).
+business-context routing, while exploratory results remain explicitly
+review-required (`AGT-003`, `EXP-001`).
 
 ## Learning and corrections
 

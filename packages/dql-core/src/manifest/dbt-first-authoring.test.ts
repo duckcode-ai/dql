@@ -71,6 +71,38 @@ describe('dbt-first Domain Package authoring', () => {
     expect(preview.patches[0]?.path).toBe('domains/commerce/modeling/entities.dql.yaml');
   });
 
+  it('keeps a focused model area as one Git-backed source file', () => {
+    const area = {
+      operation: 'upsert_area' as const,
+      value: {
+        id: 'customer_lifecycle', domain: 'commerce', name: 'Customer lifecycle',
+        description: 'How customers progress from first order to repeat purchase.',
+        intentExamples: ['Which customers made a second purchase?'],
+        references: ['customer'],
+      },
+    };
+    const areaPreview = previewModelingChange(root, area);
+    expect(areaPreview.patches[0]?.path).toBe('domains/commerce/modeling/areas/customer_lifecycle.dql.yaml');
+    applyModelingChange(root, area, areaPreview.fingerprint);
+
+    const entity = {
+      operation: 'upsert_entity' as const,
+      value: {
+        id: 'lifecycle_order', domain: 'commerce', areaId: 'customer_lifecycle', dbtModel: 'model.shop.orders',
+        businessName: 'Customer order', businessContext: 'An order used to understand repeat purchasing.',
+        conceptRefs: ['customer_lifecycle'], analyticalRole: 'event' as const, owner: 'commerce@example.com',
+      },
+    };
+    const entityPreview = previewModelingChange(root, entity);
+    expect(entityPreview.patches[0]?.path).toBe('domains/commerce/modeling/areas/customer_lifecycle.dql.yaml');
+    applyModelingChange(root, entity, entityPreview.fingerprint);
+
+    const source = readFileSync(join(root, 'domains', 'commerce', 'modeling', 'areas', 'customer_lifecycle.dql.yaml'), 'utf8');
+    expect(source).toContain('business_name: Customer order');
+    expect(source).toContain('intent_examples:');
+    expect(source).toContain('references:');
+  });
+
   it('attaches dbt generic test constraints to their columns', () => {
     const target = join(root, 'target');
     mkdirSync(target, { recursive: true });

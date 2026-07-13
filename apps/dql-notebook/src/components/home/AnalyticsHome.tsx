@@ -29,7 +29,7 @@ const STORAGE_KEY = 'dql-ask-conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
 const MAX_CONVERSATIONS = 40;
 
-function consumePendingDomainContext(): { domain: string; purpose?: string } | undefined {
+function consumePendingDomainContext(): { domain: string; purpose?: string; modelAreaId?: string } | undefined {
   if (typeof window === 'undefined') return undefined;
   try {
     const raw = window.sessionStorage.getItem('dql-ask-domain-context');
@@ -37,7 +37,11 @@ function consumePendingDomainContext(): { domain: string; purpose?: string } | u
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     return typeof parsed.domain === 'string' && parsed.domain.trim()
-      ? { domain: parsed.domain.trim(), purpose: typeof parsed.purpose === 'string' ? parsed.purpose : undefined }
+      ? {
+          domain: parsed.domain.trim(),
+          purpose: typeof parsed.purpose === 'string' ? parsed.purpose : undefined,
+          modelAreaId: typeof parsed.modelAreaId === 'string' ? parsed.modelAreaId : undefined,
+        }
       : undefined;
   } catch {
     return undefined;
@@ -277,7 +281,7 @@ export function AnalyticsHome() {
               key={activeId}
               themeMode={state.themeMode}
               title="Analytics copilot"
-              scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
+              scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ' model area' : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
               workspaceContext={domainContext}
               audience="stakeholder"
               initialMode="auto"

@@ -194,6 +194,89 @@ describe('local metadata catalog', () => {
     expect(secondStats.metadataFingerprint).toBe(firstStats.metadataFingerprint);
   });
 
+  it('SKILL-001 / CTX-002 snapshots parsed skills, invalidates on source changes, and returns only domain/Area-eligible guidance', async () => {
+    mkdirSync(join(projectRoot, 'skills'), { recursive: true });
+    writeFileSync(join(projectRoot, 'skills', 'nba-ranking.skill.md'), `---
+id: nba-ranking
+domain: nba
+model_areas: [scoring]
+description: Rank players by total points.
+triggers: [points, scorer]
+preferred_metrics: [total_points]
+vocabulary: { scorer: metric:total_points }
+---
+Use player scoring facts and explain the ranking grain.
+`, 'utf-8');
+    writeFileSync(join(projectRoot, 'skills', 'nba-finance.skill.md'), `---
+id: nba-finance
+domain: nba
+model_areas: [finance]
+triggers: [points]
+---
+This must not apply outside the finance Area.
+`, 'utf-8');
+    writeFileSync(join(projectRoot, 'skills', 'revenue-policy.skill.md'), `---
+id: revenue-policy
+domain: revenue
+triggers: [points]
+---
+This must not leak into the NBA domain.
+`, 'utf-8');
+
+    const first = await reindexProject(projectRoot);
+    expect(first.skills).toBe(3);
+    expect(first.metadataRefreshed).toBe(true);
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.getObject('skill:nba::skill::nba-ranking')).toMatchObject({
+        objectType: 'skill',
+        sourceSystem: 'DQL domain skill',
+        payload: expect.objectContaining({
+          modelAreaRefs: ['scoring'],
+          preferredMetrics: ['total_points'],
+          vocabulary: { scorer: 'metric:total_points' },
+          body: expect.stringContaining('ranking grain'),
+        }),
+      });
+    } finally {
+      catalog.close();
+    }
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Who are the leading points scorers?',
+      domainContext: {
+        activeDomain: 'nba',
+        ancestors: [],
+        allowedImports: [],
+        modelAreaId: 'scoring',
+        source: 'explicit_api',
+        confidence: 'high',
+        snapshotId: first.metadataFingerprint,
+      },
+    });
+    expect(pack.skills.map((skill) => skill.id)).toEqual(['nba-ranking']);
+    expect(pack.skills[0]).toMatchObject({
+      objectKey: 'skill:nba::skill::nba-ranking',
+      provenance: 'DQL domain skill',
+      guidance: expect.stringContaining('ranking grain'),
+    });
+    expect(pack.objects.map((object) => object.objectKey)).toContain('skill:nba::skill::nba-ranking');
+    expect(pack.objects.map((object) => object.objectKey)).not.toContain('skill:nba::skill::nba-finance');
+    expect(pack.objects.map((object) => object.objectKey)).not.toContain('skill:revenue::skill::revenue-policy');
+
+    writeFileSync(join(projectRoot, 'skills', 'nba-ranking.skill.md'), `---
+id: nba-ranking
+domain: nba
+model_areas: [scoring]
+triggers: [points]
+---
+Use player scoring facts with a revised tie-break rule.
+`, 'utf-8');
+    const second = await reindexProject(projectRoot);
+    expect(second.metadataRefreshed).toBe(true);
+    expect(second.metadataFingerprint).not.toBe(first.metadataFingerprint);
+  });
+
   it('lets reindexProject skip unchanged KG rebuilds by graph fingerprint', async () => {
     const firstStats = await reindexProject(projectRoot, { loadSkills: false });
     const first = new KGStore(defaultKgPath(projectRoot));

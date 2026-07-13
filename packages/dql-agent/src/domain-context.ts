@@ -1,6 +1,7 @@
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
 
 export interface DomainContextEnvelope {
+  /** CTX-001: server-validated request scope shared by UI, runtime, and agent. */
   activeDomain: string | null;
   ancestors: string[];
   allowedImports: Array<{
@@ -9,6 +10,8 @@ export interface DomainContextEnvelope {
     purpose: string;
   }>;
   purpose?: string;
+  /** Optional focused Model Area. It narrows ranking within activeDomain and is never an authorization boundary. */
+  modelAreaId?: string;
   source: 'explicit_ui' | 'explicit_api' | 'inferred';
   confidence: 'high' | 'medium' | 'low';
   snapshotId: string;
@@ -18,6 +21,7 @@ export interface ResolveDomainContextInput {
   manifest: DQLManifest;
   activeDomain?: string | null;
   purpose?: string;
+  modelAreaId?: string;
   source?: DomainContextEnvelope['source'];
   confidence?: DomainContextEnvelope['confidence'];
   snapshotId?: string;
@@ -38,6 +42,13 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
     parent = packages[parent]?.parent;
   }
   const purpose = input.purpose?.trim() || undefined;
+  const modelAreaId = input.modelAreaId?.trim() || undefined;
+  if (modelAreaId) {
+    const area = input.manifest.modeling?.areas?.[modelAreaId]
+      ?? Object.values(input.manifest.modeling?.areas ?? {}).find((candidate) => candidate.localId === modelAreaId);
+    if (!area) throw new Error(`Unknown model area: ${modelAreaId}`);
+    if (activeDomain && area.domain !== activeDomain) throw new Error(`Model area "${modelAreaId}" does not belong to domain "${activeDomain}"`);
+  }
   const imports = Object.values(input.manifest.modeling?.interfaces?.imports ?? {});
   const exports = input.manifest.modeling?.interfaces?.exports ?? {};
   const contracts = Object.values(input.manifest.modeling?.contracts ?? {});
@@ -62,6 +73,7 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
     ancestors,
     allowedImports,
     purpose,
+    modelAreaId,
     source: input.source ?? (activeDomain ? 'explicit_api' : 'inferred'),
     confidence: input.confidence ?? (activeDomain ? 'high' : 'low'),
     snapshotId: input.snapshotId ?? input.manifest.dbtProvenance?.manifestFingerprint ?? 'manifest-v2',

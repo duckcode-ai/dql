@@ -38,6 +38,25 @@ describe('analysis planner', () => {
     expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['location', 'product']));
   });
 
+  it('AGT-001 treats analytical what-is phrasing as a data request', () => {
+    const plan = buildAnalysisQuestionPlan('what is the tax and product info for customer life span?');
+
+    expect(plan.mode).toBe('general_analysis');
+    expect(plan.routeIntent).toBe('ad_hoc_ranking');
+    expect(plan.needsGeneratedSql).toBe(true);
+    expect(plan.outputShape).toBe('table');
+    expect(plan.metricTerms).toContain('tax');
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['customer', 'product']));
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['customer', 'product', 'tax']));
+  });
+
+  it('keeps a single-concept what-is question on the definition path', () => {
+    const plan = buildAnalysisQuestionPlan('what is customer lifetime value?');
+
+    expect(plan.mode).toBe('definition');
+    expect(plan.routeIntent).toBe('definition_lookup');
+  });
+
   it('extracts top-N and follow-up references', () => {
     const plan = buildAnalysisQuestionPlan('who are the top 5 customers for these categories?', { kind: 'drilldown' });
 

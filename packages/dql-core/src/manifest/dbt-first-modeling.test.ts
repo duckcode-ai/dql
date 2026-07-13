@@ -100,6 +100,53 @@ describe('manifest v3 dbt-first modeling', () => {
     expect(manifest.modeling?.relationships['growth::relationship::acquisition_to_customer'].to).toBe('commerce::entity::customer');
   });
 
+  it('compiles focused model areas into the one domain graph with read-only references', () => {
+    writeYaml(projectRoot, 'domains/commerce/modeling/areas/customer_lifecycle.dql.yaml', `domain: commerce
+area:
+  id: customer_lifecycle
+  name: Customer lifecycle
+  description: Understand repeat purchasing.
+  intent_examples: [Which customers made a second purchase?]
+  references: [customer]
+entities:
+  - id: lifecycle_order
+    dbt_model: model.commerce.fct_orders
+    business_name: Customer order
+    business_context: An order used to understand repeat purchasing.
+    concept_refs: [customer_lifecycle]
+    analytical_role: event
+    owner: commerce@company.test
+relationships:
+  - id: lifecycle_order_to_customer
+    from: lifecycle_order
+    to: customer
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+`);
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+    const area = manifest.modeling?.areas['commerce::model_area::customer_lifecycle'];
+
+    expect(area).toMatchObject({
+      name: 'Customer lifecycle',
+      entityIds: ['commerce::entity::lifecycle_order'],
+      relationshipIds: ['commerce::relationship::lifecycle_order_to_customer'],
+      referencedEntityIds: ['commerce::entity::customer'],
+    });
+    expect(manifest.modeling?.entities['commerce::entity::lifecycle_order']).toMatchObject({
+      areaId: 'commerce::model_area::customer_lifecycle',
+      businessName: 'Customer order',
+      businessContext: 'An order used to understand repeat purchasing.',
+      owner: 'commerce@company.test',
+    });
+    expect(manifest.modeling?.relationships['commerce::relationship::lifecycle_order_to_customer']).toMatchObject({
+      areaId: 'commerce::model_area::customer_lifecycle',
+      automaticJoinAllowed: false,
+    });
+  });
+
   it('withdraws automatic joins when warehouse evidence is expired', () => {
     const relationshipPath = join(projectRoot, 'domains', 'commerce', 'modeling', 'relationships.dql.yaml');
     writeFileSync(relationshipPath, readFileSync(relationshipPath, 'utf8').replace('    validation:\n', "    evidence_expires_at: '2000-01-01'\n    validation:\n"));

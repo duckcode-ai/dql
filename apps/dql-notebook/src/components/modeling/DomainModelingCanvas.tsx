@@ -8,6 +8,7 @@ import { themes } from '../../themes/notebook-theme';
 import { entityRecords, resolveEntityRecordKey } from './domain-studio-model';
 
 export type ColumnDisplayMode = 'keys' | 'relevant' | 'all';
+export type ModelingViewMode = 'business' | 'data';
 export type DiagramLayoutMode = 'auto' | 'grid' | 'star';
 export type DiagramDensity = 'compact' | 'normal' | 'wide';
 export type RelationshipDraft = {
@@ -24,6 +25,7 @@ type EntityNodeData = {
   detail?: DbtNodeAuthoringDetail;
   relation?: string;
   selected: boolean;
+  viewMode: ModelingViewMode;
   columnMode: ColumnDisplayMode;
   density: DiagramDensity;
   theme: Theme;
@@ -31,8 +33,8 @@ type EntityNodeData = {
   onResize: (id: string, width: number) => void;
 };
 
-export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedId: string | null; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
-  const layoutKey = `dql-model-layout:${selectedDomain ?? 'all'}`;
+export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
+  const layoutKey = `dql-model-layout:${selectedAreaId ?? selectedDomain ?? 'all'}`;
   const sizeKey = `${layoutKey}:sizes`;
   const [savedPositions, setSavedPositions] = useState<Record<string, { x: number; y: number }>>(() => readPositions(layoutKey));
   const [savedSizes, setSavedSizes] = useState<Record<string, number>>(() => readSizes(sizeKey));
@@ -47,7 +49,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   }, [resetLayoutToken]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const handleResize = (id: string, width: number) => { const next = { ...savedSizes, [id]: Math.round(width) }; setSavedSizes(next); localStorage.setItem(sizeKey, JSON.stringify(next)); };
-  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, handleResize, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedId, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, theme]);
+  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, handleResize, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, theme]);
   const [nodes, setNodes, onNodesChange] = useNodesState(graphNodes);
   useEffect(() => setNodes(graphNodes), [graphNodes, setNodes]);
   const visibleDbtIds = graphNodes.map((node) => (node.data as EntityNodeData).entity.dbtUniqueId);
@@ -93,12 +95,12 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
 }
 
 function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
-  const { recordKey, entity, detail, relation, selected, columnMode, density, theme, onAddRelatedModel, onResize } = data;
+  const { recordKey, entity, detail, relation, selected, viewMode, columnMode, density, theme, onAddRelatedModel, onResize } = data;
   const [collapsed, setCollapsed] = useState(density === 'compact');
   const color = domainColor(entity.domain);
   const columns = detail?.columns ?? [];
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
-  const visibleColumns = collapsed ? [] : columnMode === 'all' ? columns.slice(0, 16) : columnMode === 'keys' ? columns.filter((column) => keys.has(column.name)).slice(0, 10) : columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10);
+  const visibleColumns = collapsed || viewMode === 'business' ? [] : columnMode === 'all' ? columns.slice(0, 16) : columnMode === 'keys' ? columns.filter((column) => keys.has(column.name)).slice(0, 10) : columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10);
   const concepts = entity.conceptRefs?.length ? entity.conceptRefs.join(', ') : titleCase(entity.localId ?? entity.id);
   return (
     <div
@@ -115,7 +117,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
       }}
     >
       <NodeResizeControl position="bottom-right" resizeDirection="horizontal" minWidth={240} maxWidth={620} onResizeEnd={(_, params) => onResize(recordKey, params.width)} style={{ width: 16, height: 16, border: 0, background: 'transparent', color: theme.textMuted }}><span title="Drag to resize model" style={{ display: 'grid', placeItems: 'center' }}><Maximize2 size={12} /></span></NodeResizeControl>
-      {collapsed && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
+      {collapsed && viewMode === 'data' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
       <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: recordKey }); }} style={{ position: 'absolute', right: 5, top: 16, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: `2px solid ${theme.cellBg}`, background: color, color: '#fff', cursor: 'pointer', boxShadow: `0 0 0 1px ${color}66` }}><Plus size={12} /></button>
       <div style={{ height: 5, background: color, borderRadius: '9px 9px 0 0' }} />
       <div style={{ padding: '10px 12px 9px' }}>
@@ -127,7 +129,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
             alignItems: 'center',
           }}
         >
-          <strong style={{ fontSize: 13, paddingRight: 24 }}>{titleCase(entity.localId ?? entity.id)}</strong><button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>
+          <strong style={{ fontSize: 13, paddingRight: 24 }}>{viewMode === 'business' ? entity.businessName || titleCase(entity.localId ?? entity.id) : titleCase(entity.localId ?? entity.id)}</strong>{viewMode === 'data' && <button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>}
           <span
             style={{
               fontSize: 9,
@@ -143,7 +145,9 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           </span>
         </div>
         <>
-            <div title={detail?.description} style={{ fontSize: 10.5, color: theme.textSecondary, marginTop: 7, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail?.description || concepts}</div>
+            <div title={viewMode === 'business' ? entity.businessContext : detail?.description} style={{ fontSize: 10.5, color: theme.textSecondary, marginTop: 7, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{viewMode === 'business' ? entity.businessContext || concepts : detail?.description || concepts}</div>
+            {viewMode === 'business' && <div style={{ fontSize: 9.5, color: theme.textMuted, marginTop: 5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>concepts: {concepts}</div>}
+            {viewMode === 'data' && <>
             <div
               style={{
                 fontSize: 10.5,
@@ -169,6 +173,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
               <span>{columns.length} dbt columns</span>
             </div>
             <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}><NodeBadge text={entity.analyticalRole ?? 'unknown'} color={color} /><NodeBadge text={entity.status ?? 'draft'} color={entity.status === 'certified' ? '#2e9b63' : '#9a6b2f'} />{detail?.tests.length ? <NodeBadge text={`${detail.tests.length} tests`} color="#377cc8" /> : null}</div>
+            </>}
           </>
       </div>
       {visibleColumns.length > 0 && (
@@ -213,23 +218,27 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           )}
         </div>
       )}
-      {collapsed && <Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} />}
+      {(collapsed || viewMode === 'business') && <><Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} /><Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} /></>}
     </div>
   );
 }
 
-function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedId: string | null, columnMode: ColumnDisplayMode, search: string, layoutMode: DiagramLayoutMode, density: DiagramDensity, visibleLimit: number, dimUnrelated: boolean, showEdgeLabels: boolean, savedPositions: Record<string, { x: number; y: number }>, savedSizes: Record<string, number>, onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void, onResize: (id: string, width: number) => void, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
+function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedAreaId: string | null, selectedId: string | null, viewMode: ModelingViewMode, columnMode: ColumnDisplayMode, search: string, layoutMode: DiagramLayoutMode, density: DiagramDensity, visibleLimit: number, dimUnrelated: boolean, showEdgeLabels: boolean, savedPositions: Record<string, { x: number; y: number }>, savedSizes: Record<string, number>, onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void, onResize: (id: string, width: number) => void, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
+  const selectedArea = selectedAreaId ? modeling.areas[selectedAreaId] : undefined;
+  const areaEntityIds = new Set(selectedArea ? [...selectedArea.entityIds, ...selectedArea.referencedEntityIds] : []);
   const visibleRelationships = Object.entries(modeling.relationships).flatMap(([recordKey, relationship]) => {
     const from = resolveEntityRecordKey(modeling, relationship.from);
     const to = resolveEntityRecordKey(modeling, relationship.to);
     return from && to ? [{ recordKey, relationship, from, to }] : [];
-  }).filter(({ from, to }) => {
+  }).filter(({ recordKey, from, to }) => {
+    if (selectedArea) return selectedArea.relationshipIds.includes(recordKey);
     if (!selectedDomain) return true;
     return modeling.entities[from]?.domain === selectedDomain || modeling.entities[to]?.domain === selectedDomain;
   });
   const relatedIds = new Set(visibleRelationships.flatMap(({ from, to }) => [from, to]));
   const normalizedSearch = search.trim().toLowerCase();
   let entities = entityRecords(modeling).filter(({ recordKey, entity }) => {
+    if (selectedArea && !areaEntityIds.has(recordKey) && !relatedIds.has(recordKey)) return false;
     if (selectedDomain && entity.domain !== selectedDomain && !relatedIds.has(recordKey)) return false;
     if (!normalizedSearch) return true;
     const detail = detailsByDbtId[entity.dbtUniqueId];
@@ -248,7 +257,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
       .sort((a, b) => a.recordKey.localeCompare(b.recordKey))
       .forEach(({ recordKey, entity }, index) => {
         const detail = detailsByDbtId[entity.dbtUniqueId];
-        const columnCount = visibleColumnCount(entity, detail, columnMode);
+        const columnCount = viewMode === 'business' ? 0 : visibleColumnCount(entity, detail, columnMode);
         const width = savedSizes[recordKey] ?? autoNodeWidth(entity, detail, relationByDbtId[entity.dbtUniqueId], density);
         nodes.push({
           id: recordKey,
@@ -260,6 +269,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
             detail,
             relation: relationByDbtId[entity.dbtUniqueId],
             selected: selectedId === recordKey,
+            viewMode,
             columnMode,
             density,
             theme,

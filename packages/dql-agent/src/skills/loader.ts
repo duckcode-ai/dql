@@ -39,6 +39,8 @@ export interface Skill {
   domain?: string;
   /** Domain paths for cross-domain skills. `domain` remains backward compatible. */
   domains?: string[];
+  /** Optional focused Model Areas. This is a ranking hint inside an authorized domain, never an access grant. */
+  modelAreaRefs?: string[];
   kind?: 'domain_reference' | 'metric_policy' | 'glossary' | 'analysis_pattern' | 'sql_policy' | 'custom';
   status?: 'draft' | 'active' | 'deprecated';
   owner?: string;
@@ -134,6 +136,7 @@ export function parseSkill(raw: string, path: string): Skill | null {
     user,
     domain: pickString(meta.domain),
     domains: pickStringArray(meta.domains ?? meta.domain),
+    modelAreaRefs: pickStringArray(meta.model_areas ?? meta.modelAreaRefs),
     kind: parseSkillKind(pickString(meta.kind)),
     status: parseSkillStatus(pickString(meta.status)),
     owner: pickString(meta.owner),
@@ -228,6 +231,7 @@ export function renderSkill(skill: Skill): string {
   const lines: string[] = ['---', `id: ${quoteIfNeeded(skill.id)}`];
   if (skill.domain) lines.push(`domain: ${quoteIfNeeded(skill.domain)}`);
   if ((skill.domains?.length ?? 0) > 0) lines.push(`domains: [${(skill.domains ?? []).map(quoteIfNeeded).join(', ')}]`);
+  if ((skill.modelAreaRefs?.length ?? 0) > 0) lines.push(`model_areas: [${(skill.modelAreaRefs ?? []).map(quoteIfNeeded).join(', ')}]`);
   if (skill.kind && skill.kind !== 'custom') lines.push(`kind: ${skill.kind}`);
   if (skill.status && skill.status !== 'active') lines.push(`status: ${skill.status}`);
   if (skill.owner) lines.push(`owner: ${quoteIfNeeded(skill.owner)}`);
@@ -264,6 +268,7 @@ export interface WriteSkillInput {
   user?: string;
   domain?: string;
   domains?: string[];
+  modelAreaRefs?: string[];
   kind?: Skill['kind'];
   status?: Skill['status'];
   owner?: string;
@@ -293,6 +298,7 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
     user: undefined,
     domain: input.domain || undefined,
     domains: input.domains?.length ? input.domains : (input.domain ? [input.domain] : []),
+    modelAreaRefs: input.modelAreaRefs ?? [],
     kind: input.kind ?? 'custom',
     status: input.status ?? 'active',
     owner: input.owner,
@@ -549,6 +555,7 @@ function normalizeBlockHint(value: string): string | undefined {
 // ─── Skill selection (spec 16) ────────────────────────────────────────────────
 
 export interface SelectRelevantSkillsOptions {
+  /** SKILL-001: scope is established before ranking, never by a score bonus. */
   /** Active user — gates personal skills (only this user's are eligible). */
   userId?: string | null;
   /** Max skills to return after pinned ones. Default 6. */
@@ -561,6 +568,8 @@ export interface SelectRelevantSkillsOptions {
   pinnedIds?: string[];
   /** Domains inferred from the retrieved metadata context for this question. */
   domains?: string[];
+  /** Optional focused Model Areas selected in the Model workspace. */
+  modelAreaIds?: string[];
 }
 
 const DEFAULT_PINNED_SKILL_IDS = ['sql-conventions'];
@@ -571,12 +580,20 @@ function skillTokens(text: string): string[] {
   return (text.toLowerCase().match(SKILL_TOKEN_RE) ?? []).filter((t) => t.length > 1);
 }
 
+/** Area refs may be authored as a local id or a compiled qualified id. */
+function modelAreaKey(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  const qualified = trimmed.split('::');
+  return qualified.at(-1) ?? trimmed;
+}
+
 /** Searchable positive text for a skill. Exclusions are policy, not keywords. */
 function skillSearchText(skill: Skill): string {
   return [
     skill.id,
     skill.domain ?? '',
     ...(skill.domains ?? []),
+    ...(skill.modelAreaRefs ?? []),
     skill.description ?? '',
     ...(skill.triggers ?? []),
     ...skill.preferredMetrics,
@@ -620,10 +637,20 @@ export function selectRelevantSkills(
   const pinnedIds = new Set((options.pinnedIds ?? DEFAULT_PINNED_SKILL_IDS).map((id) => id.toLowerCase()));
   const queryTokens = new Set(skillTokens(question));
   const domains = new Set((options.domains ?? []).map((domain) => domain.trim().toLowerCase()).filter(Boolean));
+  const modelAreaIds = new Set((options.modelAreaIds ?? []).map(modelAreaKey).filter(Boolean));
 
   const pinned: Skill[] = [];
   const rest: Array<{ skill: Skill; score: number }> = [];
   for (const skill of inScope) {
+    const skillDomains = [skill.domain, ...(skill.domains ?? [])].map((domain) => domain?.trim().toLowerCase()).filter((domain): domain is string => Boolean(domain));
+    // An explicit domain scope is an eligibility boundary, not merely a score
+    // boost. Global skills remain eligible; caller-provided domains already
+    // include permitted ancestors and certified imports.
+    if (domains.size > 0 && skillDomains.length > 0 && !skillDomains.some((domain) => domains.has(domain))) continue;
+    const skillAreas = (skill.modelAreaRefs ?? []).map(modelAreaKey).filter(Boolean);
+    // Area refs further focus a skill within its already-authorized domain.
+    // An area never broadens domain eligibility or grants cross-domain access.
+    if (modelAreaIds.size > 0 && skillAreas.length > 0 && !skillAreas.some((id) => modelAreaIds.has(id))) continue;
     // Exclusions are a negative eligibility boundary. They are evaluated before
     // pinning so a conventions skill cannot silently apply outside its scope.
     if (matchesSkillExclusion(skill, question)) continue;
@@ -636,10 +663,11 @@ export function selectRelevantSkills(
     for (const token of textTokens) {
       if (queryTokens.has(token)) hits += 1;
     }
-    const domainMatch = [skill.domain, ...(skill.domains ?? [])].some((domain) => Boolean(domain && domains.has(domain.trim().toLowerCase())));
+    const domainMatch = skillDomains.some((domain) => domains.has(domain));
+    const areaMatch = skillAreas.some((id) => modelAreaIds.has(id));
     // Domain is a strong routing signal, but still requires either an inferred
     // domain match or topical text. It never makes a skill a hard policy override.
-    rest.push({ skill, score: hits + (domainMatch ? 4 : 0) });
+    rest.push({ skill, score: hits + (domainMatch ? 4 : 0) + (areaMatch ? 3 : 0) });
   }
 
   // Keep only skills with at least one topical hit; ordered by score desc, then

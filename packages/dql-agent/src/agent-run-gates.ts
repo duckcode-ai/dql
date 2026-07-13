@@ -97,6 +97,11 @@ function semanticCorrectnessEvaluation(
 ): AgentRunEvaluation | undefined {
   const rowCount = resultRowCount(payload);
   if (rowCount === undefined || rowCount <= 1) return undefined;
+  const plan = contextPackQuestionPlan(payload) ?? buildAnalysisQuestionPlan(question);
+  // A request with explicit result dimensions is a table/breakdown even when it
+  // starts with conversational "what is" wording. Do not burn repair attempts
+  // trying to collapse a customer × product answer into one scalar (AGT-001).
+  if (plan.requestedShape.dimensions.length > 0) return undefined;
   if (!looksLikeScalarQuestion(question)) return undefined;
   return {
     id: "semantic-cardinality",

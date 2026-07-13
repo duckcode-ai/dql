@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { buildManifest, parse } from '@duckcodeailabs/dql-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
+import type { LocalContextPack } from '../metadata/catalog.js';
 import { buildFromPrompt, type BuildBlockResult, type BuildCellResult } from './build-from-prompt.js';
 
 /** A scripted provider that returns each queued response in order. */
@@ -281,6 +282,104 @@ describe('buildFromPrompt (spec 15) — grounded SQL accuracy', () => {
     expect(result.sqlPreview).toContain("{{ ref('order_items') }}");
     expect(result.sqlPreview).not.toMatch(/FROM order_items\b/);
     expect(result.target).toBe('block');
+  });
+
+  it('uses a supplied context pack as the hard model and skill boundary', async () => {
+    const provider = scriptedProvider([
+      JSON.stringify({ sql: 'SELECT amount FROM stg_orders' }),
+      JSON.stringify({ sql: 'SELECT amount FROM order_items' }),
+    ]);
+    const contextPack = {
+      id: 'ctx_build_snapshot',
+      mode: 'build',
+      objects: [],
+      skills: [{
+        objectKey: 'sales::skill::margin-policy',
+        id: 'margin-policy',
+        qualifiedId: 'sales::skill::margin-policy',
+        domain: 'sales',
+        domains: ['sales'],
+        modelAreaRefs: [],
+        description: 'Use net amount for margin analysis.',
+        triggers: ['margin'],
+        exclusions: [],
+        preferredMetrics: [],
+        preferredBlocks: [],
+        preferredDimensions: [],
+        requiredFilters: [],
+        clarifyWhen: [],
+        vocabulary: {},
+        guidance: 'Use net amount, not gross amount.',
+        guidanceTruncated: false,
+        sourceRefs: [],
+        provenance: 'skills/sales/margin-policy.skill.md',
+      }],
+      allowedSqlContext: {
+        relations: [{
+          relation: 'dev.order_items',
+          name: 'order_items',
+          source: 'context snapshot',
+          columns: [{ name: 'order_id' }, { name: 'amount' }],
+        }],
+        sourceBlockSql: [],
+      },
+      routeDecision: { route: 'generated_sql', intent: 'ad_hoc_ranking' },
+      evidenceRoles: [{
+        objectKey: 'dbt:model.order_items',
+        objectType: 'dbt_model',
+        name: 'order_items',
+        role: 'dbt_model',
+        reason: 'selected for this request',
+      }],
+      freshness: { catalogPath: 'metadata.sqlite', builtAt: null, fingerprint: 'snapshot_123' },
+    } as unknown as LocalContextPack;
+
+    const result = (await buildFromPrompt({
+      projectRoot,
+      prompt: 'show order amounts',
+      target: 'cell',
+      provider,
+      dbtManifestPath: manifestPath,
+      contextPack,
+    })) as BuildCellResult;
+
+    expect(provider.calls[0]?.[1]?.content).toContain('margin-policy');
+    expect(provider.calls[0]?.[1]?.content).toContain('dev.order_items');
+    expect(provider.calls[0]?.[1]?.content).not.toContain('dev.stg_orders');
+    expect(provider.calls[0]?.[0]?.content).toContain('NOT governed relationship proof');
+    expect(result.sql).toContain('FROM dev.order_items');
+    expect(result.sql).not.toContain('stg_orders');
+    expect(result.appliedSkills).toEqual([expect.objectContaining({
+      id: 'margin-policy',
+      provenance: 'skills/sales/margin-policy.skill.md',
+    })]);
+    expect(result.diagnostics).toMatchObject({
+      sourceTrust: 'exploratory_dbt_grounded',
+      reviewRequired: true,
+      contextPackId: 'ctx_build_snapshot',
+      snapshotId: 'snapshot_123',
+      allowedRelations: ['dev.order_items'],
+      joinPolicy: 'dbt_hints_are_not_governed_proof',
+    });
+  });
+
+  it('rejects caller domain inputs that conflict with the server-resolved scope', async () => {
+    await expect(buildFromPrompt({
+      projectRoot,
+      prompt: 'show order amounts',
+      target: 'cell',
+      offline: true,
+      dbtManifestPath: manifestPath,
+      domain: 'sales',
+      domainContext: {
+        activeDomain: 'finance',
+        ancestors: [],
+        allowedImports: [],
+        source: 'explicit_api',
+        confidence: 'high',
+        snapshotId: 'snapshot_123',
+      },
+    })).rejects.toThrow(/does not match the server-resolved domain/i);
   });
 });
 

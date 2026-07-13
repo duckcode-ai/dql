@@ -48,7 +48,7 @@ import { createContextLedger, type ContextLedger } from './grounding/context-led
 import { validateAnswerResultShape } from './answer-shape.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
 import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
-import { planAnalyticalPath, type AnalyticalPathPlan } from './metadata/analytical-policy.js';
+import { planAnalyticalPath, type AnalyticalPathPlan, type AnalyticalPolicyCode } from './metadata/analytical-policy.js';
 import { planCertifiedAdaptation, type CertifiedAdaptation } from './metadata/block-adapt.js';
 import {
   compactSqlSnippet,
@@ -87,8 +87,33 @@ import {
 
 export type AnswerKind = 'certified' | 'uncertified' | 'no_answer';
 export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'semantic_layer' | 'dbt_manifest' | 'no_answer';
-export type AnswerRefusalCode = 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error';
+/**
+ * The coarse, host-facing disposition. `policy_blocked` is deliberately distinct
+ * from `ambiguous`: an attribution/export/proof policy is a metadata decision,
+ * not a request for the analyst to rewrite an otherwise clear question.
+ */
+export type AnswerRefusalCode = 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
 export type AnalysisDepth = CascadeAnalysisDepth;
+
+/**
+ * A generated query that was grounded in dbt metadata but cannot be executed as
+ * governed SQL because its final v3 relationship check found missing modeling
+ * coverage. Hosts may hand this to their bounded exploratory executor; the
+ * answer loop deliberately never executes it on this route.
+ */
+export interface ExploratorySqlCandidate {
+  kind: 'dbt_grounded_exploration';
+  /** Only absence-of-modeling outcomes are eligible — never an unsafe policy. */
+  reason: 'unbound_relation' | 'unplanned_join' | 'relationship_not_certified';
+  sql: string;
+  message: string;
+  /** Bound entity ids, if any, that the v3 guard resolved before it stopped. */
+  modeledEntityIds: string[];
+  /** Relationships the guard considered; empty means no certified route exists. */
+  relationshipIds: string[];
+  /** The SQL was NOT executed by the governed generated-SQL lane. */
+  executionStatus: 'not_executed';
+}
 
 export interface AgentRefusalDetails {
   /**
@@ -96,7 +121,7 @@ export interface AgentRefusalDetails {
    * grounding gaps, this preserves the exact validation code so repair loops can
    * re-ground the named identifier instead of parsing prose.
    */
-  code?: AnswerRefusalCode | SqlContextValidationCode;
+  code?: AnswerRefusalCode | SqlContextValidationCode | AnalyticalPolicyCode;
   message: string;
   offending?: SqlContextValidationOffending;
 }
@@ -364,6 +389,13 @@ export interface AgentAnswer {
   executionError?: string;
   /** Uncertified path: the LLM-proposed SQL the analyst should review. */
   proposedSql?: string;
+  /**
+   * A host-executable candidate for bounded, review-required exploration after
+   * governed SQL was correctly rejected for missing relationship modeling.
+   * Presence is the forward-compatible signal for runtimes; `refusalCode`
+   * remains `grounding_gap` for older hosts until they adopt this field.
+   */
+  exploratoryCandidate?: ExploratorySqlCandidate;
   /** Alias for the structured answer envelope. */
   sql?: string;
   /** Suggested viz type for the proposed SQL (line/bar/single_value/...). */
@@ -581,6 +613,54 @@ function refusalCodeForValidation(code: SqlContextValidationCode | undefined): A
   return 'model_declined';
 }
 
+/**
+ * An analytical-policy result is never a generic grounding gap. A missing
+ * relation/path can enter the bounded exploratory lane; every other result is
+ * an explicit governance boundary that the host must surface without retrying
+ * the same candidate or asking the user a misleading clarification question.
+ */
+function refusalCodeForAnalyticalPolicy(
+  code: AnalyticalPolicyCode | undefined,
+  hasExploratoryCandidate = false,
+): AnswerRefusalCode {
+  if (hasExploratoryCandidate || code === 'unbound_relation' || code === 'unplanned_join' || code === 'relationship_not_certified') {
+    return 'grounding_gap';
+  }
+  return 'policy_blocked';
+}
+
+/**
+ * The governed guard is intentionally strict. Only the two outcomes that mean
+ * "this repository has not modeled this join yet" may be handed to a host's
+ * exploratory lane. All other decisions are explicit governance/safety
+ * denials and must remain terminal in this loop.
+ */
+function exploratoryCandidateFromDbtFirstGuard(
+  sql: string,
+  decision: ReturnType<typeof evaluateDbtFirstGeneratedSql>,
+): ExploratorySqlCandidate | undefined {
+  const reason = decision.code;
+  if (decision.safe || (reason !== 'unbound_relation' && reason !== 'unplanned_join' && reason !== 'relationship_not_certified')) {
+    return undefined;
+  }
+  // `unplanned_join` can also mean the model ignored an existing certified
+  // relationship plan. That is a governed-query error, not missing modeling,
+  // and must remain blocked. It is exploratory only when no plan was resolved.
+  if (decision.code === 'unplanned_join' && decision.relationshipIds.length > 0) {
+    return undefined;
+  }
+  return {
+    kind: 'dbt_grounded_exploration',
+    reason,
+    sql,
+    message: decision.message
+      ?? 'This query is grounded in dbt metadata but has no certified DQL relationship path yet.',
+    modeledEntityIds: decision.entities,
+    relationshipIds: decision.relationshipIds,
+    executionStatus: 'not_executed',
+  };
+}
+
 function formatOffendingValidationToken(offending: SqlContextValidationOffending | undefined): string {
   if (!offending?.relation && !offending?.column) return '';
   const parts = [
@@ -698,6 +778,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       result.appliedSkills ??
       selectRelevantSkills(input.skills ?? [], input.question, {
         userId: input.userId ?? null,
+        modelAreaIds: input.domainContext?.modelAreaId ? [input.domainContext.modelAreaId] : [],
         domains: Array.from(new Set([
           ...domainContextSearchDomains(input.domainContext),
           ...(input.domain ? [input.domain] : []),
@@ -728,6 +809,12 @@ function cascadeExecutionStatus(result: AgentAnswer): 'executed' | 'failed' | 'n
  */
 function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute {
   if (result.kind === 'no_answer') {
+    if (result.exploratoryCandidate) {
+      return {
+        tier: 'no_answer',
+        label: 'Governed SQL stopped at missing relationship modeling; a DBT-grounded exploratory candidate is ready for bounded validation.',
+      };
+    }
     return { tier: 'no_answer', label: 'No governed answer — needs more context or review.' };
   }
   if (result.kind === 'certified') {
@@ -761,18 +848,37 @@ function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute 
 
 async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
+  // AGT-004: with no explicit domain selection, let direct question evidence
+  // establish a narrow prompt boundary before broad retrieval can introduce an
+  // unrelated domain. This is deliberately a prompt/retrieval preference, not
+  // an authorization decision; the final manifest guard remains authoritative.
+  const directQuestionEntityIds = input.manifest
+    ? inferAnalyticalEntityIds(question, [], input.manifest)
+    : [];
+  const directQuestionDomains = input.manifest?.modeling
+    ? Array.from(new Set(directQuestionEntityIds.map((id) => input.manifest!.modeling!.entities[id]?.domain).filter((value): value is string => Boolean(value))))
+    : [];
+  const hasExplicitDomainScope = Boolean(input.domain || input.domainContext?.activeDomain);
+  const questionDomainScope = hasExplicitDomainScope ? [] : directQuestionDomains;
+  const promptContextPack = questionDomainScope.length > 0
+    ? scopeContextPackToQuestionDomains(input.contextPack, questionDomainScope, input.manifest)
+    : input.contextPack;
   // Select the RELEVANT skills (not all) for this question; keep pinned project
   // skills (SQL conventions). Block hints still come from the full set so a
   // preferred-block mapping is never lost.
   const authorizedDomains = domainContextSearchDomains(input.domainContext);
   const inferredDomains = Array.from(new Set([
     ...authorizedDomains,
+    ...questionDomainScope,
     ...(domain ? [domain] : []),
-    ...(input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
+    ...(questionDomainScope.length === 0
+      ? (input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : [])
+      : []),
   ]));
   const selectedSkills = selectRelevantSkills(skills, question, {
     userId: userId ?? null,
     domains: inferredDomains,
+    modelAreaIds: input.domainContext?.modelAreaId ? [input.domainContext.modelAreaId] : [],
   });
   const effectiveBlockHints = Array.from(new Set([
     ...blockHints,
@@ -801,7 +907,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     manifestHits,
     kg.search({ query: question, domain, limit: 10 }),
   ).slice(0, 30);
-  const schemaContext = schemaContextWithAllowedSqlContext(input.schemaContext ?? [], input.contextPack);
+  const schemaContext = schemaContextWithAllowedSqlContext(
+    schemaContextWithinQuestionScope(input.schemaContext ?? [], input.contextPack, promptContextPack),
+    promptContextPack,
+  );
   const catalogRoute = input.contextPack?.routeDecision;
   const questionPlan = input.contextPack?.questionPlan?.requestedShape
     ? input.contextPack.questionPlan
@@ -888,18 +997,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     if (NAVIGATION_ARTIFACT_KINDS.includes(artifactHit.node.kind)) {
       return objectNameInQuestion(question, artifactHit.node);
     }
-    // Cold questions fall through only on STRONG data-shape signals — bare
-    // measure/dimension words are normal in definition asks ("what is revenue
-    // health?") and must keep answering from the certified business context.
-    // "Strong" = outputs requested BEYOND the measure/dimension words themselves
-    // (e.g. product_name), explicit filters, or a top-N.
-    const requested = questionPlan.requestedShape;
-    const nonTrivialOutputs = requested.requiredOutputs.filter((output) =>
-      !requested.measures.includes(output) && !requested.dimensions.includes(output));
-    const strongShape = nonTrivialOutputs.length > 0
-      || requested.filters.length > 0
-      || Boolean(requested.topN);
-    return !strongShape;
+    // Terms, skills, domains, relationships, and business views are grounding
+    // documents, not executable data. They may terminate only when the user
+    // explicitly names the object in a definition request ("what is Revenue
+    // Health?"). A broad lexical match must never turn an analytical question
+    // into a no-data Certified answer merely because it starts with "what is".
+    return isBusinessDefinitionQuestion(question)
+      && objectNameInQuestion(question, artifactHit.node);
   })();
   if (artifactHit && businessContextTerminal) {
     let result: AgentResultPayload | undefined;
@@ -1154,7 +1258,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const contextNodes = mergeNodes(
     followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
     (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
-  );
+  ).filter((node) => questionDomainScope.length === 0 || !node.domain || questionDomainScope.includes(node.domain));
   const kgJoinPathHints = buildKgJoinPathHints(kg, contextNodes, questionPlan);
   const contextBlocks = contextNodes.filter((n) => n.kind === 'block');
   const contextBusiness = contextNodes.filter((n) => BUSINESS_CONTEXT_KINDS.includes(n.kind));
@@ -1180,6 +1284,18 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     : undefined;
   const analyticalPlanPrompt = renderAnalyticalPlanPrompt(analyticalPlan);
   if (analyticalPlanPrompt) messages.push({ role: 'system', content: analyticalPlanPrompt });
+  if (questionDomainScope.length > 0) {
+    messages.push({
+      role: 'system',
+      content: [
+        'QUESTION DOMAIN BOUNDARY (authoritative for this generation):',
+        `The question is directly grounded in: ${questionDomainScope.join(', ')}.`,
+        'Use only relations and business context from those domains plus unscoped runtime/dbt relations supplied below.',
+        'Do not introduce, search for, or join another domain (including cross-domain acquisition/attribution paths) unless the user explicitly asks for that business concept or supplies a domain/purpose.',
+        'If the required relation is not modeled in this domain, prefer the bounded DBT-grounded exploratory candidate over an unrelated cross-domain relationship.',
+      ].join('\n'),
+    });
+  }
 
   messages.push({
     role: 'system',
@@ -1193,7 +1309,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       input.followUp,
       schemaContext,
       intent,
-      input.contextPack,
+      promptContextPack,
       input.conversationSnapshot,
       kgJoinPathHints,
       promptBudget,
@@ -1554,9 +1670,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       reviewStatus: 'none',
       confidence: 0.1,
       text,
-      refusalCode: analyticalPlan?.code === 'attribution_policy_required' ? 'ambiguous' : analyticalPlan?.safe === false ? 'grounding_gap' : 'model_declined',
+      refusalCode: analyticalPlan?.safe === false
+        ? refusalCodeForAnalyticalPolicy(analyticalPlan.code)
+        : 'model_declined',
       refusalDetails: {
-        code: analyticalPlan?.code === 'attribution_policy_required' ? 'ambiguous' : analyticalPlan?.safe === false ? 'grounding_gap' : 'model_declined',
+        code: analyticalPlan?.safe === false
+          ? analyticalPlan.code ?? 'unsafe_relationship'
+          : 'model_declined',
         message: text,
       },
       answer: text,
@@ -1819,6 +1939,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   if (dbtFirstJoinSafety && !dbtFirstJoinSafety.safe) {
     const text = dbtFirstJoinSafety.message
       ?? 'DQL could not prove this generated join from certified analytical relationships.';
+    const exploratoryCandidate = exploratoryCandidateFromDbtFirstGuard(parsed.sql, dbtFirstJoinSafety);
+    const analysisPlan = buildAnalysisPlan({
+      question,
+      intent,
+      routeReason: exploratoryCandidate
+        ? 'Governed relationship coverage is missing, so DQL prepared a bounded DBT-grounded exploratory candidate for host validation.'
+        : 'The generated SQL did not pass the governed relationship policy.',
+      selectedNodes: contextNodes,
+      schemaContext,
+      sql: parsed.sql,
+      suggestedViz: parsed.viz ?? 'table',
+      assumptions: [
+        ...contextValidation.warnings,
+        'DBT metadata is grounding evidence, not certified relationship proof.',
+      ],
+    });
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -1829,17 +1965,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       answer: text,
       proposedSql: parsed.sql,
       sql: parsed.sql,
-      refusalCode: dbtFirstJoinSafety.code === 'attribution_policy_required' ? 'ambiguous' : 'grounding_gap',
+      ...(exploratoryCandidate ? { exploratoryCandidate } : {}),
+      refusalCode: refusalCodeForAnalyticalPolicy(dbtFirstJoinSafety.code, Boolean(exploratoryCandidate)),
       refusalDetails: {
-        code: dbtFirstJoinSafety.code === 'attribution_policy_required' ? 'ambiguous' : 'grounding_gap',
+        code: dbtFirstJoinSafety.code ?? 'unsafe_relationship',
         message: text,
       },
       validationWarnings: [
         ...contextValidation.warnings,
         `DQL v3 relationship guard: ${dbtFirstJoinSafety.code ?? 'unsafe relationship'}.`,
+        ...(exploratoryCandidate
+          ? ['A bounded DBT-grounded exploratory route may validate this missing modeled relationship; governed SQL was not executed.']
+          : []),
       ],
       citations: [],
       memoryContext: input.memoryContext,
+      analysisPlan,
       evidence: buildNoAnswerEvidence({
         question,
         reason: text,
@@ -1849,6 +1990,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         manifestHits,
         considered,
         memoryContext: input.memoryContext ?? [],
+        analysisPlan,
       }),
       contextPack: input.contextPack,
       considered,
@@ -2196,12 +2338,19 @@ Rules:
    Design the SELECT for a business reader: prefer a joined/display name, label,
    title, or business value over raw *_id, *_uuid, *_key, or technical codes.
    Alias calculated outputs with clear business names. Include identifiers only
-   when the question asks for them or no readable field exists.
+   when the question asks for them or no readable field exists. Give every FROM
+   and JOIN relation an explicit short alias, and use only those exact aliases in
+   SELECT, ON, WHERE, GROUP BY, and ORDER BY. Include every requested output.
 4. In summary, state your QUERY PLAN first: the grain (one row per WHAT), the
    measures and how they aggregate, the dimensions/filters, and the exact join
    path + join keys between the grounded tables. Then make the SQL match that
    plan — an explicit grain and join path prevents wrong-grain answers and
-   fan-out (row-multiplying) joins.
+   fan-out (row-multiplying) joins. Treat lifetime, cumulative, balance,
+   snapshot, rate, ratio, average, and already-aggregated values as
+   non-additive across lower-grain joins: pre-aggregate at their native grain,
+   or use a grain-preserving value only when the owning entity remains in the
+   output. Never SUM the repeated parent value at child grain. If the question
+   requires allocating a parent value to children, ask for the allocation rule.
 5. Choose a visualization deliberately in the "viz" JSON field: use single_value
    or kpi for one aggregate, line/area only for an ordered time series, bar for a
    categorical comparison, grouped-bar for multiple measures by one category,
@@ -2244,23 +2393,151 @@ Rules:
 // for, while still allowing an honest refusal if context is truly missing.
 const FORCE_JOIN_INSTRUCTION = `Your previous attempt declined to produce SQL. Re-read the supplied schema, metadata, and any "Knowledge graph join routes": this question CAN be answered by joining the grounded tables along their documented keys. Do NOT refuse, and do NOT suggest showing the datasets separately — compose ONE read-only SELECT/WITH that joins the relevant tables to answer it directly, following the JSON contract from rule 3. State the grain and the exact join path in the summary. Only if a required table, column, or join key is truly absent from the supplied context may you still ask a clarifying question.`;
 
-function inferAnalyticalEntityIds(question: string, contextNodes: KGNode[], manifest: DQLManifest): string[] {
+/**
+ * Produces the prompt-facing subset of a broad local context pack. Global
+ * records remain available, while a record explicitly owned by another domain
+ * cannot steer an otherwise single-domain question into its relationship path.
+ * This is not a security boundary; manifest/domain-context validation still
+ * happens after generation and at execution.
+ */
+function scopeContextPackToQuestionDomains(
+  contextPack: LocalContextPack | undefined,
+  domains: string[],
+  manifest?: DQLManifest,
+): LocalContextPack | undefined {
+  if (!contextPack || domains.length === 0) return contextPack;
+  const allowedDomains = new Set(domains);
+  const relationDomains = manifestRelationDomains(manifest);
+  const objectDomain = (object: LocalContextPack['objects'][number]): string | undefined =>
+    object.domain ?? inferredManifestDomainForMetadataObject(object, relationDomains);
+  const objects = contextPack.objects.filter((object) => {
+    const domain = objectDomain(object);
+    return !domain || allowedDomains.has(domain);
+  });
+  const objectKeys = new Set(objects.map((object) => object.objectKey));
+  const relations = contextPack.allowedSqlContext.relations.filter((relation) =>
+    (!relation.objectKey || objectKeys.has(relation.objectKey))
+    && (!relationDomains.get(normalizeRelationKey(relation.relation))
+      || allowedDomains.has(relationDomains.get(normalizeRelationKey(relation.relation))!)));
+  const relationKeys = new Set(relations.map((relation) => normalizeRelationKey(relation.relation)));
+  const selectedRelations = contextPack.retrievalDiagnostics.selectedRelations?.filter((relation) =>
+    relationKeys.has(normalizeRelationKey(relation.relation)));
+  const selectedJoinPaths = contextPack.retrievalDiagnostics.selectedJoinPaths?.filter((path) =>
+    relationKeys.has(normalizeRelationKey(path.leftRelation))
+    && relationKeys.has(normalizeRelationKey(path.rightRelation)));
+  return {
+    ...contextPack,
+    focusObjectKey: contextPack.focusObjectKey && objectKeys.has(contextPack.focusObjectKey)
+      ? contextPack.focusObjectKey
+      : objects[0]?.objectKey ?? null,
+    objects,
+    skills: contextPack.skills.filter((skill) => !skill.domain || allowedDomains.has(skill.domain)),
+    edges: contextPack.edges.filter((edge) => objectKeys.has(edge.fromKey) && objectKeys.has(edge.toKey)),
+    citations: contextPack.citations.filter((citation) => objectKeys.has(citation.objectKey)),
+    evidenceSummaries: contextPack.evidenceSummaries.filter((summary) => !summary.objectKey || objectKeys.has(summary.objectKey)),
+    evidenceRoles: contextPack.evidenceRoles.filter((role) => objectKeys.has(role.objectKey)),
+    allowedSqlContext: {
+      relations,
+      sourceBlockSql: contextPack.allowedSqlContext.sourceBlockSql.filter((source) => objectKeys.has(source.objectKey)),
+    },
+    retrievalDiagnostics: {
+      ...contextPack.retrievalDiagnostics,
+      selectedObjects: objects.length,
+      selectedEvidence: contextPack.retrievalDiagnostics.selectedEvidence.filter((evidence) => objectKeys.has(evidence.objectKey)),
+      selectedRelations,
+      selectedJoinPaths,
+      schemaShapeCandidates: contextPack.retrievalDiagnostics.schemaShapeCandidates?.filter((candidate) => objectKeys.has(candidate.objectKey)),
+      certifiedCandidateFits: contextPack.retrievalDiagnostics.certifiedCandidateFits.filter((candidate) => objectKeys.has(candidate.objectKey)),
+    },
+  };
+}
+
+function manifestRelationDomains(manifest: DQLManifest | undefined): Map<string, string> {
+  const domains = new Map<string, string>();
+  if (!manifest?.modeling || !manifest.dbtProvenance) return domains;
+  for (const entity of Object.values(manifest.modeling.entities)) {
+    const relation = manifest.dbtProvenance.nodes[entity.dbtUniqueId]?.relation;
+    if (relation && entity.domain) domains.set(normalizeRelationKey(relation), entity.domain);
+  }
+  return domains;
+}
+
+function inferredManifestDomainForMetadataObject(
+  object: LocalContextPack['objects'][number],
+  relationDomains: Map<string, string>,
+): string | undefined {
+  const payload = object.payload ?? {};
+  const relation = typeof payload.relation === 'string' ? payload.relation : undefined;
+  if (relation) {
+    const direct = relationDomains.get(normalizeRelationKey(relation));
+    if (direct) return direct;
+  }
+  const haystack = `${object.objectKey} ${object.name}`.toLowerCase();
+  for (const [relation, domain] of relationDomains) {
+    const model = relation.split('.').at(-1);
+    if (model && haystack.includes(model)) return domain;
+  }
+  return undefined;
+}
+
+/** Removes runtime tables that were explicitly present in, then excluded from, a broad context pack. */
+function schemaContextWithinQuestionScope(
+  schemaContext: AgentSchemaTable[],
+  fullContextPack: LocalContextPack | undefined,
+  scopedContextPack: LocalContextPack | undefined,
+): AgentSchemaTable[] {
+  if (!fullContextPack || fullContextPack === scopedContextPack) return schemaContext;
+  const fullRelations = new Set(fullContextPack.allowedSqlContext.relations.map((relation) => normalizeRelationKey(relation.relation)));
+  const scopedRelations = new Set((scopedContextPack?.allowedSqlContext.relations ?? []).map((relation) => normalizeRelationKey(relation.relation)));
+  return schemaContext.filter((table) => {
+    const key = normalizeRelationKey(table.relation);
+    return !fullRelations.has(key) || scopedRelations.has(key);
+  });
+}
+
+export function inferAnalyticalEntityIds(question: string, contextNodes: KGNode[], manifest: DQLManifest): string[] {
   if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) return [];
   const normalizedQuestion = question.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
   const contextIds = new Set(contextNodes.map((node) => node.nodeId.toLowerCase()));
+  const entityIdentifierTokens = new Set(Object.values(manifest.modeling.entities).flatMap((entity) =>
+    entityIdentifierTokensForMatching(entity).map((token) => token.toLowerCase())));
   const scored = Object.entries(manifest.modeling.entities).map(([key, entity]) => {
     const dbt = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
-    const tokens = [entity.localId ?? entity.id, dbt?.name]
-      .filter((value): value is string => Boolean(value))
-      .flatMap((value) => value.toLowerCase().replace(/^(fct|dim|stg)_/, '').split(/[^a-z0-9]+/))
-      .filter((token) => token.length > 2);
-    const direct = tokens.some((token) => normalizedQuestion.includes(token));
+    const entityTokens = entityIdentifierTokensForMatching(entity);
+    // A backing dbt model may contain another entity's name (for example
+    // `dim_customer_acquisition`). Its `customer` token must not turn a plain
+    // customer question into an acquisition request. Only model tokens that are
+    // unique to this entity are supplemental lexical evidence.
+    const modelTokens = (dbt?.name ?? '')
+      .toLowerCase()
+      .replace(/^(fct|dim|stg)_/, '')
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 2 && !entityIdentifierTokens.has(token));
+    const direct = entityTokens.some((token) => normalizedQuestion.includes(token))
+      || modelTokens.some((token) => normalizedQuestion.includes(token));
     const inContext = contextIds.has(`entity:${entity.qualifiedId ?? entity.id}`.toLowerCase())
       || contextIds.has(`dbt_model:${entity.dbtUniqueId}`.toLowerCase())
       || contextNodes.some((node) => node.kind === 'dbt_model' && node.name === dbt?.name);
-    return { id: key, score: direct ? 2 : inContext ? 1 : 0 };
+    return { id: key, direct, inContext };
   });
-  return scored.filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, 5).map((entry) => entry.id);
+  // AGT-004: context retrieval is useful for completing a clearly named model,
+  // but it must not manufacture a second entity merely because an unrelated
+  // cross-domain block ranked in the context window. That was how a Commerce
+  // product question reached Growth's attribution path. Prefer lexical evidence
+  // whenever the question names at least one modeled entity; use context-only
+  // inference solely as a fallback for genuinely indirect wording.
+  const direct = scored.filter((entry) => entry.direct);
+  const candidates = direct.length > 0 ? direct : scored.filter((entry) => entry.inContext);
+  return candidates
+    .sort((a, b) => Number(b.direct) - Number(a.direct) || a.id.localeCompare(b.id))
+    .slice(0, 5)
+    .map((entry) => entry.id);
+}
+
+function entityIdentifierTokensForMatching(entity: { localId?: string; id: string }): string[] {
+  return [entity.localId ?? entity.id]
+    .flatMap((value) => value.toLowerCase().replace(/^(fct|dim|stg)_/, '').split(/[^a-z0-9]+/))
+    .filter((token) => token.length > 2 && token !== 'entity');
 }
 
 function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): string | undefined {
@@ -2289,7 +2566,7 @@ function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): strin
 // definition as the measure rather than reinventing it, so the number stays consistent
 // with the governed metric — only the join/grouping around it is generated.
 function metricAnchorInstruction(metricName: string, def: { expr: string; table: string }): string {
-  return `A GOVERNED metric matched this question, but the semantic layer could not compose the exact requested shape on its own (the breakdown likely needs a join the metric's table does not own). You MUST compute the measure using this certified definition — do NOT redefine, rename, or approximate it:\n  metric "${metricName}": ${def.expr}   (defined over ${def.table})\nCompose ONE read-only SELECT/WITH that computes exactly this expression as the measure, joining ${def.table} to the other grounded tables along their documented keys to add the requested dimensions, then GROUP BY those dimensions. State the join path and grain in the summary. Reusing the governed definition keeps the answer consistent with the certified metric; only fall back to redefining the measure if ${def.table} genuinely cannot be joined to the requested breakdown.`;
+  return `A GOVERNED metric matched this question, but the semantic layer could not compose the exact requested shape on its own (the breakdown likely needs a join the metric's table does not own). You MUST compute the measure using this certified definition — do NOT redefine, rename, or approximate it:\n  metric "${metricName}": ${def.expr}   (defined over ${def.table})\nCompose ONE read-only SELECT/WITH using explicit aliases for every relation and include every output the user requested. Preserve the metric at its native grain before joining to a lower-grain dimension. NEVER SUM a lifetime, cumulative, balance, snapshot, rate, ratio, or already-aggregated value after a one-to-many join. If the requested result retains the metric's owning entity, expose the native-grain value (or a grain-preserving MAX after deduplication) for each entity/dimension pair; if it asks to allocate that value to the child dimension, request the missing allocation policy instead of inventing one. Join ${def.table} to other grounded tables only along documented keys. State the join path, output grain, and whether each measure is an entity-level attribute or an allocated child-level measure. Reusing the governed definition keeps the answer consistent with the certified metric; if the semantic layer cannot authorize the requested dimensional composition, keep the result exploratory/review-required rather than claiming semantic provenance.`;
 }
 
 function renderContextPrompt(

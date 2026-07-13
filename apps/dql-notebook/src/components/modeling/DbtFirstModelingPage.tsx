@@ -1,18 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, XCircle } from 'lucide-react';
-import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
+import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelArea, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type ContextBootstrapSession, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
-import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type RelationshipDraft } from './DomainModelingCanvas';
+import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
 type Editor =
   | { kind: 'domain' }
-  | { kind: 'entity'; dbtUniqueId?: string; relationshipFrom?: { from: string; fromColumn?: string } }
+  | { kind: 'area'; area?: ManifestModelArea }
+  | { kind: 'entity'; entity?: ManifestModelEntity; dbtUniqueId?: string; relationshipFrom?: { from: string; fromColumn?: string } }
   | {
       kind: 'relationship';
       relationship?: ManifestModelRelationship;
@@ -23,6 +24,8 @@ type Editor =
   | { kind: 'import' };
 
 export function DbtFirstModelingPage() {
+  // UI-001: keep OSS domain authoring focused on Model + Skills, while Ask and
+  // global products remain outside this contextual workspace.
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [data, setData] = useState<DbtFirstModelingResponse | null>(null);
@@ -31,12 +34,14 @@ export function DbtFirstModelingPage() {
   const initialLocation = useMemo(() => readDomainStudioLocation(), []);
   const [tab, setTab] = useState<Tab>(initialLocation.section);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialLocation.domain);
+  const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [detailsByDbtId, setDetailsByDbtId] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
   const detailRequests = useRef(new Map<string, Promise<DbtNodeAuthoringDetail | undefined>>());
   const loadedDetailIds = useRef(new Set<string>());
   const savedDiagramPreferences = useMemo(() => readDiagramPreferences(), []);
+  const [modelingView, setModelingView] = useState<ModelingViewMode>(savedDiagramPreferences.viewMode ?? 'business');
   const [columnMode, setColumnMode] = useState<ColumnDisplayMode>(savedDiagramPreferences.columnMode ?? 'relevant');
   const [diagramSearch, setDiagramSearch] = useState('');
   const [resetLayoutToken, setResetLayoutToken] = useState(0);
@@ -53,7 +58,7 @@ export function DbtFirstModelingPage() {
   const inspectorRef = useRef<HTMLElement>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [dbtSourceEntity, setDbtSourceEntity] = useState<ManifestModelEntity | null>(null);
-  useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
+  useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ modelingView, columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [modelingView, columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
   useEffect(() => {
     const onResize = () => setNarrowLayout(window.innerWidth < 980);
     window.addEventListener('resize', onResize);
@@ -79,16 +84,16 @@ export function DbtFirstModelingPage() {
   }, [dispatch, selectedDomain]);
   const selectDomain = useCallback((domain: string | null) => {
     setSelectedDomain(domain);
+    setSelectedAreaId(null);
     setSelectedId(null);
-    const nextSection = domain ? tab : 'overview';
-    setTab(nextSection);
-    writeDomainStudioLocation(domain, nextSection);
+    writeDomainStudioLocation(domain, tab);
   }, [tab]);
 
   useEffect(() => {
     const onPopState = () => {
       const next = readDomainStudioLocation();
       setSelectedDomain(next.domain);
+      setSelectedAreaId(null);
       setSelectedId(null);
       setTab(next.section);
     };
@@ -118,6 +123,14 @@ export function DbtFirstModelingPage() {
 
   const selectedEntity = data?.modeling.entities[selectedId ?? ''];
   const selectedRelationship = data?.modeling.relationships[selectedId ?? ''];
+  const domainAreas = useMemo(
+    () => data ? Object.values(data.modeling.areas).filter((area) => !selectedDomain || area.domain === selectedDomain).sort((a, b) => a.name.localeCompare(b.name)) : [],
+    [data, selectedDomain],
+  );
+  const selectedArea = data?.modeling.areas[selectedAreaId ?? ''];
+  useEffect(() => {
+    if (selectedAreaId && !domainAreas.some((area) => area.qualifiedId === selectedAreaId)) setSelectedAreaId(null);
+  }, [domainAreas, selectedAreaId]);
   const loadNodeDetail = useCallback((uniqueId: string): Promise<DbtNodeAuthoringDetail | undefined> => {
     const active = detailRequests.current.get(uniqueId);
     if (active) return active;
@@ -169,10 +182,12 @@ export function DbtFirstModelingPage() {
   if (!data) return <EmptyState t={t} title="Domain Studio is unavailable" detail={error ?? 'Enable manifestVersion 3 and dbt-first modeling.'} />;
 
   const relationByDbtId = Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, node.relation]));
-  const domainEntities = domainEntityRecords(data.modeling, selectedDomain);
+  const selectedAreaEntityIds = selectedArea ? new Set([...selectedArea.entityIds, ...selectedArea.referencedEntityIds]) : undefined;
+  const domainEntities = domainEntityRecords(data.modeling, selectedDomain).filter(({ recordKey }) => !selectedAreaEntityIds || selectedAreaEntityIds.has(recordKey));
   const domainRelationships = Object.values(data.modeling.relationships).filter((relationship) => {
     const from = data.modeling.entities[relationship.from];
     const to = data.modeling.entities[relationship.to];
+    if (selectedArea) return selectedArea.relationshipIds.includes(relationship.qualifiedId);
     return !selectedDomain || from?.domain === selectedDomain || to?.domain === selectedDomain;
   });
   const unboundNodes = Object.values(data.dbtProvenance.nodes).filter((node) => !Object.values(data.modeling.entities).some((entity) => entity.dbtUniqueId === node.uniqueId));
@@ -218,14 +233,14 @@ export function DbtFirstModelingPage() {
           <div style={{ display: 'flex', gap: 7 }}>
             {selectedDomain && (
               <Button t={t} onClick={() => {
-                try { window.sessionStorage.setItem('dql-ask-domain-context', JSON.stringify({ domain: selectedDomain })); } catch { /* best effort */ }
+                try { window.sessionStorage.setItem('dql-ask-domain-context', JSON.stringify({ domain: selectedDomain, modelAreaId: selectedArea?.qualifiedId })); } catch { /* best effort */ }
                 dispatch({ type: 'SET_MAIN_VIEW', view: 'ask' });
               }}>
                 <MessageCircle size={14} /> Ask
               </Button>
             )}
-            <Button t={t} onClick={() => setEditor({ kind: 'domain' })}>
-              <Plus size={14} /> New domain
+            <Button t={t} onClick={() => setEditor(selectedDomain ? { kind: 'area' } : { kind: 'domain' })}>
+              <Plus size={14} /> {selectedDomain ? 'New model area' : 'New domain'}
             </Button>
             <IconButton t={t} title="Recompile" onClick={() => void refresh()}>
               <RefreshCw size={15} />
@@ -293,6 +308,7 @@ export function DbtFirstModelingPage() {
             <strong style={{ fontSize: 11 }}>{domainStudioSectionLabel(tab)}</strong>
             <span style={{ width: 1, height: 15, background: t.headerBorder }} />
             <span style={{ color: t.textMuted, fontSize: 10 }}>{selectedDomain ?? 'All domains'}</span>
+            {tab === 'diagram' && selectedDomain && <label style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 5, color: t.textMuted, fontSize: 10 }}>Area <select aria-label="Active model area" value={selectedAreaId ?? ''} onChange={(event) => { setSelectedAreaId(event.target.value || null); setSelectedId(null); }} style={{ ...inputStyle(t), minWidth: 146, padding: '4px 6px' }}><option value="">All domain</option>{domainAreas.map((area) => <option key={area.qualifiedId} value={area.qualifiedId}>{area.name}</option>)}</select></label>}
             {tab === 'diagram' && <button ref={inspectorToggleRef} aria-expanded={inspectorOpen} aria-controls="domain-studio-inspector" aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={toggleInspector} style={{ ...iconButtonStyle(t), marginLeft: 'auto' }}>
               {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
             </button>}
@@ -308,10 +324,10 @@ export function DbtFirstModelingPage() {
                   ...(diagramFullscreen ? { position: 'fixed', inset: 0, zIndex: 90, background: t.appBg } : {}),
                 }}
               >
-                <LayerToolbar columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
+                <LayerToolbar modelingView={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={selectedAreaEntityIds?.size ?? Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onNewArea={() => setEditor({ kind: 'area' })} onModelingView={setModelingView} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedId={selectedId} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
                 </div>
               </div>
             )}
@@ -355,6 +371,7 @@ export function DbtFirstModelingPage() {
               onEdit={() =>
                 setEditor({
                   kind: 'entity',
+                  entity: selectedEntity,
                   dbtUniqueId: selectedEntity.dbtUniqueId,
                 })
               }
@@ -381,6 +398,7 @@ export function DbtFirstModelingPage() {
           editor={editor}
           data={data}
           selectedDomain={selectedDomain}
+          selectedArea={selectedArea}
           t={t}
           onClose={() => setEditor(null)}
           onApplied={async (applied) => {
@@ -448,12 +466,12 @@ function domainStudioSectionLabel(section: Tab): string {
 }
 
 function readDomainStudioLocation(): { domain: string | null; section: Tab } {
-  if (typeof window === 'undefined') return { domain: null, section: 'overview' };
+  if (typeof window === 'undefined') return { domain: null, section: 'diagram' };
   const params = new URL(window.location.href).searchParams;
   const section = params.get('domainSection');
   return {
     domain: params.get('domain'),
-    section: isDomainStudioSection(section) ? section : 'overview',
+    section: isDomainStudioSection(section) ? section : 'diagram',
   };
 }
 
@@ -474,21 +492,38 @@ function relationshipRecordKey(relationships: Record<string, ManifestModelRelati
   return relationship.qualifiedId ?? relationship.id;
 }
 
-function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }: { editor: Editor; data: DbtFirstModelingResponse; selectedDomain: string | null; t: Theme; onClose: () => void; onApplied: (change: ModelingAuthoringChange) => Promise<void> }) {
+function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose, onApplied }: { editor: Editor; data: DbtFirstModelingResponse; selectedDomain: string | null; selectedArea?: ManifestModelArea; t: Theme; onClose: () => void; onApplied: (change: ModelingAuthoringChange) => Promise<void> }) {
   const existing = editor.kind === 'relationship' ? editor.relationship : undefined;
+  const existingEntity = editor.kind === 'entity' ? editor.entity : undefined;
+  const existingArea = editor.kind === 'area' ? editor.area : undefined;
   const relationshipDraft = editor.kind === 'relationship' ? editor.draft : undefined;
-  const [domain, setDomain] = useState(selectedDomain ?? Object.keys(data.modeling.packages)[0] ?? '');
-  const [id, setId] = useState(existing?.id ?? '');
-  const [owner, setOwner] = useState(existing?.owner ?? '');
+  const [domain, setDomain] = useState(existingArea?.domain ?? existingEntity?.domain ?? selectedDomain ?? Object.keys(data.modeling.packages)[0] ?? '');
+  const [areaId, setAreaId] = useState(
+    existingArea?.localId
+      ?? data.modeling.areas[existingEntity?.areaId ?? existing?.areaId ?? '']?.localId
+      ?? selectedArea?.localId
+      ?? '',
+  );
+  const [id, setId] = useState(existing?.localId ?? existingEntity?.localId ?? existingArea?.localId ?? '');
+  const [owner, setOwner] = useState(existing?.owner ?? existingEntity?.owner ?? '');
   const [parent, setParent] = useState('');
-  const [dbtModel, setDbtModel] = useState(editor.kind === 'entity' ? (editor.dbtUniqueId ?? '') : '');
-  const [grain, setGrain] = useState('');
-  const [keys, setKeys] = useState('');
+  const [dbtModel, setDbtModel] = useState(editor.kind === 'entity' ? (existingEntity?.dbtUniqueId ?? editor.dbtUniqueId ?? '') : '');
+  const [businessName, setBusinessName] = useState(existingEntity?.businessName ?? '');
+  const [businessContext, setBusinessContext] = useState(existingEntity?.businessContext ?? '');
+  const [conceptRefs, setConceptRefs] = useState(existingEntity?.conceptRefs?.join(', ') ?? '');
+  const [analyticalRole, setAnalyticalRole] = useState<NonNullable<ManifestModelEntity['analyticalRole']>>(existingEntity?.analyticalRole ?? 'unknown');
+  const [entityStatus, setEntityStatus] = useState<NonNullable<ManifestModelEntity['status']>>(existingEntity?.status ?? 'draft');
+  const [grain, setGrain] = useState(existingEntity?.grain ?? '');
+  const [keys, setKeys] = useState(existingEntity?.keys.join(', ') ?? '');
+  const [areaName, setAreaName] = useState(existingArea?.name ?? '');
+  const [areaDescription, setAreaDescription] = useState(existingArea?.description ?? '');
+  const [areaIntents, setAreaIntents] = useState(existingArea?.intentExamples.join(', ') ?? '');
+  const [areaReferences, setAreaReferences] = useState(existingArea?.referencedEntityIds.map((reference) => data.modeling.entities[reference]?.localId ?? reference).join(', ') ?? '');
   const [from, setFrom] = useState(existing?.from ?? relationshipDraft?.from ?? '');
   const [to, setTo] = useState(existing?.to ?? relationshipDraft?.to ?? '');
   const [keyPairs, setKeyPairs] = useState(existing?.keys.map((key) => `${key.from}=${key.to}`).join(', ') ?? (relationshipDraft?.fromColumn && relationshipDraft.toColumn ? `${relationshipDraft.fromColumn}=${relationshipDraft.toColumn}` : ''));
-  const [cardinality, setCardinality] = useState<RelationshipAuthoringInput['cardinality']>(existing?.cardinality ?? 'many_to_one');
-  const [fanout, setFanout] = useState<RelationshipAuthoringInput['fanout']>(existing?.fanout ?? 'safe');
+  const [cardinality, setCardinality] = useState<RelationshipAuthoringInput['cardinality']>(existing?.cardinality ?? 'unknown');
+  const [fanout, setFanout] = useState<RelationshipAuthoringInput['fanout']>(existing?.fanout ?? 'unknown');
   const [lifecycle, setLifecycle] = useState<RelationshipAuthoringInput['status']>(existing?.status ?? 'draft');
   const [verb, setVerb] = useState(existing?.verb ?? '');
   const [description, setDescription] = useState(existing?.description ?? '');
@@ -544,6 +579,18 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
           exports: [],
         },
       };
+    if (editor.kind === 'area')
+      return {
+        operation: 'upsert_area',
+        value: {
+          id,
+          domain,
+          name: areaName || id,
+          description: areaDescription || undefined,
+          intentExamples: csv(areaIntents),
+          references: csv(areaReferences),
+        },
+      };
     if (editor.kind === 'entity')
       return {
         operation: 'upsert_entity',
@@ -551,6 +598,13 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
           id,
           domain,
           dbtModel,
+          areaId: areaId || undefined,
+          businessName: businessName || undefined,
+          businessContext: businessContext || undefined,
+          conceptRefs: csv(conceptRefs),
+          analyticalRole,
+          status: entityStatus,
+          owner: owner || undefined,
           grain: grain || undefined,
           keys: csv(keys),
         },
@@ -616,6 +670,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
       value: {
         id,
         domain,
+        areaId: areaId || undefined,
         from,
         to,
         keys: parsedKeys,
@@ -693,7 +748,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
       setBusy(false);
     }
   };
-  const title = editor.kind === 'domain' ? 'Create Domain Package' : editor.kind === 'entity' ? 'Bind dbt model' : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : editor.kind === 'import' ? 'Request domain import' : existing ? 'Edit relationship' : 'Create relationship';
+  const title = editor.kind === 'domain' ? 'Create Domain Package' : editor.kind === 'area' ? (existingArea ? 'Edit model area' : 'Create model area') : editor.kind === 'entity' ? (existingEntity ? 'Edit business entity' : 'Add dbt model') : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : editor.kind === 'import' ? 'Request domain import' : existing ? 'Edit relationship' : 'Create relationship';
   return (
     <Modal title={title} t={t} onClose={onClose}>
       {!preview ? (
@@ -703,17 +758,34 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
               <Select value={domain} onChange={setDomain} values={Object.keys(data.modeling.packages)} t={t} />
             </Field>
           )}
-          {editor.kind !== 'relationship' && <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : editor.kind === 'import' ? 'Import id (optional)' : 'Domain id'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>}
+          {editor.kind !== 'relationship' && <Field label={editor.kind === 'entity' ? 'Entity id' : editor.kind === 'area' ? 'Area id' : editor.kind === 'contract' ? 'Contract id' : editor.kind === 'export' ? 'Export id' : editor.kind === 'import' ? 'Import id (optional)' : 'Domain id'}><Input value={id} onChange={setId} t={t} placeholder="stable_snake_case_id" /></Field>}
           {editor.kind === 'domain' && (
             <Field label="Parent domain (optional)">
               <Select value={parent} onChange={setParent} values={Object.keys(data.modeling.packages)} t={t} />
             </Field>
           )}
+          {editor.kind === 'area' && (
+            <>
+              <Message text="A Model Area is one small, reviewable source file. It filters the same domain graph; it never creates a competing semantic model." t={t} />
+              <Field label="Area name"><Input value={areaName} onChange={setAreaName} t={t} placeholder="Customer lifecycle" /></Field>
+              <Field label="Business question or scope"><Input value={areaDescription} onChange={setAreaDescription} t={t} placeholder="How customers progress from first order to repeat purchase." /></Field>
+              <Field label="Example questions (comma-separated)"><Input value={areaIntents} onChange={setAreaIntents} t={t} placeholder="Which customers made a second purchase?" /></Field>
+              <Field label="Read-only boundary entities (comma-separated)"><Input value={areaReferences} onChange={setAreaReferences} t={t} placeholder="customer" /></Field>
+            </>
+          )}
           {editor.kind === 'entity' && (
             <>
+              <Message text="Start with the business meaning. dbt remains the physical source of truth for columns, descriptions, and tests." t={t} />
+              <Field label="Model area"><Select value={areaId} onChange={setAreaId} values={Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => area.localId)} labels={Object.fromEntries(Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => [area.localId, area.name]))} t={t} /></Field>
               <Field label="dbt model">
                 <Select value={dbtModel} onChange={setDbtModel} values={Object.keys(data.dbtProvenance.nodes)} labels={Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, `${node.name} · ${node.relation ?? node.uniqueId}`]))} t={t} />
               </Field>
+              <Field label="Business name"><Input value={businessName} onChange={setBusinessName} t={t} placeholder="Customer order" /></Field>
+              <Field label="Business context"><Input value={businessContext} onChange={setBusinessContext} t={t} placeholder="One order used to understand repeat purchasing and revenue." /></Field>
+              <div style={twoColumns}>
+                <Field label="Business concepts"><Input value={conceptRefs} onChange={setConceptRefs} t={t} placeholder="customer_lifecycle, revenue" /></Field>
+                <Field label="Analytical role"><Select value={analyticalRole} onChange={(value) => setAnalyticalRole(value as NonNullable<ManifestModelEntity['analyticalRole']>)} values={['event', 'dimension', 'snapshot', 'bridge', 'unknown']} t={t} /></Field>
+              </div>
               <div style={twoColumns}>
                 <Field label="Grain override (optional)">
                   <Input value={grain} onChange={setGrain} t={t} placeholder="Use dbt meta.dql by default" />
@@ -722,11 +794,16 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
                   <Input value={keys} onChange={setKeys} t={t} placeholder="customer_id, order_id" />
                 </Field>
               </div>
+              <div style={twoColumns}>
+                <Field label="Lifecycle"><Select value={entityStatus} onChange={(value) => setEntityStatus(value as NonNullable<ManifestModelEntity['status']>)} values={['draft', 'review', 'certified', 'deprecated']} t={t} /></Field>
+                <Field label="Owner"><Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" /></Field>
+              </div>
             </>
           )}
           {editor.kind === 'relationship' && (
             <>
               <Message text="Choose the two analytical entities and their join keys. DQL keeps the relationship in draft until warehouse validation passes." t={t} />
+              <Field label="Model area"><Select value={areaId} onChange={setAreaId} values={Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => area.localId)} labels={Object.fromEntries(Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => [area.localId, area.name]))} t={t} /></Field>
               <div style={twoColumns}>
                 <Field label="From entity">
                   <Select value={from} onChange={setFrom} values={Object.keys(data.modeling.entities)} t={t} />
@@ -741,7 +818,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
               {id && <div style={{ color: t.textMuted, fontSize: 9.5 }}>Relationship id: <code>{id}</code></div>}
               <div style={twoColumns}>
                 <Field label="Cardinality">
-                  <Select value={cardinality} onChange={(v) => setCardinality(v as RelationshipAuthoringInput['cardinality'])} values={['one_to_one', 'one_to_many', 'many_to_one', 'many_to_many']} t={t} />
+                  <Select value={cardinality} onChange={(v) => setCardinality(v as RelationshipAuthoringInput['cardinality'])} values={['unknown', 'one_to_one', 'one_to_many', 'many_to_one', 'many_to_many']} t={t} />
                 </Field>
                 <Field label="Fanout policy">
                   <Select value={fanout} onChange={(v) => setFanout(v as RelationshipAuthoringInput['fanout'])} values={['safe', 'attribution_required', 'unsafe', 'unknown']} t={t} />
@@ -855,7 +932,7 @@ function ModelingEditor({ editor, data, selectedDomain, t, onClose, onApplied }:
               </Field>
             </>
           )}
-          {editor.kind !== 'entity' && editor.kind !== 'relationship' && (
+          {editor.kind !== 'entity' && editor.kind !== 'relationship' && editor.kind !== 'area' && (
             <Field label="Owner">
               <Input value={owner} onChange={setOwner} t={t} placeholder="team@company.com" />
             </Field>
@@ -949,7 +1026,7 @@ function DomainFact({ label, value, t }: { label: string; value: string; t: Them
   );
 }
 
-function LayerToolbar({ columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onBindModel, onRelationship, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onBindModel: () => void; onRelationship: () => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
+function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onBindModel, onRelationship, onNewArea, onModelingView, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { modelingView: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onBindModel: () => void; onRelationship: () => void; onNewArea: () => void; onModelingView: (mode: ModelingViewMode) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
   return (
     <div
       style={{
@@ -965,8 +1042,9 @@ function LayerToolbar({ columnMode, search, layoutMode, density, visibleLimit, t
         scrollbarWidth: 'thin',
       }}
     >
-      <IconButton t={t} title="Bind dbt model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>
+      <IconButton t={t} title="Add dbt model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton><IconButton t={t} title="Create model area" onClick={onNewArea}><Boxes size={14} /></IconButton>
+      <select aria-label="Modeling view" value={modelingView} onChange={(event) => onModelingView(event.target.value as ModelingViewMode)} style={{ ...inputStyle(t), width: 96, padding: '5px 6px' }}><option value="business">Business</option><option value="data">Data</option></select>
+      {modelingView === 'data' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <label style={{ position: 'relative', width: 138, flex: '0 0 138px' }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
       <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
@@ -1596,21 +1674,23 @@ function DbtInventory({ data, domain, unbound, t, onBind }: { data: DbtFirstMode
 function EntityInspector({ entity, detail, t, onEdit, onEditDbtSource }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; t: Theme; onEdit: () => void; onEditDbtSource: () => void }) {
   return (
     <Inspector t={t}>
-      <InspectorTitle title={entity.localId} subtitle={entity.domain} t={t} />
+      <InspectorTitle title={entity.businessName || entity.localId} subtitle={entity.domain} t={t} />
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <Button t={t} onClick={onEdit}>Edit DQL binding</Button>
         <Button t={t} onClick={onEditDbtSource}>Preview dbt source patch</Button>
       </div>
       <h3 style={inspectorHeading(t)}>Business context</h3>
-      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{detail?.description || `Add a business definition for ${entity.localId} in dbt, then enrich its agent guidance with domain skills.`}</p>
+      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{entity.businessContext || `Add the DQL-owned business context for ${entity.localId}. dbt descriptions remain physical-source documentation.`}</p>
       <Property label="concepts" value={entity.conceptRefs?.join(', ') || 'Not mapped'} t={t} />
       <Property label="analytical role" value={entity.analyticalRole ?? 'Not declared'} t={t} />
+      <Property label="owner" value={entity.owner ?? 'Not declared'} t={t} />
       <h3 style={inspectorHeading(t)}>Analytics identity</h3>
       <Property label="dbt unique id" value={entity.dbtUniqueId} t={t} />
       <Property label="relation" value={detail?.relation ?? 'Loading…'} t={t} />
       <Property label="grain" value={entity.grain ?? detail?.dqlMeta?.grain ?? 'Not declared'} t={t} />
       <Property label="keys" value={(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? [])).join(', ') || 'Not declared'} t={t} />
       <Property label="source" value={detail?.sourcePath ?? entity.sourcePath} t={t} />
+      <Property label="dbt description" value={detail?.description ?? 'Not declared'} t={t} />
       <h3 style={inspectorHeading(t)}>dbt columns ({detail?.columns.length ?? '…'})</h3>
       {detail?.columns.slice(0, 16).map((column) => (
         <div
@@ -2092,8 +2172,8 @@ function relationshipKeys(value: string): Array<{ from: string; to: string }> {
     return { from, to };
   });
 }
-function readDiagramPreferences(): Partial<{ columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }> {
-  try { return JSON.parse(localStorage.getItem('dql-modeling-preferences') ?? '{}') as Partial<{ columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }>; }
+function readDiagramPreferences(): Partial<{ viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }> {
+  try { return JSON.parse(localStorage.getItem('dql-modeling-preferences') ?? '{}') as Partial<{ viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }>; }
   catch { return {}; }
 }
 function domainDepth(id: string, packages: DbtFirstModelingResponse['modeling']['packages']): number {

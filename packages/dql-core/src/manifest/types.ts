@@ -797,6 +797,12 @@ export interface ManifestMetricFlowProvenance {
 export interface ManifestDbtFirstModeling {
   mode: 'dbt-first';
   packages: Record<string, ManifestDomainPackage>;
+  /**
+   * Focused, Git-backed modeling sections. Areas are source ownership and
+   * diagram/ranking hints only: every area still compiles into this one domain
+   * graph and never creates a second semantic model.
+   */
+  areas: Record<string, ManifestModelArea>;
   entities: Record<string, ManifestModelEntity>;
   relationships: Record<string, ManifestModelRelationship>;
   contracts: Record<string, ManifestModelContract>;
@@ -818,6 +824,27 @@ export interface ManifestDomainPackage {
   owner?: string;
 }
 
+export interface ManifestModelArea {
+  /** DOM-001: sparse DQL-owned source section; dbt facts stay in provenance. */
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  name: string;
+  /** A short business question or scope statement for this focused diagram. */
+  description?: string;
+  /** Examples that can boost matching retrieval inside an already-authorized domain. */
+  intentExamples: string[];
+  /** Entities defined by this one source file. */
+  entityIds: string[];
+  /** Relationships defined by this one source file. */
+  relationshipIds: string[];
+  /** Read-only boundary nodes shown in this area's focused diagram. */
+  referencedEntityIds: string[];
+  sourcePath: string;
+  layoutPath?: string;
+}
+
 export interface ManifestModelEntity {
   id: string;
   /** Author-written id inside the owning Domain Package. */
@@ -825,13 +852,19 @@ export interface ManifestModelEntity {
   /** Stable globally unique identity (`<domain>::entity::<localId>`). */
   qualifiedId: string;
   domain: string;
+  /** The focused source area that owns this entity, when authored as an area. */
+  areaId?: string;
   dbtUniqueId: string;
+  /** DQL-owned business identity; dbt descriptions remain read-only provenance. */
+  businessName?: string;
+  businessContext?: string;
   /** Analytical identity assertion; omitted when dbt `meta.dql` supplies it. */
   grain?: string;
   /** Analytical key assertion; no physical column catalog is copied. */
   keys: string[];
   analyticalRole?: 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown';
   conceptRefs?: string[];
+  owner?: string;
   status?: 'draft' | 'review' | 'certified' | 'deprecated';
   sourcePath: string;
   identityFingerprint: string;
@@ -859,6 +892,8 @@ export interface ManifestModelRelationship {
   id: string;
   localId: string;
   qualifiedId: string;
+  /** The focused source area that owns this relationship, when authored as an area. */
+  areaId?: string;
   from: string;
   to: string;
   keys: Array<{ from: string; to: string }>;

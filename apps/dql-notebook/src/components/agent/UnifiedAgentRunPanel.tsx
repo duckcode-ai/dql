@@ -601,7 +601,7 @@ export function UnifiedAgentRunPanel({
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div style={{ fontSize: 11, color: t.textMuted, flex: 1, minWidth: 180 }}>
-            Auto-routes to the best answer for your question. Use Research deeper on an answer when you want a slower investigation.
+            {scopeHint}
           </div>
           <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
         </div>
@@ -1532,14 +1532,24 @@ function trustExplainer(run: AgentRun): string | null {
   if (run.route === 'dql_block_draft') return 'Saved as a draft block. Add an owner and DQL will certify it when checks pass.';
   if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
   if (run.trustState === 'grounded') return 'Ran cleanly against your data. Save it as a block when it is reusable.';
+  if (isExploratoryDbtRun(run)) return 'Exploratory · DBT-grounded. The query and bounded join probes ran, but no certified relationship path covers it yet.';
   if (run.trustState === 'review_required') return 'AI-generated answer. Save it as a block when you want to keep it.';
   if (run.trustState === 'blocked') return null;
   return null;
 }
 
+function isExploratoryDbtRun(run: AgentRun): boolean {
+  return run.artifacts.some((artifact) => {
+    const payload = artifact.payload;
+    return Boolean(payload && typeof payload === 'object' && !Array.isArray(payload)
+      && (payload as Record<string, unknown>).exploratoryCandidate);
+  });
+}
+
 function simpleRunTitle(run: AgentRun): string {
   if (run.trustState === 'certified') return 'Certified answer';
   if (run.route === 'dql_block_draft') return 'Draft block';
+  if (isExploratoryDbtRun(run)) return 'Exploratory DBT-grounded answer';
   if (run.route === 'semantic_answer') return 'Semantic answer';
   if (run.route === 'generated_answer') return 'AI-generated answer';
   return ROUTE_LABEL[run.route];
@@ -1900,6 +1910,8 @@ function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
     ? 'Certified'
     : run.route === 'dql_block_draft'
       ? 'Draft'
+      : isExploratoryDbtRun(run)
+        ? 'Exploratory'
       : run.trustState === 'blocked'
         ? 'Needs input'
         : 'AI-generated';

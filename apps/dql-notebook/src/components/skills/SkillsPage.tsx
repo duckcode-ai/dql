@@ -342,6 +342,7 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
           >
             <SkillChipField t={t} label="Use these metrics" values={skill.preferredMetrics} empty="No preferred metrics" />
             <SkillChipField t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" />
+            <SkillChipField t={t} label="Focus on model areas" values={skill.modelAreaRefs} empty="All areas in the skill domain" />
             <SkillChipField t={t} label="Apply when" values={skill.triggers} empty="No trigger phrases defined" />
             <SkillChipField t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
             <SkillChipField t={t} label="Avoid when" values={skill.exclusions} empty="No exclusion rule defined" />
@@ -419,6 +420,7 @@ function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSa
       body: draft.body,
       domain: draft.domain?.trim() ? draft.domain.trim() : undefined,
       domains: (draft.domains ?? (draft.domain ? [draft.domain] : [])).map((value) => value.trim()).filter(Boolean),
+      modelAreaRefs: (draft.modelAreaRefs ?? []).map((value) => value.trim()).filter(Boolean),
       triggers: (draft.triggers ?? []).map((value) => value.trim()).filter(Boolean),
       exclusions: (draft.exclusions ?? []).map((value) => value.trim()).filter(Boolean),
       preferredDimensions: (draft.preferredDimensions ?? []).map((value) => value.trim()).filter(Boolean),
@@ -530,6 +532,15 @@ function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSa
                 <Plus size={12} strokeWidth={2.2} /> New domain
               </button>
             </div>
+          </Field>
+
+          <Field label="Focused model areas (optional)" t={t} hint="Comma-separated area ids from the Model workspace. This boosts the skill only inside its selected domain; it never expands access.">
+            <input
+              value={(draft.modelAreaRefs ?? []).join(', ')}
+              onChange={(e) => set('modelAreaRefs', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
+              placeholder="customer_lifecycle, revenue_reporting"
+              style={inputStyle(t)}
+            />
           </Field>
 
           <Field label="Skill type" t={t} hint="Domain references provide broad context; policies encode a focused, reusable rule.">

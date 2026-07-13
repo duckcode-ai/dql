@@ -23,6 +23,7 @@ import type {
   ManifestFanoutPolicy,
   ManifestMetricFlowProvenance,
   ManifestModelContract,
+  ManifestModelArea,
   ManifestModelEntity,
   ManifestModelRelationship,
   ManifestModelRule,
@@ -67,6 +68,20 @@ interface RawEntity {
   concept_refs?: unknown;
   conceptRefs?: unknown;
   status?: unknown;
+  business_name?: unknown;
+  businessName?: unknown;
+  business_context?: unknown;
+  businessContext?: unknown;
+  owner?: unknown;
+}
+
+interface RawModelArea {
+  id?: unknown;
+  name?: unknown;
+  description?: unknown;
+  intent_examples?: unknown;
+  intentExamples?: unknown;
+  references?: unknown;
 }
 
 interface RawRelationship {
@@ -203,8 +218,9 @@ export function loadDbtFirstModeling(
 
   const domainSources = loadDomainSources(projectRoot, diagnostics);
   const modelFiles = collectModelingFiles(domainSources);
+  const areas: Record<string, ManifestModelArea> = {};
   const entities: Record<string, ManifestModelEntity> = {};
-  const rawRelationships: Array<{ value: RawRelationship; sourcePath: string; domain: string }> = [];
+  const rawRelationships: Array<{ value: RawRelationship; sourcePath: string; domain: string; areaId?: string }> = [];
   const contracts: Record<string, ManifestModelContract> = {};
   const conformance: Record<string, ManifestConformanceDeclaration> = {};
   const rules: Record<string, ManifestModelRule> = {};
@@ -220,6 +236,32 @@ export function loadDbtFirstModeling(
     if (!domain) {
       diagnostics.push(modelingError(relPath, 'modeling source is not inside a Domain Package and does not declare `domain`'));
       continue;
+    }
+
+    const rawArea = asRecord(source.area) as RawModelArea;
+    const areaLocalId = stringValue(rawArea.id);
+    let area: ManifestModelArea | undefined;
+    if (areaLocalId) {
+      const qualifiedId = qualifiedObjectId(domain, 'model_area', areaLocalId);
+      area = {
+        id: qualifiedId,
+        localId: areaLocalId,
+        qualifiedId,
+        domain,
+        name: stringValue(rawArea.name) ?? areaLocalId,
+        description: stringValue(rawArea.description),
+        intentExamples: stringArray(rawArea.intent_examples ?? rawArea.intentExamples),
+        entityIds: [],
+        relationshipIds: [],
+        referencedEntityIds: stringArray(rawArea.references),
+        sourcePath: relPath,
+      };
+      if (!insertScopedRecord(areas, area)) {
+        diagnostics.push(modelingError(relPath, `duplicate model area "${area.qualifiedId}" in the same Domain Package`));
+        area = undefined;
+      }
+    } else if (Object.keys(rawArea).length > 0) {
+      diagnostics.push(modelingError(relPath, 'model area requires `area.id`'));
     }
 
     for (const rawEntity of arrayOfRecords(source.entities) as RawEntity[]) {
@@ -238,18 +280,26 @@ export function loadDbtFirstModeling(
       const explicitKeys = stringArray(rawEntity.keys);
       const grain = explicitGrain ?? dbt.grain;
       const keys = explicitKeys.length > 0 ? explicitKeys : dbt.keys;
-      const entityDomain = stringValue(rawEntity.domain) ?? domain;
+      const entityDomain: string = stringValue(rawEntity.domain) ?? domain;
+      if (area && entityDomain !== domain) {
+        diagnostics.push(modelingError(relPath, `entity "${id}" in model area "${areaLocalId}" must belong to domain "${domain}"`));
+        continue;
+      }
       const qualifiedId = qualifiedObjectId(entityDomain, 'entity', id);
       const entity: ManifestModelEntity = {
         id: qualifiedId,
         localId: id,
         qualifiedId,
         domain: entityDomain,
+        areaId: area?.qualifiedId,
         dbtUniqueId,
+        businessName: stringValue(rawEntity.business_name ?? rawEntity.businessName),
+        businessContext: stringValue(rawEntity.business_context ?? rawEntity.businessContext),
         grain,
         keys,
         analyticalRole: analyticalRole(rawEntity.analytical_role ?? rawEntity.analyticalRole),
         conceptRefs: stringArray(rawEntity.concept_refs ?? rawEntity.conceptRefs),
+        owner: stringValue(rawEntity.owner),
         status: lifecycle(rawEntity.status),
         sourcePath: relPath,
         identityFingerprint: fingerprint({
@@ -260,11 +310,13 @@ export function loadDbtFirstModeling(
       };
       if (!insertScopedRecord(entities, entity)) {
         diagnostics.push(modelingError(relPath, `duplicate entity "${entity.qualifiedId}" in the same Domain Package`));
+      } else if (area) {
+        area.entityIds.push(entity.qualifiedId);
       }
     }
 
     for (const rawRelationship of arrayOfRecords(source.relationships) as RawRelationship[]) {
-      rawRelationships.push({ value: rawRelationship, sourcePath: relPath, domain });
+      rawRelationships.push({ value: rawRelationship, sourcePath: relPath, domain, areaId: area?.qualifiedId });
     }
 
     for (const rawContract of arrayOfRecords(source.contracts)) {
@@ -409,6 +461,20 @@ export function loadDbtFirstModeling(
   validateInterfaces(domainExports, domainImports, entities, diagnostics);
   validateContracts(contracts, entities, diagnostics);
   const relationships = buildRelationships(rawRelationships, entities, nodeFacts, domainSources, domainExports, domainImports, contracts, diagnostics);
+  for (const relationship of Object.values(relationships)) {
+    if (relationship.areaId && areas[relationship.areaId]) areas[relationship.areaId].relationshipIds.push(relationship.qualifiedId);
+  }
+  for (const area of Object.values(areas)) {
+    const references = area.referencedEntityIds.flatMap((reference) => {
+      const resolved = resolveScopedKey(entities, reference, area.domain);
+      if (resolved) return [resolved];
+      diagnostics.push(modelingError(area.sourcePath, `model area "${area.localId}" references unknown entity "${reference}"`));
+      return [];
+    });
+    area.entityIds.sort();
+    area.relationshipIds.sort();
+    area.referencedEntityIds = [...new Set(references)].sort();
+  }
   validateConformance(conformance, entities, diagnostics);
   const packages = Object.fromEntries([...domainSources.values()]
     .map((source): [string, ManifestDomainPackage] => [source.id, {
@@ -435,6 +501,7 @@ export function loadDbtFirstModeling(
     modeling: {
       mode: 'dbt-first',
       packages,
+      areas: sortRecord(areas),
       entities: sortRecord(entities),
       relationships: sortRecord(relationships),
       contracts: sortRecord(contracts),
@@ -451,7 +518,7 @@ export function loadDbtFirstModeling(
 }
 
 function buildRelationships(
-  rawRelationships: Array<{ value: RawRelationship; sourcePath: string; domain: string }>,
+  rawRelationships: Array<{ value: RawRelationship; sourcePath: string; domain: string; areaId?: string }>,
   entities: Record<string, ManifestModelEntity>,
   nodeFacts: Map<string, DbtNodeFacts>,
   packages: Map<string, DomainSource>,
@@ -461,7 +528,7 @@ function buildRelationships(
   diagnostics: ManifestDiagnostic[],
 ): Record<string, ManifestModelRelationship> {
   const relationships: Record<string, ManifestModelRelationship> = {};
-  for (const { value, sourcePath, domain } of rawRelationships) {
+  for (const { value, sourcePath, domain, areaId } of rawRelationships) {
     const id = stringValue(value.id);
     const from = stringValue(value.from);
     const to = stringValue(value.to);
@@ -579,6 +646,7 @@ function buildRelationships(
       id: qualifiedId,
       localId: id,
       qualifiedId,
+      areaId,
       from: fromKey!,
       to: toKey!,
       keys,

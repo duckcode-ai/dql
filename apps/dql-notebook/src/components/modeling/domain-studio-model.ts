@@ -29,9 +29,7 @@ export type DomainStudioNavigationGroup = {
 export const DOMAIN_STUDIO_NAVIGATION: DomainStudioNavigationGroup[] = [
   {
     items: [
-      { id: 'overview', label: 'Domain' },
-      { id: 'blocks', label: 'Blocks' },
-      { id: 'diagram', label: 'Modeling' },
+      { id: 'diagram', label: 'Model' },
       { id: 'skills', label: 'Skills' },
     ],
   },

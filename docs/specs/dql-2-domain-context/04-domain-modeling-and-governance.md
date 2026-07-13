@@ -16,6 +16,17 @@ within the same model:
 legacy files remain readable, but the UI presents one model and offers a
 lossless consolidation migration.
 
+### Focused Model Areas (OSS v1)
+
+Large domains can be authored as several small, reviewable Model Areas without
+creating competing models. Each `modeling/areas/<area-id>.dql.yaml` carries a
+short business scope, example questions, owned entities/relationships, and
+optional read-only boundary-entity references. The compiler merges every Area
+and legacy/default source into one qualified domain graph. A relationship is
+owned by its active Area and may cross Areas; cross-domain policy remains the
+same explicit relationship/export/import/contract path. Area selection boosts
+retrieval only after the domain and lifecycle gates have passed.
+
 ## Entity bindings
 
 Each binding resolves a qualified entity to one dbt unique ID. It may add a
@@ -80,6 +91,8 @@ Domain skills specify intent examples, vocabulary, policies, ambiguity rules,
 tool guidance, exclusions, and evaluation links. Global skills specify reusable
 workflow/tool technique and cannot override domain safety. A domain skill is
 selected only when the active/allowed domain matches and evidence is fresh.
+Skills may optionally name focused Model Areas; that further narrows ranking
+inside their already-authorized domain and never grants context outside it.
 `exclusions` reduce or veto a match and are never indexed as positive search
 tokens (`SKILL-001`, `SKILL-002`).
 
