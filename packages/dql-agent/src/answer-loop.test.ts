@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SemanticLayer } from "@duckcodeailabs/dql-core";
+import { SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, parseProposal } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, parseProposal } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import type { CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -572,6 +572,50 @@ describe("answer (block-first loop)", () => {
         item.value?.includes("Weekly business review"),
       ),
     ).toBe(true);
+  });
+
+  it("AGT-001 does not let a broad business-view match terminate an analytical data question", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "business_view:Jaffle Growth Pulse",
+          kind: "business_view",
+          name: "Jaffle Growth Pulse",
+          domain: "executive",
+          status: "certified",
+          description: "Executive customer health and revenue momentum context.",
+          llmContext: "customer lifetime value, products, revenue, tax",
+          sourceTier: "business_context",
+          certification: "certified",
+          provenance: "DQL business view",
+        },
+        {
+          nodeId: "metric:customers.lifetime_spend",
+          kind: "metric",
+          name: "customers.lifetime_spend",
+          domain: "customers",
+          description: "Gross customer lifetime spend inclusive of taxes.",
+          llmContext: "label: lifetime_spend\naggregation: sum\ntable: customers\nsql: SUM(lifetime_spend)",
+          sourceTier: "semantic_layer",
+          certification: "ai_generated",
+          provenance: "dbt measure",
+        },
+      ],
+      [],
+    );
+    const provider = new StubProvider(
+      "```sql\nSELECT customer_name, lifetime_tax_paid FROM customers ORDER BY lifetime_tax_paid DESC\n```",
+    );
+
+    const result = await answer({
+      question: "what is the tax and product info for customer life span?",
+      provider,
+      kg,
+    });
+
+    expect(provider.calls.length).toBeGreaterThan(0);
+    expect(result.kind === "certified" && result.sourceTier === "business_context").toBe(false);
+    expect(result.route?.ref).not.toBe("Jaffle Growth Pulse");
   });
 
   it("prefers an exact certified executable block over a certified term for KPI questions", async () => {
@@ -5609,6 +5653,62 @@ function contextPackForRankedRelations(
   } as any;
 }
 
+/** A v3 manifest that intentionally models orders but not products. */
+function manifestWithUnmodeledProducts(): DQLManifest {
+  return {
+    manifestVersion: 3,
+    dqlVersion: "2.0.0",
+    generatedAt: "2026-07-13T00:00:00.000Z",
+    project: "commerce",
+    projectRoot: "/fixture",
+    blocks: {},
+    businessViews: {},
+    terms: {},
+    notebooks: {},
+    metrics: {},
+    dimensions: {},
+    sources: {},
+    lineage: { nodes: [], edges: [], domains: [], crossDomainFlows: [], domainTrust: {} },
+    dbtProvenance: {
+      manifestPath: "/fixture/target/manifest.json",
+      manifestFingerprint: "fixture",
+      nodes: {
+        "model.commerce.fct_orders": {
+          uniqueId: "model.commerce.fct_orders",
+          resourceType: "model",
+          name: "fct_orders",
+          relation: "analytics.fct_orders",
+          identityFingerprint: "fct_orders",
+          available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+        },
+      },
+      metricFlow: {},
+    },
+    modeling: {
+      mode: "dbt-first",
+      packages: {},
+      entities: {
+        order: {
+          id: "commerce::entity::order",
+          localId: "order",
+          qualifiedId: "commerce::entity::order",
+          dbtUniqueId: "model.commerce.fct_orders",
+          domain: "commerce",
+          grain: "order_id",
+          keys: ["order_id"],
+          sourcePath: "entities.dql.yaml",
+          identityFingerprint: "order",
+        },
+      },
+      relationships: {},
+      contracts: {},
+      conformance: {},
+      rules: {},
+      domainLineage: [],
+    },
+  } as unknown as DQLManifest;
+}
+
 describe("parseProposal", () => {
   it("extracts a structured JSON proposal from a fenced object", () => {
     const raw = [
@@ -5868,6 +5968,236 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.route?.tier).toBe("semantic_metric");
     expect(result.sql).toContain("SUM(tax_paid)");
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("returns an unexecuted exploratory candidate when a dbt-grounded join lacks v3 modeling coverage", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Top customers who bought beverage products.",
+        sql: "SELECT o.customer_id, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_products p ON o.product_id = p.product_id WHERE p.category = 'beverage' GROUP BY o.customer_id ORDER BY revenue DESC LIMIT 10",
+        outputs: ["customer_id", "revenue"],
+        viz: "bar",
+      }),
+      "```",
+    ].join("\n"));
+    let executed = false;
+    const result = await answer({
+      question: "Who are the top customers who bought beverage products?",
+      provider,
+      kg,
+      manifest: manifestWithUnmodeledProducts(),
+      contextPack: contextPackForRankedRelations(
+        "Who are the top customers who bought beverage products?",
+        [
+          {
+            relation: "analytics.fct_orders",
+            name: "fct_orders",
+            source: "dbt manifest",
+            columns: [
+              { name: "customer_id", type: "VARCHAR" },
+              { name: "product_id", type: "VARCHAR" },
+              { name: "amount", type: "DECIMAL" },
+            ],
+            rank: 1,
+            score: 90,
+            reason: "orders fact",
+          },
+          {
+            relation: "analytics.dim_products",
+            name: "dim_products",
+            source: "dbt manifest",
+            columns: [
+              { name: "product_id", type: "VARCHAR" },
+              { name: "category", type: "VARCHAR", sampleValues: ["beverage"] },
+            ],
+            rank: 2,
+            score: 85,
+            reason: "product category",
+          },
+        ],
+        { metricTerms: ["revenue"], dimensionTerms: ["customer"] },
+      ),
+      executeGeneratedSql: async (sql) => {
+        executed = true;
+        return { columns: ["customer_id", "revenue"], rows: [], rowCount: 0, sql };
+      },
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("grounding_gap"); // compatibility for runtimes that have not adopted the candidate field yet
+    expect(result.proposedSql).toContain("analytics.dim_products");
+    expect(result.exploratoryCandidate).toMatchObject({
+      kind: "dbt_grounded_exploration",
+      reason: "unbound_relation",
+      modeledEntityIds: ["order"],
+      relationshipIds: [],
+      executionStatus: "not_executed",
+    });
+    expect(result.route?.label).toContain("exploratory candidate");
+    expect(executed).toBe(false);
+  });
+
+  it("EXP-001 treats a draft relationship as exploratory coverage instead of a terminal policy refusal", async () => {
+    kg.rebuild([], []);
+    const base = manifestWithUnmodeledProducts();
+    const manifest = {
+      ...base,
+      dbtProvenance: {
+        ...base.dbtProvenance!,
+        nodes: {
+          ...base.dbtProvenance!.nodes,
+          "model.commerce.dim_products": {
+            uniqueId: "model.commerce.dim_products",
+            resourceType: "model",
+            name: "dim_products",
+            relation: "analytics.dim_products",
+            identityFingerprint: "dim_products",
+            available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+        },
+      },
+      modeling: {
+        ...base.modeling!,
+        entities: {
+          ...base.modeling!.entities,
+          product: {
+            id: "commerce::entity::product",
+            localId: "product",
+            qualifiedId: "commerce::entity::product",
+            dbtUniqueId: "model.commerce.dim_products",
+            domain: "commerce",
+            grain: "product_id",
+            keys: ["product_id"],
+            sourcePath: "entities.dql.yaml",
+            identityFingerprint: "product",
+          },
+        },
+        relationships: {
+          order_to_product: {
+            id: "order_to_product",
+            localId: "order_to_product",
+            qualifiedId: "commerce::relationship::order_to_product",
+            from: "order",
+            to: "product",
+            keys: [{ from: "product_id", to: "product_id" }],
+            cardinality: "many_to_one",
+            fanout: "safe",
+            status: "draft",
+            crossDomain: false,
+            ownerDomain: "commerce",
+            automaticJoinAllowed: false,
+          },
+        },
+      },
+    } as unknown as DQLManifest;
+    const provider = new StubProvider([
+      "```sql",
+      "SELECT o.customer_id, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_products p ON o.product_id = p.product_id GROUP BY o.customer_id",
+      "```",
+    ].join("\n"));
+
+    const result = await answer({
+      question: "Who are the top customers by product revenue?",
+      provider,
+      kg,
+      manifest,
+      schemaContext: [
+        { relation: "analytics.fct_orders", columns: [
+          { name: "customer_id" },
+          { name: "product_id" },
+          { name: "amount" },
+        ] },
+        { relation: "analytics.dim_products", columns: [{ name: "product_id" }] },
+      ],
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("grounding_gap");
+    expect(result.exploratoryCandidate).toMatchObject({
+      kind: "dbt_grounded_exploration",
+      reason: "relationship_not_certified",
+      executionStatus: "not_executed",
+    });
+  });
+
+  it("keeps a product-ranking question out of unrelated cross-domain attribution paths (AGT-004)", () => {
+    const base = manifestWithUnmodeledProducts();
+    const manifest: DQLManifest = {
+      ...base,
+      dbtProvenance: {
+        ...base.dbtProvenance!,
+        nodes: {
+          ...base.dbtProvenance!.nodes,
+          "model.commerce.dim_customers": {
+            uniqueId: "model.commerce.dim_customers",
+            resourceType: "model",
+            name: "dim_customers",
+            relation: "analytics.dim_customers",
+            identityFingerprint: "dim_customers",
+            available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+          "model.growth.fct_campaign_touches": {
+            uniqueId: "model.growth.fct_campaign_touches",
+            resourceType: "model",
+            name: "fct_campaign_touches",
+            relation: "analytics.fct_campaign_touches",
+            identityFingerprint: "fct_campaign_touches",
+            available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+          "model.growth.dim_customer_acquisition": {
+            uniqueId: "model.growth.dim_customer_acquisition",
+            resourceType: "model",
+            name: "dim_customer_acquisition",
+            relation: "analytics.dim_customer_acquisition",
+            identityFingerprint: "dim_customer_acquisition",
+            available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+        },
+      },
+      modeling: {
+        ...base.modeling!,
+        entities: {
+          ...base.modeling!.entities,
+          customer: {
+            id: "commerce::entity::customer",
+            localId: "customer",
+            qualifiedId: "commerce::entity::customer",
+            dbtUniqueId: "model.commerce.dim_customers",
+            domain: "commerce",
+            sourcePath: "entities.dql.yaml",
+            identityFingerprint: "customer",
+          },
+          campaign_touch: {
+            id: "growth::entity::campaign_touch",
+            localId: "campaign_touch",
+            qualifiedId: "growth::entity::campaign_touch",
+            dbtUniqueId: "model.growth.fct_campaign_touches",
+            domain: "growth",
+            sourcePath: "entities.dql.yaml",
+            identityFingerprint: "campaign_touch",
+          },
+          acquisition: {
+            id: "growth::entity::acquisition",
+            localId: "acquisition",
+            qualifiedId: "growth::entity::acquisition",
+            dbtUniqueId: "model.growth.dim_customer_acquisition",
+            domain: "growth",
+            sourcePath: "entities.dql.yaml",
+            identityFingerprint: "acquisition",
+          },
+        },
+      },
+    } as DQLManifest;
+
+    const selected = inferAnalyticalEntityIds(
+      "Who are the customers who spend the highest on beverage products?",
+      [{ nodeId: "dbt_model:model.growth.fct_campaign_touches", kind: "dbt_model", name: "fct_campaign_touches" } as KGNode],
+      manifest,
+    );
+
+    expect(selected).toEqual(["customer"]);
   });
 
   it("keeps a directly resolved metric on the semantic route when retrieval selected dbt context", async () => {

@@ -4,14 +4,16 @@
  * Files (the source of truth, consistent with DQL):
  *   - `.dql/traces/<id>.trace.json`  — correction traces
  *   - `.dql/hints/<id>.hint.yaml`     — candidate / approved / rejected hints
+ *   - `.dql/evaluations/<id>.hint-evaluation.yaml` — required evaluation results
  *   - `.dql/reviews/<id>.review.yaml` — human review decisions
  *
  * `.dql/cache/agent-kg.sqlite` is a rebuildable index (see {@link HintStore}).
  *
  * The lifecycle:
  *   recordCorrectionTrace() → derives a `candidate` hint
- *   reviewHint('approved') → flips status to `approved`, writes the review,
- *                            and reindexes SQLite
+ *   evaluateHint() → writes a passed/failed Git evaluation against the trace snapshot
+ *   reviewHint('approved') → requires a passing evaluation in dbt-first v3,
+ *                            flips status, writes the review, and reindexes SQLite
  * Approved-only is enforced at retrieval; nothing here auto-applies a hint.
  */
 
@@ -24,16 +26,20 @@ import {
   writeFileSync,
 } from 'node:fs';
 import * as yaml from 'js-yaml';
+import { loadProjectConfig } from '@duckcodeailabs/dql-core';
 import { HintStore } from './store.js';
 import type {
   CorrectionTrace,
   Hint,
+  HintEvaluation,
+  HintEvaluationCheck,
   HintReview,
   HintScope,
 } from './types.js';
 
 const TRACES_DIR = ['.dql', 'traces'];
 const HINTS_DIR = ['.dql', 'hints'];
+const EVALUATIONS_DIR = ['.dql', 'evaluations'];
 const REVIEWS_DIR = ['.dql', 'reviews'];
 
 export function tracesDir(projectRoot: string): string {
@@ -41,6 +47,9 @@ export function tracesDir(projectRoot: string): string {
 }
 export function hintsDir(projectRoot: string): string {
   return join(projectRoot, ...HINTS_DIR);
+}
+export function evaluationsDir(projectRoot: string): string {
+  return join(projectRoot, ...EVALUATIONS_DIR);
 }
 export function reviewsDir(projectRoot: string): string {
   return join(projectRoot, ...REVIEWS_DIR);
@@ -68,6 +77,14 @@ export interface RecordCorrectionTraceInput {
   rationale?: string;
   author?: string;
   anchorObjectKey?: string;
+  /** Failed governed route/tool path. Required by dbt-first manifest v3. */
+  failedRoute?: string;
+  /** Reviewable evidence supporting the proposed correction. Required by v3. */
+  evidence?: string[];
+  /** Immutable project snapshot for this correction. Required by v3. */
+  snapshotId?: string;
+  /** Stable evaluation name that must pass before approval. Required by v3. */
+  requiredEvaluation?: string;
   /** Override the derived candidate hint's title. */
   hintTitle?: string;
   /** Override the derived candidate hint's guidance (defaults to the correction). */
@@ -89,6 +106,20 @@ export function recordCorrectionTrace(
   projectRoot: string,
   input: RecordCorrectionTraceInput,
 ): RecordCorrectionTraceResult {
+  if (requiresEvaluatedApproval(projectRoot)) {
+    const missing = [
+      !strOrUndef(input.failedRoute) ? 'failedRoute' : undefined,
+      cleanStringList(input.evidence).length === 0 ? 'evidence' : undefined,
+      !strOrUndef(input.snapshotId) ? 'snapshotId' : undefined,
+      !strOrUndef(input.requiredEvaluation) ? 'requiredEvaluation' : undefined,
+    ].filter((item): item is string => Boolean(item));
+    if (missing.length > 0) {
+      throw new HintLifecycleError(
+        'HINT_CORRECTION_EVIDENCE_REQUIRED',
+        `dbt-first manifest v3 corrections require ${missing.join(', ')}.`,
+      );
+    }
+  }
   const traceId = genId('trace');
   const hintId = genId('hint');
   const createdAt = nowIso();
@@ -103,6 +134,10 @@ export function recordCorrectionTrace(
     rationale: input.rationale,
     author: input.author,
     anchorObjectKey: input.anchorObjectKey,
+    failedRoute: strOrUndef(input.failedRoute),
+    evidence: cleanStringList(input.evidence),
+    snapshotId: strOrUndef(input.snapshotId),
+    requiredEvaluation: strOrUndef(input.requiredEvaluation),
     derivedHintId: hintId,
   };
 
@@ -116,6 +151,8 @@ export function recordCorrectionTrace(
     correctedSql: input.correctedSql,
     tags: input.tags,
     author: input.author,
+    snapshotId: strOrUndef(input.snapshotId),
+    requiredEvaluation: strOrUndef(input.requiredEvaluation),
     createdAt,
     updatedAt: createdAt,
   };
@@ -154,6 +191,9 @@ export function writeHintFile(projectRoot: string, hint: Hint): void {
     tags: hint.tags,
     author: hint.author,
     reviewer: hint.reviewer,
+    snapshotId: hint.snapshotId,
+    requiredEvaluation: hint.requiredEvaluation,
+    evaluationId: hint.evaluationId,
     supersedes: hint.supersedes,
     createdAt: hint.createdAt,
     updatedAt: hint.updatedAt,
@@ -188,6 +228,9 @@ export function readHintFile(path: string, sourcePath?: string): Hint | null {
       tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
       author: strOrUndef(raw.author),
       reviewer: strOrUndef(raw.reviewer),
+      snapshotId: strOrUndef(raw.snapshotId),
+      requiredEvaluation: strOrUndef(raw.requiredEvaluation),
+      evaluationId: strOrUndef(raw.evaluationId),
       supersedes: strOrUndef(raw.supersedes),
       createdAt: String(raw.createdAt ?? nowIso()),
       updatedAt: String(raw.updatedAt ?? nowIso()),
@@ -218,6 +261,133 @@ export function getHintFromGit(projectRoot: string, hintId: string): Hint | null
   return existsSync(path) ? readHintFile(path, path) : null;
 }
 
+// --- Evaluations ------------------------------------------------------------
+
+export class HintLifecycleError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'HintLifecycleError';
+  }
+}
+
+export interface EvaluateHintInput {
+  hintId: string;
+  snapshotId: string;
+  evaluation: string;
+  evaluator: string;
+  checks: HintEvaluationCheck[];
+  evidence: string[];
+  note?: string;
+}
+
+export interface EvaluateHintResult {
+  hint: Hint;
+  evaluation: HintEvaluation;
+}
+
+export function hintEvaluationFilePath(projectRoot: string, evaluationId: string): string {
+  return join(evaluationsDir(projectRoot), `${evaluationId}.hint-evaluation.yaml`);
+}
+
+/** Record a deterministic required evaluation. Overall status is derived from every check. */
+export function evaluateHint(projectRoot: string, input: EvaluateHintInput): EvaluateHintResult {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) throw new HintLifecycleError('HINT_NOT_FOUND', `Hint ${input.hintId} was not found.`);
+  if (hint.status !== 'candidate') {
+    throw new HintLifecycleError('HINT_NOT_CANDIDATE', `Hint ${input.hintId} is ${hint.status}; only candidates can be evaluated.`);
+  }
+
+  const snapshotId = strOrUndef(input.snapshotId);
+  if (!snapshotId || !hint.snapshotId || snapshotId !== hint.snapshotId) {
+    throw new HintLifecycleError(
+      'HINT_SNAPSHOT_MISMATCH',
+      `Hint ${input.hintId} was recorded against snapshot ${hint.snapshotId ?? 'unknown'}, not ${snapshotId ?? 'unknown'}. Refresh and evaluate the original correction snapshot.`,
+    );
+  }
+  const evaluationName = strOrUndef(input.evaluation);
+  if (!evaluationName || !hint.requiredEvaluation || evaluationName !== hint.requiredEvaluation) {
+    throw new HintLifecycleError(
+      'HINT_EVALUATION_MISMATCH',
+      `Hint ${input.hintId} requires evaluation ${hint.requiredEvaluation ?? 'unknown'}, not ${evaluationName ?? 'unknown'}.`,
+    );
+  }
+  const checks = cleanEvaluationChecks(input.checks);
+  const evidence = cleanStringList(input.evidence);
+  if (checks.length === 0 || evidence.length === 0) {
+    throw new HintLifecycleError('HINT_EVALUATION_EVIDENCE_REQUIRED', 'Hint evaluation requires at least one check and one evidence reference.');
+  }
+
+  const evaluationId = genId('hint_eval');
+  const createdAt = nowIso();
+  const evaluation: HintEvaluation = {
+    id: evaluationId,
+    hintId: hint.id,
+    traceId: hint.traceId,
+    snapshotId,
+    evaluation: evaluationName,
+    status: checks.every((check) => check.passed) ? 'passed' : 'failed',
+    checks,
+    evidence,
+    evaluator: input.evaluator.trim(),
+    note: strOrUndef(input.note),
+    createdAt,
+  };
+  if (!evaluation.evaluator) {
+    throw new HintLifecycleError('HINT_EVALUATOR_REQUIRED', 'Hint evaluation requires an evaluator.');
+  }
+
+  mkdirSync(evaluationsDir(projectRoot), { recursive: true });
+  writeFileSync(
+    hintEvaluationFilePath(projectRoot, evaluationId),
+    yaml.dump(stripUndefined({ ...evaluation }), { lineWidth: 100, noRefs: true }),
+    'utf-8',
+  );
+  const updated: Hint = { ...hint, evaluationId, updatedAt: createdAt };
+  writeHintFile(projectRoot, updated);
+  reindexHints(projectRoot);
+  return { hint: updated, evaluation };
+}
+
+export function readHintEvaluationFile(path: string): HintEvaluation | null {
+  try {
+    const raw = yaml.load(readFileSync(path, 'utf-8')) as Record<string, unknown> | null;
+    if (!raw || typeof raw !== 'object') return null;
+    const rawChecks = Array.isArray(raw.checks) ? raw.checks : [];
+    const evaluation: HintEvaluation = {
+      id: String(raw.id ?? ''),
+      hintId: String(raw.hintId ?? ''),
+      traceId: strOrUndef(raw.traceId),
+      snapshotId: String(raw.snapshotId ?? ''),
+      evaluation: String(raw.evaluation ?? ''),
+      status: raw.status === 'passed' ? 'passed' : 'failed',
+      checks: cleanEvaluationChecks(rawChecks as HintEvaluationCheck[]),
+      evidence: cleanStringList(raw.evidence),
+      evaluator: String(raw.evaluator ?? ''),
+      note: strOrUndef(raw.note),
+      createdAt: String(raw.createdAt ?? ''),
+    };
+    if (!evaluation.id || !evaluation.hintId || !evaluation.snapshotId || !evaluation.evaluation || !evaluation.evaluator) return null;
+    return evaluation;
+  } catch {
+    return null;
+  }
+}
+
+export function getHintEvaluationFromGit(projectRoot: string, evaluationId: string): HintEvaluation | null {
+  const path = hintEvaluationFilePath(projectRoot, evaluationId);
+  return existsSync(path) ? readHintEvaluationFile(path) : null;
+}
+
+export function listHintEvaluationsFromGit(projectRoot: string, hintId?: string): HintEvaluation[] {
+  const dir = evaluationsDir(projectRoot);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((file) => file.endsWith('.hint-evaluation.yaml'))
+    .map((file) => readHintEvaluationFile(join(dir, file)))
+    .filter((item): item is HintEvaluation => Boolean(item) && (!hintId || item!.hintId === hintId))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
 // --- Reviews ----------------------------------------------------------------
 
 export interface ReviewHintInput {
@@ -225,6 +395,8 @@ export interface ReviewHintInput {
   decision: 'approved' | 'rejected';
   reviewer: string;
   note?: string;
+  /** Current immutable project snapshot. Required for v3 approval. */
+  snapshotId?: string;
 }
 
 export interface ReviewHintResult {
@@ -240,6 +412,25 @@ export interface ReviewHintResult {
 export function reviewHint(projectRoot: string, input: ReviewHintInput): ReviewHintResult | null {
   const hint = getHintFromGit(projectRoot, input.hintId);
   if (!hint) return null;
+
+  if (input.decision === 'approved' && requiresEvaluatedApproval(projectRoot)) {
+    if (!input.snapshotId || !hint.snapshotId || input.snapshotId !== hint.snapshotId) {
+      throw new HintLifecycleError(
+        'HINT_SNAPSHOT_MISMATCH',
+        `Hint ${hint.id} was recorded against snapshot ${hint.snapshotId ?? 'unknown'}, not ${input.snapshotId ?? 'unknown'}. Refresh before review.`,
+      );
+    }
+    const evaluation = hint.evaluationId ? getHintEvaluationFromGit(projectRoot, hint.evaluationId) : null;
+    if (!evaluation) {
+      throw new HintLifecycleError('HINT_EVALUATION_REQUIRED', `Hint ${hint.id} cannot be approved before its required evaluation runs.`);
+    }
+    if (evaluation.status !== 'passed') {
+      throw new HintLifecycleError('HINT_EVALUATION_FAILED', `Hint ${hint.id} cannot be approved because evaluation ${evaluation.id} failed.`);
+    }
+    if (evaluation.snapshotId !== input.snapshotId || evaluation.evaluation !== hint.requiredEvaluation) {
+      throw new HintLifecycleError('HINT_EVALUATION_STALE', `Hint ${hint.id} evaluation does not match the current correction snapshot and required evaluation.`);
+    }
+  }
 
   const reviewId = genId('review');
   const createdAt = nowIso();
@@ -307,6 +498,30 @@ function strOrUndef(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   const str = String(value).trim();
   return str.length > 0 ? str : undefined;
+}
+
+function cleanStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item).trim()).filter(Boolean))];
+}
+
+function cleanEvaluationChecks(value: HintEvaluationCheck[]): HintEvaluationCheck[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((check) => {
+    if (!check || typeof check !== 'object') return [];
+    const name = strOrUndef(check.name);
+    if (!name || typeof check.passed !== 'boolean') return [];
+    return [{ name, passed: check.passed, evidence: strOrUndef(check.evidence) }];
+  });
+}
+
+function requiresEvaluatedApproval(projectRoot: string): boolean {
+  try {
+    const config = loadProjectConfig(projectRoot) as { manifestVersion?: number; modeling?: { mode?: string } };
+    return config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
+  } catch {
+    return false;
+  }
 }
 
 function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {

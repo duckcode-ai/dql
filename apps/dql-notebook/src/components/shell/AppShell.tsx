@@ -22,6 +22,7 @@ import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { AgentLogPage } from '../agent/AgentLogPage';
 import { GovernedContextPage } from '../domains/GovernedContextPage';
+import { DbtFirstModelingPage } from '../modeling/DbtFirstModelingPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { AiBuildDialog } from '../agent/AiBuildDialog';
@@ -223,8 +224,8 @@ export function AppShell() {
             <ReadinessPage />
           ) : state.mainView === 'skills' ? (
             <GovernedContextPage initialTab="skills" />
-          ) : state.mainView === 'domains' ? (
-            <GovernedContextPage />
+          ) : state.mainView === 'domains' || state.mainView === 'modeling' ? (
+            <DbtFirstModelingPage />
           ) : state.mainView === 'apps' ? (
             <AppsView />
           ) : state.mainView === 'agent_log' ? (

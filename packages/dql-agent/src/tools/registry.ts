@@ -22,6 +22,8 @@ export type DqlToolName =
   | 'search_metadata'
   | 'get_table_schema'
   | 'validate_sql'
+  | 'resolve_analytical_path'
+  | 'explain_relationship_proof'
   | 'inspect_dql_project'
   | 'build_dql_block'
   | 'build_dql_app'
@@ -57,6 +59,13 @@ const KG_KIND_ENUM = [
   'dashboard',
   'app',
   'skill',
+  'relationship',
+  'contract',
+  'domain_export',
+  'domain_import',
+  'conformance',
+  'policy',
+  'evaluation',
 ] as const;
 
 const RESEARCH_INTENT_ENUM = [
@@ -598,6 +607,38 @@ const CORE_TOOL_DEFINITIONS = [
       },
     },
     surfaces: ['mcp', 'native', 'answer_loop'],
+  },
+  {
+    name: 'resolve_analytical_path',
+    description:
+      'Resolve a deterministic manifest-v3 analytical path before generating SQL. Returns exact certified relationships, key pairs, fanout policy, and cross-domain interfaces, or a clarification/refusal reason.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['entities'],
+      properties: {
+        entities: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'DQL analytical entity ids to connect.' },
+        ownerDomain: { type: 'string', description: 'Domain that owns the proposed analysis.' },
+        purpose: { type: 'string', description: 'Declared cross-domain analytical purpose.' },
+        measureEntities: { type: 'array', items: { type: 'string' }, description: 'Entities contributing additive measures.' },
+        dimensionEntities: { type: 'array', items: { type: 'string' }, description: 'Entities contributing grouping dimensions.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'answer_loop'],
+  },
+  {
+    name: 'explain_relationship_proof',
+    description:
+      'Inspect one DQL analytical relationship including exact keys, cardinality, fanout, validation evidence, stale status, and cross-domain import/export proof.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['relationshipId'],
+      properties: {
+        relationshipId: { type: 'string', description: 'Manifest-v3 relationship id.' },
+      },
+    },
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'answer_loop'],
   },
   {
     name: 'inspect_dql_project',

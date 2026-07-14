@@ -360,17 +360,10 @@ describe('conversation context follow-up routing', () => {
     });
 
     const rewritten = __test__.rewriteFollowUpQuestion('can you include product details with previous results and give final', followUp);
-    expect(rewritten).toContain('Follow-up request: can you include product details with previous results and give final');
-    expect(rewritten).toContain('Prior question: give me product and supply info');
-    expect(rewritten).toContain('Prior result ref: result:turn_products');
-    expect(rewritten).toContain('schema=[product_id, supply_id, supply_name, supply_cost]');
-    expect(rewritten).toContain('row_count=65');
-    expect(rewritten).toContain('Prior DQL artifact: kind=sql_block');
-    expect(rewritten).toContain('name=product_supply_breakdown');
-    expect(rewritten).toContain('order_by=[supply_cost desc]');
-    expect(rewritten).toContain('limit=10');
-    expect(rewritten).toContain('source_sql=SELECT product_id, supply_id, supply_name, supply_cost FROM analytics.product_supplies ORDER BY supply_cost DESC LIMIT 10');
-    expect(rewritten).toContain('Resolved prior result values: product_id=[BEV-001, JAF-001]; supply_id=[SUP-005, SUP-009]');
+    expect(rewritten).toBe('can you include product details with previous results and give final');
+    expect(rewritten).not.toContain('Prior result ref');
+    expect(rewritten).not.toContain('source_sql');
+    expect(rewritten).not.toContain('Prior DQL artifact');
   });
 
   it('can bind a follow-up to a semantically recalled older result instead of an unrelated active turn', () => {

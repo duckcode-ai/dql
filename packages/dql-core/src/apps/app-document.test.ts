@@ -15,6 +15,9 @@ const minimalApp: AppDocument = {
   id: 'growth-cxo',
   name: 'Growth — CXO',
   domain: 'growth',
+  ownerDomain: 'growth',
+  usesDomains: ['growth'],
+  requiredExports: [],
   owners: ['alice@acme.com'],
   members: [
     { userId: 'alice@acme.com', roles: ['owner'], attributes: { region: 'NA' } },
@@ -71,6 +74,29 @@ describe('parseAppDocument', () => {
     expect(document?.audience).toBe('operations');
     expect(document?.lifecycle).toBe('review');
     expect(document?.notebooks?.[0]).toEqual(app.notebooks[0]);
+  });
+
+  it('round-trips exact ProductDomainContext including explicit empty arrays', () => {
+    const { document, errors } = parseAppDocument(JSON.stringify({
+      ...minimalApp,
+      usesDomains: [],
+      requiredExports: [],
+      purpose: 'Cross-domain revenue review',
+      classification: 'internal',
+    }));
+
+    expect(errors).toEqual([]);
+    expect(document).toMatchObject({
+      ownerDomain: 'growth',
+      usesDomains: [],
+      purpose: 'Cross-domain revenue review',
+      requiredExports: [],
+      classification: 'internal',
+    });
+    expect(parseAppDocument(JSON.stringify(document)).document).toMatchObject({
+      usesDomains: [],
+      requiredExports: [],
+    });
   });
 
   it('rejects invalid OSS metadata enums', () => {

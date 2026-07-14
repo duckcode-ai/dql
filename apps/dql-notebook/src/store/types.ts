@@ -22,6 +22,11 @@ export interface NotebookDocMetadata {
   author?: string;
   createdAt?: string;
   modifiedAt?: string;
+  ownerDomain?: string;
+  usesDomains?: string[];
+  purpose?: string;
+  requiredExports?: string[];
+  classification?: string;
 }
 
 export type CellType =
@@ -156,7 +161,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | 'agent_log';
+export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'modeling' | 'settings' | 'agent_log';
 
 export type GlobalAiAudience = 'stakeholder' | 'analyst';
 
@@ -204,6 +209,11 @@ export interface AppSummary {
   name: string;
   filePath?: string;
   domain: string;
+  ownerDomain?: string;
+  usesDomains: string[];
+  purpose?: string;
+  requiredExports: string[];
+  classification?: string;
   subdomain?: string;
   groups?: string[];
   description?: string;
@@ -304,6 +314,20 @@ export interface AiBuildCertifierVerdict {
   ready: boolean;
 }
 
+/** Snapshot-bound provenance for a direct AI Build proposal; never a certification. */
+export interface AiBuildTrustDiagnostics {
+  sourceTrust: 'governed_semantic_source' | 'exploratory_dbt_grounded';
+  reviewRequired: true;
+  contextPackId?: string;
+  snapshotId?: string;
+  activeDomain?: string;
+  selectedSkillIds: string[];
+  selectedSkillProvenance: Array<{ id: string; qualifiedId?: string; provenance?: string }>;
+  allowedRelations: string[];
+  joinPolicy: 'semantic_definition' | 'dbt_hints_are_not_governed_proof';
+  warnings: string[];
+}
+
 export interface ProposePlanCandidate {
   model: string;
   slug: string;
@@ -336,6 +360,7 @@ export type AiBuildResult =
       explanation?: string;
       // Spec 16 — skills that guided this build (backend-populated).
       appliedSkills?: Array<{ id: string; description?: string }>;
+      diagnostics?: AiBuildTrustDiagnostics;
       // Spec 17 (part C) — how the answer was reached (backend-populated).
       route?: AiRoute;
     }
@@ -351,6 +376,7 @@ export type AiBuildResult =
       certifierVerdict: AiBuildCertifierVerdict;
       // Spec 16 — skills that guided this build (backend-populated).
       appliedSkills?: Array<{ id: string; description?: string }>;
+      diagnostics?: AiBuildTrustDiagnostics;
       // Spec 17 (part A) — the block's SQL before an edit-mode build, for a
       // before/after diff. Present only when mode:'edit' was requested.
       previousSql?: string;
@@ -429,6 +455,8 @@ export interface Skill {
   /** Spec 17 (part B) — the domain this skill belongs to (domain id). */
   domain?: string;
   domains?: string[];
+  /** Optional focused Model Areas; narrows ranking inside the selected domain only. */
+  modelAreaRefs?: string[];
   kind?: 'domain_reference' | 'metric_policy' | 'glossary' | 'analysis_pattern' | 'sql_policy' | 'custom';
   status?: 'draft' | 'active' | 'deprecated';
   owner?: string;

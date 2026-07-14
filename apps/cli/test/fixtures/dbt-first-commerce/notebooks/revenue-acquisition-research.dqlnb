@@ -1,0 +1,19 @@
+{
+  "dqlnbVersion": 2,
+  "version": 1,
+  "title": "Revenue Acquisition Research",
+  "metadata": {
+    "createdWith": "dql",
+    "ownerDomain": "growth",
+    "usesDomains": ["growth", "commerce"],
+    "purpose": "growth_attribution",
+    "requiredExports": ["commerce.customer_identity@1", "commerce.order_analytics@1"],
+    "classification": "internal"
+  },
+  "cells": [{
+    "id": "safe-route",
+    "type": "sql",
+    "name": "Safe route notes",
+    "content": "SELECT 1 AS reviewed_safe_route"
+  }]
+}

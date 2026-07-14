@@ -15,6 +15,8 @@ import {
   searchMetadata,
   getTableSchema,
   validateSql,
+  resolveAnalyticalPath,
+  explainRelationshipProof,
 } from '@duckcodeailabs/dql-mcp';
 import {
   dqlToolDefinitionsForSurface,
@@ -68,6 +70,8 @@ function nativeToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, AgentT
     // join instead of declining.
     search_metadata: async (args) => searchMetadata(ctx, args as Parameters<typeof searchMetadata>[1]),
     validate_sql: async (args) => validateSql(ctx, args as Parameters<typeof validateSql>[1]),
+    resolve_analytical_path: async (args) => resolveAnalyticalPath(ctx, args as Parameters<typeof resolveAnalyticalPath>[1]),
+    explain_relationship_proof: async (args) => explainRelationshipProof(ctx, args as Parameters<typeof explainRelationshipProof>[1]),
     get_table_schema: async (args) => {
       const params = args as Parameters<typeof getTableSchema>[1];
       const result = getTableSchema(ctx, params);

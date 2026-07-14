@@ -74,7 +74,14 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   const dimensionSelection = selectDimensions(allDimensions, input.questionPlan, timeDimension?.name);
   const dimensions = dimensionSelection.dimensions;
   const filters = selectFilters(allDimensions, dimensions, input.question, input.questionPlan, timeDimension?.name, input.filterValueColumns);
-  if (input.questionPlan.requestedShape.filters.length > 0 && filters.length === 0) return undefined;
+  // A semantic metric can legitimately encode a restriction in its governed
+  // definition (`drink_revenue`, `enterprise_arr`). In that case requiring a
+  // second physical dimension filter is both redundant and sometimes
+  // impossible. Only treat an unresolved restriction as fatal when the selected
+  // metric does not itself cover the qualifier.
+  const unresolvedMetricFilters = input.questionPlan.requestedShape.filters.length > 0 && filters.length === 0;
+  if (unresolvedMetricFilters
+    && !metricEncodesRequestedFilters(primaryMetric, input.questionPlan.requestedShape.filters)) return undefined;
   // Abort only on a LOAD-BEARING unresolved dimension — one that isn't actually a
   // filter value or a time grain we already captured. Previously ANY unresolved
   // term (compose.ts:75) killed the governed compile, so "revenue for beverages by
@@ -90,6 +97,11 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   const buildFor = (candidateMetrics: MetricDefinition[]): SemanticBridgeQueryResult | undefined => {
     const primary = candidateMetrics[0];
     if (!primary) return undefined;
+    // Every retry candidate must independently preserve an unresolved qualifier.
+    // Otherwise a failed category-specific compile (`drink_revenue by customer`)
+    // can silently retry a broad metric (`lifetime_spend`) and erase "beverage".
+    if (unresolvedMetricFilters
+      && !metricEncodesRequestedFilters(primary, input.questionPlan.requestedShape.filters)) return undefined;
     const orderBy = input.questionPlan.requestedShape.topN
       ? [{ name: primary.name, direction: input.questionPlan.requestedShape.rankingDirection === 'bottom' ? 'asc' as const : 'desc' as const }]
       : undefined;
@@ -256,12 +268,14 @@ function buildSemanticBridgeResult(input: {
 function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryInput): MetricDefinition[] {
   if (metrics.length === 0) return [];
   const selected: MetricDefinition[] = [];
+  const qualified = qualifiedMetricForQuestion(metrics, input.questionPlan);
+  if (qualified) return [qualified];
   const hintedNames = input.matchedMetric
     ? [input.matchedMetric.name, leafName(input.matchedMetric.name)]
     : [];
   for (const hint of hintedNames) {
     const hit = metrics.find((metric) => semanticNameMatches(metric, hint));
-    if (hit) {
+    if (hit && !selected.some((metric) => metric.name === hit.name)) {
       selected.push(hit);
       break;
     }
@@ -287,6 +301,60 @@ function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryI
     .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))
     .slice(0, 1)
     .map((candidate) => candidate.metric);
+}
+
+/**
+ * Prefer a governed metric whose semantic definition covers an explicit user
+ * qualifier as well as the requested measure family. This is what lets
+ * `drink_revenue` outrank broad `lifetime_spend` for "spent ... on beverages"
+ * without any project-specific metric name or table rule.
+ */
+function qualifiedMetricForQuestion(
+  metrics: MetricDefinition[],
+  questionPlan: AnalysisQuestionPlan,
+): MetricDefinition | undefined {
+  const qualifierTokens = expandedSemanticTokens(questionPlan.requestedShape.filters);
+  const measureTokens = expandedSemanticTokens([
+    ...questionPlan.requestedShape.measures,
+    ...questionPlan.metricTerms,
+  ]);
+  if (qualifierTokens.size === 0 || measureTokens.size === 0) return undefined;
+  return metrics
+    .map((metric) => {
+      const qualifierScore = scoreMetric(metric, qualifierTokens);
+      const measureScore = scoreMetric(metric, measureTokens);
+      return { metric, qualifierScore, measureScore, score: (qualifierScore * 10) + measureScore };
+    })
+    .filter((candidate) => candidate.qualifierScore > 0 && candidate.measureScore > 0)
+    .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))[0]?.metric;
+}
+
+function metricEncodesRequestedFilters(metric: MetricDefinition, filters: string[]): boolean {
+  const metricTokens = new Set(tokenize([
+    metric.name,
+    metric.label,
+    metric.description,
+    metric.domain,
+    ...(metric.tags ?? []),
+  ].join(' ')));
+  return filters.every((filter) => {
+    const tokens = expandedSemanticTokens([filter]);
+    return tokens.size > 0 && [...tokens].some((token) => metricTokens.has(token));
+  });
+}
+
+function expandedSemanticTokens(values: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const value of values) {
+    for (const token of tokenize(value)) {
+      const singular = token.replace(/ies$/, 'y').replace(/s$/, '');
+      out.add(token);
+      if (singular.length > 1) out.add(singular);
+      for (const synonym of SEMANTIC_TERM_SYNONYM_INDEX.get(token) ?? []) out.add(synonym);
+      for (const synonym of SEMANTIC_TERM_SYNONYM_INDEX.get(singular) ?? []) out.add(synonym);
+    }
+  }
+  return out;
 }
 
 /**
@@ -410,6 +478,21 @@ const DIMENSION_SYNONYMS: string[][] = [
   ['department', 'team', 'division', 'unit'],
   ['status', 'state', 'stage'],
 ];
+
+const SEMANTIC_TERM_SYNONYMS: string[][] = [
+  ['beverage', 'drink'],
+  ['spend', 'spent', 'spending', 'revenue', 'sales'],
+  ['customer', 'client', 'buyer', 'shopper', 'account', 'user'],
+  ['product', 'item', 'sku', 'article', 'goods'],
+];
+
+const SEMANTIC_TERM_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
+  const index = new Map<string, Set<string>>();
+  for (const cluster of SEMANTIC_TERM_SYNONYMS) {
+    for (const word of cluster) index.set(word, new Set(cluster));
+  }
+  return index;
+})();
 
 const DIMENSION_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
   const index = new Map<string, Set<string>>();
@@ -546,8 +629,11 @@ function selectFilterDimension(
     if (matched) return matched;
   }
 
-  const selected = dimensions.filter((dimension) => selectedSet.has(dimension.name));
-  if (selected.length === 1) return selected[0];
+  // Never bind an unresolved literal to the only selected grouping dimension.
+  // "beverage by customer" previously became customer_name = 'beverage'. A
+  // literal needs value-index evidence (above) or explicit dimension grammar
+  // (handled by extractInlineFilterCandidates); otherwise it stays unresolved.
+  void selectedSet;
   return undefined;
 }
 

@@ -44,6 +44,7 @@ import type {
   ManifestBusinessView,
   ManifestDomain,
   ManifestTerm,
+  ManifestDbtFirstModeling,
 } from './types.js';
 import {
   loadAppDocument,
@@ -52,11 +53,15 @@ import {
   loadDashboardDocument,
   extractDashboardBlockRefs,
   appFolderRelPath,
+  normalizeProductDomainContext,
   type AppDocument,
   type DashboardDocument,
 } from '../apps/index.js';
 import { loadDbtRunState, applyBlockDataState, type DbtRunStateIndex } from './dbt-freshness.js';
 import { blockParameterDefinitions } from '../blocks/parameters.js';
+import { loadDbtFirstModeling, siblingDbtArtifact } from './dbt-first-modeling.js';
+import { domainFolderSlug } from './domain-writer.js';
+import { loadDomainPackageRegistry } from './domain-package-registry.js';
 
 // ---- Public API ----
 
@@ -148,7 +153,7 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
   }
 
-  const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
+  const notebookDirs = ['notebooks', 'domains', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   for (const dir of notebookDirs) {
     for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'])) files.add(f);
   }
@@ -160,6 +165,14 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
 
   if (options.dbtManifestPath && existsSync(options.dbtManifestPath)) {
     files.add(options.dbtManifestPath);
+    const catalogPath = siblingDbtArtifact(options.dbtManifestPath, 'catalog.json');
+    const semanticManifestPath = siblingDbtArtifact(options.dbtManifestPath, 'semantic_manifest.json');
+    if (catalogPath) files.add(catalogPath);
+    if (semanticManifestPath) files.add(semanticManifestPath);
+  }
+
+  if (config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first') {
+    for (const f of scanFilesRecursive(join(projectRoot, 'domains'), ['.yaml', '.yml'])) files.add(f);
   }
 
   // Apps & dashboards. Manifests live at apps/<id>/dql.app.json; dashboards
@@ -181,6 +194,14 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   // Load project config
   const config = loadProjectConfig(projectRoot);
   const projectName = config.project ?? 'dql-project';
+  const dbtFirstV3 = config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
+  if ((config.manifestVersion === 3 || config.modeling?.mode === 'dbt-first') && !dbtFirstV3) {
+    diagnostics.push({
+      kind: 'config',
+      severity: 'error',
+      message: 'manifest v3 requires both `manifestVersion: 3` and `modeling.mode: "dbt-first"`; compiling with manifest v2 compatibility defaults',
+    });
+  }
   const datalexManifestPath = resolveDataLexManifestPath(projectRoot, options.datalexManifestPath, config);
   const datalexRegistry = datalexManifestPath
     ? new DataLexContractRegistry({ manifestPath: datalexManifestPath })
@@ -196,8 +217,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
   // Scan first-class business domains
   const domainDirs = ['domains', 'blocks', 'terms', 'business-views', ...(options.extraBlockDirs ?? [])];
-  const domains = scanDomains(projectRoot, domainDirs, diagnostics);
-  validateDomainHierarchy(domains, diagnostics);
+  const packageRegistry = dbtFirstV3 ? loadDomainPackageRegistry(projectRoot) : undefined;
+  const domains = packageRegistry
+    ? Object.fromEntries(packageRegistry.values().map((pkg) => [pkg.id, pkg.domain]))
+    : scanDomains(projectRoot, domainDirs, diagnostics);
+  if (!packageRegistry) validateDomainHierarchy(domains, diagnostics);
 
   // Scan blocks
   const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
@@ -280,6 +304,20 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     applyBlockDataState(blocks, sources, dbtImport.dbtDag, runState);
   }
 
+  let dbtFirstModeling: ReturnType<typeof loadDbtFirstModeling> | undefined;
+  if (dbtFirstV3) {
+    if (!options.dbtManifestPath || !existsSync(options.dbtManifestPath)) {
+      diagnostics.push({
+        kind: 'config',
+        severity: 'error',
+        message: 'manifest v3 dbt-first modeling requires a readable dbt manifest.json',
+      });
+    } else {
+      dbtFirstModeling = loadDbtFirstModeling(projectRoot, options.dbtManifestPath);
+      diagnostics.push(...dbtFirstModeling.diagnostics);
+    }
+  }
+
   // Apps & dashboards (consumption layer). Scanned after blocks/notebooks
   // because dashboard refs are resolved against the block path → name map.
   const { apps, dashboards } = scanAppsAndDashboards(projectRoot, blocks, diagnostics);
@@ -291,17 +329,20 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     metrics,
     dimensions,
     notebooks,
-    dbtImport,
+    dbtFirstV3 ? stripDbtImportDetails(dbtImport) : dbtImport,
     apps,
     dashboards,
     businessViews,
     terms,
   );
+  if (dbtFirstModeling) appendDbtFirstModelingLineage(lineage, dbtFirstModeling.modeling);
 
   return {
-    manifestVersion: 2,
+    manifestVersion: dbtFirstV3 ? 3 : 2,
     dqlVersion,
-    generatedAt: new Date().toISOString(),
+    // v3 is a reproducible policy artifact. Runtime build time lives in the
+    // local cache, not in the canonical manifest content.
+    generatedAt: dbtFirstV3 ? new Date(0).toISOString() : new Date().toISOString(),
     project: projectName,
     projectRoot,
     domains,
@@ -311,11 +352,13 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     notebooks,
     metrics,
     dimensions,
-    sources,
+    sources: dbtFirstV3 ? stripDbtOwnedSourceDetails(sources) : sources,
     apps: Object.keys(apps).length > 0 ? apps : undefined,
     dashboards: Object.keys(dashboards).length > 0 ? dashboards : undefined,
     lineage,
-    dbtImport,
+    dbtImport: dbtFirstV3 ? undefined : dbtImport,
+    dbtProvenance: dbtFirstModeling?.provenance,
+    modeling: dbtFirstModeling?.modeling,
     diagnostics,
   };
 }
@@ -324,6 +367,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
 interface ProjectConfig {
   project?: string;
+  /** Manifest v3 is opt-in and only active with `modeling.mode: "dbt-first"`. */
+  manifestVersion?: 1 | 2 | 3;
+  modeling?: {
+    mode?: 'dbt-first';
+  };
   semanticLayer?: { provider?: string; path?: string; projectPath?: string };
   dataDir?: string;
   /** Selective dbt import filters; merged into buildManifest options. */
@@ -430,6 +478,77 @@ export function resolveDataLexManifestPath(
 
 function isAbsPath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+}
+
+/** Remove physical dbt payloads before serializing a v3 lineage graph. */
+function stripDbtImportDetails(dbtImport: ManifestDbtImport | undefined): ManifestDbtImport | undefined {
+  if (!dbtImport?.dbtDag) return dbtImport;
+  return {
+    ...dbtImport,
+    dbtDag: {
+      edges: dbtImport.dbtDag.edges,
+      models: dbtImport.dbtDag.models.map(({ columns: _columns, description: _description, ...model }) => model),
+    },
+  };
+}
+
+/** Keep source names/usage but never serialize dbt-owned schema content in v3. */
+function stripDbtOwnedSourceDetails(sources: Record<string, ManifestSource>): Record<string, ManifestSource> {
+  return Object.fromEntries(Object.entries(sources).map(([name, source]) => {
+    const { dbtModel: _dbtModel, ...sparseSource } = source;
+    return [name, sparseSource];
+  }));
+}
+
+/**
+ * Add DQL-owned analytical bindings and relationship proof to lineage without
+ * mutating or reclassifying dbt transformation edges. A relationship edge is
+ * intentionally distinct from dbt `depends_on`: it is a reviewed analytical
+ * join policy, not inferred DAG evidence.
+ */
+function appendDbtFirstModelingLineage(lineage: ManifestLineage, modeling: ManifestDbtFirstModeling): void {
+  const existingNodeIds = new Set(lineage.nodes.map((node) => node.id));
+  const existingEdges = new Set(lineage.edges.map((edge) => `${edge.source}:${edge.target}:${edge.type}`));
+  const dbtNodeByUniqueId = new Map<string, string>();
+  for (const node of lineage.nodes) {
+    const uniqueId = typeof node.metadata?.uniqueId === 'string' ? node.metadata.uniqueId : undefined;
+    if (uniqueId) dbtNodeByUniqueId.set(uniqueId, node.id);
+  }
+  const addEdge = (source: string, target: string, type: string) => {
+    const key = `${source}:${target}:${type}`;
+    if (!existingEdges.has(key)) {
+      lineage.edges.push({ source, target, type });
+      existingEdges.add(key);
+    }
+  };
+
+  for (const entity of Object.values(modeling.entities)) {
+    const entityId = `dql_entity:${entity.id}`;
+    if (!existingNodeIds.has(entityId)) {
+      lineage.nodes.push({
+        id: entityId,
+        type: 'dql_entity',
+        name: entity.id,
+        layer: 'answer',
+        domain: entity.domain,
+        filePath: entity.sourcePath,
+        metadata: {
+          dbtUniqueId: entity.dbtUniqueId,
+          grain: entity.grain,
+          keys: entity.keys,
+          identityFingerprint: entity.identityFingerprint,
+          provenance: 'dql sparse overlay',
+        },
+      });
+      existingNodeIds.add(entityId);
+    }
+    const dbtNode = dbtNodeByUniqueId.get(entity.dbtUniqueId);
+    if (dbtNode) addEdge(dbtNode, entityId, 'binds_dbt_model');
+  }
+
+  for (const relationship of Object.values(modeling.relationships)) {
+    addEdge(`dql_entity:${relationship.from}`, `dql_entity:${relationship.to}`, 'governed_relationship');
+  }
 }
 
 function resolveSemanticPath(projectRoot: string, config: ProjectConfig): string {
@@ -1109,9 +1228,14 @@ function scanNotebooks(
         }
 
         if (cells.length > 0) {
+          const productContext = normalizeProductDomainContext(
+            doc.metadata ?? {},
+            stringOrUndefined(doc.metadata?.domain),
+          );
           notebooks[relPath] = {
             title: doc.metadata?.title ?? doc.title ?? relPath,
             filePath: relPath,
+            ...productContext,
             cells,
           };
         }
@@ -1128,6 +1252,16 @@ function scanNotebooks(
   }
 
   return notebooks;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = [...new Set(value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))];
+  return items.length > 0 ? items : undefined;
 }
 
 /** Extract blocks declared inside notebook DQL cells into the blocks map. */
@@ -1852,6 +1986,11 @@ function appDocumentToManifest(
     businessRules: app.businessRules,
     caveats: app.caveats,
     domain: app.domain,
+    ownerDomain: app.ownerDomain ?? app.domain,
+    usesDomains: app.usesDomains,
+    purpose: app.purpose,
+    requiredExports: app.requiredExports,
+    classification: app.classification,
     subdomain: app.subdomain,
     groups: app.groups ?? [],
     audience: app.audience,
@@ -2328,6 +2467,7 @@ function buildOutputContract(
 
 function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDomain {
   return {
+    id: typeof domain.id === 'string' ? domain.id : domainFolderSlug(domain.name),
     name: domain.name,
     filePath,
     parent: typeof domain.parent === 'string' ? domain.parent : undefined,
@@ -2347,6 +2487,7 @@ function domainDeclToManifestDomain(domain: any, filePath: string): ManifestDoma
     dbtTags: Array.isArray(domain.dbtTags) ? domain.dbtTags : undefined,
     semanticDomains: Array.isArray(domain.semanticDomains) ? domain.semanticDomains : undefined,
     semanticTags: Array.isArray(domain.semanticTags) ? domain.semanticTags : undefined,
+    exports: Array.isArray(domain.exports) ? domain.exports : undefined,
   };
 }
 

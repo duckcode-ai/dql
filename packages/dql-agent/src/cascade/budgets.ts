@@ -237,11 +237,16 @@ export function questionShapeClass(plan: AnalysisQuestionPlan, intent?: string):
     return 'deep_research';
   }
   const shape = plan.requestedShape;
-  const entityOrJoinShape = plan.entities.length > 0
+  // One filtered ranking at one output grain is a direct lookup even when it
+  // needs a short dbt join (`beverage spend by customer`). The quick prompt
+  // already carries bounded relation cards and join paths, and SQL validation +
+  // exploratory probes still verify it. Treating every filter+dimension as deep
+  // inflated simple prompts from ~18 to ~80 metadata objects and made a single
+  // provider turn take tens of seconds.
+  const entityOrJoinShape = plan.entities.length > 1
     || shape.dimensions.length > 1
     || shape.requiredOutputs.length > 2
-    || (shape.filters.length > 0 && shape.dimensions.length > 0)
-    || Boolean(shape.topN)
+    || shape.topN?.scope === 'per_group'
     || plan.mode === 'comparison'
     || plan.mode === 'entity_profile'
     || plan.mode === 'entity_drilldown';

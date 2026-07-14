@@ -9,6 +9,7 @@ import {
   resolveLocalOwner,
   upsertGeneratedDraft,
   validateSqlAgainstLocalContext,
+  validateAnalyticalSql,
   type GroundingExpansionResult,
   type LocalContextPack,
   type MetadataFollowUpContext,
@@ -133,6 +134,22 @@ export async function queryViaMetadata(
         : undefined,
       repairBudget: repairPlan?.budget,
       repairPlan,
+      draftBlock: undefined,
+    };
+  }
+  const analyticalDecision = validateAnalyticalSql(proposedSql, ctx.manifest);
+  if (!analyticalDecision.safe) {
+    recordTier2QueryRun(ctx.projectRoot, { slug, question: args.question, status: 'rejected', errorCode: analyticalDecision.code, contextPack });
+    return {
+      uncertified: true,
+      intent,
+      reviewStatus: 'rejected',
+      errorCode: analyticalDecision.code,
+      error: analyticalDecision.message,
+      proposedSql,
+      analyticalPolicy: analyticalDecision,
+      validationWarnings: contextValidation.warnings,
+      ...contextPackResponseFields(contextPack),
       draftBlock: undefined,
     };
   }

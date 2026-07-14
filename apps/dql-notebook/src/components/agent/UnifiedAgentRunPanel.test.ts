@@ -6,6 +6,8 @@ let resolveArtifactDqlView: typeof UnifiedAgentRunPanelModule.resolveArtifactDql
 let artifactSqlDisclosureLabel: typeof UnifiedAgentRunPanelModule.artifactSqlDisclosureLabel;
 let deriveResultChartConfig: typeof UnifiedAgentRunPanelModule.deriveResultChartConfig;
 let artifactReadyPayloadFromRun: typeof UnifiedAgentRunPanelModule.artifactReadyPayloadFromRun;
+let longRunGuidanceFor: typeof UnifiedAgentRunPanelModule.longRunGuidanceFor;
+let completedRunGuidanceFor: typeof UnifiedAgentRunPanelModule.completedRunGuidanceFor;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -15,6 +17,21 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     artifactSqlDisclosureLabel = module.artifactSqlDisclosureLabel;
     deriveResultChartConfig = module.deriveResultChartConfig;
     artifactReadyPayloadFromRun = module.artifactReadyPayloadFromRun;
+    longRunGuidanceFor = module.longRunGuidanceFor;
+    completedRunGuidanceFor = module.completedRunGuidanceFor;
+  });
+
+  it('UI-003 progressively explains long SQL generation and its durable optimization path', () => {
+    expect(longRunGuidanceFor(11, 'generated_answer')).toBeNull();
+    expect(longRunGuidanceFor(15, 'generated_answer')).toMatchObject({ title: 'Checking governed context' });
+    expect(longRunGuidanceFor(25, 'generated_answer')?.detail).toContain('lower future AI/token usage');
+    expect(longRunGuidanceFor(25, 'research')?.title).toContain('Deep research');
+  });
+
+  it('UI-003 shows completed guidance only for long, non-certified reusable work', () => {
+    expect(completedRunGuidanceFor(28, 'generated_answer', 'review_required', 0)?.detail).toContain('review it, then certify it');
+    expect(completedRunGuidanceFor(28, 'generated_answer', 'certified', 0)).toBeNull();
+    expect(completedRunGuidanceFor(8, 'generated_answer', 'review_required', 0)).toBeNull();
   });
 
   it('charts an arbitrary 3-column result whose names do not match the strict auto-detector', () => {

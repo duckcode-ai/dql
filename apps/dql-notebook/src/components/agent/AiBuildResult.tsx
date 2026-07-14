@@ -323,6 +323,7 @@ export function AiBuildResult({
             sql={result.sql}
             explanation={result.explanation}
             appliedSkills={result.appliedSkills}
+            diagnostics={result.diagnostics}
             route={result.route}
             inserted={inserted}
             onInsert={() => { onInsertCell?.(result.sql); setInserted(true); }}
@@ -373,6 +374,7 @@ function CellResultCard({
   sql,
   explanation,
   appliedSkills,
+  diagnostics,
   route,
   inserted,
   onInsert,
@@ -384,6 +386,7 @@ function CellResultCard({
   sql: string;
   explanation?: string;
   appliedSkills?: Array<{ id: string; description?: string }>;
+  diagnostics?: AiBuildResultPayload['diagnostics'];
   route?: AiRoute;
   inserted: boolean;
   onInsert: () => void;
@@ -408,6 +411,7 @@ function CellResultCard({
       </div>
       <CodeBlock t={t} code={sql} />
       <GuidedBySkills t={t} skills={appliedSkills} onOpenSkills={onOpenSkills} />
+      <BuildContextLine t={t} diagnostics={diagnostics} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" onClick={onInsert} disabled={inserted} style={{ ...primaryButtonStyle(t), opacity: inserted ? 0.65 : 1 }}>
           {inserted ? <CheckCircle2 size={13} strokeWidth={2} /> : <SquarePlus size={13} strokeWidth={2} />}
@@ -446,7 +450,7 @@ function BlockResultCard({
   onOpenSkills: () => void;
 }): JSX.Element {
   const [sqlOpen, setSqlOpen] = useState(false);
-  const { name, description, sqlPreview, grain, outputs, examples, certifierVerdict, appliedSkills, route, previousSql } = result;
+  const { name, description, sqlPreview, grain, outputs, examples, certifierVerdict, appliedSkills, diagnostics, route, previousSql } = result;
   // Spec 17 (part A) — an edit shows a before/after diff instead of a single
   // SQL pane. We treat the build as an edit when the backend returned the
   // block's prior SQL (or when the surface launched in edit mode).
@@ -500,6 +504,7 @@ function BlockResultCard({
       <CertifierVerdictBlock t={t} verdict={certifierVerdict} />
 
       <GuidedBySkills t={t} skills={appliedSkills} onOpenSkills={onOpenSkills} />
+      <BuildContextLine t={t} diagnostics={diagnostics} />
 
       {owner ? (
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
@@ -650,6 +655,28 @@ export function CertifierVerdictBlock({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+function BuildContextLine({
+  t,
+  diagnostics,
+}: {
+  t: Theme;
+  diagnostics?: AiBuildResultPayload['diagnostics'];
+}): JSX.Element | null {
+  if (!diagnostics) return null;
+  const semantic = diagnostics.sourceTrust === 'governed_semantic_source';
+  const scope = diagnostics.activeDomain ? `domain ${diagnostics.activeDomain}` : 'project metadata';
+  const relationCount = diagnostics.allowedRelations.length;
+  const warning = diagnostics.warnings[0];
+  return (
+    <div style={{ display: 'grid', gap: 3, fontSize: 10.5, color: t.textMuted, lineHeight: 1.4, fontFamily: t.font }}>
+      <span title={diagnostics.contextPackId ? `Context pack ${diagnostics.contextPackId}` : undefined}>
+        {semantic ? 'Built from governed semantic context' : 'Exploratory DBT-grounded draft'} · {scope} · {relationCount} allowed relation{relationCount === 1 ? '' : 's'} · review required
+      </span>
+      {warning ? <span style={{ color: t.warning }}>{warning}</span> : null}
     </div>
   );
 }

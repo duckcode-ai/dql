@@ -1,4 +1,5 @@
 import { canonicalizeNotebook } from "@duckcodeailabs/dql-core/format";
+import { normalizeProductDomainContext, type ProductDomainContext } from "@duckcodeailabs/dql-core";
 
 export type NotebookCellType =
   | "markdown"
@@ -15,7 +16,7 @@ export type NotebookCellType =
   | "python"
   | "chat";
 
-export interface NotebookMetadata {
+export interface NotebookMetadata extends ProductDomainContext {
   title: string;
   description?: string;
   createdWith: 'dql';
@@ -90,6 +91,7 @@ export function createNotebookDocument(
       title,
       createdWith: 'dql',
       ...metadata,
+      ...normalizeProductDomainContext(metadata),
     },
     cells,
   };
@@ -132,6 +134,7 @@ export function deserializeNotebook(raw: string): NotebookDocument {
       description: parsed.metadata?.description,
       createdWith: "dql",
       template: parsed.metadata?.template,
+      ...normalizeProductDomainContext(parsed.metadata ?? {}, parsed.metadata?.ownerDomain),
     },
     cells: parsed.cells.map((cell, index) => {
       const raw = cell as NotebookCell & {

@@ -175,6 +175,7 @@ export class KGStore {
 
   search(options: KGSearchOptions): KGSearchHit[] {
     const { query, kinds, domain, limit = 20 } = options;
+    const domains = [...new Set([...(options.domains ?? []), ...(domain ? [domain] : [])].filter(Boolean))];
     if (!query.trim()) return [];
 
     const match = buildFtsMatch(query, { prefix: true });
@@ -184,10 +185,10 @@ export class KGStore {
     if (kinds && kinds.length > 0) {
       filters.push(`f.kind IN (${kinds.map(() => '?').join(', ')})`);
     }
-    if (domain) {
-      filters.push(`f.domain = ?`);
+    if (domains.length > 0) {
+      filters.push(`f.domain IN (${domains.map(() => '?').join(', ')})`);
     }
-    const extraParams: unknown[] = [...(kinds && kinds.length > 0 ? kinds : []), ...(domain ? [domain] : [])];
+    const extraParams: unknown[] = [...(kinds && kinds.length > 0 ? kinds : []), ...domains];
     const whereExtra = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
 
     // Fetch a wider window than `limit` so the feedback multiplier (W4.1) can
@@ -485,6 +486,7 @@ function rowToNode(row: {
     caveats: metadata.caveats,
     dataState: metadata.dataState,
     dataStateDetail: metadata.dataStateDetail,
+    payload: metadata.payload,
   };
 }
 
@@ -522,6 +524,7 @@ function nodeMetadata(node: KGNode): Partial<KGNode> {
     'caveats',
     'dataState',
     'dataStateDetail',
+    'payload',
   ] as const) {
     const value = node[key];
     if (value !== undefined) {

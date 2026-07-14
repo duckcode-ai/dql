@@ -3,6 +3,9 @@
 // `dql.app.json` and `.dqld` are the on-disk shapes. Compiled views
 // (`ManifestApp`, `ManifestDashboard`) live in `manifest/types.ts`.
 
+export { normalizeProductDomainContext } from './product-domain-context.js';
+export type { ProductDomainContext } from './product-domain-context.js';
+
 export {
   parseAppDocument,
   loadAppDocument,

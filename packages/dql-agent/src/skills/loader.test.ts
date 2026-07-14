@@ -61,6 +61,20 @@ Body content.`;
 });
 
 describe('loadSkills', () => {
+  it('keeps the same local skill id in different Domain Packages collision-free', () => {
+    for (const domain of ['commerce', 'growth']) {
+      mkdirSync(join(root, 'domains', domain, 'skills'), { recursive: true });
+      writeFileSync(join(root, 'domains', domain, 'domain.dql'), `domain "${domain}" {\n  id = "${domain}"\n}\n`);
+      writeFileSync(join(root, 'domains', domain, 'skills', 'analyst.skill.md'), '---\nid: analyst\n---\nDomain guidance', 'utf-8');
+    }
+
+    const matches = loadSkills(root).skills.filter((skill) => skill.id === 'analyst');
+    expect(matches.map((skill) => skill.qualifiedId).sort()).toEqual([
+      'commerce::skill::analyst',
+      'growth::skill::analyst',
+    ]);
+  });
+
   it('keeps legacy .dql/skills files readable during the OSS layout migration', () => {
     writeFileSync(
       join(root, '.dql', 'skills', 'a.skill.md'),
@@ -277,11 +291,60 @@ describe('selectRelevantSkills (spec 16)', () => {
     expect(selected[0]?.id).toBe('finance-review');
   });
 
+  it('does not leak a topically matching skill from an unauthorized domain', () => {
+    const finance: Skill = {
+      id: 'finance-revenue', scope: 'project', domain: 'Finance', description: 'Revenue recognition',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Use recognized revenue.', sourcePath: '',
+    };
+    const sales: Skill = {
+      id: 'sales-revenue', scope: 'project', domain: 'Sales', description: 'Revenue pipeline',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Use pipeline revenue.', sourcePath: '',
+    };
+
+    expect(selectRelevantSkills([finance, sales], 'show revenue', { domains: ['Sales'] }).map((skill) => skill.id)).toEqual(['sales-revenue']);
+  });
+
+  it('uses a focused model area only as a ranking and eligibility hint inside the selected domain', () => {
+    const lifecycle: Skill = {
+      id: 'lifecycle', scope: 'project', domain: 'Commerce', modelAreaRefs: ['customer_lifecycle'], description: 'Repeat purchase analysis',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Focus on customer lifecycle.', sourcePath: '',
+    };
+    const revenue: Skill = {
+      id: 'revenue', scope: 'project', domain: 'Commerce', modelAreaRefs: ['revenue_reporting'], description: 'Revenue analysis',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Focus on customer lifecycle and revenue.', sourcePath: '',
+    };
+
+    expect(selectRelevantSkills([revenue, lifecycle], 'customer lifecycle', {
+      domains: ['Commerce'], modelAreaIds: ['commerce::model_area::customer_lifecycle'],
+    }).map((skill) => skill.id)).toEqual(['lifecycle']);
+  });
+
   it('does not inject a draft skill until the user activates it', () => {
     const draft: Skill = {
       id: 'draft-revenue', scope: 'project', status: 'draft', domain: 'Revenue',
       preferredMetrics: ['recognized_revenue'], preferredBlocks: [], vocabulary: {}, body: 'Use recognized revenue.', sourcePath: '',
     };
     expect(selectRelevantSkills([draft], 'revenue', { domains: ['Revenue'] })).toEqual([]);
+  });
+
+  it('treats exclusions as negative eligibility and never as positive search tokens', () => {
+    const excluded: Skill = {
+      id: 'recognized-revenue', scope: 'project', description: 'Recognized revenue reporting',
+      exclusions: ['cash bookings'], preferredMetrics: ['recognized_revenue'], preferredBlocks: [],
+      vocabulary: {}, body: 'Use recognized revenue for finance reporting.', sourcePath: '',
+    };
+
+    expect(selectRelevantSkills([excluded], 'show recognized revenue')).toEqual([excluded]);
+    expect(selectRelevantSkills([excluded], 'show cash bookings')).toEqual([]);
+    expect(selectRelevantSkills([excluded], 'cash bookings by month', { domains: ['Finance'] })).toEqual([]);
+  });
+
+  it('lets an exclusion withdraw an otherwise pinned skill', () => {
+    const pinned: Skill = {
+      ...sqlConventions,
+      exclusions: ['python notebook'],
+    };
+
+    expect(selectRelevantSkills([pinned], 'write a python notebook')).toEqual([]);
   });
 });

@@ -10,6 +10,7 @@ import { themes } from '../../themes/notebook-theme';
 import type { BlockEntry } from '../blocks/block-types';
 import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
+import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 
 export type BuildTab = 'notebooks' | 'semantic' | 'database' | 'blocks';
 
@@ -32,7 +33,7 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock, blockDomain = '', onBlockDomainChange }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
@@ -41,6 +42,9 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
   onInsertText?: (text: string) => void;
   /** When set, catalog rows show a "Build block" action (governed AI). Block Studio only. */
   onSeedBlock?: (ref: string, label: string) => void;
+  /** Domain scope for the Blocks tab. An empty value selects the first available domain. */
+  blockDomain?: string;
+  onBlockDomainChange?: (domain: string) => void;
 }) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -105,7 +109,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
         {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} onSeedBlock={onSeedBlock} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} onSeedBlock={onSeedBlock} />}
-        {tab === 'blocks' && <BlocksList t={t} search={search} />}
+        {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} />}
       </div>
     </div>
   );
@@ -287,7 +291,7 @@ function DatabaseList({ t, search, onInsert, onSeedBlock }: { t: Theme; search: 
   );
 }
 
-function BlocksList({ t, search }: { t: Theme; search: string }) {
+function BlocksList({ t, search, domain, onDomainChange }: { t: Theme; search: string; domain: string; onDomainChange?: (domain: string) => void }) {
   const { state, dispatch } = useNotebook();
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -302,9 +306,14 @@ function BlocksList({ t, search }: { t: Theme; search: string }) {
     return () => { active = false; };
   }, [blockFileKey]);
 
-  const q = search.trim().toLowerCase();
-  const uniqueBlocks = Array.from(new Map(blocks.map((b) => [b.path, b])).values());
-  const filtered = uniqueBlocks.filter((b) => !q || b.name.toLowerCase().includes(q) || (b.description ?? '').toLowerCase().includes(q));
+  const domains = blockDomains(blocks);
+  const selectedDomain = domain || domains[0] || '';
+  const domainOptions = selectedDomain && !domains.includes(selectedDomain) ? [selectedDomain, ...domains] : domains;
+  const filtered = filterBlocksForDomain(blocks, selectedDomain, search);
+
+  useEffect(() => {
+    if (!domain && domains[0]) onDomainChange?.(domains[0]);
+  }, [domain, domains.join('|'), onDomainChange]);
 
   const open = (block: BlockEntry) => {
     const file = { name: block.path.split('/').pop() ?? block.name, path: block.path, type: 'block' as const, folder: 'blocks' };
@@ -313,8 +322,25 @@ function BlocksList({ t, search }: { t: Theme; search: string }) {
   };
 
   if (loading) return <EmptyNote text="Loading blocks…" t={t} />;
-  if (filtered.length === 0) return <EmptyNote text={blocks.length === 0 ? 'No blocks yet.' : 'No matches.'} t={t} />;
-  return <div>{filtered.map((block) => <BlockRow key={block.path} block={block} t={t} onOpen={() => open(block)} />)}</div>;
+  if (blocks.length === 0) return <EmptyNote text="No blocks yet." t={t} />;
+  return <div>
+    <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 5 }}>
+      <label htmlFor="block-domain-filter" style={{ color: t.textMuted, fontSize: 9, fontWeight: 750, letterSpacing: '.06em', textTransform: 'uppercase' }}>Domain</label>
+      <select
+        id="block-domain-filter"
+        aria-label="Block domain"
+        value={selectedDomain}
+        onChange={(event) => onDomainChange?.(event.target.value)}
+        style={{ width: '100%', background: t.inputBg, border: `1px solid ${t.inputBorder}`, borderRadius: 6, color: t.textPrimary, fontFamily: t.font, fontSize: 12, padding: '7px 8px' }}
+      >
+        {domainOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+      </select>
+      <span style={{ color: t.textMuted, fontSize: 10 }}>{filtered.length} {selectedDomain} block{filtered.length === 1 ? '' : 's'}</span>
+    </div>
+    {filtered.length === 0
+      ? <EmptyNote text={search ? `No ${selectedDomain} blocks match this search.` : `No blocks in ${selectedDomain} yet.`} t={t} />
+      : filtered.map((block) => <BlockRow key={block.path} block={block} t={t} onOpen={() => open(block)} />)}
+  </div>;
 }
 
 function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: () => void }) {

@@ -38,6 +38,8 @@ import {
 } from './tools/hints.js';
 import {
   getTableSchema,
+  explainRelationshipProof,
+  resolveAnalyticalPath,
   searchMetadata,
   validateSql,
 } from './tools/metadata.js';
@@ -73,6 +75,11 @@ const DQL_MCP_AGENTIC_INSTRUCTIONS =
   'SQL yourself. To create a reusable block from a description, use ' +
   '`build_block_from_prompt` (governed, no SQL authoring); it returns a ' +
   'review-required draft + Certifier verdict and never auto-certifies.\n' +
+  'Manifest v3 relationships: before authoring a multi-entity or cross-domain ' +
+  'query, call `resolve_analytical_path`; use only its ordered certified key ' +
+  'plan. Call `explain_relationship_proof` when the user needs the cardinality, ' +
+  'fanout, export/import, warehouse evidence, owner, or stale-state rationale. ' +
+  'A dbt dependency edge or an inferred key suggestion never authorizes a join.\n' +
   'Semantic compile: when the semantic layer contains the requested metric, ' +
   'dimension, or time grain, use `query_semantic_model` before deep dbt or ' +
   'warehouse search. Return the DQL semantic artifact, draft path when present, and generated SQL as ' +
@@ -114,6 +121,7 @@ const DQL_MCP_FULL_PROFILE_INSTRUCTIONS =
   '\nFull expert profile only: `build_dql_block`, `build_dql_app`, ' +
   '`list_proposals`, `feedback_record`, `record_correction`, `approve_hint`, ' +
   '`list_hints`, `search_metadata`, `get_table_schema`, `validate_sql`, ' +
+  '`resolve_analytical_path`, `explain_relationship_proof`, ' +
   '`list_metrics`, and `list_dimensions` are available for maintenance, legacy, ' +
   'and governance-admin workflows. Prefer the bounded governed cascade tools for normal analytics questions.\n' +
   'Correction memory: when an analyst corrects a Tier-2 answer, call ' +
@@ -233,6 +241,12 @@ function mcpToolHandlers(ctx: DQLContext): Partial<Record<DqlToolName, Pick<McpT
     },
     validate_sql: {
       run: (args) => validateSql(ctx, args as Parameters<typeof validateSql>[1]),
+    },
+    resolve_analytical_path: {
+      run: (args) => resolveAnalyticalPath(ctx, args as Parameters<typeof resolveAnalyticalPath>[1]),
+    },
+    explain_relationship_proof: {
+      run: (args) => explainRelationshipProof(ctx, args as Parameters<typeof explainRelationshipProof>[1]),
     },
     inspect_dql_project: {
       run: (args) => inspectDqlProject(ctx, args as Parameters<typeof inspectDqlProject>[1]),

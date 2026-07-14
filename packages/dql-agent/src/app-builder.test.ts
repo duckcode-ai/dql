@@ -627,7 +627,7 @@ describe("generateAppFromPlan", () => {
       expect(readme).not.toMatch(/Review backlog|review backlog/i);
     }));
 
-  it("writes generated apps under domains/<domain>/apps when the domain folder exists", () =>
+  it("writes generated apps globally with domain backlinks when a domain folder exists", () =>
     withKg(revenueNodes, (kg, dir) => {
       const projectRoot = join(dir, "project");
       mkdirSync(join(projectRoot, "domains", "growth"), { recursive: true });
@@ -641,11 +641,13 @@ describe("generateAppFromPlan", () => {
       const generated = generateAppFromPlan(projectRoot, plan, kg);
 
       expect(generated.paths).toEqual([
-        `domains/growth/apps/${plan.appId}/dql.app.json`,
-        `domains/growth/apps/${plan.appId}/dashboards/overview.dqld`,
-        `domains/growth/apps/${plan.appId}/README.md`,
+        `apps/${plan.appId}/dql.app.json`,
+        `apps/${plan.appId}/dashboards/overview.dqld`,
+        `apps/${plan.appId}/README.md`,
       ]);
-      expect(parseAppDocument(readFileSync(join(projectRoot, generated.paths[0]), "utf-8")).errors).toEqual([]);
+      const parsed = parseAppDocument(readFileSync(join(projectRoot, generated.paths[0]), "utf-8"));
+      expect(parsed.errors).toEqual([]);
+      expect(parsed.document).toMatchObject({ ownerDomain: 'growth', usesDomains: ['growth'], requiredExports: [] });
       expect(parseDashboardDocument(readFileSync(join(projectRoot, generated.paths[1]), "utf-8")).errors).toEqual([]);
     }));
 

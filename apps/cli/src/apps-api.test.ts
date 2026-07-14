@@ -161,7 +161,7 @@ describe('Apps command center API helpers', () => {
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
   });
 
-  it('creates App packages under domains/<domain>/apps when the domain folder exists', () => {
+  it('creates App packages globally with exact domain backlinks when a domain folder exists', () => {
     const root = createProject();
     mkdirSync(join(root, 'domains', 'growth'), { recursive: true });
     writeDomainBlock(root, 'growth', 'revenue.dql', {
@@ -182,20 +182,22 @@ describe('Apps command center API helpers', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.paths).toContain('domains/growth/apps/growth-cxo/dql.app.json');
-    expect(result.paths).toContain('domains/growth/apps/growth-cxo/dashboards/overview.dqld');
-    expect(existsSync(join(root, 'domains/growth/apps/growth-cxo/dql.app.json'))).toBe(true);
-    expect(existsSync(join(root, 'apps/growth-cxo/dql.app.json'))).toBe(false);
-    expect(result.app.filePath).toBe('domains/growth/apps/growth-cxo');
+    expect(result.paths).toContain('apps/growth-cxo/dql.app.json');
+    expect(result.paths).toContain('apps/growth-cxo/dashboards/overview.dqld');
+    expect(existsSync(join(root, 'domains/growth/apps/growth-cxo/dql.app.json'))).toBe(false);
+    expect(existsSync(join(root, 'apps/growth-cxo/dql.app.json'))).toBe(true);
+    expect(result.app.filePath).toBe('apps/growth-cxo');
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
 
-    const dashboard = JSON.parse(readFileSync(join(root, 'domains/growth/apps/growth-cxo/dashboards/overview.dqld'), 'utf-8'));
+    const appDocument = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dql.app.json'), 'utf-8'));
+    expect(appDocument).toMatchObject({ ownerDomain: 'growth', usesDomains: ['growth'], requiredExports: [] });
+    const dashboard = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dashboards/overview.dqld'), 'utf-8'));
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
 
     const newDashboard = createDashboardForApp(root, 'growth-cxo', { title: 'Forecast Review' });
     expect(newDashboard.ok).toBe(true);
     if (!newDashboard.ok) return;
-    expect(newDashboard.path).toBe('domains/growth/apps/growth-cxo/dashboards/forecast-review.dqld');
+    expect(newDashboard.path).toBe('apps/growth-cxo/dashboards/forecast-review.dqld');
     expect(existsSync(join(root, newDashboard.path))).toBe(true);
 
     const notebook = createNotebookForApp(root, 'growth-cxo', {
@@ -205,10 +207,13 @@ describe('Apps command center API helpers', () => {
     });
     expect(notebook.ok).toBe(true);
     if (!notebook.ok) return;
-    expect(notebook.path).toBe('domains/growth/apps/growth-cxo/notebooks/board-notes.dqlnb');
+    expect(notebook.path).toBe('apps/growth-cxo/notebooks/board-notes.dqlnb');
     expect(existsSync(join(root, notebook.path))).toBe(true);
+    expect(JSON.parse(readFileSync(join(root, notebook.path), 'utf-8')).metadata).toMatchObject({
+      ownerDomain: 'growth', usesDomains: ['growth'], requiredExports: [],
+    });
 
-    const updated = JSON.parse(readFileSync(join(root, 'domains/growth/apps/growth-cxo/dql.app.json'), 'utf-8'));
+    const updated = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dql.app.json'), 'utf-8'));
     expect(updated.notebooks[0]).toMatchObject({ path: notebook.path, role: 'analysis' });
   });
 

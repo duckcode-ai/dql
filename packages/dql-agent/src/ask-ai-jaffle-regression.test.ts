@@ -314,6 +314,60 @@ describe('Ask AI jaffle-shop regression', () => {
     }
   });
 
+  it('AGT-005/AGT-006 does not answer beverage spend with the broad top-customers block', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const provider = new SequencedProvider([[
+        '```json',
+        JSON.stringify({
+          summary: 'Top customers by beverage spend.',
+          sql: [
+            'SELECT c.customer_name, SUM(f.product_price) AS beverage_spend',
+            'FROM order_items AS f',
+            'JOIN fct_orders AS o ON f.order_id = o.order_id',
+            'JOIN dim_customers AS c ON o.customer_id = c.customer_id',
+            "WHERE f.product_type = 'beverage'",
+            'GROUP BY c.customer_name',
+            'ORDER BY beverage_spend DESC',
+            'LIMIT 10',
+          ].join('\n'),
+          viz: 'bar',
+          outputs: ['customer_name', 'beverage_spend'],
+        }),
+        '```',
+      ].join('\n')]);
+      const question = 'who are the customers who spent most on beverages?';
+      const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const result = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        executeCertifiedBlock,
+        executeGeneratedSql,
+      });
+
+      expect(result.sourceCertifiedBlock).not.toBe('top_customers');
+      expect(result.proposedSql).toMatch(/product_type\s*=\s*'beverage'/i);
+      expect(result.result?.columns).toEqual(['customer_name', 'beverage_spend']);
+      expect(contextPack.questionPlan.requestedShape).toMatchObject({
+        grain: 'customer',
+        measures: expect.arrayContaining(['spend']),
+        filters: expect.arrayContaining(['beverage']),
+        rankingDirection: 'top',
+      });
+      expect(contextPack.retrievalDiagnostics.certifiedCandidateFits).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          name: 'top_customers',
+          action: expect.stringMatching(/context_only|rejected_for_fit/),
+          fit: expect.objectContaining({ unsupportedFilters: expect.arrayContaining(['beverage']) }),
+        }),
+      ]));
+    } finally {
+      kg.close();
+    }
+  });
+
   it('answers product, supply, and order detail questions and expands follow-ups without grounding dead-ends', async () => {
     const kg = new KGStore(defaultKgPath(projectRoot));
     try {

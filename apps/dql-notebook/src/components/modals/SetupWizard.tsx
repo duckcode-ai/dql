@@ -3,6 +3,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
+import { DbtOnboardingFlow } from './DbtOnboardingFlow';
 
 type WizardStep = 'provider' | 'configure' | 'preview' | 'importing' | 'done';
 type Provider = 'dbt' | 'cubejs' | 'snowflake';
@@ -19,7 +20,7 @@ const PROVIDERS: ProviderCard[] = [
   {
     id: 'dbt',
     label: 'dbt',
-    description: 'Import semantic models, metrics, and dimensions from a dbt project (v1.6+).',
+    description: 'Connect a dbt project as the read-only source for models, schema, lineage, tests, catalog types, and MetricFlow.',
     icon: 'dbt',
     color: '#ff694a',
   },
@@ -63,7 +64,7 @@ interface SetupWizardProps {
 }
 
 export function SetupWizard({ detectedProvider, onClose, onImported }: SetupWizardProps) {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
 
   const [step, setStep] = useState<WizardStep>('provider');
@@ -185,6 +186,35 @@ export function SetupWizard({ detectedProvider, onClose, onImported }: SetupWiza
     display: 'block' as const,
   };
 
+  // CFG-001 / AGT-002: dbt uses the dbt-first onboarding flow. Cube and
+  // Snowflake intentionally retain the existing semantic-provider import path.
+  if (provider === 'dbt' && step !== 'provider') {
+    return (
+      <div onClick={handleOverlay} style={{
+        position: 'fixed', inset: 0, background: t.modalOverlay,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 1000, backdropFilter: 'blur(4px)',
+      }}>
+        <DbtOnboardingFlow
+          t={t}
+          initialProjectDir={projectPath}
+          onBack={() => setStep('provider')}
+          onClose={onClose}
+          onComplete={onImported}
+          onOpen={(target) => {
+            onClose();
+            if (target === 'block') {
+              dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' });
+              dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
+              return;
+            }
+            dispatch({ type: 'SET_MAIN_VIEW', view: target });
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div onClick={handleOverlay} style={{
       position: 'fixed', inset: 0, background: t.modalOverlay,
@@ -229,7 +259,7 @@ export function SetupWizard({ detectedProvider, onClose, onImported }: SetupWiza
           {step === 'provider' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ fontSize: 13, color: t.textSecondary, fontFamily: t.font, lineHeight: 1.5 }}>
-                Choose where to import your semantic definitions from.
+                Connect dbt for the governed DQL 2.0 path, or import a supported external semantic provider.
               </div>
               {PROVIDERS.map((p) => {
                 const isDetected = detectedProvider === p.id;
@@ -544,7 +574,7 @@ export function SetupWizard({ detectedProvider, onClose, onImported }: SetupWiza
                 color: '#fff', cursor: provider ? 'pointer' : 'not-allowed', fontSize: 13,
                 fontFamily: t.font, fontWeight: 500, padding: '7px 20px',
                 opacity: provider ? 1 : 0.5,
-              }}>Next</button>
+              }}>{provider === 'dbt' ? 'Connect dbt' : 'Next'}</button>
             )}
 
             {step === 'configure' && (

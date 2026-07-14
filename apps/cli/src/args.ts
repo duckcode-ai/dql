@@ -9,6 +9,8 @@ export interface CLIFlags {
   outDir: string;
   to?: string;
   dryRun?: boolean;
+  /** Explicitly apply a migration plan that otherwise defaults to preview-only. */
+  apply?: boolean;
   /** `dql propose --plan` — print the deterministic plan; write nothing. */
   plan?: boolean;
   port: number | null;
@@ -16,6 +18,8 @@ export interface CLIFlags {
   host?: string | null;
   chart: string;
   domain: string;
+  /** Governed analytical purpose used to authorize exact cross-domain imports. */
+  purpose?: string;
   owner: string;
   queryOnly: boolean;
   template: string;
@@ -100,6 +104,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     host: null,
     chart: '',
     domain: '',
+    purpose: '',
     owner: '',
     queryOnly: false,
     template: '',
@@ -139,6 +144,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.to = argv[++i];
     } else if (arg === '--dry-run') {
       flags.dryRun = true;
+    } else if (arg === '--apply') {
+      flags.apply = true;
     } else if (arg === '--plan') {
       flags.plan = true;
     } else if (arg === '--port' && i + 1 < argv.length) {
@@ -152,6 +159,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.chart = argv[++i];
     } else if (arg === '--domain' && i + 1 < argv.length) {
       flags.domain = argv[++i];
+    } else if (arg === '--purpose' && i + 1 < argv.length) {
+      flags.purpose = argv[++i];
     } else if (arg === '--owner' && i + 1 < argv.length) {
       flags.owner = argv[++i];
     } else if ((arg === '--template' || arg === '--pattern') && i + 1 < argv.length) {

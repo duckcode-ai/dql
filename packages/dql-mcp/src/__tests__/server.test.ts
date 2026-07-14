@@ -41,13 +41,15 @@ describe('DQL MCP server instructions', () => {
     const registrations = __test__.buildMcpToolRegistrations({} as DQLContext);
 
     expect(registrations.map((tool) => tool.name)).toEqual(dqlToolNamesForSurface('mcp_agentic'));
-    expect(registrations).toHaveLength(15);
+    expect(registrations).toHaveLength(17);
     expect(registrations.map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
         'ask_dql',
         'query_semantic_model',
         'inspect_metadata_context',
         'query_via_metadata',
+        'resolve_analytical_path',
+        'explain_relationship_proof',
         'expand_context',
         'inspect_dql_project',
         // Governed-generation tools (DQL generates end-to-end; UI parity).

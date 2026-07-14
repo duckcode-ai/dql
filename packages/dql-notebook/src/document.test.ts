@@ -53,9 +53,31 @@ describe("canonical notebook document", () => {
       }),
     );
     expect(document.metadata.title).toBe("Legacy");
+    expect(document.metadata.usesDomains).toEqual([]);
+    expect(document.metadata.requiredExports).toEqual([]);
     expect(document.cells[0]).toMatchObject({
       type: "chat",
       chatConfig: { threadId: "t1" },
+    });
+  });
+
+  it("round-trips exact ProductDomainContext including explicit empty arrays", () => {
+    const document = createNotebookDocument("Cross-domain research", [], {
+      ownerDomain: "growth",
+      usesDomains: [],
+      purpose: "Investigate acquisition quality",
+      requiredExports: [],
+      classification: "internal",
+    });
+
+    const restored = deserializeNotebook(serializeNotebook(document));
+
+    expect(restored.metadata).toMatchObject({
+      ownerDomain: "growth",
+      usesDomains: [],
+      purpose: "Investigate acquisition quality",
+      requiredExports: [],
+      classification: "internal",
     });
   });
 });

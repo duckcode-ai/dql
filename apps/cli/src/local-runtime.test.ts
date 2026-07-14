@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyRequestedTopNToExploratorySql,
   buildAgentValueProbeSql,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
+  buildExploratoryJoinProbeSql,
+  repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
   buildDbtStatus,
   buildProposeReadiness,
@@ -52,8 +55,9 @@ import {
 import { getRunner } from './llm/index.js';
 import { afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
 import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
@@ -136,6 +140,287 @@ describe('serializeJSON', () => {
   it('serializes unsafe bigint values as strings', () => {
     const value = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     expect(serializeJSON({ revenue: value })).toBe(`{"revenue":"${value.toString()}"}`);
+  });
+});
+
+describe('local runtime network boundary', () => {
+  it('refuses non-loopback binding without a token and explicit origin allowlist', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-remote-security-'));
+    tempDirs.push(projectRoot);
+    await expect(startLocalServer({
+      rootDir: projectRoot,
+      projectRoot,
+      executor: {} as QueryExecutor,
+      preferredPort: 0,
+      host: '0.0.0.0',
+    })).rejects.toThrow('DQL_SERVER_TOKEN');
+  });
+
+  it('does not grant wildcard CORS to a non-loopback browser origin', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-loopback-cors-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/domain-workspaces`, { headers: { Origin: 'https://evil.example' } });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('access-control-allow-origin')).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
+describe('dbt-first onboarding runtime API', () => {
+  it('previews, drift-checks, and applies dbt-first config without copying dbt semantics', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-onboarding-dbt-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{"project":"shop"}\n');
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: shop\nversion: 1\n');
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    writeFileSync(manifestPath, JSON.stringify({ metadata: { project_name: 'shop' }, nodes: { 'model.shop.orders': { resource_type: 'model', name: 'orders' } }, sources: {}, metrics: {} }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const previewResponse = await fetch(`${base}/api/onboarding/dbt/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json' }) });
+      expect(previewResponse.status).toBe(200);
+      const preview = await previewResponse.json() as { requestId: string; fingerprint: string; counts: { models: number } };
+      expect(preview.requestId).toMatch(/^onboarding-dbt-preview-/);
+      expect(preview.counts.models).toBe(1);
+
+      writeFileSync(manifestPath, `${readFileSync(manifestPath, 'utf8')}\n`);
+      const staleApply = await fetch(`${base}/api/onboarding/dbt/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json', fingerprint: preview.fingerprint }) });
+      expect(staleApply.status).toBe(409);
+      const staleResult = await staleApply.json() as { requestId: string; code: string };
+      expect(staleResult.requestId).toMatch(/^onboarding-dbt-apply-/);
+      expect(staleResult.code).toBe('SOURCE_CHANGED');
+
+      const freshPreview = await (await fetch(`${base}/api/onboarding/dbt/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json' }) })).json() as { fingerprint: string };
+      const applyResponse = await fetch(`${base}/api/onboarding/dbt/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json', fingerprint: freshPreview.fingerprint }) });
+      expect(applyResponse.status).toBe(200);
+      const config = JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8')) as any;
+      expect(config).toMatchObject({ manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' }, semanticLayer: { provider: 'dbt' } });
+      expect(existsSync(join(projectRoot, 'semantic-layer'))).toBe(false);
+      const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean } };
+      expect(status.requestId).toMatch(/^onboarding-status-/);
+      expect(status.snapshotId).toMatch(/^[a-f0-9]{64}$/);
+      expect(status.modeling.enabled).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('discovers evidence-cited domains, previews without writes, and applies only draft declarations', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-onboarding-domains-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'shop',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: '.', manifestPath: 'target/manifest.json' },
+    }));
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: shop\nversion: 1\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: {
+        'model.shop.orders': {
+          resource_type: 'model',
+          name: 'orders',
+          original_file_path: 'models/commerce/orders.sql',
+          meta: { dql: { domain: 'commerce' } },
+          depends_on: { nodes: [] },
+          tags: [],
+        },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const discovery = await (await fetch(`${base}/api/onboarding/domains/discover`, { method: 'POST' })).json() as {
+        requestId: string;
+        snapshotId: string;
+        sourceFingerprint: string;
+        proposals: Array<{ id: string; requiresReview: boolean }>;
+      };
+      expect(discovery.requestId).toMatch(/^domain-discovery-/);
+      expect(discovery.snapshotId).toMatch(/^[a-f0-9]{64}$/);
+      expect(discovery.proposals).toContainEqual(expect.objectContaining({ id: 'commerce', requiresReview: true }));
+
+      const preview = await (await fetch(`${base}/api/onboarding/domains/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedSourceFingerprint: discovery.sourceFingerprint, selectedDomains: ['commerce'], mode: 'preview' }),
+      })).json() as { applied: boolean; preview: Array<{ path: string }> };
+      expect(preview).toMatchObject({ applied: false, preview: [{ path: 'domains/commerce/domain.dql' }] });
+      expect(existsSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'))).toBe(false);
+
+      const apply = await (await fetch(`${base}/api/onboarding/domains/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedSourceFingerprint: discovery.sourceFingerprint, selectedDomains: ['commerce'] }),
+      })).json() as { applied: boolean; results: Array<{ status: string }> };
+      expect(apply).toMatchObject({ applied: true, results: [{ status: 'created' }] });
+      expect(readFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'utf8')).toContain('Draft domain boundary');
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('returns snapshot-guarded structured errors and applies dbt YAML source patches', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-modeling-source-patch-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'models'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: '.', manifestPath: 'target/manifest.json' },
+    }));
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: shop\nversion: 1\n');
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" { id = "commerce" }\n');
+    writeFileSync(join(projectRoot, 'models', 'orders.yml'), 'version: 2\nmodels:\n  - name: orders\n    description: Old\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: {
+        'model.shop.orders': {
+          unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders',
+          original_file_path: 'models/orders.sql', patch_path: 'shop://models/orders.yml',
+          columns: { order_id: {} }, depends_on: { nodes: [] }, tags: [],
+        },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { requestId: string; snapshotId: string };
+      expect(modeling.requestId).toMatch(/^modeling-dbt-first-/);
+      expect(modeling.snapshotId).toMatch(/^[a-f0-9]{64}$/);
+
+      const stale = await fetch(`${base}/api/modeling/dbt-first/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedSnapshotId: 'stale', change: { operation: 'upsert_entity', value: { id: 'order', domain: 'commerce', dbtModel: 'model.shop.orders' } } }),
+      });
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({ code: 'SOURCE_CHANGED', recoverable: true, snapshotId: modeling.snapshotId, message: expect.any(String), nextActions: expect.any(Array) });
+
+      const change = { uniqueId: 'model.shop.orders', description: 'One row per order.', columns: [{ name: 'order_id', tests: ['unique', 'not_null'] }] };
+      const previewResponse = await fetch(`${base}/api/modeling/dbt-first/dbt-source/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ change, expectedSnapshotId: modeling.snapshotId }),
+      });
+      expect(previewResponse.status).toBe(200);
+      const preview = await previewResponse.json() as { snapshotId: string; fingerprint: string; patch: { path: string; after: string } };
+      expect(preview.patch.path).toBe('models/orders.yml');
+      expect(preview.patch.after).toContain('data_tests:');
+      const applyResponse = await fetch(`${base}/api/modeling/dbt-first/dbt-source/apply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ change, expectedSnapshotId: preview.snapshotId, expectedFingerprint: preview.fingerprint }),
+      });
+      expect(applyResponse.status).toBe(200);
+      expect(readFileSync(join(projectRoot, 'models', 'orders.yml'), 'utf8')).toContain('One row per order.');
+      expect(existsSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'model.dql.yaml'))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
+describe('dbt-first semantic ownership runtime guard', () => {
+  it('rejects local metric and semantic-block writes while preserving custom blocks', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-first-semantic-guard-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'shop',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const metric = await fetch(`${base}/api/semantic-layer/metric`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'gross_revenue', sql: 'sum(revenue)', type: 'sum', table: 'orders' }),
+      });
+      expect(metric.status).toBe(409);
+      expect(await metric.json()).toMatchObject({ code: 'DQL_MODELING_DBT_OWNED' });
+
+      const semanticBlock = await fetch(`${base}/api/blocks`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Duplicate Revenue', domain: 'commerce', blockType: 'semantic' }),
+      });
+      expect(semanticBlock.status).toBe(409);
+      expect(await semanticBlock.json()).toMatchObject({ code: 'DQL_MODELING_DBT_OWNED' });
+
+      const customBlock = await fetch(`${base}/api/blocks`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Reviewed Revenue Query', domain: 'commerce', blockType: 'custom', content: 'SELECT 1 AS revenue' }),
+      });
+      expect(customBlock.status).toBe(201);
+      expect(existsSync(join(projectRoot, 'blocks', 'commerce', 'reviewed-revenue-query.dql'))).toBe(true);
+      expect(existsSync(join(projectRoot, 'semantic-layer', 'metrics'))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
+describe('domain Related Products backlinks', () => {
+  it('derives both domain counts from global App and Notebook ProductDomainContext', async () => {
+    const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      for (const domain of ['growth', 'commerce']) {
+        const related = await (await fetch(`${base}/api/domain-workspaces/${domain}/related-products`)).json() as {
+          apps: Array<Record<string, unknown>>;
+          notebooks: Array<Record<string, unknown>>;
+        };
+        expect(related.apps).toContainEqual(expect.objectContaining({
+          id: 'growth-revenue',
+          filePath: 'apps/growth-revenue',
+          ownerDomain: 'growth',
+          usesDomains: ['growth', 'commerce'],
+          requiredExports: ['commerce.customer_identity@1', 'commerce.order_analytics@1'],
+        }));
+        expect(related.notebooks).toContainEqual(expect.objectContaining({
+          id: 'notebooks/revenue-acquisition-research.dqlnb',
+          ownerDomain: 'growth',
+          usesDomains: ['growth', 'commerce'],
+        }));
+        const workspace = await (await fetch(`${base}/api/domain-workspaces/${domain}`)).json() as { counts: { relatedProducts: number } };
+        expect(workspace.counts.relatedProducts).toBe(2);
+      }
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+});
+
+describe('exploratory result contracts', () => {
+  it('EXP-003 enforces the planned overall top-N before exploratory execution', () => {
+    expect(applyRequestedTopNToExploratorySql(
+      'SELECT customer_name, spend FROM customers ORDER BY spend DESC LIMIT 100',
+      10,
+    )).toBe('SELECT customer_name, spend FROM customers ORDER BY spend DESC LIMIT 10');
+    expect(applyRequestedTopNToExploratorySql(
+      'SELECT customer_name, spend FROM customers ORDER BY spend DESC;',
+      5,
+    )).toBe('SELECT customer_name, spend FROM customers ORDER BY spend DESC\nLIMIT 5');
   });
 });
 
@@ -248,6 +533,21 @@ describe('agent run runtime API', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'no_answer',
       text: 'Need more context.',
+    })).toBe(false);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'uncertified',
+      certification: 'analyst_review_required',
+      text: 'Exploratory result at a declared grain.',
+      exploratoryCandidate: {
+        kind: 'dbt_grounded_exploration',
+        reason: 'unbound_relation',
+        sql: 'select 1',
+        message: 'Missing modeled relationship coverage.',
+        modeledEntityIds: [],
+        relationshipIds: [],
+        executionStatus: 'not_executed',
+      },
     })).toBe(false);
   });
 
@@ -1616,6 +1916,118 @@ describe('buildAgentPreviewSql', () => {
   });
 });
 
+describe('EXP-001 exploratory join probes', () => {
+  it('repairs a uniquely resolvable relation qualifier and preserves lifetime measures at owner grain', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT
+        customer_name,
+        products.product_description,
+        SUM(lifetime_spend) AS lifetime_spend
+      FROM dev.customers
+      LEFT JOIN jaffle_shop.dev.orders ON customers.customer_id = orders.customer_id
+      LEFT JOIN jaffle_shop.dev.order_items ON orders.order_id = order_items.order_id
+      LEFT JOIN jaffle_shop.dev.products ON order_item.product_id = products.product_id
+      GROUP BY customer_name, products.product_description
+    `, [
+      {
+        relation: 'dev.customers',
+        name: 'customers',
+        columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_spend' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.order_items',
+        name: 'order_items',
+        columns: [{ name: 'order_id' }, { name: 'product_id' }],
+      },
+    ]);
+
+    expect(result.blockedReason).toBeUndefined();
+    expect(result.sql).toContain('order_items.product_id = products.product_id');
+    expect(result.sql).toContain('MAX(lifetime_spend) AS lifetime_spend');
+    expect(result.repairs).toHaveLength(2);
+  });
+
+  it('qualifies inspected tables and uses an available lifetime measure for a lifespan request', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT c.customer_name, p.product_description, SUM(o.tax_paid) AS tax_paid
+      FROM orders AS o
+      JOIN customers AS c ON o.customer_id = c.customer_id
+      JOIN order_items AS oi ON o.order_id = oi.order_id
+      JOIN products AS p ON oi.product_id = p.product_id
+      GROUP BY c.customer_name, p.product_description
+    `, [
+      {
+        relation: 'jaffle_shop.dev.orders',
+        name: 'orders',
+        columns: [{ name: 'order_id' }, { name: 'customer_id' }, { name: 'tax_paid' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.customers',
+        name: 'customers',
+        columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_tax_paid' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.order_items',
+        name: 'order_items',
+        columns: [{ name: 'order_id' }, { name: 'product_id' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.products',
+        name: 'products',
+        columns: [{ name: 'product_id' }, { name: 'product_description' }],
+      },
+    ], 'what is the tax and product info for customer life span?');
+
+    expect(result.blockedReason).toBeUndefined();
+    expect(result.sql).toContain('FROM jaffle_shop.dev.orders AS o');
+    expect(result.sql).toContain('JOIN jaffle_shop.dev.order_items AS oi');
+    expect(result.sql).toContain('MAX(c.lifetime_tax_paid) AS tax_paid');
+    expect(result.repairs).toEqual(expect.arrayContaining([
+      expect.stringContaining('Qualified exploratory relation orders'),
+      expect.stringContaining('Used lifetime_tax_paid'),
+    ]));
+  });
+
+  it('blocks a non-additive parent measure when the owning entity is not retained', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT p.product_name, SUM(c.lifetime_tax_paid) AS lifetime_tax_paid
+      FROM customers AS c
+      JOIN orders AS o ON c.customer_id = o.customer_id
+      JOIN products AS p ON o.product_id = p.product_id
+      GROUP BY p.product_name
+    `, [{
+      relation: 'customers',
+      name: 'customers',
+      columns: [{ name: 'customer_id' }, { name: 'customer_name' }, { name: 'lifetime_tax_paid' }],
+    }]);
+
+    expect(result.blockedReason).toContain('allocation policy');
+    expect(result.sql).toContain('SUM(c.lifetime_tax_paid)');
+  });
+
+  it('uses safely quoted identifiers and fixed bounded samples', () => {
+    const sql = buildExploratoryJoinProbeSql({
+      leftRelation: 'analytics.orders',
+      leftColumn: 'customer_id',
+      rightRelation: 'analytics.customers',
+      rightColumn: 'id',
+    });
+    expect(sql).toContain('FROM "analytics"."orders"');
+    expect(sql).toContain('FROM "analytics"."customers"');
+    expect(sql.match(/LIMIT 5000/g)).toHaveLength(2);
+    expect(sql).toContain('max_matches_per_left_key');
+  });
+
+  it('rejects identifiers that cannot be safely rendered into a probe', () => {
+    expect(() => buildExploratoryJoinProbeSql({
+      leftRelation: 'analytics.orders; DROP TABLE customers',
+      leftColumn: 'customer_id',
+      rightRelation: 'analytics.customers',
+      rightColumn: 'id',
+    })).toThrow('safe physical identifier');
+  });
+});
+
 describe('validateConnectionForTest', () => {
   function result(rows: Record<string, unknown>[]): QueryResult {
     return {
@@ -2922,7 +3334,7 @@ describe('domains API (spec 17, part B)', () => {
     const domains = listDomains(projectRoot);
     const sales = domains.find((d) => d.name === 'Sales');
     expect(sales).toMatchObject({
-      id: 'Sales',
+      id: 'sales',
       owner: 'sales@x.com',
       sourceSystems: ['orders'],
       blockCount: 1,

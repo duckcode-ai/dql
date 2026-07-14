@@ -25,7 +25,7 @@ import { ManifestCache, type TrackedFile } from '@duckcodeailabs/dql-project';
 import { ensureMetadataCatalogFresh } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 
-const MANIFEST_COMPILER_CACHE_VERSION = 'enterprise-domain-aliases-v1';
+const MANIFEST_COMPILER_CACHE_VERSION = 'dql2-qualified-domain-context-v2';
 
 export function manifestCacheTrackedFiles(inputFiles: string[], dqlVersion: string): TrackedFile[] {
   return [

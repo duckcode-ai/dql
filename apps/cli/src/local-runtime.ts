@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   watch,
@@ -57,6 +58,7 @@ import {
   blockParameterDefinitions,
   buildLineageGraph,
   buildManifest,
+  collectInputFiles,
   findAppDocuments,
   findDashboardsForApp,
   isBlockIdRef,
@@ -87,12 +89,26 @@ import {
   canonicalizeNotebook,
   diffDQL,
   diffNotebook,
-  writeDomainDeclaration,
-  deleteDomainDeclaration,
   domainFolderSlug,
   type DomainInput,
   type ManifestDomain,
   type DiffReport,
+  previewModelingChange,
+  applyModelingChange,
+  previewDbtSourcePatch,
+  applyDbtSourcePatch,
+  loadDomainPackageRegistry,
+  loadDbtNodeAuthoringDetail,
+  type ModelingAuthoringChange,
+  type DbtNodeAuthoringDetail,
+  type DbtSourceAuthoringInput,
+  type RelationshipAuthoringInput,
+  type ManifestRelationshipValidationEvidence,
+  relationshipValidationProofFingerprint,
+  discoverDbtDomains,
+  renderDomainDeclaration,
+  ProjectSnapshotService,
+  analyzeSqlReferences,
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
@@ -172,10 +188,15 @@ import {
   type EnrichedContent,
   type BuildFromPromptResult,
   reindexProject,
+  invalidateAgentProjectState,
+  resolveDomainContextEnvelope,
   defaultKgPath,
   planApp,
   planResearch,
   loadSemanticMetrics,
+  cascadeTraceToEvidenceRouteSteps,
+  createCascadeAnswerResult,
+  createCascadeTrace,
   routeReasoningEffort,
   routeForCascadeAnswerTier,
   clampReasoningEffort,
@@ -296,6 +317,8 @@ const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0
 
 export interface ProjectConfig {
   project?: string;
+  manifestVersion?: 1 | 2 | 3;
+  modeling?: { mode?: 'dbt-first' };
   layout?: { version?: number; mode?: string; skillsPath?: string };
   defaultConnection?: ConnectionConfig;
   defaultConnectionName?: string;
@@ -388,6 +411,10 @@ export interface LocalServerOptions {
    * port is reachable from the host. Honours `DQL_HOST` env var when unset.
    */
   host?: string;
+  /** Required for non-loopback bindings. Defaults to `DQL_SERVER_TOKEN`. */
+  authToken?: string;
+  /** Exact browser origins allowed for non-loopback API access. */
+  allowedOrigins?: string[];
   /**
    * Receives the underlying HTTP server once created, so short-lived callers
    * (e.g. `dql agent ask` starting an ephemeral runtime) can `close()` it and
@@ -495,9 +522,14 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
   };
 }
 
-export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'dqlArtifact'>): boolean {
+export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
   if (governedAnswer.kind === 'no_answer') return false;
   if (governedAnswer.kind === 'certified' || governedAnswer.certification === 'certified') return false;
+  // EXP-001: exploratory prose is part of the trust boundary. A free-form
+  // synthesis pass can accidentally relabel an entity-level lifetime measure
+  // as a child-level allocation or total repeated values. Keep the host's
+  // deterministic grain statement instead.
+  if (governedAnswer.exploratoryCandidate) return false;
   const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
   if (governedAnswer.dqlArtifact && finalText) return false;
   return true;
@@ -608,7 +640,7 @@ function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
     certification: agentRunString(payload?.certification),
     sourceCertifiedBlock: agentRunString(payload?.sourceCertifiedBlock)
       ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
-    contextPackId: agentRunString(payload?.contextPackId),
+    contextPackId: agentRunString(payload?.contextPackId) ?? agentRunString(contextPack?.id),
     sql: agentRunString(payload?.proposedSql) ?? agentRunString(payload?.sql),
     dqlArtifact: agentRunRecord(payload?.dqlArtifact) as ConversationTurnInput['dqlArtifact'],
     cascade: agentRunRecord(payload?.cascade) as CascadeAnswerResult | undefined,
@@ -677,16 +709,137 @@ function conversationStringArray(value: unknown): string[] | undefined {
   return values.length > 0 ? values : undefined;
 }
 
+function isLoopbackOrigin(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 function compactConversationRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
   const entries = Object.entries(record).filter(([, value]) => value !== undefined && value !== null);
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+function apiRequestId(scope: string): string {
+  return `${scope}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function apiErrorEnvelope(input: {
+  requestId: string;
+  code: string;
+  message: string;
+  snapshotId?: string;
+  recoverable?: boolean;
+  details?: unknown;
+  nextActions?: string[];
+}) {
+  return {
+    requestId: input.requestId,
+    ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+    code: input.code,
+    message: input.message,
+    // Retain the legacy field during the compatibility window.
+    error: input.message,
+    recoverable: input.recoverable ?? input.code !== 'DOMAIN_COLLISION',
+    ...(input.details !== undefined ? { details: input.details } : {}),
+    ...(input.nextActions?.length ? { nextActions: input.nextActions } : {}),
+  };
+}
+
+function apiErrorCode(error: unknown, fallback: string): string {
+  return typeof error === 'object' && error && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : fallback;
+}
+
+function apiErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
+  const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
+  const authToken = opts.authToken ?? process.env.DQL_SERVER_TOKEN;
+  const allowedOrigins = new Set((opts.allowedOrigins ?? (process.env.DQL_ALLOWED_ORIGINS ?? '').split(','))
+    .map((value) => value.trim().replace(/\/$/, ''))
+    .filter(Boolean));
+  if (!loopback && !authToken) {
+    throw new Error('Non-loopback DQL server binding requires DQL_SERVER_TOKEN (or LocalServerOptions.authToken).');
+  }
+  if (!loopback && allowedOrigins.size === 0) {
+    throw new Error('Non-loopback DQL server binding requires DQL_ALLOWED_ORIGINS (or LocalServerOptions.allowedOrigins).');
+  }
   let connection = rawConnection ? normalizeProjectConnection(rawConnection, projectRoot) : null;
   let projectConfig = loadProjectConfig(projectRoot);
+  const projectSnapshots = new ProjectSnapshotService<DQLManifest>();
+  const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
+  const onboardingJobs = new Map<string, { id: string; kind: string; status: 'completed' | 'failed' | 'cancelled'; createdAt: string; result?: unknown; error?: string }>();
+  const projectSnapshot = () => {
+    const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+    const inputs = collectInputFiles({ projectRoot, dbtManifestPath });
+    const signatureHash = createHash('sha256');
+    for (const input of inputs.sort()) {
+      try {
+        const stats = statSync(input);
+        signatureHash.update(`${input}\0${stats.size}\0${stats.mtimeMs}\n`);
+      } catch {
+        signatureHash.update(`${input}\0missing\n`);
+      }
+    }
+    const signature = signatureHash.digest('hex');
+    const previousId = projectSnapshots.current()?.snapshotId;
+    const snapshot = projectSnapshots.refresh(signature, () => buildManifest({ projectRoot, dbtManifestPath }));
+    if (snapshot.snapshotId !== previousId) dbtNodeDetailCache.clear();
+    return {
+      signature: snapshot.sourceVersion,
+      snapshotId: snapshot.snapshotId,
+      manifest: snapshot.value,
+      stale: snapshot.stale,
+      error: snapshot.error,
+    };
+  };
+  const onboardingDbtPaths = (body: Record<string, unknown> = {}) => {
+    const projectDirInput = typeof body.projectDir === 'string' ? body.projectDir : projectConfig.dbt?.projectDir ?? '.';
+    const dbtProjectDir = resolve(projectRoot, projectDirInput);
+    const manifestInput = typeof body.manifestPath === 'string' ? body.manifestPath : projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
+    const manifestPath = resolve(dbtProjectDir, manifestInput);
+    if (!(manifestPath === dbtProjectDir || manifestPath.startsWith(`${dbtProjectDir}/`))) {
+      throw Object.assign(new Error('dbt manifestPath must stay inside dbt projectDir.'), { code: 'DBT_ARTIFACT_INVALID' });
+    }
+    return { dbtProjectDir, manifestPath, projectDirInput, manifestInput };
+  };
+  const previewDbtOnboarding = (body: Record<string, unknown> = {}) => {
+    const paths = onboardingDbtPaths(body);
+    if (!existsSync(join(paths.dbtProjectDir, 'dbt_project.yml'))) throw Object.assign(new Error('dbt_project.yml was not found.'), { code: 'DBT_PROJECT_NOT_FOUND' });
+    if (!existsSync(paths.manifestPath)) throw Object.assign(new Error(`dbt manifest is missing at ${paths.manifestPath}. Run dbt parse, then retry.`), { code: 'DBT_MANIFEST_MISSING' });
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(readFileSync(paths.manifestPath, 'utf8')) as Record<string, unknown>;
+    } catch (error) {
+      throw Object.assign(new Error(`dbt manifest is invalid: ${error instanceof Error ? error.message : String(error)}`), { code: 'DBT_ARTIFACT_INVALID' });
+    }
+    const fingerprint = createHash('sha256').update(readFileSync(paths.manifestPath)).digest('hex');
+    return {
+      projectDir: relative(projectRoot, paths.dbtProjectDir).replace(/\\/g, '/') || '.',
+      manifestPath: relative(paths.dbtProjectDir, paths.manifestPath).replace(/\\/g, '/'),
+      fingerprint,
+      projectName: typeof (raw.metadata as Record<string, unknown> | undefined)?.project_name === 'string' ? (raw.metadata as Record<string, unknown>).project_name : undefined,
+      counts: {
+        models: Object.keys((raw.nodes as Record<string, unknown> | undefined) ?? {}).filter((id) => id.startsWith('model.')).length,
+        sources: Object.keys((raw.sources as Record<string, unknown> | undefined) ?? {}).length,
+        metrics: Object.keys((raw.metrics as Record<string, unknown> | undefined) ?? {}).length,
+      },
+      artifacts: {
+        manifest: paths.manifestPath,
+        catalog: existsSync(join(dirname(paths.manifestPath), 'catalog.json')) ? join(dirname(paths.manifestPath), 'catalog.json') : null,
+        semanticManifest: existsSync(join(dirname(paths.manifestPath), 'semantic_manifest.json')) ? join(dirname(paths.manifestPath), 'semantic_manifest.json') : null,
+      },
+    };
+  };
   const datasetWorkspace = new NotebookDatasetWorkspace(
     projectRoot,
     executor,
@@ -977,6 +1130,46 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     formatAgentRunInfrastructureError(error, 'Notebook research storage')
   );
 
+  /**
+   * CTX-001 / SKILL-001 — Build surfaces receive the same server-resolved,
+   * snapshot-bound domain envelope and compact evidence pack as Ask. The pack
+   * is a retrieval boundary, never an authorization bypass.
+   */
+  const buildDirectBuildContext = async (input: {
+    question: string;
+    domain?: string;
+    purpose?: string;
+    modelAreaId?: string;
+    surface: 'notebook' | 'block';
+    selectedContext?: Record<string, unknown>;
+  }) => {
+    const snapshot = projectSnapshot();
+    const domainContext = resolveDomainContextEnvelope({
+      manifest: snapshot.manifest,
+      activeDomain: input.domain,
+      purpose: input.purpose,
+      modelAreaId: input.modelAreaId,
+      source: input.domain ? 'explicit_ui' : 'inferred',
+      snapshotId: snapshot.snapshotId,
+    });
+    const contextPack = await buildLocalContextPack(projectRoot, {
+      question: input.question,
+      mode: 'build',
+      surface: input.surface,
+      selectedContext: {
+        activeSurface: input.surface,
+        domain: input.domain,
+        purpose: input.purpose,
+        modelAreaId: input.modelAreaId,
+        ...input.selectedContext,
+      },
+      domainContext,
+      strictness: 'balanced',
+      limit: 120,
+    });
+    return { domainContext, contextPack };
+  };
+
   const buildAgentPromptArtifact = async (
     request: AgentRunRequest,
     target: 'cell' | 'block',
@@ -996,6 +1189,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const prompt = isRepair
       ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}`
       : request.question;
+    const domain = target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined;
+    const modelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
+    const purpose = agentRunWorkspaceValue(request, 'purpose');
+    const { domainContext, contextPack } = await buildDirectBuildContext({
+      question: prompt,
+      domain,
+      purpose,
+      modelAreaId,
+      surface: target === 'cell' ? 'notebook' : 'block',
+      selectedContext: { target, mode },
+    });
     return buildFromPrompt({
       projectRoot,
       prompt,
@@ -1012,7 +1216,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : undefined)
         : undefined,
       owner: agentRunWorkspaceValue(request, 'owner'),
-      domain: target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined,
+      domain,
+      modelAreaId,
+      contextPack,
+      domainContext,
       userId: agentRunWorkspaceValue(request, 'userId'),
       skills,
       dbtManifestPath: resolveDbtManifestPath(projectRoot, projectConfig),
@@ -1120,12 +1327,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     } catch {
       semanticDriver = undefined;
     }
+    const requestedDomain = agentRunWorkspaceValue(request, 'domain');
+    const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
+    const requestedModelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
+    const runProjectSnapshot = projectSnapshot();
+    const domainContext = requestedDomain
+      ? resolveDomainContextEnvelope({
+          manifest: runProjectSnapshot.manifest,
+          activeDomain: requestedDomain,
+          purpose: requestedPurpose,
+          modelAreaId: requestedModelAreaId,
+          source: 'explicit_ui',
+          snapshotId: runProjectSnapshot.snapshotId,
+        })
+      : undefined;
     await runner.run(
       {
         provider: resolvedProvider,
         messages: [
           ...(request.history ?? []).map((message) => ({ role: message.role, content: message.text })),
-          { role: 'user', content: isRepair ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}` : request.question },
+          ...(isRepair
+            ? [{ role: 'assistant' as const, content: `The prior attempt needs repair without changing the original question or requested output grain: ${repair?.repairHint}` }]
+            : []),
+          { role: 'user', content: request.question },
         ],
         conversationContext: request.conversationContext,
         upstream: {
@@ -1135,6 +1359,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
         projectRoot,
+        domainContext,
+        projectSnapshot: { snapshotId: runProjectSnapshot.snapshotId, manifest: runProjectSnapshot.manifest },
+        assertProjectSnapshot: (snapshotId) => {
+          // Refresh the service from current source state before the final guard.
+          projectSnapshot();
+          projectSnapshots.assertCurrent(snapshotId);
+        },
         ...(semanticDriver ? { semanticDriver } : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
@@ -1251,6 +1482,130 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       if (!governedAnswer.appliedHints) {
         governedAnswer.appliedHints = governedAnswer.contextPack?.appliedHints;
       }
+      // EXP-001 — a missing modeled relationship is not the same as an unsafe
+      // relationship. The answer loop exposes a non-executed candidate only for
+      // that narrow case; the host owns bounded probe/execution and never
+      // weakens the final governed-SQL guard.
+      if (governedAnswer.exploratoryCandidate) {
+        const explorationSchema = governedAnswer.contextPack?.allowedSqlContext.relations.map((table) => ({
+          relation: table.relation,
+          name: table.name,
+          columns: table.columns.map((column) => ({ ...column })),
+          source: table.source,
+        } satisfies AgentSchemaTable))
+          ?? governedAnswer.analysisPlan?.candidateTables.map((table) => ({
+            relation: table.relation,
+            name: table.relation.split('.').at(-1) ?? table.relation,
+            columns: table.columns.map((name) => ({ name })),
+            source: 'answer analysis plan',
+          } satisfies AgentSchemaTable));
+        const exploration = await executeExploratoryCandidate(
+          governedAnswer.exploratoryCandidate,
+          explorationSchema,
+          request.question,
+          governedAnswer.contextPack?.questionPlan.requestedShape.topN?.scope === 'overall'
+            ? governedAnswer.contextPack.questionPlan.requestedShape.topN.n
+            : undefined,
+        );
+        const probeSummary = exploration.proofs.length > 0
+          ? `${exploration.proofs.length} bounded join probe${exploration.proofs.length === 1 ? '' : 's'} completed.`
+          : 'No join probe was required for this query.';
+        const baseWarnings = governedAnswer.validationWarnings ?? [];
+        const evidence = governedAnswer.evidence ?? {
+          route: [], lineage: [], businessContext: [], selectedAssets: [], sourceTables: [], semanticObjects: [], citations: [],
+        };
+        governedAnswer.evidence = evidence;
+        evidence.route.push({
+          tool: 'explore_dbt_grounded_sql',
+          status: exploration.result ? 'checked' : 'failed',
+          label: exploration.result ? 'Executed bounded DBT-grounded exploration' : 'DBT-grounded exploration could not execute',
+          detail: exploration.error ?? probeSummary,
+        });
+        if (exploration.proofs.length > 0) {
+          evidence.businessContext.push({
+            label: 'Exploratory join probes',
+            value: exploration.proofs.map((proof) => proof.summary).join('; '),
+            source: 'bounded DBT-grounded validation',
+          });
+        }
+        if (exploration.result) {
+          evidence.route = [
+            ...cascadeTraceToEvidenceRouteSteps(createCascadeTrace({ terminalLane: 'generated' })),
+            ...evidence.route.filter((step) => !step.tool.startsWith('cascade_')),
+          ];
+          evidence.validation = {
+            status: 'warning',
+            message: 'The bounded DBT-grounded query executed successfully, but its inferred relationship path still requires analyst review before reuse.',
+          };
+          evidence.execution = {
+            status: 'executed',
+            message: 'Executed the bounded DBT-grounded exploratory SQL preview.',
+            rowCount: exploration.result.rowCount,
+            executionTime: exploration.result.executionTime,
+          };
+        }
+        const repairedExploratoryCandidate = exploration.sql !== governedAnswer.exploratoryCandidate.sql
+          ? { ...governedAnswer.exploratoryCandidate, sql: exploration.sql }
+          : governedAnswer.exploratoryCandidate;
+        const lifetimeGrainRepair = exploration.repairs.find((repair) => repair.startsWith('Used lifetime_'));
+        const explorationAnswer = exploration.result
+          ? lifetimeGrainRepair
+            ? `Exploratory DBT-grounded query executed and returned ${exploration.result.rowCount} row${exploration.result.rowCount === 1 ? '' : 's'}. Each row is an owning-entity and joined-dimension pair. The lifetime measure remains an entity-level attribute repeated across that dimension; it is not allocated to the joined dimension. ${lifetimeGrainRepair}`
+            : `Exploratory DBT-grounded query executed and returned ${exploration.result.rowCount} row${exploration.result.rowCount === 1 ? '' : 's'}. Review the inferred join evidence before reusing this analysis.`
+          : `DQL found a DBT-grounded exploratory path, but the bounded validation could not run: ${exploration.error ?? 'unknown execution error'}.`;
+        governedAnswer = {
+          ...governedAnswer,
+          kind: 'uncertified',
+          sourceTier: 'dbt_manifest',
+          certification: 'analyst_review_required',
+          reviewStatus: 'analyst_review_required',
+          confidence: exploration.result ? 0.58 : 0.2,
+          ...(exploration.result ? {
+            refusalCode: undefined,
+            refusalDetails: undefined,
+            intentDecision: {
+              ...governedAnswer.intentDecision,
+              action: 'answer' as const,
+              confidence: Math.max(governedAnswer.intentDecision?.confidence ?? 0, 0.9),
+              reason: 'Executed a bounded DBT-grounded exploratory answer after certified and semantic routes did not fully cover the request.',
+              clarifyingQuestion: undefined,
+              clarifySoft: undefined,
+              followsUp: governedAnswer.intentDecision?.followsUp ?? false,
+            },
+          } : {}),
+          result: exploration.result,
+          proposedSql: exploration.sql,
+          sql: exploration.sql,
+          exploratoryCandidate: repairedExploratoryCandidate,
+          executionError: exploration.error,
+          text: explorationAnswer,
+          answer: explorationAnswer,
+          trustLabel: 'Exploratory · DBT-grounded',
+          contextPackId: governedAnswer.contextPackId ?? governedAnswer.contextPack?.id,
+          route: {
+            tier: 'generated_sql',
+            label: exploration.result
+              ? 'Exploratory · DBT-grounded answer (review required).'
+              : 'Exploratory · DBT-grounded query needs review before execution.',
+          },
+          cascade: exploration.result
+            ? createCascadeAnswerResult({
+                routeTier: 'generated_sql',
+                label: 'Exploratory DBT-grounded answer executed with review required.',
+                artifactKind: 'dbt_grounded_exploration',
+                hasSqlPreview: true,
+                executionStatus: 'executed',
+                rowCount: exploration.result.rowCount,
+              })
+            : governedAnswer.cascade,
+          validationWarnings: [
+            ...baseWarnings,
+            probeSummary,
+            ...exploration.repairs,
+            ...(exploration.error ? [`Exploratory execution: ${exploration.error}`] : []),
+          ],
+        };
+      }
       applySmartVisualization(governedAnswer, request.question);
     } catch (error) {
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
@@ -1289,8 +1644,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       || governedAnswer.sourceCertifiedBlock
       || governedAnswer.dqlArtifact?.kind === 'certified_block'
     ));
-    const isGroundingGap = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'grounding_gap';
+    const isExploratory = Boolean(governedAnswer.exploratoryCandidate);
+    const isGroundingGap = governedAnswer.kind === 'no_answer'
+      && governedAnswer.refusalCode === 'grounding_gap'
+      && !isExploratory;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
+    // AGT-004: a rejected attribution/export/proof policy is a deliberate
+    // governance boundary, not an ambiguous user question and not a repairable
+    // retrieval miss. Keep the precise policy detail visible, but never burn two
+    // more provider calls retrying the same incompatible candidate.
+    const isPolicyBlocked = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked';
     // The model tried to compose a governed query and declined despite having usable
     // context (e.g. it wasn't confident about a multi-table join). That is NOT a
     // question for the USER to clarify — it's a case to retry harder: escalate to a
@@ -1305,9 +1668,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // grounding gap or a model decline is retried/escalated by the engine, and a
     // provider outage is surfaced as blocked so the UI offers a retry.
     const needsClarification = governedAnswer.kind === 'no_answer'
-      && !isGroundingGap && !isProviderError && !isModelDeclined;
+      && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
-    const runnableSql = governedAnswer.kind === 'no_answer' ? undefined : sql;
+    const runnableSql = governedAnswer.kind === 'no_answer' || (isExploratory && !governedAnswer.result)
+      ? undefined
+      : sql;
     // Synthesis is a legacy polish pass. Certified/no-answer paths and lanes
     // that already produced DQL-first final prose keep the fast path.
     let synthesizedAnswer: string | undefined;
@@ -1358,18 +1723,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ? 'not_applicable'
         : isCertified
           ? 'certified'
-          : isSemantic
-            ? 'governed'
-            : 'review_required';
+            : isSemantic
+              ? 'governed'
+              : 'review_required';
     const stopReason: AgentRunStopReason = isProviderError
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
         : isCertified
           ? 'certified_answer_found'
-          : isSemantic
-            ? 'governed_semantic_answer'
-            : 'human_review_required';
+            : isSemantic
+              ? 'governed_semantic_answer'
+              : 'human_review_required';
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
       : [
@@ -1381,7 +1746,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       resolvedRoute,
       answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
-      summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : 'Answered with review-required generated analysis.'),
+      summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
       trustState,
@@ -1401,10 +1766,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : [])
         : [agentRunArtifact(
             'answer',
-            isCertified ? 'Certified answer' : isSemantic ? 'Governed semantic answer' : 'Review-required answer',
+            isCertified ? 'Certified answer' : isSemantic ? 'Governed semantic answer' : isExploratory ? 'Exploratory DBT-grounded answer' : 'Review-required answer',
             governedAnswer,
             governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
-            isCertified ? 'certified' : isSemantic ? 'governed' : 'review_required',
+          isCertified ? 'certified' : isSemantic ? 'governed' : 'review_required',
           )],
       evaluations: [
         agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.', {
@@ -1439,8 +1804,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ? 'The answer came from certified DQL context.'
             : isSemantic
               ? 'The answer was compiled and executed from governed semantic definitions; it is not a human-certified reusable block.'
-              : needsClarification
+            : needsClarification
               ? 'The answer loop needs more context before producing a governed answer.'
+              : isPolicyBlocked
+                ? `DQL blocked the generated path under its relationship policy: ${governedAnswer.refusalDetails?.message ?? 'the relationship is not authorized for this analysis.'}`
+              : isExploratory
+                ? 'The answer used bounded DBT/schema evidence because no certified modeled relationship path covered the request. It is review-required and was not certified.'
               : 'The answer is generated or semantic-layer backed and remains review-required.',
           governedAnswer.route,
         ),
@@ -1481,6 +1850,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             suggestedRepair: declinedRepairHint,
             repairAction: { kind: 'escalate' as const, route: 'research' as const, hint: declinedRepairHint },
           },
+        ] : []),
+        ...(isPolicyBlocked ? [
+          agentRunEvaluation(
+            'relationship-policy',
+            'Relationship policy',
+            false,
+            'warning',
+            governedAnswer.refusalDetails?.message
+              ?? 'The selected relationship is not authorized for this analysis.',
+            {
+              refusalCode: governedAnswer.refusalCode,
+              refusalDetails: governedAnswer.refusalDetails,
+              validationWarnings: governedAnswer.validationWarnings,
+              route: governedAnswer.route,
+            },
+          ),
         ] : []),
         ...(governedAnswer.executionError ? [
           agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
@@ -2377,6 +2762,74 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  /**
+   * EXP-001: execution host for the deliberately narrow non-governed lane.
+   * It does not reinterpret dbt lineage or shared names as relationship proof.
+   * Instead it validates the generated equality predicates against bounded
+   * samples, records the result as exploratory evidence, then executes the
+   * existing read-only 200-row preview. Any malformed, broad, or unsupported
+   * candidate remains review-required and is not executed automatically.
+   */
+  const executeExploratoryCandidate = async (
+    candidate: NonNullable<AgentAnswer['exploratoryCandidate']>,
+    schemaContext: AgentSchemaTable[] = [],
+    question = '',
+    requestedTopN?: number,
+  ): Promise<{
+    result?: AgentResultPayload;
+    proofs: Array<{ summary: string }>;
+    sql: string;
+    repairs: string[];
+    error?: string;
+  }> => {
+    const preflight = repairExploratorySqlBeforeExecution(candidate.sql, schemaContext, question);
+    const boundedSql = applyRequestedTopNToExploratorySql(preflight.sql, requestedTopN);
+    const repairs = boundedSql === preflight.sql
+      ? preflight.repairs
+      : [...preflight.repairs, `Applied the requested overall top-${requestedTopN} bound before exploratory execution.`];
+    if (preflight.blockedReason) {
+      return {
+        proofs: [],
+        sql: boundedSql,
+        repairs,
+        error: preflight.blockedReason,
+      };
+    }
+    const analysis = analyzeSqlReferences(boundedSql);
+    if (!analysis.parsed) {
+      return { proofs: [], sql: boundedSql, repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
+    }
+    // A normal customer → order → order-item → product question needs three
+    // joins. Keep the lane bounded, but do not reject this common dbt-star path
+    // solely because the old two-join demo limit was too small.
+    if (analysis.joins.length > 4) {
+      return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has more than four joins and requires an analyst to review the relationship path.' };
+    }
+    if (analysis.joins.some((join) => !join.leftRelation || !join.rightRelation)) {
+      return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
+    }
+
+    const activeConnection = requireActiveConnection();
+    const proofs: Array<{ summary: string }> = [];
+    try {
+      for (const join of analysis.joins) {
+        const proofSql = buildExploratoryJoinProbeSql({
+          leftRelation: join.leftRelation!,
+          leftColumn: join.leftColumn,
+          rightRelation: join.rightRelation!,
+          rightColumn: join.rightColumn,
+        });
+        const prepared = prepareLocalExecution(proofSql, activeConnection, projectRoot, projectConfig);
+        const raw = await executor.executeQuery(prepared.sql, [], runtimeVariables({}), prepared.connection);
+        proofs.push({ summary: summarizeExploratoryJoinProbe(raw.rows, join.leftRelation!, join.leftColumn, join.rightRelation!, join.rightColumn) });
+      }
+      const result = await executeGeneratedSqlForAgent(boundedSql);
+      return { result, proofs, sql: boundedSql, repairs };
+    } catch (error) {
+      return { proofs, sql: boundedSql, repairs, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
   const getSchemaContextForAgent = async (question: string, preparedContextPack?: LocalContextPack): Promise<AgentSchemaTable[]> => {
     const scanRuntimeSchema = async (): Promise<{ ranked: AgentSchemaTable[]; snapshot: AgentSchemaTable[] }> => {
       if (!connection) return { ranked: [], snapshot: [] };
@@ -3159,18 +3612,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
 
-  // Watch notebooks/, workbooks/, semantic-layer/, and data/ dirs for changes
+  // Watch all Git-owned authoring roots. Domain Packages are recursive and are
+  // the canonical home for modeling, skills, blocks, notebooks, Apps, and evals.
   if (projectRoot) {
-    for (const dir of ['notebooks', 'workbooks', 'blocks', 'dashboards', 'semantic-layer', 'data']) {
+    let sourceRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    for (const dir of ['domains', 'skills', 'tests', 'notebooks', 'workbooks', 'blocks', 'apps', 'dashboards', 'semantic-layer', 'data']) {
       const watchDir = join(projectRoot, dir);
       if (!existsSync(watchDir)) continue;
       try {
-        watch(watchDir, { persistent: false }, (eventType, filename) => {
+        watch(watchDir, { persistent: false, recursive: true }, (eventType, filename) => {
           if (!filename) return;
           const path = `${dir}/${filename}`;
           const payload = JSON.stringify({ type: eventType === 'rename' ? 'file-added' : 'file-changed', path });
           for (const client of sseClients) {
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+          if (['domains', 'skills', 'tests', 'blocks', 'apps', 'notebooks'].includes(dir)) {
+            invalidateAgentProjectState(projectRoot);
+            if (sourceRefreshTimer) clearTimeout(sourceRefreshTimer);
+            sourceRefreshTimer = setTimeout(() => {
+              void refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
+            }, 250);
           }
           // Hot-reload semantic layer on change and notify frontend
           if (dir === 'semantic-layer') {
@@ -3196,6 +3658,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         });
       } catch { /* dir not watchable */ }
+    }
+    const configuredDbtManifest = resolveDbtManifestPath(projectRoot);
+    if (configuredDbtManifest && existsSync(dirname(configuredDbtManifest))) {
+      try {
+        watch(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
+          if (!filename || !['manifest.json', 'catalog.json', 'semantic_manifest.json', 'run_results.json'].includes(String(filename))) return;
+          invalidateAgentProjectState(projectRoot);
+          if (sourceRefreshTimer) clearTimeout(sourceRefreshTimer);
+          sourceRefreshTimer = setTimeout(() => {
+            void refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
+          }, 250);
+          const payload = JSON.stringify({ type: 'dbt-artifacts-changed', path: String(filename) });
+          for (const client of sseClients) {
+            try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+        });
+      } catch { /* dbt artifact directory not watchable */ }
     }
   }
 
@@ -3561,19 +4040,594 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const url = new URL(requestUrl, 'http://127.0.0.1');
     const path = url.pathname || '/';
 
-    // CORS — needed for dql-notebook SPA dev mode
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Exact-origin CORS. Loopback dev origins are accepted; remote serving
+    // requires an explicit allowlist and bearer token.
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.replace(/\/$/, '') : undefined;
+    const loopbackOrigin = requestOrigin ? isLoopbackOrigin(requestOrigin) : false;
+    const originAllowed = !requestOrigin || (loopback ? loopbackOrigin : allowedOrigins.has(requestOrigin));
+    if (requestOrigin && originAllowed) res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (!originAllowed && path.startsWith('/api/')) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ error: 'Origin is not allowed.' }));
+      return;
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
     }
+    if (!loopback && path.startsWith('/api/') && path !== '/api/health') {
+      const authorization = req.headers.authorization ?? '';
+      if (authorization !== `Bearer ${authToken}`) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8', 'WWW-Authenticate': 'Bearer' });
+        res.end(serializeJSON({ error: 'A valid DQL server bearer token is required.' }));
+        return;
+      }
+    }
 
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok' }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/onboarding/status') {
+      const requestId = apiRequestId('onboarding-status');
+      const dbtProjectDir = resolve(projectRoot, projectConfig.dbt?.projectDir ?? '.');
+      const manifestPath = resolve(dbtProjectDir, projectConfig.dbt?.manifestPath ?? 'target/manifest.json');
+      const registry = loadDomainPackageRegistry(projectRoot);
+      const manifestFound = existsSync(manifestPath);
+      let snapshotId: string | undefined;
+      let snapshotError: string | undefined;
+      if (manifestFound) {
+        try {
+          snapshotId = projectSnapshot().snapshotId;
+        } catch (error) {
+          snapshotError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        snapshotId,
+        dbt: {
+          configured: Boolean(projectConfig.dbt),
+          projectDir: projectConfig.dbt?.projectDir,
+          manifestPath: projectConfig.dbt?.manifestPath,
+          projectFound: existsSync(join(dbtProjectDir, 'dbt_project.yml')),
+          manifestFound,
+        },
+        modeling: {
+          enabled: projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first',
+          manifestVersion: projectConfig.manifestVersion ?? 2,
+          mode: projectConfig.modeling?.mode,
+        },
+        domains: { count: registry.values().length, diagnostics: registry.diagnostics },
+        snapshot: { id: snapshotId, error: snapshotError },
+        capabilities: {
+          warehouse: Boolean(connection),
+          ai: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GEMINI_API_KEY || process.env.OLLAMA_BASE_URL),
+        },
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/dbt/preview') {
+      const requestId = apiRequestId('onboarding-dbt-preview');
+      try {
+        const preview = previewDbtOnboarding(await readJSON(req) as Record<string, unknown>);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, ...preview }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Verify the dbt project and artifact paths, then preview again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/dbt/apply') {
+      const requestId = apiRequestId('onboarding-dbt-apply');
+      try {
+        const body = await readJSON(req) as Record<string, unknown>;
+        let preview;
+        try {
+          preview = previewDbtOnboarding(body);
+        } catch (error) {
+          const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : '';
+          if (code !== 'DBT_MANIFEST_MISSING' || body.buildArtifacts !== true) throw error;
+          const { dbtProjectDir } = onboardingDbtPaths(body);
+          try {
+            execFileSync('dbt', ['parse', '--project-dir', dbtProjectDir], {
+              cwd: dbtProjectDir,
+              timeout: 120_000,
+              maxBuffer: 1024 * 1024,
+              encoding: 'utf8',
+              stdio: ['ignore', 'pipe', 'pipe'],
+              env: { ...process.env, DBT_LOG_FORMAT: 'text' },
+            });
+          } catch (parseError) {
+            throw Object.assign(new Error(`dbt parse failed. Run it in ${dbtProjectDir} to inspect the project error, then retry.`), { code: 'DBT_PARSE_FAILED', cause: parseError });
+          }
+          preview = previewDbtOnboarding(body);
+        }
+        const expectedFingerprint = typeof body.fingerprint === 'string'
+          ? body.fingerprint
+          : typeof body.expectedFingerprint === 'string' ? body.expectedFingerprint : undefined;
+        if ((!expectedFingerprint && body.buildArtifacts !== true) || (expectedFingerprint && expectedFingerprint !== preview.fingerprint)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SOURCE_CHANGED', message: 'dbt artifacts changed after preview. Review the refreshed preview before applying.', nextActions: ['Refresh the preview and review the new diff.'] })));
+          return;
+        }
+        const nextConfig: ProjectConfig = {
+          ...projectConfig,
+          manifestVersion: 3,
+          modeling: { mode: 'dbt-first' },
+          dbt: { projectDir: preview.projectDir, manifestPath: preview.manifestPath },
+          semanticLayer: { provider: 'dbt', projectPath: preview.projectDir },
+        };
+        const configPath = join(projectRoot, 'dql.config.json');
+        const previousConfigSource = readFileSync(configPath, 'utf8');
+        const previousProjectConfig = projectConfig;
+        const tempPath = `${configPath}.tmp-${process.pid}`;
+        writeFileSync(tempPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+        renameSync(tempPath, configPath);
+        projectConfig = nextConfig;
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        let snapshotId: string;
+        try {
+          snapshotId = projectSnapshot().snapshotId;
+        } catch (error) {
+          const rollbackPath = `${configPath}.rollback-${process.pid}`;
+          writeFileSync(rollbackPath, previousConfigSource, { encoding: 'utf8', mode: 0o600 });
+          renameSync(rollbackPath, configPath);
+          projectConfig = previousProjectConfig;
+          projectSnapshots.invalidate();
+          invalidateAgentProjectState(projectRoot);
+          throw Object.assign(new Error(`dbt-first configuration did not compile and was rolled back: ${error instanceof Error ? error.message : String(error)}`), { code: 'SNAPSHOT_BUILD_FAILED' });
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId, applied: true, config: { manifestVersion: 3, modeling: nextConfig.modeling, dbt: nextConfig.dbt }, fingerprint: preview.fingerprint }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Fix the reported dbt issue and run preview again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/refresh') {
+      const requestId = apiRequestId('onboarding-refresh');
+      const id = `dbt-refresh-${Date.now().toString(36)}`;
+      try {
+        const body = await readJSON(req) as { expectedFingerprint?: string };
+        const currentArtifact = previewDbtOnboarding({});
+        if (!body.expectedFingerprint || body.expectedFingerprint !== currentArtifact.fingerprint) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SOURCE_CHANGED', message: 'dbt artifacts changed before refresh. Review the current artifact preview.', nextActions: ['Return to the dbt preview step and review the refreshed fingerprint.'] })));
+          return;
+        }
+        projectSnapshots.invalidate();
+        const snapshot = projectSnapshot();
+        invalidateAgentProjectState(projectRoot);
+        await reindexProject(projectRoot, { manifest: snapshot.manifest, kgPath: defaultKgPath(projectRoot) });
+        const job = { id, kind: 'dbt_refresh', status: 'completed' as const, createdAt: new Date().toISOString(), result: { snapshotId: snapshot.snapshotId, diagnostics: snapshot.manifest.diagnostics ?? [] } };
+        onboardingJobs.set(id, job);
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, jobId: id, ...job }));
+      } catch (error) {
+        const job = { id, kind: 'dbt_refresh', status: 'failed' as const, createdAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) };
+        onboardingJobs.set(id, job);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ...apiErrorEnvelope({ requestId, code: 'SNAPSHOT_BUILD_FAILED', message: job.error, nextActions: ['Keep using the previous snapshot while fixing compile diagnostics.'] }), jobId: id, ...job }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/onboarding/jobs/')) {
+      const requestId = apiRequestId('onboarding-job');
+      const id = decodeURIComponent(path.slice('/api/onboarding/jobs/'.length));
+      const job = onboardingJobs.get(id);
+      res.writeHead(job ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      const jobSnapshotId = typeof (job?.result as { snapshotId?: unknown } | undefined)?.snapshotId === 'string'
+        ? String((job?.result as { snapshotId: string }).snapshotId)
+        : undefined;
+      res.end(serializeJSON(job ? { requestId, ...(jobSnapshotId ? { snapshotId: jobSnapshotId } : {}), ...job } : apiErrorEnvelope({ requestId, code: 'ONBOARDING_JOB_NOT_FOUND', message: `onboarding job not found: ${id}`, recoverable: false })));
+      return;
+    }
+
+    if (req.method === 'DELETE' && path.startsWith('/api/onboarding/jobs/')) {
+      const requestId = apiRequestId('onboarding-job-cancel');
+      const id = decodeURIComponent(path.slice('/api/onboarding/jobs/'.length));
+      const job = onboardingJobs.get(id);
+      if (job) onboardingJobs.set(id, { ...job, status: 'cancelled' });
+      res.writeHead(job ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(job ? { requestId, ...job, status: 'cancelled' } : apiErrorEnvelope({ requestId, code: 'ONBOARDING_JOB_NOT_FOUND', message: `onboarding job not found: ${id}`, recoverable: false })));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/domains/discover') {
+      const requestId = apiRequestId('domain-discovery');
+      try {
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+        if (!dbtManifestPath || !existsSync(dbtManifestPath)) throw Object.assign(new Error('No dbt manifest found. Run dbt parse or connect the project first.'), { code: 'DBT_MANIFEST_MISSING' });
+        const report = discoverDbtDomains({ projectRoot, dbtManifestPath });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          requestId,
+          snapshotId: projectSnapshot().snapshotId,
+          ...report,
+          capabilities: { aiEnrichment: false, deterministic: true },
+        }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Build a valid dbt manifest and retry discovery.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/domains/apply') {
+      const requestId = apiRequestId('domain-apply');
+      try {
+        const body = await readJSON(req) as { sourceFingerprint?: string; expectedSourceFingerprint?: string; selectedDomains?: unknown; domains?: unknown; proposals?: unknown; mode?: string };
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+        if (!dbtManifestPath || !existsSync(dbtManifestPath)) throw Object.assign(new Error('No dbt manifest found.'), { code: 'DBT_MANIFEST_MISSING' });
+        const report = discoverDbtDomains({ projectRoot, dbtManifestPath });
+        const expectedFingerprint = body.sourceFingerprint ?? body.expectedSourceFingerprint;
+        if (!expectedFingerprint || expectedFingerprint !== report.sourceFingerprint) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: projectSnapshot().snapshotId, code: 'SOURCE_CHANGED', message: 'dbt/domain evidence changed after discovery. Review the refreshed proposals before applying.', nextActions: ['Run domain discovery again and review the updated evidence.'] })));
+          return;
+        }
+        const proposalIds = Array.isArray(body.proposals) ? body.proposals.flatMap((value) => typeof value === 'object' && value && 'id' in value && typeof (value as { id?: unknown }).id === 'string' ? [(value as { id: string }).id] : []) : [];
+        const requested = proposalIds.length > 0 ? proposalIds : Array.isArray(body.selectedDomains) ? body.selectedDomains : Array.isArray(body.domains) ? body.domains : report.proposals.map((proposal) => proposal.id);
+        const selected = new Set(requested.filter((value): value is string => typeof value === 'string'));
+        if (body.mode === 'preview') {
+          const preview = report.proposals.filter((proposal) => selected.has(proposal.id)).map((proposal) => ({ path: join('domains', ...proposal.id.split('.'), 'domain.dql').replace(/\\/g, '/'), operation: 'create_or_retain', summary: `${proposal.matchedDbtUniqueIds.length} dbt model(s); review required` }));
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ requestId, snapshotId: projectSnapshot().snapshotId, applied: false, preview }));
+          return;
+        }
+        const existing = loadDomainPackageRegistry(projectRoot);
+        const applied: Array<{ id: string; status: string; path?: string; message: string }> = [];
+        for (const proposal of report.proposals.filter((value) => selected.has(value.id))) {
+          if (existing.get(proposal.id)) {
+            applied.push({ id: proposal.id, status: 'existing', message: 'Existing Domain Package retained unchanged.' });
+            continue;
+          }
+          const segments = proposal.id.split('.');
+          if (segments.length === 0 || segments.some((segment) => !/^[a-z0-9_]+$/.test(segment))) {
+            applied.push({ id: proposal.id, status: 'blocked', message: 'Domain id is not a safe normalized path.' });
+            continue;
+          }
+          const sourcePath = join('domains', ...segments, 'domain.dql').replace(/\\/g, '/');
+          const absolute = join(projectRoot, sourcePath);
+          mkdirSync(dirname(absolute), { recursive: true });
+          const dbtPaths = [...new Set(report.memberships.filter((membership) => membership.proposedDomain === proposal.id).flatMap((membership) => membership.sourcePath ? [membership.sourcePath] : []))].sort();
+          const source = renderDomainDeclaration({
+            id: proposal.id,
+            name: proposal.name,
+            parent: proposal.proposedParent,
+            owner: proposal.owner,
+            dbtPaths,
+            description: 'Draft domain boundary proposed from cited dbt evidence; review before governance use.',
+          });
+          const temp = `${absolute}.tmp-${process.pid}`;
+          writeFileSync(temp, source, { encoding: 'utf8', mode: 0o600 });
+          renameSync(temp, absolute);
+          applied.push({ id: proposal.id, status: 'created', path: sourcePath, message: 'Review-required domain boundary created; no relationships or skills were certified.' });
+        }
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: projectSnapshot().snapshotId, applied: true, results: applied, domains: loadDomainPackageRegistry(projectRoot).values().map((pkg) => ({ id: pkg.id, filePath: pkg.declarationPath, lifecycle: 'draft' })) }));
+      } catch (error) {
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DOMAIN_COLLISION';
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Resolve the collision or invalid proposal and preview again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/domain-packages') {
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const registry = loadDomainPackageRegistry(projectRoot);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        domains: listDomains(projectRoot),
+        packages: registry.values().map((pkg) => ({
+          id: pkg.id,
+          name: pkg.name,
+          parent: pkg.parent,
+          depth: pkg.depth,
+          ancestry: pkg.ancestry,
+          declarationPath: pkg.declarationPath,
+          root: relative(projectRoot, pkg.root).replace(/\\/g, '/'),
+          owner: pkg.owner,
+          exports: pkg.exports,
+        })),
+        modeling: manifest.modeling,
+        dbtProvenance: manifest.dbtProvenance,
+        domainAssets: collectDomainPackageAssets(projectRoot, registry),
+        diagnostics: manifest.diagnostics ?? [],
+        snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
+      }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/domain-workspaces') {
+      const requestId = apiRequestId('domain-workspaces');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const packages = Object.values(manifest.modeling?.packages ?? {});
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        snapshotId: snapshot.snapshotId,
+        snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
+        domains: packages.map((pkg) => domainWorkspaceSummary(manifest, pkg.id)),
+        unassignedModels: Object.values(manifest.dbtProvenance?.nodes ?? {}).filter((node) =>
+          !Object.values(manifest.modeling?.entities ?? {}).some((entity) => entity.dbtUniqueId === node.uniqueId)
+        ).length,
+      }));
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/domain-workspaces/')) {
+      const requestId = apiRequestId('domain-workspace');
+      const suffix = decodeURIComponent(path.slice('/api/domain-workspaces/'.length));
+      const relatedSuffix = '/related-products';
+      const domainId = suffix.endsWith(relatedSuffix) ? suffix.slice(0, -relatedSuffix.length) : suffix;
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      if (!manifest.modeling?.packages[domainId]) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DOMAIN_NOT_FOUND', message: `domain workspace not found: ${domainId}`, recoverable: false })));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(suffix.endsWith(relatedSuffix)
+        ? { requestId, domain: domainId, ...relatedProductsForDomain(manifest, domainId), snapshotId: snapshot.snapshotId }
+        : {
+            requestId,
+            snapshotId: snapshot.snapshotId,
+            ...domainWorkspaceSummary(manifest, domainId),
+            relatedProducts: relatedProductsForDomain(manifest, domainId),
+            snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
+          }));
+      return;
+    }
+
+    // Manifest v3 modeling surface. This response intentionally contains dbt
+    // provenance references and the sparse DQL overlay, never copied dbt YAML.
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
+      const requestId = apiRequestId('modeling-dbt-first');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DBT_FIRST_NOT_ENABLED', message: 'dbt-first modeling is not enabled. Set manifestVersion: 3 and modeling.mode: "dbt-first" in dql.config.json.', nextActions: ['Use Setup to connect dbt and enable dbt-first modeling.'] })));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        snapshotId: snapshot.snapshotId,
+        manifestVersion: manifest.manifestVersion,
+        dbtProvenance: manifest.dbtProvenance,
+        modeling: manifest.modeling,
+        domainAssets: collectDomainPackageAssets(projectRoot, loadDomainPackageRegistry(projectRoot)),
+        lineage: manifest.lineage,
+        diagnostics: manifest.diagnostics ?? [],
+        snapshot: { id: snapshot.snapshotId, stale: snapshot.stale, error: snapshot.error },
+      }));
+      return;
+    }
+
+    if (req.method === 'GET' && path.startsWith('/api/modeling/dbt-first/nodes/')) {
+      const requestId = apiRequestId('modeling-node');
+      const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+      const uniqueId = decodeURIComponent(path.slice('/api/modeling/dbt-first/nodes/'.length));
+      const snapshot = projectSnapshot();
+      const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
+      if (!dbtNodeDetailCache.has(cacheKey)) {
+        dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
+      }
+      const detail = dbtNodeDetailCache.get(cacheKey);
+      if (!detail) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DBT_NODE_NOT_FOUND', message: `dbt node not found: ${uniqueId}`, recoverable: false })));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...detail }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first/inventory') {
+      const requestId = apiRequestId('modeling-inventory');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
+      const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      const domain = (url.searchParams.get('domain') ?? '').trim();
+      const boundByDbtId = new Map(Object.values(manifest.modeling?.entities ?? {}).map((entity) => [entity.dbtUniqueId, entity]));
+      const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {})
+        .filter((node) => !query || `${node.name} ${node.relation ?? ''} ${node.sourcePath ?? ''}`.toLowerCase().includes(query))
+        .filter((node) => !domain || boundByDbtId.get(node.uniqueId)?.domain === domain)
+        .sort((a, b) => a.uniqueId.localeCompare(b.uniqueId));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        items: nodes.slice(cursor, cursor + limit).map((node) => ({ ...node, binding: boundByDbtId.get(node.uniqueId) })),
+        nextCursor: cursor + limit < nodes.length ? cursor + limit : null,
+        total: nodes.length,
+        snapshotId: snapshot.snapshotId,
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/nodes/batch') {
+      const requestId = apiRequestId('modeling-node-batch');
+      const body = await readJSON(req) as { uniqueIds?: unknown };
+      const uniqueIds = Array.isArray(body.uniqueIds) ? body.uniqueIds.filter((value): value is string => typeof value === 'string').slice(0, 100) : [];
+      const snapshot = projectSnapshot();
+      const dbtManifestPath = resolveDbtManifestPath(projectRoot);
+      const details = uniqueIds.map((uniqueId) => {
+        const cacheKey = `${snapshot.snapshotId}:${uniqueId}`;
+        if (!dbtNodeDetailCache.has(cacheKey)) dbtNodeDetailCache.set(cacheKey, dbtManifestPath ? loadDbtNodeAuthoringDetail(dbtManifestPath, uniqueId) : undefined);
+        return dbtNodeDetailCache.get(cacheKey);
+      }).filter(Boolean);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ requestId, details, snapshotId: snapshot.snapshotId }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/modeling/dbt-first/neighborhood') {
+      const requestId = apiRequestId('modeling-neighborhood');
+      const snapshot = projectSnapshot();
+      const manifest = snapshot.manifest;
+      const entityRef = url.searchParams.get('entity') ?? '';
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+      const entities = manifest.modeling?.entities ?? {};
+      const relationships = manifest.modeling?.relationships ?? {};
+      const entityKey = entities[entityRef] ? entityRef : Object.entries(entities).find(([, entity]) => entity.qualifiedId === entityRef)?.[0];
+      if (!entityKey) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'MODELING_ENTITY_NOT_FOUND', message: `modeling entity not found: ${entityRef}`, recoverable: false })));
+        return;
+      }
+      const edges = Object.values(relationships).filter((relationship) => relationship.from === entityKey || relationship.to === entityKey).slice(0, limit);
+      const keys = new Set([entityKey, ...edges.flatMap((edge) => [edge.from, edge.to])]);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        entities: Object.fromEntries([...keys].flatMap((key) => entities[key] ? [[key, entities[key]]] : [])),
+        relationships: Object.fromEntries(edges.map((edge) => [edge.qualifiedId, edge])),
+        snapshotId: snapshot.snapshotId,
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/dbt-source/preview') {
+      const requestId = apiRequestId('modeling-dbt-source-preview');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { change?: DbtSourceAuthoringInput; expectedSnapshotId?: string };
+        if (!body.change) throw Object.assign(new Error('A dbt source change is required.'), { code: 'INVALID_REQUEST' });
+        if (body.expectedSnapshotId && body.expectedSnapshotId !== snapshot.snapshotId) {
+          throw Object.assign(new Error('Project sources changed after the model was loaded.'), { code: 'SOURCE_CHANGED' });
+        }
+        const { dbtProjectDir, manifestPath } = onboardingDbtPaths({});
+        const preview = previewDbtSourcePatch(dbtProjectDir, manifestPath, body.change);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...preview }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'DBT_SOURCE_PATCH_INVALID');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the model and review the dbt YAML source patch again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/dbt-source/apply') {
+      const requestId = apiRequestId('modeling-dbt-source-apply');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { change?: DbtSourceAuthoringInput; fingerprint?: string; expectedFingerprint?: string; expectedSnapshotId?: string };
+        if (!body.change) throw Object.assign(new Error('A dbt source change is required.'), { code: 'INVALID_REQUEST' });
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) {
+          throw Object.assign(new Error('Project sources changed after the source patch preview.'), { code: 'SOURCE_CHANGED' });
+        }
+        const expectedFingerprint = body.expectedFingerprint ?? body.fingerprint;
+        if (!expectedFingerprint) throw Object.assign(new Error('The reviewed source patch fingerprint is required.'), { code: 'SOURCE_CHANGED' });
+        const { dbtProjectDir, manifestPath } = onboardingDbtPaths({});
+        const applied = applyDbtSourcePatch(dbtProjectDir, manifestPath, body.change, expectedFingerprint);
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        const nextSnapshot = projectSnapshot();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: nextSnapshot.snapshotId, applied }));
+      } catch (error) {
+        const inferred = /changed after the preview/i.test(apiErrorMessage(error)) ? 'SOURCE_CHANGED' : 'DBT_SOURCE_PATCH_INVALID';
+        const code = apiErrorCode(error, inferred);
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the source patch preview before applying.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/preview') {
+      const requestId = apiRequestId('modeling-preview');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { change?: ModelingAuthoringChange; expectedSnapshotId?: string };
+        if (!body.change) throw new Error('A modeling change is required.');
+        if (body.expectedSnapshotId && body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed after the model was loaded.'), { code: 'SOURCE_CHANGED' });
+        const preview = previewModelingChange(projectRoot, body.change);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, ...preview }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'MODELING_CHANGE_INVALID');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh Domain Studio and preview the change again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/apply') {
+      const requestId = apiRequestId('modeling-apply');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { change?: ModelingAuthoringChange; fingerprint?: string; expectedSnapshotId?: string };
+        if (!body.change) throw new Error('A modeling change is required.');
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed after the modeling preview.'), { code: 'SOURCE_CHANGED' });
+        if (!body.fingerprint) throw Object.assign(new Error('The reviewed modeling source fingerprint is required.'), { code: 'SOURCE_CHANGED' });
+        const applied = applyModelingChange(projectRoot, body.change, body.fingerprint);
+        projectSnapshots.invalidate();
+        const nextSnapshot = projectSnapshot();
+        const manifest = nextSnapshot.manifest;
+        await refreshUnifiedProjectIndexes(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: nextSnapshot.snapshotId, applied, modeling: manifest.modeling, diagnostics: manifest.diagnostics ?? [] }));
+      } catch (error) {
+        const inferred = /changed after the preview/i.test(apiErrorMessage(error)) ? 'SOURCE_CHANGED' : 'MODELING_APPLY_FAILED';
+        const code = apiErrorCode(error, inferred);
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh Domain Studio and review the latest source diff.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/relationships/validate') {
+      const requestId = apiRequestId('modeling-relationship-validate');
+      const snapshot = projectSnapshot();
+      try {
+        const body = await readJSON(req) as { relationship?: RelationshipAuthoringInput; expectedSnapshotId?: string };
+        if (!body.relationship) throw new Error('A relationship is required.');
+        if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed before relationship validation.'), { code: 'SOURCE_CHANGED' });
+        const manifest = snapshot.manifest;
+        const activeConnection = requireActiveConnection();
+        const evidence = await validateModelingRelationship(
+          body.relationship,
+          manifest,
+          (sql) => executor.executeQuery(sql, [], {}, activeConnection),
+          (identifier) => getDialect(activeConnection.driver).quoteIdentifier(identifier),
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, evidence }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'RELATIONSHIP_VALIDATION_FAILED');
+        res.writeHead(code === 'SOURCE_CHANGED' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code, message: apiErrorMessage(error), nextActions: ['Refresh the model or configure a warehouse connection, then retry validation.'] })));
+      }
       return;
     }
 
@@ -3956,6 +5010,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           context?: { cellSql?: unknown; selection?: unknown };
           target?: unknown;
           owner?: unknown;
+          domain?: unknown;
+          modelAreaId?: unknown;
           mode?: unknown;
           blockPath?: unknown;
         };
@@ -3976,6 +5032,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           selection: typeof body?.context?.selection === 'string' ? body.context.selection : undefined,
         };
         const owner = typeof body?.owner === 'string' ? body.owner : undefined;
+        const domain = typeof body?.domain === 'string' && body.domain.trim() ? body.domain.trim() : undefined;
+        const modelAreaId = typeof body?.modelAreaId === 'string' && body.modelAreaId.trim() ? body.modelAreaId.trim() : undefined;
+        const purpose = typeof (body as { purpose?: unknown })?.purpose === 'string'
+          ? (body as { purpose?: string }).purpose?.trim() || undefined
+          : undefined;
         const userId = typeof (body as { userId?: unknown })?.userId === 'string'
           ? (body as { userId?: string }).userId
           : undefined;
@@ -3999,6 +5060,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } catch {
           // Best-effort: a failed reindex falls back to whatever KG exists (or none).
         }
+        const { domainContext, contextPack } = await buildDirectBuildContext({
+          question: prompt,
+          domain,
+          purpose,
+          modelAreaId,
+          surface: target === 'cell' ? 'notebook' : 'block',
+          selectedContext: { target, mode, blockPath, owner },
+        });
         // Inject user-authored Skills as business context; the engine selects the
         // relevant subset and stamps `appliedSkills` on the result.
         const skills = loadSkills(projectRoot).skills;
@@ -4010,6 +5079,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           mode,
           blockPath,
           owner,
+          domain,
+          modelAreaId,
+          contextPack,
+          domainContext,
           userId,
           skills,
           dbtManifestPath: resolveDbtManifestPath(projectRoot, loadProjectConfig(projectRoot)),
@@ -4179,9 +5252,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Provide { domain } with a non-empty name.' }));
           return;
         }
-        writeDomainDeclaration(projectRoot, input);
-        await refreshLocalMetadataCatalog(projectRoot);
-        const domain = findDomain(projectRoot, input.name);
+        applyModelingChange(projectRoot, {
+          operation: 'upsert_domain',
+          value: { ...input, id: input.id ?? domainFolderSlug(input.name).replace(/-/g, '_') },
+        });
+        await refreshUnifiedProjectIndexes(projectRoot);
+        const domain = findDomain(projectRoot, input.id ?? input.name);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ domain }));
       } catch (error) {
@@ -4202,12 +5278,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         // If the name changed, remove the old declaration so we never orphan one.
-        if (domainFolderSlug(id) !== domainFolderSlug(input.name)) {
-          deleteDomainDeclaration(projectRoot, id);
+        if (domainKey(id) !== domainKey(input.id ?? input.name)) {
+          deleteCanonicalDomainDeclaration(projectRoot, id);
         }
-        writeDomainDeclaration(projectRoot, input);
-        await refreshLocalMetadataCatalog(projectRoot);
-        const domain = findDomain(projectRoot, input.name);
+        applyModelingChange(projectRoot, {
+          operation: 'upsert_domain',
+          value: { ...input, id: input.id ?? id },
+        });
+        await refreshUnifiedProjectIndexes(projectRoot);
+        const domain = findDomain(projectRoot, input.id ?? input.name);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ domain }));
       } catch (error) {
@@ -4220,8 +5299,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'DELETE' && path.startsWith('/api/domains/')) {
       try {
         const id = decodeURIComponent(path.slice('/api/domains/'.length));
-        deleteDomainDeclaration(projectRoot, id);
-        await refreshLocalMetadataCatalog(projectRoot);
+        deleteCanonicalDomainDeclaration(projectRoot, id);
+        await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -4316,8 +5395,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           try {
             if (candidate.kind === 'domain' && candidate.domain) {
-              const written = writeDomainDeclaration(projectRoot, candidate.domain);
-              saved.push({ id: candidate.id, path: written.path, status: 'saved' });
+              const domainId = candidate.domain.id ?? domainFolderSlug(candidate.domain.name).replace(/-/g, '_');
+              const written = applyModelingChange(projectRoot, {
+                operation: 'upsert_domain',
+                value: { ...candidate.domain, id: domainId },
+              });
+              saved.push({ id: candidate.id, path: written.patches[0]?.path, status: 'saved' });
             } else if (candidate.kind === 'skill' && candidate.skill) {
               const skill = writeSkill(projectRoot, { ...candidate.skill, scope: 'project', status: 'draft' });
               saved.push({ id: candidate.id, path: relative(projectRoot, skill.sourcePath), status: 'saved' });
@@ -4328,7 +5411,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             saved.push({ id: candidate.id, status: 'blocked', blockers: [error instanceof Error ? error.message : String(error)] });
           }
         }
-        await refreshLocalMetadataCatalog(projectRoot);
+        await refreshUnifiedProjectIndexes(projectRoot);
         updateContextBootstrapSession(projectRoot, id, (current) => ({ ...current, closedAt: new Date().toISOString() }));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ id, saved }));
@@ -5847,6 +6930,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Missing block name' }));
           return;
         }
+        if (dbtFirstOwnsSemanticAuthoring(projectConfig)
+          && (blockType === 'semantic' || /\btype\s*=\s*["']semantic["']/i.test(content ?? ''))) {
+          sendDbtOwnedSemanticAuthoringError(res);
+          return;
+        }
         const created = createBlockArtifacts(projectRoot, {
           name,
           domain,
@@ -5913,6 +7001,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!name || typeof name !== 'string' || !content || typeof content !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'name and content are required' }));
+          return;
+        }
+        if (dbtFirstOwnsSemanticAuthoring(projectConfig) && /\btype\s*=\s*["']semantic["']/i.test(content)) {
+          sendDbtOwnedSemanticAuthoringError(res);
           return;
         }
         // OSS keeps the save flow deliberately small: the person saving the
@@ -9005,6 +10097,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'name and at least one metric are required.' }));
           return;
         }
+        if (blockType === 'semantic' && dbtFirstOwnsSemanticAuthoring(projectConfig)) {
+          sendDbtOwnedSemanticAuthoringError(res);
+          return;
+        }
         const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
         const composed = composeRuntimeSemanticQuery({
           metrics,
@@ -9472,6 +10568,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Create a new metric YAML file in semantic-layer/metrics/
     if (req.method === 'POST' && path === '/api/semantic-layer/metric') {
       try {
+        if (dbtFirstOwnsSemanticAuthoring(projectConfig)) {
+          sendDbtOwnedSemanticAuthoringError(res);
+          return;
+        }
         const body = await readJSON(req);
         const { name, label, description, domain, sql, type, table, tags } = body as {
           name: string; label: string; description: string; domain: string;
@@ -9549,6 +10649,159 @@ table: ${table}${tagList}
       resolvePromise(address.port);
     });
   });
+}
+
+async function validateModelingRelationship(
+  relationship: RelationshipAuthoringInput,
+  manifest: DQLManifest,
+  execute: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>,
+  quoteIdentifier: (identifier: string) => string = quoteSqlIdentifier,
+): Promise<ManifestRelationshipValidationEvidence> {
+  const fromEntity = manifest.modeling?.entities[relationship.from];
+  const toEntity = manifest.modeling?.entities[relationship.to];
+  if (!fromEntity || !toEntity) throw new Error('Both relationship entities must be bound to dbt models before validation.');
+  const fromNode = manifest.dbtProvenance?.nodes[fromEntity.dbtUniqueId];
+  const toNode = manifest.dbtProvenance?.nodes[toEntity.dbtUniqueId];
+  if (!fromNode?.relation || !toNode?.relation) throw new Error('Both dbt models must expose warehouse relation names.');
+  if (!relationship.keys.length) throw new Error('At least one join key pair is required.');
+
+  const safeQuote = (identifier: string) => quoteIdentifier(assertSafeSqlIdentifier(identifier));
+  const fromRelation = quoteQualifiedIdentifier(fromNode.relation, safeQuote);
+  const toRelation = quoteQualifiedIdentifier(toNode.relation, safeQuote);
+  const fromNull = relationship.keys.map((key) => `f.${safeQuote(key.from)} IS NULL`).join(' OR ');
+  const toNull = relationship.keys.map((key) => `t.${safeQuote(key.to)} IS NULL`).join(' OR ');
+  const join = relationship.keys.map((key) => `f.${safeQuote(key.from)} = t.${safeQuote(key.to)}`).join(' AND ');
+  const fromKeys = relationship.keys.map((key) => safeQuote(key.from)).join(', ');
+  const toKeys = relationship.keys.map((key) => safeQuote(key.to)).join(', ');
+  const firstToKey = safeQuote(relationship.keys[0]!.to);
+  const sql = `WITH
+from_counts AS (SELECT COUNT(*) AS rows, SUM(CASE WHEN ${fromNull} THEN 1 ELSE 0 END) AS null_keys FROM ${fromRelation} f),
+to_counts AS (SELECT COUNT(*) AS rows, SUM(CASE WHEN ${toNull} THEN 1 ELSE 0 END) AS null_keys FROM ${toRelation} t),
+from_max AS (SELECT COALESCE(MAX(key_count), 0) AS max_per_key FROM (SELECT COUNT(*) AS key_count FROM ${fromRelation} GROUP BY ${fromKeys}) x),
+to_max AS (SELECT COALESCE(MAX(key_count), 0) AS max_per_key FROM (SELECT COUNT(*) AS key_count FROM ${toRelation} GROUP BY ${toKeys}) x),
+joined AS (SELECT COUNT(*) AS rows FROM ${fromRelation} f JOIN ${toRelation} t ON ${join}),
+unmatched AS (SELECT COUNT(*) AS rows FROM ${fromRelation} f LEFT JOIN ${toRelation} t ON ${join} WHERE t.${firstToKey} IS NULL)
+SELECT from_counts.rows AS from_rows, to_counts.rows AS to_rows, joined.rows AS joined_rows,
+  from_counts.null_keys AS from_null_keys, to_counts.null_keys AS to_null_keys,
+  unmatched.rows AS unmatched_from, from_max.max_per_key AS max_from_per_key, to_max.max_per_key AS max_to_per_key
+FROM from_counts, to_counts, joined, unmatched, from_max, to_max`;
+  const result = await execute(sql);
+  const row = result.rows[0] ?? {};
+  const maxFromPerKey = numericValue(row.max_from_per_key);
+  const maxToPerKey = numericValue(row.max_to_per_key);
+  const cardinalityPassed = relationship.cardinality === 'one_to_one'
+    ? maxFromPerKey <= 1 && maxToPerKey <= 1
+    : relationship.cardinality === 'one_to_many'
+      ? maxFromPerKey <= 1
+      : relationship.cardinality === 'many_to_one'
+        ? maxToPerKey <= 1
+        : false;
+  const policyPassed = relationship.fanout === 'safe' && cardinalityPassed;
+  const queryFingerprint = createHash('sha256').update(sql).digest('hex');
+  return {
+    status: policyPassed ? 'passed' : 'failed',
+    checkedAt: new Date().toISOString(),
+    queryFingerprint,
+    proofFingerprint: relationshipValidationProofFingerprint({
+      fromRelation: fromNode.relation,
+      toRelation: toNode.relation,
+      keys: relationship.keys,
+      cardinality: relationship.cardinality,
+      fanout: relationship.fanout,
+      queryFingerprint,
+    }),
+    fromRows: numericValue(row.from_rows),
+    toRows: numericValue(row.to_rows),
+    joinedRows: numericValue(row.joined_rows),
+    fromNullKeys: numericValue(row.from_null_keys),
+    toNullKeys: numericValue(row.to_null_keys),
+    unmatchedFrom: numericValue(row.unmatched_from),
+    maxFromPerKey,
+    maxToPerKey,
+    message: policyPassed
+      ? 'Warehouse evidence matches the declared cardinality and safe fanout policy.'
+      : 'Warehouse evidence does not prove the declared cardinality and safe fanout policy.',
+  };
+}
+
+function relatedProductsForDomain(manifest: DQLManifest, domainId: string): {
+  apps: Array<Record<string, unknown>>;
+  notebooks: Array<Record<string, unknown>>;
+} {
+  const apps = Object.values(manifest.apps ?? {})
+    .filter((app) => app.ownerDomain === domainId || app.usesDomains.includes(domainId))
+    .map((app) => ({
+      id: app.id,
+      name: app.name,
+      filePath: app.filePath,
+      ownerDomain: app.ownerDomain ?? app.domain,
+      usesDomains: app.usesDomains,
+      purpose: app.purpose,
+      requiredExports: app.requiredExports,
+      classification: app.classification,
+      lifecycle: app.lifecycle,
+      legacyLayout: app.filePath.startsWith('domains/'),
+    }));
+  const notebooks = Object.entries(manifest.notebooks)
+    .filter(([, notebook]) => notebook.ownerDomain === domainId || notebook.usesDomains.includes(domainId))
+    .map(([id, notebook]) => ({
+      id,
+      title: notebook.title,
+      filePath: notebook.filePath,
+      ownerDomain: notebook.ownerDomain,
+      usesDomains: notebook.usesDomains,
+      purpose: notebook.purpose,
+      requiredExports: notebook.requiredExports,
+      classification: notebook.classification,
+      legacyLayout: notebook.filePath.startsWith('domains/'),
+    }));
+  return { apps, notebooks };
+}
+
+function domainWorkspaceSummary(manifest: DQLManifest, domainId: string): Record<string, unknown> {
+  const pkg = manifest.modeling?.packages[domainId];
+  const entities = Object.values(manifest.modeling?.entities ?? {}).filter((entity) => entity.domain === domainId);
+  const entityKeys = new Set(Object.entries(manifest.modeling?.entities ?? {}).filter(([, entity]) => entity.domain === domainId).map(([key]) => key));
+  const relationships = Object.values(manifest.modeling?.relationships ?? {}).filter((relationship) => entityKeys.has(relationship.from) || entityKeys.has(relationship.to));
+  const contracts = Object.values(manifest.modeling?.contracts ?? {}).filter((contract) => contract.domain === domainId);
+  const imports = Object.values(manifest.modeling?.interfaces?.imports ?? {}).filter((value) => value.domain === domainId);
+  const exports = Object.values(manifest.modeling?.interfaces?.exports ?? {}).filter((value) => value.domain === domainId);
+  return {
+    id: domainId,
+    parent: pkg?.parent,
+    owner: pkg?.owner,
+    filePath: pkg?.filePath,
+    counts: {
+      entities: entities.length,
+      relationships: relationships.length,
+      safeRelationships: relationships.filter((relationship) => relationship.automaticJoinAllowed).length,
+      staleRelationships: relationships.filter((relationship) => relationship.staleCertification).length,
+      contracts: contracts.length,
+      imports: imports.length,
+      exports: exports.length,
+      relatedProducts: Object.values(relatedProductsForDomain(manifest, domainId)).reduce((sum, values) => sum + values.length, 0),
+    },
+    readiness: relationships.some((relationship) => relationship.staleCertification) ? 'attention' : entities.length > 0 ? 'ready' : 'setup',
+  };
+}
+
+function quoteQualifiedIdentifier(value: string, quote: (identifier: string) => string = quoteSqlIdentifier): string {
+  return value.split('.').map((part) => quote(assertSafeSqlIdentifier(part))).join('.');
+}
+
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function assertSafeSqlIdentifier(value: string): string {
+  if (!value || !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(value)) throw new Error(`Unsafe SQL identifier: ${value}`);
+  return value;
+}
+
+function numericValue(value: unknown): number {
+  if (typeof value === 'bigint') return Number(value);
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 export async function assertLocalQueryRuntimeReady(
@@ -9924,6 +11177,7 @@ function serializeSkill(skill: Skill): {
   user?: string;
   domain?: string;
   domains?: string[];
+  modelAreaRefs?: string[];
   kind?: Skill['kind'];
   status?: Skill['status'];
   owner?: string;
@@ -9948,6 +11202,7 @@ function serializeSkill(skill: Skill): {
     user: undefined,
     domain: skill.domain,
     domains: skill.domains,
+    modelAreaRefs: skill.modelAreaRefs,
     kind: skill.kind,
     status: skill.status,
     owner: skill.owner,
@@ -9997,6 +11252,7 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
     user: undefined,
     domain: typeof skill.domain === 'string' && skill.domain.trim() ? skill.domain.trim() : undefined,
     domains: asStrings(skill.domains),
+    modelAreaRefs: asStrings(skill.modelAreaRefs),
     kind: skill.kind === 'domain_reference' || skill.kind === 'metric_policy' || skill.kind === 'glossary' || skill.kind === 'analysis_pattern' || skill.kind === 'sql_policy' ? skill.kind : 'custom',
     status: skill.status === 'draft' || skill.status === 'deprecated' ? skill.status : 'active',
     owner: typeof skill.owner === 'string' ? skill.owner : undefined,
@@ -10056,7 +11312,7 @@ function manifestDomainToDto(
   counts: { blockCount: number; skillCount: number; termCount: number },
 ): DomainDto {
   return {
-    id: domain.name,
+    id: domain.id ?? domain.name,
     name: domain.name,
     parent: domain.parent,
     owner: domain.owner,
@@ -10106,7 +11362,7 @@ export function listDomains(projectRoot: string): DomainDto[] {
 
   return Object.values(domains)
     .map((domain) => {
-      const key = domainKey(domain.name);
+      const key = domainKey(domain.id ?? domain.name);
       return manifestDomainToDto(domain, {
         blockCount: blockCounts.get(key) ?? 0,
         skillCount: skillCounts.get(key) ?? 0,
@@ -10119,7 +11375,55 @@ export function listDomains(projectRoot: string): DomainDto[] {
 /** Find a single authored domain by name/id (case/slug-insensitive). */
 function findDomain(projectRoot: string, nameOrId: string): DomainDto | undefined {
   const key = domainKey(nameOrId);
-  return listDomains(projectRoot).find((domain) => domainKey(domain.name) === key);
+  return listDomains(projectRoot).find((domain) => domainKey(domain.id) === key || domainKey(domain.name) === key);
+}
+
+function deleteCanonicalDomainDeclaration(projectRoot: string, nameOrId: string): boolean {
+  const registry = loadDomainPackageRegistry(projectRoot);
+  const key = domainKey(nameOrId);
+  const pkg = registry.values().find((candidate) => domainKey(candidate.id) === key || domainKey(candidate.name) === key);
+  if (!pkg) return false;
+  const declaration = join(projectRoot, pkg.declarationPath);
+  if (existsSync(declaration)) rmSync(declaration, { force: true });
+  if (pkg.legacyYamlPath) {
+    const legacy = join(projectRoot, pkg.legacyYamlPath);
+    if (existsSync(legacy)) rmSync(legacy, { force: true });
+  }
+  return true;
+}
+
+async function refreshUnifiedProjectIndexes(projectRoot: string): Promise<void> {
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+  const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook', dbtManifestPath });
+  invalidateAgentProjectState(projectRoot);
+  await reindexProject(projectRoot, {
+    manifest,
+    kgPath: defaultKgPath(projectRoot),
+    forceMetadataCatalog: true,
+    forceKgIndex: true,
+  });
+}
+
+function collectDomainPackageAssets(
+  projectRoot: string,
+  registry: ReturnType<typeof loadDomainPackageRegistry>,
+): Record<string, Record<string, string[]>> {
+  const output: Record<string, Record<string, string[]>> = {};
+  for (const pkg of registry.values()) output[pkg.id] = {};
+  for (const path of listProjectFiles(projectRoot).filter((candidate) => candidate.startsWith('domains/'))) {
+    const pkg = registry.packageForPath(join(projectRoot, path));
+    if (!pkg || path === pkg.declarationPath) continue;
+    const local = relative(pkg.root, join(projectRoot, path)).replace(/\\/g, '/');
+    const top = local.split('/')[0] ?? '';
+    const kind = top === 'business-views' ? 'views' : top;
+    if (!['terms', 'skills', 'blocks', 'views', 'notebooks', 'apps', 'evaluations', 'tests'].includes(kind)) continue;
+    const bucket = output[pkg.id] ?? (output[pkg.id] = {});
+    (bucket[kind] ??= []).push(path);
+  }
+  for (const assets of Object.values(output)) {
+    for (const paths of Object.values(assets)) paths.sort();
+  }
+  return output;
 }
 
 /** Validate + normalize an inbound `{ domain }` body into a DomainInput. */
@@ -10138,6 +11442,7 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
       ? value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
       : undefined;
   return {
+    id: typeof domain.id === 'string' && domain.id.trim() ? domain.id.trim() : domainFolderSlug(name).replace(/-/g, '_'),
     name,
     parent: typeof domain.parent === 'string' ? domain.parent : undefined,
     owner: typeof domain.owner === 'string' ? domain.owner : undefined,
@@ -10404,6 +11709,22 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   }
 
   return config;
+}
+
+function dbtFirstOwnsSemanticAuthoring(config: ProjectConfig): boolean {
+  return config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
+}
+
+function sendDbtOwnedSemanticAuthoringError(res: {
+  writeHead(statusCode: number, headers: Record<string, string>): unknown;
+  end(chunk?: string): unknown;
+}): void {
+  res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(serializeJSON({
+    error: 'dbt-first projects use dbt/MetricFlow as the physical and metric source of truth. Edit the dbt project and refresh artifacts instead of creating duplicate local semantic definitions.',
+    code: 'DQL_MODELING_DBT_OWNED',
+    nextAction: 'Create or edit the metric in dbt/MetricFlow, run dbt parse or dbt build, then run dql sync dbt.',
+  }));
 }
 
 /**
@@ -12107,6 +13428,321 @@ export function buildAgentPreviewSql(sql: string): string {
   return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
 }
 
+export interface ExploratorySqlPreflightResult {
+  sql: string;
+  repairs: string[];
+  blockedReason?: string;
+}
+
+/**
+ * EXP-001 preflight for model-authored exploratory SQL.
+ *
+ * This is deliberately narrow and deterministic: it repairs a singular/plural
+ * qualifier typo only when it resolves to exactly one relation already present
+ * in the query, and it changes SUM to MAX for a non-additive parent attribute
+ * only when the owning entity is retained in GROUP BY. It never invents a
+ * relation, join key, or allocation rule.
+ */
+export function repairExploratorySqlBeforeExecution(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  question = '',
+): ExploratorySqlPreflightResult {
+  const repairs: string[] = [];
+  let repairedSql = qualifyExploratoryRelationsFromSchema(sql, schemaContext, repairs);
+  repairedSql = repairExploratoryRelationQualifiers(repairedSql, repairs);
+  repairedSql = repairExploratoryLifetimeMeasureSelection(repairedSql, schemaContext, question, repairs);
+  const grainRepair = repairExploratoryNonAdditiveAggregates(repairedSql, schemaContext, repairs);
+  repairedSql = grainRepair.sql;
+  return {
+    sql: repairedSql,
+    repairs,
+    ...(grainRepair.blockedReason ? { blockedReason: grainRepair.blockedReason } : {}),
+  };
+}
+
+/**
+ * EXP-003 — make the typed overall ranking contract executable before the host
+ * runs a review-required exploratory candidate. The answer-shape gate remains a
+ * backstop, but a provider's generic LIMIT 100 must not trigger a second model
+ * call when the planner already established top 10.
+ */
+export function applyRequestedTopNToExploratorySql(sql: string, requestedTopN?: number): string {
+  if (!Number.isInteger(requestedTopN) || requestedTopN! <= 0) return sql;
+  const withoutTerminator = sql.trim().replace(/;\s*$/, '');
+  const trailingLimit = /\blimit\s+\d+\s*$/i;
+  if (trailingLimit.test(withoutTerminator)) {
+    return withoutTerminator.replace(trailingLimit, `LIMIT ${requestedTopN}`);
+  }
+  return `${withoutTerminator}\nLIMIT ${requestedTopN}`;
+}
+
+function qualifyExploratoryRelationsFromSchema(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  repairs: string[],
+): string {
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed) return sql;
+  let repaired = sql;
+  for (const relation of analysis.tables) {
+    const cleanRelation = relation.replace(/["`\[\]]/g, '');
+    if (cleanRelation.includes('.')) continue;
+    const basename = cleanRelation.toLowerCase();
+    const candidates = schemaContext
+      .map((table) => table.relation)
+      .filter((candidate) => (candidate.split('.').at(-1) ?? candidate).toLowerCase() === basename)
+      .filter((candidate, index, values) => values.indexOf(candidate) === index);
+    if (candidates.length === 0) continue;
+    const compatible = candidates.every((candidate) => candidates.every((other) =>
+      candidate.toLowerCase() === other.toLowerCase()
+      || candidate.toLowerCase().endsWith(`.${other.toLowerCase()}`)
+      || other.toLowerCase().endsWith(`.${candidate.toLowerCase()}`)
+    ));
+    if (!compatible) continue;
+    const replacement = [...candidates].sort((left, right) => right.split('.').length - left.split('.').length)[0]!;
+    if (replacement.toLowerCase() === basename) continue;
+    repaired = repaired.replace(
+      new RegExp(`\\b(from|join)\\s+${escapeExploratoryRegex(cleanRelation)}\\b`, 'gi'),
+      (_match, keyword: string) => `${keyword} ${replacement}`,
+    );
+    repairs.push(`Qualified exploratory relation ${cleanRelation} as inspected relation ${replacement}.`);
+  }
+  return repaired;
+}
+
+function repairExploratoryRelationQualifiers(sql: string, repairs: string[]): string {
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed) return sql;
+  const declared = Object.entries(analysis.aliasToRelation).map(([qualifier, relation]) => ({
+    qualifier,
+    subject: normalizeExploratoryRelationSubject(relation.split('.').at(-1) ?? relation),
+  }));
+  let repaired = sql;
+  const unresolved = analysis.columns
+    .filter((column) => column.tableAlias && column.relation === column.tableAlias && !analysis.aliasToRelation[column.tableAlias])
+    .map((column) => column.tableAlias!)
+    .filter((value, index, values) => values.indexOf(value) === index);
+  for (const qualifier of unresolved) {
+    const subject = normalizeExploratoryRelationSubject(qualifier);
+    const matches = declared.filter((candidate) => candidate.subject === subject);
+    if (matches.length !== 1 || matches[0]!.qualifier === qualifier) continue;
+    const replacement = matches[0]!.qualifier;
+    repaired = repaired.replace(
+      new RegExp(`\\b${escapeExploratoryRegex(qualifier)}\\s*\\.`, 'gi'),
+      `${replacement}.`,
+    );
+    repairs.push(`Corrected unresolved SQL qualifier ${qualifier} to the inspected relation alias ${replacement}.`);
+  }
+  return repaired;
+}
+
+function repairExploratoryLifetimeMeasureSelection(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  question: string,
+  repairs: string[],
+): string {
+  if (!/\b(lifetime|life\s*span|lifespan|customer\s+life)\b/i.test(question)) return sql;
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed || analysis.joins.length === 0) return sql;
+  const groupClause = sql.match(/\bgroup\s+by\s+([\s\S]*?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i)?.[1] ?? '';
+  let repaired = sql;
+  for (const aggregate of analysis.aggregates) {
+    if (aggregate.func.toLowerCase() !== 'sum' || !aggregate.column) continue;
+    const lifetimeColumn = `lifetime_${aggregate.column.toLowerCase()}`;
+    const owner = resolveUniqueExploratoryColumnOwner(schemaContext, lifetimeColumn);
+    if (!owner) continue;
+    const ownerAliases = Object.entries(analysis.aliasToRelation)
+      .filter(([, relation]) => exploratoryRelationsMatch(relation, owner.relation))
+      .map(([alias]) => alias);
+    const ownerRetained = owner.columns.some((ownerColumn) =>
+      new RegExp(`(?:^|[^A-Za-z0-9_$])${escapeExploratoryRegex(ownerColumn.name)}(?:[^A-Za-z0-9_$]|$)`, 'i').test(groupClause)
+    );
+    if (!ownerRetained || ownerAliases.length === 0) continue;
+    const sourcePattern = new RegExp(
+      `\\bsum\\s*\\(\\s*(?:[A-Za-z_][A-Za-z0-9_$]*\\s*\\.\\s*)?${escapeExploratoryRegex(aggregate.column)}\\s*\\)`,
+      'gi',
+    );
+    if (!sourcePattern.test(repaired)) continue;
+    repaired = repaired.replace(sourcePattern, `MAX(${ownerAliases[0]}.${lifetimeColumn})`);
+    repairs.push(`Used ${lifetimeColumn} from ${owner.name} at the retained entity grain instead of multiplying ${aggregate.column} across lower-grain joined rows.`);
+  }
+  return repaired;
+}
+
+function repairExploratoryNonAdditiveAggregates(
+  sql: string,
+  schemaContext: AgentSchemaTable[],
+  repairs: string[],
+): { sql: string; blockedReason?: string } {
+  const analysis = analyzeSqlReferences(sql);
+  if (!analysis.parsed || analysis.joins.length === 0) return { sql };
+  const risky = analysis.aggregates.filter((aggregate) =>
+    aggregate.func.toLowerCase() === 'sum'
+    && Boolean(aggregate.column)
+    && /(^|_)(lifetime|cumulative|balance|snapshot|rate|ratio|average|avg)(_|$)/i.test(aggregate.column!),
+  );
+  if (risky.length === 0) return { sql };
+
+  const groupClause = sql.match(/\bgroup\s+by\s+([\s\S]*?)(?:\border\s+by\b|\blimit\b|\bqualify\b|\bhaving\b|$)/i)?.[1] ?? '';
+  let repaired = sql;
+  for (const aggregate of risky) {
+    const column = aggregate.column!;
+    const owner = resolveUniqueExploratoryColumnOwner(schemaContext, column);
+    if (!owner) {
+      return {
+        sql: repaired,
+        blockedReason: `The exploratory query sums non-additive measure ${column} after a join, but DQL cannot prove its owning grain. Clarify the desired allocation or keep the owning entity in the result.`,
+      };
+    }
+    const ownerAliases = Object.entries(analysis.aliasToRelation)
+      .filter(([, relation]) => exploratoryRelationsMatch(relation, owner.relation))
+      .map(([alias]) => alias);
+    const ownerRetained = owner.columns.some((ownerColumn) => {
+      const name = escapeExploratoryRegex(ownerColumn.name);
+      if (new RegExp(`(?:^|[^A-Za-z0-9_$])${name}(?:[^A-Za-z0-9_$]|$)`, 'i').test(groupClause)) return true;
+      return ownerAliases.some((alias) => new RegExp(`\\b${escapeExploratoryRegex(alias)}\\s*\\.\\s*${name}\\b`, 'i').test(groupClause));
+    });
+    if (!ownerRetained) {
+      return {
+        sql: repaired,
+        blockedReason: `The exploratory query would allocate non-additive measure ${column} below its owning ${owner.name} grain. Keep ${owner.name} in the output or provide an allocation policy.`,
+      };
+    }
+    const sumPattern = new RegExp(
+      `\\bsum\\s*\\(\\s*((?:[A-Za-z_][A-Za-z0-9_$]*\\s*\\.\\s*)?${escapeExploratoryRegex(column)})\\s*\\)`,
+      'gi',
+    );
+    if (!sumPattern.test(repaired)) continue;
+    repaired = repaired.replace(sumPattern, 'MAX($1)');
+    repairs.push(`Preserved non-additive ${column} at ${owner.name} grain instead of summing repeated values after the join.`);
+  }
+  return { sql: repaired };
+}
+
+function resolveUniqueExploratoryColumnOwner(
+  schemaContext: AgentSchemaTable[],
+  column: string,
+): AgentSchemaTable | undefined {
+  const candidates = schemaContext.filter((table) =>
+    table.columns.some((candidate) => candidate.name.toLowerCase() === column.toLowerCase())
+  );
+  if (candidates.length === 0) return undefined;
+  const compatible = candidates.every((candidate) => candidates.every((other) =>
+    exploratoryRelationsMatch(candidate.relation, other.relation)
+  ));
+  if (!compatible) return undefined;
+  const preferred = [...candidates].sort((left, right) =>
+    right.relation.split('.').length - left.relation.split('.').length
+  )[0]!;
+  const columns = new Map<string, AgentSchemaTable['columns'][number]>();
+  for (const candidate of candidates) {
+    for (const candidateColumn of candidate.columns) columns.set(candidateColumn.name.toLowerCase(), candidateColumn);
+  }
+  return { ...preferred, columns: [...columns.values()] };
+}
+
+function normalizeExploratoryRelationSubject(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (normalized.endsWith('ies') && normalized.length > 4) return `${normalized.slice(0, -3)}y`;
+  if (normalized.endsWith('s') && normalized.length > 3) return normalized.slice(0, -1);
+  return normalized;
+}
+
+function exploratoryRelationsMatch(left: string, right: string): boolean {
+  const leftLower = left.toLowerCase();
+  const rightLower = right.toLowerCase();
+  return leftLower === rightLower
+    || leftLower.endsWith(`.${rightLower}`)
+    || rightLower.endsWith(`.${leftLower}`)
+    || normalizeExploratoryRelationSubject(leftLower.split('.').at(-1) ?? leftLower)
+      === normalizeExploratoryRelationSubject(rightLower.split('.').at(-1) ?? rightLower);
+}
+
+function escapeExploratoryRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Render parser-derived physical identifiers only; exploratory probes never interpolate arbitrary SQL. */
+function quoteExploratoryIdentifier(value: string, label: string): string {
+  const parts = value
+    .replace(/["`\[\]]/g, '')
+    .split('.')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0 || parts.some((part) => !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(part))) {
+    throw new Error(`Exploratory ${label} is not a safe physical identifier.`);
+  }
+  return parts.map((part) => `"${part.replace(/"/g, '""')}"`).join('.');
+}
+
+/** One bounded, sampled relationship observation per inferred equality join. */
+export function buildExploratoryJoinProbeSql(input: {
+  leftRelation: string;
+  leftColumn: string;
+  rightRelation: string;
+  rightColumn: string;
+}): string {
+  const leftRelation = quoteExploratoryIdentifier(input.leftRelation, 'left relation');
+  const leftColumn = quoteExploratoryIdentifier(input.leftColumn, 'left column');
+  const rightRelation = quoteExploratoryIdentifier(input.rightRelation, 'right relation');
+  const rightColumn = quoteExploratoryIdentifier(input.rightColumn, 'right column');
+  return `WITH
+  left_sample AS (
+    SELECT ${leftColumn} AS join_key
+    FROM ${leftRelation}
+    WHERE ${leftColumn} IS NOT NULL
+    LIMIT 5000
+  ),
+  right_sample AS (
+    SELECT ${rightColumn} AS join_key
+    FROM ${rightRelation}
+    WHERE ${rightColumn} IS NOT NULL
+    LIMIT 5000
+  ),
+  matches AS (
+    SELECT l.join_key AS left_key, r.join_key AS right_key
+    FROM left_sample AS l
+    INNER JOIN right_sample AS r ON l.join_key = r.join_key
+  ),
+  left_counts AS (
+    SELECT left_key, COUNT(*) AS match_count
+    FROM matches
+    GROUP BY left_key
+  ),
+  right_counts AS (
+    SELECT right_key, COUNT(*) AS match_count
+    FROM matches
+    GROUP BY right_key
+  )
+SELECT
+  (SELECT COUNT(*) FROM left_sample) AS left_sample_rows,
+  (SELECT COUNT(*) FROM right_sample) AS right_sample_rows,
+  (SELECT COUNT(*) FROM matches) AS joined_rows,
+  (SELECT COUNT(*) FROM left_sample AS l WHERE NOT EXISTS (SELECT 1 FROM right_sample AS r WHERE r.join_key = l.join_key)) AS unmatched_left_sample_rows,
+  (SELECT COUNT(*) FROM right_sample AS r WHERE NOT EXISTS (SELECT 1 FROM left_sample AS l WHERE l.join_key = r.join_key)) AS unmatched_right_sample_rows,
+  (SELECT COALESCE(MAX(match_count), 0) FROM left_counts) AS max_matches_per_left_key,
+  (SELECT COALESCE(MAX(match_count), 0) FROM right_counts) AS max_matches_per_right_key`;
+}
+
+function summarizeExploratoryJoinProbe(
+  rows: unknown[],
+  leftRelation: string,
+  leftColumn: string,
+  rightRelation: string,
+  rightColumn: string,
+): string {
+  const row = Array.isArray(rows) && rows[0] && typeof rows[0] === 'object'
+    ? rows[0] as Record<string, unknown>
+    : {};
+  const number = (key: string) => {
+    const value = Number(row[key]);
+    return Number.isFinite(value) ? value : 0;
+  };
+  return `${leftRelation}.${leftColumn} ↔ ${rightRelation}.${rightColumn}: sample left=${number('left_sample_rows')}, right=${number('right_sample_rows')}, joined=${number('joined_rows')}, unmatched left/right=${number('unmatched_left_sample_rows')}/${number('unmatched_right_sample_rows')}, max matches left/right=${number('max_matches_per_left_key')}/${number('max_matches_per_right_key')}`;
+}
+
 function readOnlySqlValidationError(sql: string, subject: string): string | null {
   const scanSql = stripSqlStringsAndComments(sql).trim();
   if (!/^(select|with)\b/i.test(scanSql)) {
@@ -12456,7 +14092,39 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
     if (!existsSync(dir)) continue;
     collect(dir, folder, type);
   }
+  collectDomainArtifacts(join(projectRoot, 'domains'), 'domains');
   return result;
+
+  function collectDomainArtifacts(currentDir: string, relativeDir: string): void {
+    if (!existsSync(currentDir)) return;
+    try {
+      for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        const fullPath = join(currentDir, entry.name);
+        const relativePath = `${relativeDir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          collectDomainArtifacts(fullPath, relativePath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const segments = relativePath.split('/');
+        const ownerFolder = segments.find((segment) => ['notebooks', 'blocks', 'terms', 'views'].includes(segment));
+        const type = ownerFolder === 'notebooks' ? 'notebook'
+          : ownerFolder === 'blocks' ? 'block'
+            : ownerFolder === 'terms' ? 'term'
+              : ownerFolder === 'views' ? 'business_view'
+                : undefined;
+        if (!type || (!entry.name.endsWith('.dql') && !entry.name.endsWith('.dqlnb'))) continue;
+        const fallbackName = entry.name.replace(/\.(dql|dqlnb)$/, '');
+        result.push({
+          name: inferDqlArtifactName(fullPath, type, fallbackName),
+          path: relativePath,
+          type,
+          folder: relativeDir,
+        });
+      }
+    } catch { /* skip unreadable domain package dirs */ }
+  }
 
   function collect(currentDir: string, relativeDir: string, type: NotebookFileEntry['type']): void {
     try {

@@ -109,7 +109,7 @@ const METRIC_WORDS = [
   'amount', 'arr', 'average', 'avg', 'balance', 'bookings', 'churn', 'conversion', 'cost',
   'count', 'duration', 'expense', 'growth', 'kpi', 'margin', 'metric', 'mrr', 'orders',
   'points', 'profit', 'quantity', 'rate', 'revenue', 'sales', 'score', 'scorer', 'scoring', 'spend', 'stats',
-  'statistics', 'total', 'usage', 'value', 'volume',
+  'statistics', 'tax', 'total', 'usage', 'value', 'volume',
 ];
 
 const DIMENSION_WORDS = [
@@ -117,6 +117,27 @@ const DIMENSION_WORDS = [
   'location', 'market', 'merchant', 'month', 'person', 'player', 'product', 'profile',
   'region', 'segment', 'sku', 'team', 'type', 'user', 'vendor', 'week', 'year',
 ];
+
+/**
+ * Small, domain-neutral vocabulary clusters used only to broaden metadata
+ * retrieval. These are ordinary-language equivalents, not project-specific
+ * value-to-column mappings; physical filter binding still comes from sampled
+ * warehouse values or semantic definitions.
+ */
+const SEARCH_TERM_SYNONYMS: string[][] = [
+  ['beverage', 'drink'],
+  ['customer', 'client', 'buyer', 'shopper'],
+  ['product', 'item', 'sku'],
+  ['spend', 'spent', 'spending', 'revenue', 'sales'],
+];
+
+const SEARCH_TERM_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
+  const index = new Map<string, Set<string>>();
+  for (const cluster of SEARCH_TERM_SYNONYMS) {
+    for (const word of cluster) index.set(word, new Set(cluster));
+  }
+  return index;
+})();
 
 const PROFILE_WORDS = [
   'bio', 'biography', 'career', 'complete stats', 'details', 'entity 360', 'overview',
@@ -140,8 +161,9 @@ export function buildAnalysisQuestionPlan(
   const timeTerms = extractTimeTerms(cleanQuestion);
   const mode = inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
   const routeIntent = routeIntentForMode(mode);
-  const outputShape = outputShapeForMode(mode, lower);
-  const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities);
+  const outputShape = outputShapeForMode(mode, lower, dimensionTerms);
+  const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities)
+    && !(mode === 'general_analysis' && definitionPhraseCarriesAnalyticalShape({ lower, metricTerms, dimensionTerms }));
   const needsGeneratedSql = generatedSqlIsLikely(mode, shouldConsiderCertifiedExact);
   const needsResearchWorkspace = researchWorkspaceIsLikely(mode, lower);
   const requestedShape = buildRequestedAnswerShape(cleanQuestion, {
@@ -153,7 +175,7 @@ export function buildAnalysisQuestionPlan(
     timeTerms,
     followUp,
   });
-  const searchTerms = uniqueStrings([
+  const searchTerms = uniqueStrings(uniqueStrings([
     ...tokenize(cleanQuestion),
     ...entities.flatMap((entity) => tokenize(entity.text)),
     ...metricTerms,
@@ -161,7 +183,7 @@ export function buildAnalysisQuestionPlan(
     ...filterTerms,
     ...timeTerms,
     ...modeSearchTerms(mode),
-  ]).filter((term) => !STOP_WORDS.has(term)).slice(0, 36);
+  ]).flatMap(expandSearchTerm)).filter((term) => !STOP_WORDS.has(term)).slice(0, 36);
   const searchQueries = buildSearchQueries({
     question: cleanQuestion,
     mode,
@@ -605,7 +627,13 @@ function inferQuestionMode(input: {
   if (followUpKind(input.followUp) === 'drilldown') return 'entity_drilldown';
   if (/^\s*(run|execute|open)\b/i.test(lower)) return 'exact_lookup';
   if (/\b(trust|rely|certif|certified|lineage|owner|caveat|gap|governance|can .* trust)\b/i.test(lower)) return 'trust_review';
-  if (/\b(define|definition|meaning of|what is|what are|what does .+ mean)\b/i.test(lower)) return 'definition';
+  // "What is" is not, by itself, a definition request. Questions such as
+  // "what is revenue by customer and product?" carry an explicit analytical
+  // shape and must reach the data cascade. Keep genuine single-concept meaning
+  // questions on the fast definition path while treating multi-dimensional or
+  // explicitly grouped measure requests as analysis (AGT-001).
+  if (/\b(define|definition|meaning of|what is|what are|what does .+ mean)\b/i.test(lower)
+    && !definitionPhraseCarriesAnalyticalShape(input)) return 'definition';
   if (/\b(anomal|exception|outlier|spike|dip)\b/i.test(lower)) return 'anomaly';
   if (/\b(compare|versus|vs\.?|cohort)\b/i.test(lower)) return 'comparison';
   if (/\b(why|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|what happened)\b/i.test(lower)) return 'diagnose_change';
@@ -624,6 +652,17 @@ function inferQuestionMode(input: {
   // instead of a fast direct answer.
   if (input.dimensionTerms.length > 0 || input.metricTerms.length > 0) return 'general_analysis';
   return 'clarify';
+}
+
+function definitionPhraseCarriesAnalyticalShape(input: {
+  lower: string;
+  metricTerms: string[];
+  dimensionTerms: string[];
+}): boolean {
+  if (input.metricTerms.length === 0) return false;
+  if (input.dimensionTerms.length >= 2) return true;
+  return input.dimensionTerms.length > 0
+    && /\b(by|per|for each|group(?:ed)? by|split by|break(?:down| down)|info for|details for)\b/i.test(input.lower);
 }
 
 function routeIntentForMode(mode: AnalysisQuestionMode): MetadataAgentIntent {
@@ -660,10 +699,15 @@ function researchWorkspaceIsLikely(mode: AnalysisQuestionMode, lower: string): b
     || /\b(deep\s+research|research|reserach|investigate|investigation|root cause)\b/i.test(lower);
 }
 
-function outputShapeForMode(mode: AnalysisQuestionMode, lower: string): AnalysisQuestionPlan['outputShape'] {
+function outputShapeForMode(
+  mode: AnalysisQuestionMode,
+  lower: string,
+  dimensionTerms: string[],
+): AnalysisQuestionPlan['outputShape'] {
   if (mode === 'entity_profile') return 'profile';
   if (mode === 'definition' || mode === 'trust_review') return 'narrative';
   if (/\b(chart|graph|visual|plot)\b/i.test(lower) || mode === 'trend') return 'chart';
+  if (dimensionTerms.length >= 2 || /\b(info for|details for|for each|group(?:ed)? by|split by|break(?:down| down))\b/i.test(lower)) return 'table';
   if (/\b(table|list|show all|complete|full)\b/i.test(lower) || mode === 'ranking' || mode === 'entity_drilldown') return 'table';
   if (/\bwhat is|how many|how much|total|count|kpi|metric\b/i.test(lower)) return 'value';
   return 'narrative';
@@ -704,6 +748,9 @@ function extractMetricTerms(question: string): string[] {
   }
   if (/\bhow much\b/i.test(lower)) {
     terms.add('amount');
+  }
+  if (/\b(spend|spends|spent|spending)\b/i.test(lower)) {
+    terms.add('spend');
   }
   for (const word of METRIC_WORDS) {
     if (new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
@@ -746,13 +793,48 @@ function pluralizeDimensionWord(word: string): string {
 }
 
 function extractFilterTerms(question: string, entities: AnalysisEntityMention[]): string[] {
-  // Filter VALUES come from the question's own entities and time phrases only.
-  // (Real value binding happens later against the runtime value index / sampled
-  // column values — never from a hard-coded project-specific vocabulary.)
+  // Filter VALUES come from the question's own entities, time phrases, and
+  // explicit analytical restriction grammar. Real value-to-column binding still
+  // happens later against the runtime value index / sampled column values.
+  const analyticalValues: string[] = [];
+  const valuePatterns = [
+    /\b(?:category|segment|type|class|group|channel|region|market)\s*(?:=|:|is|equals|of)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3})/gi,
+    /\b(?:spend|spends|spent|spending)\b[^?.!,;]{0,60}?\bon\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3}?)(?=\s+(?:product|products|item|items|category|segment|type)\b|[?.,!;]|$)/gi,
+    /\b(?:buy|buys|bought|buying|purchase|purchases|purchased|purchasing)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3}?)(?=\s+(?:product|products|item|items|category|segment|type)\b|[?.,!;]|$)/gi,
+  ];
+  for (const pattern of valuePatterns) {
+    for (const match of question.matchAll(pattern)) {
+      const value = cleanAnalyticalFilterValue(match[1]);
+      if (value) analyticalValues.push(value);
+    }
+  }
   return uniqueStrings([
     ...entities.flatMap((entity) => tokenize(entity.text)),
+    ...analyticalValues,
     ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
+}
+
+function cleanAnalyticalFilterValue(value: string | undefined): string {
+  return (value ?? '')
+    .toLowerCase()
+    .replace(/\b(?:highest|lowest|most|least|top|bottom|best|worst|the)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/ies$/, 'y')
+    .replace(/s$/, '');
+}
+
+function expandSearchTerm(raw: string): string[] {
+  const term = normalizeTerm(raw);
+  if (!term) return [];
+  const singular = term.replace(/ies$/, 'y').replace(/s$/, '');
+  return uniqueStrings([
+    term,
+    ...(singular.length > 1 ? [singular] : []),
+    ...Array.from(SEARCH_TERM_SYNONYM_INDEX.get(term) ?? []),
+    ...Array.from(SEARCH_TERM_SYNONYM_INDEX.get(singular) ?? []),
+  ]);
 }
 
 function extractTimeTerms(question: string): string[] {
@@ -809,7 +891,7 @@ function buildRequestedAnswerShape(
     ...input.dimensionTerms.map(canonicalShapeTerm),
     ...followUpDimensionsForRequestedShape(input.followUp, followUpReferences),
   ].filter(Boolean));
-  const dimensions = scalarValueQuestionUsesEntitiesAsMeasures(input.mode, input.lower)
+  const dimensions = scalarValueQuestionUsesEntitiesAsMeasures(input.mode, input.lower, rawDimensions)
     ? []
     : rawDimensions;
   const measures = uniqueStrings(input.metricTerms.map(canonicalShapeTerm).filter(Boolean));
@@ -838,8 +920,13 @@ function buildRequestedAnswerShape(
   };
 }
 
-function scalarValueQuestionUsesEntitiesAsMeasures(mode: AnalysisQuestionMode, lower: string): boolean {
+function scalarValueQuestionUsesEntitiesAsMeasures(
+  mode: AnalysisQuestionMode,
+  lower: string,
+  dimensions: string[],
+): boolean {
   if (mode !== 'exact_lookup' && mode !== 'general_analysis') return false;
+  if (dimensions.length >= 2 || /\b(info for|details for|for each|group(?:ed)? by|split by|break(?:down| down))\b/.test(lower)) return false;
   return /\b(how many|how much|what is|what was|total|count|number of)\b/.test(lower)
     && !/\b(by|per|each|every|top|bottom|rank|ranking|list|which|who|break\s*down|breakdown|split|segment|trend|over time)\b/.test(lower);
 }
@@ -847,13 +934,21 @@ function scalarValueQuestionUsesEntitiesAsMeasures(mode: AnalysisQuestionMode, l
 function parseTopN(question: string): RequestedAnswerShape['topN'] | undefined {
   const lower = question.toLowerCase();
   const numeric = lower.match(/\b(?:top|bottom|first|last)\s+(\d{1,3})\b/);
-  const n = numeric ? Number(numeric[1]) : wordNumberFromTopN(lower);
+  const explicitN = numeric ? Number(numeric[1]) : wordNumberFromTopN(lower);
+  // A ranking request without a literal N still needs a bounded result contract.
+  // Ten is the product's concise table default; this prevents the provider from
+  // silently widening "customers who spent most" to LIMIT 100.
+  const n = explicitN ?? (hasImplicitRankingRequest(lower) ? 10 : undefined);
   if (!n || n <= 0) return undefined;
   const scope: 'overall' | 'per_group' = /\b(?:per|for each|within each)\s+\w+/i.test(lower)
     || /\bby\s+(?:category|segment|region|channel|product|customer|account|user|month|week|year)\b/i.test(lower)
     ? 'per_group'
     : 'overall';
   return { n, scope };
+}
+
+function hasImplicitRankingRequest(lower: string): boolean {
+  return /\b(top|bottom|most|least|highest|lowest|largest|smallest|greatest|best|worst|leading)\b/.test(lower);
 }
 
 function wordNumberFromTopN(lower: string): number | undefined {

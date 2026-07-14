@@ -25,6 +25,8 @@ jaffle-shop/
 .dql/local/
 .dql/imports/
 .dql/docker-starter/
+.dql/perf/
+**/.dql/perf/
 **/.dql/cache/
 **/.dql/local/
 **/.dql/imports/

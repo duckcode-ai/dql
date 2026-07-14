@@ -122,6 +122,39 @@ describe("defaultAgentRunGates", () => {
     expect(gate(context).find((evaluation) => evaluation.id === "semantic-cardinality")).toBeUndefined();
   });
 
+  it("AGT-001 does not collapse an analytical what-is question with explicit dimensions", () => {
+    const gate = defaultAgentRunGates.generated_answer!;
+    const context: AgentRunGateContext = {
+      route: "generated_answer",
+      request: { question: "what is the tax and product info for customer life span?" },
+      result: {
+        answer: "Customer lifetime tax by purchased product.",
+        artifacts: [{
+          id: "a",
+          kind: "answer",
+          title: "Answer",
+          trustState: "review_required",
+          payload: {
+            answer: "Customer lifetime tax by purchased product.",
+            result: {
+              columns: ["customer_name", "product_description", "tax_paid"],
+              rows: [
+                { customer_name: "A", product_description: "Tea", tax_paid: 12 },
+                { customer_name: "B", product_description: "Coffee", tax_paid: 18 },
+              ],
+              rowCount: 2,
+            },
+          },
+        }],
+      },
+      attempt: 0,
+    };
+
+    const evaluations = gate(context);
+    expect(evaluations.find((evaluation) => evaluation.id === "semantic-cardinality")).toBeUndefined();
+    expect(evaluations.find((evaluation) => evaluation.id === "answer-shape")).toBeUndefined();
+  });
+
   it("answer-shape gate flags missing requested output columns", () => {
     const gate = defaultAgentRunGates.generated_answer!;
     const context: AgentRunGateContext = {

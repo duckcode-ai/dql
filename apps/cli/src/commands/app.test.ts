@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe('runApp', () => {
-  it('creates new apps under a matching domain-first app folder', async () => {
+  it('creates new apps globally with exact domain backlinks', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-new-domain-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'demo' }), 'utf-8');
@@ -59,14 +59,16 @@ describe('runApp', () => {
     expect(payload).toMatchObject({
       created: true,
       id: 'customer-360',
-      path: 'domains/customer/apps/customer-360',
+      path: 'apps/customer-360',
     });
-    expect(existsSync(join(projectRoot, 'domains', 'customer', 'apps', 'customer-360', 'dql.app.json'))).toBe(true);
-    expect(existsSync(join(projectRoot, 'apps', 'customer-360', 'dql.app.json'))).toBe(false);
+    expect(existsSync(join(projectRoot, 'domains', 'customer', 'apps', 'customer-360', 'dql.app.json'))).toBe(false);
+    expect(existsSync(join(projectRoot, 'apps', 'customer-360', 'dql.app.json'))).toBe(true);
     expect(__test__.collectApps(projectRoot)[0]).toMatchObject({
       id: 'customer-360',
-      filePath: 'domains/customer/apps/customer-360',
+      filePath: 'apps/customer-360',
     });
+    const authored = JSON.parse(readFileSync(join(projectRoot, 'apps', 'customer-360', 'dql.app.json'), 'utf-8'));
+    expect(authored).toMatchObject({ ownerDomain: 'customer', usesDomains: ['customer'], requiredExports: [] });
   });
 
   it('lists apps from an explicit project path', async () => {

@@ -78,6 +78,8 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
+export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
+export type { DomainContextEnvelope, ResolveDomainContextInput } from './domain-context.js';
 export {
   stampTrustLabel,
   trustLabelIdForAnswer,
@@ -486,6 +488,16 @@ export type {
 export { selectRelevantModels } from "./metadata/sql-retrieval.js";
 export type { SelectRelevantModelsOptions } from "./metadata/sql-retrieval.js";
 export {
+  assessAnalyticalRelationship,
+  planAnalyticalPath,
+  validateAnalyticalSql,
+  type AnalyticalPolicyCode,
+  type AnalyticalJoinPlanEdge,
+  type AnalyticalPathPlan,
+  type AnalyticalPathRequest,
+  type AnalyticalRelationshipDecision,
+} from "./metadata/analytical-policy.js";
+export {
   deriveGeneratedDraftSlug,
   deriveSemanticDraftName,
   renderGeneratedSqlDqlArtifact,
@@ -611,6 +623,7 @@ export type {
 } from "./hints/store.js";
 export {
   recordCorrectionTrace,
+  evaluateHint,
   reviewHint,
   reindexHints,
   listHintsFromGit,
@@ -618,9 +631,15 @@ export {
   writeHintFile,
   readHintFile,
   hintsDir,
+  evaluationsDir,
   tracesDir,
   reviewsDir,
   defaultHintIndexPath,
+  hintEvaluationFilePath,
+  readHintEvaluationFile,
+  getHintEvaluationFromGit,
+  listHintEvaluationsFromGit,
+  HintLifecycleError,
 } from "./hints/git-store.js";
 export {
   buildCorrectionEvalCase,
@@ -638,6 +657,8 @@ export {
 export type {
   RecordCorrectionTraceInput,
   RecordCorrectionTraceResult,
+  EvaluateHintInput,
+  EvaluateHintResult,
   ReviewHintInput,
   ReviewHintResult,
 } from "./hints/git-store.js";
@@ -656,6 +677,9 @@ export {
 export type {
   CorrectionTrace,
   Hint,
+  HintEvaluation,
+  HintEvaluationCheck,
+  HintEvaluationStatus,
   HintReview,
   HintScope,
   HintStatus,
@@ -812,6 +836,7 @@ export function agentProjectSourceVersion(projectRoot: string): string {
   // New OSS projects keep shared skills visible and Git-owned at `skills/`.
   // Watch the historical path as well until project migrations are complete.
   addSmallTreeState(join(root, 'skills'), tokens);
+  addSmallTreeState(join(root, 'domains'), tokens);
   addSmallTreeState(join(root, '.dql', 'skills'), tokens);
   addSmallTreeState(join(root, '.dql', 'hints'), tokens);
   return createHash('sha1').update(tokens.sort().join('\n')).digest('hex');
@@ -893,14 +918,42 @@ export async function reindexProject(
     const result = loadSkills(projectRoot);
     skills = result.skills;
     for (const s of skills) {
+      const skillIdentity = s.qualifiedId ?? s.id;
       nodes.push({
-        nodeId: `skill:${s.id}`,
+        nodeId: `skill:${skillIdentity}`,
         kind: "skill",
         name: s.id,
+        domain: s.domain,
+        status: s.status,
+        owner: s.owner,
         description: s.description,
         llmContext: s.body,
         sourcePath: s.sourcePath,
+        sourceTier: "business_context",
+        provenance: "DQL domain skill",
+        payload: {
+          localId: s.localId ?? s.id,
+          qualifiedId: s.qualifiedId,
+          scope: s.scope,
+          user: s.user,
+          domains: s.domains ?? [],
+          modelAreaRefs: s.modelAreaRefs ?? [],
+          kind: s.kind,
+          triggers: s.triggers ?? [],
+          exclusions: s.exclusions ?? [],
+          preferredMetrics: s.preferredMetrics,
+          preferredBlocks: s.preferredBlocks,
+          preferredDimensions: s.preferredDimensions ?? [],
+          requiredFilters: s.requiredFilters ?? [],
+          clarifyWhen: s.clarifyWhen ?? [],
+          examples: s.examples ?? [],
+          sourceRefs: s.sourceRefs ?? [],
+          vocabulary: s.vocabulary,
+        },
       });
+      for (const domain of s.domains ?? (s.domain ? [s.domain] : [])) {
+        edges.push({ src: `domain:${domain}`, dst: `skill:${skillIdentity}`, kind: "contains" });
+      }
     }
   }
 
@@ -920,6 +973,10 @@ export async function reindexProject(
   const metadataRefresh = await ensureMetadataCatalogFresh(projectRoot, {
     manifest,
     semanticLayer,
+    // `loadSkills: false` preserves the historical KG opt-out, while the
+    // metadata catalog still owns a complete immutable snapshot for context
+    // retrieval and will load its source-owned skill records itself.
+    skills: opts.loadSkills === false ? undefined : skills,
     force: opts.forceMetadataCatalog,
   });
   // Rebuild the approved-hint index (Git authoritative; SQLite is a view). Safe

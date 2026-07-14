@@ -812,6 +812,11 @@ type AppListEntry = {
   name: string;
   filePath: string;
   domain: string;
+  ownerDomain?: string;
+  usesDomains: string[];
+  purpose?: string;
+  requiredExports: string[];
+  classification?: string;
   subdomain?: string;
   groups: string[];
   description?: string;
@@ -851,6 +856,11 @@ function collectAppsList(projectRoot: string): AppListEntry[] {
       name: document.name,
       filePath: relative(projectRoot, appDir),
       domain: document.domain,
+      ownerDomain: document.ownerDomain,
+      usesDomains: document.usesDomains,
+      purpose: document.purpose,
+      requiredExports: document.requiredExports,
+      classification: document.classification,
       subdomain: document.subdomain,
       groups: document.groups ?? [],
       description: document.description,
@@ -902,6 +912,10 @@ interface VisualizationRecommendationRequest {
 interface AppCreateRequest {
   name?: string;
   domain?: string;
+  ownerDomain?: string;
+  usesDomains?: string[];
+  requiredExports?: string[];
+  classification?: string;
   dashboardTitle?: string;
   subdomain?: string;
   groups?: string[];
@@ -2823,12 +2837,12 @@ export function createAppPackage(
   input: AppCreateRequest,
 ): { ok: true; app: ReturnType<typeof collectAppsList>[number]; paths: string[]; dashboardId: string } | { ok: false; error: string } {
   const name = cleanString(input.name);
-  const domain = cleanString(input.domain);
+  const domain = cleanString(input.ownerDomain) || cleanString(input.domain);
   if (!name) return { ok: false, error: 'name is required' };
   if (!domain) return { ok: false, error: 'domain is required' };
 
   const id = suggestAppId(name);
-  const appDir = resolveAppPackageDir(projectRoot, domain, id);
+  const appDir = resolveAppPackageDir(projectRoot, id);
   if (existsSync(appDir)) return { ok: false, error: `App already exists: ${id}` };
   const dashboardTitle = cleanString(input.dashboardTitle) || 'Overview';
   const dashboardId = slugify(dashboardTitle) || 'overview';
@@ -2854,6 +2868,11 @@ export function createAppPackage(
     name,
     description: cleanString(input.purpose) || `${name} consumption surface for ${domain}`,
     visibility,
+    ownerDomain: domain,
+    usesDomains: normalizeTags(input.usesDomains ?? [domain]),
+    purpose: cleanString(input.purpose) || undefined,
+    requiredExports: normalizeTags(input.requiredExports ?? []),
+    classification: cleanString(input.classification) || undefined,
     domain,
     subdomain: subdomain || undefined,
     groups,
@@ -5072,12 +5091,7 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-function resolveAppPackageDir(projectRoot: string, domain: string, id: string): string {
-  const domainSlug = slugify(domain);
-  const domainDir = domainSlug ? join(projectRoot, 'domains', domainSlug) : '';
-  if (domainDir && existsSync(domainDir)) {
-    return join(domainDir, 'apps', id);
-  }
+function resolveAppPackageDir(projectRoot: string, id: string): string {
   return join(projectRoot, 'apps', id);
 }
 
@@ -5647,13 +5661,18 @@ function buildAppNotebookTemplate(title: string, app: AppDocument, template?: st
     });
   }
   return JSON.stringify({
-    dqlnbVersion: 1,
+    dqlnbVersion: 2,
     version: 1,
     title,
     metadata: {
       description: `Supporting notebook for ${app.name}`,
       status: 'draft',
       categories: [app.domain, app.subdomain, ...(app.groups ?? [])].filter(Boolean),
+      ownerDomain: app.ownerDomain,
+      usesDomains: app.usesDomains,
+      purpose: app.purpose,
+      requiredExports: app.requiredExports,
+      classification: app.classification,
       createdAt: new Date().toISOString(),
       modifiedAt: new Date().toISOString(),
     },

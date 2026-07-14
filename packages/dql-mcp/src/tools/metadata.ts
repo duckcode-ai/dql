@@ -21,6 +21,10 @@ import {
   relationKeys,
   selectRelevantModels,
   validateSqlAgainstGrounding,
+  validateAnalyticalSql,
+  planAnalyticalPath,
+  assessAnalyticalRelationship,
+  resolveDomainContextEnvelope,
   type DbtArtifacts,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLContext } from '../context.js';
@@ -98,7 +102,33 @@ export function getTableSchema(ctx: DQLContext, args: { table: string }) {
       rightRelation: join.rightRelation,
       rightColumn: join.rightColumn,
       reason: join.reason,
+      authorization: 'suggestion_only',
     })),
+    governedRelationships: Object.values(ctx.manifest.modeling?.relationships ?? {})
+      .filter((relationship) => {
+        const entities = ctx.manifest.modeling?.entities ?? {};
+        const fromNode = ctx.manifest.dbtProvenance?.nodes[entities[relationship.from]?.dbtUniqueId ?? ''];
+        const toNode = ctx.manifest.dbtProvenance?.nodes[entities[relationship.to]?.dbtUniqueId ?? ''];
+        return [fromNode?.name, fromNode?.relation, toNode?.name, toNode?.relation]
+          .filter(Boolean)
+          .some((value) => relationKeys(String(value)).some((key) => keys.includes(key)));
+      })
+      .map((relationship) => {
+        const decision = assessAnalyticalRelationship(relationship, ctx.manifest);
+        return {
+          id: relationship.id,
+          from: relationship.from,
+          to: relationship.to,
+          keys: relationship.keys,
+          cardinality: relationship.cardinality,
+          fanout: relationship.fanout,
+          automaticJoinAllowed: relationship.automaticJoinAllowed,
+          executableJoin: decision.executable,
+          policyCode: decision.code ?? null,
+          policyReason: decision.message,
+          staleCertification: relationship.staleCertification,
+        };
+      }),
   };
 }
 
@@ -117,7 +147,18 @@ export async function validateSql(ctx: DQLContext, args: { sql: string; query?: 
   const grounding = buildSchemaGrounding(artifacts, relevant, { limit: 500 });
   const result = validateSqlAgainstGrounding(args.sql, grounding);
   if (result.ok) {
-    return { ok: true, warnings: result.warnings, referencedRelations: result.referencedRelations };
+    const analyticalPolicy = validateAnalyticalSql(args.sql, ctx.manifest);
+    if (!analyticalPolicy.safe) {
+      return {
+        ok: false,
+        code: analyticalPolicy.code,
+        error: analyticalPolicy.message,
+        warnings: result.warnings,
+        referencedRelations: result.referencedRelations,
+        analyticalPolicy,
+      };
+    }
+    return { ok: true, warnings: result.warnings, referencedRelations: result.referencedRelations, analyticalPolicy };
   }
   return {
     ok: false,
@@ -126,5 +167,61 @@ export async function validateSql(ctx: DQLContext, args: { sql: string; query?: 
     warnings: result.warnings,
     referencedRelations: result.referencedRelations,
     offending: result.offending ?? null,
+  };
+}
+
+export function resolveAnalyticalPath(ctx: DQLContext, args: {
+  entities: string[];
+  ownerDomain?: string;
+  purpose?: string;
+  measureEntities?: string[];
+  dimensionEntities?: string[];
+}) {
+  const domainContext = args.ownerDomain
+    ? resolveDomainContextEnvelope({
+        manifest: ctx.manifest,
+        activeDomain: args.ownerDomain,
+        purpose: args.purpose,
+        source: 'explicit_api',
+      })
+    : undefined;
+  return planAnalyticalPath(ctx.manifest, {
+    entityIds: args.entities,
+    ownerDomain: args.ownerDomain,
+    purpose: args.purpose,
+    domainContext,
+    measureEntities: args.measureEntities,
+    dimensionEntities: args.dimensionEntities,
+  });
+}
+
+export function explainRelationshipProof(ctx: DQLContext, args: { relationshipId: string }) {
+  const relationships = ctx.manifest.modeling?.relationships ?? {};
+  const direct = relationships[args.relationshipId];
+  const matches = direct ? [direct] : Object.values(relationships).filter((value) =>
+    value.qualifiedId === args.relationshipId || value.localId === args.relationshipId);
+  const relationship = matches.length === 1 ? matches[0] : undefined;
+  if (!relationship) {
+    return { found: false, error: `Relationship "${args.relationshipId}" was not found in manifest v3.` };
+  }
+  const entities = ctx.manifest.modeling?.entities ?? {};
+  const from = entities[relationship.from];
+  const to = entities[relationship.to];
+  const exports = ctx.manifest.modeling?.interfaces?.exports ?? {};
+  const imports = ctx.manifest.modeling?.interfaces?.imports ?? {};
+  const policy = assessAnalyticalRelationship(relationship, ctx.manifest);
+  return {
+    found: true,
+    relationship,
+    endpoints: {
+      from: from ? { ...from, dbt: ctx.manifest.dbtProvenance?.nodes[from.dbtUniqueId] } : undefined,
+      to: to ? { ...to, dbt: ctx.manifest.dbtProvenance?.nodes[to.dbtUniqueId] } : undefined,
+    },
+    interfaces: (relationship.importRefs ?? []).map((exportRef) => ({
+      export: exports[exportRef],
+      imports: Object.values(imports).filter((value) => value.exportRef === exportRef),
+    })),
+    decision: policy.executable ? 'automatic_join_allowed' : 'blocked_or_review_required',
+    policy,
   };
 }

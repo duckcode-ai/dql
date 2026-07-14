@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "growth-revenue",
+  "name": "Growth Revenue",
+  "domain": "growth",
+  "ownerDomain": "growth",
+  "usesDomains": ["growth", "commerce"],
+  "purpose": "growth_attribution",
+  "requiredExports": ["commerce.customer_identity@1", "commerce.order_analytics@1"],
+  "classification": "internal",
+  "owners": ["growth@company.test"],
+  "members": [{ "userId": "growth@company.test", "roles": ["owner"] }],
+  "roles": [{ "id": "owner" }],
+  "policies": [],
+  "homepage": { "type": "dashboard", "id": "revenue-by-acquisition" }
+}

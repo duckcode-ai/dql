@@ -299,7 +299,7 @@ export interface AgentRouteExecutorResult {
    * decline (`model_declined`) or grounding gap without inspecting prose. Absent
    * for any successful answer.
    */
-  answerRefusalCode?: 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error';
+  answerRefusalCode?: 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
   artifacts?: AgentRunArtifact[];
   evaluations?: AgentRunEvaluation[];
   nextActions?: AgentRunNextAction[];

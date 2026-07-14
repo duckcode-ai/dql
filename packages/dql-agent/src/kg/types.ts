@@ -27,7 +27,14 @@ export type KGNodeKind =
   | 'notebook'
   | 'dashboard'
   | 'app'
-  | 'skill';
+  | 'skill'
+  | 'relationship'
+  | 'contract'
+  | 'domain_export'
+  | 'domain_import'
+  | 'conformance'
+  | 'policy'
+  | 'evaluation';
 
 export type KGSourceTier =
   | 'certified_artifact'
@@ -148,12 +155,15 @@ export interface KGNode {
   caveats?: string[];
   /** Manifest references that introduced this source, for example block or notebook ids. */
   referencedBy?: string[];
+  /** Typed v3 analytical policy payload retained for deterministic planning. */
+  payload?: Record<string, unknown>;
 }
 
 export interface KGEdge {
   src: string;
   dst: string;
-  kind: 'feeds_into' | 'reads_from' | 'aggregates' | 'visualizes' | 'depends_on' | 'contains' | 'related_to' | 'defines' | 'composes';
+  kind: 'feeds_into' | 'reads_from' | 'aggregates' | 'visualizes' | 'depends_on' | 'contains' | 'related_to' | 'defines' | 'composes'
+    | 'parent_domain' | 'binds_to' | 'proves_join' | 'governed_by' | 'exports' | 'imports' | 'conforms_with' | 'validated_by';
   weight?: number;
 }
 
@@ -182,6 +192,8 @@ export interface KGSearchOptions {
   kinds?: KGNodeKind[];
   /** Restrict to a domain. */
   domain?: string;
+  /** Restrict to one of several server-authorized domains. */
+  domains?: string[];
   /** Maximum hits to return. */
   limit?: number;
 }

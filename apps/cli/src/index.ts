@@ -34,6 +34,7 @@ import { runConnect } from "./commands/connect.js";
 import { runPromote } from "./commands/promote.js";
 import { runEval } from "./commands/eval.js";
 import { runPropose } from "./commands/propose.js";
+import { runModel } from "./commands/model.js";
 
 const HELP = `
   dql — DQL CLI
@@ -62,6 +63,12 @@ const HELP = `
     dql migrate layout --to domain-first [--dry-run]
                                     Preview or apply legacy-to-domain folder moves
     dql migrate parameters --check  Audit legacy block parameters before AI adaptation
+    dql migrate datalex --input <manifest.json> [--dry-run|--apply]
+                                    Convert DataLex-only business semantics into
+                                    draft dbt-first Domain Package overlays
+    dql migrate modeling --to dbt-first --dry-run|--apply
+                                    Explicitly adopt manifest v3, consolidate
+                                    modeling, and relocate legacy shared products
     dql import sql <path>           Generate AI import drafts from SQL files/folders
     dql import sql <path> --save    Compatibility alias; drafts autosave before certification
     dql propose [path]              Draft a ranked governance layer from dbt evidence
@@ -82,7 +89,13 @@ const HELP = `
     dql notebook [path]             Launch the browser-first notebook for a project
     dql semantic <sub> [path]       Semantic layer: list, validate, query, pull
     dql compile [path]              Generate project manifest (dql-manifest.json)
-    dql sync dbt [path]             Detect dbt manifest changes; report DQL cache status
+    dql sync dbt [path]             Diff, compile, and reindex dbt-backed DQL state
+    dql sync dbt --check [path]     Report dbt/DQL drift without writing
+    dql model list|validate [path]  Inspect or validate dbt-first Domain Packages
+    dql model discover [path]       Preview deterministic dbt domain proposals
+    dql model apply-discovery [path] --apply
+                                    Write reviewed sparse Domain Package proposals
+    dql model explain <id> [path]   Explain whether a relationship is automatic join proof
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql lineage cross-domain        Show cross-domain lineage flows (--domain filters)
     dql mcp [--http]                Run the DQL MCP server (stdio by default; --http = loopback)
@@ -130,6 +143,7 @@ const HELP = `
       --force                         For "certify --from-draft": overwrite an existing certified block
                                       For "migrate layout": apply domain-first file moves
       --dry-run                       For "migrate layout": preview file moves
+      --apply                         For "migrate datalex": write the reviewed migration plan
       --execute                       For "agent eval": run bounded SQL previews
       --min-answer-rate <0..1>        For "eval": fail below non-refusal rate on answerable cases
       --min-tool-requirement <0..1>    For "agent eval": fail below required tool-call pass rate
@@ -387,6 +401,9 @@ async function main() {
         break;
       case "sync":
         await runSync(file, rest, flags);
+        break;
+      case "model":
+        await runModel(file, rest, flags);
         break;
       case "lineage":
         await runLineage(file, rest, flags);

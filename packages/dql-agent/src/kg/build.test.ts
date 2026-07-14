@@ -287,6 +287,32 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+  it('keeps synthetic physical dimensions model-scoped above the PERF-001 threshold', () => {
+    const dimensions = Array.from({ length: 50_001 }, (_, index) => ({
+      name: `column_${index}`,
+      cube: 'large_model',
+      table: 'large_model',
+      type: 'string' as const,
+    }));
+    const layer = {
+      listMetrics: () => [],
+      listDimensions: () => dimensions,
+      listMeasures: () => [],
+      listEntities: () => [],
+      listSemanticModels: () => [{
+        name: 'large_model', table: 'large_model', model: 'large_model',
+        entities: [], measures: [], dimensions: dimensions.map((item) => item.name), timeDimensions: [],
+      }],
+      listSavedQueries: () => [],
+    } as unknown as SemanticLayer;
+
+    const graph = buildKGFromSemanticLayer(layer);
+    expect(graph.nodes.filter((node) => node.kind === 'dimension')).toHaveLength(0);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'semantic_model:large_model' }),
+    ]));
+  });
+
   it('maps app and dashboard lifecycle into KG certification', () => {
     const manifest = {
       manifestVersion: 2,
@@ -353,6 +379,63 @@ describe('buildKGFromManifest', () => {
         status: 'draft',
         certification: 'ai_generated',
       }),
+    ]));
+  });
+
+  it('indexes manifest v3 relationship proof, contracts, and domain interfaces as planning evidence', () => {
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test',
+      generatedAt: '1970-01-01T00:00:00.000Z',
+      project: 'test',
+      projectRoot: '/tmp/dql',
+      domains: {
+        commerce: { id: 'commerce', name: 'Commerce', filePath: 'domains/commerce/domain.dql' },
+      },
+      blocks: {}, businessViews: {}, terms: {}, notebooks: {}, metrics: {}, dimensions: {}, sources: {},
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: {
+        manifestPath: '/tmp/manifest.json', manifestFingerprint: 'm', nodes: {
+          'model.shop.orders': {
+            uniqueId: 'model.shop.orders', resourceType: 'model', name: 'orders', relation: 'analytics.orders',
+            identityFingerprint: 'orders', available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+          'model.shop.customers': {
+            uniqueId: 'model.shop.customers', resourceType: 'model', name: 'customers', relation: 'analytics.customers',
+            identityFingerprint: 'customers', available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+        }, metricFlow: {},
+      },
+      modeling: {
+        mode: 'dbt-first',
+        packages: { commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] } },
+        entities: {
+          order: { id: 'order', domain: 'commerce', dbtUniqueId: 'model.shop.orders', grain: 'order_id', keys: ['customer_id'], sourcePath: 'entities', identityFingerprint: 'o' },
+          customer: { id: 'customer', domain: 'commerce', dbtUniqueId: 'model.shop.customers', grain: 'customer_id', keys: ['customer_id'], sourcePath: 'entities', identityFingerprint: 'c' },
+        },
+        relationships: {
+          order_to_customer: {
+            id: 'order_to_customer', from: 'order', to: 'customer', keys: [{ from: 'customer_id', to: 'customer_id' }],
+            cardinality: 'many_to_one', fanout: 'safe', status: 'certified', crossDomain: false,
+            sourcePath: 'relationships', fingerprint: 'r', staleCertification: false, automaticJoinAllowed: true,
+          },
+        },
+        contracts: {
+          revenue: { id: 'revenue', domain: 'commerce', entities: ['order'], blocks: [], status: 'certified', sourcePath: 'contracts', requiredEvaluation: true },
+        },
+        interfaces: { exports: {}, imports: {} }, conformance: {}, rules: {}, domainLineage: [],
+      },
+    } as DQLManifest;
+
+    const graph = buildKGFromManifest(manifest);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'entity:order', payload: expect.objectContaining({ dbtUniqueId: 'model.shop.orders' }) }),
+      expect.objectContaining({ nodeId: 'relationship:order_to_customer', certification: 'certified' }),
+      expect.objectContaining({ nodeId: 'contract:revenue', certification: 'certified' }),
+    ]));
+    expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ src: 'entity:order', dst: 'relationship:order_to_customer', kind: 'proves_join' }),
+      expect.objectContaining({ src: 'entity:order', dst: 'dbt_model:model.shop.orders', kind: 'binds_to' }),
     ]));
   });
 });

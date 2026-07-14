@@ -91,6 +91,23 @@ describe('cascade budgets', () => {
     });
   });
 
+  it('AGT-005 keeps a one-grain filtered ranking on the verified quick path', () => {
+    const questionPlan = buildAnalysisQuestionPlan('who are the customers who spent most on beverages?');
+
+    expect(questionShapeClass(questionPlan, 'ad_hoc_analysis')).toBe('lookup');
+    expect(analysisDepthForQuestion(questionPlan)).toBe('quick');
+    expect(proposalToolBudgetForQuestion(questionPlan, 'ad_hoc_analysis')).toMatchObject({
+      maxToolCalls: 2,
+      effortClass: 'lookup',
+    });
+    expect(promptContextBudgetForQuestion({ questionPlan })).toMatchObject({
+      label: 'quick',
+      contextObjectLimit: 18,
+      relationCardLimit: 12,
+      joinPathLimit: 8,
+    });
+  });
+
   it('widens prompt rendering and metadata retrieval from the same deep policy', () => {
     const questionPlan = buildAnalysisQuestionPlan('Research why margin dropped in Q2 by product and region');
 

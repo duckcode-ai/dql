@@ -22,6 +22,8 @@ import { dirname, join, relative } from 'node:path';
 /** A domain authored through the writer (spec 17, part B). */
 export interface DomainInput {
   name: string;
+  /** Stable dot-qualified package id. Defaults to the normalized name for compatibility. */
+  id?: string;
   parent?: string;
   owner?: string;
   businessOwner?: string;
@@ -38,6 +40,8 @@ export interface DomainInput {
   dbtTags?: string[];
   semanticDomains?: string[];
   semanticTags?: string[];
+  /** Compatibility entity export ids; prefer structured v3 interfaces for new policy. */
+  exports?: string[];
   /** Optional review cadence; defaults to "quarterly" so doctor stays quiet. */
   reviewCadence?: string;
   /** Existing project-relative source path. Used for legacy flat declarations. */
@@ -81,6 +85,7 @@ function stringArrayField(name: string, values: string[] | undefined): string {
 export function renderDomainDeclaration(domain: DomainInput): string {
   const reviewCadence = domain.reviewCadence?.trim() || 'quarterly';
   const lines = [`domain "${escapeString(domain.name)}" {`];
+  if (domain.id) lines.push(`  id = "${escapeString(domain.id)}"`);
   if (domain.parent) lines.push(`  parent = "${escapeString(domain.parent)}"`);
   if (domain.owner) lines.push(`  owner = "${escapeString(domain.owner)}"`);
   if (domain.businessOwner) lines.push(`  businessOwner = "${escapeString(domain.businessOwner)}"`);
@@ -97,6 +102,7 @@ export function renderDomainDeclaration(domain: DomainInput): string {
   body += stringArrayField('dbtTags', domain.dbtTags);
   body += stringArrayField('semanticDomains', domain.semanticDomains);
   body += stringArrayField('semanticTags', domain.semanticTags);
+  body += stringArrayField('exports', domain.exports);
   if (domain.businessOutcome) body += `\n  businessOutcome = "${escapeString(domain.businessOutcome)}"`;
   if (domain.description) body += `\n  description = "${escapeString(domain.description)}"`;
   body += '\n}\n';

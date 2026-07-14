@@ -7,11 +7,13 @@
  * and external tools (DataHub, Atlan, etc.).
  */
 
+import type { ProductDomainContext } from '../apps/product-domain-context.js';
+
 // ---- Top-level manifest ----
 
 export interface DQLManifest {
   /** Manifest schema version */
-  manifestVersion: 1 | 2;
+  manifestVersion: 1 | 2 | 3;
   /** DQL CLI version that generated this manifest */
   dqlVersion: string;
   /** ISO 8601 timestamp */
@@ -53,6 +55,19 @@ export interface DQLManifest {
 
   /** dbt manifest import metadata (if --dbt-manifest was used) */
   dbtImport?: ManifestDbtImport;
+
+  /**
+   * Manifest v3 dbt artifact index. This is deliberately provenance-only:
+   * DQL references dbt unique IDs and artifact locations but never serializes a
+   * second copy of schema.yml columns, descriptions, tests, or MetricFlow SQL.
+   */
+  dbtProvenance?: ManifestDbtProvenance;
+
+  /**
+   * Manifest v3 sparse analytical overlay. Present only when
+   * `manifestVersion: 3` and `modeling.mode: "dbt-first"` are both selected.
+   */
+  modeling?: ManifestDbtFirstModeling;
 
   /**
    * Non-fatal problems encountered during the build — files that failed to
@@ -378,6 +393,8 @@ export interface ManifestBlockParameter {
 // ---- Business Domains ----
 
 export interface ManifestDomain {
+  /** Stable dot-qualified package id. */
+  id?: string;
   name: string;
   /** Relative path from project root */
   filePath: string;
@@ -398,6 +415,7 @@ export interface ManifestDomain {
   dbtTags?: string[];
   semanticDomains?: string[];
   semanticTags?: string[];
+  exports?: string[];
 }
 
 // ---- Business Terms ----
@@ -459,7 +477,7 @@ export interface ManifestBusinessView {
 
 // ---- Notebooks ----
 
-export interface ManifestNotebook {
+export interface ManifestNotebook extends ProductDomainContext {
   /** Notebook title */
   title: string;
   /** Relative path from project root */
@@ -578,7 +596,7 @@ export interface ManifestLineageEdge {
 
 // ---- Apps & Dashboards (consumption layer) ----
 
-export interface ManifestApp {
+export interface ManifestApp extends ProductDomainContext {
   id: string;
   name: string;
   description?: string;
@@ -732,4 +750,276 @@ export interface ManifestDbtImport {
    * last-run/freshness state, when one was found alongside the manifest.
    */
   runResultsPath?: string;
+}
+
+// ---- Manifest v3: dbt-first analytical overlay ----
+
+/** A deterministic reference to dbt artifacts without copying their contents. */
+export interface ManifestDbtProvenance {
+  manifestPath: string;
+  catalogPath?: string;
+  semanticManifestPath?: string;
+  manifestFingerprint: string;
+  catalogFingerprint?: string;
+  semanticManifestFingerprint?: string;
+  projectName?: string;
+  nodes: Record<string, ManifestDbtNodeProvenance>;
+  metricFlow: Record<string, ManifestMetricFlowProvenance>;
+}
+
+export interface ManifestDbtNodeProvenance {
+  uniqueId: string;
+  resourceType: 'model' | 'source';
+  name: string;
+  packageName?: string;
+  relation?: string;
+  sourcePath?: string;
+  /** Fingerprint of identity-relevant dbt metadata, not a copy of it. */
+  identityFingerprint: string;
+  /** Lets consumers open dbt-owned fields from the source artifact on demand. */
+  available: {
+    description: boolean;
+    columns: boolean;
+    tests: boolean;
+    catalogTypes: boolean;
+    dqlMeta: boolean;
+  };
+}
+
+export interface ManifestMetricFlowProvenance {
+  uniqueId: string;
+  name: string;
+  sourcePath?: string;
+  semanticModel?: string;
+  fingerprint: string;
+}
+
+export interface ManifestDbtFirstModeling {
+  mode: 'dbt-first';
+  packages: Record<string, ManifestDomainPackage>;
+  /**
+   * Focused, Git-backed modeling sections. Areas are source ownership and
+   * diagram/ranking hints only: every area still compiles into this one domain
+   * graph and never creates a second semantic model.
+   */
+  areas: Record<string, ManifestModelArea>;
+  entities: Record<string, ManifestModelEntity>;
+  relationships: Record<string, ManifestModelRelationship>;
+  contracts: Record<string, ManifestModelContract>;
+  conformance: Record<string, ManifestConformanceDeclaration>;
+  rules: Record<string, ManifestModelRule>;
+  interfaces?: {
+    exports: Record<string, ManifestDomainExport>;
+    imports: Record<string, ManifestDomainImport>;
+  };
+  /** DQL analytical edges; separate from dbt transformation lineage. */
+  domainLineage: ManifestDomainRelationshipLineage[];
+}
+
+export interface ManifestDomainPackage {
+  id: string;
+  filePath: string;
+  parent?: string;
+  exports: string[];
+  owner?: string;
+}
+
+export interface ManifestModelArea {
+  /** DOM-001: sparse DQL-owned source section; dbt facts stay in provenance. */
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  name: string;
+  /** A short business question or scope statement for this focused diagram. */
+  description?: string;
+  /** Examples that can boost matching retrieval inside an already-authorized domain. */
+  intentExamples: string[];
+  /** Entities defined by this one source file. */
+  entityIds: string[];
+  /** Relationships defined by this one source file. */
+  relationshipIds: string[];
+  /** Read-only boundary nodes shown in this area's focused diagram. */
+  referencedEntityIds: string[];
+  sourcePath: string;
+  layoutPath?: string;
+}
+
+export interface ManifestModelEntity {
+  id: string;
+  /** Author-written id inside the owning Domain Package. */
+  localId: string;
+  /** Stable globally unique identity (`<domain>::entity::<localId>`). */
+  qualifiedId: string;
+  domain: string;
+  /** The focused source area that owns this entity, when authored as an area. */
+  areaId?: string;
+  dbtUniqueId: string;
+  /** DQL-owned business identity; dbt descriptions remain read-only provenance. */
+  businessName?: string;
+  businessContext?: string;
+  /** Analytical identity assertion; omitted when dbt `meta.dql` supplies it. */
+  grain?: string;
+  /** Analytical key assertion; no physical column catalog is copied. */
+  keys: string[];
+  analyticalRole?: 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown';
+  conceptRefs?: string[];
+  owner?: string;
+  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  sourcePath: string;
+  identityFingerprint: string;
+}
+
+export type ManifestRelationshipCardinality = 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
+export type ManifestFanoutPolicy = 'safe' | 'attribution_required' | 'unsafe' | 'unknown';
+export type ManifestRelationshipOptionality = 'required' | 'optional' | 'unknown';
+export type ManifestRelationshipJoinType = 'left' | 'inner';
+
+export interface ManifestRelationshipAggregationPolicy {
+  measuresFrom: string[];
+  dimensionsFrom: string[];
+  requiresPreAggregation?: boolean;
+}
+
+export interface ManifestRelationshipTemporalPolicy {
+  factTime: string;
+  validFrom: string;
+  validTo?: string;
+  openEnded?: boolean;
+}
+
+export interface ManifestModelRelationship {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  /** The focused source area that owns this relationship, when authored as an area. */
+  areaId?: string;
+  from: string;
+  to: string;
+  keys: Array<{ from: string; to: string }>;
+  cardinality: ManifestRelationshipCardinality;
+  fanout: ManifestFanoutPolicy;
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  crossDomain: boolean;
+  ownerDomain?: string;
+  owner?: string;
+  verb?: string;
+  description?: string;
+  rationale?: string;
+  roles?: { from?: string; to?: string };
+  optionality?: { from: ManifestRelationshipOptionality; to: ManifestRelationshipOptionality };
+  joinTypes?: ManifestRelationshipJoinType[];
+  aggregation?: ManifestRelationshipAggregationPolicy;
+  temporal?: ManifestRelationshipTemporalPolicy;
+  attributionBlock?: string;
+  importRefs?: string[];
+  evidenceExpiresAt?: string;
+  sourcePath: string;
+  fingerprint: string;
+  certificationFingerprint?: string;
+  /** Warehouse-backed evidence captured before certification. */
+  validation?: ManifestRelationshipValidationEvidence;
+  staleCertification: boolean;
+  /** Only certified, fresh, exported, fanout-safe edges can prove a generated join. */
+  automaticJoinAllowed: boolean;
+}
+
+export interface ManifestRelationshipValidationEvidence {
+  status: 'passed' | 'failed' | 'error';
+  checkedAt: string;
+  queryFingerprint: string;
+  /** Fingerprint of relations, keys, cardinality and fanout validated by the query. */
+  proofFingerprint?: string;
+  fromRows: number;
+  toRows: number;
+  joinedRows: number;
+  fromNullKeys: number;
+  toNullKeys: number;
+  unmatchedFrom: number;
+  maxFromPerKey: number;
+  maxToPerKey: number;
+  message?: string;
+}
+
+export interface ManifestModelContract {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  entities: string[];
+  blocks: string[];
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+  sourcePath: string;
+  requiredEvaluation: boolean;
+  version?: number;
+  grain?: string;
+  metricRefs?: string[];
+  dimensions?: string[];
+  allowedFilters?: string[];
+  requiredFilters?: string[];
+  purpose?: string;
+  evaluationRefs?: string[];
+}
+
+export interface ManifestDomainExport {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  version: number;
+  entity?: string;
+  metrics: string[];
+  blocks: string[];
+  allowedKeys: string[];
+  allowedDimensions: string[];
+  allowedFilters: string[];
+  purposes: string[];
+  consumerDomains: string[];
+  classification?: string;
+  contract?: string;
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+  sourcePath: string;
+  fingerprint: string;
+}
+
+export interface ManifestDomainImport {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  exportRef: string;
+  purpose: string;
+  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  owner?: string;
+  sourcePath: string;
+}
+
+export interface ManifestConformanceDeclaration {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  entities: string[];
+  rule: string;
+  sourcePath: string;
+}
+
+export interface ManifestModelRule {
+  id: string;
+  localId: string;
+  qualifiedId: string;
+  domain: string;
+  kind: 'fanout' | 'export' | 'contract' | 'custom';
+  expression: string;
+  sourcePath: string;
+}
+
+export interface ManifestDomainRelationshipLineage {
+  relationship: string;
+  fromDomain: string;
+  toDomain: string;
+  automaticJoinAllowed: boolean;
+  staleCertification: boolean;
 }

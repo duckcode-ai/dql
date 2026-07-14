@@ -12,6 +12,44 @@ export {
 
 export { detectOutputDrift } from './output-drift.js';
 export {
+  loadDbtFirstModeling,
+  siblingDbtArtifact,
+  relationshipValidationProofFingerprint,
+  type DbtFirstModelingLoadResult,
+} from './dbt-first-modeling.js';
+export {
+  previewModelingChange,
+  applyModelingChange,
+  previewDbtSourcePatch,
+  applyDbtSourcePatch,
+  loadDbtNodeAuthoringDetail,
+  resetDbtArtifactReadCount,
+  dbtArtifactReadCount,
+  type DomainPackageAuthoringInput,
+  type ModelAreaAuthoringInput,
+  type EntityBindingAuthoringInput,
+  type RelationshipAuthoringInput,
+  type ContractAuthoringInput,
+  type DomainExportAuthoringInput,
+  type DomainImportAuthoringInput,
+  type ModelingAuthoringChange,
+  type ModelingSourcePatch,
+  type ModelingChangePreview,
+  type DbtNodeAuthoringDetail,
+  type DbtSourceAuthoringInput,
+  type DbtSourcePatchPreview,
+} from './dbt-first-authoring.js';
+export {
+  planDataLexMigration,
+  applyDataLexMigration,
+  type DataLexMigrationInput,
+  type DataLexMigrationFile,
+  type DataLexMigrationLoss,
+  type DataLexMigrationAmbiguity,
+  type DataLexMigrationReport,
+  type DataLexMigrationPlan,
+} from './datalex-migration.js';
+export {
   writeDomainDeclaration,
   deleteDomainDeclaration,
   renderDomainDeclaration,
@@ -20,6 +58,28 @@ export {
   type DomainInput,
   type WrittenDomain,
 } from './domain-writer.js';
+export {
+  loadDomainPackageRegistry,
+  type DomainPackageRecord,
+  type DomainPackageRegistryResult,
+} from './domain-package-registry.js';
+export {
+  discoverDbtDomains,
+  type DiscoverDbtDomainsOptions,
+  type DomainDiscoveryEvidenceKind,
+  type DomainDiscoveryEvidence,
+  type DomainMembershipProposal,
+  type DomainProposal,
+  type UnassignedDbtModel,
+  type RelationshipDraftCandidate,
+  type SkillDraftCandidate,
+  type DomainDiscoveryReport,
+} from './domain-discovery.js';
+export {
+  ProjectSnapshotService,
+  ProjectSnapshotMismatchError,
+  type ProjectSnapshot,
+} from './project-snapshot.js';
 export {
   loadDbtRunState,
   applyBlockDataState,
@@ -42,6 +102,27 @@ export type {
   ManifestLineageNode,
   ManifestLineageEdge,
   ManifestDbtImport,
+  ManifestDbtProvenance,
+  ManifestDbtNodeProvenance,
+  ManifestMetricFlowProvenance,
+  ManifestDbtFirstModeling,
+  ManifestDomainPackage,
+  ManifestModelArea,
+  ManifestModelEntity,
+  ManifestModelRelationship,
+  ManifestRelationshipValidationEvidence,
+  ManifestRelationshipCardinality,
+  ManifestFanoutPolicy,
+  ManifestRelationshipOptionality,
+  ManifestRelationshipJoinType,
+  ManifestRelationshipAggregationPolicy,
+  ManifestRelationshipTemporalPolicy,
+  ManifestModelContract,
+  ManifestDomainExport,
+  ManifestDomainImport,
+  ManifestConformanceDeclaration,
+  ManifestModelRule,
+  ManifestDomainRelationshipLineage,
   ManifestDiagnostic,
   ManifestConflictDetail,
   ManifestConflictSide,

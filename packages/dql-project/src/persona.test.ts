@@ -7,6 +7,9 @@ const app: AppDocument = {
   id: 'growth-cxo',
   name: 'Growth',
   domain: 'growth',
+  ownerDomain: 'growth',
+  usesDomains: ['growth'],
+  requiredExports: [],
   owners: ['alice@acme.com'],
   members: [
     { userId: 'alice@acme.com', roles: ['owner'], attributes: { region: 'NA' } },

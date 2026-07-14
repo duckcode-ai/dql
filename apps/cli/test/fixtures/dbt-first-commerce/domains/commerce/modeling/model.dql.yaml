@@ -1,0 +1,63 @@
+entities:
+  - id: order
+    dbt_model: model.dbt_first_commerce.fct_orders
+  - id: customer
+    dbt_model: model.dbt_first_commerce.dim_customers
+relationships:
+  - id: order_to_customer
+    from: order
+    to: customer
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: certified
+    owner: commerce@company.test
+    certifiedAgainst:
+      from: { grain: order_id, keys: [customer_id] }
+      to: { grain: customer_id, keys: [customer_id] }
+    validation:
+      status: passed
+      checked_at: "2026-07-11T00:00:00.000Z"
+      query_fingerprint: fixture-order-customer-proof
+      proof_fingerprint: 5b4ccb4990be9c2b158cd4d644c02c19f264b20c750e3558d7916d0646a835fc
+      from_rows: 8
+      to_rows: 5
+      joined_rows: 8
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 3
+      max_to_per_key: 1
+exports:
+  - id: customer_identity
+    version: 1
+    entity: customer
+    allowed_keys: [customer_id]
+    purposes: [growth_attribution]
+    consumer_domains: [growth]
+    status: certified
+    owner: commerce@company.test
+    contract: customer_identity_contract
+  - id: order_analytics
+    version: 1
+    entity: order
+    allowed_keys: [customer_id]
+    metrics: [gross_revenue]
+    purposes: [growth_attribution]
+    consumer_domains: [growth]
+    status: certified
+    owner: commerce@company.test
+    contract: order_analytics_contract
+contracts:
+  - id: customer_identity_contract
+    entities: [customer]
+    purpose: growth_attribution
+    status: certified
+    owner: commerce@company.test
+    required_evaluation: false
+  - id: order_analytics_contract
+    entities: [order]
+    purpose: growth_attribution
+    status: certified
+    owner: commerce@company.test
+    required_evaluation: false

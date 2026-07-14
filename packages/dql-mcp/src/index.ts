@@ -33,6 +33,8 @@ export {
   getTableSchemaInput,
   validateSql,
   validateSqlInput,
+  resolveAnalyticalPath,
+  explainRelationshipProof,
 } from './tools/metadata.js';
 export {
   askDql,

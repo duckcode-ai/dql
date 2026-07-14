@@ -25,7 +25,7 @@ import {
   type ConversationSnapshot,
   type LocalContextPack,
 } from '@duckcodeailabs/dql-agent';
-import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core';
+import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
@@ -316,7 +316,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from terms, business views, blocks, apps, dashboards, dbt, and semantic metadata.' });
         }
         const projectStateStartedAt = Date.now();
-        const projectState = await ensureAgentProjectReady(req.projectRoot, { kgPath });
+        const projectState = await ensureAgentProjectReady(req.projectRoot, { kgPath, manifest: req.projectSnapshot?.manifest });
         const projectStateDurationMs = Date.now() - projectStateStartedAt;
         emit({ kind: 'thinking', text: projectState.cacheHit ? 'Reused the warm project index.' : 'Refreshed the project index after source changes.' });
 
@@ -332,6 +332,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           const conversationSnapshot = conversationSnapshotFromContext(req.conversationContext);
           const rawFollowUp = followUpFromConversationContext(req, rawQuestion) ?? inferFollowUpContext(req, rawQuestion);
           const followUp = applyTopicShiftGuard(rawFollowUp, conversationSnapshot);
+          // CTX-003: retrieval and planning operate on the user's current words.
+          // Prior SQL, DQL source, owners, and result metadata stay in the typed
+          // follow-up envelope rendered separately for the provider; concatenating
+          // them into the question polluted filters/dimensions and changed intent.
           const question = rewriteFollowUpQuestion(rawQuestion, followUp);
           // Retrieve durable learnings only — notebook/project/user/artifact scope.
           // `thread` (per-conversation) memory is intentionally excluded: it is
@@ -365,6 +369,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             // filter-only refinements, re-stamp) the prior turn's context pack.
             priorContextPackId: priorContextPackIdFromSnapshot(conversationSnapshot),
             conversationTopicRelation: conversationSnapshot?.topicRelation,
+            domainContext: req.domainContext,
+            preparedMetadataFingerprint: projectState.metadataFingerprint,
           })
             .catch(() => undefined);
           const contextDurationMs = Date.now() - contextStartedAt;
@@ -404,11 +410,21 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           ]));
           const answerStartedAt = Date.now();
           emit({ kind: 'thinking', text: 'Resolving the best governed answer path and validating the result.' });
+          const manifest = req.projectSnapshot?.manifest ?? buildManifest({
+            projectRoot: req.projectRoot,
+            dbtManifestPath: resolveDbtManifestPath(req.projectRoot) ?? undefined,
+          });
+          const guardSnapshot = (): void => {
+            if (req.projectSnapshot) req.assertProjectSnapshot?.(req.projectSnapshot.snapshotId);
+          };
           const result = await answer({
             question,
             extraContext,
             provider,
             kg,
+            manifest,
+            domain: req.domainContext?.activeDomain ?? undefined,
+            domainContext: req.domainContext,
             skills,
             blockHints,
             followUp,
@@ -422,8 +438,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             analysisDepth: contextBudget.analysisDepth,
             ...(req.semanticDriver ? { semanticDriver: req.semanticDriver } : {}),
             ...(req.semanticTableMapping ? { semanticTableMapping: req.semanticTableMapping } : {}),
-            executeCertifiedBlock: req.executeCertifiedBlock,
-            executeGeneratedSql: req.executeGeneratedSql,
+            executeCertifiedBlock: req.executeCertifiedBlock
+              ? async (...args) => { guardSnapshot(); return req.executeCertifiedBlock!(...args); }
+              : undefined,
+            executeGeneratedSql: req.executeGeneratedSql
+              ? async (...args) => { guardSnapshot(); return req.executeGeneratedSql!(...args); }
+              : undefined,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot),
             answerLoopTools,
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
@@ -431,6 +451,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
           });
           const answerDurationMs = Date.now() - answerStartedAt;
+          // CTX-002: an answer built from one snapshot must never be published
+          // after the runtime has advanced to another snapshot.
+          guardSnapshot();
           result.evidence = result.evidence ?? {
             route: [], lineage: [], businessContext: [], selectedAssets: [], sourceTables: [], semanticObjects: [], citations: result.citations,
           };
@@ -519,19 +542,8 @@ export function resolveEffectiveQuestion(req: AgentRunRequest): string {
 }
 
 export function rewriteFollowUpQuestion(question: string, followUp?: AgentFollowUpContext): string {
-  if (!followUp || followUp.kind === 'contextual') return question;
-  const pieces = [
-    `Follow-up request: ${question}`,
-    followUp.sourceQuestion ? `Prior question: ${followUp.sourceQuestion}` : '',
-    followUp.sourceBlockName ? `Prior certified block: ${followUp.sourceBlockName}` : '',
-    followUp.priorResultRef ? formatPriorResultRefForQuestion(followUp.priorResultRef) : '',
-    followUp.priorDqlArtifact ? formatPriorDqlArtifactForQuestion(followUp.priorDqlArtifact) : '',
-    followUp.priorResultValues ? `Resolved prior result values: ${formatResultDimensionValues(followUp.priorResultValues)}` : '',
-    followUp.filters?.length ? `Apply referenced filters: ${formatFollowUpFilters(followUp)}` : '',
-    followUp.dimensions?.length ? `Referenced dimensions: ${followUp.dimensions.join(', ')}` : '',
-    followUp.priorMeasures?.length ? `Prior measures: ${followUp.priorMeasures.join(', ')}` : '',
-  ].filter(Boolean);
-  return pieces.length > 1 ? pieces.join('\n') : question;
+  void followUp;
+  return question.replace(/\s+/g, ' ').trim();
 }
 
 function formatPriorResultRefForQuestion(ref: AgentPriorResultReference): string {

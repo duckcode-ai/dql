@@ -12,21 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import {
-  GraduationCap,
-  Plus,
-  Pencil,
-  Trash2,
-  X,
-  Sparkles,
-  Loader2,
-  AlertTriangle,
-  RefreshCw,
-  BookMarked,
-  Tags,
-  ChevronDown,
-  ChevronUp,
-} from 'lucide-react';
+import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, BookMarked, Tags, ChevronDown, ChevronUp } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -56,14 +42,17 @@ function emptyDraft(): Skill {
   };
 }
 
-export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean } = {}): JSX.Element {
+export function SkillsPage({ embedded = false, domainFilter = null }: { embedded?: boolean; domainFilter?: string | null } = {}): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
 
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [options, setOptions] = useState<{ metrics: string[]; blocks: string[] }>({ metrics: [], blocks: [] });
+  const [options, setOptions] = useState<{
+    metrics: string[];
+    blocks: string[];
+  }>({ metrics: [], blocks: [] });
   // Spec 17 (part B) — domains feed the form's domain picker. Best-effort.
   const [domains, setDomains] = useState<Domain[]>([]);
   const [form, setForm] = useState<FormMode | null>(null);
@@ -84,11 +73,7 @@ export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean
       .catch((error: unknown) => {
         if (cancelled) return;
         setSkills([]);
-        setLoadError(
-          error instanceof Error && error.message
-            ? error.message
-            : 'Could not load skills. Is the local DQL server running?',
-        );
+        setLoadError(error instanceof Error && error.message ? error.message : 'Could not load skills. Is the local DQL server running?');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -122,7 +107,7 @@ export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean
 
   useEffect(() => load(), [load]);
 
-  const sorted = useMemo(() => [...skills].sort((a, b) => a.id.localeCompare(b.id)), [skills]);
+  const sorted = useMemo(() => skills.filter((skill) => !domainFilter || skill.domain === domainFilter || skill.domains?.includes(domainFilter)).sort((a, b) => a.id.localeCompare(b.id)), [skills, domainFilter]);
 
   const handleSaved = useCallback((saved: Skill) => {
     setSkills((prev) => {
@@ -152,20 +137,56 @@ export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean
 
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg }}>
-      <div style={{ maxWidth: 980, margin: '0 auto', padding: '22px 28px 40px' }}>
+      <div
+        style={{
+          maxWidth: 980,
+          margin: '0 auto',
+          padding: embedded ? '18px 20px 40px' : '22px 28px 40px',
+        }}
+      >
         {/* Header */}
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 18, marginBottom: 18 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'flex-end',
+            justifyContent: 'space-between',
+            gap: 18,
+            marginBottom: 18,
+          }}
+        >
           <div style={{ minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
               <GraduationCap size={20} strokeWidth={1.9} color={t.accent} />
-              <div style={{ fontSize: 22, fontWeight: 700, color: t.textPrimary }}>Skills</div>
+              <div
+                style={{
+                  fontSize: embedded ? 18 : 22,
+                  fontWeight: 700,
+                  color: t.textPrimary,
+                }}
+              >
+                {domainFilter ? `${domainFilter} skills` : 'Skills'}
+              </div>
             </div>
-            <div style={{ fontSize: 13, color: t.textMuted, marginTop: 6, maxWidth: 680, lineHeight: 1.5 }}>
-              Teach the AI your business context — definitions, rules, vocabulary, and the metrics and blocks it should
-              prefer. Skills are Git-backed project guidance and are applied only when their domain and triggers match.
+            <div
+              style={{
+                fontSize: 13,
+                color: t.textMuted,
+                marginTop: 6,
+                maxWidth: 680,
+                lineHeight: 1.5,
+              }}
+            >
+              Teach the AI your business context — definitions, rules, vocabulary, and the metrics and blocks it should prefer. Skills are Git-backed project guidance and are applied only when their domain and triggers match.
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              flexShrink: 0,
+            }}
+          >
             <button type="button" onClick={() => load()} title="Refresh" style={ghostButton(t)}>
               <RefreshCw size={13} strokeWidth={2} /> Refresh
             </button>
@@ -177,7 +198,16 @@ export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean
 
         {/* Body states */}
         {loading ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: t.textMuted, fontSize: 13, padding: '40px 0' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              color: t.textMuted,
+              fontSize: 13,
+              padding: '40px 0',
+            }}
+          >
             <Loader2 size={15} strokeWidth={2} /> Loading skills…
           </div>
         ) : loadError ? (
@@ -203,17 +233,7 @@ export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean
       </div>
 
       {/* Add / Edit drawer */}
-      {form ? (
-        <SkillFormDrawer
-          mode={form}
-          options={options}
-          domains={domains}
-          existingIds={skills.map((s) => s.id)}
-          t={t}
-          onClose={() => setForm(null)}
-          onSaved={handleSaved}
-        />
-      ) : null}
+      {form ? <SkillFormDrawer mode={form} options={options} domains={domains} existingIds={skills.map((s) => s.id)} t={t} onClose={() => setForm(null)} onSaved={handleSaved} /> : null}
 
       {/* Delete confirm */}
       {pendingDelete ? (
@@ -234,17 +254,7 @@ export function SkillsPage({ embedded: _embedded = false }: { embedded?: boolean
 
 // ── List row ─────────────────────────────────────────────────────────────────
 
-function SkillRow({
-  skill,
-  t,
-  onEdit,
-  onDelete,
-}: {
-  skill: Skill;
-  t: Theme;
-  onEdit: () => void;
-  onDelete: () => void;
-}): JSX.Element {
+function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEdit: () => void; onDelete: () => void }): JSX.Element {
   const vocabCount = Object.keys(skill.vocabulary ?? {}).length;
   const [expanded, setExpanded] = useState(false);
   const domains = skill.domains?.length ? skill.domains : skill.domain ? [skill.domain] : [];
@@ -261,11 +271,31 @@ function SkillRow({
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13.5, fontWeight: 750, color: t.textPrimary, fontFamily: t.fontMono }}>{skill.id}</span>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span
+            style={{
+              fontSize: 13.5,
+              fontWeight: 750,
+              color: t.textPrimary,
+              fontFamily: t.fontMono,
+            }}
+          >
+            {skill.id}
+          </span>
           {skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
           {skill.status === 'active' || !skill.status ? <span style={activeBadge(t)}>active</span> : null}
-          {domains.map((domain) => <span key={domain} style={domainBadge(t)}>{domain}</span>)}
+          {domains.map((domain) => (
+            <span key={domain} style={domainBadge(t)}>
+              {domain}
+            </span>
+          ))}
           {skill.isStarter ? (
             <span style={starterBadge(t)} title="A dbt-seeded starter — edit it to make it yours">
               <Sparkles size={10} strokeWidth={2.2} /> starter — edit me
@@ -273,26 +303,79 @@ function SkillRow({
           ) : null}
         </div>
         {skill.description ? (
-          <div style={{ fontSize: 12.5, color: t.textSecondary, marginTop: 5, lineHeight: 1.5 }}>{skill.description}</div>
+          <div
+            style={{
+              fontSize: 12.5,
+              color: t.textSecondary,
+              marginTop: 5,
+              lineHeight: 1.5,
+            }}
+          >
+            {skill.description}
+          </div>
         ) : (
-          <div style={{ fontSize: 12, color: t.textMuted, marginTop: 5, fontStyle: 'italic' }}>No description yet.</div>
+          <div
+            style={{
+              fontSize: 12,
+              color: t.textMuted,
+              marginTop: 5,
+              fontStyle: 'italic',
+            }}
+          >
+            No description yet.
+          </div>
         )}
         <div style={{ display: 'flex', gap: 7, marginTop: 9, flexWrap: 'wrap' }}>
           <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="metrics" count={skill.preferredMetrics?.length ?? 0} />
           <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="blocks" count={skill.preferredBlocks?.length ?? 0} />
           <CountPill t={t} icon={<Tags size={11} strokeWidth={2} />} label="vocabulary" count={vocabCount} />
         </div>
-        {expanded ? <div style={{ display: 'grid', gap: 9, marginTop: 12, paddingTop: 11, borderTop: `1px solid ${t.btnBorder}` }}>
-          <SkillChipField t={t} label="Use these metrics" values={skill.preferredMetrics} empty="No preferred metrics" />
-          <SkillChipField t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" />
-          <SkillChipField t={t} label="Apply when" values={skill.triggers} empty="No trigger phrases defined" />
-          <SkillChipField t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
-          <SkillChipField t={t} label="Avoid when" values={skill.exclusions} empty="No exclusion rule defined" />
-          {skill.body ? <div style={{ display: 'grid', gap: 5 }}><strong style={{ color: t.textMuted, fontSize: 11.5 }}>Guidance the agent reads</strong><pre style={{ margin: 0, padding: '10px 11px', borderRadius: 7, background: t.appBg, color: t.textSecondary, fontFamily: t.font, fontSize: 12, whiteSpace: 'pre-wrap', lineHeight: 1.5, maxHeight: 220, overflow: 'auto' }}>{skill.body}</pre></div> : null}
-        </div> : null}
+        {expanded ? (
+          <div
+            style={{
+              display: 'grid',
+              gap: 9,
+              marginTop: 12,
+              paddingTop: 11,
+              borderTop: `1px solid ${t.btnBorder}`,
+            }}
+          >
+            <SkillChipField t={t} label="Use these metrics" values={skill.preferredMetrics} empty="No preferred metrics" />
+            <SkillChipField t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" />
+            <SkillChipField t={t} label="Focus on model areas" values={skill.modelAreaRefs} empty="All areas in the skill domain" />
+            <SkillChipField t={t} label="Apply when" values={skill.triggers} empty="No trigger phrases defined" />
+            <SkillChipField t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
+            <SkillChipField t={t} label="Avoid when" values={skill.exclusions} empty="No exclusion rule defined" />
+            {skill.body ? (
+              <div style={{ display: 'grid', gap: 5 }}>
+                <strong style={{ color: t.textMuted, fontSize: 11.5 }}>Guidance the agent reads</strong>
+                <pre
+                  style={{
+                    margin: 0,
+                    padding: '10px 11px',
+                    borderRadius: 7,
+                    background: t.appBg,
+                    color: t.textSecondary,
+                    fontFamily: t.font,
+                    fontSize: 12,
+                    whiteSpace: 'pre-wrap',
+                    lineHeight: 1.5,
+                    maxHeight: 220,
+                    overflow: 'auto',
+                  }}
+                >
+                  {skill.body}
+                </pre>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), padding: '5px 7px', fontSize: 11.5 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>{expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{expanded ? 'Less' : 'Details'}</button>
+        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), padding: '5px 7px', fontSize: 11.5 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>
+          {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          {expanded ? 'Less' : 'Details'}
+        </button>
         <button type="button" onClick={onEdit} style={iconButton(t)} title="Edit skill">
           <Pencil size={13} strokeWidth={2} />
         </button>
@@ -306,23 +389,7 @@ function SkillRow({
 
 // ── Form drawer (add / edit) ─────────────────────────────────────────────────
 
-function SkillFormDrawer({
-  mode,
-  options,
-  domains,
-  existingIds,
-  t,
-  onClose,
-  onSaved,
-}: {
-  mode: FormMode;
-  options: { metrics: string[]; blocks: string[] };
-  domains: Domain[];
-  existingIds: string[];
-  t: Theme;
-  onClose: () => void;
-  onSaved: (skill: Skill) => void;
-}): JSX.Element {
+function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[] }; domains: Domain[]; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
   const { dispatch } = useNotebook();
   const editing = mode.kind === 'edit';
   const [draft, setDraft] = useState<Skill>(() => (mode.kind === 'edit' ? { ...mode.skill } : emptyDraft()));
@@ -353,6 +420,7 @@ function SkillFormDrawer({
       body: draft.body,
       domain: draft.domain?.trim() ? draft.domain.trim() : undefined,
       domains: (draft.domains ?? (draft.domain ? [draft.domain] : [])).map((value) => value.trim()).filter(Boolean),
+      modelAreaRefs: (draft.modelAreaRefs ?? []).map((value) => value.trim()).filter(Boolean),
       triggers: (draft.triggers ?? []).map((value) => value.trim()).filter(Boolean),
       exclusions: (draft.exclusions ?? []).map((value) => value.trim()).filter(Boolean),
       preferredDimensions: (draft.preferredDimensions ?? []).map((value) => value.trim()).filter(Boolean),
@@ -379,9 +447,7 @@ function SkillFormDrawer({
         <div style={drawerHeader(t)}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <GraduationCap size={16} strokeWidth={2} color={t.accent} />
-            <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>
-              {editing ? 'Edit skill' : 'New skill'}
-            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>{editing ? 'Edit skill' : 'New skill'}</div>
           </div>
           <button type="button" onClick={() => !saving && onClose()} style={iconButton(t)} title="Close">
             <X size={15} strokeWidth={2} />
@@ -389,16 +455,19 @@ function SkillFormDrawer({
         </div>
 
         {/* Drawer body */}
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '16px 18px', display: 'grid', gap: 16 }}>
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: 'auto',
+            padding: '16px 18px',
+            display: 'grid',
+            gap: 16,
+          }}
+        >
           {/* Name + id */}
           <Field label="Name" t={t} hint={editing ? undefined : 'A short, human label for this skill.'}>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => onNameChange(e.target.value)}
-              placeholder="Metrics glossary"
-              style={inputStyle(t)}
-            />
+            <input type="text" value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="Metrics glossary" style={inputStyle(t)} />
           </Field>
           <Field label="ID (slug)" t={t} hint="Used as the file name. Letters, numbers, and dashes.">
             <input
@@ -410,25 +479,34 @@ function SkillFormDrawer({
                 set('id', slugify(e.target.value));
               }}
               placeholder="metrics-glossary"
-              style={{ ...inputStyle(t), fontFamily: t.fontMono, opacity: editing ? 0.7 : 1 }}
+              style={{
+                ...inputStyle(t),
+                fontFamily: t.fontMono,
+                opacity: editing ? 0.7 : 1,
+              }}
             />
-            {idCollision ? <InlineNote t={t} tone="error">A skill with this id already exists.</InlineNote> : null}
+            {idCollision ? (
+              <InlineNote t={t} tone="error">
+                A skill with this id already exists.
+              </InlineNote>
+            ) : null}
           </Field>
 
           {/* Description */}
           <Field label="Description" t={t} hint="One line shown in the list and in the 'guided by' note on AI results.">
-            <input
-              type="text"
-              value={draft.description ?? ''}
-              onChange={(e) => set('description', e.target.value)}
-              placeholder="How we define and name our core revenue metrics."
-              style={inputStyle(t)}
-            />
+            <input type="text" value={draft.description ?? ''} onChange={(e) => set('description', e.target.value)} placeholder="How we define and name our core revenue metrics." style={inputStyle(t)} />
           </Field>
 
           {/* Domain picker (Spec 17 part B) */}
           <Field label="Domain" t={t} hint="Which business domain this skill belongs to. Domains are the top of the hierarchy.">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                flexWrap: 'wrap',
+              }}
+            >
               <select
                 value={draft.domain ?? ''}
                 onChange={(e) => {
@@ -436,22 +514,33 @@ function SkillFormDrawer({
                   set('domain', domain);
                   set('domains', domain ? [domain] : []);
                 }}
-                style={{ ...inputStyle(t), flex: 1, cursor: 'pointer', color: draft.domain ? t.textPrimary : t.textMuted }}
+                style={{
+                  ...inputStyle(t),
+                  flex: 1,
+                  cursor: 'pointer',
+                  color: draft.domain ? t.textPrimary : t.textMuted,
+                }}
               >
                 <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
                 {domains.map((domain) => (
-                  <option key={domain.id} value={domain.id}>{domain.name}</option>
+                  <option key={domain.id} value={domain.id}>
+                    {domain.name}
+                  </option>
                 ))}
               </select>
-              <button
-                type="button"
-                onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })}
-                style={ghostButton(t)}
-                title="Create a new domain on the Domains page"
-              >
+              <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={ghostButton(t)} title="Create a new domain on the Domains page">
                 <Plus size={12} strokeWidth={2.2} /> New domain
               </button>
             </div>
+          </Field>
+
+          <Field label="Focused model areas (optional)" t={t} hint="Comma-separated area ids from the Model workspace. This boosts the skill only inside its selected domain; it never expands access.">
+            <input
+              value={(draft.modelAreaRefs ?? []).join(', ')}
+              onChange={(e) => set('modelAreaRefs', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
+              placeholder="customer_lifecycle, revenue_reporting"
+              style={inputStyle(t)}
+            />
           </Field>
 
           <Field label="Skill type" t={t} hint="Domain references provide broad context; policies encode a focused, reusable rule.">
@@ -475,47 +564,64 @@ function SkillFormDrawer({
 
           {/* Business-context body */}
           <Field label="Business context" t={t} hint="The guidance the AI follows — definitions, rules, and how to interpret a question.">
-            <textarea
-              value={draft.body}
-              onChange={(e) => set('body', e.target.value)}
-              rows={7}
-              placeholder={'e.g. "Revenue means recognized revenue, not bookings. Always exclude test accounts (account_type = \'test\'). When someone asks for ARR, use the arr metric."'}
-              style={textareaStyle(t)}
-            />
+            <textarea value={draft.body} onChange={(e) => set('body', e.target.value)} rows={7} placeholder={'e.g. "Revenue means recognized revenue, not bookings. Always exclude test accounts (account_type = \'test\'). When someone asks for ARR, use the arr metric."'} style={textareaStyle(t)} />
           </Field>
 
           {/* Preferred metrics + blocks */}
           <Field label="Preferred metrics" t={t} hint="Metrics the AI should reach for first when answering.">
-            <MultiSelect
-              t={t}
-              options={options.metrics}
-              optionKind="metrics"
-              selected={draft.preferredMetrics}
-              onChange={(next) => set('preferredMetrics', next)}
-              placeholder="Add a metric…"
-              emptyOptionsHint="No metrics available from the project yet."
-            />
+            <MultiSelect t={t} options={options.metrics} optionKind="metrics" selected={draft.preferredMetrics} onChange={(next) => set('preferredMetrics', next)} placeholder="Add a metric…" emptyOptionsHint="No metrics available from the project yet." />
           </Field>
           <Field label="Preferred blocks" t={t} hint="Certified blocks the AI should prefer to reuse.">
-            <MultiSelect
-              t={t}
-              options={options.blocks}
-              optionKind="blocks"
-              selected={draft.preferredBlocks}
-              onChange={(next) => set('preferredBlocks', next)}
-              placeholder="Add a block…"
-              emptyOptionsHint="No blocks available from the project yet."
-            />
+            <MultiSelect t={t} options={options.blocks} optionKind="blocks" selected={draft.preferredBlocks} onChange={(next) => set('preferredBlocks', next)} placeholder="Add a block…" emptyOptionsHint="No blocks available from the project yet." />
           </Field>
 
           <Field label="Triggers" t={t} hint="Comma-separated phrases that make this skill relevant.">
-            <input value={(draft.triggers ?? []).join(', ')} onChange={(e) => set('triggers', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="recognized revenue, net sales" style={inputStyle(t)} />
+            <input
+              value={(draft.triggers ?? []).join(', ')}
+              onChange={(e) =>
+                set(
+                  'triggers',
+                  e.target.value
+                    .split(',')
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                )
+              }
+              placeholder="recognized revenue, net sales"
+              style={inputStyle(t)}
+            />
           </Field>
           <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">
-            <input value={(draft.preferredDimensions ?? []).join(', ')} onChange={(e) => set('preferredDimensions', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="region, month" style={inputStyle(t)} />
+            <input
+              value={(draft.preferredDimensions ?? []).join(', ')}
+              onChange={(e) =>
+                set(
+                  'preferredDimensions',
+                  e.target.value
+                    .split(',')
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                )
+              }
+              placeholder="region, month"
+              style={inputStyle(t)}
+            />
           </Field>
           <Field label="Clarify when" t={t} hint="Ambiguities that should prompt one focused follow-up question.">
-            <input value={(draft.clarifyWhen ?? []).join(', ')} onChange={(e) => set('clarifyWhen', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="currency is not specified" style={inputStyle(t)} />
+            <input
+              value={(draft.clarifyWhen ?? []).join(', ')}
+              onChange={(e) =>
+                set(
+                  'clarifyWhen',
+                  e.target.value
+                    .split(',')
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                )
+              }
+              placeholder="currency is not specified"
+              style={inputStyle(t)}
+            />
           </Field>
 
           {/* Vocabulary editor */}
@@ -523,7 +629,11 @@ function SkillFormDrawer({
             <VocabularyEditor t={t} value={draft.vocabulary} onChange={(next) => set('vocabulary', next)} />
           </Field>
 
-          {error ? <InlineNote t={t} tone="error">{error}</InlineNote> : null}
+          {error ? (
+            <InlineNote t={t} tone="error">
+              {error}
+            </InlineNote>
+          ) : null}
         </div>
 
         {/* Drawer footer */}
@@ -543,35 +653,25 @@ function SkillFormDrawer({
 
 // ── Multi-select (preferred metrics / blocks) ────────────────────────────────
 
-function MultiSelect({
-  t,
-  options,
-  optionKind,
-  selected,
-  onChange,
-  placeholder,
-  emptyOptionsHint,
-}: {
-  t: Theme;
-  options: string[];
-  optionKind: 'metrics' | 'blocks';
-  selected: string[];
-  onChange: (next: string[]) => void;
-  placeholder: string;
-  emptyOptionsHint: string;
-}): JSX.Element {
+function MultiSelect({ t, options, optionKind, selected, onChange, placeholder, emptyOptionsHint }: { t: Theme; options: string[]; optionKind: 'metrics' | 'blocks'; selected: string[]; onChange: (next: string[]) => void; placeholder: string; emptyOptionsHint: string }): JSX.Element {
   const [query, setQuery] = useState('');
   const [remoteOptions, setRemoteOptions] = useState<string[]>(options);
   useEffect(() => {
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      void api.getSkillOptions(query).then((result) => {
-        if (!cancelled) setRemoteOptions(optionKind === 'metrics' ? result.metrics : result.blocks);
-      }).catch(() => {
-        if (!cancelled) setRemoteOptions(options);
-      });
+      void api
+        .getSkillOptions(query)
+        .then((result) => {
+          if (!cancelled) setRemoteOptions(optionKind === 'metrics' ? result.metrics : result.blocks);
+        })
+        .catch(() => {
+          if (!cancelled) setRemoteOptions(options);
+        });
     }, 160);
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [optionKind, options, query]);
   const available = useMemo(
     () =>
@@ -596,12 +696,7 @@ function MultiSelect({
           {selected.map((value) => (
             <span key={value} style={selectedChip(t)}>
               {value}
-              <button
-                type="button"
-                onClick={() => onChange(selected.filter((s) => s !== value))}
-                style={chipRemoveButton(t)}
-                title="Remove"
-              >
+              <button type="button" onClick={() => onChange(selected.filter((s) => s !== value))} style={chipRemoveButton(t)} title="Remove">
                 <X size={11} strokeWidth={2.4} />
               </button>
             </span>
@@ -638,19 +733,9 @@ function MultiSelect({
 
 // ── Vocabulary editor (term → target rows) ───────────────────────────────────
 
-function VocabularyEditor({
-  t,
-  value,
-  onChange,
-}: {
-  t: Theme;
-  value: Record<string, string>;
-  onChange: (next: Record<string, string>) => void;
-}): JSX.Element {
+function VocabularyEditor({ t, value, onChange }: { t: Theme; value: Record<string, string>; onChange: (next: Record<string, string>) => void }): JSX.Element {
   // Edit as an ordered row list so empty/duplicate terms don't collapse while typing.
-  const [rows, setRows] = useState<Array<{ term: string; target: string }>>(() =>
-    Object.entries(value ?? {}).map(([term, target]) => ({ term, target })),
-  );
+  const [rows, setRows] = useState<Array<{ term: string; target: string }>>(() => Object.entries(value ?? {}).map(([term, target]) => ({ term, target })));
 
   const commit = (next: Array<{ term: string; target: string }>) => {
     setRows(next);
@@ -670,27 +755,10 @@ function VocabularyEditor({
     <div style={{ display: 'grid', gap: 7 }}>
       {rows.map((row, index) => (
         <div key={index} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <input
-            type="text"
-            value={row.term}
-            onChange={(e) => update(index, { term: e.target.value })}
-            placeholder="arr"
-            style={{ ...inputStyle(t), flex: 1 }}
-          />
+          <input type="text" value={row.term} onChange={(e) => update(index, { term: e.target.value })} placeholder="arr" style={{ ...inputStyle(t), flex: 1 }} />
           <span style={{ color: t.textMuted, fontSize: 13 }}>→</span>
-          <input
-            type="text"
-            value={row.target}
-            onChange={(e) => update(index, { target: e.target.value })}
-            placeholder="metric:arr"
-            style={{ ...inputStyle(t), flex: 1.3, fontFamily: t.fontMono }}
-          />
-          <button
-            type="button"
-            onClick={() => commit(rows.filter((_, i) => i !== index))}
-            style={iconButton(t)}
-            title="Remove row"
-          >
+          <input type="text" value={row.target} onChange={(e) => update(index, { target: e.target.value })} placeholder="metric:arr" style={{ ...inputStyle(t), flex: 1.3, fontFamily: t.fontMono }} />
+          <button type="button" onClick={() => commit(rows.filter((_, i) => i !== index))} style={iconButton(t)} title="Remove row">
             <X size={13} strokeWidth={2} />
           </button>
         </div>
@@ -733,9 +801,15 @@ function EmptyState({ t, onAdd }: { t: Theme; onAdd: () => void }): JSX.Element 
         <GraduationCap size={22} strokeWidth={1.9} />
       </div>
       <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Teach the AI your business rules</div>
-      <div style={{ fontSize: 13, color: t.textMuted, maxWidth: 460, lineHeight: 1.55 }}>
-        Skills are the definitions, rules, and vocabulary the AI follows when it answers — like "revenue = recognized,
-        not bookings" or "always exclude test accounts." Add your first one to start guiding every answer.
+      <div
+        style={{
+          fontSize: 13,
+          color: t.textMuted,
+          maxWidth: 460,
+          lineHeight: 1.55,
+        }}
+      >
+        Skills are the definitions, rules, and vocabulary the AI follows when it answers — like "revenue = recognized, not bookings" or "always exclude test accounts." Add your first one to start guiding every answer.
       </div>
       <button type="button" onClick={onAdd} style={{ ...primaryButton(t), marginTop: 4 }}>
         <Plus size={14} strokeWidth={2.2} /> Add your first skill
@@ -760,7 +834,16 @@ function ErrorPanel({ t, message, onRetry }: { t: Theme; message: string; onRetr
       <AlertTriangle size={16} strokeWidth={2} color={t.warning} style={{ marginTop: 1, flexShrink: 0 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary }}>Skills are not available right now</div>
-        <div style={{ fontSize: 12.5, color: t.textSecondary, marginTop: 4, lineHeight: 1.5 }}>{message}</div>
+        <div
+          style={{
+            fontSize: 12.5,
+            color: t.textSecondary,
+            marginTop: 4,
+            lineHeight: 1.5,
+          }}
+        >
+          {message}
+        </div>
         <button type="button" onClick={onRetry} style={{ ...ghostButton(t), marginTop: 10 }}>
           <RefreshCw size={13} strokeWidth={2} /> Retry
         </button>
@@ -771,21 +854,7 @@ function ErrorPanel({ t, message, onRetry }: { t: Theme; message: string; onRetr
 
 // ── Delete confirm dialog ────────────────────────────────────────────────────
 
-function ConfirmDeleteDialog({
-  skill,
-  t,
-  deleting,
-  error,
-  onCancel,
-  onConfirm,
-}: {
-  skill: Skill;
-  t: Theme;
-  deleting: boolean;
-  error: string | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}): JSX.Element {
+function ConfirmDeleteDialog({ skill, t, deleting, error, onCancel, onConfirm }: { skill: Skill; t: Theme; deleting: boolean; error: string | null; onCancel: () => void; onConfirm: () => void }): JSX.Element {
   return (
     <div style={modalScrim} onClick={onCancel}>
       <div style={modalCard(t)} onClick={(e) => e.stopPropagation()}>
@@ -794,11 +863,21 @@ function ConfirmDeleteDialog({
           <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>Delete this skill?</div>
         </div>
         <div style={{ fontSize: 13, color: t.textSecondary, lineHeight: 1.55 }}>
-          <span style={{ fontFamily: t.fontMono, color: t.textPrimary }}>{skill.id}</span> will be removed and the AI
-          will stop following it. This can't be undone.
+          <span style={{ fontFamily: t.fontMono, color: t.textPrimary }}>{skill.id}</span> will be removed and the AI will stop following it. This can't be undone.
         </div>
-        {error ? <InlineNote t={t} tone="error">{error}</InlineNote> : null}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+        {error ? (
+          <InlineNote t={t} tone="error">
+            {error}
+          </InlineNote>
+        ) : null}
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 8,
+            marginTop: 4,
+          }}
+        >
           <button type="button" onClick={onCancel} disabled={deleting} style={ghostButton(t)}>
             Cancel
           </button>
@@ -837,24 +916,48 @@ function CountPill({ t, icon, label, count }: { t: Theme; icon: React.ReactNode;
 }
 
 function SkillChipField({ t, label, values, empty }: { t: Theme; label: string; values?: string[]; empty: string }): JSX.Element {
-  return <div style={{ display: 'grid', gridTemplateColumns: '118px minmax(0, 1fr)', gap: 10, fontSize: 12, lineHeight: 1.5 }}><strong style={{ color: t.textMuted }}>{label}</strong><div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>{values?.length ? values.map((value) => <span key={value} style={skillChip(t)}>{value}</span>) : <span style={{ color: t.textMuted, fontStyle: 'italic' }}>{empty}</span>}</div></div>;
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '118px minmax(0, 1fr)',
+        gap: 10,
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}
+    >
+      <strong style={{ color: t.textMuted }}>{label}</strong>
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+        {values?.length ? (
+          values.map((value) => (
+            <span key={value} style={skillChip(t)}>
+              {value}
+            </span>
+          ))
+        ) : (
+          <span style={{ color: t.textMuted, fontStyle: 'italic' }}>{empty}</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
-function Field({
-  label,
-  hint,
-  t,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  t: Theme;
-  children: React.ReactNode;
-}): JSX.Element {
+function Field({ label, hint, t, children }: { label: string; hint?: string; t: Theme; children: React.ReactNode }): JSX.Element {
   return (
     <div style={{ display: 'grid', gap: 6 }}>
       <label style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{label}</label>
-      {hint ? <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.45, marginTop: -2 }}>{hint}</div> : null}
+      {hint ? (
+        <div
+          style={{
+            fontSize: 11.5,
+            color: t.textMuted,
+            lineHeight: 1.45,
+            marginTop: -2,
+          }}
+        >
+          {hint}
+        </div>
+      ) : null}
       {children}
     </div>
   );
@@ -866,15 +969,44 @@ function InlineNote({ t, tone, children }: { t: Theme; tone: 'error' | 'muted'; 
 }
 
 function skillChip(t: Theme): CSSProperties {
-  return { fontSize: 11, fontWeight: 600, color: t.textSecondary, background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, padding: '3px 8px', fontFamily: t.fontMono };
+  return {
+    fontSize: 11,
+    fontWeight: 600,
+    color: t.textSecondary,
+    background: t.btnBg,
+    border: `1px solid ${t.btnBorder}`,
+    borderRadius: 6,
+    padding: '3px 8px',
+    fontFamily: t.fontMono,
+  };
 }
 
 function activeBadge(t: Theme): CSSProperties {
-  return { display: 'inline-flex', alignItems: 'center', fontSize: 10.5, fontWeight: 700, color: t.success, background: `${t.success}14`, border: `1px solid ${t.success}38`, borderRadius: 999, padding: '2px 7px' };
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: t.success,
+    background: `${t.success}14`,
+    border: `1px solid ${t.success}38`,
+    borderRadius: 999,
+    padding: '2px 7px',
+  };
 }
 
 function domainBadge(t: Theme): CSSProperties {
-  return { display: 'inline-flex', alignItems: 'center', fontSize: 10.5, fontWeight: 700, color: t.accent, background: `${t.accent}14`, border: `1px solid ${t.accent}38`, borderRadius: 999, padding: '2px 7px' };
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: t.accent,
+    background: `${t.accent}14`,
+    border: `1px solid ${t.accent}38`,
+    borderRadius: 999,
+    padding: '2px 7px',
+  };
 }
 
 // ── Styles ───────────────────────────────────────────────────────────────────

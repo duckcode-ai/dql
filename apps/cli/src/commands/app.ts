@@ -1,8 +1,7 @@
 /**
  * `dql app` — manage Apps (consumption-layer artifacts).
  *
- * Apps live at `apps/<id>/dql.app.json` or
- * `domains/<domain>/apps/<id>/dql.app.json` and bundle dashboards/notebooks plus
+ * New Apps live at `apps/<id>/dql.app.json` and bundle dashboards/notebooks plus
  * declarative members, roles, policies, RLS bindings, and schedules. They're
  * compiled into the `apps[]` and `dashboards[]` records of `dql-manifest.json`
  * and read by both the desktop UI and the CLI.
@@ -87,7 +86,7 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
 
   const id = suggestAppId(rawId);
   const projectRoot = findProjectRoot(process.cwd());
-  const appDir = resolveAppDir(projectRoot, domain, id);
+  const appDir = resolveAppDir(projectRoot, id);
 
   if (existsSync(appDir)) {
     throw new Error(
@@ -106,6 +105,9 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
     name: displayName,
     description: `${displayName} — consumption surface for ${domain}`,
     visibility: "shared",
+    ownerDomain: domain,
+    usesDomains: [domain],
+    requiredExports: [],
     domain,
     groups: [],
     lifecycle: "draft",
@@ -505,12 +507,7 @@ function relFromRoot(projectRoot: string, p: string): string {
   return p.startsWith(prefix) ? p.slice(prefix.length) : p;
 }
 
-function resolveAppDir(projectRoot: string, domain: string, id: string): string {
-  const domainSlug = slugify(domain);
-  const domainDir = domainSlug ? join(projectRoot, "domains", domainSlug) : "";
-  if (domainDir && existsSync(domainDir)) {
-    return join(domainDir, APPS_ROOT, id);
-  }
+function resolveAppDir(projectRoot: string, id: string): string {
   return join(projectRoot, APPS_ROOT, id);
 }
 
