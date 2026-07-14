@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NodeKind } from '../ast/nodes.js';
 import { Parser } from '../parser/parser.js';
-import { blockParameterDefinitions, resolveBlockParameterValues } from './parameters.js';
+import { blockParameterDefinitions, blockSemanticRuntimeBindings, resolveBlockParameterValues } from './parameters.js';
 
 const SOURCE = `block "Regional leaderboard" {
   domain = "sales"
@@ -68,5 +68,27 @@ describe('block parameter contract', () => {
     expect(resolveBlockParameterValues(definitions)).toMatchObject({ unresolved: ['start_date'] });
     expect(resolveBlockParameterValues(definitions, { start_date: 'not-a-date' }).errors)
       .toContain('Parameter "start_date" must be date.');
+  });
+
+  it('lowers semantic filter and limit values into one shared runtime contract', () => {
+    const block = new Parser(`block "Beverage revenue" {
+  domain = "commerce"
+  type = "semantic"
+  metric = "revenue"
+  params {
+    category_set: string[]
+    top_n: number = 10
+  }
+  filterBindings {
+    category_set = "product_category"
+    top_n = "limit"
+  }
+}`, 'semantic-parameters.dql').parse().statements[0];
+    if (block.kind !== NodeKind.BlockDecl) throw new Error('Expected block');
+
+    expect(blockSemanticRuntimeBindings(block, { category_set: ['Beverage', 'Coffee'], top_n: '5' })).toEqual({
+      filters: [{ dimension: 'product_category', operator: 'in', values: ['Beverage', 'Coffee'] }],
+      limit: 5,
+    });
   });
 });

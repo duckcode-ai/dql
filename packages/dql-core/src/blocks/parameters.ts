@@ -29,6 +29,11 @@ export interface BlockParameterResolution {
   errors: string[];
 }
 
+export interface SemanticRuntimeParameterBindings {
+  filters: Array<{ dimension: string; operator: string; values: string[] }>;
+  limit?: number;
+}
+
 /**
  * Converts the compact AST parameter shape into a durable runtime contract.
  * Legacy parameters continue to work: their type is inferred from the default
@@ -85,6 +90,37 @@ export function resolveBlockParameterValues(
   }
 
   return { values, resolved, unresolved, errors };
+}
+
+/**
+ * Lowers a semantic block's typed runtime values into the semantic-layer query
+ * contract. Keeping this in core gives Notebook, Ask, Apps, CLI, and MCP the
+ * same filter/limit behavior instead of maintaining surface-specific rules.
+ */
+export function blockSemanticRuntimeBindings(
+  block: BlockDeclNode,
+  values: Record<string, unknown> = {},
+): SemanticRuntimeParameterBindings {
+  if (block.blockType !== 'semantic') return { filters: [] };
+
+  const filters: SemanticRuntimeParameterBindings['filters'] = [];
+  let limit: number | undefined;
+  for (const definition of blockParameterDefinitions(block)) {
+    const value = values[definition.name];
+    if (value === undefined || value === null || value === '') continue;
+    if (definition.binding?.kind === 'semantic_filter') {
+      const rawValues = Array.isArray(value) ? value : [value];
+      filters.push({
+        dimension: definition.binding.field,
+        operator: definition.binding.operator,
+        values: rawValues.map((item) => String(item)),
+      });
+    } else if (definition.binding?.kind === 'limit') {
+      const parsed = typeof value === 'number' ? value : Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) limit = Math.floor(parsed);
+    }
+  }
+  return { filters, ...(limit !== undefined ? { limit } : {}) };
 }
 
 export function evaluateBlockParameterExpression(node: ExpressionNode): unknown {

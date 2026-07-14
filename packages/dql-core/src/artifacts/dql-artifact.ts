@@ -1,4 +1,8 @@
+import type { BlockParameterBinding, BlockParameterDefinition, BlockParameterPolicy } from '../blocks/parameters.js';
+
 export type DqlArtifactKind = 'certified_block' | 'semantic_block' | 'sql_block';
+export type DqlArtifactPersistence = 'transient' | 'saved';
+export type DqlArtifactTrustState = 'certified' | 'governed' | 'review_required';
 
 export interface DqlArtifactFilter {
   dimension: string;
@@ -27,6 +31,16 @@ export interface DqlArtifactReference {
   timeDimension?: DqlArtifactTimeDimension;
   orderBy?: DqlArtifactOrderBy[];
   limit?: number;
+  /** Typed runtime contract carried with transient, draft, and certified artifacts. */
+  parameters?: BlockParameterDefinition[];
+  /** Values used for the current execution. Changing them must not require another AI search. */
+  parameterValues?: Record<string, unknown>;
+  /** Transient answers become saved drafts without regenerating their DQL source. */
+  persistence?: DqlArtifactPersistence;
+  /** Trust is independent from executability and persistence. */
+  trustState?: DqlArtifactTrustState;
+  /** Optional compiled evidence. The DQL source remains the primary artifact. */
+  compiledSql?: string;
 }
 
 export function normalizeDqlArtifactReference(value: unknown): DqlArtifactReference | undefined {
@@ -46,6 +60,11 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
     filters: normalizeDqlArtifactFilters(record.filters),
     timeDimension: normalizeDqlArtifactTimeDimension(record.timeDimension),
     orderBy: normalizeDqlArtifactOrderBy(record.orderBy),
+    parameters: normalizeDqlArtifactParameters(record.parameters),
+    parameterValues: normalizeParameterValues(record.parameterValues),
+    persistence: normalizeDqlArtifactPersistence(record.persistence),
+    trustState: normalizeDqlArtifactTrustState(record.trustState),
+    compiledSql: cleanString(record.compiledSql),
     ...(limit === undefined ? {} : { limit }),
   };
 }
@@ -87,6 +106,71 @@ function normalizeDqlArtifactOrderBy(value: unknown): DqlArtifactOrderBy[] | und
     return name && direction ? [{ name, direction }] : [];
   });
   return orderBy.length ? orderBy : undefined;
+}
+
+function normalizeDqlArtifactParameters(value: unknown): BlockParameterDefinition[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const parameters = value.flatMap((item): BlockParameterDefinition[] => {
+    const record = objectRecord(item);
+    const name = cleanString(record?.name);
+    const type = normalizeParameterType(record?.type);
+    const policy = normalizeParameterPolicy(record?.policy);
+    if (!record || !name || !type || !policy || seen.has(name)) return [];
+    seen.add(name);
+    const binding = normalizeParameterBinding(record.binding);
+    return [{
+      name,
+      type,
+      required: record.required === true,
+      ...(record.default === undefined ? {} : { default: record.default }),
+      policy,
+      ...(binding ? { binding } : {}),
+    }];
+  });
+  return parameters.length ? parameters : undefined;
+}
+
+function normalizeParameterType(value: unknown): BlockParameterDefinition['type'] | undefined {
+  return value === 'string' || value === 'number' || value === 'boolean' || value === 'date'
+    || value === 'string[]' || value === 'number[]' || value === 'date[]'
+    ? value
+    : undefined;
+}
+
+function normalizeParameterPolicy(value: unknown): BlockParameterPolicy | undefined {
+  return value === 'dynamic' || value === 'static' || value === 'business' || value === 'derived'
+    || value === 'optional' || value === 'ambiguous_review_required'
+    ? value
+    : undefined;
+}
+
+function normalizeParameterBinding(value: unknown): BlockParameterBinding | undefined {
+  const record = objectRecord(value);
+  if (!record) return undefined;
+  if (record.kind === 'sql_value') return { kind: 'sql_value' };
+  if (record.kind === 'limit') return { kind: 'limit' };
+  const field = cleanString(record.field);
+  if (record.kind === 'semantic_filter' && field
+    && (record.operator === 'equals' || record.operator === 'in' || record.operator === 'gte' || record.operator === 'lte')) {
+    return { kind: 'semantic_filter', field, operator: record.operator };
+  }
+  return undefined;
+}
+
+function normalizeParameterValues(value: unknown): Record<string, unknown> | undefined {
+  const record = objectRecord(value);
+  if (!record) return undefined;
+  const entries = Object.entries(record).filter(([name]) => name.trim().length > 0);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeDqlArtifactPersistence(value: unknown): DqlArtifactPersistence | undefined {
+  return value === 'transient' || value === 'saved' ? value : undefined;
+}
+
+function normalizeDqlArtifactTrustState(value: unknown): DqlArtifactTrustState | undefined {
+  return value === 'certified' || value === 'governed' || value === 'review_required' ? value : undefined;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {

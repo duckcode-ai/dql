@@ -1,5 +1,5 @@
 import type { DiffReport } from '@duckcodeailabs/dql-core/format';
-import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
+import { normalizeDqlArtifactReference, type DqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
 import type {
   ManifestDbtFirstModeling,
@@ -44,6 +44,7 @@ import type {
   BlockSimilarityMatch,
   DqlCandidateRecommendedAction,
   BlockStudioDbtStatus,
+  BlockParameterDefinition,
   SemanticLayerDiagnostics,
   AppSummary,
   ActivePersona,
@@ -368,6 +369,10 @@ export type DashboardTileParameterBinding = {
   filter?: string;
   field?: string;
   value?: unknown;
+  parameterType?: BlockParameterDefinition['type'];
+  required?: boolean;
+  default?: unknown;
+  policy?: BlockParameterDefinition['policy'];
 };
 
 export type DashboardTileSourceEvidence = {
@@ -793,6 +798,22 @@ export interface AgentRun {
   events: AgentRunEvent[];
   nextActions: AgentRunNextAction[];
   repairAttempts: number;
+}
+
+export interface CertifiedBlockInvocationResponse {
+  result: QueryResult & {
+    sql?: string;
+    blockName?: string;
+    blockPath?: string;
+    chartConfig?: unknown;
+    parameters?: Array<{ name: string; value: unknown; source: string }>;
+    auditId?: string;
+  };
+  parameters: BlockParameterDefinition[];
+}
+
+export interface DqlArtifactInvocationResponse extends CertifiedBlockInvocationResponse {
+  artifact: DqlArtifactReference;
 }
 
 export type AgentRunAudience = 'stakeholder' | 'analyst';
@@ -2669,6 +2690,60 @@ export const api = {
     });
   },
 
+  async getCertifiedBlockParameters(blockName: string): Promise<{
+    blockName: string;
+    blockPath: string;
+    parameters: BlockParameterDefinition[];
+  }> {
+    return request(`/api/blocks/parameters?name=${encodeURIComponent(blockName)}`);
+  },
+
+  async invokeCertifiedBlock(blockName: string, parameters: Record<string, unknown>, question?: string): Promise<CertifiedBlockInvocationResponse> {
+    const raw = await request<any>('/api/blocks/invoke', {
+      method: 'POST',
+      body: JSON.stringify({ blockName, parameters, question }),
+    });
+    return {
+      parameters: Array.isArray(raw?.parameters) ? raw.parameters : [],
+      result: {
+        ...normalizeQueryResultPayload(raw?.result),
+        ...(typeof raw?.result?.sql === 'string' ? { sql: raw.result.sql } : {}),
+        ...(typeof raw?.result?.blockName === 'string' ? { blockName: raw.result.blockName } : {}),
+        ...(typeof raw?.result?.blockPath === 'string' ? { blockPath: raw.result.blockPath } : {}),
+        ...(raw?.result?.chartConfig ? { chartConfig: raw.result.chartConfig } : {}),
+        ...(Array.isArray(raw?.result?.parameters) ? { parameters: raw.result.parameters } : {}),
+        ...(typeof raw?.result?.auditId === 'string' ? { auditId: raw.result.auditId } : {}),
+      },
+    };
+  },
+
+  async invokeDqlArtifact(
+    artifact: DqlArtifactReference,
+    parameters: Record<string, unknown>,
+    question?: string,
+    blockName?: string,
+  ): Promise<DqlArtifactInvocationResponse> {
+    const raw = await request<any>('/api/dql/artifacts/execute', {
+      method: 'POST',
+      body: JSON.stringify({ artifact, parameters, question, blockName }),
+    });
+    const normalizedArtifact = normalizeDqlArtifactReference(raw?.artifact);
+    if (!normalizedArtifact) throw new Error('DQL artifact execution returned an invalid artifact contract.');
+    return {
+      artifact: normalizedArtifact,
+      parameters: normalizedArtifact.parameters ?? [],
+      result: {
+        ...normalizeQueryResultPayload(raw?.result),
+        ...(typeof raw?.result?.sql === 'string' ? { sql: raw.result.sql } : {}),
+        ...(typeof raw?.result?.blockName === 'string' ? { blockName: raw.result.blockName } : {}),
+        ...(typeof raw?.result?.blockPath === 'string' ? { blockPath: raw.result.blockPath } : {}),
+        ...(raw?.result?.chartConfig ? { chartConfig: raw.result.chartConfig } : {}),
+        ...(Array.isArray(raw?.result?.parameters) ? { parameters: raw.result.parameters } : {}),
+        ...(typeof raw?.result?.auditId === 'string' ? { auditId: raw.result.auditId } : {}),
+      },
+    };
+  },
+
   async saveBlockStudio(payload: {
     path?: string | null;
     source: string;
@@ -3016,7 +3091,7 @@ export const api = {
           config: cell.chartConfig,
         },
         executionTarget: cell.executionTarget,
-        parameters: cell.blockBinding?.parameterValues,
+        parameters: cell.blockBinding?.parameterValues ?? cell.dqlParameterValues,
         executionContext,
       }),
       signal,

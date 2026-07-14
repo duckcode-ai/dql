@@ -15,10 +15,13 @@ import {
   findDashboardsForApp,
   parseAppDocument,
   parseDashboardDocument,
+  normalizeDqlArtifactReference,
   suggestAppId,
   type AppDocument,
+  type BlockParameterDefinition,
   type DashboardDisplayMetadata,
   type DashboardDocument,
+  type DashboardFilter,
   type DashboardGridItem,
 } from '@duckcodeailabs/dql-core';
 import {
@@ -5216,6 +5219,12 @@ function createAiPinTile(
       followUps: Array.isArray(input.followUps) ? input.followUps.filter((item): item is string => typeof item === 'string') : [],
     });
     const vizType = normalizeVizTypeFromChart(input.chartConfig);
+    const dqlArtifact = normalizeDqlArtifactReference(
+      input.analysisPlan && typeof input.analysisPlan === 'object' && !Array.isArray(input.analysisPlan)
+        ? (input.analysisPlan as Record<string, unknown>).dqlArtifact
+        : undefined,
+    );
+    const runtimeParameters = (dqlArtifact?.parameters ?? []).filter((parameter) => parameter.policy === 'dynamic' || parameter.policy === 'optional');
     const tile: DashboardGridItem = {
       i: tileId,
       ...nextTilePosition(loaded.dashboard),
@@ -5223,9 +5232,31 @@ function createAiPinTile(
       viz: { type: vizType },
       display: displayForAiPin(title, vizType, input),
       title,
+      ...(runtimeParameters.length > 0 ? {
+        parameterBindings: runtimeParameters.map((parameter) => ({
+          param: parameter.name,
+          source: 'dashboard_filter' as const,
+          filter: parameter.name,
+          field: parameter.binding?.kind === 'semantic_filter' ? parameter.binding.field : parameter.name,
+          parameterType: parameter.type,
+          required: parameter.required,
+          ...(parameter.default === undefined ? {} : { default: parameter.default }),
+          policy: parameter.policy,
+        })),
+        trustState: dqlArtifact?.trustState === 'certified' ? 'certified' as const : 'review_required' as const,
+        reviewStatus: dqlArtifact?.trustState === 'certified' ? 'certified' as const : 'review_required' as const,
+      } : {}),
     };
+    const artifactFilters = runtimeParameters.map(dashboardFilterForArtifactParameter);
+    const existingFilterIds = new Set((loaded.dashboard.filters ?? []).map((filter) => filter.id));
     const dashboard: DashboardDocument = {
       ...loaded.dashboard,
+      ...(artifactFilters.length > 0 ? {
+        filters: [
+          ...(loaded.dashboard.filters ?? []),
+          ...artifactFilters.filter((filter) => !existingFilterIds.has(filter.id)),
+        ],
+      } : {}),
       layout: {
         ...loaded.dashboard.layout,
         items: [...loaded.dashboard.layout.items, tile],
@@ -5239,6 +5270,28 @@ function createAiPinTile(
   } finally {
     storage.close();
   }
+}
+
+function dashboardFilterForArtifactParameter(
+  parameter: BlockParameterDefinition,
+): DashboardFilter {
+  const type: DashboardFilter['type'] = parameter.type === 'number'
+    ? 'number'
+    : parameter.type === 'boolean'
+      ? 'boolean'
+      : parameter.type === 'date'
+        ? 'date'
+        : parameter.type.endsWith('[]')
+          ? 'select'
+          : 'string';
+  const options = Array.isArray(parameter.default) ? parameter.default.map(String) : undefined;
+  return {
+    id: parameter.name,
+    type,
+    ...(parameter.default === undefined ? {} : { default: parameter.default }),
+    ...(options?.length ? { options } : {}),
+    ...(parameter.binding?.kind === 'semantic_filter' ? { bindsTo: parameter.binding.field } : {}),
+  };
 }
 
 function findExistingAiPinTile(

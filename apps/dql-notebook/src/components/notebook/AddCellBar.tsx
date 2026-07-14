@@ -41,8 +41,15 @@ type PaletteEntry = {
 
 const CORE_PALETTE: PaletteEntry[] = [
   {
+    type: "dql",
+    label: "DQL Query",
+    Icon: BlockIcon,
+    color: "#6b8afd",
+    group: "core",
+  },
+  {
     type: "sql",
-    label: "Query",
+    label: "SQL (advanced)",
     Icon: SQLCellIcon,
     color: "#3b8ef0",
     group: "core",
@@ -153,7 +160,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   };
 
   const addCell = (type: CellType) => {
-    const cell = makeCell(type);
+    const cell = makeCell(type, type === 'dql' ? newNotebookDqlSource() : '');
     dispatch({ type: 'ADD_CELL', cell, afterId });
     closeAll();
   };
@@ -396,6 +403,28 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
       )}
     </div>
   );
+}
+
+function newNotebookDqlSource(): string {
+  return `block "notebook_analysis" {
+  status = "draft"
+  domain = "uncategorized"
+  type = "custom"
+  description = "Notebook analysis"
+
+  params {
+    top_n: number = 10
+  }
+  parameterPolicy {
+    top_n = "dynamic"
+  }
+
+  query = """
+SELECT 1 AS value
+LIMIT \${top_n}
+  """
+}
+`;
 }
 
 function PaletteTile({

@@ -66,4 +66,48 @@ describe('buildExecutionPlan', () => {
     expect(plan?.sql).toContain('SUM(product_price) AS revenue');
     expect(plan?.sql).toContain('is_food_item AS item_food_flag');
   });
+
+  it('applies typed semantic filter and limit parameters to composed SQL', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'revenue',
+        sql: 'product_price', type: 'sum', table: 'order_items',
+      }],
+      dimensions: [{
+        name: 'item_category', label: 'Item category', description: '', domain: 'revenue',
+        sql: 'product_category', type: 'string', table: 'order_items',
+      }],
+    });
+
+    const plan = buildExecutionPlan({
+      id: 'cell-4',
+      type: 'dql',
+      title: 'Revenue by category',
+      source: `block "Revenue by category" {
+  domain = "revenue"
+  type = "semantic"
+  metric = "revenue"
+  dimensions = ["item_category"]
+  params {
+    category: string
+    top_n: number = 10
+  }
+  parameterPolicy {
+    category = "dynamic"
+    top_n = "dynamic"
+  }
+  filterBindings {
+    category = "item_category"
+    top_n = "limit"
+  }
+}`,
+    }, {
+      semanticLayer,
+      driver: 'duckdb',
+      parameters: { category: 'Beverage', top_n: 5 },
+    });
+
+    expect(plan?.sql).toContain("product_category = 'Beverage'");
+    expect(plan?.sql).toContain('LIMIT 5');
+  });
 });

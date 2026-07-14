@@ -1,4 +1,5 @@
 import type {
+  BlockParameterDefinition,
   ComposeQueryResult,
   DimensionDefinition,
   DqlArtifactReference,
@@ -230,6 +231,10 @@ function buildSemanticBridgeResult(input: {
     orderBy,
     limit,
   });
+  const runtimeContract = semanticArtifactRuntimeContract({
+    filters,
+    limit,
+  });
   return {
     sql: composed.sql,
     metric: primaryMetric.name,
@@ -260,6 +265,11 @@ function buildSemanticBridgeResult(input: {
       ...(timeDimension ? { timeDimension } : {}),
       ...(orderBy ? { orderBy } : {}),
       ...(limit ? { limit } : {}),
+      ...(runtimeContract.parameters.length > 0 ? { parameters: runtimeContract.parameters } : {}),
+      ...(Object.keys(runtimeContract.values).length > 0 ? { parameterValues: runtimeContract.values } : {}),
+      persistence: 'transient',
+      trustState: 'governed',
+      compiledSql: composed.sql,
     },
     composeResult: composed,
   };
@@ -704,6 +714,7 @@ function inferTimeGranularity(question: string, questionPlan: AnalysisQuestionPl
 }
 
 export function renderSemanticDqlArtifact(input: SemanticDqlArtifactInput): string {
+  const runtimeContract = semanticArtifactRuntimeContract({ filters: input.filters, limit: input.limit });
   const lines = [
     `block "${escapeDqlString(input.name ?? titleFromQuestion(input.question, input.titleFallback ?? input.metrics[0] ?? 'semantic_query'))}" {`,
     '  status = "draft"',
@@ -728,8 +739,75 @@ export function renderSemanticDqlArtifact(input: SemanticDqlArtifactInput): stri
   if (typeof input.limit === 'number' && Number.isFinite(input.limit) && input.limit > 0) {
     lines.push(`  limit = ${Math.floor(input.limit)}`);
   }
+  if (runtimeContract.parameters.length > 0) {
+    lines.push('  params {');
+    for (const parameter of runtimeContract.parameters) {
+      lines.push(`    ${parameter.name}: ${parameter.type} = ${renderDqlParameterValue(parameter.default)}`);
+    }
+    lines.push('  }');
+    lines.push('  parameterPolicy {');
+    for (const parameter of runtimeContract.parameters) lines.push(`    ${parameter.name} = "dynamic"`);
+    lines.push('  }');
+    lines.push('  filterBindings {');
+    for (const parameter of runtimeContract.parameters) {
+      const binding = parameter.binding;
+      if (binding?.kind === 'semantic_filter') lines.push(`    ${parameter.name} = "${escapeDqlString(binding.field)}"`);
+      else if (binding?.kind === 'limit') lines.push(`    ${parameter.name} = "limit"`);
+    }
+    lines.push('  }');
+  }
   lines.push('}');
   return `${lines.join('\n')}\n`;
+}
+
+function semanticArtifactRuntimeContract(input: {
+  filters: SemanticBridgeFilter[];
+  limit?: number;
+}): { parameters: BlockParameterDefinition[]; values: Record<string, unknown> } {
+  const parameters: BlockParameterDefinition[] = [];
+  const values: Record<string, unknown> = {};
+  const used = new Set<string>();
+  const uniqueName = (preferred: string, fallback: string): string => {
+    const base = preferred.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || fallback;
+    let name = base;
+    let suffix = 2;
+    while (used.has(name)) name = `${base}_${suffix++}`;
+    used.add(name);
+    return name;
+  };
+  for (const [index, filter] of input.filters.entries()) {
+    if (filter.values.length === 0) continue;
+    const name = uniqueName(leafName(filter.dimension), `filter_${index + 1}`);
+    const multiple = filter.values.length > 1;
+    const value = multiple ? [...filter.values] : filter.values[0];
+    parameters.push({
+      name,
+      type: multiple ? 'string[]' : 'string',
+      required: false,
+      default: value,
+      policy: 'dynamic',
+      binding: {
+        kind: 'semantic_filter',
+        field: filter.dimension,
+        operator: multiple || filter.operator === 'in' ? 'in' : 'equals',
+      },
+    });
+    values[name] = value;
+  }
+  if (typeof input.limit === 'number' && Number.isFinite(input.limit) && input.limit > 0) {
+    const value = Math.floor(input.limit);
+    const name = uniqueName('top_n', 'top_n');
+    parameters.push({ name, type: 'number', required: false, default: value, policy: 'dynamic', binding: { kind: 'limit' } });
+    values[name] = value;
+  }
+  return { parameters, values };
+}
+
+function renderDqlParameterValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(renderDqlParameterValue).join(', ')}]`;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return `"${escapeDqlString(String(value ?? ''))}"`;
 }
 
 export function semanticDqlArtifactName(input: SemanticDqlArtifactInput): string {

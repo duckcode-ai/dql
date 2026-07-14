@@ -31,6 +31,7 @@ describe(".dqlnb v2 persistence", () => {
             metrics: ["retained_customers"],
             reviewState: "draft",
           },
+          dqlParameterValues: { category: "Beverage", top_n: 10 },
           chatConfig: {
             history: [],
             threadId: "thread-1",
@@ -59,6 +60,7 @@ describe(".dqlnb v2 persistence", () => {
     ]);
     expect(cell.annotations[0].body).toBe("Validate cohort boundary");
     expect(cell.dqlArtifact.metrics).toEqual(["retained_customers"]);
+    expect(cell.dqlParameterValues).toEqual({ category: "Beverage", top_n: 10 });
     expect(cell.chatConfig.threadId).toBe("thread-1");
     expect(cell.kernel.environment).toBe("reserved");
     expect(cell.futureAdvancedField).toEqual({ enabled: true });

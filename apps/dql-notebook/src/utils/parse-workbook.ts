@@ -129,6 +129,7 @@ const KNOWN_CELL_FIELDS = new Set([
   "chatConfig",
   "upstream",
   "blockBinding",
+  "dqlParameterValues",
   "dqlArtifact",
   "executionTarget",
   "datasetRefs",
@@ -161,6 +162,7 @@ export interface DqlNotebookFile {
     chatConfig?: ChatCellConfig;
     upstream?: string;
     blockBinding?: BlockBinding;
+    dqlParameterValues?: Record<string, unknown>;
     dqlArtifact?: CellDqlArtifact;
     executionTarget?: ExecutionTarget;
     datasetRefs?: DatasetReference[];
@@ -198,6 +200,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
         ...(c.chatConfig ? { chatConfig: c.chatConfig } : {}),
         ...(c.upstream ? { upstream: c.upstream } : {}),
         ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
+        ...(c.dqlParameterValues ? { dqlParameterValues: c.dqlParameterValues } : {}),
         ...(c.dqlArtifact ? { dqlArtifact: c.dqlArtifact } : {}),
         ...(c.executionTarget ? { executionTarget: c.executionTarget } : {}),
         ...(c.datasetRefs ? { datasetRefs: c.datasetRefs } : {}),
@@ -255,6 +258,7 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(c.chatConfig ? { chatConfig: c.chatConfig } : {}),
       ...(c.upstream ? { upstream: c.upstream } : {}),
       ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
+      ...(c.dqlParameterValues ? { dqlParameterValues: c.dqlParameterValues } : {}),
       ...(c.dqlArtifact ? { dqlArtifact: c.dqlArtifact } : {}),
       ...(c.executionTarget ? { executionTarget: c.executionTarget } : {}),
       ...(c.datasetRefs ? { datasetRefs: c.datasetRefs } : {}),

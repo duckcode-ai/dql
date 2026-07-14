@@ -257,7 +257,8 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         setAiOpen(true);
         return;
       }
-      const cell = makeCell("sql", sql);
+      const dqlSource = payload.dqlArtifact?.source?.trim();
+      const cell = makeCell(dqlSource ? "dql" : "sql", dqlSource || sql);
       cell.name = safeCellName(
         payload.title ?? payload.dqlArtifact?.name ?? "AI analysis",
       );
@@ -276,7 +277,13 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           kind: payload.dqlArtifact.kind,
           metrics: payload.dqlArtifact.metrics,
           dimensions: payload.dqlArtifact.dimensions,
+          parameters: payload.dqlArtifact.parameters,
+          parameterValues: payload.dqlArtifact.parameterValues,
+          persistence: payload.dqlArtifact.persistence,
+          trustState: payload.dqlArtifact.trustState,
+          compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
         };
+        cell.dqlParameterValues = payload.dqlArtifact.parameterValues;
       }
       const datasetRefs = datasets
         .filter((dataset) =>

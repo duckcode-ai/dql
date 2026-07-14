@@ -51,6 +51,7 @@ import { extractSqlFromText } from "../../utils/block-studio";
 import { CellChrome } from "@duckcodeailabs/dql-ui";
 import { CombineDataPanel, type CombineDataRequest } from '../notebook/CombineDataPanel';
 import { buildCombinedDatasetCell, findDatasetReferences, findWarehouseReferences } from '../../utils/dataset-references';
+import { BlockParameterControls } from '../parameters/BlockParameterControls';
 
 interface CellProps {
   cell: Cell;
@@ -420,29 +421,55 @@ function BoundBlockParameterControls({
   if (parameters.length === 0 || binding.state === 'forked') return null;
   const current = binding.parameterValues ?? {};
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '8px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: t.appBg }}>
-      {parameters.map((parameter) => {
-        const value = Object.prototype.hasOwnProperty.call(current, parameter.name) ? current[parameter.name] : parameter.default;
-        const setValue = (next: unknown) => onChange({ ...current, [parameter.name]: next });
-        return (
-          <label key={parameter.name} style={{ display: 'grid', gap: 3, minWidth: 145 }}>
-            <span style={{ fontSize: 10, color: t.textMuted }}>{parameter.name}{parameter.required ? ' *' : ''}</span>
-            {parameter.type === 'boolean' ? (
-              <select value={String(value ?? '')} onChange={(event) => setValue(event.target.value)} style={{ ...binderBtnStyle(t, t.accent), width: '100%' }}>
-                <option value="">Select…</option><option value="true">True</option><option value="false">False</option>
-              </select>
-            ) : (
-              <input
-                type={parameter.type === 'number' ? 'number' : parameter.type === 'date' ? 'date' : 'text'}
-                value={Array.isArray(value) ? value.join(', ') : value == null ? '' : String(value)}
-                placeholder={parameter.type.endsWith('[]') ? 'a, b, c' : parameter.required ? 'Required' : 'Default'}
-                onChange={(event) => setValue(event.target.value)}
-                style={{ background: t.inputBg, border: `1px solid ${t.inputBorder}`, borderRadius: 4, color: t.textPrimary, padding: '4px 6px', fontSize: 11, fontFamily: t.font }}
-              />
-            )}
-          </label>
-        );
-      })}
+    <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: t.appBg }}>
+      <BlockParameterControls
+        parameters={parameters}
+        values={current}
+        onChange={(name, value) => onChange({ ...current, [name]: value })}
+        t={t}
+      />
+    </div>
+  );
+}
+
+function InlineDqlParameterControls({
+  source,
+  values,
+  t,
+  onChange,
+}: {
+  source: string;
+  values: Record<string, unknown>;
+  t: Theme;
+  onChange: (values: Record<string, unknown>) => void;
+}) {
+  const [parameters, setParameters] = useState<BlockParameterDefinition[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api.validateBlockStudio(source)
+        .then((validation) => {
+          if (cancelled) return;
+          setParameters(validation.parameters ?? []);
+          const defaults = Object.fromEntries((validation.parameters ?? []).flatMap((parameter) =>
+            parameter.default === undefined ? [] : [[parameter.name, parameter.default]]));
+          if (Object.keys(defaults).length > 0) onChange({ ...defaults, ...values });
+        })
+        .catch(() => { if (!cancelled) setParameters([]); });
+    }, 200);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [source]);
+
+  if (parameters.length === 0) return null;
+  return (
+    <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: t.appBg }}>
+      <BlockParameterControls
+        parameters={parameters}
+        values={values}
+        onChange={(name, value) => onChange({ ...values, [name]: value })}
+        t={t}
+      />
     </div>
   );
 }
@@ -1547,6 +1574,19 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
             onUnbind={() => {
               dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { blockBinding: undefined } });
             }}
+          />
+        )}
+
+        {cell.type === 'dql' && !cell.blockBinding && (
+          <InlineDqlParameterControls
+            source={cell.content}
+            values={cell.dqlParameterValues ?? {}}
+            t={t}
+            onChange={(dqlParameterValues) => dispatch({
+              type: 'UPDATE_CELL',
+              id: cell.id,
+              updates: { dqlParameterValues },
+            })}
           />
         )}
 

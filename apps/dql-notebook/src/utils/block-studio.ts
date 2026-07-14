@@ -317,6 +317,7 @@ export function setSemanticRuntimeFilters(content: string, filters: string[]): s
   const unique = Array.from(new Set(filters.filter(Boolean)));
   let next = setSemanticArray(content, 'requested_filters', unique);
   next = updateNamedSectionEntries(next, 'params', managedNames, unique, (name) => `${name}: string`);
+  next = updateNamedSectionEntries(next, 'parameterPolicy', managedNames, unique, (name) => `${name} = "dynamic"`);
   next = updateNamedSectionEntries(next, 'filterBindings', managedNames, unique, (name) => `${name} = "${escapeDqlValue(name)}"`);
   return next;
 }
