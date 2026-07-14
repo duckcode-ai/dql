@@ -53,6 +53,16 @@ skill, or relationship ranked in the context window. A rejected candidate keeps
 its exact policy code and is terminal for that candidate: it is neither a
 generic grounding retry nor a misleading user clarification (`AGT-004`).
 
+Before candidate routing, the question is normalized into a typed analytical
+contract: requested measures, dimensions, entity grain, categorical/time
+filters, ranking/limit, and unresolved ambiguity. Categorical value grounding
+uses bounded runtime values plus dbt/MetricFlow/domain vocabulary; it must not
+depend on a project-specific keyword list. Synonyms may map a phrase to a
+semantic metric only with cited metadata evidence. Retrieval searches certified
+assets, MetricFlow, domain context/skills, and dbt/warehouse context as parallel
+candidate classes, then passes a compact ranked context pack to routing
+(`AGT-005`).
+
 ## Governed answer cascade
 
 The route order is mandatory (`AGT-001`):
@@ -70,6 +80,13 @@ checks every table/column/relationship/export/contract against the same
 snapshot. Certified blocks do not bypass parameter, purpose, export, contract,
 or freshness checks.
 
+A certified asset terminates the cascade only when its declared or safely
+inferred contract covers every requested measure, output, dimension, grain,
+filter/value, ranking direction, and parameter. A request with a categorical
+filter cannot be answered by an unparameterized block that aggregates across
+that category. Unknown filter/grain capability is context-only for a shaped
+analytical request, not evidence of compatibility (`AGT-006`).
+
 The exploratory lane is distinct from governed SQL. It may use dbt catalog,
 schema, tests, lineage, and descriptions to propose a bounded single-domain
 join hypothesis, but none of those facts is relationship proof and it must not
@@ -82,6 +99,22 @@ certified block, governed semantic query, or governed SQL answer (`EXP-001`).
 An exploratory answer may offer an explicit draft-block action with that
 provenance, but never writes, certifies, or promotes an asset automatically
 (`EXP-002`).
+
+When bounded exploration succeeds, the persisted conversation turn records the
+executed exploratory outcome, result contract, context-pack/snapshot reference,
+SQL provenance, row bound, and review-required trust state. It must not retain
+an earlier refusal/no-answer terminal state after successful recovery
+(`EXP-003`).
+
+## Multi-turn analytical intent
+
+Conversation continuation operates on the prior typed analytical contract and
+the new turn's typed delta. It may carry forward a measure, dimension, filter,
+timeframe, ranking, or selected result value only when the follow-up refers to
+or corrects it. Prior answer prose, SQL text, DQL source, owners, paths, and
+provider metadata are retrieval evidence only and cannot become requested
+dimensions or filter values. A correction rebuilds the effective contract and
+re-runs the full candidate cascade when compatibility changes (`CTX-003`).
 
 ## Ambiguity and unsafe questions
 

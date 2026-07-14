@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyRequestedTopNToExploratorySql,
   buildAgentValueProbeSql,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
@@ -407,6 +408,19 @@ describe('domain Related Products backlinks', () => {
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
+  });
+});
+
+describe('exploratory result contracts', () => {
+  it('EXP-003 enforces the planned overall top-N before exploratory execution', () => {
+    expect(applyRequestedTopNToExploratorySql(
+      'SELECT customer_name, spend FROM customers ORDER BY spend DESC LIMIT 100',
+      10,
+    )).toBe('SELECT customer_name, spend FROM customers ORDER BY spend DESC LIMIT 10');
+    expect(applyRequestedTopNToExploratorySql(
+      'SELECT customer_name, spend FROM customers ORDER BY spend DESC;',
+      5,
+    )).toBe('SELECT customer_name, spend FROM customers ORDER BY spend DESC\nLIMIT 5');
   });
 });
 

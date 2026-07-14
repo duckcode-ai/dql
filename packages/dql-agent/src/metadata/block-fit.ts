@@ -62,7 +62,7 @@ export function evaluateCertifiedBlockFit(input: {
   const measureMatch = requestedMeasures.length === 0
     || requestedMeasures.some((measure) => blockMeasures.has(measure) || block.textTokens.has(measure) || outputHasEntity(blockOutputs, measure));
 
-  const unsupportedFilters = unsupportedRequestedFilters(requested, block);
+  const unsupportedFilters = unsupportedRequestedFilters(requested, block, input.question);
   const grainMismatch = requested.grain && block.grain && canonicalToken(requested.grain) !== block.grain
     && !blockDimensions.has(canonicalToken(requested.grain))
     ? `certified block grain=${block.grain} does not cover requested grain=${canonicalToken(requested.grain)}`
@@ -222,14 +222,38 @@ function inferredTextDimensions(text: string): string[] {
   return uniqueStrings(inferred);
 }
 
-function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: BlockShape): string[] {
+function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: BlockShape, question: string): string[] {
   const requestedFilters = uniqueStrings([
     ...requested.filters,
     ...requested.followUpReferences.flatMap((ref) => ref.resolvedValues ?? []),
-  ].map(canonicalToken).filter(Boolean));
-  if (requestedFilters.length === 0 || block.filters.length === 0) return [];
+  ].map(canonicalToken).filter((filter) => Boolean(filter) && !isTemporalFilter(filter)));
+  if (requestedFilters.length === 0) return [];
+  // A filtered question cannot be answered exactly by an unparameterized block.
+  // Returning [] here used to erase the user's restriction and let a broad
+  // certified ranking (for example all-customer lifetime spend) answer a
+  // category-specific question. A block may still be useful as context, but it
+  // cannot terminate the certified lane unless it exposes the requested value
+  // through a filter or dimension contract.
+  if (block.filters.length === 0) {
+    // A certified breakdown can be safely narrowed on one of its own output
+    // dimensions when the question explicitly names that binding ("by segment
+    // for Enterprise"). The adaptation lane applies the actual restriction.
+    const explicitlyFilterable = block.dimensions.some((dimension) => {
+      const words = dimension.replace(/_/g, '[ _-]+');
+      return new RegExp(`\\b(?:by|per)\\s+${words}\\b`, 'i').test(question)
+        || new RegExp(`\\b${words}\\s*(?:=|:|is|equals)`, 'i').test(question);
+    });
+    if (explicitlyFilterable) return [];
+    return requestedFilters.filter((filter) => !block.dimensions.includes(filter));
+  }
   const blockFilters = new Set(block.filters);
   return requestedFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter));
+}
+
+function isTemporalFilter(filter: string): boolean {
+  return /^(?:day|week|month|quarter|year|season)$/.test(filter)
+    || /^(?:last|this|next|previous|prior|current)_(?:day|week|month|quarter|year|season)$/.test(filter)
+    || /^\d{4}$/.test(filter);
 }
 
 function topNFitAction(requested: RequestedAnswerShape, block: BlockShape): CertifiedBlockFit['topNAction'] {

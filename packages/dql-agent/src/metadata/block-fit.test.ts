@@ -20,6 +20,22 @@ function fit(question: string, block: MetadataObject) {
 }
 
 describe('certified block fit', () => {
+  it('AGT-006 rejects an unfiltered lifetime-spend block for beverage-scoped ranking', () => {
+    const block = certifiedBlock('top_customers', {
+      grain: 'customer',
+      entities: ['Customer'],
+      declaredOutputs: ['customer_name', 'lifetime_spend', 'order_count'],
+      dimensions: ['customer'],
+      sql: 'select customer_name, lifetime_spend, order_count from customers order by lifetime_spend desc limit 10',
+    });
+
+    const result = fit('who are the customers who spent most on beverages?', block);
+
+    expect(result.kind).toBe('context_only');
+    expect(result.unsupportedFilters).toContain('beverage');
+    expect(result.reasons.join(' ')).toContain('unsupported requested filters');
+  });
+
   it('rejects a category-level revenue block for a product-level revenue request', () => {
     const block = certifiedBlock('food_vs_drink_revenue', {
       grain: 'category',

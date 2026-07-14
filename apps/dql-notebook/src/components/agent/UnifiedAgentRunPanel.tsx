@@ -881,6 +881,51 @@ function slowReasonFor(thinkingMode: AgentThinkingMode | undefined, events: Agen
   return null;
 }
 
+export interface LongRunGuidance {
+  title: string;
+  detail: string;
+}
+
+/** UI-003 — progressive, actionable copy for genuinely long governed work. */
+export function longRunGuidanceFor(
+  elapsedSeconds: number,
+  route?: AgentRunRoute,
+  hasRepair = false,
+): LongRunGuidance | null {
+  if (elapsedSeconds < 12) return null;
+  if (elapsedSeconds < 24 && !hasRepair) {
+    return {
+      title: 'Checking governed context',
+      detail: 'AI is checking certified blocks, semantic metrics, domain modeling, and dbt metadata before it generates SQL.',
+    };
+  }
+  if (route === 'research') {
+    return {
+      title: 'Deep research is validating the analysis',
+      detail: 'This can use several AI and SQL steps. Reusable relationships and semantic metrics make future investigations faster; reviewed repeat answers can be saved as blocks and certified.',
+    };
+  }
+  return {
+    title: hasRepair ? 'Repairing and validating generated SQL' : 'Generating and validating SQL',
+    detail: 'No exact reusable answer covered this question. After review, save this result as a block and certify it for faster repeat questions and lower future AI/token usage. Model repeated joins or reusable metrics once.',
+  };
+}
+
+/** UI-003 — keep the optimization path visible beside the completed result. */
+export function completedRunGuidanceFor(
+  elapsedSeconds: number,
+  route: AgentRunRoute,
+  trustState: AgentRunTrustState,
+  repairAttempts: number,
+): LongRunGuidance | null {
+  if (trustState === 'certified' || (elapsedSeconds < 20 && repairAttempts === 0)) return null;
+  if (route !== 'research' && route !== 'generated_answer') return null;
+  return {
+    title: route === 'research' ? 'Make future research faster' : 'Make this question faster next time',
+    detail: 'If this analysis is reusable, save it as a block, review it, then certify it. Add repeated joins to Domain Modeling and reusable measures to the semantic layer to reduce future AI work and token usage.',
+  };
+}
+
 const ACTIVITY_STAGES: Array<{ key: 'plan' | 'work' | 'verify'; label: string }> = [
   { key: 'plan', label: 'Plan' },
   { key: 'work', label: 'Work' },
@@ -988,6 +1033,11 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }
   thinkingMode?: AgentThinkingMode;
   backgroundRun?: PendingAgentRun | null;
 }) {
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const action = events.length ? currentActionLabel(events) : backgroundRun ? 'Continuing your request in the background' : 'Starting';
   const stage = deriveStage(events);
   const Icon = phaseIconFor(events);
@@ -999,6 +1049,14 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }
   // deliberately on a slower, more thorough path (a deep investigation, or the
   // user's High thinking selection cross-checking the number).
   const slowReason = slowReasonFor(thinkingMode, events);
+  const runStartedAt = backgroundRun?.startedAt ?? events.find((event) => event.type === 'run.started')?.at;
+  const startedAtMs = runStartedAt ? Date.parse(runStartedAt) : clock;
+  const elapsedSeconds = Number.isFinite(startedAtMs) ? Math.max(0, Math.floor((clock - startedAtMs) / 1_000)) : 0;
+  const longRunGuidance = longRunGuidanceFor(
+    elapsedSeconds,
+    latestRoute(events),
+    events.some((event) => event.type === 'repair.attempted'),
+  );
   // A conversational turn has no Plan/Work/Verify work to show — just a light
   // "Replying…" line, and the streamed text as it arrives.
   const isConversation = latestRoute(events) === 'conversation';
@@ -1087,7 +1145,14 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }
           </div>
         ) : null}
 
-        {slowReason && !streamingAnswer ? (
+        {longRunGuidance && !streamingAnswer ? (
+          <div style={{ display: 'grid', gap: 3, marginTop: 2, padding: '8px 9px', border: `1px solid ${t.accent}33`, borderRadius: 7, background: `${t.accent}0a` }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.textSecondary, fontSize: 11, fontWeight: 800 }}>
+              <Lightbulb size={11} color={t.accent} /> {longRunGuidance.title}
+            </span>
+            <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.45 }}>{longRunGuidance.detail}</span>
+          </div>
+        ) : slowReason && !streamingAnswer ? (
           <span style={{ fontSize: 11, color: t.textMuted, fontStyle: 'italic', lineHeight: 1.4 }}>{slowReason}</span>
         ) : null}
 
@@ -1204,6 +1269,12 @@ function RunCard({
   const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
   const sourceArtifact = answerDqlArtifactFromRun(run);
   const canSaveBlock = pinnable && !sourceArtifact?.sourcePath && Boolean(sourceArtifact?.source ?? answerSqlFromRun(run));
+  const startedAtMs = Date.parse(run.startedAt);
+  const completedAtMs = Date.parse(run.completedAt);
+  const elapsedSeconds = Number.isFinite(startedAtMs) && Number.isFinite(completedAtMs)
+    ? Math.max(0, Math.round((completedAtMs - startedAtMs) / 1_000))
+    : 0;
+  const completedGuidance = completedRunGuidanceFor(elapsedSeconds, run.route, run.trustState, run.repairAttempts);
   return (
     <div style={runCardStyle(t)}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1287,6 +1358,15 @@ function RunCard({
         >
           <ListTree size={12} /> View steps · where the time went
         </button>
+      ) : null}
+
+      {completedGuidance ? (
+        <div style={{ display: 'grid', gap: 3, padding: '8px 9px', border: `1px solid ${t.accent}33`, borderRadius: 7, background: `${t.accent}0a` }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.textSecondary, fontSize: 11, fontWeight: 800 }}>
+            <Lightbulb size={11} color={t.accent} /> {completedGuidance.title}
+          </span>
+          <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.45 }}>{completedGuidance.detail}</span>
+        </div>
       ) : null}
 
       {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (

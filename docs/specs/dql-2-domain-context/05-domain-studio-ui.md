@@ -27,6 +27,16 @@ interfaces, evaluations, related products, and dbt scope are contextual
 inspector/readiness details—not top-level authoring destinations in this first
 OSS workflow. Global Apps/Ask/Notebooks behavior is unchanged (`UI-001`).
 
+Long-running Ask and Research turns progressively explain the active governed
+work instead of showing generic loading copy. After the initial wait, the UI
+states that DQL is checking certified blocks, semantic metrics, domain
+modeling, and dbt metadata. If generation or research continues, it explains
+that reusable relationship modeling and semantic metrics shorten future
+analysis, while a reviewed result can be saved as a block and explicitly
+certified to reduce repeated AI work and token usage. This guidance is shown
+only for materially long or repaired/deep turns and never implies that saving a
+draft certifies it (`UI-003`).
+
 ## Overview
 
 Show ownership, parent/children, selected dbt scope, readiness by capability,

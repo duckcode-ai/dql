@@ -8,6 +8,20 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('AGT-005 preserves measure, grain, qualifier, and ranking for category-scoped spend questions', () => {
+    const plan = buildAnalysisQuestionPlan('who are the customers who spent most on beverages?');
+
+    expect(plan.mode).toBe('ranking');
+    expect(plan.metricTerms).toContain('spend');
+    expect(plan.dimensionTerms).toContain('customer');
+    expect(plan.filterTerms).toContain('beverage');
+    expect(plan.requestedShape.filters).toContain('beverage');
+    expect(plan.requestedShape.rankingDirection).toBe('top');
+    expect(plan.requestedShape.topN).toEqual({ n: 10, scope: 'overall' });
+    expect(plan.searchTerms).toEqual(expect.arrayContaining(['beverage', 'drink', 'spend', 'revenue']));
+    expect(new Set(plan.searchTerms).size).toBe(plan.searchTerms.length);
+  });
+
   it('extracts requested shape for product revenue rankings', () => {
     const plan = buildAnalysisQuestionPlan('Give me the most revenue products with product name, category and revenue');
 

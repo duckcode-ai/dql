@@ -40,6 +40,51 @@ describe('composeSemanticQueryFromMembers — hollow-answer guard', () => {
 });
 
 describe('composeSemanticQueryForQuestion — grain-aware metric disambiguation', () => {
+  it('AGT-005 prefers a qualifier-specific governed metric over broad lifetime spend', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'lifetime_spend', label: 'Lifetime Spend', description: 'All customer lifetime spend.', domain: 'customers', sql: 'lifetime_spend', type: 'sum', table: 'customers' },
+        { name: 'drink_revenue', label: 'Drink Revenue', description: 'Revenue from beverage and drink purchases.', domain: 'customers', sql: 'drink_revenue', type: 'sum', table: 'customers' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: 'Customer name.', domain: 'customers', sql: 'customer_name', type: 'string', table: 'customers' },
+      ],
+    });
+    const question = 'who are the customers who spent most on beverages?';
+    const result = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      matchedMetric: { nodeId: 'metric:lifetime_spend', kind: 'metric', name: 'lifetime_spend' },
+    });
+
+    expect(result?.metric).toBe('drink_revenue');
+    expect(result?.sql).toContain('SUM(drink_revenue)');
+    expect(result?.sql).toContain('customer_name');
+    expect(result?.filters).toEqual([]);
+  });
+
+  it('AGT-005 does not erase a qualifier when the specific metric cannot compile at the requested grain', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'lifetime_spend', label: 'Lifetime Spend', description: 'All customer lifetime spend.', domain: 'customers', sql: 'lifetime_spend', type: 'sum', table: 'customers' },
+        { name: 'drink_revenue', label: 'Drink Revenue', description: 'Revenue from beverage and drink purchases.', domain: 'orders', sql: 'product_price', type: 'sum', table: 'order_items' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: 'Customer name.', domain: 'customers', sql: 'customer_name', type: 'string', table: 'customers' },
+      ],
+    });
+    const question = 'who are the customers who spent most on beverages?';
+    const result = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      matchedMetric: { nodeId: 'metric:lifetime_spend', kind: 'metric', name: 'lifetime_spend' },
+    });
+
+    expect(result).toBeUndefined();
+  });
+
   // Mirrors the real jaffle project: two revenue metrics at different grains. The
   // measure-family match picks one, but only the product-grain metric can be
   // grouped "by product". Previously the wrong-grain pick failed to compose and the

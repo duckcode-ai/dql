@@ -332,6 +332,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           const conversationSnapshot = conversationSnapshotFromContext(req.conversationContext);
           const rawFollowUp = followUpFromConversationContext(req, rawQuestion) ?? inferFollowUpContext(req, rawQuestion);
           const followUp = applyTopicShiftGuard(rawFollowUp, conversationSnapshot);
+          // CTX-003: retrieval and planning operate on the user's current words.
+          // Prior SQL, DQL source, owners, and result metadata stay in the typed
+          // follow-up envelope rendered separately for the provider; concatenating
+          // them into the question polluted filters/dimensions and changed intent.
           const question = rewriteFollowUpQuestion(rawQuestion, followUp);
           // Retrieve durable learnings only — notebook/project/user/artifact scope.
           // `thread` (per-conversation) memory is intentionally excluded: it is
@@ -538,19 +542,8 @@ export function resolveEffectiveQuestion(req: AgentRunRequest): string {
 }
 
 export function rewriteFollowUpQuestion(question: string, followUp?: AgentFollowUpContext): string {
-  if (!followUp || followUp.kind === 'contextual') return question;
-  const pieces = [
-    `Follow-up request: ${question}`,
-    followUp.sourceQuestion ? `Prior question: ${followUp.sourceQuestion}` : '',
-    followUp.sourceBlockName ? `Prior certified block: ${followUp.sourceBlockName}` : '',
-    followUp.priorResultRef ? formatPriorResultRefForQuestion(followUp.priorResultRef) : '',
-    followUp.priorDqlArtifact ? formatPriorDqlArtifactForQuestion(followUp.priorDqlArtifact) : '',
-    followUp.priorResultValues ? `Resolved prior result values: ${formatResultDimensionValues(followUp.priorResultValues)}` : '',
-    followUp.filters?.length ? `Apply referenced filters: ${formatFollowUpFilters(followUp)}` : '',
-    followUp.dimensions?.length ? `Referenced dimensions: ${followUp.dimensions.join(', ')}` : '',
-    followUp.priorMeasures?.length ? `Prior measures: ${followUp.priorMeasures.join(', ')}` : '',
-  ].filter(Boolean);
-  return pieces.length > 1 ? pieces.join('\n') : question;
+  void followUp;
+  return question.replace(/\s+/g, ' ').trim();
 }
 
 function formatPriorResultRefForQuestion(ref: AgentPriorResultReference): string {

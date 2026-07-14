@@ -194,6 +194,9 @@ import {
   planApp,
   planResearch,
   loadSemanticMetrics,
+  cascadeTraceToEvidenceRouteSteps,
+  createCascadeAnswerResult,
+  createCascadeTrace,
   routeReasoningEffort,
   routeForCascadeAnswerTier,
   clampReasoningEffort,
@@ -637,7 +640,7 @@ function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
     certification: agentRunString(payload?.certification),
     sourceCertifiedBlock: agentRunString(payload?.sourceCertifiedBlock)
       ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
-    contextPackId: agentRunString(payload?.contextPackId),
+    contextPackId: agentRunString(payload?.contextPackId) ?? agentRunString(contextPack?.id),
     sql: agentRunString(payload?.proposedSql) ?? agentRunString(payload?.sql),
     dqlArtifact: agentRunRecord(payload?.dqlArtifact) as ConversationTurnInput['dqlArtifact'],
     cascade: agentRunRecord(payload?.cascade) as CascadeAnswerResult | undefined,
@@ -1500,6 +1503,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           governedAnswer.exploratoryCandidate,
           explorationSchema,
           request.question,
+          governedAnswer.contextPack?.questionPlan.requestedShape.topN?.scope === 'overall'
+            ? governedAnswer.contextPack.questionPlan.requestedShape.topN.n
+            : undefined,
         );
         const probeSummary = exploration.proofs.length > 0
           ? `${exploration.proofs.length} bounded join probe${exploration.proofs.length === 1 ? '' : 's'} completed.`
@@ -1522,6 +1528,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             source: 'bounded DBT-grounded validation',
           });
         }
+        if (exploration.result) {
+          evidence.route = [
+            ...cascadeTraceToEvidenceRouteSteps(createCascadeTrace({ terminalLane: 'generated' })),
+            ...evidence.route.filter((step) => !step.tool.startsWith('cascade_')),
+          ];
+          evidence.validation = {
+            status: 'warning',
+            message: 'The bounded DBT-grounded query executed successfully, but its inferred relationship path still requires analyst review before reuse.',
+          };
+          evidence.execution = {
+            status: 'executed',
+            message: 'Executed the bounded DBT-grounded exploratory SQL preview.',
+            rowCount: exploration.result.rowCount,
+            executionTime: exploration.result.executionTime,
+          };
+        }
         const repairedExploratoryCandidate = exploration.sql !== governedAnswer.exploratoryCandidate.sql
           ? { ...governedAnswer.exploratoryCandidate, sql: exploration.sql }
           : governedAnswer.exploratoryCandidate;
@@ -1538,6 +1560,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           certification: 'analyst_review_required',
           reviewStatus: 'analyst_review_required',
           confidence: exploration.result ? 0.58 : 0.2,
+          ...(exploration.result ? {
+            refusalCode: undefined,
+            refusalDetails: undefined,
+            intentDecision: {
+              ...governedAnswer.intentDecision,
+              action: 'answer' as const,
+              confidence: Math.max(governedAnswer.intentDecision?.confidence ?? 0, 0.9),
+              reason: 'Executed a bounded DBT-grounded exploratory answer after certified and semantic routes did not fully cover the request.',
+              clarifyingQuestion: undefined,
+              clarifySoft: undefined,
+              followsUp: governedAnswer.intentDecision?.followsUp ?? false,
+            },
+          } : {}),
           result: exploration.result,
           proposedSql: exploration.sql,
           sql: exploration.sql,
@@ -1546,12 +1581,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           text: explorationAnswer,
           answer: explorationAnswer,
           trustLabel: 'Exploratory · DBT-grounded',
+          contextPackId: governedAnswer.contextPackId ?? governedAnswer.contextPack?.id,
           route: {
             tier: 'generated_sql',
             label: exploration.result
               ? 'Exploratory · DBT-grounded answer (review required).'
               : 'Exploratory · DBT-grounded query needs review before execution.',
           },
+          cascade: exploration.result
+            ? createCascadeAnswerResult({
+                routeTier: 'generated_sql',
+                label: 'Exploratory DBT-grounded answer executed with review required.',
+                artifactKind: 'dbt_grounded_exploration',
+                hasSqlPreview: true,
+                executionStatus: 'executed',
+                rowCount: exploration.result.rowCount,
+              })
+            : governedAnswer.cascade,
           validationWarnings: [
             ...baseWarnings,
             probeSummary,
@@ -2728,6 +2774,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     candidate: NonNullable<AgentAnswer['exploratoryCandidate']>,
     schemaContext: AgentSchemaTable[] = [],
     question = '',
+    requestedTopN?: number,
   ): Promise<{
     result?: AgentResultPayload;
     proofs: Array<{ summary: string }>;
@@ -2736,26 +2783,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     error?: string;
   }> => {
     const preflight = repairExploratorySqlBeforeExecution(candidate.sql, schemaContext, question);
+    const boundedSql = applyRequestedTopNToExploratorySql(preflight.sql, requestedTopN);
+    const repairs = boundedSql === preflight.sql
+      ? preflight.repairs
+      : [...preflight.repairs, `Applied the requested overall top-${requestedTopN} bound before exploratory execution.`];
     if (preflight.blockedReason) {
       return {
         proofs: [],
-        sql: preflight.sql,
-        repairs: preflight.repairs,
+        sql: boundedSql,
+        repairs,
         error: preflight.blockedReason,
       };
     }
-    const analysis = analyzeSqlReferences(preflight.sql);
+    const analysis = analyzeSqlReferences(boundedSql);
     if (!analysis.parsed) {
-      return { proofs: [], sql: preflight.sql, repairs: preflight.repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
+      return { proofs: [], sql: boundedSql, repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
     }
     // A normal customer → order → order-item → product question needs three
     // joins. Keep the lane bounded, but do not reject this common dbt-star path
     // solely because the old two-join demo limit was too small.
     if (analysis.joins.length > 4) {
-      return { proofs: [], sql: preflight.sql, repairs: preflight.repairs, error: 'This exploratory query has more than four joins and requires an analyst to review the relationship path.' };
+      return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has more than four joins and requires an analyst to review the relationship path.' };
     }
     if (analysis.joins.some((join) => !join.leftRelation || !join.rightRelation)) {
-      return { proofs: [], sql: preflight.sql, repairs: preflight.repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
+      return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
     }
 
     const activeConnection = requireActiveConnection();
@@ -2772,10 +2823,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const raw = await executor.executeQuery(prepared.sql, [], runtimeVariables({}), prepared.connection);
         proofs.push({ summary: summarizeExploratoryJoinProbe(raw.rows, join.leftRelation!, join.leftColumn, join.rightRelation!, join.rightColumn) });
       }
-      const result = await executeGeneratedSqlForAgent(preflight.sql);
-      return { result, proofs, sql: preflight.sql, repairs: preflight.repairs };
+      const result = await executeGeneratedSqlForAgent(boundedSql);
+      return { result, proofs, sql: boundedSql, repairs };
     } catch (error) {
-      return { proofs, sql: preflight.sql, repairs: preflight.repairs, error: error instanceof Error ? error.message : String(error) };
+      return { proofs, sql: boundedSql, repairs, error: error instanceof Error ? error.message : String(error) };
     }
   };
 
@@ -13408,6 +13459,22 @@ export function repairExploratorySqlBeforeExecution(
     repairs,
     ...(grainRepair.blockedReason ? { blockedReason: grainRepair.blockedReason } : {}),
   };
+}
+
+/**
+ * EXP-003 — make the typed overall ranking contract executable before the host
+ * runs a review-required exploratory candidate. The answer-shape gate remains a
+ * backstop, but a provider's generic LIMIT 100 must not trigger a second model
+ * call when the planner already established top 10.
+ */
+export function applyRequestedTopNToExploratorySql(sql: string, requestedTopN?: number): string {
+  if (!Number.isInteger(requestedTopN) || requestedTopN! <= 0) return sql;
+  const withoutTerminator = sql.trim().replace(/;\s*$/, '');
+  const trailingLimit = /\blimit\s+\d+\s*$/i;
+  if (trailingLimit.test(withoutTerminator)) {
+    return withoutTerminator.replace(trailingLimit, `LIMIT ${requestedTopN}`);
+  }
+  return `${withoutTerminator}\nLIMIT ${requestedTopN}`;
 }
 
 function qualifyExploratoryRelationsFromSchema(

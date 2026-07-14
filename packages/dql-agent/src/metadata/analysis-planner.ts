@@ -118,6 +118,27 @@ const DIMENSION_WORDS = [
   'region', 'segment', 'sku', 'team', 'type', 'user', 'vendor', 'week', 'year',
 ];
 
+/**
+ * Small, domain-neutral vocabulary clusters used only to broaden metadata
+ * retrieval. These are ordinary-language equivalents, not project-specific
+ * value-to-column mappings; physical filter binding still comes from sampled
+ * warehouse values or semantic definitions.
+ */
+const SEARCH_TERM_SYNONYMS: string[][] = [
+  ['beverage', 'drink'],
+  ['customer', 'client', 'buyer', 'shopper'],
+  ['product', 'item', 'sku'],
+  ['spend', 'spent', 'spending', 'revenue', 'sales'],
+];
+
+const SEARCH_TERM_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
+  const index = new Map<string, Set<string>>();
+  for (const cluster of SEARCH_TERM_SYNONYMS) {
+    for (const word of cluster) index.set(word, new Set(cluster));
+  }
+  return index;
+})();
+
 const PROFILE_WORDS = [
   'bio', 'biography', 'career', 'complete stats', 'details', 'entity 360', 'overview',
   'profile', 'record', 'snapshot', 'stats', 'statistics', 'summary',
@@ -154,7 +175,7 @@ export function buildAnalysisQuestionPlan(
     timeTerms,
     followUp,
   });
-  const searchTerms = uniqueStrings([
+  const searchTerms = uniqueStrings(uniqueStrings([
     ...tokenize(cleanQuestion),
     ...entities.flatMap((entity) => tokenize(entity.text)),
     ...metricTerms,
@@ -162,7 +183,7 @@ export function buildAnalysisQuestionPlan(
     ...filterTerms,
     ...timeTerms,
     ...modeSearchTerms(mode),
-  ]).filter((term) => !STOP_WORDS.has(term)).slice(0, 36);
+  ]).flatMap(expandSearchTerm)).filter((term) => !STOP_WORDS.has(term)).slice(0, 36);
   const searchQueries = buildSearchQueries({
     question: cleanQuestion,
     mode,
@@ -728,6 +749,9 @@ function extractMetricTerms(question: string): string[] {
   if (/\bhow much\b/i.test(lower)) {
     terms.add('amount');
   }
+  if (/\b(spend|spends|spent|spending)\b/i.test(lower)) {
+    terms.add('spend');
+  }
   for (const word of METRIC_WORDS) {
     if (new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
@@ -769,13 +793,48 @@ function pluralizeDimensionWord(word: string): string {
 }
 
 function extractFilterTerms(question: string, entities: AnalysisEntityMention[]): string[] {
-  // Filter VALUES come from the question's own entities and time phrases only.
-  // (Real value binding happens later against the runtime value index / sampled
-  // column values — never from a hard-coded project-specific vocabulary.)
+  // Filter VALUES come from the question's own entities, time phrases, and
+  // explicit analytical restriction grammar. Real value-to-column binding still
+  // happens later against the runtime value index / sampled column values.
+  const analyticalValues: string[] = [];
+  const valuePatterns = [
+    /\b(?:category|segment|type|class|group|channel|region|market)\s*(?:=|:|is|equals|of)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3})/gi,
+    /\b(?:spend|spends|spent|spending)\b[^?.!,;]{0,60}?\bon\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3}?)(?=\s+(?:product|products|item|items|category|segment|type)\b|[?.,!;]|$)/gi,
+    /\b(?:buy|buys|bought|buying|purchase|purchases|purchased|purchasing)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3}?)(?=\s+(?:product|products|item|items|category|segment|type)\b|[?.,!;]|$)/gi,
+  ];
+  for (const pattern of valuePatterns) {
+    for (const match of question.matchAll(pattern)) {
+      const value = cleanAnalyticalFilterValue(match[1]);
+      if (value) analyticalValues.push(value);
+    }
+  }
   return uniqueStrings([
     ...entities.flatMap((entity) => tokenize(entity.text)),
+    ...analyticalValues,
     ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
+}
+
+function cleanAnalyticalFilterValue(value: string | undefined): string {
+  return (value ?? '')
+    .toLowerCase()
+    .replace(/\b(?:highest|lowest|most|least|top|bottom|best|worst|the)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/ies$/, 'y')
+    .replace(/s$/, '');
+}
+
+function expandSearchTerm(raw: string): string[] {
+  const term = normalizeTerm(raw);
+  if (!term) return [];
+  const singular = term.replace(/ies$/, 'y').replace(/s$/, '');
+  return uniqueStrings([
+    term,
+    ...(singular.length > 1 ? [singular] : []),
+    ...Array.from(SEARCH_TERM_SYNONYM_INDEX.get(term) ?? []),
+    ...Array.from(SEARCH_TERM_SYNONYM_INDEX.get(singular) ?? []),
+  ]);
 }
 
 function extractTimeTerms(question: string): string[] {
@@ -875,13 +934,21 @@ function scalarValueQuestionUsesEntitiesAsMeasures(
 function parseTopN(question: string): RequestedAnswerShape['topN'] | undefined {
   const lower = question.toLowerCase();
   const numeric = lower.match(/\b(?:top|bottom|first|last)\s+(\d{1,3})\b/);
-  const n = numeric ? Number(numeric[1]) : wordNumberFromTopN(lower);
+  const explicitN = numeric ? Number(numeric[1]) : wordNumberFromTopN(lower);
+  // A ranking request without a literal N still needs a bounded result contract.
+  // Ten is the product's concise table default; this prevents the provider from
+  // silently widening "customers who spent most" to LIMIT 100.
+  const n = explicitN ?? (hasImplicitRankingRequest(lower) ? 10 : undefined);
   if (!n || n <= 0) return undefined;
   const scope: 'overall' | 'per_group' = /\b(?:per|for each|within each)\s+\w+/i.test(lower)
     || /\bby\s+(?:category|segment|region|channel|product|customer|account|user|month|week|year)\b/i.test(lower)
     ? 'per_group'
     : 'overall';
   return { n, scope };
+}
+
+function hasImplicitRankingRequest(lower: string): boolean {
+  return /\b(top|bottom|most|least|highest|lowest|largest|smallest|greatest|best|worst|leading)\b/.test(lower);
 }
 
 function wordNumberFromTopN(lower: string): number | undefined {
