@@ -6843,6 +6843,19 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.dqlArtifact?.source).toContain('requested_filters = ["channel=Online"]');
     expect(result.dqlArtifact?.source).toContain('order_by = ["total_revenue desc"]');
     expect(result.dqlArtifact?.source).toContain("limit = 5");
+    expect(result.dqlArtifact?.source).toContain('channel: string = "Online"');
+    expect(result.dqlArtifact?.source).toContain('top_n: number = 5');
+    expect(result.dqlArtifact?.source).toContain('channel = "channel"');
+    expect(result.dqlArtifact?.source).toContain('top_n = "limit"');
+    expect(result.dqlArtifact).toMatchObject({
+      persistence: 'transient',
+      trustState: 'governed',
+      parameterValues: { channel: 'Online', top_n: 5 },
+      parameters: expect.arrayContaining([
+        expect.objectContaining({ name: 'channel', type: 'string', policy: 'dynamic' }),
+        expect.objectContaining({ name: 'top_n', type: 'number', policy: 'dynamic' }),
+      ]),
+    });
   });
 
   it("routes an ad-hoc analytical question to generated_sql", async () => {

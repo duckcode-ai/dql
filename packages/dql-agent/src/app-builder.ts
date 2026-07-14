@@ -1440,16 +1440,26 @@ function parameterBindingsForCertifiedNode(
   node: KGNode,
   filterBindings: DashboardTileFilterBinding[],
 ): DashboardTileParameterBinding[] {
-  const dynamicParams = (node.parameterPolicy ?? [])
-    .filter((entry) => entry.policy === "dynamic")
-    .map((entry) => entry.name);
+  const definitions = new Map((node.parameters ?? []).map((entry) => [entry.name, entry]));
+  const runtimePolicies = new Set(["dynamic", "optional"]);
+  const dynamicParams = Array.from(new Set([
+    ...(node.parameters ?? []).filter((entry) => runtimePolicies.has(entry.policy)).map((entry) => entry.name),
+    ...(node.parameterPolicy ?? []).filter((entry) => runtimePolicies.has(entry.policy)).map((entry) => entry.name),
+  ]));
   return dynamicParams.map((param) => {
     const filterBinding = filterBindings.find((entry) => entry.paramNames?.includes(param) || entry.filter === param);
+    const definition = definitions.get(param);
     return {
       param,
       source: filterBinding ? "dashboard_filter" as const : "variable" as const,
       ...(filterBinding?.filter ? { filter: filterBinding.filter } : {}),
       field: filterBinding?.binding ?? param,
+      ...(definition ? {
+        parameterType: definition.type,
+        required: definition.required,
+        ...(definition.default !== undefined ? { default: definition.default } : {}),
+        policy: definition.policy,
+      } : {}),
     };
   });
 }

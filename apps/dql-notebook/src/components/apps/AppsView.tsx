@@ -2858,8 +2858,8 @@ function filterFromParameterBinding(
   const id = binding.filter || binding.field || binding.param;
   return {
     id,
-    type: parameterFilterType(id),
-    default: defaultParameterFilterValue(id),
+    type: parameterFilterType(id, binding.parameterType),
+    default: binding.default ?? defaultParameterFilterValue(id),
     bindsTo: binding.param,
   };
 }
@@ -2875,11 +2875,14 @@ function isCoveredByExistingDashboardFilter(
   });
 }
 
-function parameterFilterType(id: string): DashboardFilter['type'] {
-  if (/(top[_-]?n|limit|count|number|start|end|year|season)/i.test(id)) return 'number';
+function parameterFilterType(id: string, parameterType?: string): DashboardFilter['type'] {
+  if (parameterType === 'number' || parameterType === 'number[]') return 'number';
+  if (parameterType === 'boolean') return 'boolean';
+  if (parameterType === 'date' || parameterType === 'date[]') return 'date';
   // Time-ish columns get a date-RANGE picker (the runtime applies BETWEEN). Covers
   // the common dbt/warehouse naming (`ordered_at`, `_at`, `_date`, `_time`, `_ts`).
   if (/(_at$|_date$|_time$|_ts$|date|time|day|week|month|quarter|period)/i.test(id)) return 'daterange';
+  if (/(top[_-]?n|limit|count|number|year|season)/i.test(id)) return 'number';
   return 'text';
 }
 

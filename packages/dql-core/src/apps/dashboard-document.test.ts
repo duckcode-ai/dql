@@ -167,7 +167,7 @@ describe('parseDashboardDocument', () => {
               { filter: 'season', binding: 'game_date_est', mode: 'parameter', paramNames: ['season_year'], required: true },
             ],
             parameterBindings: [
-              { param: 'season_year', source: 'dashboard_filter', filter: 'season' },
+              { param: 'season_year', source: 'dashboard_filter', filter: 'season', parameterType: 'number', required: true, default: 2017, policy: 'dynamic' },
             ],
             sourceEvidence: [
               { source: 'block:top_scorers', reason: 'Certified scorer ranking block.', kind: 'block', trustState: 'certified' },
@@ -184,7 +184,7 @@ describe('parseDashboardDocument', () => {
     expect(errors).toEqual([]);
     expect(document?.layout.items[0]).toMatchObject({
       filterBindings: [{ filter: 'season', binding: 'game_date_est', mode: 'parameter', paramNames: ['season_year'], required: true }],
-      parameterBindings: [{ param: 'season_year', source: 'dashboard_filter', filter: 'season' }],
+      parameterBindings: [{ param: 'season_year', source: 'dashboard_filter', filter: 'season', parameterType: 'number', required: true, default: 2017, policy: 'dynamic' }],
       sourceEvidence: [{ source: 'block:top_scorers', reason: 'Certified scorer ranking block.', kind: 'block', trustState: 'certified' }],
       trustState: 'certified',
       reviewStatus: 'certified',

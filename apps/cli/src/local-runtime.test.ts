@@ -178,6 +178,109 @@ describe('local runtime network boundary', () => {
   });
 });
 
+describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-002, AGT-006, EXP-002)', () => {
+  it('returns the typed contract and reruns only the named certified block with explicit values', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-certified-parameter-api-'));
+    tempDirs.push(projectRoot);
+    const blockDir = join(projectRoot, 'domains', 'commerce', 'blocks');
+    mkdirSync(blockDir, { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'parameter-api',
+      connections: { default: { driver: 'duckdb', filepath: join(projectRoot, 'parameter-api.duckdb') } },
+      defaultConnectionName: 'default',
+    }));
+    writeFileSync(join(blockDir, 'runtime_parameter.dql'), `block "Runtime Parameter" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  params {
+    category: string = "Beverage"
+    top_n: number = 10
+  }
+  parameterPolicy {
+    category = "dynamic"
+    top_n = "dynamic"
+  }
+  query = """SELECT \${category} AS selected_category, \${top_n} AS selected_limit"""
+}`);
+
+    const executeQuery = vi.fn(async (_sql, _params, variables: Record<string, unknown>): Promise<QueryResult> => ({
+      columns: [
+        { name: 'selected_category', type: 'string', driverType: 'VARCHAR' },
+        { name: 'selected_limit', type: 'number', driverType: 'INTEGER' },
+      ],
+      rows: [{ selected_category: variables.category, selected_limit: variables.top_n }],
+      rowCount: 1,
+      executionTimeMs: 1,
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'duckdb', filepath: join(projectRoot, 'parameter-api.duckdb') },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const contractResponse = await fetch(`${base}/api/blocks/parameters?name=${encodeURIComponent('Runtime Parameter')}`);
+      expect(contractResponse.status).toBe(200);
+      const contract = await contractResponse.json() as { parameters: Array<{ name: string; type: string; policy: string }> };
+      expect(contract.parameters).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'category', type: 'string', policy: 'dynamic' }),
+        expect.objectContaining({ name: 'top_n', type: 'number', policy: 'dynamic' }),
+      ]));
+
+      const invokeResponse = await fetch(`${base}/api/blocks/invoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blockName: 'Runtime Parameter', parameters: { category: 'Coffee', top_n: 3 } }),
+      });
+      const invoked = await invokeResponse.json() as { error?: string; result: { rows: Array<Record<string, unknown>>; auditId: string } };
+      expect({ status: invokeResponse.status, error: invoked.error }).toEqual({ status: 200, error: undefined });
+      expect(invoked.result.rows).toEqual([{ selected_category: 'Coffee', selected_limit: 3 }]);
+      expect(invoked.result.auditId).toMatch(/^[a-f0-9]+$/);
+
+      const generatedSource = `block "Generated Runtime Parameter" {
+  domain = "commerce"
+  type = "custom"
+  status = "draft"
+  params { category: string = "Beverage" top_n: number = 10 }
+  parameterPolicy { category = "dynamic" top_n = "dynamic" }
+  query = """SELECT \${category} AS selected_category, \${top_n} AS selected_limit"""
+}`;
+      const generatedResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: { kind: 'sql_block', name: 'Generated Runtime Parameter', source: generatedSource, persistence: 'transient', trustState: 'review_required' },
+          parameters: { category: 'Tea', top_n: 7 },
+        }),
+      });
+      const generated = await generatedResponse.json() as {
+        error?: string;
+        result: { rows: Array<Record<string, unknown>> };
+        artifact: { trustState: string; persistence: string; parameters: Array<{ name: string; type: string }>; parameterValues: Record<string, unknown> };
+      };
+      expect({ status: generatedResponse.status, error: generated.error }).toEqual({ status: 200, error: undefined });
+      expect(generated.result.rows).toEqual([{ selected_category: 'Tea', selected_limit: 7 }]);
+      expect(generated.artifact).toMatchObject({
+        trustState: 'review_required',
+        persistence: 'transient',
+        parameterValues: { category: 'Tea', top_n: 7 },
+        parameters: expect.arrayContaining([
+          expect.objectContaining({ name: 'category', type: 'string' }),
+          expect.objectContaining({ name: 'top_n', type: 'number' }),
+        ]),
+      });
+      expect(executeQuery).toHaveBeenCalledTimes(2);
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+});
+
 describe('dbt-first onboarding runtime API', () => {
   it('previews, drift-checks, and applies dbt-first config without copying dbt semantics', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-onboarding-dbt-'));

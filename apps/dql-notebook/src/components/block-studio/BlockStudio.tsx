@@ -56,6 +56,7 @@ import {
   visualParameterDefaultText,
 } from '../../utils/block-studio';
 import { getTypeColor } from '../../utils/type-colors';
+import { BlockParameterControls } from '../parameters/BlockParameterControls';
 
 type ExplorerTab = 'blocks' | 'semantic' | 'database';
 type ResultTab = 'results' | 'parameters' | 'lineage' | 'save' | 'history';
@@ -4335,37 +4336,7 @@ function BlockStudioParameterPanel({
         </div>
         <button type="button" onClick={onRun} disabled={running} style={primaryImportButtonStyle(t)}>{running ? 'Running…' : 'Run preview'}</button>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
-        {parameters.map((parameter) => {
-          const hasOverride = Object.prototype.hasOwnProperty.call(values, parameter.name);
-          const value = hasOverride ? values[parameter.name] : parameter.default;
-          const isArray = parameter.type.endsWith('[]');
-          const inputType = parameter.type === 'number' ? 'number' : parameter.type === 'date' ? 'date' : 'text';
-          return (
-            <label key={parameter.name} style={{ display: 'grid', gap: 5, padding: 10, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.appBg }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 750, color: t.textPrimary }}>
-                {businessLabel(parameter.name)}
-                {parameter.required && <span style={{ color: '#f85149' }}>required</span>}
-              </span>
-              <span style={{ fontSize: 10, color: t.textMuted }}>{parameter.type} · {parameter.policy}{parameter.binding ? ` · ${parameter.binding.kind.replace('_', ' ')}` : ''}</span>
-              {parameter.type === 'boolean' ? (
-                <select value={String(value ?? '')} onChange={(event) => onChange(parameter.name, event.target.value)} style={importInputStyle(t)}>
-                  <option value="">Select…</option><option value="true">True</option><option value="false">False</option>
-                </select>
-              ) : (
-                <input
-                  type={inputType}
-                  value={Array.isArray(value) ? value.join(', ') : value == null ? '' : String(value)}
-                  placeholder={isArray ? 'Comma-separated values' : parameter.required ? 'Required value' : 'Use default'}
-                  onChange={(event) => onChange(parameter.name, event.target.value)}
-                  style={importInputStyle(t)}
-                />
-              )}
-              {hasOverride && <button type="button" onClick={() => onReset(parameter.name)} style={{ justifySelf: 'start', border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 10 }}>Reset to default</button>}
-            </label>
-          );
-        })}
-      </div>
+      <BlockParameterControls parameters={parameters} values={values} onChange={onChange} onReset={onReset} t={t} includeNonRuntime card />
     </div>
   );
 }

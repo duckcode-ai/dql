@@ -279,6 +279,7 @@ import {
 } from './semantic-import.js';
 import {
   clearBlockStudioImportSessions,
+  candidateToDqlSource,
   createBlockStudioImportSession,
   deleteBlockStudioImportSession,
   listBlockStudioImportSessions,
@@ -1468,6 +1469,70 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     ];
   }
 
+  /**
+   * PRD-001 / AGT-002 / AGT-006 / EXP-002 — every answer surface receives the
+   * same executable DQL artifact. Generated SQL is parameterized before the
+   * artifact leaves the runtime; it remains compiled evidence, not the primary
+   * user-facing object. Saving later persists this exact source without another
+   * model call.
+   */
+  function attachExecutableDqlArtifactContract(governedAnswer: AgentAnswer, question: string): void {
+    const originalSql = governedAnswer.proposedSql?.trim() || governedAnswer.sql?.trim();
+    let artifact = governedAnswer.dqlArtifact;
+    if ((!artifact || artifact.kind === 'sql_block') && originalSql) {
+      const parameterized = parameterizeSqlForDqlImport(originalSql);
+      const artifactName = artifact?.name
+        ?? artifact?.source.match(/\bblock\s+"([^"]+)"/i)?.[1]
+        ?? deriveGeneratedDraftSlug(question);
+      const domain = artifact?.source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1] ?? 'uncategorized';
+      const source = candidateToDqlSource({
+        name: artifactName,
+        domain,
+        description: question,
+        owner: '',
+        tags: ['ai-generated', 'review-required'],
+        terms: [],
+        pattern: '',
+        grain: '',
+        entities: [],
+        outputs: [],
+        dimensions: [],
+        allowedFilters: parameterized.allowedFilters,
+        parameterPolicy: parameterized.parameterPolicy,
+        filterBindings: parameterized.filterBindings,
+        parameterDecisions: parameterized.parameterDecisions,
+        sourceSystems: [],
+        replacementFor: [],
+        reviewCadence: 'monthly',
+        sql: parameterized.sql,
+        llmContext: `Review-required DQL generated for: ${question}`,
+      });
+      artifact = {
+        ...(artifact ?? { kind: 'sql_block' as const }),
+        kind: 'sql_block',
+        name: artifactName,
+        source,
+      };
+    }
+    if (!artifact?.source) return;
+    const invocation = prepareBlockInvocation({
+      source: artifact.source,
+      parameters: artifact.parameterValues,
+      question,
+      surface: 'ask_ai',
+    });
+    const certified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
+    const semantic = governedAnswer.route?.tier === 'semantic_metric';
+    governedAnswer.dqlArtifact = {
+      ...artifact,
+      ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
+      ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
+      persistence: artifact.sourcePath ? 'saved' : 'transient',
+      trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
+      ...(originalSql ? { compiledSql: originalSql } : {}),
+    };
+  }
+
   const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit, emitAnswerDelta }) => {
     let governedAnswer: AgentAnswer;
     try {
@@ -1606,6 +1671,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ],
         };
       }
+      attachExecutableDqlArtifactContract(governedAnswer, request.question);
       applySmartVisualization(governedAnswer, request.question);
     } catch (error) {
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
@@ -1740,7 +1806,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : [
           { id: 'create-block', label: governedAnswer.dqlArtifact ? 'Review DQL draft' : 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
           { id: 'research-gap', label: 'Research deeper', route: 'research' },
-          ...(runnableSql ? [{ id: 'insert-sql', label: 'Insert SQL preview', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
+          ...(runnableSql ? [{
+            id: 'insert-sql',
+            label: governedAnswer.dqlArtifact ? 'Insert as DQL cell' : 'Insert SQL preview',
+            route: 'sql_cell' as const,
+            artifactKind: 'sql_cell' as const,
+          }] : []),
         ];
     return {
       resolvedRoute,
@@ -2173,6 +2244,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         { attempt: attempt ?? 0, repairHint },
         'sql_cell',
       );
+      attachExecutableDqlArtifactContract(governedAnswer, request.question);
       const schemaContext = requestedNotebookDataset
         ? await getSchemaContextForAgent(request.question)
         : [];
@@ -2230,24 +2302,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? `No certified block or semantic result exactly covered all requested sources. The workflow combines ${naturalMixedSourcePlan.warehouseRelations?.join(', ') || 'the requested warehouse tables'} in one bounded warehouse extraction, then joins it locally with ${naturalMixedSourcePlan.localDataset} on ${naturalMixedSourcePlan.warehouseKey} = ${naturalMixedSourcePlan.localKey}. Click Add workflow to notebook below to create the cells. The mixed result remains review-required.`
           : explanation,
         ...(naturalMixedSourcePlan ? { mixedSourcePlan: naturalMixedSourcePlan } : {}),
+        ...(!naturalMixedSourcePlan && governedAnswer.dqlArtifact ? { dqlArtifact: governedAnswer.dqlArtifact } : {}),
         ...(governedAnswer.appliedSkills ? { appliedSkills: governedAnswer.appliedSkills } : {}),
       };
       return {
         summary: hasSql
           ? naturalMixedSourcePlan
             ? `Prepared a mixed-source notebook workflow using ${naturalMixedSourcePlan.localDataset}.`
-            : 'Created a review-required SQL cell draft.'
+            : 'Created a review-required DQL query cell.'
           : (explanation || 'No SQL could be generated for this request.'),
         answer: result.explanation,
-        artifacts: [agentRunArtifact('sql_cell', 'Generated SQL cell', result)],
+        artifacts: [agentRunArtifact('sql_cell', naturalMixedSourcePlan ? 'Warehouse extraction for local analysis' : 'Generated DQL query cell', result)],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to SQL cell generation.'),
           agentRunEvaluation('review-boundary', 'Review boundary', true, 'warning', naturalMixedSourcePlan
             ? 'The warehouse extraction is staged with limits and the CSV join runs locally. Mixed-source output is never auto-certified.'
-            : 'Generated SQL must be reviewed before it becomes certified analytics.'),
+            : 'Generated DQL and its compiled SQL evidence must be reviewed before certification.'),
         ],
         nextActions: naturalMixedSourcePlan ? [] : [
-          { id: 'insert-sql', label: 'Insert SQL preview', artifactKind: 'sql_cell' },
+          { id: 'insert-sql', label: governedAnswer.dqlArtifact ? 'Insert as DQL cell' : 'Insert SQL preview', artifactKind: 'sql_cell' },
           { id: 'create-block', label: 'Review as DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
         ],
       };
@@ -2661,21 +2734,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
   };
 
-  const executeCertifiedBlockForAgent = async (
-    node: KGNode,
+  const executeDqlArtifactSourceForAgent = async (
+    source: string,
+    metadata: { name?: string; path?: string; domain?: string; chartType?: string } = {},
     invocationInput?: { question?: string; parameters?: Record<string, unknown> },
   ): Promise<AgentResultPayload> => {
-    if (node.kind !== 'block') {
-      throw new Error(`Certified ${node.kind} "${node.name}" is a navigation artifact and cannot be executed as a block.`);
-    }
-    const manifest = buildManifest({ projectRoot });
-    const block = manifest.blocks[node.name] ?? manifest.blocks[node.nodeId.replace(/^block:/, '')];
-    if (!block) {
-      throw new Error(`Matched block "${node.name}" is not present in the project manifest.`);
-    }
-
-    const absBlockPath = join(projectRoot, block.filePath);
-    const source = readFileSync(absBlockPath, 'utf-8');
     const invocation = prepareBlockInvocation({
       source,
       parameters: invocationInput?.parameters,
@@ -2689,8 +2752,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const activeConnection = requireActiveConnection();
     const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
     const plan = buildExecutionPlan(
-      { id: `agent-${block.name}`, type: 'dql', source, title: block.name },
-      { semanticLayer, driver: activeConnection.driver, tableMapping },
+      { id: `agent-${metadata.name ?? 'dql-artifact'}`, type: 'dql', source, title: metadata.name ?? 'DQL artifact' },
+      { semanticLayer, driver: activeConnection.driver, tableMapping, parameters: invocation.values },
     );
     const semanticCompose = semanticLayer
       ? composeSemanticBlockSql(source, semanticLayer, {
@@ -2704,7 +2767,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : null;
     if (!plan && !semanticCompose?.sql) {
       const semanticError = semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
-      throw new Error(semanticError ?? `Block "${block.name}" produced no executable SQL.`);
+      throw new Error(semanticError ?? `DQL artifact "${metadata.name ?? 'draft'}" produced no executable SQL.`);
     }
 
     const prepared = prepareLocalExecution(
@@ -2714,7 +2777,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       projectConfig,
     );
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
-    assertAppAccess({ app, domain: block.domain ?? app?.domain, level: 'execute' });
+    const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
+    assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
     const rawResult = await executor.executeQuery(
       prepared.sql,
       plan?.sqlParams ?? [],
@@ -2727,13 +2791,48 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       rows: normalized.rows,
       rowCount: normalized.rowCount,
       executionTime: normalized.executionTime,
-      chartConfig: plan?.chartConfig ?? (block.chartType ? { chart: block.chartType } : undefined),
+      chartConfig: plan?.chartConfig ?? (metadata.chartType ? { chart: metadata.chartType } : undefined),
       sql: prepared.sql,
-      blockName: block.name,
-      blockPath: block.filePath,
+      ...(metadata.name ? { blockName: metadata.name } : {}),
+      ...(metadata.path ? { blockPath: metadata.path } : {}),
       parameters: invocation.resolvedParameters,
       auditId: invocation.auditId,
     };
+  };
+
+  const executeCertifiedBlockByNameForAgent = async (
+    blockName: string,
+    invocationInput?: { question?: string; parameters?: Record<string, unknown> },
+    requireCertified = false,
+  ): Promise<AgentResultPayload> => {
+    const manifest = buildManifest({ projectRoot });
+    const block = manifest.blocks[blockName];
+    if (!block) {
+      throw new Error(`Matched block "${blockName}" is not present in the project manifest.`);
+    }
+    if (requireCertified && block.status !== 'certified') {
+      throw new Error(`Block "${block.name}" is not certified and cannot be rerun as a certified answer.`);
+    }
+    const source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
+    return executeDqlArtifactSourceForAgent(source, {
+      name: block.name,
+      path: block.filePath,
+      domain: block.domain,
+      chartType: block.chartType,
+    }, invocationInput);
+  };
+
+  const executeCertifiedBlockForAgent = async (
+    node: KGNode,
+    invocationInput?: { question?: string; parameters?: Record<string, unknown> },
+  ): Promise<AgentResultPayload> => {
+    if (node.kind !== 'block') {
+      throw new Error(`Certified ${node.kind} "${node.name}" is a navigation artifact and cannot be executed as a block.`);
+    }
+    return executeCertifiedBlockByNameForAgent(
+      node.name || node.nodeId.replace(/^block:/, ''),
+      invocationInput,
+    );
   };
 
   const executeGeneratedSqlForAgent = async (sql: string): Promise<AgentResultPayload> => {
@@ -5894,7 +5993,40 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
               continue;
             }
-            if (pin.refreshCadence === 'daily' && pin.sql && isAiPinRefreshDue(pin.lastRefreshedAt)) {
+            const pinPlan = pin.analysisPlan && typeof pin.analysisPlan === 'object' && !Array.isArray(pin.analysisPlan)
+              ? pin.analysisPlan as Record<string, unknown>
+              : undefined;
+            const pinArtifact = normalizeDqlArtifactReference(pinPlan?.dqlArtifact);
+            let renderedPinResult = pin.result;
+            let renderedPinChartConfig = pin.chartConfig as Record<string, unknown> | undefined;
+            if (pinArtifact) {
+              try {
+                const boundParameters = dashboardTileParameterValues({
+                  item,
+                  dashboardValues: dashboardVariables,
+                  requestValues: variables,
+                });
+                const executed = await executeDqlArtifactSourceForAgent(
+                  pinArtifact.source,
+                  { name: pinArtifact.name ?? pin.title, path: pinArtifact.sourcePath },
+                  { question: pin.question, parameters: { ...(pinArtifact.parameterValues ?? {}), ...boundParameters } },
+                );
+                renderedPinResult = executed;
+                renderedPinChartConfig = executed.chartConfig && typeof executed.chartConfig === 'object'
+                  ? executed.chartConfig as Record<string, unknown>
+                  : renderedPinChartConfig;
+              } catch (err) {
+                tiles.push({
+                  tileId: item.i,
+                  status: 'error',
+                  tileType: 'aiPin',
+                  title: item.title ?? pin.title,
+                  error: err instanceof Error ? err.message : String(err),
+                  trustState: pinArtifact.trustState ?? 'review_required',
+                });
+                continue;
+              }
+            } else if (pin.refreshCadence === 'daily' && pin.sql && isAiPinRefreshDue(pin.lastRefreshedAt)) {
               try {
                 const refreshed = await executeLocalSqlForStoredResult(pin.sql);
                 pin = localApps.updateAiPinResult(pin.id, refreshed) ?? pin;
@@ -5912,8 +6044,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               tileType: 'aiPin',
               title: item.title ?? pin.title,
               viz: item.viz,
-              chartConfig: mergeDashboardChartConfig(pin.chartConfig as Record<string, unknown> | undefined, item),
-              result: pin.result,
+              chartConfig: mergeDashboardChartConfig(renderedPinChartConfig, item),
+              result: renderedPinResult,
               aiPin: pin,
               citation: {
                 kind: 'ai_pin',
@@ -10435,6 +10567,118 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && path === '/api/dql/artifacts/execute') {
+      try {
+        const body = await readJSON(req);
+        const requestedArtifact = normalizeDqlArtifactReference(body.artifact);
+        const requestedBlockName = typeof body.blockName === 'string' ? body.blockName.trim() : '';
+        let source = requestedArtifact?.source ?? '';
+        let sourcePath = requestedArtifact?.sourcePath;
+        let blockName = requestedBlockName || requestedArtifact?.name;
+        let domain: string | undefined;
+        let chartType: string | undefined;
+
+        if (requestedBlockName) {
+          const block = buildManifest({ projectRoot }).blocks[requestedBlockName];
+          if (!block) throw new Error(`Block "${requestedBlockName}" was not found.`);
+          source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
+          sourcePath = block.filePath;
+          blockName = block.name;
+          domain = block.domain;
+          chartType = block.chartType;
+        } else if (sourcePath) {
+          const filePath = safeJoin(projectRoot, sourcePath);
+          if (filePath && existsSync(filePath) && !statSync(filePath).isDirectory()) source = readFileSync(filePath, 'utf-8');
+        }
+        if (!source.trim()) throw new Error('Provide an executable DQL artifact or block name.');
+        const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+          ? body.parameters as Record<string, unknown>
+          : requestedArtifact?.parameterValues ?? {};
+        const result = await executeDqlArtifactSourceForAgent(source, {
+          name: blockName,
+          path: sourcePath,
+          domain,
+          chartType,
+        }, {
+          parameters,
+          question: typeof body.question === 'string' ? body.question : undefined,
+        });
+        const contract = prepareBlockInvocation({ source, parameters, surface: 'ask_ai' });
+        const certified = /\bstatus\s*=\s*"certified"/i.test(source);
+        const semantic = /\btype\s*=\s*"semantic"/i.test(source);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          result,
+          artifact: {
+            ...(requestedArtifact ?? { kind: semantic ? 'semantic_block' : 'sql_block' }),
+            source,
+            ...(blockName ? { name: blockName } : {}),
+            ...(sourcePath ? { sourcePath } : {}),
+            parameters: contract.parameters,
+            parameterValues: contract.values,
+            persistence: sourcePath ? 'saved' : 'transient',
+            trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
+            compiledSql: result.sql,
+          },
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/blocks/parameters') {
+      try {
+        const blockName = url.searchParams.get('name')?.trim();
+        if (!blockName) throw new Error('Missing certified block name.');
+        const manifest = buildManifest({ projectRoot });
+        const block = manifest.blocks[blockName];
+        if (!block) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Block "${blockName}" was not found.` }));
+          return;
+        }
+        if (block.status !== 'certified') throw new Error(`Block "${blockName}" is not certified.`);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          blockName: block.name,
+          blockPath: block.filePath,
+          parameters: block.parameters ?? [],
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/blocks/invoke') {
+      try {
+        const body = await readJSON(req);
+        const blockName = typeof body.blockName === 'string' ? body.blockName.trim() : '';
+        if (!blockName) throw new Error('Missing certified block name.');
+        const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+          ? body.parameters as Record<string, unknown>
+          : {};
+        const result = await executeCertifiedBlockByNameForAgent(
+          blockName,
+          { parameters, question: typeof body.question === 'string' ? body.question : undefined },
+          true,
+        );
+        const manifest = buildManifest({ projectRoot });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          result,
+          parameters: manifest.blocks[blockName]?.parameters ?? [],
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/notebook/execute') {
       let body: any;
       let execContext: NotebookExecutionContextInput | null = null;
@@ -10470,7 +10714,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const tableMapping = needsSemanticTableMapping(executableCell)
           ? await resolveSemanticTableMapping(executor, cellConnection, semanticLayer)
           : undefined;
-        const plan = buildExecutionPlan(executableCell, { semanticLayer, driver: cellConnection.driver, tableMapping });
+        const plan = buildExecutionPlan(executableCell, {
+          semanticLayer,
+          driver: cellConnection.driver,
+          tableMapping,
+          parameters: invocation?.values,
+        });
         if (!plan) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ cellType: cell.type, result: null }));

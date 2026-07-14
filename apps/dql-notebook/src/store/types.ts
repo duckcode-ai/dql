@@ -587,6 +587,11 @@ export interface CellDqlArtifact {
   kind?: string;           // artifact kind (e.g. semantic_block, sql_block)
   metrics?: string[];
   dimensions?: string[];
+  parameters?: BlockParameterDefinition[];
+  parameterValues?: Record<string, unknown>;
+  persistence?: "transient" | "saved";
+  trustState?: "certified" | "governed" | "review_required";
+  compiledSql?: string;
   routeEvidence?: Array<Record<string, unknown>>;
   lineage?: Record<string, unknown>;
   reviewState?: "certified" | "draft" | "review_required";
@@ -645,6 +650,7 @@ export interface Cell {
   chatConfig?: ChatCellConfig; // Chat cell (v1.2 Track C)
   upstream?: string; // Dataframe handle this cell consumes
   blockBinding?: BlockBinding; // Present when cell references a .dql block file
+  dqlParameterValues?: Record<string, unknown>; // Ephemeral values for an inline DQL cell
   dqlArtifact?: CellDqlArtifact; // Governed DQL provenance for AI/Explore-generated cells
   executionTarget?: ExecutionTarget; // Named warehouse connection or local DuckDB workspace
   datasetRefs?: DatasetReference[]; // Imported or staged datasets used by the cell

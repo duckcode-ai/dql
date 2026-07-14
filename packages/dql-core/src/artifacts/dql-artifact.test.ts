@@ -14,6 +14,14 @@ describe('normalizeDqlArtifactReference', () => {
       timeDimension: { name: ' order_date ', granularity: ' month ' },
       orderBy: [{ name: ' total_revenue ', direction: 'desc' }],
       limit: 10.8,
+      parameters: [
+        { name: 'category', type: 'string', required: false, default: 'Beverage', policy: 'dynamic', binding: { kind: 'semantic_filter', field: 'product_category', operator: 'equals' } },
+        { name: 'top_n', type: 'number', required: false, default: 10, policy: 'dynamic', binding: { kind: 'limit' } },
+      ],
+      parameterValues: { category: 'Beverage', top_n: 10 },
+      persistence: 'transient',
+      trustState: 'governed',
+      compiledSql: ' SELECT 1 ',
     })).toEqual({
       kind: 'semantic_block',
       source: 'block "revenue" { type = "semantic" }',
@@ -25,6 +33,14 @@ describe('normalizeDqlArtifactReference', () => {
       timeDimension: { name: 'order_date', granularity: 'month' },
       orderBy: [{ name: 'total_revenue', direction: 'desc' }],
       limit: 10,
+      parameters: [
+        { name: 'category', type: 'string', required: false, default: 'Beverage', policy: 'dynamic', binding: { kind: 'semantic_filter', field: 'product_category', operator: 'equals' } },
+        { name: 'top_n', type: 'number', required: false, default: 10, policy: 'dynamic', binding: { kind: 'limit' } },
+      ],
+      parameterValues: { category: 'Beverage', top_n: 10 },
+      persistence: 'transient',
+      trustState: 'governed',
+      compiledSql: 'SELECT 1',
     });
   });
 

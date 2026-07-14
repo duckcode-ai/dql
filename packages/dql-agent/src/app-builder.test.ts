@@ -320,6 +320,11 @@ describe("planAppFromPrompt", () => {
           { name: "season_end", policy: "dynamic" },
           { name: "top_n", policy: "dynamic" },
         ],
+        parameters: [
+          { name: "season_start", type: "number", required: false, default: 2016, policy: "dynamic", binding: { kind: "semantic_filter", field: "game_date_est.year", operator: "gte" } },
+          { name: "season_end", type: "number", required: false, default: 2017, policy: "dynamic", binding: { kind: "semantic_filter", field: "game_date_est.year", operator: "lte" } },
+          { name: "top_n", type: "number", required: false, default: 5, policy: "dynamic", binding: { kind: "limit" } },
+        ],
       },
     ], (kg) => {
       const plan = planAppFromPrompt({
@@ -347,7 +352,7 @@ describe("planAppFromPrompt", () => {
         expect.arrayContaining([
           expect.objectContaining({ param: "season_start", source: "dashboard_filter", filter: "season_start" }),
           expect.objectContaining({ param: "season_end", source: "dashboard_filter", filter: "season_end" }),
-          expect.objectContaining({ param: "top_n", source: "dashboard_filter", filter: "top_n" }),
+          expect.objectContaining({ param: "top_n", source: "dashboard_filter", filter: "top_n", parameterType: "number", default: 5 }),
         ]),
       );
     }));

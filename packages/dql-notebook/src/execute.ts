@@ -1,5 +1,6 @@
 import {
   NodeKind,
+  blockSemanticRuntimeBindings,
   parse,
   type BlockDeclNode,
   type DecoratorNode,
@@ -26,6 +27,8 @@ export interface BuildExecutionPlanOptions {
   driver?: string;
   /** Maps semantic table names to actual database table names, e.g. order_items -> dev.order_items. */
   tableMapping?: Record<string, string>;
+  /** Resolved typed values from the shared block invocation contract. */
+  parameters?: Record<string, unknown>;
 }
 
 export function buildExecutionPlan(
@@ -68,7 +71,7 @@ export function buildExecutionPlan(
 
   // Semantic blocks: compose SQL from the semantic layer
   if (block.blockType === 'semantic') {
-    return buildSemanticPlan(block, options?.semanticLayer, options?.driver, options?.tableMapping);
+    return buildSemanticPlan(block, options?.semanticLayer, options?.driver, options?.tableMapping, options?.parameters);
   }
 
   if (block.blockType !== 'custom') {
@@ -167,6 +170,7 @@ function buildSemanticPlan(
   semanticLayer?: SemanticLayer,
   driver?: string,
   tableMapping?: Record<string, string>,
+  parameters?: Record<string, unknown>,
 ): NotebookExecutionPlan {
   if (!semanticLayer) {
     throw new Error(
@@ -206,7 +210,20 @@ function buildSemanticPlan(
     );
   }
 
-  const composed = semanticLayer.composeQuery({ metrics, dimensions, driver, tableMapping });
+  const runtimeBindings = blockSemanticRuntimeBindings(block, parameters);
+  const composed = semanticLayer.composeQuery({
+    metrics,
+    dimensions,
+    ...(block.timeDimension && block.granularity
+      ? { timeDimension: { name: block.timeDimension, granularity: block.granularity } }
+      : {}),
+    ...(runtimeBindings.filters.length > 0 ? { filters: runtimeBindings.filters } : {}),
+    ...((runtimeBindings.limit ?? block.limit) !== undefined
+      ? { limit: runtimeBindings.limit ?? block.limit }
+      : {}),
+    driver,
+    tableMapping,
+  });
   if (!composed) {
     throw new Error(
       `Could not compose SQL for semantic block "${block.name}". ` +

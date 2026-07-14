@@ -8,6 +8,7 @@ let deriveResultChartConfig: typeof UnifiedAgentRunPanelModule.deriveResultChart
 let artifactReadyPayloadFromRun: typeof UnifiedAgentRunPanelModule.artifactReadyPayloadFromRun;
 let longRunGuidanceFor: typeof UnifiedAgentRunPanelModule.longRunGuidanceFor;
 let completedRunGuidanceFor: typeof UnifiedAgentRunPanelModule.completedRunGuidanceFor;
+let trustExplainer: typeof UnifiedAgentRunPanelModule.trustExplainer;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -19,6 +20,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     artifactReadyPayloadFromRun = module.artifactReadyPayloadFromRun;
     longRunGuidanceFor = module.longRunGuidanceFor;
     completedRunGuidanceFor = module.completedRunGuidanceFor;
+    trustExplainer = module.trustExplainer;
   });
 
   it('UI-003 progressively explains long SQL generation and its durable optimization path', () => {
@@ -164,6 +166,32 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   it('labels SQL-only output as a preview instead of the default query artifact', () => {
     expect(resolveArtifactDqlView({ sql: 'SELECT 1' })).toBeUndefined();
     expect(artifactSqlDisclosureLabel(false)).toBe('View SQL preview');
+  });
+
+  it('EXP-002 does not claim an exploratory query ran when bounded execution failed', () => {
+    expect(trustExplainer({
+      trustState: 'review_required',
+      artifacts: [{
+        kind: 'answer',
+        payload: {
+          exploratoryCandidate: { kind: 'dbt_grounded_exploration' },
+          executionError: 'DQL could not parse the exploratory SQL.',
+        },
+      }],
+    } as any)).toContain('bounded execution failed');
+  });
+
+  it('EXP-002 describes an exploratory answer as executed only when result evidence exists', () => {
+    expect(trustExplainer({
+      trustState: 'review_required',
+      artifacts: [{
+        kind: 'answer',
+        payload: {
+          exploratoryCandidate: { kind: 'dbt_grounded_exploration' },
+          result: { columns: ['customer_name'], rows: [{ customer_name: 'Melissa' }], rowCount: 1 },
+        },
+      }],
+    } as any)).toContain('query and bounded join probes ran');
   });
 
   it('hands semantic and generated SQL artifacts to Block Studio but never duplicates a certified answer', () => {

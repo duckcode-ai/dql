@@ -1639,6 +1639,58 @@ SELECT * FROM hidden_trace
     expect(dashboard.layout.items.filter((item: { aiPin?: unknown }) => Boolean(item.aiPin))).toHaveLength(1);
   });
 
+  it('preserves transient DQL parameters when adding a review-required answer to an app (PRD-001, AGT-002, AGT-006)', () => {
+    const root = createProject();
+    const app = createAppPackage(root, {
+      name: 'Parameterized Analysis',
+      domain: 'growth',
+      purpose: 'Review generated parameterized analysis',
+      audience: 'analyst',
+      owners: ['owner@local'],
+      selectedBlockIds: [],
+    });
+    expect(app.ok).toBe(true);
+    if (!app.ok) return;
+
+    const created = __test__.createAiPinTile(root, 'parameterized-analysis', {
+      dashboardId: 'overview',
+      title: 'Customer beverage spend',
+      answer: 'Review-required generated answer.',
+      question: 'Who spent most on beverages?',
+      certification: 'ai_generated',
+      reviewStatus: 'needs_review',
+      analysisPlan: {
+        dqlArtifact: {
+          kind: 'semantic_block',
+          source: 'block "customer_beverage_spend" { status = "draft" type = "semantic" metric = "customer_spend" dimensions = ["customer_name"] params { category: string = "Beverage" top_n: number = 10 } parameterPolicy { category = "dynamic" top_n = "dynamic" } filterBindings { category = "product_category" top_n = "limit" } }',
+          name: 'customer_beverage_spend',
+          persistence: 'transient',
+          trustState: 'governed',
+          parameters: [
+            { name: 'category', type: 'string', required: false, default: 'Beverage', policy: 'dynamic', binding: { kind: 'semantic_filter', field: 'product_category', operator: 'equals' } },
+            { name: 'top_n', type: 'number', required: false, default: 10, policy: 'dynamic', binding: { kind: 'limit' } },
+          ],
+          parameterValues: { category: 'Beverage', top_n: 10 },
+        },
+      },
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const dashboard = JSON.parse(readFileSync(join(root, 'apps/parameterized-analysis/dashboards/overview.dqld'), 'utf-8'));
+    expect(dashboard.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'category', type: 'string', default: 'Beverage', bindsTo: 'product_category' }),
+      expect.objectContaining({ id: 'top_n', type: 'number', default: 10 }),
+    ]));
+    expect(dashboard.layout.items.at(-1)).toMatchObject({
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+      parameterBindings: expect.arrayContaining([
+        expect.objectContaining({ param: 'category', source: 'dashboard_filter', filter: 'category', parameterType: 'string' }),
+        expect.objectContaining({ param: 'top_n', source: 'dashboard_filter', filter: 'top_n', parameterType: 'number' }),
+      ]),
+    });
+  });
+
   it('reports deduped local pinned insights in app summaries', () => {
     const root = createProject();
     writeBlock(root, 'growth/revenue.dql', {

@@ -70,7 +70,8 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
   const insertGeneratedDqlCell = (payload: InsertDqlPayload) => {
     const sql = (payload.sql ?? payload.dqlArtifact?.source ?? '').trim();
     if (!sql) return;
-    const sqlCell = makeCell('sql', sql);
+    const dqlSource = payload.dqlArtifact?.source?.trim();
+    const sqlCell = makeCell(dqlSource ? 'dql' : 'sql', dqlSource || sql);
     sqlCell.name = uniqueSqlCellName(payload.title ?? payload.dqlArtifact?.name, cells);
     if (payload.result) {
       sqlCell.result = payload.result;
@@ -87,7 +88,13 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
         kind: payload.dqlArtifact.kind,
         metrics: payload.dqlArtifact.metrics,
         dimensions: payload.dqlArtifact.dimensions,
+        parameters: payload.dqlArtifact.parameters,
+        parameterValues: payload.dqlArtifact.parameterValues,
+        persistence: payload.dqlArtifact.persistence,
+        trustState: payload.dqlArtifact.trustState,
+        compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
       };
+      sqlCell.dqlParameterValues = payload.dqlArtifact.parameterValues;
     }
     dispatch({ type: 'ADD_CELL', cell: sqlCell, afterId: cell.id });
   };

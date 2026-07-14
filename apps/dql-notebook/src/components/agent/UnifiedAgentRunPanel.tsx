@@ -49,8 +49,9 @@ import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuil
 import { ResultView } from '../output/ResultView';
 import { DraftReviewCard } from '../blocks/DraftReviewCard';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
+import { BlockParameterControls, isRuntimeEditableParameter } from '../parameters/BlockParameterControls';
 export { deriveResultChartConfig } from '../output/ResultView';
-import type { QueryResult, AppSummary, CellChartConfig, Cell } from '../../store/types';
+import type { QueryResult, AppSummary, CellChartConfig, Cell, BlockParameterDefinition } from '../../store/types';
 import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
@@ -1470,6 +1471,7 @@ function AddToAppButton({
   };
 
   const pinTo = async (appId: string, dashboardId: string, name: string) => {
+    const dqlArtifact = answerDqlArtifactFromRun(run);
     const result = await api.createAiPin(appId, {
       dashboardId,
       title: defaultAppName(run.question),
@@ -1478,6 +1480,7 @@ function AddToAppButton({
       sql: answerSqlFromRun(run),
       certification: run.trustState === 'certified' ? 'certified' : 'ai_generated',
       reviewStatus: run.trustState === 'certified' ? 'certified' : 'needs_review',
+      analysisPlan: dqlArtifact ? { dqlArtifact } : undefined,
     });
     if (!result.ok) throw new Error('Could not add to app.');
     setDone({ appId, dashboardId, name });
@@ -1607,12 +1610,32 @@ function AddToAppButton({
 }
 
 /** Plain-English trust line so a stakeholder knows what they can rely on. */
-function trustExplainer(run: AgentRun): string | null {
+/**
+ * EXP-002 — the trust explainer must reflect execution truth. An exploratory
+ * candidate is not an executed answer merely because dbt-grounded SQL exists.
+ */
+export function trustExplainer(run: AgentRun): string | null {
   if (run.trustState === 'certified') return 'Answered from a certified block.';
   if (run.route === 'dql_block_draft') return 'Saved as a draft block. Add an owner and DQL will certify it when checks pass.';
   if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
   if (run.trustState === 'grounded') return 'Ran cleanly against your data. Save it as a block when it is reusable.';
-  if (isExploratoryDbtRun(run)) return 'Exploratory · DBT-grounded. The query and bounded join probes ran, but no certified relationship path covers it yet.';
+  if (isExploratoryDbtRun(run)) {
+    const payloads = run.artifacts
+      .map((artifact) => artifact.payload)
+      .filter((payload): payload is Record<string, unknown> => Boolean(payload && typeof payload === 'object' && !Array.isArray(payload)));
+    const executed = payloads.some((payload) => {
+      const result = payload.result;
+      return Boolean(result && typeof result === 'object' && !Array.isArray(result));
+    });
+    if (executed) {
+      return 'Exploratory · DBT-grounded. The query and bounded join probes ran, but no certified relationship path covers it yet.';
+    }
+    const executionError = payloads.find((payload) => typeof payload.executionError === 'string')?.executionError;
+    if (typeof executionError === 'string' && executionError.trim()) {
+      return 'Exploratory · DBT-grounded. DQL prepared a review-required query, but its bounded execution failed. Inspect the error and DQL artifact before reuse.';
+    }
+    return 'Exploratory · DBT-grounded. DQL prepared a review-required query, but it has not executed yet.';
+  }
   if (run.trustState === 'review_required') return 'AI-generated answer. Save it as a block when you want to keep it.';
   if (run.trustState === 'blocked') return null;
   return null;
@@ -1731,6 +1754,121 @@ function AppProposalArtifact({
   );
 }
 
+function ExecutableDqlResult({
+  artifact,
+  certifiedBlockName,
+  initialResult,
+  initialChartConfig,
+  payload,
+  t,
+  themeMode,
+}: {
+  artifact: AgentConversationDqlArtifact;
+  certifiedBlockName?: string;
+  initialResult: QueryResult;
+  initialChartConfig?: CellChartConfig;
+  payload: Record<string, unknown>;
+  t: Theme;
+  themeMode: ThemeMode;
+}) {
+  const [parameters, setParameters] = useState<BlockParameterDefinition[]>(() => artifact.parameters ?? []);
+  const [values, setValues] = useState<Record<string, unknown>>(() => ({
+    ...(artifact.parameterValues ?? {}),
+    ...resolvedParameterValues(payload),
+  }));
+  const [result, setResult] = useState(initialResult);
+  const [chartConfig, setChartConfig] = useState<CellChartConfig | undefined>(initialChartConfig);
+  const [loading, setLoading] = useState(Boolean(certifiedBlockName));
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!certifiedBlockName) {
+      setParameters(artifact.parameters ?? []);
+      setValues((current) => ({ ...(artifact.parameterValues ?? {}), ...current }));
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void api.getCertifiedBlockParameters(certifiedBlockName)
+      .then((response) => {
+        if (cancelled) return;
+        setParameters(response.parameters);
+        setValues((current) => ({
+          ...Object.fromEntries(response.parameters.flatMap((parameter) => parameter.default === undefined ? [] : [[parameter.name, parameter.default]])),
+          ...current,
+        }));
+      })
+      .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [artifact, certifiedBlockName]);
+
+  const run = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const response = await api.invokeDqlArtifact(artifact, values, undefined, certifiedBlockName);
+      setResult(response.result);
+      if (response.result.chartConfig && typeof response.result.chartConfig === 'object') {
+        setChartConfig(response.result.chartConfig as CellChartConfig);
+      }
+      if (response.parameters.length > 0) setParameters(response.parameters);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const editable = parameters.some(isRuntimeEditableParameter);
+  return (
+    <div style={{ display: 'grid', gap: 9 }}>
+      {loading ? <div style={{ fontSize: 10.5, color: t.textMuted }}>Loading reusable inputs…</div> : editable ? (
+        <div style={{ display: 'grid', gap: 8, padding: 9, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.appBg }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: t.textPrimary }}>Change DQL inputs</div>
+              <div style={{ fontSize: 10, color: t.textMuted }}>Reruns this DQL artifact directly. It does not start another AI search.</div>
+            </div>
+            <button type="button" disabled={running} onClick={() => void run()} style={{ ...smallButtonStyle(t), color: t.accent, opacity: running ? .65 : 1 }}>
+              {running ? <Loader2 size={11} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Sparkles size={11} />}
+              {running ? 'Running…' : 'Apply'}
+            </button>
+          </div>
+          <BlockParameterControls parameters={parameters} values={values} onChange={(name, value) => setValues((current) => ({ ...current, [name]: value }))} t={t} />
+        </div>
+      ) : null}
+      {error ? <div style={{ fontSize: 10.5, color: t.error }}>{error}</div> : null}
+      <ResultView result={result} themeMode={themeMode} t={t} chartConfig={chartConfig} />
+    </div>
+  );
+}
+
+function resolvedParameterValues(payload: Record<string, unknown>): Record<string, unknown> {
+  const result = payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
+    ? payload.result as Record<string, unknown>
+    : undefined;
+  const raw = Array.isArray(result?.parameters) ? result.parameters : Array.isArray(payload.parameters) ? payload.parameters : [];
+  return Object.fromEntries(raw.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const record = entry as { name?: unknown; value?: unknown };
+    return typeof record.name === 'string' ? [[record.name, record.value]] : [];
+  }));
+}
+
+function certifiedBlockName(artifact: AgentRunArtifact, payload: Record<string, unknown>): string | undefined {
+  const result = payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
+    ? payload.result as Record<string, unknown>
+    : undefined;
+  const block = payload.block && typeof payload.block === 'object' && !Array.isArray(payload.block)
+    ? payload.block as Record<string, unknown>
+    : undefined;
+  const candidates = [result?.blockName, payload.sourceCertifiedBlock, block?.name, artifact.ref];
+  return candidates.find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0);
+}
+
 function ArtifactView({
   artifact,
   t,
@@ -1796,6 +1934,7 @@ function ArtifactView({
     ? narration.keyFindings.filter((item): item is string => typeof item === 'string')
     : [];
   const recommendation = typeof narration?.recommendation === 'string' ? narration.recommendation : undefined;
+  const certifiedName = artifact.trustState === 'certified' ? certifiedBlockName(artifact, payload) : undefined;
 
   // A governed DQL block draft renders through the shared draft-review card:
   // DQL-first, grounding + enriched metadata + verdict, draft-first status.
@@ -1873,7 +2012,17 @@ function ArtifactView({
           <span style={{ color: t.accent }}>→</span><span>{recommendation}</span>
         </div>
       ) : null}
-      {resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={extractChartConfig(payload, resultData)} /> : null}
+      {resultData ? dqlArtifact ? (
+        <ExecutableDqlResult
+          artifact={dqlArtifact}
+          certifiedBlockName={certifiedName}
+          initialResult={resultData}
+          initialChartConfig={extractChartConfig(payload, resultData)}
+          payload={payload}
+          t={t}
+          themeMode={themeMode}
+        />
+      ) : <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={extractChartConfig(payload, resultData)} /> : null}
       {dqlArtifact ? (
         <details>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: t.textSecondary, listStyle: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>

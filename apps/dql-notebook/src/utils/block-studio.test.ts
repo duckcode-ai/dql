@@ -3,6 +3,7 @@ import {
   inferVisualParameterType,
   parseVisualBlockParameters,
   removeVisualBlockParameter,
+  setSemanticRuntimeFilters,
   upsertVisualBlockParameter,
 } from './block-studio.js';
 
@@ -41,5 +42,18 @@ describe('visual block parameters', () => {
       }),
     ]);
     expect(parseVisualBlockParameters(removeVisualBlockParameter(withParameter, 'region_set'))).toEqual([]);
+  });
+
+  it('creates a complete dynamic semantic-filter contract from visual authoring', () => {
+    const source = `block "Revenue" {
+  domain = "sales"
+  type = "semantic"
+  metric = "revenue"
+}`;
+    const result = setSemanticRuntimeFilters(source, ['product_category']);
+    expect(result).toContain('product_category: string');
+    expect(result).toContain('product_category = "dynamic"');
+    expect(result).toContain('product_category = "product_category"');
+    expect(result).toContain('requested_filters = ["product_category"]');
   });
 });

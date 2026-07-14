@@ -117,6 +117,11 @@ export type DashboardTileParameterBinding = {
   filter?: string;
   field?: string;
   value?: unknown;
+  /** Typed block contract metadata used to render the correct consumer control. */
+  parameterType?: 'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]' | 'date[]';
+  required?: boolean;
+  default?: unknown;
+  policy?: 'dynamic' | 'static' | 'business' | 'derived' | 'optional' | 'ambiguous_review_required';
 };
 
 export type DashboardTileSourceEvidence = {
@@ -711,6 +716,10 @@ function readTileParameterBindings(
       filter: typeof record.filter === 'string' ? record.filter : undefined,
       field: typeof record.field === 'string' ? record.field : undefined,
       value: record.value,
+      parameterType: enumOrUndefined(record.parameterType, `layout.items[${index}].parameterBindings[${i}].parameterType`, ['string', 'number', 'boolean', 'date', 'string[]', 'number[]', 'date[]'] as const, err),
+      required: typeof record.required === 'boolean' ? record.required : undefined,
+      default: record.default,
+      policy: enumOrUndefined(record.policy, `layout.items[${index}].parameterBindings[${i}].policy`, ['dynamic', 'static', 'business', 'derived', 'optional', 'ambiguous_review_required'] as const, err),
     });
   }
   return out;
