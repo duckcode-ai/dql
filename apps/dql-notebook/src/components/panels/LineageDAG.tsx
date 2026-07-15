@@ -209,7 +209,7 @@ export function LineageDAG() {
   const [visibleTypes, setVisibleTypes] = useState<Record<string, boolean>>(
     Object.fromEntries(LINEAGE_NODE_TYPE_ORDER.map((type) => [type, true])),
   );
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>('flow');
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>('layered');
   const [direction, setDirection] = useState<Direction>('LR');
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node>([]);
@@ -254,6 +254,21 @@ export function LineageDAG() {
     };
   }, [graphData, visibleTypes]);
 
+  const directionalFocusIds = useMemo(() => {
+    if (!focalNode) return null;
+    const ancestors = new Set<string>([focalNode.id]);
+    const descendants = new Set<string>([focalNode.id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const edge of fullGraph.edges) {
+        if (ancestors.has(edge.target) && !ancestors.has(edge.source)) { ancestors.add(edge.source); changed = true; }
+        if (descendants.has(edge.source) && !descendants.has(edge.target)) { descendants.add(edge.target); changed = true; }
+      }
+    }
+    return new Set([...ancestors, ...descendants]);
+  }, [focalNode, fullGraph.edges]);
+
   const activePreset = useMemo(() => {
     for (const preset of LINEAGE_PRESETS) {
       const allowed = new Set<string>(preset.types);
@@ -283,6 +298,8 @@ export function LineageDAG() {
         domain: node.domain,
         layer: getNodeLayer(node),
       },
+      selected: node.id === focalNode?.id,
+      style: { opacity: !directionalFocusIds || directionalFocusIds.has(node.id) ? 1 : 0.14, transition: 'opacity 180ms ease' },
     }));
 
     const edges: Edge[] = filteredGraph.edges.map((edge, index) => ({
@@ -291,7 +308,8 @@ export function LineageDAG() {
       target: edge.target,
       style: {
         stroke: EDGE_TYPE_COLORS[edge.type] ?? 'var(--text-tertiary)',
-        strokeWidth: 1.6,
+        strokeWidth: focalNode && (edge.source === focalNode.id || edge.target === focalNode.id) ? 2.5 : 1.6,
+        opacity: !directionalFocusIds || (directionalFocusIds.has(edge.source) && directionalFocusIds.has(edge.target)) ? 1 : 0.08,
       },
       markerEnd: {
         type: MarkerType.ArrowClosed,
@@ -303,17 +321,18 @@ export function LineageDAG() {
 
     setRfNodes(layoutGraph(nodes, edges, layoutMode, direction));
     setRfEdges(edges);
-  }, [filteredGraph, layoutMode, direction, setRfEdges, setRfNodes]);
+  }, [filteredGraph, layoutMode, direction, focalNode, directionalFocusIds, setRfEdges, setRfNodes]);
 
   const focusNode = useCallback(async (nodeId: string) => {
     const result = await api.queryLineage({ focus: nodeId });
-    setGraphData(result.graph ?? { nodes: [], edges: [] });
-    setFocalNode(result.focalNode ?? null);
-    setSelectedNode(result.focalNode ?? null);
+    const focused = result.focalNode ?? fullGraph.nodes.find((node) => node.id === nodeId) ?? null;
+    setGraphData(fullGraph);
+    setFocalNode(focused);
+    setSelectedNode(focused);
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
     setSearch('');
     setMatches([]);
-  }, [dispatch]);
+  }, [dispatch, fullGraph]);
 
   useEffect(() => {
     if (!state.lineageFocusNodeId) return;
@@ -483,7 +502,7 @@ export function LineageDAG() {
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search lineage and focus the graph..."
+            placeholder="Search lineage, focus a path…"
             style={{
               flex: 1,
               padding: '8px 10px',
@@ -540,7 +559,8 @@ export function LineageDAG() {
         )}
       </div>
 
-      <div style={{ flex: 1, position: 'relative' }}>
+      <div style={{ flex: 1, position: 'relative', minHeight: 0, paddingBottom: 28 }}>
+        {layoutMode === 'layered' && direction === 'LR' && <div aria-hidden="true" style={{ position: 'absolute', zIndex: 4, left: 30, right: 30, top: 10, display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', pointerEvents: 'none' }}>{['Sources', 'dbt models', 'Semantic & blocks', 'Business views', 'Consumption'].map((label) => <span key={label} style={{ color: t.textMuted, fontSize: 9.5, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase', textAlign: 'center' }}>{label}</span>)}</div>}
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}
@@ -574,7 +594,8 @@ export function LineageDAG() {
                 fontSize: 12,
               }}
             >
-              <div style={{ fontWeight: 700, marginBottom: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 700, marginBottom: 4 }}>
+                {focalNode && <span style={{ width: 8, height: 8, borderRadius: 999, background: NODE_TYPE_COLORS[focalNode.type] ?? t.accent }} />}
                 {focalNode ? focalNode.name : 'Full Lineage View'}
               </div>
               <div style={{ color: 'var(--text-tertiary)', fontSize: 11 }}>
@@ -617,6 +638,7 @@ export function LineageDAG() {
             </div>
           </Panel>
         </ReactFlow>
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 28, borderTop: `1px solid ${t.headerBorder}`, background: t.headerBg, display: 'flex', alignItems: 'center', gap: 12, padding: '0 12px', color: t.textMuted, fontSize: 9.5 }}><span>Click a node to focus its path · click the canvas to clear</span><span style={{ marginLeft: 'auto' }}>{filteredGraph.nodes.length} nodes · {filteredGraph.edges.length} relationships</span>{focalNode && <span style={{ color: t.accent }}>{directionalFocusIds?.size ?? 0} in focused path</span>}</div>
       </div>
     </div>
   );
