@@ -904,15 +904,11 @@ export function BlockStudio() {
       }}
     >
       <div style={{ gridColumn: '1', gridRow: compactLayout ? '1' : '1 / 4', borderRight: leftPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, borderBottom: compactLayout && !leftPaneCollapsed ? `1px solid ${t.headerBorder}` : 'none', display: leftPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg, minWidth: 0 }}>
-        {/* v1.3.3 Hex cleanup — single compact header row; drop wordy
-            description and the empty 3-up stat cards in favor of an
-            inline count chip. */}
+        {/* Compact explorer title and collapse action. The object-type tabs and
+            create action live directly below, matching the workbench handoff. */}
         <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
-            Source
-          </span>
-          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            Blocks, semantics, and database objects
+            Explorer
           </span>
           <div style={{ flex: 1 }} />
           {state.semanticLayer.provider && (
@@ -936,6 +932,7 @@ export function BlockStudio() {
           <BuildSidebar
             tabs={['blocks', 'semantic', 'database']}
             defaultTab={explorerTab}
+            onCreateBlock={beginNewWorkspace}
             blockDomain={domainFilter}
             onBlockDomainChange={setDomainFilter}
             onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
@@ -944,6 +941,12 @@ export function BlockStudio() {
               autoRun: `Draft a reusable, governed DQL block from ${label} (${ref}). Give it a clear name and description, declare grain, dimensions, and outputs, and ground it in the certified/semantic context.`,
             })}
           />
+        </div>
+        <div style={{ padding: '8px 12px', borderTop: `1px solid ${t.headerBorder}`, fontSize: 10.5, color: t.textMuted, display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+          <span style={{ width: 6, height: 6, borderRadius: 999, background: state.blockStudioDbtStatus?.artifacts.manifest.exists ? '#2e8b57' : t.textMuted }} />
+          {state.blockStudioDbtStatus?.artifacts.manifest.exists
+            ? `dbt synced · ${state.blockStudioDbtStatus.counts.models} models · ${state.blockStudioDbtStatus.counts.metrics} metrics`
+            : 'dbt context loading'}
         </div>
       </div>
 
@@ -1003,24 +1006,16 @@ export function BlockStudio() {
             />
           )}
           <div style={{ flex: 1 }} />
-          <TemplateButton label="New block" Icon={Plus} onClick={beginNewWorkspace} />
           {hasActiveDraft && (
             <>
               <TemplateButton
                 label="Ask AI"
                 Icon={Sparkles}
                 variant="primary"
-                onClick={() => openAskAi({ kind: 'ask' })}
+                onClick={() => state.activeBlockPath
+                  ? openAskAi({ kind: 'edit', initialInput: `Modify this block${activeBlockName ? ` (${activeBlockName})` : ''}: ` })
+                  : openAskAi({ kind: 'ask' })}
               />
-              {/* Modify the block currently in the editor — the governed cascade in
-                  edit mode (workspaceContext.mode='edit' + blockPath). */}
-              {state.activeBlockPath && (
-                <TemplateButton
-                  label="Modify with AI"
-                  Icon={Sparkles}
-                  onClick={() => openAskAi({ kind: 'edit', initialInput: `Modify this block${activeBlockName ? ` (${activeBlockName})` : ''}: ` })}
-                />
-              )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
               <TemplateButton label="Save draft" onClick={() => void handleSave()} busy={saving} />
             </>

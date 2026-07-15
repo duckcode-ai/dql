@@ -33,7 +33,7 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock, blockDomain = '', onBlockDomainChange }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock, onCreateBlock, blockDomain = '', onBlockDomainChange }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
@@ -42,13 +42,17 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
   onInsertText?: (text: string) => void;
   /** When set, catalog rows show a "Build block" action (governed AI). Block Studio only. */
   onSeedBlock?: (ref: string, label: string) => void;
+  /** Optional compact create action beside catalog search. Block Studio only. */
+  onCreateBlock?: () => void;
   /** Domain scope for the Blocks tab. An empty value selects the first available domain. */
   blockDomain?: string;
   onBlockDomainChange?: (domain: string) => void;
 }) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const visibleTabs = tabs ? TABS.filter((x) => tabs.includes(x.id)) : TABS;
+  const visibleTabs = tabs
+    ? tabs.map((id) => TABS.find((item) => item.id === id)).filter((item): item is (typeof TABS)[number] => Boolean(item))
+    : TABS;
   const [tab, setTab] = useState<BuildTab>(defaultTab ?? visibleTabs[0]?.id ?? 'notebooks');
   const [search, setSearch] = useState('');
 
@@ -89,8 +93,8 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
 
       {/* Search (all tabs except notebooks, which has its own + button) */}
       {tab !== 'notebooks' && (
-        <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div style={{ position: 'relative' }}>
+        <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', gap: 6 }}>
+          <div style={{ position: 'relative', flex: 1 }}>
             <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: t.textMuted }} />
             <input
               value={search}
@@ -102,6 +106,29 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
               }}
             />
           </div>
+          {onCreateBlock && (
+            <button
+              type="button"
+              title="New block"
+              aria-label="New block"
+              onClick={onCreateBlock}
+              style={{
+                width: 28,
+                height: 28,
+                flexShrink: 0,
+                borderRadius: 6,
+                border: `1px solid ${t.headerBorder}`,
+                background: t.cellBg,
+                color: t.accent,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+              }}
+            >
+              <Plus size={14} strokeWidth={2} aria-hidden="true" />
+            </button>
+          )}
         </div>
       )}
 
