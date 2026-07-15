@@ -119,7 +119,6 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
       }}
     >
       <NodeResizeControl position="bottom-right" resizeDirection="horizontal" minWidth={240} maxWidth={620} onResizeEnd={(_, params) => onResize(recordKey, params.width)} style={{ width: 16, height: 16, border: 0, background: 'transparent', color: theme.textMuted }}><span title="Drag to resize model" style={{ display: 'grid', placeItems: 'center' }}><Maximize2 size={12} /></span></NodeResizeControl>
-      {collapsed && viewMode === 'data' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
       <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: recordKey }); }} style={{ position: 'absolute', right: 5, top: 16, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: `2px solid ${theme.cellBg}`, background: color, color: '#fff', cursor: 'pointer', boxShadow: `0 0 0 1px ${color}66` }}><Plus size={12} /></button>
       <div style={{ height: 4, background: color, borderRadius: '9px 9px 0 0' }} />
       <div style={{ padding: '10px 12px 9px', borderBottom: viewMode === 'business' ? `1px solid ${theme.headerBorder}` : undefined, background: selected ? `${theme.accent}0d` : theme.headerBg }}>
@@ -220,7 +219,8 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           )}
         </div>
       )}
-      {(collapsed || viewMode === 'business') && <><Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} /><Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} /></>}
+      <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />
+      <Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} />
     </div>
   );
 }
@@ -328,8 +328,8 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
         id: recordKey,
         source: from,
         target: to,
-        sourceHandle: firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : undefined,
-        targetHandle: firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
+        sourceHandle: viewMode === 'data' && firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : 'entity-source',
+        targetHandle: viewMode === 'data' && firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : 'entity-target',
         type: 'smoothstep',
         label: showEdgeLabels ? `${cardinalitySymbol(relationship.cardinality)}  ${label}` : undefined,
         animated: relationship.status === 'review',
