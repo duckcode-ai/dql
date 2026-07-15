@@ -348,6 +348,14 @@ function BlocksList({ t, search, domain, onDomainChange }: { t: Theme; search: s
     void api.openBlockStudio(block.path).then((payload) => dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload }));
   };
 
+  useEffect(() => {
+    const first = filtered[0];
+    if (loading || state.activeBlockPath || !first) return;
+    const file = { name: first.path.split('/').pop() ?? first.name, path: first.path, type: 'block' as const, folder: 'blocks' };
+    if (!state.files.some((candidate) => candidate.path === first.path)) dispatch({ type: 'FILE_ADDED', file });
+    void api.openBlockStudio(first.path).then((payload) => dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload }));
+  }, [loading, state.activeBlockPath, filtered[0]?.path]);
+
   if (loading) return <EmptyNote text="Loading blocks…" t={t} />;
   if (blocks.length === 0) return <EmptyNote text="No blocks yet." t={t} />;
   return <div>
@@ -386,7 +394,8 @@ function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: (
         </button>
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
+          onClick={onOpen}
+          title={`Open ${block.name}`}
           style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 7, padding: 0, fontFamily: t.font }}
         >
           <Box size={13} color={STATUS_COLOR[block.status] ?? t.textMuted} style={{ flexShrink: 0 }} />

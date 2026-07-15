@@ -358,7 +358,7 @@ export function BlockStudio() {
 
   useEffect(() => {
     setWorkspaceMode(hasBlockStudioWorkspaceContent(state) ? 'manual' : 'start');
-    setEditorMode(parseBlockFields(state.blockStudioDraft)?.blockType === 'semantic' ? 'visual' : 'source');
+    setEditorMode('visual');
   }, [state.activeBlockPath]);
 
   useEffect(() => {
@@ -1147,7 +1147,7 @@ export function BlockStudio() {
             Output
           </span>
           <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
-          <ExplorerTabButton active={resultTab === 'parameters'} onClick={() => setResultTab('parameters')} label={`Parameters${(state.blockStudioValidation?.parameters?.length ?? 0) > 0 ? ` (${state.blockStudioValidation!.parameters!.length})` : ''}`} />
+          <ExplorerTabButton active={resultTab === 'parameters'} onClick={() => setResultTab('parameters')} label={`Run inputs${(state.blockStudioValidation?.parameters?.length ?? 0) > 0 ? ` (${state.blockStudioValidation!.parameters!.length})` : ''}`} />
           <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
           <span style={{ width: 1, height: 18, background: t.headerBorder, margin: '0 6px' }} />
           <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
@@ -3186,7 +3186,7 @@ function BlockStudioImportWorkspace({
                   disabled={loading || !sourceReady}
                   style={{ ...primaryImportButtonStyle(t), padding: '8px 12px', opacity: loading || !sourceReady ? 0.65 : 1, cursor: loading || !sourceReady ? 'not-allowed' : 'pointer' }}
                 >
-                  {loading ? smartImportPhaseLabel(smartPhase) : 'Generate DQL drafts'}
+                  {loading ? smartImportPhaseLabel(smartPhase) : mode === 'paste' ? 'Convert to DQL script' : 'Generate DQL drafts'}
                 </button>
                 <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, lineHeight: 1.45 }}>
                   Uses dbt, MetricFlow, warehouse catalog, and existing DQL context when available.
