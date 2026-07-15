@@ -33,7 +33,7 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock, blockDomain = '', onBlockDomainChange }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSeedBlock, blockDomain = '', onBlockDomainChange, onNewBlock, footer, onCollapse }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
@@ -45,10 +45,19 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
   /** Domain scope for the Blocks tab. An empty value selects the first available domain. */
   blockDomain?: string;
   onBlockDomainChange?: (domain: string) => void;
+  /** Shows a "+" new-block button beside the search input (Block Studio). */
+  onNewBlock?: () => void;
+  /** Optional status footer line (e.g. "dbt synced · 42 models · 5 metrics"). */
+  footer?: React.ReactNode;
+  /** Renders a collapse chevron at the end of the tab bar. */
+  onCollapse?: () => void;
 }) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const visibleTabs = tabs ? TABS.filter((x) => tabs.includes(x.id)) : TABS;
+  // Respect the host's tab order (the prototype puts Blocks first in Block Studio).
+  const visibleTabs = tabs
+    ? tabs.map((id) => TABS.find((x) => x.id === id)).filter((x): x is typeof TABS[number] => Boolean(x))
+    : TABS;
   const [tab, setTab] = useState<BuildTab>(defaultTab ?? visibleTabs[0]?.id ?? 'notebooks');
   const [search, setSearch] = useState('');
 
@@ -85,12 +94,22 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
             </button>
           );
         })}
+        {onCollapse ? (
+          <button
+            type="button"
+            onClick={onCollapse}
+            title="Collapse explorer"
+            style={{ border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', fontSize: 13, padding: '0 6px', flexShrink: 0 }}
+          >
+            ‹
+          </button>
+        ) : null}
       </div>
 
       {/* Search (all tabs except notebooks, which has its own + button) */}
       {tab !== 'notebooks' && (
-        <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div style={{ position: 'relative' }}>
+        <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', gap: 6 }}>
+          <div style={{ position: 'relative', flex: 1 }}>
             <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: t.textMuted }} />
             <input
               value={search}
@@ -102,6 +121,16 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
               }}
             />
           </div>
+          {onNewBlock ? (
+            <button
+              type="button"
+              onClick={onNewBlock}
+              title="New block"
+              style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 6, border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+            >
+              <Plus size={14} strokeWidth={2} />
+            </button>
+          ) : null}
         </div>
       )}
 
@@ -111,6 +140,13 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSee
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} onSeedBlock={onSeedBlock} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} />}
       </div>
+
+      {footer ? (
+        <div style={{ padding: '9px 12px', borderTop: `1px solid ${t.headerBorder}`, fontSize: 10.5, color: t.textMuted, display: 'flex', alignItems: 'center', gap: 6, fontFamily: t.font }}>
+          <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{footer}</span>
+        </div>
+      ) : null}
     </div>
   );
 }

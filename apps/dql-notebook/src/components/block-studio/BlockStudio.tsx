@@ -904,34 +904,9 @@ export function BlockStudio() {
       }}
     >
       <div style={{ gridColumn: '1', gridRow: compactLayout ? '1' : '1 / 4', borderRight: leftPaneCollapsed ? 'none' : `1px solid ${t.headerBorder}`, borderBottom: compactLayout && !leftPaneCollapsed ? `1px solid ${t.headerBorder}` : 'none', display: leftPaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden', background: t.sidebarBg, minWidth: 0 }}>
-        {/* v1.3.3 Hex cleanup — single compact header row; drop wordy
-            description and the empty 3-up stat cards in favor of an
-            inline count chip. */}
-        <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${t.headerBorder}` }}>
-          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
-            Source
-          </span>
-          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            Blocks, semantics, and database objects
-          </span>
-          <div style={{ flex: 1 }} />
-          {state.semanticLayer.provider && (
-            <span style={{ fontSize: 9, fontWeight: 700, color: t.accent, background: `${t.accent}18`, borderRadius: 999, padding: '2px 7px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-              {state.semanticLayer.provider}
-            </span>
-          )}
-          <button
-            onClick={() => setLeftPaneCollapsed(true)}
-            style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 14, fontFamily: t.font, padding: 0, lineHeight: 1 }}
-            title="Collapse explorer"
-          >
-            ‹
-          </button>
-        </div>
-
-        {/* Unified catalog — the same clean object-display as the notebook Build
-            sidebar (metrics/dimensions/time expand under a parent; blocks expand to
-            their description). Selected refs append to the block draft. */}
+        {/* Prototype explorer: tabs / search + new-block / catalog / sync footer.
+            The unified catalog is the same clean object-display as the notebook
+            Build sidebar; selected refs append to the block draft. */}
         <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           <BuildSidebar
             tabs={['blocks', 'semantic', 'database']}
@@ -943,6 +918,9 @@ export function BlockStudio() {
               kind: 'build',
               autoRun: `Draft a reusable, governed DQL block from ${label} (${ref}). Give it a clear name and description, declare grain, dimensions, and outputs, and ground it in the certified/semantic context.`,
             })}
+            onNewBlock={beginNewWorkspace}
+            onCollapse={() => setLeftPaneCollapsed(true)}
+            footer={`${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${databaseStats.tables} table${databaseStats.tables === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`}
           />
         </div>
       </div>
@@ -961,7 +939,12 @@ export function BlockStudio() {
       <div style={{ display: compactLayout && aiDockOpen ? 'none' : 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden', gridColumn: editorGridColumn, gridRow: editorGridRow }}>
         {/* v1.3.3 Hex cleanup — tight single-row editor toolbar to match
             the explorer header; drop wordy subtitle. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
+        <style>{`
+          @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+          @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
+        `}</style>
+        {/* Prototype toolbar: breadcrumb · status pill · Visual/Source toggle · actions */}
+        <div style={{ height: 46, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg, overflowX: 'auto' }}>
           {leftPaneCollapsed && (
             <button
               onClick={() => setLeftPaneCollapsed(false)}
@@ -971,26 +954,16 @@ export function BlockStudio() {
               ›
             </button>
           )}
-          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font }}>
-            {isSemanticBlock ? 'Semantic Builder' : 'SQL Builder'}
-          </span>
-          <span style={{
-            fontSize: 10,
-            fontWeight: 700,
-            color: isSemanticBlock ? '#2ea043' : t.accent,
-            background: `${isSemanticBlock ? '#2ea043' : t.accent}18`,
-            borderRadius: 999,
-            padding: '3px 8px',
-            textTransform: 'uppercase',
-            letterSpacing: '0.04em',
-          }}>
-            {isSemanticBlock ? 'metric block' : 'sql block'}
+          <span style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, whiteSpace: 'nowrap' }}>Blocks</span>
+          <ChevronRight size={11} color={t.textMuted} style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: t.textPrimary, fontFamily: t.fontMono, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>
+            {activeBlockName || state.blockStudioMetadata?.name || (hasActiveDraft ? 'new_block' : (isSemanticBlock ? 'semantic' : 'sql'))}
           </span>
           {state.blockStudioMetadata?.reviewStatus && (
             <BlockStatusBadge status={state.blockStudioMetadata.reviewStatus} t={t} />
           )}
           {hasActiveDraft && workspaceMode === 'manual' && (
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg }}>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, marginLeft: 6, flexShrink: 0 }}>
               <button type="button" onClick={() => setEditorMode('visual')} style={editorModeButtonStyle(t, editorMode === 'visual')}>Visual Builder</button>
               <button type="button" onClick={() => setEditorMode('source')} style={editorModeButtonStyle(t, editorMode === 'source')}>DQL Source</button>
             </div>
@@ -1009,7 +982,6 @@ export function BlockStudio() {
               <TemplateButton
                 label="Ask AI"
                 Icon={Sparkles}
-                variant="primary"
                 onClick={() => openAskAi({ kind: 'ask' })}
               />
               {/* Modify the block currently in the editor — the governed cascade in
@@ -1022,11 +994,17 @@ export function BlockStudio() {
                 />
               )}
               <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-              <TemplateButton label="Save draft" onClick={() => void handleSave()} busy={saving} />
+              <button
+                type="button"
+                onClick={() => void handleSave()}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 13px', borderRadius: 999, border: `1px solid ${t.accent}`, background: t.accent, color: '#ffffff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 2px rgba(107,93,211,0.25)', opacity: saving ? 0.7 : 1, whiteSpace: 'nowrap' }}
+              >
+                {saving ? 'Saving…' : 'Save draft'}
+              </button>
             </>
           )}
           {saveError && (
-            <span style={{ fontSize: 11, color: '#f85149', fontFamily: t.font, padding: '4px 8px', background: '#f8514918', borderRadius: 6 }}>
+            <span style={{ fontSize: 11, color: 'var(--status-error)', fontFamily: t.font, padding: '4px 8px', background: 'var(--status-error-bg)', borderRadius: 6 }}>
               {saveError}
             </span>
           )}
@@ -1112,19 +1090,46 @@ export function BlockStudio() {
                   t={t}
                 />
               )}
-              <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', background: t.cellBg }}>
-                <SQLCellEditor
-                  value={state.blockStudioDraft}
-                  onChange={handleDraftChange}
-                  onRun={() => void handleRun()}
-                  themeMode={state.themeMode}
-                  autoFocus
-                  wrap={false}
-                  fillHeight
-                  schema={editorSchema}
-                  dqlMode
-                  errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
-                />
+              {/* Prototype IDE chrome: file path bar + editor + 208px right rail. */}
+              <div style={{ height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px', borderBottom: '1px solid var(--border-subtle)', background: t.appBg }}>
+                <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {state.activeBlockPath ?? `blocks/${state.blockStudioMetadata?.domain || 'draft'}/${state.blockStudioMetadata?.name || 'new_block'}.dql`}
+                </span>
+                <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-warning)', flexShrink: 0 }} title="Unsaved changes" />
+                <div style={{ flex: 1 }} />
+                {(state.blockStudioValidation?.diagnostics.filter((item) => item.severity === 'error').length ?? 0) === 0 ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--status-success)', fontWeight: 600, whiteSpace: 'nowrap', fontFamily: t.font }}>
+                    <CheckCircle2 size={12} /> Valid
+                  </span>
+                ) : (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--status-warning)', fontWeight: 600, whiteSpace: 'nowrap', fontFamily: t.font }}>
+                    <AlertTriangle size={12} /> {state.blockStudioValidation!.diagnostics.filter((item) => item.severity === 'error').length} problem{state.blockStudioValidation!.diagnostics.filter((item) => item.severity === 'error').length === 1 ? '' : 's'}
+                  </span>
+                )}
+              </div>
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+                <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', background: t.cellBg, borderRight: '1px solid var(--border-subtle)' }}>
+                  <SQLCellEditor
+                    value={state.blockStudioDraft}
+                    onChange={handleDraftChange}
+                    onRun={() => void handleRun()}
+                    themeMode={state.themeMode}
+                    autoFocus
+                    wrap={false}
+                    fillHeight
+                    schema={editorSchema}
+                    dqlMode
+                    errorMessage={state.blockStudioValidation?.diagnostics.find((item) => item.severity === 'error')?.message}
+                  />
+                </div>
+                {!compactLayout && (
+                  <DqlSourceRail
+                    source={state.blockStudioDraft}
+                    diagnostics={state.blockStudioValidation?.diagnostics ?? []}
+                    parameterCount={state.blockStudioValidation?.parameters?.length ?? 0}
+                    t={t}
+                  />
+                )}
               </div>
             </div>
           )}
@@ -1147,28 +1152,27 @@ export function BlockStudio() {
             during block authoring. Validation and test details still run in
             the background and certification flow, but do not compete for
             attention as primary tabs. */}
-        <div style={{ padding: '10px 14px', display: 'flex', gap: 6, alignItems: 'center', borderBottom: `1px solid ${t.headerBorder}`, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
-            Output
-          </span>
-          <ExplorerTabButton active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" />
-          <ExplorerTabButton active={resultTab === 'parameters'} onClick={() => setResultTab('parameters')} label={`Parameters${(state.blockStudioValidation?.parameters?.length ?? 0) > 0 ? ` (${state.blockStudioValidation!.parameters!.length})` : ''}`} />
-          <ExplorerTabButton active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" />
-          <span style={{ width: 1, height: 18, background: t.headerBorder, margin: '0 6px' }} />
-          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', color: t.textMuted, textTransform: 'uppercase' as const, fontFamily: t.font, marginRight: 4 }}>
-            Details
-          </span>
-          <ExplorerTabButton active={resultTab === 'history'} onClick={() => {
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', padding: '0 16px', borderBottom: `1px solid ${t.headerBorder}`, flexWrap: 'wrap' }}>
+          <OutputTab active={resultTab === 'results'} onClick={() => setResultTab('results')} label="Results" t={t} />
+          <OutputTab active={resultTab === 'parameters'} onClick={() => setResultTab('parameters')} label={`Run inputs${(state.blockStudioValidation?.parameters?.length ?? 0) > 0 ? ` · ${state.blockStudioValidation!.parameters!.length}` : ''}`} t={t} />
+          <OutputTab active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" t={t} />
+          <OutputTab active={resultTab === 'history'} onClick={() => {
             setResultTab('history');
             if (!historyLoaded && state.activeBlockPath) {
               api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
             }
-          }} label="History" />
-          <ExplorerTabButton active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Metadata" />
+          }} label="History" t={t} />
+          <OutputTab active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Metadata" t={t} />
           <div style={{ flex: 1 }} />
+          {state.blockStudioPreview ? (
+            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font, whiteSpace: 'nowrap' }}>
+              {state.blockStudioPreview.result.executionTime ? `Ran in ${(state.blockStudioPreview.result.executionTime / 1000).toFixed(1)}s · ` : ''}
+              {state.blockStudioPreview.result.rowCount ?? state.blockStudioPreview.result.rows.length} rows
+            </span>
+          ) : null}
           <button
             onClick={() => setBottomPaneCollapsed(true)}
-            style={{ background: 'transparent', border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textMuted, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '4px 8px' }}
+            style={{ background: 'transparent', border: 'none', color: t.textMuted, cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '4px 6px' }}
             title="Hide pane"
           >
             ▾ Hide
@@ -1469,6 +1473,99 @@ function TemplateButton(props: { label: string; onClick: () => void; busy?: bool
   return <ExplorerTabButton active={false} {...props} />;
 }
 
+// Prototype DQL-source right rail (208px): Outline of the block's sections
+// with real line numbers, Problems from live validation, and Context counts.
+function DqlSourceRail({
+  source,
+  diagnostics,
+  parameterCount,
+  t,
+}: {
+  source: string;
+  diagnostics: BlockStudioDiagnostic[];
+  parameterCount: number;
+  t: Theme;
+}) {
+  const lines = source.split('\n');
+  const sectionColor: Record<string, string> = {
+    block: 'var(--text-tertiary)',
+    parameters: 'var(--accent)',
+    query: 'var(--status-success)',
+    tests: 'var(--status-warning)',
+    visualization: 'var(--cat-audit)',
+  };
+  const outline: Array<{ label: string; line: number; color: string }> = [];
+  lines.forEach((line, index) => {
+    const match = line.match(/^\s*(block|parameters|query|tests|visualization)\b/);
+    if (match && !outline.some((row) => row.label.toLowerCase().startsWith(match[1]))) {
+      const key = match[1];
+      const label = key === 'block' ? 'Metadata'
+        : key === 'parameters' ? `Parameters${parameterCount ? ` · ${parameterCount}` : ''}`
+        : key.charAt(0).toUpperCase() + key.slice(1);
+      outline.push({ label, line: index + 1, color: sectionColor[key] ?? 'var(--text-tertiary)' });
+    }
+  });
+  const testCount = (source.match(/^\s*assert\b/gm) ?? []).length;
+  const modelCount = new Set((source.match(/\b(?:from|join)\s+([a-z_][\w.]*)/gi) ?? []).map((token) => token.replace(/^(from|join)\s+/i, ''))).size;
+  const errors = diagnostics.filter((item) => item.severity === 'error');
+  return (
+    <div style={{ width: 208, flexShrink: 0, background: t.appBg, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+      <div style={{ padding: '12px 14px 6px', fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, fontFamily: t.font }}>Outline</div>
+      <div style={{ padding: '0 8px', display: 'flex', flexDirection: 'column', gap: 1 }}>
+        {outline.length === 0 ? <span style={{ fontSize: 11, color: t.textMuted, padding: '2px 8px', fontFamily: t.font }}>No sections yet.</span> : outline.map((row) => (
+          <div key={row.label} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px', borderRadius: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: row.color, flexShrink: 0 }} />
+            <span style={{ flex: 1, fontSize: 11.5, fontWeight: 550, color: t.textSecondary, fontFamily: t.font }}>{row.label}</span>
+            <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>:{row.line}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ padding: '14px 14px 6px', fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, fontFamily: t.font }}>Problems</div>
+      {errors.length === 0 ? (
+        <div style={{ padding: '0 14px', fontSize: 11.5, color: 'var(--status-success)', display: 'flex', alignItems: 'center', gap: 6, fontFamily: t.font }}>
+          <CheckCircle2 size={12} /> No problems
+        </div>
+      ) : (
+        <div style={{ padding: '0 14px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {errors.slice(0, 4).map((item, index) => (
+            <span key={index} style={{ fontSize: 11, color: 'var(--status-error)', lineHeight: 1.4, fontFamily: t.font }}>{item.message}</span>
+          ))}
+        </div>
+      )}
+      <div style={{ padding: '14px 14px 6px', fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, fontFamily: t.font }}>Context</div>
+      <div style={{ padding: '0 14px 16px', display: 'flex', flexDirection: 'column', gap: 5, fontSize: 11, color: t.textSecondary, fontFamily: t.font }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--accent)' }} />{parameterCount} parameter{parameterCount === 1 ? '' : 's'} bound</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)' }} />{modelCount} model{modelCount === 1 ? '' : 's'} referenced</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-warning)' }} />{testCount} test{testCount === 1 ? '' : 's'} declared</span>
+      </div>
+    </div>
+  );
+}
+
+// Prototype output-pane tab: quiet text with a 2px accent underline when active.
+function OutputTab({ active, onClick, label, t }: { active: boolean; onClick: () => void; label: string; t: Theme }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: '9px 1px',
+        fontSize: 11.5,
+        fontWeight: 650,
+        cursor: 'pointer',
+        border: 'none',
+        background: 'none',
+        fontFamily: t.font,
+        whiteSpace: 'nowrap',
+        color: active ? t.textPrimary : t.textMuted,
+        boxShadow: active ? `inset 0 -2px 0 0 ${t.accent}` : 'none',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function askOverlayHeaderStyle(t: Theme): React.CSSProperties {
   return {
     display: 'flex',
@@ -1510,32 +1607,37 @@ function closeAskButtonStyle(t: Theme): React.CSSProperties {
   };
 }
 
+// Prototype segmented toggle: 2px-padded track, active = accent tint + accent text.
 function editorModeButtonStyle(t: Theme, active: boolean): React.CSSProperties {
   return {
     border: 'none',
     borderRadius: 5,
-    background: active ? t.cellBg : 'transparent',
-    color: active ? t.textPrimary : t.textMuted,
+    background: active ? 'var(--accent-dim)' : 'transparent',
+    color: active ? t.accent : t.textMuted,
     cursor: 'pointer',
-    fontSize: 10,
-    fontWeight: active ? 750 : 600,
-    padding: '4px 8px',
+    fontSize: 11.5,
+    fontWeight: 600,
+    fontFamily: t.font,
+    padding: '4px 10px',
+    whiteSpace: 'nowrap' as const,
   };
 }
 
+// Prototype semantic chips: pill radius, mono identifiers, accent tint when selected.
 function selectionChipStyle(t: Theme, selected: boolean): React.CSSProperties {
   return {
     display: 'inline-flex',
     alignItems: 'center',
-    background: selected ? `${t.accent}18` : t.btnBg,
-    border: `1px solid ${selected ? t.accent : t.btnBorder}`,
-    borderRadius: 6,
+    gap: 5,
+    background: selected ? 'var(--accent-dim)' : t.btnBg,
+    border: `1px solid ${selected ? `${t.accent}55` : t.btnBorder}`,
+    borderRadius: 999,
     color: selected ? t.accent : t.textSecondary,
     cursor: 'pointer',
-    fontSize: 10.5,
-    fontFamily: t.font,
+    fontSize: 11.5,
+    fontFamily: t.fontMono,
     lineHeight: 1.2,
-    padding: '4px 7px',
+    padding: '4px 9px',
   };
 }
 
@@ -2158,7 +2260,8 @@ function SemanticBlockBuilder({
     setDimensions(next);
   };
   return (
-    <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
+    <div style={{ height: '100%', overflow: 'auto', background: t.appBg }}>
+    <div style={{ width: 'min(820px, 100% - 48px)', margin: '0 auto', padding: '24px 0 40px', display: 'flex', flexDirection: 'column', animation: 'dql-agent-fadein 0.25s ease-out' }}>
       <CompactBlockIdentity
         metadata={metadata}
         domains={domainOptions}
@@ -2166,8 +2269,7 @@ function SemanticBlockBuilder({
         onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
         t={t}
       />
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
-        <PanelBox title="Metric and grain" t={t}>
+        <PanelBox title="Metric and grain" hint="Pick governed semantic objects — they compile to the DQL script." t={t}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
             <span style={{ fontSize: 11, fontWeight: 750, color: t.textSecondary }}>Governed metrics · {values.metrics.length} selected</span>
             {loadingCompatibility && <span style={{ fontSize: 10, color: t.textMuted }}>Checking compatibility…</span>}
@@ -2210,24 +2312,23 @@ function SemanticBlockBuilder({
           )}
         </PanelBox>
 
-        <PanelBox title="Chart intent" t={t}>
-          <FieldLabel label="Chart type" t={t}>
-            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={compactInput}>
-              <option value="table">Table</option>
-              {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          </FieldLabel>
-          <FieldLabel label="Title" t={t}>
-            <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={compactInput} />
-          </FieldLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <PanelBox title="Chart intent" hint="How apps and answers render this block by default." t={t}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+            <FieldLabel label="Type" t={t}>
+              <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={compactInput}>
+                <option value="table">Table</option>
+                {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </FieldLabel>
             <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={compactInput}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
             <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={compactInput}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
           </div>
+          <FieldLabel label="Title" t={t}>
+            <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={compactInput} />
+          </FieldLabel>
         </PanelBox>
-      </div>
 
-      <PanelBox title="Dimensions" t={t}>
+      <PanelBox title="Dimensions" hint="Governed group-bys checked against the metric's join path." t={t}>
         {allDimensions.length === 0 ? (
           <div style={{ fontSize: 12, color: t.textMuted }}>No dimensions are loaded yet.</div>
         ) : (
@@ -2248,7 +2349,7 @@ function SemanticBlockBuilder({
         )}
       </PanelBox>
 
-      <PanelBox title="Filters and parameters" t={t}>
+      <PanelBox title="Filters and parameters" hint="Values-only inputs so this block is reusable across periods and regions." t={t}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
           {Array.from(new Set([...values.dimensions, ...(values.timeDimension ? [values.timeDimension] : [])])).map((name) => {
             const selected = values.filters.includes(name);
@@ -2266,19 +2367,18 @@ function SemanticBlockBuilder({
         t={t}
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12, alignItems: 'start' }}>
-        <PanelBox title={`Output fields${outputFields.length ? ` · ${outputFields.length}` : ''}`} t={t}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>{outputFields.length > 0 ? outputFields.map((field) => <span key={field} style={selectionChipStyle(t, true)}>{businessLabel(field)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Select metrics and dimensions to define outputs.</span>}</div>
-        </PanelBox>
-        <PanelBox title="Tests" t={t}>
-          <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...compactInput, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
-        </PanelBox>
-      </div>
+      <PanelBox title={`Output fields${outputFields.length ? ` · ${outputFields.length}` : ''}`} hint="What consumers see when this block answers a question." t={t}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>{outputFields.length > 0 ? outputFields.map((field) => <span key={field} style={selectionChipStyle(t, true)}>{businessLabel(field)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Select metrics and dimensions to define outputs.</span>}</div>
+      </PanelBox>
+      <PanelBox title="Tests" hint="Assertions checked on every run and required for certification." t={t}>
+        <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...compactInput, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
+      </PanelBox>
 
-      <details style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg, padding: '8px 10px', color: t.textSecondary, fontFamily: t.font }}>
+      <details style={{ padding: '14px 0', color: t.textSecondary, fontFamily: t.font }}>
         <summary style={{ cursor: 'pointer', fontSize: 11, fontWeight: 750 }}>Generated DQL preview</summary>
-        <pre style={{ maxHeight: 240, overflow: 'auto', margin: '10px 0 0', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono }}>{source}</pre>
+        <pre style={{ maxHeight: 240, overflow: 'auto', margin: '10px 0 0', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono, border: '1px solid var(--border-subtle)', background: 'var(--bg-2)', borderRadius: 9, padding: '12px 14px' }}>{source}</pre>
       </details>
+    </div>
     </div>
   );
 }
@@ -2299,9 +2399,9 @@ function CompactBlockIdentity({
   const options = blockDomainOptions(metadata?.domain, domains);
   const input = compactBuilderInputStyle(t);
   return (
-    <PanelBox title="Block details" t={t}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 8 }}>
-        <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => onTextChange('name', event.target.value)} style={input} /></FieldLabel>
+    <PanelBox title="Details" hint="Name, ownership, and where this block lives." t={t}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <FieldLabel label="Block name" t={t}><input value={metadata?.name ?? ''} onChange={(event) => onTextChange('name', event.target.value)} style={{ ...input, fontFamily: t.fontMono }} /></FieldLabel>
         <FieldLabel label="Domain" t={t}>
           <select aria-label="Block domain" value={metadata?.domain ?? ''} onChange={(event) => onTextChange('domain', event.target.value)} style={input}>
             <option value="">Select domain…</option>
@@ -2309,9 +2409,11 @@ function CompactBlockIdentity({
           </select>
         </FieldLabel>
         <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => onTextChange('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
-        <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => onTextChange('description', event.target.value)} placeholder="What this answers" style={input} /></FieldLabel>
+        <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => onTagsChange(event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="finance, emea" style={input} /></FieldLabel>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => onTextChange('description', event.target.value)} placeholder="What business question does this answer?" style={input} /></FieldLabel>
+        </div>
       </div>
-      <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => onTagsChange(event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="finance, executive" style={input} /></FieldLabel>
     </PanelBox>
   );
 }
@@ -2433,7 +2535,8 @@ function SqlBlockVisualBuilder({
     onChange(field === 'name' ? setBlockName(source, value) : setBlockStringField(source, field, value));
   };
   return (
-    <div style={{ height: '100%', overflow: 'auto', padding: 16, display: 'grid', gap: 14, alignContent: 'start', background: t.appBg }}>
+    <div style={{ height: '100%', overflow: 'auto', background: t.appBg }}>
+    <div style={{ width: 'min(820px, 100% - 48px)', margin: '0 auto', padding: '24px 0 40px', display: 'flex', flexDirection: 'column', animation: 'dql-agent-fadein 0.25s ease-out' }}>
       <CompactBlockIdentity
         metadata={metadata}
         domains={domainOptions}
@@ -2441,31 +2544,43 @@ function SqlBlockVisualBuilder({
         onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
         t={t}
       />
-      <PanelBox title="Chart intent" t={t}>
-        <FieldLabel label="Chart type" t={t}>
-          <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={input}>
-            <option value="table">Table</option>
-            {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-        </FieldLabel>
-        <FieldLabel label="Title" t={t}><input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} style={input} /></FieldLabel>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+      <PanelBox title="Query" hint="Paste raw SQL or edit in DQL Source — both compile to the DQL script." t={t}>
+        <textarea
+          rows={5}
+          value={query}
+          readOnly
+          style={{ border: '1px solid var(--border-default)', background: 'var(--bg-1)', borderRadius: 8, padding: '10px 12px', fontSize: 11.5, lineHeight: 1.6, fontFamily: t.fontMono, color: t.textPrimary, outline: 'none', resize: 'vertical' }}
+          placeholder="Open DQL Source to add a SELECT query."
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
+            Detects <span style={{ fontFamily: t.fontMono }}>{'${params}'}</span>, grounds tables against dbt — edit in DQL Source.
+          </span>
+        </div>
+      </PanelBox>
+      <PanelBox title="Chart intent" hint="How apps and answers render this block by default." t={t}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+          <FieldLabel label="Type" t={t}>
+            <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={input}>
+              <option value="table">Table</option>
+              {CHART_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </FieldLabel>
           <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
           <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
         </div>
+        <FieldLabel label="Title" t={t}><input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} style={input} /></FieldLabel>
       </PanelBox>
-      <PanelBox title="Business outputs" t={t}>
+      <PanelBox title="Business outputs" hint="What consumers see when this block answers a question." t={t}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
           {outputs.length > 0 ? outputs.map((output) => <span key={output} style={selectionChipStyle(t, true)}>{businessLabel(output)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Add aliases in DQL Source to expose business-friendly output names.</span>}
         </div>
       </PanelBox>
       <VisualParameterEditor source={source} kind="custom" onChange={onChange} t={t} />
-      <PanelBox title="Tests" t={t}>
+      <PanelBox title="Tests" hint="Assertions checked on every run and required for certification." t={t}>
         <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
       </PanelBox>
-      <PanelBox title="SQL preview" t={t}>
-        <pre style={{ margin: 0, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.5, fontFamily: t.fontMono }}>{query || 'Open DQL Source to add a SELECT query.'}</pre>
-      </PanelBox>
+    </div>
     </div>
   );
 }
@@ -3952,11 +4067,18 @@ function FieldLabel({ label, children, t }: { label: string; children: React.Rea
   );
 }
 
-function PanelBox({ title, children, t }: { title: string; children: React.ReactNode; t: Theme }) {
+// Prototype (Block Studio Redesign) builder row: label column left, content
+// right, hairline divider below — replaces the old bordered card look.
+function PanelBox({ title, hint, children, t }: { title: string; hint?: string; children: React.ReactNode; t: Theme }) {
   return (
-    <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: 12, display: 'grid', gap: 10 }}>
-      <div style={{ fontSize: 11, fontWeight: 800, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: t.font }}>{title}</div>
-      {children}
+    <section style={{ display: 'grid', gridTemplateColumns: '176px minmax(0, 1fr)', gap: 24, padding: '18px 0', borderBottom: '1px solid var(--border-subtle)' }}>
+      <div>
+        <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary, fontFamily: t.font }}>{title}</div>
+        {hint ? <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.45, marginTop: 3, fontFamily: t.font }}>{hint}</div> : null}
+      </div>
+      <div style={{ minWidth: 0, display: 'grid', gap: 10, alignContent: 'start' }}>
+        {children}
+      </div>
     </section>
   );
 }
