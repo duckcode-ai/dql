@@ -18,7 +18,7 @@ import { BusinessArtifactView } from '../panels/BusinessArtifactView';
 import { LineageDetailView } from '../panels/LineageDetailView';
 import { LineageDAG } from '../panels/LineageDAG';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
-import { ReferencePanel } from '../panels/ReferencePanel';
+import { HelpDocsPage } from '../panels/HelpDocsPage';
 import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { AgentLogPage } from '../agent/AgentLogPage';
@@ -212,12 +212,7 @@ export function AppShell() {
               <ConnectionPanel variant="page" />
             </ConnectionWorkspace>
           ) : state.mainView === 'reference' ? (
-            <FullPageSection
-              title="Quick Reference"
-              description="Browse the complete DQL guide, semantic workflows, and authoring patterns in a documentation-style view."
-            >
-              <ReferencePanel themeMode={state.themeMode} />
-            </FullPageSection>
+            <HelpDocsPage />
           ) : state.mainView === 'git' ? (
             <GitPage />
           ) : state.mainView === 'readiness' ? (

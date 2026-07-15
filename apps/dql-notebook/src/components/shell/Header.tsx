@@ -66,7 +66,7 @@ export function Header() {
     lineage: 'Lineage',
     lineage_detail: 'Lineage',
     connection: 'Settings',
-    reference: 'Quick Reference',
+    reference: 'Help & documentation',
     apps: 'Apps',
     git: 'Source control',
     settings: 'Settings',

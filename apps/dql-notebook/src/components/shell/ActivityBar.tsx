@@ -4,7 +4,6 @@ import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
   GitBranch,
-  BookOpen,
   HelpCircle,
   Package,
   ChevronsLeft,
@@ -193,17 +192,10 @@ export function ActivityBar() {
       onClick: () => handlePanelClick('settings'),
     },
     {
-      key: 'reference',
-      title: 'Reference',
-      icon: <BookOpen size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'reference',
-      onClick: () => handlePanelClick('reference'),
-    },
-    {
       key: 'help',
       title: 'Help',
       icon: <HelpCircle size={16} strokeWidth={1.75} />,
-      active: false,
+      active: state.mainView === 'reference',
       onClick: () => handlePanelClick('reference'),
     },
   ];
