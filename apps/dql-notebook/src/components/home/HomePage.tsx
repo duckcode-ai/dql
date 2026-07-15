@@ -31,6 +31,8 @@ const WAREHOUSES = [
 ] as const;
 
 type AsyncState = 'idle' | 'testing' | 'ok' | 'error';
+type SetupConnectionFields = { host: string; database: string; schema: string; role: string };
+const EMPTY_CONNECTION_FIELDS: SetupConnectionFields = { host: '', database: '', schema: '', role: '' };
 
 export function HomePage() {
   const { state, dispatch } = useNotebook();
@@ -42,6 +44,8 @@ export function HomePage() {
   const [dbtWizardOpen, setDbtWizardOpen] = useState(false);
   const [warehouse, setWarehouse] = useState('duckdb');
   const [authMode, setAuthMode] = useState<'credentials' | 'enterprise'>('credentials');
+  const [connectionFields, setConnectionFields] = useState<SetupConnectionFields>(EMPTY_CONNECTION_FIELDS);
+  const [enterpriseKey, setEnterpriseKey] = useState('');
   const [dbState, setDbState] = useState<AsyncState>('idle');
   const [dbMessage, setDbMessage] = useState('');
   const [providerId, setProviderId] = useState<ProviderSettingsId>('anthropic');
@@ -58,6 +62,12 @@ export function HomePage() {
     ]);
     setDbtStatus(nextDbt);
     setConnections(nextConnections);
+    const activeConnection = nextConnections.connections[nextConnections.default] as Record<string, unknown> | undefined;
+    const activeWarehouse = warehouseForConnection(activeConnection);
+    if (activeWarehouse) {
+      setWarehouse(activeWarehouse);
+      setConnectionFields(fieldsForConnection(activeConnection));
+    }
     setProviders(providerResult.providers);
     const active = providerResult.providers.find((provider) => provider.active) ?? providerResult.providers.find((provider) => provider.enabled);
     if (active) {
@@ -72,14 +82,40 @@ export function HomePage() {
   const sourceReady = Boolean(dbtStatus?.artifacts.manifest.exists || dbtStatus?.artifacts.semanticManifest.exists);
   const provider = providers.find((item) => item.id === providerId);
   const providerReady = providerState === 'ok' || Boolean(provider?.enabled && (provider.hasApiKey || provider.authMode === 'subscription_cli' || provider.id === 'ollama'));
-  const connectionReady = dbState === 'ok' || Object.keys(connections.connections).length > 0;
+  const connectionReady = dbState === 'ok';
   const canContinue = step === 0 || step === 1 ? sourceReady || step === 0 : step === 2 ? connectionReady : step === 3 ? providerReady : true;
   const nextLabel = ['Start setup', 'Next · Database', 'Next · AI provider', 'Next · Choose your start', ''][step];
 
   const testDatabase = async () => {
+    const draftFieldsReady = authMode === 'enterprise'
+      ? enterpriseKey.trim().length > 0
+      : connectionFields.host.trim().length > 0
+        && (warehouse === 'duckdb' || warehouse === 'file' || (connectionFields.database.trim().length > 0 && connectionFields.schema.trim().length > 0));
+    if (!draftFieldsReady) {
+      setDbState('error');
+      setDbMessage(authMode === 'enterprise' ? 'Enter the enterprise connection key before testing.' : 'Complete the required connection fields before testing.');
+      return;
+    }
     setDbState('testing');
     setDbMessage('Running a read-only test query…');
-    const result = await api.testConnection();
+    const existingEntry = Object.entries(connections.connections).find(([, value]) => warehouseForConnection(value as Record<string, unknown>) === warehouse);
+    const draft = {
+      ...((existingEntry?.[1] as Record<string, unknown> | undefined) ?? {}),
+      ...connectionFromSetup(warehouse, authMode, connectionFields, enterpriseKey),
+    };
+    const result = await api.testConnection(draft);
+    if (result.ok) {
+      try {
+        const connectionName = existingEntry?.[0] ?? `setup_${warehouse}`;
+        const nextConnections = { ...connections.connections, [connectionName]: draft };
+        await api.saveConnections(nextConnections, connectionName);
+        setConnections({ default: connectionName, connections: nextConnections });
+      } catch (error) {
+        setDbState('error');
+        setDbMessage(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     setDbState(result.ok ? 'ok' : 'error');
     setDbMessage(result.message);
   };
@@ -88,6 +124,16 @@ export function HomePage() {
     setProviderState('testing');
     setProviderMessage('Running a test prompt…');
     const result = await api.testProviderSettings(providerId, apiKey ? { apiKey } : undefined);
+    if (result.ok) {
+      try {
+        const saved = await api.saveProviderSettings({ id: providerId, enabled: true, apiKey: apiKey || undefined });
+        setProviders(saved.providers);
+      } catch (error) {
+        setProviderState('error');
+        setProviderMessage(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     setProviderState(result.ok ? 'ok' : 'error');
     setProviderMessage(result.message);
   };
@@ -117,11 +163,11 @@ export function HomePage() {
       </SetupSection>}
 
       {step === 2 && <SetupSection eyebrow="Step 2 of 4" title="Connect your database" description="Where queries run. Pick your warehouse — DQL installs the matching catalog driver for you.">
-        <div className="dql-warehouse-grid">{WAREHOUSES.map((item) => <button key={item.id} className={warehouse === item.id ? 'active' : ''} onClick={() => { setWarehouse(item.id); setDbState('idle'); }}><b>{item.glyph}</b><span>{item.label}</span></button>)}</div>
+        <div className="dql-warehouse-grid">{WAREHOUSES.map((item) => <button key={item.id} className={warehouse === item.id ? 'active' : ''} onClick={() => { const existing = Object.values(connections.connections).find((value) => warehouseForConnection(value as Record<string, unknown>) === item.id) as Record<string, unknown> | undefined; setWarehouse(item.id); setConnectionFields(existing ? fieldsForConnection(existing) : EMPTY_CONNECTION_FIELDS); setEnterpriseKey(''); setDbState('idle'); setDbMessage(''); }}><b>{item.glyph}</b><span>{item.label}</span></button>)}</div>
         <div className="dql-setup-card">
           <div className="dql-driver-status"><Check size={13} />{WAREHOUSES.find((item) => item.id === warehouse)?.label} catalog driver installed</div>
-          <label className="dql-field"><span>Authenticate with</span><div className="dql-choice-row"><button className={authMode === 'credentials' ? 'active' : ''} onClick={() => setAuthMode('credentials')}><i />Credentials<small>Username, SSO, or key pair</small></button><button className={authMode === 'enterprise' ? 'active' : ''} onClick={() => setAuthMode('enterprise')}><i />Enterprise key<small>Managed by your admin</small></button></div></label>
-          {authMode === 'enterprise' ? <Field label="Enterprise connection key"><input type="password" placeholder="dqlk_….paste from your admin" /></Field> : <WarehouseFields warehouse={warehouse} />}
+          <label className="dql-field"><span>Authenticate with</span><div className="dql-choice-row"><button className={authMode === 'credentials' ? 'active' : ''} onClick={() => { setAuthMode('credentials'); setDbState('idle'); }}><i />Credentials<small>Username, SSO, or key pair</small></button><button className={authMode === 'enterprise' ? 'active' : ''} onClick={() => { setAuthMode('enterprise'); setDbState('idle'); }}><i />Enterprise key<small>Managed by your admin</small></button></div></label>
+          {authMode === 'enterprise' ? <Field label="Enterprise connection key"><input type="password" value={enterpriseKey} onChange={(event) => { setEnterpriseKey(event.target.value); setDbState('idle'); }} placeholder="dqlk_….paste from your admin" /></Field> : <WarehouseFields warehouse={warehouse} values={connectionFields} onChange={(key, value) => { setConnectionFields((current) => ({ ...current, [key]: value })); setDbState('idle'); }} />}
           <button className="primary fit" onClick={() => void testDatabase()} disabled={dbState === 'testing'}>{dbState === 'testing' ? 'Running a read-only test query…' : 'Test connection'}</button>
           {dbState === 'ok' && <Success title={`Connected to ${WAREHOUSES.find((item) => item.id === warehouse)?.label}`} body={dbMessage || 'dbt models matched to warehouse tables'} />}
           {dbState === 'error' && <ErrorNotice>{dbMessage}</ErrorNotice>}
@@ -172,7 +218,29 @@ function WelcomeStory() {
 function Chapter({ number, title, subtitle, children, right = false }: { number: string; title: string; subtitle: string; children: React.ReactNode; right?: boolean }) { return <section className={`dql-chapter ${right ? 'right' : ''}`}><header><span>{number}</span><div><b>{title}</b><small>{subtitle}</small></div></header>{children}</section>; }
 function SetupSection({ eyebrow, title, description, children, required, centered }: { eyebrow: string; title: string; description?: string; children: React.ReactNode; required?: boolean; centered?: boolean }) { return <section className={`dql-setup-section ${centered ? 'centered' : ''}`}><header><span>{eyebrow}</span><h1>{title}{required && <em>Required</em>}</h1>{description && <p>{description}</p>}</header>{children}</section>; }
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="dql-field"><span>{label}</span>{children}</label>; }
-function WarehouseFields({ warehouse }: { warehouse: string }) { const hostLabel = warehouse === 'duckdb' || warehouse === 'file' ? 'Database file' : warehouse === 'snowflake' ? 'Account / host' : 'Server hostname'; return <div className="dql-two-fields"><Field label={hostLabel}><input placeholder={warehouse === 'duckdb' ? './warehouse/analytics.duckdb' : warehouse === 'snowflake' ? 'acme.us-east-1' : 'dbc-…cloud.databricks.com'} /></Field><Field label="Database"><input placeholder="ANALYTICS" /></Field><Field label="Schema"><input placeholder="analytics" /></Field><Field label="Role"><input placeholder="ANALYST" /></Field></div>; }
+function WarehouseFields({ warehouse, values, onChange }: { warehouse: string; values: SetupConnectionFields; onChange: (key: keyof SetupConnectionFields, value: string) => void }) { const hostLabel = warehouse === 'duckdb' || warehouse === 'file' ? 'Database file' : warehouse === 'snowflake' ? 'Account / host' : 'Server hostname'; return <div className="dql-two-fields"><Field label={hostLabel}><input value={values.host} onChange={(event) => onChange('host', event.target.value)} placeholder={warehouse === 'duckdb' ? './warehouse/analytics.duckdb' : warehouse === 'snowflake' ? 'acme.us-east-1' : 'dbc-…cloud.databricks.com'} /></Field><Field label="Database"><input value={values.database} onChange={(event) => onChange('database', event.target.value)} placeholder="ANALYTICS" /></Field><Field label="Schema"><input value={values.schema} onChange={(event) => onChange('schema', event.target.value)} placeholder="analytics" /></Field><Field label="Role"><input value={values.role} onChange={(event) => onChange('role', event.target.value)} placeholder="ANALYST" /></Field></div>; }
+
+function warehouseForConnection(connection: Record<string, unknown> | undefined): string | null {
+  const driver = String(connection?.driver ?? '').toLowerCase();
+  if (driver === 'duckdb' || driver === 'snowflake' || driver === 'databricks' || driver === 'file') return driver;
+  return null;
+}
+
+function fieldsForConnection(connection: Record<string, unknown> | undefined): SetupConnectionFields {
+  return {
+    host: String(connection?.filepath ?? connection?.account ?? connection?.serverHostname ?? ''),
+    database: String(connection?.database ?? connection?.catalog ?? ''),
+    schema: String(connection?.schema ?? ''),
+    role: String(connection?.role ?? ''),
+  };
+}
+
+function connectionFromSetup(warehouse: string, authMode: 'credentials' | 'enterprise', fields: SetupConnectionFields, enterpriseKey: string): Record<string, unknown> {
+  if (authMode === 'enterprise') return { driver: warehouse === 'file' ? 'duckdb' : warehouse, enterpriseKey: enterpriseKey.trim() };
+  if (warehouse === 'duckdb' || warehouse === 'file') return { driver: 'duckdb', filepath: fields.host.trim() };
+  if (warehouse === 'snowflake') return { driver: 'snowflake', account: fields.host.trim(), database: fields.database.trim(), schema: fields.schema.trim(), role: fields.role.trim() || undefined };
+  return { driver: 'databricks', serverHostname: fields.host.trim(), catalog: fields.database.trim(), schema: fields.schema.trim() };
+}
 function Success({ title, body }: { title: string; body: string }) { return <div className="dql-success"><b><Check size={13} />{title}</b><span>{body}</span></div>; }
 function Notice({ children }: { children: React.ReactNode }) { return <div className="dql-notice">{children}</div>; }
 function ErrorNotice({ children }: { children: React.ReactNode }) { return <div className="dql-error">{children}</div>; }

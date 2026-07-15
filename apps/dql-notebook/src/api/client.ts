@@ -3633,11 +3633,11 @@ export const api = {
     });
   },
 
-  async testConnection(): Promise<{ ok: boolean; message: string }> {
+  async testConnection(connection?: Record<string, unknown>): Promise<{ ok: boolean; message: string }> {
     try {
       return await request<{ ok: boolean; message: string }>('/api/test-connection', {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify(connection ? { connection } : {}),
       });
     } catch (e: any) {
       return { ok: false, message: e.message ?? 'Connection failed' };
