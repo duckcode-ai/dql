@@ -40,20 +40,22 @@ export interface CompletePathResult {
 
 // ---- Node type colors ----
 
+// Paper-handoff lineage palette (Lineage Redesign.dc.html): mid-tone hues
+// that read on the warm Paper canvas and stay legible on obsidian/white.
 export const NODE_TYPE_COLORS: Record<string, string> = {
-  source_table: '#8b949e',
-  dbt_model: '#ff7b72',
-  dbt_source: '#79c0ff',
-  term: '#39c5cf',
-  block: '#56d364',
-  business_view: '#f2cc60',
-  metric: '#388bfd',
-  dimension: '#e3b341',
-  domain: '#d2a8ff',
-  chart: '#f778ba',
-  notebook: '#bc8cff',
-  dashboard: '#a371f7',
-  app: '#db6d28',
+  source_table: '#8a8d96',
+  dbt_model: '#4a74c9',
+  dbt_source: '#4a74c9',
+  term: '#0a6b5e',
+  block: '#b26b1f',
+  business_view: '#c14545',
+  metric: '#6b5dd3',
+  dimension: '#0a6b5e',
+  domain: '#7c5cff',
+  chart: '#c14590',
+  notebook: '#2e8b57',
+  dashboard: '#2e8b57',
+  app: '#2e8b57',
 };
 
 // ---- Short type labels (for badges) ----

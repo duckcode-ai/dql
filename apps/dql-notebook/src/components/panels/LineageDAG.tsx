@@ -16,6 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Dagre from '@dagrejs/dagre';
+import { ShieldCheck } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
@@ -98,64 +99,46 @@ function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow', di
   });
 }
 
+// Prototype (Lineage Redesign) node card: type dot · mono name · uppercase
+// type label in the type color · certified shield. 196px wide.
 function DagNode({ data, selected }: NodeProps) {
   const nodeType = data.nodeType as string;
   const color = NODE_TYPE_COLORS[nodeType] ?? 'var(--color-text-tertiary)';
-  const label = TYPE_LABELS[nodeType] ?? nodeType.toUpperCase();
   const direction = (data.direction as Direction) ?? 'LR';
   const targetPos = direction === 'LR' ? Position.Left : Position.Top;
   const sourcePos = direction === 'LR' ? Position.Right : Position.Bottom;
+  const dimmed = Boolean(data.dimmed);
+  const certified = data.status === 'certified';
   return (
     <div
       style={{
-        minWidth: 156,
-        maxWidth: 220,
+        width: 196,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
         background: 'var(--color-bg-card)',
-        border: `2px solid ${selected ? 'var(--color-accent-blue)' : color}`,
-        borderRadius: 10,
-        padding: '8px 10px',
-        boxShadow: selected
-          ? '0 0 0 1px color-mix(in srgb, var(--color-accent-blue) 25%, transparent)'
-          : 'none',
+        border: `1.5px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`,
+        borderRadius: 9,
+        padding: '9px 11px',
+        boxShadow: selected ? '0 1px 6px rgba(107,93,211,0.16)' : '0 1px 4px rgba(26,26,26,0.05)',
+        opacity: dimmed ? 0.3 : 1,
+        transition: 'opacity 0.15s ease',
       }}
     >
       <Handle type="target" position={targetPos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+      <span style={{ width: 8, height: 8, borderRadius: 999, background: color, flexShrink: 0 }} />
+      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
         <span
-          style={{
-            fontSize: 9,
-            fontWeight: 700,
-            letterSpacing: '0.04em',
-            color: 'var(--color-bg-primary)',
-            background: color,
-            borderRadius: 4,
-            padding: '2px 6px',
-          }}
+          title={data.label as string}
+          style={{ fontSize: 11.5, fontWeight: 650, color: 'var(--color-text-primary)', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
         >
-          {label}
+          {data.label as string}
         </span>
-        {(data.domain as string | undefined) && (
-          <span style={{ color: 'var(--color-text-tertiary)', fontSize: 10 }}>
-            {data.domain as string}
-          </span>
-        )}
-      </div>
-      <div
-        style={{
-          color: 'var(--color-text-primary)',
-          fontSize: 11,
-          fontWeight: 600,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-        title={data.label as string}
-      >
-        {data.label as string}
-      </div>
-      <div style={{ color: 'var(--color-text-tertiary)', fontSize: 10, marginTop: 3 }}>
-        {TYPE_TITLES[nodeType] ?? nodeType}
-      </div>
+        <span style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color }}>
+          {TYPE_TITLES[nodeType] ?? nodeType}
+        </span>
+      </span>
+      {certified ? <ShieldCheck size={12} color="var(--status-success)" strokeWidth={2} style={{ flexShrink: 0 }} /> : null}
       <Handle type="source" position={sourcePos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
     </div>
   );
@@ -163,6 +146,7 @@ function DagNode({ data, selected }: NodeProps) {
 
 const nodeTypes = { dagNode: DagNode };
 
+// Prototype filter chip: colored dot + label; toggled-off chips fade.
 function FilterChip({
   label,
   active,
@@ -178,18 +162,23 @@ function FilterChip({
     <button
       onClick={onClick}
       style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
         borderRadius: 999,
-        border: `1px solid ${active ? color : 'var(--color-border-primary)'}`,
-        background: active
-          ? `color-mix(in srgb, ${color} 13%, transparent)`
-          : 'transparent',
-        color: active ? color : 'var(--color-text-tertiary)',
-        fontSize: 10,
-        fontWeight: 700,
-        padding: '4px 8px',
+        border: '1px solid var(--color-border-primary)',
+        background: 'var(--color-bg-card)',
+        color: active ? 'var(--color-text-secondary)' : 'var(--color-text-muted)',
+        fontSize: 11,
+        fontWeight: 600,
+        padding: '3.5px 10px',
         cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        opacity: active ? 1 : 0.45,
+        transition: 'opacity 0.12s ease',
       }}
     >
+      <span style={{ width: 7, height: 7, borderRadius: 999, background: color, flexShrink: 0 }} />
       {label}
     </button>
   );
@@ -211,6 +200,9 @@ export function LineageDAG() {
   );
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('flow');
   const [direction, setDirection] = useState<Direction>('LR');
+  // Prototype directional focus: clicking a node dims everything that is not
+  // an ancestor or descendant of it (computed client-side over visible edges).
+  const [dimSelId, setDimSelId] = useState<string | null>(null);
 
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -272,6 +264,23 @@ export function LineageDAG() {
     setVisibleTypes((current) => ({ ...current, [type]: !(current[type] ?? true) }));
   }, []);
 
+  // Directional reachability for the focus dim: ancestors via reverse edges
+  // ∪ descendants via forward edges (never the union of both per hop).
+  const dimConnected = useMemo(() => {
+    if (!dimSelId) return null;
+    const up = new Set([dimSelId]);
+    const down = new Set([dimSelId]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const edge of filteredGraph.edges) {
+        if (up.has(edge.target) && !up.has(edge.source)) { up.add(edge.source); grew = true; }
+        if (down.has(edge.source) && !down.has(edge.target)) { down.add(edge.target); grew = true; }
+      }
+    }
+    return new Set([...up, ...down]);
+  }, [dimSelId, filteredGraph.edges]);
+
   useEffect(() => {
     const nodes: Node[] = filteredGraph.nodes.map((node) => ({
       id: node.id,
@@ -281,29 +290,36 @@ export function LineageDAG() {
         label: node.name,
         nodeType: node.type,
         domain: node.domain,
+        status: node.status,
         layer: getNodeLayer(node),
+        dimmed: dimConnected ? !dimConnected.has(node.id) : false,
       },
     }));
 
-    const edges: Edge[] = filteredGraph.edges.map((edge, index) => ({
-      id: `edge-${index}-${edge.source}-${edge.target}-${edge.type}`,
-      source: edge.source,
-      target: edge.target,
-      style: {
-        stroke: EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)',
-        strokeWidth: 1.6,
-      },
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        color: EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)',
-        width: 12,
-        height: 12,
-      },
-    }));
+    const edges: Edge[] = filteredGraph.edges.map((edge, index) => {
+      const onPath = dimConnected ? dimConnected.has(edge.source) && dimConnected.has(edge.target) : false;
+      const color = onPath ? 'var(--accent)' : EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)';
+      return {
+        id: `edge-${index}-${edge.source}-${edge.target}-${edge.type}`,
+        source: edge.source,
+        target: edge.target,
+        style: {
+          stroke: color,
+          strokeWidth: onPath ? 2 : 1.5,
+          opacity: dimConnected && !onPath ? 0.25 : 1,
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color,
+          width: 12,
+          height: 12,
+        },
+      };
+    });
 
     setRfNodes(layoutGraph(nodes, edges, layoutMode, direction));
     setRfEdges(edges);
-  }, [filteredGraph, layoutMode, direction, setRfEdges, setRfNodes]);
+  }, [filteredGraph, layoutMode, direction, dimConnected, setRfEdges, setRfNodes]);
 
   const focusNode = useCallback(async (nodeId: string) => {
     const result = await api.queryLineage({ focus: nodeId });
@@ -324,12 +340,23 @@ export function LineageDAG() {
     setGraphData(fullGraph);
     setFocalNode(null);
     setSelectedNode(null);
+    setDimSelId(null);
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId: null });
   }, [dispatch, fullGraph]);
 
-  const handleNodeClick = useCallback(async (_event: React.MouseEvent, node: Node) => {
-    await focusNode(node.id);
-  }, [focusNode]);
+  // Prototype behavior: clicking a node dims off-path nodes on the visible
+  // canvas (directional). Search matches and deep links still run the full
+  // server-side focus query.
+  const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
+    setDimSelId(node.id);
+    const lineageNode = filteredGraph.nodes.find((item) => item.id === node.id) ?? null;
+    setSelectedNode(lineageNode);
+  }, [filteredGraph.nodes]);
+
+  const clearDim = useCallback(() => {
+    setDimSelId(null);
+    setSelectedNode(null);
+  }, []);
 
   const selectedSummary = useMemo(() => {
     if (!selectedNode) return null;
@@ -437,20 +464,23 @@ export function LineageDAG() {
               TB
             </button>
           </div>
-          <div style={{ display: 'flex', borderRadius: 6, border: `1px solid ${t.headerBorder}`, overflow: 'hidden', marginRight: 4 }}>
-            {LINEAGE_PRESETS.map((preset, index) => (
+          {/* Prototype segmented presets. */}
+          <div role="group" aria-label="Lineage presets" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, marginRight: 4 }}>
+            {LINEAGE_PRESETS.map((preset) => (
               <button
                 key={preset.key}
                 onClick={() => applyPreset(preset.types)}
                 style={{
-                  padding: '4px 8px',
-                  fontSize: 10,
-                  fontWeight: 700,
+                  padding: '4px 11px',
+                  fontSize: 11.5,
+                  fontWeight: 600,
                   border: 'none',
-                  borderLeft: index === 0 ? 'none' : `1px solid ${t.headerBorder}`,
+                  borderRadius: 5,
                   cursor: 'pointer',
-                  background: activePreset === preset.key ? 'var(--color-bg-tertiary)' : 'transparent',
-                  color: activePreset === preset.key ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                  fontFamily: t.font,
+                  whiteSpace: 'nowrap',
+                  background: activePreset === preset.key ? 'var(--accent-dim)' : 'transparent',
+                  color: activePreset === preset.key ? t.accent : t.textMuted,
                 }}
               >
                 {preset.label}
@@ -484,26 +514,24 @@ export function LineageDAG() {
               outline: 'none',
             }}
           />
-          {focalNode && (
+          {(focalNode || dimSelId) && (
             <button
               onClick={resetFocus}
               style={{
-                borderRadius: 6,
-                border: `1px solid ${t.headerBorder}`,
-                background: 'transparent',
-                color: t.textPrimary,
+                borderRadius: 7,
+                border: `1px solid ${t.accent}`,
+                background: 'var(--accent-dim)',
+                color: t.accent,
                 cursor: 'pointer',
-                fontSize: 12,
-                fontWeight: 600,
-                padding: '8px 10px',
+                fontSize: 11.5,
+                fontWeight: 650,
+                padding: '6px 11px',
+                whiteSpace: 'nowrap',
               }}
             >
-              Show All
+              Show all
             </button>
           )}
-        </div>
-        <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          This graph joins technical and business lineage: source tables, dbt models, semantic objects, terms, DQL blocks, business views, dashboards, notebooks, and Apps. Search to focus one path, then switch filters to inspect either the business composition or the technical chain behind it.
         </div>
 
         {matches.length > 0 && (
@@ -540,13 +568,15 @@ export function LineageDAG() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={handleNodeClick}
+          onPaneClick={clearDim}
           nodeTypes={nodeTypes}
           fitView
           fitViewOptions={{ padding: 0.18 }}
           proOptions={{ hideAttribution: true }}
-          style={{ background: 'var(--color-bg-primary)' }}
+          style={{ background: 'var(--bg-canvas)' }}
         >
-          <Background color="var(--color-border-secondary)" gap={24} size={1} />
+          {/* Prototype 22px dot grid. */}
+          <Background color="var(--border-strong)" gap={22} size={1} />
           <Controls showInteractive={false} />
           <MiniMap
             nodeColor={(node) => NODE_TYPE_COLORS[(node.data?.nodeType as string) ?? 'source_table'] ?? 'var(--color-text-tertiary)'}
@@ -554,61 +584,75 @@ export function LineageDAG() {
             style={{ background: 'var(--color-bg-sunken)', border: '1px solid var(--color-border-primary)' }}
           />
 
-          <Panel position="top-left">
-            <div
-              style={{
-                background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
-                border: '1px solid var(--color-border-primary)',
-                borderRadius: 8,
-                padding: '8px 10px',
-                minWidth: 220,
-                color: 'var(--color-text-primary)',
-                fontSize: 12,
-              }}
-            >
-              <div style={{ fontWeight: 700, marginBottom: 4 }}>
-                {focalNode ? focalNode.name : 'Full Lineage View'}
-              </div>
-              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11 }}>
-                {graphData.nodes.length} node(s), {graphData.edges.length} edge(s)
-              </div>
-              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
-                {focalNode
-                  ? `Focused on ${TYPE_TITLES[focalNode.type] ?? focalNode.type}. Upstream shows technical inputs and business definitions; downstream shows composition, dashboards, notebooks, and Apps.`
-                  : 'Full project lineage across source tables, dbt, semantic objects, terms, DQL blocks, business views, dashboards, notebooks, and Apps.'}
-              </div>
-              {selectedNode && selectedSummary && (
-                <div style={{ marginTop: 8, color: 'var(--color-text-tertiary)', fontSize: 11 }}>
-                  {selectedSummary.incoming} upstream, {selectedSummary.outgoing} downstream
-                </div>
-              )}
-            </div>
-          </Panel>
-
+          {/* Prototype overlays: focus card + node-type legend float on the
+              viewport (ReactFlow Panels), never on the scrolling canvas. */}
           <Panel position="bottom-left">
-            <div
-              style={{
-                display: 'flex',
-                gap: 10,
-                flexWrap: 'wrap',
-                maxWidth: 760,
-                background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
-                border: '1px solid var(--color-border-primary)',
-                borderRadius: 8,
-                padding: '6px 10px',
-                color: 'var(--color-text-tertiary)',
-                fontSize: 10,
-              }}
-            >
-              {Object.entries(EDGE_TYPE_COLORS).map(([type, color]) => (
-                <span key={type} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  <span style={{ width: 10, height: 2, background: color, display: 'inline-block' }} />
-                  {EDGE_TITLES[type] ?? type}
-                </span>
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start' }}>
+              {selectedNode ? (
+                <div style={{ width: 264, background: 'var(--color-bg-card)', border: '1px solid var(--color-border-primary)', borderRadius: 11, boxShadow: '0 8px 26px rgba(26,26,26,0.13)', padding: '12px 14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 999, background: NODE_TYPE_COLORS[selectedNode.type] ?? 'var(--color-text-tertiary)', flexShrink: 0 }} />
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700, color: 'var(--color-text-primary)', fontFamily: "'JetBrains Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selectedNode.name}</span>
+                    <button onClick={clearDim} title="Clear focus" style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', color: 'var(--color-text-tertiary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0, flexShrink: 0 }}>×</button>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginTop: 3 }}>
+                    {TYPE_TITLES[selectedNode.type] ?? selectedNode.type}
+                    {selectedSummary ? ` · ${selectedSummary.incoming} upstream · ${selectedSummary.outgoing} downstream` : ''}
+                  </div>
+                  {selectedNode.domain ? (
+                    <div style={{ fontSize: 11.5, color: 'var(--color-text-secondary)', lineHeight: 1.5, marginTop: 7 }}>Domain: {selectedNode.domain}</div>
+                  ) : null}
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    <button
+                      onClick={() => { if (dimSelId) void focusNode(dimSelId); }}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 26, padding: '0 10px', borderRadius: 6, border: 'none', background: 'var(--accent)', color: '#fff', fontSize: 11, fontWeight: 650, cursor: 'pointer' }}
+                    >
+                      Focus this path
+                    </button>
+                    <button
+                      onClick={() => dispatch({ type: 'OPEN_GLOBAL_AI', autoRun: { text: `Explain the lineage of ${selectedNode.name} — where does it come from and what consumes it?` } })}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 26, padding: '0 10px', borderRadius: 6, border: '1px solid var(--color-border-primary)', background: 'var(--color-bg-card)', color: 'var(--color-text-secondary)', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+                    >
+                      Ask about this
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 12,
+                  flexWrap: 'wrap',
+                  maxWidth: 700,
+                  background: 'color-mix(in srgb, var(--color-bg-card) 93%, transparent)',
+                  border: '1px solid var(--color-border-primary)',
+                  borderRadius: 8,
+                  padding: '5px 11px',
+                  color: 'var(--color-text-tertiary)',
+                  fontSize: 10,
+                }}
+              >
+                {NODE_TYPE_FILTERS.filter((filter) => visibleTypes[filter.type] ?? true).map((filter) => (
+                  <span key={filter.type} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 999, background: NODE_TYPE_COLORS[filter.type], display: 'inline-block' }} />
+                    {filter.label}
+                  </span>
+                ))}
+              </div>
             </div>
           </Panel>
         </ReactFlow>
+      </div>
+
+      {/* Prototype status bar. */}
+      <div style={{ height: 28, flexShrink: 0, borderTop: '1px solid var(--border-subtle)', background: 'var(--color-bg-card)', display: 'flex', alignItems: 'center', gap: 14, padding: '0 14px', fontSize: 10.5, color: 'var(--color-text-tertiary)' }}>
+        <span>{filteredGraph.nodes.length} nodes · {filteredGraph.edges.length} edges{focalNode ? ` · focused on ${focalNode.name}` : ''}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)' }} />
+          Compiled from the dbt manifest
+        </span>
+        <div style={{ flex: 1 }} />
+        <span>Click a node to focus its path · click the canvas to clear</span>
       </div>
     </div>
   );

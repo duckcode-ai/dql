@@ -4,6 +4,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import { MiniLineageGraph } from '../lineage/MiniLineageGraph';
+import { LineageDAG } from './LineageDAG';
 import {
   EDGE_TITLES,
   NODE_TYPE_COLORS,
@@ -67,6 +68,7 @@ export function LineageDetailView() {
   const [graph, setGraph] = useState<FocusedGraph>({ nodes: [], edges: [], focalNode: null });
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>('details');
+  const [fullGraphOpen, setFullGraphOpen] = useState(false);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -108,10 +110,23 @@ export function LineageDetailView() {
       .filter((entry): entry is { edge: LineageEdge; node: LineageNode } => Boolean(entry.node));
   }, [focal, graph.edges, nodeById]);
 
-  if (!nodeId) {
+  // Prototype (Lineage Redesign): with nothing focused, show the full DAG
+  // canvas — presets, type chips, directional focus dim, and the status bar.
+  if (!nodeId || fullGraphOpen) {
     return (
-      <div style={{ flex: 1, padding: 24, color: t.textMuted }}>
-        Select a lineage item from the Lineage index.
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {fullGraphOpen && nodeId ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
+            <button
+              type="button"
+              onClick={() => setFullGraphOpen(false)}
+              style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, borderRadius: 7, padding: '5px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font }}
+            >
+              ← Back to focused view
+            </button>
+          </div>
+        ) : null}
+        <LineageDAG />
       </div>
     );
   }
@@ -158,6 +173,14 @@ export function LineageDetailView() {
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={() => setFullGraphOpen(true)}
+              title="Open the full lineage graph"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, borderRadius: 7, padding: '6px 11px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap' }}
+            >
+              Full graph
+            </button>
             {returnTarget ? (
               <button
                 type="button"
