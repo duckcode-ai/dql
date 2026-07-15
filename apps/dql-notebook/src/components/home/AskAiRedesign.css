@@ -1,0 +1,57 @@
+.dql-ask-workspace { flex: 1; min-width: 0; display: flex; overflow: hidden; background: var(--bg-1); }
+.dql-ask-conversations { width: clamp(176px, 17vw, 248px) !important; }
+.dql-ask-main { flex: 1; min-width: 360px; display: flex; justify-content: center; overflow: hidden; background: var(--bg-1); }
+.dql-ask-main-inner { width: min(720px, calc(100% - 48px)); min-width: 0; height: 100%; display: flex; }
+.dql-ask-ai-panel { background: var(--bg-1) !important; }
+.dql-ask-transcript { padding: 30px 0 20px !important; gap: 26px !important; }
+.dql-ask-empty-title { color: var(--text-primary); font-size: 22px; font-weight: 700; letter-spacing: -.025em; }
+.dql-ask-empty-kicker { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 11px; font-weight: 650; padding: 4px 9px; border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 999px; background: var(--accent-dim); }
+.dql-ask-user-message { align-self: flex-end; max-width: 82%; padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: var(--bg-3); color: var(--text-primary); font-size: 13.5px; line-height: 1.5; }
+.dql-ask-quoted-context { display: -webkit-box; overflow: hidden; margin-bottom: 7px; padding: 5px 9px; border-left: 2px solid var(--accent); border-radius: 0 6px 6px 0; background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--text-secondary); font-size: 11.5px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.dql-ask-run { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; max-width: 100%; animation: dql-agent-fadein .3s ease-out; }
+.dql-ask-trust-line { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.dql-ask-answer { color: var(--text-primary); font-size: 14.5px; line-height: 1.65; }
+.dql-ask-artifacts { display: flex; flex-wrap: wrap; gap: 8px; }
+.dql-ask-artifact-chip { display: flex; align-items: center; gap: 10px; width: fit-content; max-width: 100%; padding: 9px 12px; border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-2); color: var(--text-primary); cursor: pointer; text-align: left; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+.dql-ask-artifact-chip:hover, .dql-ask-artifact-chip[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 1px 6px color-mix(in srgb, var(--accent) 14%, transparent); }
+.dql-ask-artifact-chip:hover { transform: translateY(-1px); }
+.dql-ask-artifact-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 30px; height: 30px; border-radius: 7px; background: var(--accent-dim); color: var(--accent); }
+.dql-ask-artifact-copy { display: grid; min-width: 0; gap: 1px; }
+.dql-ask-artifact-title { overflow: hidden; color: var(--text-primary); font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.dql-ask-artifact-meta { color: var(--text-tertiary); font-size: 11px; }
+.dql-ask-quiet-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; margin-top: -2px; }
+.dql-ask-quiet-actions > button, .dql-ask-quiet-actions > div > button { min-height: 26px !important; padding: 5px 8px !important; border: 0 !important; border-radius: 6px !important; background: transparent !important; box-shadow: none !important; color: var(--text-tertiary) !important; font-size: 11.5px !important; font-weight: 550 !important; }
+.dql-ask-quiet-actions > button:hover, .dql-ask-quiet-actions > div > button:hover { background: var(--bg-3) !important; color: var(--text-primary) !important; }
+.dql-ask-composer-shell { padding: 8px 0 16px !important; border-top: 0 !important; background: var(--bg-1); }
+.dql-ask-composer { display: grid; gap: 6px; padding: 8px 9px 8px 13px; border: 1px solid var(--border-default); border-radius: 14px; background: var(--bg-2); box-shadow: 0 1px 4px color-mix(in srgb, var(--text-primary) 5%, transparent); }
+.dql-ask-composer textarea { width: 100%; min-height: 38px; max-height: 140px; padding: 5px 0; border: 0; resize: none; background: transparent; color: var(--text-primary); font: 13.5px/1.45 var(--font-ui); outline: none; }
+.dql-ask-composer-tools { display: flex; align-items: center; gap: 7px; }
+.dql-ask-model-chip { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border-radius: 6px; background: var(--bg-3); color: var(--text-secondary); font-size: 10.5px; font-weight: 650; }
+.dql-ask-send { justify-content: center; width: 34px !important; min-width: 34px; height: 34px !important; margin-left: auto; padding: 0 !important; border-radius: 9px !important; }
+.dql-ask-send span { display: none; }
+.dql-ask-inspector { display: flex; flex: 0 0 auto; flex-direction: column; width: clamp(300px, 34vw, 440px); min-width: 0; border-left: 1px solid var(--border-default); background: var(--bg-2); }
+.dql-ask-inspector-head { display: flex; align-items: center; gap: 10px; min-height: 58px; padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); }
+.dql-ask-inspector-title { min-width: 0; flex: 1; }
+.dql-ask-inspector-title strong { display: block; overflow: hidden; font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.dql-ask-inspector-title span { color: var(--text-tertiary); font-size: 10.5px; }
+.dql-ask-inspector-actions, .dql-ask-inspector-tabs { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
+.dql-ask-inspector-tabs { gap: 0; overflow-x: auto; padding-bottom: 0; }
+.dql-ask-inspector-tabs button { height: 34px; padding: 0 9px; border-bottom: 2px solid transparent; color: var(--text-tertiary); font-size: 11.5px; white-space: nowrap; }
+.dql-ask-inspector-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--text-primary); }
+.dql-ask-inspector-body { flex: 1; min-height: 0; overflow: auto; padding: 14px; }
+.dql-ask-inspector-body h3 { margin: 0 0 10px; font-size: 12px; }
+.dql-ask-inspector-body pre { overflow: auto; padding: 12px; border: 1px solid var(--border-default); border-radius: 8px; background: var(--bg-1); color: var(--text-primary); font: 11px/1.55 var(--font-mono); white-space: pre-wrap; }
+.dql-ask-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.dql-ask-table th, .dql-ask-table td { padding: 8px 9px; border-bottom: 1px solid var(--border-subtle); text-align: left; }
+.dql-ask-table th { color: var(--text-tertiary); font-size: 10.5px; font-weight: 650; }
+.dql-ask-table td:last-child { font-family: var(--font-mono); text-align: right; }
+.dql-ask-trust-section { display: grid; gap: 12px; }
+.dql-ask-trust-banner { padding: 9px 10px; border: 1px solid var(--status-warning-border); border-radius: 8px; background: var(--status-warning-bg); color: var(--status-warning); font-size: 11.5px; line-height: 1.45; }
+.dql-ask-trust-row { display: flex; align-items: flex-start; gap: 8px; color: var(--text-secondary); font-size: 11.5px; line-height: 1.45; }
+.dql-ask-trust-row b { min-width: 44px; color: var(--status-success); font-size: 10px; }
+.dql-selection-popover { position: fixed; z-index: 1000; width: 324px; padding: 11px; border: 1px solid var(--border-default); border-radius: 11px; background: var(--bg-2); box-shadow: var(--shadow-pop); }
+.dql-selection-popover input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border-default); border-radius: 7px; background: var(--bg-1); color: var(--text-primary); font: 12px var(--font-ui); }
+.dql-selection-popover-actions { display: flex; gap: 5px; margin-top: 8px; }
+.dql-selection-popover-actions button { padding: 5px 7px; border-radius: 6px; background: var(--bg-3); color: var(--text-secondary); font-size: 10.5px; }
+@media (max-width: 980px) { .dql-ask-inspector { display: none; } .dql-ask-main-inner { width: min(720px, calc(100% - 32px)); } .dql-ask-quiet-actions button span { display: none; } }
+@media (max-width: 720px) { .dql-ask-conversations { display: none !important; } .dql-ask-main { min-width: 0; } }

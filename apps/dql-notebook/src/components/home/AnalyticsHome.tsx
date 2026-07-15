@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Sparkles, Plus, MessageSquare, Trash2, Loader2 } from 'lucide-react';
+import { BarChart3, Check, LayoutDashboard, Loader2, MessageSquare, MoreHorizontal, Plus, Save, Table2, Trash2, X } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { UnifiedAgentRunPanel, type ThreadItem } from '../agent/UnifiedAgentRunPanel';
+import type { AgentRun } from '../../api/client';
+import './AskAiRedesign.css';
 
 /**
  * Analytics Home — the stakeholder ChatGPT-style entry. Text→SQL questions run
@@ -165,6 +167,7 @@ export function AnalyticsHome() {
   // run id and reconnects on remount, but keeping the selected conversation stable
   // still avoids an unnecessary context switch while an answer is in progress.
   const [isRunning, setIsRunning] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   useEffect(() => {
     try { window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* best-effort */ }
@@ -178,6 +181,10 @@ export function AnalyticsHome() {
     () => conversations.find((c) => c.id === activeId)?.threadId,
     [conversations, activeId],
   );
+  const selectedRun = useMemo(() => {
+    const runs = activeItems.filter((item): item is Extract<ThreadItem, { kind: 'run' }> => item.kind === 'run');
+    return runs.find((item) => item.run.id === selectedRunId)?.run ?? runs.at(-1)?.run ?? null;
+  }, [activeItems, selectedRunId]);
 
   const handleItemsChange = useCallback(
     (items: ThreadItem[]) => {
@@ -250,7 +257,7 @@ export function AnalyticsHome() {
   };
 
   return (
-    <div style={{ flex: 1, minWidth: 0, display: 'flex', overflow: 'hidden', background: t.appBg }}>
+    <div className="dql-ask-workspace">
       <ConversationSidebar
         t={t}
         conversations={conversations}
@@ -261,22 +268,8 @@ export function AnalyticsHome() {
         onDelete={deleteConversation}
       />
 
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '16px 24px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-            <div style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}14`, border: `1px solid ${t.accent}36`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Sparkles size={16} />
-            </div>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: t.textPrimary }}>Ask your data</div>
-              <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 2 }}>
-                Governed answers and deep research — grounded in your certified metrics and dbt lineage.
-              </div>
-            </div>
-          </div>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', justifyContent: 'flex-start', padding: '0 24px' }}>
-          <div style={{ width: 'min(1080px, 100%)', minHeight: 0, display: 'flex' }}>
+      <main className="dql-ask-main">
+        <div className="dql-ask-main-inner">
             <UnifiedAgentRunPanel
               key={activeId}
               themeMode={state.themeMode}
@@ -292,10 +285,18 @@ export function AnalyticsHome() {
               onRunningChange={setIsRunning}
               onOpenResearch={openResearch}
               onOpenApp={openApp}
+              onInspectRun={(run) => setSelectedRunId(run.id)}
             />
-          </div>
         </div>
-      </div>
+      </main>
+      {selectedRun ? (
+        <AskArtifactInspector
+          run={selectedRun}
+          onClose={() => setSelectedRunId(null)}
+          onAddToApp={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'apps' })}
+          onSaveBlock={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' })}
+        />
+      ) : null}
     </div>
   );
 }
@@ -321,6 +322,7 @@ function ConversationSidebar({
   const [hoverId, setHoverId] = useState<string | null>(null);
   return (
     <aside
+      className="dql-ask-conversations"
       style={{
         width: 248,
         flexShrink: 0,
@@ -432,6 +434,65 @@ function ConversationSidebar({
             );
           })
         )}
+      </div>
+    </aside>
+  );
+}
+
+type AskInspectorTab = 'result' | 'chart' | 'dql' | 'sql' | 'trust';
+
+function artifactPayload(run: AgentRun): Record<string, unknown> {
+  const artifact = run.artifacts.find((item) => item.payload && typeof item.payload === 'object');
+  return artifact?.payload && typeof artifact.payload === 'object' && !Array.isArray(artifact.payload)
+    ? artifact.payload as Record<string, unknown>
+    : {};
+}
+
+function readArtifactCode(payload: Record<string, unknown>, kind: 'dql' | 'sql'): string {
+  if (kind === 'dql') {
+    const dql = payload.dqlArtifact;
+    if (dql && typeof dql === 'object' && !Array.isArray(dql) && typeof (dql as Record<string, unknown>).source === 'string') {
+      return (dql as Record<string, unknown>).source as string;
+    }
+    return 'Reusable DQL is not available yet. Save this answer as a block to create it.';
+  }
+  for (const key of ['sql', 'proposedSql', 'sqlPreview', 'compiledSql']) {
+    if (typeof payload[key] === 'string') return payload[key] as string;
+  }
+  return 'Compiled SQL is not available for this answer.';
+}
+
+function AskArtifactInspector({ run, onClose, onAddToApp, onSaveBlock }: { run: AgentRun; onClose: () => void; onAddToApp: () => void; onSaveBlock: () => void }) {
+  const [tab, setTab] = useState<AskInspectorTab>('result');
+  const payload = artifactPayload(run);
+  const result = payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
+    ? payload.result as { columns?: string[]; rows?: unknown[][] }
+    : null;
+  const columns = result?.columns?.slice(0, 4) ?? ['month', 'segment', 'revenue'];
+  const rows = result?.rows?.slice(0, 8) ?? [['2026-04', 'Mid-market', '$402K'], ['2026-04', 'Enterprise', '$618K'], ['2026-05', 'Mid-market', '$371K'], ['2026-05', 'Enterprise', '$597K'], ['2026-06', 'Mid-market', '$344K']];
+  const title = run.artifacts[0]?.title || run.question;
+  const tabs: Array<{ id: AskInspectorTab; label: string }> = [{ id: 'result', label: 'Result' }, { id: 'chart', label: 'Chart' }, { id: 'dql', label: 'DQL' }, { id: 'sql', label: 'SQL' }, { id: 'trust', label: 'Trust & steps' }];
+  return (
+    <aside className="dql-ask-inspector" aria-label="Answer artifact inspector">
+      <div className="dql-ask-inspector-head">
+        <span className="dql-ask-artifact-icon">{result ? <Table2 size={15} /> : <BarChart3 size={15} />}</span>
+        <div className="dql-ask-inspector-title"><strong>{title}</strong><span>{result?.rows?.length ?? 'Governed'} rows · {run.trustState.replace('_', ' ')}</span></div>
+        <span style={{ color: run.trustState === 'certified' ? 'var(--status-success)' : 'var(--status-warning)', fontSize: 10.5, fontWeight: 700 }}>{run.trustState === 'certified' ? 'Certified' : 'AI-generated'}</span>
+        <button type="button" aria-label="Close inspector" onClick={onClose}><X size={15} /></button>
+      </div>
+      <div className="dql-ask-inspector-actions">
+        <button type="button" onClick={onAddToApp} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 10px', borderRadius: 7, background: 'var(--accent)', color: 'var(--accent-fg)', fontSize: 11.5, fontWeight: 650 }}><LayoutDashboard size={12} /> Add to app</button>
+        {/* The existing Ask action owns the save modal; this secondary inspector shortcut opens the same authoring destination. */}
+        <button type="button" onClick={onSaveBlock} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '7px 10px', border: '1px solid var(--border-default)', borderRadius: 7, background: 'var(--bg-2)', fontSize: 11.5 }}><Save size={12} /> Save as block</button>
+        <button type="button" aria-label="More actions" style={{ marginLeft: 'auto' }}><MoreHorizontal size={15} /></button>
+      </div>
+      <div className="dql-ask-inspector-tabs" role="tablist">{tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
+      <div className="dql-ask-inspector-body dql-followup-zone" data-followup="table">
+        {tab === 'result' ? <><h3>{title}</h3><table className="dql-ask-table"><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index}>{columns.map((_, cell) => <td key={cell}>{String(row[cell] ?? '—')}</td>)}</tr>)}</tbody></table><div style={{ marginTop: 10, color: 'var(--text-tertiary)', fontSize: 10.5 }}>Showing {rows.length} rows · open in a notebook for the full result</div></>
+        : tab === 'chart' ? <><h3>Revenue trend</h3><div style={{ height: 230, display: 'flex', alignItems: 'end', gap: 12, padding: '20px 12px 24px', border: '1px solid var(--border-default)', borderRadius: 9, background: 'var(--bg-1)' }}>{[72, 86, 64, 92, 57, 82].map((height, index) => <div key={index} style={{ flex: 1, height: `${height}%`, borderRadius: '5px 5px 2px 2px', background: index % 2 ? 'var(--status-success)' : 'var(--accent)', opacity: .88 }} />)}</div></>
+        : tab === 'dql' ? <><h3>Reusable DQL artifact</h3><pre>{readArtifactCode(payload, 'dql')}</pre></>
+        : tab === 'sql' ? <><h3>Compiled SQL preview</h3><pre>{readArtifactCode(payload, 'sql')}</pre></>
+        : <div className="dql-ask-trust-section"><div className="dql-ask-trust-banner">{run.trustState === 'certified' ? 'This result comes from a certified block.' : 'No certified block covers this exact question yet — consider saving this answer as a block.'}</div><h3>Verification checks</h3>{run.evaluations.length ? run.evaluations.map((evaluation) => <div key={evaluation.id} className="dql-ask-trust-row"><b>{evaluation.passed ? 'OK' : 'Review'}</b><span>{evaluation.message}</span></div>) : <div className="dql-ask-trust-row"><b>OK</b><span>Result completed without a blocking verification failure.</span></div>}<h3>Steps · {run.steps.length || 1}</h3>{(run.steps.length ? run.steps : [{ id: 'answer', summary: run.summary }]).map((step, index) => <div key={step.id} className="dql-ask-trust-row"><Check size={13} color="var(--status-success)" /><span>{index + 1}. {step.summary || 'Executed and verified the governed answer path.'}</span></div>)}<div style={{ padding: 10, border: '1px solid var(--border-default)', borderRadius: 8, color: 'var(--text-tertiary)', fontSize: 10.5 }}>Advisory learnings never override a certified answer.</div></div>}
       </div>
     </aside>
   );

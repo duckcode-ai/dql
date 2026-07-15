@@ -57,7 +57,7 @@ import { buildConversationContext } from './agentConversationContext';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
 
 export type ThreadItem =
-  | { kind: 'user'; id: string; text: string }
+  | { kind: 'user'; id: string; text: string; quote?: string }
   | { kind: 'run'; id: string; run: AgentRun };
 
 /** A submitted run that may outlive this mounted panel (tab switch, reload, or navigation). */
@@ -128,6 +128,8 @@ interface UnifiedAgentRunPanelProps {
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
   onRunningChange?: (running: boolean) => void;
+  /** Opens the Ask page artifact inspector without changing the run lifecycle. */
+  onInspectRun?: (run: AgentRun) => void;
 }
 
 /** Payload for DQL-first cell insertion from a governed answer artifact. */
@@ -177,6 +179,7 @@ export function UnifiedAgentRunPanel({
   onOpenResearch,
   onOpenApp,
   onRunningChange,
+  onInspectRun,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
   // One clean composer everywhere: an auto-routed box — no mode chips. Capability
@@ -194,6 +197,9 @@ export function UnifiedAgentRunPanel({
   const [backgroundRun, setBackgroundRun] = useState<PendingAgentRun | null>(null);
   const [blockToSave, setBlockToSave] = useState<AgentBlockSave | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [selectionDraft, setSelectionDraft] = useState('');
+  const selectionInputRef = useRef<HTMLInputElement | null>(null);
   // The composer "thinking" selection, sticky across refreshes. `auto` defers to
   // the engine's shape-adaptive routing; the user can change it mid-conversation.
   const [thinkingMode, setThinkingMode] = useState<AgentThinkingMode>(() => readStoredThinkingMode());
@@ -357,12 +363,12 @@ export function UnifiedAgentRunPanel({
     return () => document.removeEventListener('visibilitychange', reconnectWhenVisible);
   }, [recoverPendingRun, threadIdProp]);
 
-  const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode) => {
+  const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode, quote?: string) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
     const activeMode = modeOverride ?? pendingModeRef.current ?? initialMode;
     pendingModeRef.current = undefined;
-    const userItem: ThreadItem = { kind: 'user', id: makeId('user'), text };
+    const userItem: ThreadItem = { kind: 'user', id: makeId('user'), text, ...(quote ? { quote } : {}) };
     setItems((current) => [...current, userItem]);
     setInput('');
     setError(null);
@@ -489,6 +495,51 @@ export function UnifiedAgentRunPanel({
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
   }, []);
 
+  useEffect(() => {
+    const onMouseUp = (event: MouseEvent) => {
+      if ((event.target as HTMLElement | null)?.closest('.dql-selection-popover')) return;
+      window.setTimeout(() => {
+        const selected = window.getSelection();
+        const text = selected?.toString().trim() ?? '';
+        if (!selected || selected.rangeCount === 0 || text.length < 3) {
+          setSelection(null);
+          return;
+        }
+        const anchor = selected.anchorNode instanceof Element ? selected.anchorNode : selected.anchorNode?.parentElement;
+        if (!anchor?.closest('.dql-followup-zone')) {
+          setSelection(null);
+          return;
+        }
+        const rect = selected.getRangeAt(0).getBoundingClientRect();
+        setSelection({
+          text: text.slice(0, 220),
+          x: Math.max(12, Math.min(rect.left, window.innerWidth - 340)),
+          y: rect.bottom + 176 > window.innerHeight ? Math.max(12, rect.top - 176) : rect.bottom + 8,
+        });
+        setSelectionDraft('');
+        window.requestAnimationFrame(() => selectionInputRef.current?.focus());
+      }, 0);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSelection(null);
+    };
+    document.addEventListener('mouseup', onMouseUp);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mouseup', onMouseUp);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+
+  const sendSelectionFollowUp = (question: string) => {
+    if (!selection || !question.trim()) return;
+    const quote = selection.text;
+    setSelection(null);
+    setSelectionDraft('');
+    window.getSelection()?.removeAllRanges();
+    void submit(question.trim(), 'auto', quote);
+  };
+
   // Pre-selected app target when the panel is opened inside an app (the global
   // rail); on the Ask home there is none and the picker lists/creates apps.
   const appContext = {
@@ -527,7 +578,7 @@ export function UnifiedAgentRunPanel({
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
+    <div className={onInspectRun ? 'dql-ask-ai-panel' : undefined} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
       {blockToSave ? (
         <SaveAsBlockModal
           cell={{
@@ -559,12 +610,12 @@ export function UnifiedAgentRunPanel({
         details > summary::-webkit-details-marker { display: none; }
       `}</style>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className={onInspectRun ? 'dql-ask-transcript' : undefined} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
         {items.length === 0 && !running ? (
           <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary }}>
-            <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
+            {onInspectRun ? <><div className="dql-ask-empty-kicker"><ShieldCheck size={13} /> Answers grounded in governed data</div><div className="dql-ask-empty-title">Ask your data</div></> : <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>}
             <div style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 380, color: t.textSecondary }}>
-              {emptyHint ?? DEFAULT_EMPTY_HINT}
+              {emptyHint ?? (onInspectRun ? 'Certified first · semantic next · generated SQL last' : DEFAULT_EMPTY_HINT)}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 520 }}>
               {(examplePrompts ?? EXAMPLE_PROMPTS).map((ex) => (
@@ -577,7 +628,10 @@ export function UnifiedAgentRunPanel({
         ) : null}
 
         {items.map((item) => item.kind === 'user' ? (
-          <div key={item.id} style={userBubbleStyle(t)}>{item.text}</div>
+          <div key={item.id} className={onInspectRun ? 'dql-ask-user-message' : undefined} style={onInspectRun ? undefined : userBubbleStyle(t)}>
+            {item.quote ? <div className={onInspectRun ? 'dql-ask-quoted-context' : undefined}>“{item.quote}”</div> : null}
+            {item.text}
+          </div>
         ) : (
           <RunCard
             key={item.id}
@@ -591,6 +645,7 @@ export function UnifiedAgentRunPanel({
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
             onNextAction={(action) => handleNextAction(item.run, action)}
+            onInspectRun={onInspectRun}
           />
         ))}
 
@@ -599,14 +654,8 @@ export function UnifiedAgentRunPanel({
 
       {error ? <div style={{ margin: '0 16px 8px', color: t.error, fontSize: 12 }}>{error}</div> : null}
 
-      <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 11, color: t.textMuted, flex: 1, minWidth: 180 }}>
-            {scopeHint}
-          </div>
-          <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+      <div className={onInspectRun ? 'dql-ask-composer-shell' : undefined} style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
+        <div className={onInspectRun ? 'dql-ask-composer' : undefined} style={onInspectRun ? undefined : { display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
             ref={inputRef}
             value={input}
@@ -619,11 +668,14 @@ export function UnifiedAgentRunPanel({
                 handleSubmit();
               }
             }}
-            style={inputStyle(t)}
+            style={onInspectRun ? undefined : inputStyle(t)}
           />
+          <div className={onInspectRun ? 'dql-ask-composer-tools' : undefined} style={onInspectRun ? undefined : { display: 'contents' }}>
+          {onInspectRun ? <span className="dql-ask-model-chip"><Sparkles size={11} /> Governed auto</span> : null}
+          <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
           <button
             type="button"
-            className="dql-hover dql-lift"
+            className={`dql-hover dql-lift${onInspectRun ? ' dql-ask-send' : ''}`}
             onClick={handleSubmit}
             disabled={!input.trim() || running}
             style={sendButtonStyle(t, Boolean(input.trim()) && !running)}
@@ -632,8 +684,27 @@ export function UnifiedAgentRunPanel({
             <span>{running ? 'Working' : 'Ask'}</span>
           </button>
           {running ? <button type="button" className="dql-hover" onClick={handleStop} style={{ ...sendButtonStyle(t, true), background: t.btnBg, borderColor: t.error, color: t.error }} title="Stop the active agent run"><Square size={13} fill="currentColor" /><span>Stop</span></button> : null}
+          </div>
         </div>
+        <div style={{ textAlign: onInspectRun ? 'center' : 'left', color: t.textMuted, fontSize: 10.5 }}>{scopeHint}</div>
       </div>
+      {selection ? (
+        <div className="dql-selection-popover" style={{ left: selection.x, top: selection.y }}>
+          <div className="dql-ask-quoted-context">“{selection.text}”</div>
+          <input
+            ref={selectionInputRef}
+            value={selectionDraft}
+            onChange={(event) => setSelectionDraft(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') sendSelectionFollowUp(selectionDraft); }}
+            placeholder="Ask about this…"
+          />
+          <div className="dql-selection-popover-actions">
+            <button type="button" onClick={() => sendSelectionFollowUp('Why is this happening?')}>Why is this?</button>
+            <button type="button" onClick={() => sendSelectionFollowUp('What is the root cause?')}>Root cause</button>
+            <button type="button" onClick={() => sendSelectionFollowUp('Break this down further')}>Break it down</button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1205,6 +1276,7 @@ function RunCard({
   onOpenBlock,
   onOpenResearch,
   onNextAction,
+  onInspectRun,
 }: {
   run: AgentRun;
   t: Theme;
@@ -1216,6 +1288,7 @@ function RunCard({
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
+  onInspectRun?: (run: AgentRun) => void;
 }) {
   const { dispatch } = useNotebook();
   // A conversational reply renders as a plain assistant bubble — no route label,
@@ -1224,13 +1297,13 @@ function RunCard({
     const isGeneralKnowledge = run.answerKind === 'general_knowledge';
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-agent-fadein 0.3s ease-out' }}>
-        <div style={assistantBubbleStyle(t)}>
+        <div className={onInspectRun ? 'dql-ask-answer dql-followup-zone' : undefined} data-followup={onInspectRun ? 'answer' : undefined} style={onInspectRun ? undefined : assistantBubbleStyle(t)}>
           {isGeneralKnowledge ? (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: t.textMuted, marginBottom: 6, fontWeight: 650 }}>
               <Lightbulb size={11} /> General knowledge — not from your data
             </div>
           ) : null}
-          <div style={{ fontSize: 13.5, lineHeight: 1.55, color: t.textPrimary }}>
+          <div>
             {run.answer ? <StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /> : run.summary}
           </div>
         </div>
@@ -1277,34 +1350,29 @@ function RunCard({
     : 0;
   const completedGuidance = completedRunGuidanceFor(elapsedSeconds, run.route, run.trustState, run.repairAttempts);
   return (
-    <div style={runCardStyle(t)}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+    <div className={onInspectRun ? 'dql-ask-run' : undefined} style={onInspectRun ? undefined : runCardStyle(t)}>
+      <div className={onInspectRun ? 'dql-ask-trust-line' : undefined} style={onInspectRun ? undefined : { display: 'flex', alignItems: 'center', gap: 8 }}>
         <StatusIcon run={run} />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 850, color: t.textPrimary }}>{simpleRunTitle(run)}</div>
-        </div>
+        <span>{simpleRunTitle(run)}</span>
         <TrustBadge run={run} t={t} />
+        {run.evaluations.length ? (
+          <button type="button" onClick={() => onInspectRun?.(run)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 11 }}>
+            <Check size={11} color={t.success} /> {run.evaluations.filter((item) => item.passed).length} checks passed
+          </button>
+        ) : null}
       </div>
 
-      {trustNote ? (
+      {!onInspectRun && trustNote ? (
         <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', fontSize: 11, color: t.textMuted, lineHeight: 1.4 }}>
-          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} style={{ flex: '0 0 auto', marginTop: 1 }} /> : run.trustState === 'governed' || run.trustState === 'grounded' ? <ShieldCheck size={12} color={t.accent} style={{ flex: '0 0 auto', marginTop: 1 }} /> : <ShieldAlert size={12} color={t.warning} style={{ flex: '0 0 auto', marginTop: 1 }} />}
+          {run.trustState === 'certified' ? <ShieldCheck size={12} color={t.success} /> : <ShieldAlert size={12} color={t.warning} />}
           <span>{trustNote}</span>
         </div>
       ) : null}
 
-      {(isLlmPlan || multiStep || run.repairAttempts > 0) ? (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {isLlmPlan ? <MetaChip t={t} icon={<ListTree size={11} />} label="AI plan" tone="accent" /> : null}
-          {multiStep ? <MetaChip t={t} icon={<Route size={11} />} label={`${steps.length} steps`} tone="muted" /> : null}
-          {run.repairAttempts > 0 ? <MetaChip t={t} icon={<Wrench size={11} />} label={`${run.repairAttempts} repair${run.repairAttempts > 1 ? 's' : ''}`} tone="warning" /> : null}
-        </div>
-      ) : null}
-
       {run.summary && !(run.answer && sameText(cleanPresentationText(run.summary), cleanAnswerText(run.answer))) ? (
-        <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
+        <div className="dql-ask-answer dql-followup-zone" data-followup="answer">{cleanPresentationText(run.summary)}</div>
       ) : null}
-      {run.answer ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
+      {run.answer ? <div className="dql-ask-answer dql-followup-zone" data-followup="answer"><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
 
       {evidence.length > 0 ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1320,58 +1388,28 @@ function RunCard({
 
       <AppliedLearnings run={run} t={t} />
 
-      {run.artifacts.length > 0 ? (
-        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0 }}>
-          {run.artifacts.map((artifact) => (
-            <ArtifactView
-              key={artifact.id}
-              artifact={artifact}
-              t={t}
-              themeMode={themeMode}
-              onInsertSql={onInsertSql}
-              onInsertDql={onInsertDql}
-              onOpenBlock={onOpenBlock}
-              onOpenResearch={onOpenResearch}
-              onOpenApp={onOpenApp}
-              onNextAction={onNextAction}
-            />
-          ))}
-        </div>
-      ) : null}
-
-      {multiStep ? (
-        <StepTrace steps={steps} t={t} />
-      ) : (
-        <VerificationChecks evaluations={run.evaluations} t={t} />
-      )}
-
-      {run.events.length > 0 ? (
-        <button
-          type="button"
-          className="dql-hover"
-          onClick={() => dispatch({ type: 'OPEN_AGENT_LOG', run })}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start',
-            background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
-            color: t.textMuted, fontSize: 11.5, fontFamily: t.font,
-          }}
-          title="See what the agent did and where the time went"
-        >
-          <ListTree size={12} /> View steps · where the time went
+      {onInspectRun && run.artifacts.length > 0 ? <div className="dql-ask-artifacts">{run.artifacts.map((artifact) => (
+        <button key={artifact.id} type="button" className="dql-ask-artifact-chip" onClick={() => onInspectRun?.(run)}>
+          <span className="dql-ask-artifact-icon"><ArtifactIcon kind={artifact.kind} /></span>
+          <span className="dql-ask-artifact-copy"><span className="dql-ask-artifact-title">{cleanPresentationText(artifact.title)}</span><span className="dql-ask-artifact-meta">{artifact.kind.replace(/_/g, ' ')} · {artifact.trustState.replace(/_/g, ' ')}</span></span>
+          <ArrowRight size={13} color={t.textMuted} />
         </button>
-      ) : null}
-
-      {completedGuidance ? (
-        <div style={{ display: 'grid', gap: 3, padding: '8px 9px', border: `1px solid ${t.accent}33`, borderRadius: 7, background: `${t.accent}0a` }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.textSecondary, fontSize: 11, fontWeight: 800 }}>
-            <Lightbulb size={11} color={t.accent} /> {completedGuidance.title}
-          </span>
-          <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.45 }}>{completedGuidance.detail}</span>
+      ))}</div> : null}
+      {!onInspectRun && run.artifacts.length > 0 ? (
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0 }}>
+          {run.artifacts.map((artifact) => <ArtifactView key={artifact.id} artifact={artifact} t={t} themeMode={themeMode} onInsertSql={onInsertSql} onInsertDql={onInsertDql} onOpenBlock={onOpenBlock} onOpenResearch={onOpenResearch} onOpenApp={onOpenApp} onNextAction={onNextAction} />)}
         </div>
       ) : null}
 
-      {(pinnable || showResearchDeeper || run.nextActions.length > 0) ? (
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+      {!onInspectRun ? (multiStep ? <StepTrace steps={steps} t={t} /> : <VerificationChecks evaluations={run.evaluations} t={t} />) : null}
+      {!onInspectRun && run.events.length > 0 ? (
+        <button type="button" onClick={() => dispatch({ type: 'OPEN_AGENT_LOG', run })} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start', color: t.textMuted, fontSize: 11.5 }}><ListTree size={12} /> View steps · where the time went</button>
+      ) : null}
+      {!onInspectRun && completedGuidance ? <div style={{ padding: 8, border: `1px solid ${t.accent}33`, borderRadius: 7, color: t.textMuted, fontSize: 10.5 }}>{completedGuidance.detail}</div> : null}
+
+      {(pinnable || showResearchDeeper || run.nextActions.length > 0 || run.events.length > 0) ? (
+        <div className="dql-ask-quiet-actions">
+          <button type="button" onClick={() => void navigator.clipboard?.writeText(run.answer ?? run.summary)}><Copy size={11} /> <span>Copy</span></button>
           {pinnable ? <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} /> : null}
           {canSaveBlock ? (
             <button type="button" className="dql-hover" onClick={() => onNextAction({ id: 'save-dql-block', label: 'Save as block', route: 'dql_block_draft' })} style={smallButtonStyle(t)}>
@@ -1387,7 +1425,7 @@ function RunCard({
               title="Run a slower, multi-step investigation on this question"
             >
               <FileSearch size={11} />
-              Research this deeper
+              <span>Research deeper</span>
             </button>
           ) : null}
           {/* confirm-app-build is owned by the proposal card itself, not a composer action. */}
@@ -1402,6 +1440,9 @@ function RunCard({
                 {action.label}
               </button>
             ))}
+          {run.events.length > 0 ? (
+            <button type="button" onClick={() => onInspectRun?.(run)}><ListTree size={11} /> <span>How it was answered</span></button>
+          ) : null}
         </div>
       ) : null}
     </div>
