@@ -64,6 +64,9 @@ export function DbtFirstModelingPage() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+  useEffect(() => {
+    if (narrowLayout) setInspectorOpen(false);
+  }, [narrowLayout]);
   const toggleInspector = useCallback(() => {
     setInspectorOpen((open) => {
       const next = !open;
@@ -367,7 +370,10 @@ export function DbtFirstModelingPage() {
             ...(narrowLayout ? { position: 'fixed', inset: '0 0 0 auto', width: 'min(90vw, 380px)', zIndex: 95, boxShadow: '-12px 0 30px rgba(0,0,0,.18)' } : {}),
           }}
         >
-          <SideHeading t={t}>Inspector</SideHeading>
+          <div style={{ position: narrowLayout ? 'sticky' : undefined, top: 0, zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: narrowLayout ? 10 : 0, background: t.appBg }}>
+            <SideHeading t={t}>Inspector</SideHeading>
+            {narrowLayout && <button type="button" aria-label="Close inspector" title="Close inspector" onClick={toggleInspector} style={iconButtonStyle(t)}><PanelRightClose size={14} /></button>}
+          </div>
           {selectedEntity ? (
             <EntityInspector
               entity={selectedEntity}
