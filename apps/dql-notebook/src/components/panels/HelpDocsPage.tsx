@@ -156,7 +156,7 @@ function Trouble({ title, body, t }: { title: string; body: string; t: Theme }) 
 }
 
 function ImageSlot({ label, caption, t }: { label: string; caption: string; t: Theme }) {
-  return <figure style={{ margin: '16px 0 14px' }}><div role="img" aria-label={label} style={{ height: 190, border: `1px dashed ${t.inputBorder}`, borderRadius: 10, background: t.inputBg, display: 'grid', placeItems: 'center', color: t.textMuted }}><div style={{ display: 'grid', justifyItems: 'center', gap: 8 }}><Image size={24} strokeWidth={1.5} /><span style={{ fontSize: 11.5 }}>{label}</span></div></div><figcaption style={{ marginTop: 6, textAlign: 'center', color: t.textMuted, fontSize: 11.5 }}>{caption}</figcaption></figure>;
+  return <figure style={{ margin: '16px 0 14px' }}><div role="img" aria-label={label} style={{ height: 300, border: `1px dashed ${t.inputBorder}`, borderRadius: 10, background: t.inputBg, display: 'grid', placeItems: 'center', color: t.textMuted }}><div style={{ display: 'grid', justifyItems: 'center', gap: 8 }}><Image size={24} strokeWidth={1.5} /><span style={{ fontSize: 11.5 }}>{label}</span></div></div><figcaption style={{ marginTop: 6, textAlign: 'center', color: t.textMuted, fontSize: 11.5 }}>{caption}</figcaption></figure>;
 }
 
 function TrustTable({ t }: { t: Theme }) {
