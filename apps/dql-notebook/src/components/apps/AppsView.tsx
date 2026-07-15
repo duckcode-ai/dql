@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   AlertTriangle,
   BarChart3,
   Blocks,
@@ -188,6 +189,10 @@ export function AppsView(): JSX.Element {
   const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [smartView, setSmartView] = useState(false);
   const [explainOpen, setExplainOpen] = useState(false);
+  // Redesigned build flow: a nonce bumped by startAiBuilder auto-runs the
+  // proposal once the create surface mounts (library send → building stream).
+  const [autoBuildNonce, setAutoBuildNonce] = useState(0);
+  const autoBuildRanRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -334,6 +339,9 @@ export function AppsView(): JSX.Element {
     setGenerated(null);
     setBuildSession(null);
     setSurface('create');
+    // Redesigned flow: the library composer send goes straight into the
+    // building stream (orb + shimmer) and auto-advances to the proposal.
+    setAutoBuildNonce((nonce) => nonce + 1);
   };
 
   const startClassicBuilder = () => {
@@ -353,7 +361,9 @@ export function AppsView(): JSX.Element {
     });
   };
 
-  const runGenerate = async () => {
+  const runGenerate = async (extraBlockIds?: string[]) => {
+    // Guard: callers may pass a click event; only real id arrays count.
+    const extras = Array.isArray(extraBlockIds) ? extraBlockIds.filter((id) => typeof id === 'string') : [];
     const prompt = builderPrompt.trim();
     if (!prompt) {
       setBuilderError('Describe the app you want to build.');
@@ -365,6 +375,7 @@ export function AppsView(): JSX.Element {
       ? Array.from(selectedBlocks)
       : Array.from(new Set([
           ...Array.from(selectedBlocks),
+          ...extras,
           ...catalog
             .filter((block) => block.status === 'certified')
             .slice(0, 6)
@@ -392,6 +403,28 @@ export function AppsView(): JSX.Element {
     setProposalSelection(session.proposal ? defaultProposalSelection(session.proposal) : new Set());
     const planName = (session.plan as GeneratedAppPlan | undefined)?.name;
     if (planName) setBuilderName(planName);
+  };
+
+  // Auto-run the proposal after startAiBuilder lands on the create surface.
+  // Ref-guarded so React StrictMode double-effects don't propose twice.
+  useEffect(() => {
+    if (surface !== 'create' || builderMode !== 'ai') return;
+    if (autoBuildNonce === 0 || autoBuildRanRef.current === autoBuildNonce) return;
+    autoBuildRanRef.current = autoBuildNonce;
+    void runGenerate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [surface, builderMode, autoBuildNonce]);
+
+  // "Add more blocks" in the proposal: adding a certified catalog block
+  // re-proposes the build with that block pinned, so the new tile arrives
+  // through the same governed propose flow (no client-side tile fabrication).
+  const addBlockToProposal = (blockId: string) => {
+    setSelectedBlocks((current) => {
+      const next = new Set(current);
+      next.add(blockId);
+      return next;
+    });
+    void runGenerate([blockId]);
   };
 
   const toggleProposalTile = (tileId: string) => {
@@ -549,6 +582,7 @@ export function AppsView(): JSX.Element {
           themeMode={state.themeMode}
           onToggleProposalTile={toggleProposalTile}
           onCommitProposal={() => void runCommitProposal()}
+          onAddBlock={addBlockToProposal}
           saving={builderSaving}
           error={builderError}
           onBack={() => setSurface('library')}
@@ -663,45 +697,47 @@ function AppLibrarySurface({
     <main className="dql-apps-wrap">
       <section className="dql-apps-createhead">
         <h1>Build an app</h1>
-        <p>Start with one stakeholder request. DQL finds certified blocks, app filters, and analysis gaps before opening the generated app view.</p>
+        <p>One request. DQL finds certified blocks, binds filters, and opens a stakeholder-ready app.</p>
       </section>
 
-      <section className="dql-apps-ai-entry" aria-label="Build an app with AI">
-        <div className="dql-apps-ai-entry-head">
-          <span><Sparkles size={14} /> AI app builder</span>
-          <b>Certified blocks first</b>
-        </div>
-        <div className="dql-apps-ai-entry-box">
-          <textarea
-            value={draftPrompt}
-            onChange={(event) => setDraftPrompt(event.target.value)}
-            rows={3}
-            aria-label="App build request"
-            placeholder="Build an NBA player performance app for stakeholders..."
-          />
-          <button type="button" onClick={submitPrompt} disabled={!draftPrompt.trim()} title="Review matched context">
-            <Send size={16} /> Continue
+      <section className="dql-apps-composer" aria-label="Build an app with AI">
+        <textarea
+          value={draftPrompt}
+          onChange={(event) => setDraftPrompt(event.target.value)}
+          rows={2}
+          aria-label="App build request"
+          placeholder="Build an EMEA revenue app for the CFO…"
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              submitPrompt();
+            }
+          }}
+        />
+        <div className="dql-apps-composer-row">
+          <span className="dql-apps-composer-chip"><ShieldCheck size={11} /> Certified blocks first</span>
+          <i />
+          <button type="button" className="dql-apps-composer-blank" onClick={onStartClassic}>
+            <LayoutDashboard size={12} /> Create blank
           </button>
-        </div>
-        <div className="dql-apps-ai-entry-foot">
-          <div>
-            {APP_PROMPT_EXAMPLES.slice(0, 3).map((item) => (
-              <button key={item.title} type="button" onClick={() => setDraftPrompt(item.prompt)}>
-                {item.title}
-              </button>
-            ))}
-          </div>
-          <button type="button" className="dql-apps-ai-entry-secondary" onClick={onStartClassic}>
-            <LayoutDashboard size={14} /> Create blank
-            <ArrowRight size={13} />
+          <button type="button" className="dql-apps-composer-send" onClick={submitPrompt} disabled={!draftPrompt.trim()} title="Build">
+            <ArrowUp size={15} strokeWidth={2} />
           </button>
         </div>
       </section>
+      <div className="dql-apps-try">
+        <span>Try:</span>
+        {APP_PROMPT_EXAMPLES.slice(0, 3).map((item) => (
+          <button key={item.title} type="button" onClick={() => setDraftPrompt(item.prompt)}>
+            {item.title}
+          </button>
+        ))}
+      </div>
 
       <div className="dql-apps-sectionhead">
         <span>App library</span>
         <i />
-        <b>{allApps.length} total</b>
+        <b>{allApps.length} app{allApps.length === 1 ? '' : 's'}</b>
       </div>
 
       <div className="dql-apps-libbar">
@@ -832,6 +868,7 @@ function AppCreateSurface({
   onToggleBlock,
   onBuild,
   onOpenGenerated,
+  onAddBlock,
 }: {
   mode: BuilderMode;
   appName: string;
@@ -849,6 +886,7 @@ function AppCreateSurface({
   themeMode: ThemeMode;
   onToggleProposalTile: (tileId: string) => void;
   onCommitProposal: () => void;
+  onAddBlock: (blockId: string) => void;
   saving: boolean;
   error: string | null;
   onBack: () => void;
@@ -861,6 +899,8 @@ function AppCreateSurface({
   onBuild: () => void;
   onOpenGenerated: () => void;
 }) {
+  const [addMoreOpen, setAddMoreOpen] = useState(false);
+  const [addQuery, setAddQuery] = useState('');
   const selected = catalog.filter((block) => selectedBlocks.has(block.id));
   const contextDomainLabel = domain.trim() || 'Auto domain';
   const contextOwnerLabel = owner.trim() || 'Local owner';
@@ -872,6 +912,163 @@ function AppCreateSurface({
   const certifiedPlanTiles = planTiles.filter(isCertifiedPlanTile);
   const sessionWarnings = buildSession?.warnings ?? [];
   const scopedReportCount = planScopedReportCount(plan);
+
+  // ── Redesigned AI build flow (Apps Redesign.dc.html) ──────────────────────
+  // library send → user bubble → building stream (orb + shimmer + staggered
+  // steps while the real propose call runs) → proposal checklist → commit.
+  if (mode === 'ai') {
+    const tiles = proposal?.tiles ?? [];
+    const certifiedTileCount = tiles.filter((tile) => tile.certification === 'certified').length;
+    const selectedCount = tiles.filter((tile) => proposalSelection.has(tile.id)).length;
+    const proposalBlockIds = new Set(tiles.map((tile) => tile.blockId).filter(Boolean));
+    const addNeedle = addQuery.trim().toLowerCase();
+    const addPool = catalog.filter((block) =>
+      !proposalBlockIds.has(block.id)
+      && (!addNeedle || block.name.toLowerCase().includes(addNeedle) || (block.description ?? '').toLowerCase().includes(addNeedle)));
+    const detectedFilters = (plan.globalFilters?.length ? plan.globalFilters : plan.pages[0]?.filters ?? []).slice(0, 4);
+    const glyphFor = (viz: string): string => {
+      const v = viz.toLowerCase();
+      if (v.includes('kpi') || v.includes('metric') || v.includes('single')) return 'Σ';
+      if (v.includes('table')) return '▤';
+      return '▦';
+    };
+    const vizLabel = (viz: string): string => {
+      const v = viz.toLowerCase();
+      if (v.includes('kpi') || v.includes('single')) return 'KPI';
+      if (v.includes('table')) return 'Table';
+      if (v.includes('line')) return 'Line chart';
+      if (v.includes('bar')) return 'Bar chart';
+      return viz ? viz.charAt(0).toUpperCase() + viz.slice(1) : 'Auto';
+    };
+    return (
+      <div className="dql-app-flow-scroll">
+        <div className="dql-app-flow">
+          <div className="dql-app-flow-head">
+            <h2>Build an app</h2>
+            <p>One request. DQL finds certified blocks, binds filters, and opens a stakeholder-ready app.</p>
+          </div>
+
+          {/* sent prompt */}
+          <div className="dql-app-flow-bubble">{prompt}</div>
+
+          {/* building stream */}
+          {saving ? (
+            <div className="dql-app-buildstream">
+              <span className="dql-app-buildorb"><Sparkles size={14} /></span>
+              <div className="dql-app-buildbody">
+                <span className="dql-app-shimmer">Finding certified blocks…</span>
+                <div className="dql-app-buildsteps">
+                  <span style={{ animationDelay: '0.2s' }}><Check size={11} className="ok" />Matched domain <code>{contextDomainLabel.toLowerCase()}</code></span>
+                  <span style={{ animationDelay: '0.8s' }}><Check size={11} className="ok" />Scanning certified blocks and semantic metrics</span>
+                  <span style={{ animationDelay: '1.4s' }}><i className="dot" />Detecting app filters from block parameters…</span>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* proposal */}
+          {!saving && proposal ? (
+            <div className="dql-app-buildstream proposal">
+              <span className="dql-app-buildorb still"><Sparkles size={14} /></span>
+              <div className="dql-app-buildbody wide">
+                <div className="dql-app-proposal-lede">
+                  Found <strong>{certifiedTileCount} certified block{certifiedTileCount === 1 ? '' : 's'}</strong> for your app.
+                  Uncheck any you don&apos;t need, or add more — everything ships governed.
+                </div>
+                <div className="dql-app-proposal-card">
+                  {tiles.map((tile) => {
+                    const on = proposalSelection.has(tile.id);
+                    const certifiedTile = tile.certification === 'certified';
+                    return (
+                      <button key={tile.id} type="button" className={`dql-app-proposal-row ${on ? '' : 'off'}`} onClick={() => onToggleProposalTile(tile.id)}>
+                        <span className={`dql-app-prop-check ${on ? 'on' : ''}`}>{on ? <Check size={10} strokeWidth={3.2} /> : null}</span>
+                        <span className={`dql-app-prop-glyph ${certifiedTile && glyphFor(tile.viz) === '▤' ? 'green' : ''}`}>{glyphFor(tile.viz)}</span>
+                        <span className="dql-app-prop-name">
+                          <b>{tile.blockId ?? tile.title}</b>
+                          <small>{tile.description ?? tile.question ?? tile.title}</small>
+                        </span>
+                        <span className={`dql-app-prop-badge ${certifiedTile ? 'certified' : 'draft'}`}>{certifiedTile ? 'Certified' : 'Draft'}</span>
+                        <span className="dql-app-prop-viz">{vizLabel(tile.viz)}</span>
+                      </button>
+                    );
+                  })}
+                  <button type="button" className="dql-app-addmore" onClick={() => setAddMoreOpen((open) => !open)}>
+                    <Plus size={13} strokeWidth={2.2} /> Add more blocks
+                  </button>
+                  {addMoreOpen ? (
+                    <div className="dql-app-addmore-panel">
+                      <div className="dql-app-addmore-search">
+                        <Search size={12} />
+                        <input
+                          value={addQuery}
+                          onChange={(event) => setAddQuery(event.target.value)}
+                          placeholder={`Search ${catalog.length} certified block${catalog.length === 1 ? '' : 's'}…`}
+                        />
+                      </div>
+                      {catalogLoading ? <div className="dql-app-addmore-hint">Loading certified blocks…</div> : null}
+                      {addPool.slice(0, 6).map((block) => (
+                        <button key={block.id} type="button" className="dql-app-addmore-row" onClick={() => { setAddQuery(''); onAddBlock(block.id); }}>
+                          <Plus size={12} strokeWidth={2.2} />
+                          <span>{block.name}</span>
+                          <small>{block.domain ?? 'certified'} · {block.status}</small>
+                        </button>
+                      ))}
+                      {!catalogLoading && addPool.length === 0 ? <div className="dql-app-addmore-hint">No more matching certified blocks.</div> : null}
+                    </div>
+                  ) : null}
+                </div>
+
+                {detectedFilters.length > 0 ? (
+                  <div className="dql-app-detected">
+                    <span className="dql-app-detected-label">Detected filters</span>
+                    {detectedFilters.map((filter) => (
+                      <span key={filter.id} className="dql-app-detected-pill">{filter.label} · <strong>{formatVariableValue(filter.default ?? 'Any')}</strong></span>
+                    ))}
+                  </div>
+                ) : null}
+
+                {proposal.gaps.length > 0 ? (
+                  <div className="dql-app-flow-gaps">
+                    {proposal.gaps.slice(0, 3).map((gap) => (
+                      <span key={gap.id}><AlertTriangle size={12} /> {gap.question}</span>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="dql-app-flow-actions">
+                  <button type="button" className="dql-app-flow-build" onClick={onCommitProposal} disabled={committing || selectedCount === 0}>
+                    <LayoutDashboard size={13} />
+                    {committing ? 'Building app…' : `Build app with ${selectedCount} block${selectedCount === 1 ? '' : 's'}`}
+                  </button>
+                  <button type="button" className="dql-app-flow-reset" onClick={onBack}>Start over</button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* propose failed or empty state fallback */}
+          {!saving && !proposal ? (
+            <div className="dql-app-flow-actions">
+              <button type="button" className="dql-app-flow-build" onClick={onBuild}>
+                <Sparkles size={13} /> Find certified blocks
+              </button>
+              <button type="button" className="dql-app-flow-reset" onClick={onBack}>Start over</button>
+            </div>
+          ) : null}
+
+          {error ? <div className="dql-app-error">{error}</div> : null}
+          {sessionWarnings.length > 0 && !saving ? (
+            <div className="dql-app-flow-gaps">
+              {sessionWarnings.slice(0, 2).map((warning, index) => (
+                <span key={`${warning}-${index}`}><AlertTriangle size={12} /> {warning}</span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="dql-app-create-shell">
       <div className="dql-app-buildbar">
@@ -883,11 +1080,12 @@ function AppCreateSurface({
           <input value={appName} onChange={(event) => onAppNameChange(event.target.value)} spellCheck={false} />
         </span>
         <StatusSeal tone={generated ? 'agentic' : 'draft'}>{generated ? 'generated' : 'draft'}</StatusSeal>
+        {/* This surface only renders in classic mode now — AI mode uses the chat flow above. */}
         <div className="dql-app-mode-seg">
-          <button type="button" className={mode === 'ai' ? 'on' : ''} onClick={() => onModeChange('ai')}>
+          <button type="button" onClick={() => onModeChange('ai')}>
             <Sparkles size={15} /> Build AI
           </button>
-          <button type="button" className={mode === 'classic' ? 'on' : ''} onClick={() => onModeChange('classic')}>
+          <button type="button" className="on" onClick={() => onModeChange('classic')}>
             <Blocks size={15} /> Classic
           </button>
         </div>
@@ -895,12 +1093,12 @@ function AppCreateSurface({
           <span className="dql-app-persona"><b>CFO</b> CFO</span>
           {generated ? <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onOpenGenerated}>Open app</button> : null}
           <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onBuild} disabled={saving}>
-            {saving ? 'Building...' : mode === 'ai' ? 'Generate app' : 'Create app'}
+            {saving ? 'Building...' : 'Create app'}
           </button>
         </div>
       </div>
 
-      <div className={`dql-app-create-workspace clean ${mode === 'classic' ? 'classic' : 'ai'}`}>
+      <div className="dql-app-create-workspace clean classic">
         <section className="dql-app-ai-start">
           <div className="dql-app-ai-start-main">
             <div className="dql-app-ai-start-copy">
@@ -1240,12 +1438,34 @@ function AppWorkspaceSurface({
   return (
     <div className="dql-app-workspace">
       <div className="dql-app-view-topbar">
-        <button type="button" className="dql-app-back" onClick={onBack} title="Back to apps"><ArrowLeft size={16} /></button>
+        <button type="button" className="dql-app-back dql-app-back-label" onClick={onBack} title="Back to apps">
+          <ArrowLeft size={14} />
+          <span>Apps</span>
+        </button>
         <span className="dql-app-crumb"><b>{app?.id ?? 'app'}</b></span>
-        <StatusSeal tone="certified">{certifiedCount} certified</StatusSeal>
+        <StatusSeal tone="certified">{draftCount > 0 ? `${certifiedCount} certified` : 'All certified'}</StatusSeal>
         {draftCount > 0 ? <StatusSeal tone="draft">{draftCount} draft</StatusSeal> : null}
 
         <span className="dql-app-topbar-divider" aria-hidden="true" />
+
+        <div className="dql-app-modeseg" role="group" aria-label="App mode">
+          <button
+            type="button"
+            className={experience === 'view' ? 'on' : ''}
+            onClick={() => onExperienceChange('view')}
+            title="Clean stakeholder view"
+          >
+            <Eye size={12} /> View
+          </button>
+          <button
+            type="button"
+            className={experience === 'build' ? 'on' : ''}
+            onClick={() => onExperienceChange('build')}
+            title="Rearrange tiles and edit this app"
+          >
+            <Pencil size={12} /> Edit
+          </button>
+        </div>
 
         <div className="dql-app-topbar-filters">
           <DashboardFilterControls
@@ -1258,14 +1478,6 @@ function AppWorkspaceSurface({
 
         <div className="dql-app-view-actions">
           <PersonaSwitcher app={appDoc?.app ?? null} />
-          <button
-            type="button"
-            className={`dql-app-customize-btn ${experience === 'build' ? 'on' : ''}`}
-            onClick={() => onExperienceChange(experience === 'build' ? 'view' : 'build')}
-            title={experience === 'build' ? 'Finish customizing and return to the clean view' : 'Rearrange tiles and edit this app'}
-          >
-            {experience === 'build' ? <><Check size={14} /> Done</> : <><Pencil size={14} /> Customize</>}
-          </button>
           {experience === 'build' ? (
             <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={() => void promoteApp()} disabled={promoteStatus === 'running'}>
               <ShieldCheck size={14} /> {promoteStatus === 'running' ? 'Promoting' : 'Promote'}
@@ -4031,12 +4243,12 @@ const APP_STYLES = `
   --dql-app-muted: var(--color-text-secondary, #64748b);
   --dql-app-faint: var(--color-text-tertiary, #94a3b8);
   --dql-app-accent: var(--color-accent-blue, #2563eb);
-  --dql-app-accent-soft: rgba(37, 99, 235, 0.10);
+  --dql-app-accent-soft: var(--accent-dim, rgba(37, 99, 235, 0.10));
   --dql-app-deep: #111827;
   --dql-app-green: var(--color-status-success, #16a34a);
-  --dql-app-green-soft: rgba(22, 163, 74, 0.08);
+  --dql-app-green-soft: var(--status-success-bg, rgba(22, 163, 74, 0.08));
   --dql-app-orange: var(--color-status-warning, #ca8a04);
-  --dql-app-orange-soft: rgba(202, 138, 4, 0.10);
+  --dql-app-orange-soft: var(--status-warning-bg, rgba(202, 138, 4, 0.10));
   --dql-app-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 28px rgba(15, 23, 42, 0.06);
   --surface: var(--dql-app-surface);
   --surface-hover: var(--dql-app-control);
@@ -4057,70 +4269,91 @@ const APP_STYLES = `
   letter-spacing: 0;
 }
 
-.dql-apps-theme-paper {
-  --dql-app-canvas: #f7f4ed;
-  --dql-app-surface: #fffefa;
-  --dql-app-surface-muted: #f3f0ea;
-  --dql-app-control: #f8f6f1;
-  --dql-app-line: rgba(57, 48, 36, 0.12);
-  --dql-app-line-2: rgba(57, 48, 36, 0.18);
-  --dql-app-ink: #171717;
-  --dql-app-muted: #5f636b;
-  --dql-app-faint: #8b909a;
-  --dql-app-accent: #4f63d7;
-  --dql-app-accent-soft: rgba(79, 99, 215, 0.11);
-}
-
-.dql-apps-theme-white {
-  --dql-app-canvas: #f7f8fb;
-  --dql-app-surface: #ffffff;
-  --dql-app-surface-muted: #f2f5f8;
-  --dql-app-control: #f7f9fc;
-  --dql-app-line: rgba(15, 23, 42, 0.10);
-  --dql-app-line-2: rgba(15, 23, 42, 0.16);
-  --dql-app-ink: #0f172a;
-  --dql-app-muted: #5d6878;
-  --dql-app-faint: #8a94a5;
-  --dql-app-accent: #2563eb;
-  --dql-app-accent-soft: rgba(37, 99, 235, 0.10);
-}
-
+/* Per-theme palettes come straight from the Luna tokens the base block maps
+   (tokens.css under [data-theme]) — the redesign handoff palette IS the Paper
+   token set, so no per-theme hex overrides remain here. Obsidian only mutes
+   card shadows. */
 .dql-apps-theme-obsidian {
-  --dql-app-canvas: #0f141c;
-  --dql-app-surface: #151b24;
-  --dql-app-surface-muted: #111720;
-  --dql-app-control: #1b2430;
-  --dql-app-line: rgba(226, 232, 240, 0.10);
-  --dql-app-line-2: rgba(226, 232, 240, 0.16);
-  --dql-app-ink: #eef3fb;
-  --dql-app-muted: #aab4c3;
-  --dql-app-faint: #7f8b9b;
-  --dql-app-accent: #84a5ff;
-  --dql-app-accent-soft: rgba(132, 165, 255, 0.16);
   --dql-app-deep: #05070b;
   --dql-app-shadow: none;
 }
 
 .dql-apps-wrap {
-  width: min(1240px, calc(100% - 52px));
+  width: min(880px, calc(100% - 48px));
   margin: 0 auto;
-  padding: 30px 0 72px;
+  padding: 28px 0 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .dql-apps-createhead h1 {
   margin: 0;
-  font-size: 32px;
-  line-height: 1.05;
-  font-weight: 850;
+  font-size: 18px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .dql-apps-createhead p {
-  margin: 10px 0 0;
-  color: var(--dql-app-muted);
-  font-size: 14px;
+  margin: 3px 0 0;
+  color: var(--dql-app-faint);
+  font-size: 12.5px;
   line-height: 1.55;
   max-width: 720px;
 }
+
+/* Prototype composer card (library) */
+.dql-apps-composer {
+  background: var(--dql-app-surface);
+  border: 1px solid var(--dql-app-line-2);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(26, 26, 26, 0.03), 0 6px 22px rgba(26, 26, 26, 0.05);
+  display: flex;
+  flex-direction: column;
+}
+.dql-apps-composer textarea {
+  border: 0; background: transparent; resize: none; outline: none;
+  padding: 13px 15px 4px;
+  font-size: 13.5px; line-height: 1.5;
+  color: var(--dql-app-ink); font-family: inherit;
+}
+.dql-apps-composer-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px 12px; }
+.dql-apps-composer-row > i { flex: 1; }
+.dql-apps-composer-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border-radius: 8px;
+  border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-canvas);
+  font-size: 11.5px; color: var(--dql-app-muted); white-space: nowrap;
+}
+.dql-apps-composer-chip svg { color: var(--dql-app-green); }
+.dql-apps-composer-blank {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 11px;
+  border-radius: 8px; border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface); color: var(--dql-app-muted);
+  font-size: 11.5px; font-weight: 600; cursor: pointer; font-family: inherit;
+}
+.dql-apps-composer-blank:hover { background: var(--dql-app-surface-muted); }
+.dql-apps-composer-send {
+  width: 34px; height: 34px; border-radius: 10px; border: 0;
+  background: var(--dql-app-accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; box-shadow: 0 1px 5px rgba(107, 93, 211, 0.3);
+}
+.dql-apps-composer-send:hover { filter: brightness(0.95); }
+.dql-apps-composer-send:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
+.dql-apps-try { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dql-apps-try > span { font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-apps-try button {
+  border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  color: var(--dql-app-muted);
+  border-radius: 999px; padding: 3.5px 11px;
+  font-size: 11px; font-weight: 550; cursor: pointer; font-family: inherit;
+}
+.dql-apps-try button:hover { border-color: var(--dql-app-accent); color: var(--dql-app-accent); background: var(--dql-app-accent-soft); }
 
 .dql-apps-btn {
   height: 32px;
@@ -8255,4 +8488,178 @@ const APP_STYLES = `
     grid-template-columns: 1fr;
   }
 }
+
+/* ══ Redesigned AI build flow (Apps Redesign.dc.html) ══ */
+@keyframes dql-app-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes dql-app-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes dql-app-orb { 0%, 100% { box-shadow: 0 0 0 0 rgba(107, 93, 211, 0); } 50% { box-shadow: 0 0 13px 1px rgba(107, 93, 211, 0.4); } }
+@keyframes dql-app-step { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+
+.dql-app-flow-scroll { min-height: 100%; }
+.dql-app-flow {
+  width: min(880px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.dql-app-flow-head h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: var(--dql-app-ink); }
+.dql-app-flow-head p { margin: 3px 0 0; font-size: 12.5px; color: var(--dql-app-faint); }
+.dql-app-flow-bubble {
+  align-self: flex-end;
+  max-width: 78%;
+  background: var(--dql-app-surface-muted);
+  color: var(--dql-app-ink);
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  animation: dql-app-fadein 0.2s ease-out;
+}
+.dql-app-buildstream { display: flex; gap: 12px; animation: dql-app-fadein 0.25s ease-out; }
+.dql-app-buildorb {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: var(--dql-app-accent-soft);
+  border: 1px solid var(--dql-app-line);
+  color: var(--dql-app-accent);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+  animation: dql-app-orb 1.8s ease-in-out infinite;
+}
+.dql-app-buildorb.still { animation: none; }
+.dql-app-buildbody { display: flex; flex-direction: column; gap: 7px; padding-top: 4px; min-width: 0; }
+.dql-app-buildbody.wide { flex: 1; gap: 10px; }
+.dql-app-shimmer {
+  font-size: 13.5px; font-weight: 700; letter-spacing: -0.01em;
+  background-image: linear-gradient(100deg, var(--dql-app-ink) 25%, var(--dql-app-accent) 50%, var(--dql-app-ink) 75%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+  animation: dql-app-shimmer 2.4s linear infinite;
+}
+.dql-app-buildsteps { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--dql-app-faint); line-height: 1.45; }
+.dql-app-buildsteps > span { display: inline-flex; align-items: center; gap: 6px; animation: dql-app-step 0.3s ease-out both; }
+.dql-app-buildsteps .ok { color: var(--dql-app-green); flex: none; }
+.dql-app-buildsteps code { font-family: var(--font-mono); font-size: 10.5px; }
+.dql-app-buildsteps .dot { width: 5px; height: 5px; border-radius: 999px; background: var(--dql-app-accent); margin: 0 3px; flex: none; }
+.dql-app-proposal-lede { font-size: 13.5px; line-height: 1.6; color: var(--dql-app-ink); }
+.dql-app-proposal-card {
+  border: 1px solid var(--dql-app-line);
+  border-radius: 11px;
+  background: var(--dql-app-surface);
+  overflow: hidden;
+}
+.dql-app-proposal-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  padding: 10px 13px;
+  border: 0; border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  cursor: pointer; text-align: left; font-family: inherit;
+}
+.dql-app-proposal-row:hover { background: var(--dql-app-canvas); }
+.dql-app-proposal-row.off { background: var(--dql-app-canvas); }
+.dql-app-prop-check {
+  width: 16px; height: 16px; border-radius: 4.5px;
+  border: 1.5px solid var(--dql-app-line-2);
+  background: var(--dql-app-surface);
+  color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.dql-app-prop-check.on { border-color: var(--dql-app-accent); background: var(--dql-app-accent); }
+.dql-app-prop-glyph {
+  width: 26px; height: 26px; border-radius: 6px;
+  background: var(--dql-app-accent-soft); color: var(--dql-app-accent);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; font-size: 13px;
+}
+.dql-app-prop-glyph.green { background: var(--dql-app-green-soft); color: var(--dql-app-green); }
+.dql-app-prop-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dql-app-prop-name b { font-size: 12.5px; font-weight: 650; color: var(--dql-app-ink); font-family: var(--font-mono); }
+.dql-app-prop-name small { font-size: 11px; color: var(--dql-app-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dql-app-prop-badge {
+  flex: none; border-radius: 999px; padding: 2px 8px;
+  font-size: 9.5px; font-weight: 700;
+}
+.dql-app-prop-badge.certified { border: 1px solid rgba(46, 139, 87, 0.33); color: var(--dql-app-green); background: var(--dql-app-green-soft); }
+.dql-app-prop-badge.draft { border: 1px solid rgba(178, 107, 31, 0.31); color: var(--dql-app-orange); background: var(--dql-app-orange-soft); }
+.dql-app-prop-viz { flex: none; font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-app-addmore {
+  display: flex; align-items: center; gap: 7px;
+  width: 100%; padding: 10px 13px;
+  border: 0; background: none;
+  color: var(--dql-app-accent);
+  font-size: 12px; font-weight: 650; cursor: pointer; font-family: inherit; text-align: left;
+}
+.dql-app-addmore:hover { background: var(--dql-app-accent-soft); }
+.dql-app-addmore-panel { border-top: 1px solid var(--dql-app-line); animation: dql-app-fadein 0.15s ease-out; }
+.dql-app-addmore-search {
+  display: flex; align-items: center; gap: 7px;
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--dql-app-line);
+  background: var(--dql-app-canvas);
+  color: var(--dql-app-faint);
+}
+.dql-app-addmore-search input {
+  flex: 1; border: 0; background: none; outline: none;
+  font-size: 12px; font-family: inherit; color: var(--dql-app-ink); min-width: 0;
+}
+.dql-app-addmore-row {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 8px 13px;
+  border: 0; border-bottom: 1px solid var(--dql-app-line);
+  background: none; cursor: pointer; text-align: left; font-family: inherit;
+  color: var(--dql-app-accent);
+}
+.dql-app-addmore-row:hover { background: var(--dql-app-accent-soft); }
+.dql-app-addmore-row span { flex: 1; min-width: 0; font-size: 12px; font-family: var(--font-mono); color: var(--dql-app-ink); }
+.dql-app-addmore-row small { flex: none; font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-app-addmore-hint { padding: 9px 13px; font-size: 11px; color: var(--dql-app-faint); }
+.dql-app-detected { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--dql-app-faint); }
+.dql-app-detected-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; font-size: 9.5px; }
+.dql-app-detected-pill {
+  border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface);
+  border-radius: 999px; padding: 2.5px 9px;
+  color: var(--dql-app-muted);
+}
+.dql-app-flow-gaps { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--dql-app-orange); }
+.dql-app-flow-gaps span { display: inline-flex; align-items: center; gap: 6px; }
+.dql-app-flow-actions { display: flex; align-items: center; gap: 8px; }
+.dql-app-flow-build {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 34px; padding: 0 16px;
+  border-radius: 8px; border: 0;
+  background: var(--dql-app-accent); color: #fff;
+  font-size: 12.5px; font-weight: 650; cursor: pointer; font-family: inherit;
+  box-shadow: 0 1px 5px rgba(107, 93, 211, 0.3);
+}
+.dql-app-flow-build:hover { filter: brightness(0.95); }
+.dql-app-flow-build:disabled { opacity: 0.55; cursor: default; }
+.dql-app-flow-reset {
+  height: 34px; padding: 0 13px;
+  border-radius: 8px; border: 1px solid var(--dql-app-line);
+  background: var(--dql-app-surface); color: var(--dql-app-muted);
+  font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit;
+}
+.dql-app-flow-reset:hover { background: var(--dql-app-surface-muted); }
+/* View / Edit segmented toggle (app workspace top bar) */
+.dql-app-modeseg {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 7px;
+  background: var(--dql-app-canvas);
+}
+.dql-app-modeseg button {
+  border: 0; border-radius: 5px;
+  padding: 4px 12px;
+  font-size: 11.5px; font-weight: 600;
+  cursor: pointer; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 5px;
+  background: transparent; color: var(--dql-app-faint);
+}
+.dql-app-modeseg button.on { background: var(--dql-app-accent-soft); color: var(--dql-app-accent); }
 `;
