@@ -13,6 +13,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   GitBranch, GitCommit, RefreshCw, ArrowUp, ArrowDown,
   Search, ChevronDown, X, Plus, Check, ExternalLink,
+  ShieldCheck, Sparkles, GitPullRequest,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -105,6 +106,16 @@ export function GitPage() {
   const [reviewUrl, setReviewUrl] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [governedContext, setGovernedContext] = useState<GovernedContext | null>(null);
+  // Redesigned guided flow (Source Control Redesign.dc.html): plain-language
+  // diff view, share-rail phase, and the final description shown after share.
+  const [diffView, setDiffView] = useState<'plain' | 'code'>('plain');
+  const [sharedInfo, setSharedInfo] = useState<{ count: number; message: string } | null>(null);
+  const [narrowLayout, setNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 980);
+  useEffect(() => {
+    const onResize = () => setNarrowLayout(window.innerWidth < 980);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   const branchMenuRef = useRef<HTMLDivElement>(null);
 
   const refreshAll = useCallback(async () => {
@@ -260,7 +271,8 @@ export function GitPage() {
     await runOp('push', () => api.gitPush(), 'Pushed to remote');
   };
   const onRequestReview = async () => {
-    const title = commitMsg.trim();
+    // After a share the composer is cleared — fall back to the shared message.
+    const title = commitMsg.trim() || sharedInfo?.message || '';
     if (!title) return flash('err', 'Review title required');
     const paths = Array.from(new Set(entries.map((entry) => entry.path)));
     if (paths.length === 0) return flash('err', 'No changes to request review for');
@@ -281,6 +293,37 @@ export function GitPage() {
   };
   const onPull = () => runOp('pull', () => api.gitPull(), 'Pulled from remote');
   const onPush = () => runOp('push', () => api.gitPush(), 'Pushed to remote');
+
+  // ── Guided share-rail handlers (prototype: describe → share → review) ──────
+  // "Write it for me from the changes": a deterministic plain-words summary
+  // from the actual picked file names and statuses (no AI call needed).
+  const suggestDescription = () => {
+    const picked = stagedFiles.length > 0 ? stagedFiles : unstagedFiles;
+    if (picked.length === 0) return;
+    const verb: Record<FileEntry['status'], string> = { M: 'Updated', A: 'Added', D: 'Removed', R: 'Renamed', '?': 'Added' };
+    const parts = picked.slice(0, 3).map((entry) => `${verb[entry.status]} ${entry.path.split('/').pop()?.replace(/\.(dql|md|json|ya?ml|sql)$/i, '') ?? entry.path}`);
+    const rest = picked.length > 3 ? ` and ${picked.length - 3} more change${picked.length - 3 === 1 ? '' : 's'}` : '';
+    setCommitMsg(`${parts.join(', ')}${rest}.`);
+  };
+  // Share = commit the picked changes + push to the branch, then remember the
+  // description for the stepper's done state.
+  const onShareToBranch = async () => {
+    const msg = commitMsg.trim();
+    if (!msg) return flash('err', 'Describe your change first');
+    const count = stagedFiles.length > 0 ? stagedFiles.length : unstagedFiles.length;
+    const stageAll = stagedFiles.length === 0;
+    const committed = await runOp('commit', () => api.gitCommit(msg, stageAll));
+    if (!committed.ok) return;
+    const pushed = await runOp('push', () => api.gitPush(), 'Shared to your branch');
+    if (pushed.ok) setSharedInfo({ count, message: msg });
+    setCommitMsg('');
+  };
+  const onStartNewChange = () => {
+    setSharedInfo(null);
+    setReviewUrl(null);
+    setCommitMsg('');
+    void refreshAll();
+  };
   const onCheckout = (name: string) => {
     setBranchMenuOpen(false);
     void runOp('checkout', () => api.gitCheckout(name), `Switched to ${name}`);
@@ -330,16 +373,6 @@ export function GitPage() {
         branchMenuRef={branchMenuRef}
       />
 
-      <GitFlowGuide
-        t={t}
-        changeCount={entries.length}
-        branch={branchInfo.current}
-        advancedOpen={advancedOpen}
-        onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
-        context={governedContext}
-        onEnableTracking={onEnableGovernedTracking}
-      />
-
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <FileTree
           t={t}
@@ -370,32 +403,61 @@ export function GitPage() {
                 onUnstage={() => onUnstage(selectedEntry.path)}
                 onDiscard={() => onDiscard(selectedEntry.path)}
                 stagedView={selectedStaged}
+                diffView={diffView}
+                onDiffView={setDiffView}
               />
-              <DiffBody
-                t={t}
-                diff={diff?.diff ?? ''}
-                entry={selectedEntry}
-                loading={diffLoading}
-                error={diffError}
-              />
+              {diffView === 'plain' && !diffLoading && !diffError ? (
+                <PlainChangeView t={t} diff={diff?.diff ?? ''} entry={selectedEntry} />
+              ) : (
+                <DiffBody
+                  t={t}
+                  diff={diff?.diff ?? ''}
+                  entry={selectedEntry}
+                  loading={diffLoading}
+                  error={diffError}
+                />
+              )}
             </>
           ) : (
             <DiffEmpty t={t} hasFiles={entries.length > 0} />
           )}
-          <CommitBar
+          {narrowLayout ? (
+            <CommitBar
+              t={t}
+              commitMsg={commitMsg}
+              setCommitMsg={setCommitMsg}
+              stagedCount={stagedFiles.length}
+              unstagedCount={unstagedFiles.length}
+              onCommit={onCommit}
+              onCommitAndPush={onCommitAndPush}
+              onRequestReview={onRequestReview}
+              advancedOpen={advancedOpen}
+              onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
+              busy={busy}
+            />
+          ) : null}
+        </div>
+        {!narrowLayout ? (
+          <ShareRail
             t={t}
+            branch={branchInfo.current}
+            pickedCount={stagedFiles.length > 0 ? stagedFiles.length : unstagedFiles.length}
+            totalCount={entries.length}
             commitMsg={commitMsg}
             setCommitMsg={setCommitMsg}
-            stagedCount={stagedFiles.length}
-            unstagedCount={unstagedFiles.length}
-            onCommit={onCommit}
-            onCommitAndPush={onCommitAndPush}
-            onRequestReview={onRequestReview}
+            busy={busy}
+            sharedInfo={sharedInfo}
+            reviewUrl={reviewUrl}
+            onSuggest={suggestDescription}
+            onShare={() => void onShareToBranch()}
+            onRequestReview={() => void onRequestReview()}
+            onStartNew={onStartNewChange}
             advancedOpen={advancedOpen}
             onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
-            busy={busy}
+            context={governedContext}
+            onEnableTracking={onEnableGovernedTracking}
           />
-        </div>
+        ) : null}
       </div>
 
       {toast && <Toast t={t} kind={toast.kind} text={toast.text} />}
@@ -638,6 +700,175 @@ function sameGitStatus(left: Status | null, right: Status): boolean {
     && left!.behind === right.behind
     && left!.changes.length === right.changes.length
     && left!.changes.every((change, index) => change.path === right.changes[index]?.path && change.status === right.changes[index]?.status);
+}
+
+// ---------- Share rail (prototype 4-step guided flow) ----------
+// Pick → Describe → Share to your branch → Ask for review. Plain language
+// only; each action routes through the real git handlers.
+
+function StepDot({ t, state, index }: { t: Theme; state: 'done' | 'active' | 'todo'; index: number }) {
+  const styles = state === 'done'
+    ? { background: 'var(--status-success-bg)', color: 'var(--status-success)', border: '1.5px solid var(--status-success-border)' }
+    : state === 'active'
+      ? { background: 'var(--accent-dim)', color: t.accent, border: `1.5px solid ${t.accent}` }
+      : { background: t.appBg, color: t.textMuted, border: `1.5px solid ${t.headerBorder}` };
+  return (
+    <span style={{ width: 24, height: 24, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0, ...styles }}>
+      {state === 'done' ? <Check size={12} strokeWidth={3} /> : index}
+    </span>
+  );
+}
+
+function ShareRail({ t, branch, pickedCount, totalCount, commitMsg, setCommitMsg, busy, sharedInfo, reviewUrl, onSuggest, onShare, onRequestReview, onStartNew, advancedOpen, onToggleAdvanced, context, onEnableTracking }: {
+  t: Theme;
+  branch: string | null;
+  pickedCount: number;
+  totalCount: number;
+  commitMsg: string;
+  setCommitMsg: (value: string) => void;
+  busy: string | null;
+  sharedInfo: { count: number; message: string } | null;
+  reviewUrl: string | null;
+  onSuggest: () => void;
+  onShare: () => void;
+  onRequestReview: () => void;
+  onStartNew: () => void;
+  advancedOpen: boolean;
+  onToggleAdvanced: () => void;
+  context: GovernedContext | null;
+  onEnableTracking: () => void;
+}) {
+  const sharing = busy === 'commit' || busy === 'push';
+  const shared = sharedInfo !== null;
+  const prOpened = reviewUrl !== null && shared;
+  const s1: 'done' | 'active' | 'todo' = pickedCount > 0 || shared ? 'done' : 'active';
+  const s2: 'done' | 'active' | 'todo' = shared || commitMsg.trim() ? 'done' : pickedCount > 0 ? 'active' : 'todo';
+  const s3: 'done' | 'active' | 'todo' = shared ? 'done' : commitMsg.trim() ? 'active' : 'todo';
+  const s4: 'done' | 'active' | 'todo' = prOpened ? 'done' : shared ? 'active' : 'todo';
+  const connector = <span style={{ width: 1.5, flex: 1, background: 'var(--border-subtle)', margin: '4px 0' }} />;
+  return (
+    <aside style={{ width: 'clamp(280px, 26vw, 350px)', flexShrink: 0, background: t.cellBg, borderLeft: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
+      <div style={{ padding: '14px 16px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Share your work</div>
+        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Three steps — no git commands needed.</div>
+      </div>
+      <div style={{ padding: '14px 16px 20px', display: 'flex', flexDirection: 'column' }}>
+        {/* Step 1 — pick */}
+        <div style={{ display: 'flex', gap: 11 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+            <StepDot t={t} state={s1} index={1} />
+            {connector}
+          </div>
+          <div style={{ flex: 1, minWidth: 0, paddingBottom: 18 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Pick what to share</div>
+            <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5, marginTop: 2 }}>
+              {shared ? `${sharedInfo.count} change${sharedInfo.count === 1 ? '' : 's'} shared.` : `${pickedCount} of ${totalCount} change${totalCount === 1 ? '' : 's'} selected in the left panel. Review each one before moving on.`}
+            </div>
+          </div>
+        </div>
+        {/* Step 2 — describe */}
+        <div style={{ display: 'flex', gap: 11 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+            <StepDot t={t} state={s2} index={2} />
+            {connector}
+          </div>
+          <div style={{ flex: 1, minWidth: 0, paddingBottom: 18 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Describe your change</div>
+            {shared ? (
+              <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5, marginTop: 2 }}>“{sharedInfo.message}”</div>
+            ) : (
+              <div style={{ marginTop: 7, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <textarea
+                  rows={2}
+                  value={commitMsg}
+                  onChange={(event) => setCommitMsg(event.target.value)}
+                  placeholder="What did you change, in plain words?"
+                  style={{ border: `1px solid ${t.headerBorder}`, background: t.appBg, borderRadius: 8, padding: '8px 10px', fontSize: 12, lineHeight: 1.5, fontFamily: t.font, color: t.textPrimary, outline: 'none', resize: 'vertical' }}
+                />
+                <button type="button" onClick={onSuggest} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, width: 'fit-content', border: 'none', background: 'none', color: t.accent, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, padding: 0 }}>
+                  <Sparkles size={11} /> Write it for me from the changes
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        {/* Step 3 — share */}
+        <div style={{ display: 'flex', gap: 11 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+            <StepDot t={t} state={s3} index={3} />
+            {connector}
+          </div>
+          <div style={{ flex: 1, minWidth: 0, paddingBottom: 18 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Share to your branch</div>
+            <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5, marginTop: 2 }}>
+              Saves your work to <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>{branch ?? 'your branch'}</span> — main stays untouched.
+            </div>
+            {sharing ? (
+              <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, backgroundImage: `linear-gradient(100deg, ${t.textPrimary} 25%, ${t.accent} 50%, ${t.textPrimary} 75%)`, backgroundSize: '220% 100%', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', WebkitTextFillColor: 'transparent', animation: 'dql-git-shimmer 2s linear infinite' }}>
+                Sharing your changes…
+              </div>
+            ) : shared ? (
+              <div style={{ marginTop: 6, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--status-success)', fontWeight: 600 }}>
+                <Check size={12} strokeWidth={2.5} /> Shared · {sharedInfo.count} change{sharedInfo.count === 1 ? '' : 's'} on your branch
+              </div>
+            ) : (
+              <button type="button" onClick={onShare} disabled={!commitMsg.trim() || pickedCount === 0} style={{ marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 7, height: 32, padding: '0 14px', borderRadius: 8, border: 'none', background: commitMsg.trim() && pickedCount > 0 ? t.accent : t.btnBg, color: commitMsg.trim() && pickedCount > 0 ? '#fff' : t.textMuted, fontSize: 12, fontWeight: 650, cursor: commitMsg.trim() && pickedCount > 0 ? 'pointer' : 'default', fontFamily: t.font, boxShadow: commitMsg.trim() && pickedCount > 0 ? '0 1px 4px rgba(107,93,211,0.25)' : 'none' }}>
+                <ArrowUp size={12} strokeWidth={2} /> Share {pickedCount > 0 ? `${pickedCount} change${pickedCount === 1 ? '' : 's'}` : 'changes'}
+              </button>
+            )}
+          </div>
+        </div>
+        {/* Step 4 — review */}
+        <div style={{ display: 'flex', gap: 11 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+            <StepDot t={t} state={s4} index={4} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Ask for review</div>
+            {prOpened ? (
+              <>
+                <div style={{ marginTop: 8, border: '1px solid var(--status-success-border)', background: 'var(--status-success-bg)', borderRadius: 10, padding: '11px 13px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <GitPullRequest size={13} color="var(--status-success)" />
+                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--status-success)' }}>Review request opened</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--status-success)', lineHeight: 1.55, marginTop: 5 }}>
+                    “{sharedInfo?.message}” — you&apos;ll be notified on approval. Nothing reaches main until then.
+                  </div>
+                  <a href={reviewUrl!} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginTop: 9, fontSize: 11.5, fontWeight: 600, color: t.accent, textDecoration: 'none' }}>
+                    View on GitHub <ExternalLink size={11} />
+                  </a>
+                </div>
+                <button type="button" onClick={onStartNew} style={{ marginTop: 10, border: 'none', background: 'none', color: t.textMuted, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, padding: 0 }}>
+                  Start a new change
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5, marginTop: 2 }}>A teammate approves before anything reaches main.</div>
+                {shared ? (
+                  <button type="button" onClick={onRequestReview} disabled={busy === 'request review'} style={{ marginTop: 8, display: 'inline-flex', alignItems: 'center', gap: 7, height: 32, padding: '0 14px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, width: 'fit-content', boxShadow: '0 1px 4px rgba(107,93,211,0.25)', opacity: busy === 'request review' ? 0.7 : 1 }}>
+                    <GitPullRequest size={12} strokeWidth={1.75} /> {busy === 'request review' ? 'Opening…' : 'Open review request'}
+                  </button>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+      <div style={{ marginTop: 'auto', borderTop: '1px solid var(--border-subtle)' }}>
+        <button type="button" onClick={onToggleAdvanced} style={{ width: '100%', textAlign: 'left', border: 'none', background: 'none', color: t.textMuted, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, padding: '10px 16px' }}>
+          {advancedOpen ? '▾' : '▸'} Advanced
+        </button>
+        {advancedOpen && context ? (
+          <div style={{ padding: '0 16px 14px' }}>
+            <GovernedContextSummary t={t} context={context} onEnableTracking={onEnableTracking} />
+          </div>
+        ) : null}
+      </div>
+      <style>{'@keyframes dql-git-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }'}</style>
+    </aside>
+  );
 }
 
 function GitFlowGuide({
@@ -894,9 +1125,13 @@ function FileTree(p: FileTreeProps) {
         )}
       </div>
 
+      {/* Prototype reassurance footer. */}
+      <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border-subtle)', fontSize: 10.5, color: t.textMuted, lineHeight: 1.5 }}>
+        Unselected changes stay safely in your workspace — nothing is lost.
+      </div>
       <div
         style={{
-          padding: '10px 14px', borderTop: `1px solid ${t.headerBorder}`,
+          padding: '8px 14px', borderTop: '1px solid var(--border-subtle)',
           fontSize: 10, color: t.textMuted,
           display: 'flex', alignItems: 'center', gap: 6,
         }}
@@ -1018,25 +1253,31 @@ function artifactGroupPillStyle(t: Theme, group: ArtifactGroup): React.CSSProper
   };
 }
 
+// Prototype status pills: plain words, never git letter codes.
 function StatusBadge({ t, status }: { t: Theme; status: FileEntry['status'] }) {
-  const colorMap: Record<FileEntry['status'], string> = {
-    M: t.warning,
-    A: t.success,
-    D: t.error,
-    R: t.accent,
-    '?': t.textMuted,
+  const map: Record<FileEntry['status'], { label: string; color: string }> = {
+    M: { label: 'Edited', color: t.warning },
+    A: { label: 'New', color: t.success },
+    D: { label: 'Removed', color: t.error },
+    R: { label: 'Renamed', color: t.accent },
+    '?': { label: 'New', color: t.success },
   };
-  const c = colorMap[status];
+  const { label, color } = map[status];
   return (
     <span
       style={{
-        width: 18, height: 18, borderRadius: 3, flexShrink: 0,
-        background: `${c}1a`, color: c, border: `1px solid ${c}40`,
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 10, fontWeight: 700, fontFamily: t.fontMono,
+        flexShrink: 0,
+        padding: '1.5px 7px',
+        borderRadius: 999,
+        background: `${color}1a`,
+        color,
+        fontSize: 9.5,
+        fontWeight: 700,
+        fontFamily: t.font,
+        whiteSpace: 'nowrap',
       }}
     >
-      {status}
+      {label}
     </span>
   );
 }
@@ -1050,33 +1291,31 @@ interface FileDiffHeaderProps {
   onStage: () => void;
   onUnstage: () => void;
   onDiscard: () => void;
+  diffView: 'plain' | 'code';
+  onDiffView: (view: 'plain' | 'code') => void;
 }
 
-function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }: FileDiffHeaderProps) {
+function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard, diffView, onDiffView }: FileDiffHeaderProps) {
   return (
     <div
       style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '12px 20px',
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '9px 16px',
         borderBottom: `1px solid ${t.headerBorder}`,
         background: t.cellBg,
         flexShrink: 0,
       }}
     >
+      <div style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary, fontFamily: t.fontMono, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {entry.path}
+      </div>
       <StatusBadge t={t} status={entry.status} />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: t.textPrimary, fontFamily: t.fontMono }}>
-          {entry.path}
-        </div>
-        <div style={{ fontSize: 11, color: t.textMuted, display: 'flex', gap: 8 }}>
-          <span>{stagedView ? 'Included in your next update' : 'Needs review'}</span>
-          {entry.partiallyStaged && (
-            <>
-              <span>·</span>
-              <span style={{ color: t.warning }}>partially staged</span>
-            </>
-          )}
-        </div>
+      {entry.partiallyStaged && <span style={{ fontSize: 10.5, color: t.warning, whiteSpace: 'nowrap' }}>partially included</span>}
+      <div style={{ flex: 1 }} />
+      {/* Prototype "What changed / Code view" toggle. */}
+      <div role="group" aria-label="Diff view" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, flexShrink: 0 }}>
+        <button type="button" onClick={() => onDiffView('plain')} style={{ border: 'none', borderRadius: 5, padding: '3.5px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, background: diffView === 'plain' ? 'var(--accent-dim)' : 'transparent', color: diffView === 'plain' ? t.accent : t.textMuted }}>What changed</button>
+        <button type="button" onClick={() => onDiffView('code')} style={{ border: 'none', borderRadius: 5, padding: '3.5px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, background: diffView === 'code' ? 'var(--accent-dim)' : 'transparent', color: diffView === 'code' ? t.accent : t.textMuted }}>Code view</button>
       </div>
       {!stagedView && (
         <>
@@ -1087,6 +1326,62 @@ function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }:
       {stagedView && (
         <button onClick={onUnstage} style={miniBtn(t)}>Remove</button>
       )}
+    </div>
+  );
+}
+
+// Prototype plain-language review: derive +/±/− bullets from the real diff
+// hunks, with a reassurance banner. No git vocabulary.
+function PlainChangeView({ t, diff, entry }: { t: Theme; diff: string; entry: FileEntry }) {
+  const lines = parseDiff(diff);
+  const bullets: Array<{ mark: '+' | '−' | '±'; text: string }> = [];
+  let currentSection = '';
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.kind === 'hunk') {
+      const section = line.text.replace(/^@@[^@]*@@\s*/, '').trim();
+      currentSection = section;
+    }
+    if (line.kind === 'add') added += 1;
+    if (line.kind === 'del') removed += 1;
+    if ((line.kind === 'add' || line.kind === 'del') && bullets.length < 5) {
+      const text = line.text.replace(/^[+-]\s?/, '').trim();
+      if (text && !bullets.some((b) => b.text.includes(text.slice(0, 40)))) {
+        bullets.push({
+          mark: line.kind === 'add' ? '+' : '−',
+          text: `${line.kind === 'add' ? 'Added' : 'Removed'}${currentSection ? ` in ${currentSection}` : ''}: ${text.slice(0, 90)}`,
+        });
+      }
+    }
+  }
+  const markStyles: Record<string, { bg: string; color: string }> = {
+    '+': { bg: 'var(--status-success-bg)', color: 'var(--status-success)' },
+    '−': { bg: 'var(--status-error-bg)', color: 'var(--status-error)' },
+    '±': { bg: 'var(--status-warning-bg)', color: 'var(--status-warning)' },
+  };
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 560 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>Summary of this change</div>
+        <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
+          {bullets.length === 0 ? (
+            <div style={{ padding: '10px 13px', fontSize: 12.5, color: t.textMuted }}>
+              {entry.status === '?' ? 'A brand-new file — everything in it is an addition.' : 'No line-level changes to summarize for this selection.'}
+            </div>
+          ) : bullets.map((bullet, index) => (
+            <div key={index} style={{ display: 'flex', gap: 9, padding: '10px 13px', borderBottom: index < bullets.length - 1 ? '1px solid var(--border-subtle)' : 'none', alignItems: 'flex-start' }}>
+              <span style={{ flexShrink: 0, width: 18, height: 18, borderRadius: 5, background: markStyles[bullet.mark].bg, color: markStyles[bullet.mark].color, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700 }}>{bullet.mark}</span>
+              <span style={{ fontSize: 12.5, color: t.textPrimary, lineHeight: 1.5, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>{bullet.text}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: t.textMuted }}>{added} addition{added === 1 ? '' : 's'} · {removed} removal{removed === 1 ? '' : 's'} — switch to Code view for the full detail.</div>
+        <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: '1px solid var(--status-success-border)', background: 'var(--status-success-bg)', borderRadius: 10, padding: '10px 13px' }}>
+          <ShieldCheck size={13} color="var(--status-success)" style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ fontSize: 12, color: 'var(--status-success)', lineHeight: 1.55 }}>Nothing reaches main until a reviewer approves — your workspace stays safe.</span>
+        </div>
+      </div>
     </div>
   );
 }
