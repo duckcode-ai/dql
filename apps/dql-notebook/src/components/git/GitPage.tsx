@@ -106,7 +106,14 @@ export function GitPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [reviewMode, setReviewMode] = useState<'plain' | 'code'>('plain');
   const [governedContext, setGovernedContext] = useState<GovernedContext | null>(null);
+  const [narrowLayout, setNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 980);
   const branchMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onResize = () => setNarrowLayout(window.innerWidth < 980);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
@@ -333,9 +340,10 @@ export function GitPage() {
         branchMenuRef={branchMenuRef}
         advancedOpen={advancedOpen}
         onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
+        narrow={narrowLayout}
       />
 
-      <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flexDirection: narrowLayout ? 'column' : 'row', flex: 1, minHeight: 0, overflow: narrowLayout ? 'auto' : 'hidden' }}>
         <FileTree
           t={t}
           stagedFiles={filteredStaged}
@@ -354,8 +362,9 @@ export function GitPage() {
           ahead={status?.ahead ?? 0}
           behind={status?.behind ?? 0}
           branchCurrent={branchInfo.current}
+          narrow={narrowLayout}
         />
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.appBg }}>
+        <div style={{ flex: narrowLayout ? '0 0 420px' : 1, minWidth: 0, minHeight: narrowLayout ? 420 : 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: t.appBg }}>
           {selectedEntry ? (
             <>
               <FileDiffHeader
@@ -397,6 +406,7 @@ export function GitPage() {
           busy={busy}
           context={governedContext}
           onEnableTracking={onEnableGovernedTracking}
+          narrow={narrowLayout}
         />
       </div>
 
@@ -431,6 +441,7 @@ interface TopBarProps {
   branchMenuRef: React.RefObject<HTMLDivElement>;
   advancedOpen: boolean;
   onToggleAdvanced: () => void;
+  narrow: boolean;
 }
 
 function TopBar(p: TopBarProps) {
@@ -439,10 +450,11 @@ function TopBar(p: TopBarProps) {
     <div
       style={{
         display: 'flex', alignItems: 'center', gap: 10,
-        padding: '10px 20px',
         borderBottom: `1px solid ${t.headerBorder}`,
         background: t.appBg,
         flexShrink: 0, whiteSpace: 'nowrap',
+        flexWrap: p.narrow ? 'wrap' : 'nowrap',
+        padding: p.narrow ? '8px 12px' : '10px 20px',
       }}
     >
       <span style={{ fontSize: 12.5, fontWeight: 650, color: t.textSecondary }}>Your workspace · <span style={{ fontFamily: t.fontMono, fontSize: 11, color: t.textPrimary }}>{p.branchCurrent ?? 'local workspace'}</span></span>
@@ -726,6 +738,7 @@ interface FileTreeProps {
   ahead: number;
   behind: number;
   branchCurrent: string | null;
+  narrow: boolean;
 }
 
 function FileTree(p: FileTreeProps) {
@@ -733,9 +746,13 @@ function FileTree(p: FileTreeProps) {
   return (
     <div
       style={{
-        width: 300, flexShrink: 0,
+        width: p.narrow ? '100%' : 300,
+        height: p.narrow ? 310 : undefined,
+        minHeight: p.narrow ? 310 : 0,
+        flexShrink: 0,
         background: t.sidebarBg,
-        borderRight: `1px solid ${t.headerBorder}`,
+        borderRight: p.narrow ? undefined : `1px solid ${t.headerBorder}`,
+        borderBottom: p.narrow ? `1px solid ${t.headerBorder}` : undefined,
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }}
     >
@@ -1294,9 +1311,10 @@ interface ShareFlowProps {
   busy: string | null;
   context: GovernedContext | null;
   onEnableTracking: () => void;
+  narrow: boolean;
 }
 
-function ShareFlow({ t, commitMsg, setCommitMsg, includedCount, totalCount, branch, reviewUrl, onCommit, onCommitAndPush, onRequestReview, advancedOpen, onToggleAdvanced, busy, context, onEnableTracking }: ShareFlowProps) {
+function ShareFlow({ t, commitMsg, setCommitMsg, includedCount, totalCount, branch, reviewUrl, onCommit, onCommitAndPush, onRequestReview, advancedOpen, onToggleAdvanced, busy, context, onEnableTracking, narrow }: ShareFlowProps) {
   const noChanges = totalCount === 0;
   const steps = [
     { title: 'Pick what to share', body: `${includedCount} of ${totalCount} change${totalCount === 1 ? '' : 's'} selected in the left panel.`, complete: includedCount > 0 },
@@ -1307,12 +1325,13 @@ function ShareFlow({ t, commitMsg, setCommitMsg, includedCount, totalCount, bran
   return (
     <div
       style={{
-        width: 'clamp(280px, 26vw, 350px)',
+        width: narrow ? '100%' : 'clamp(280px, 26vw, 350px)',
         padding: 0,
-        borderLeft: `1px solid ${t.headerBorder}`,
+        borderLeft: narrow ? undefined : `1px solid ${t.headerBorder}`,
+        borderTop: narrow ? `1px solid ${t.headerBorder}` : undefined,
         background: t.cellBg,
         flexShrink: 0,
-        display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto',
+        display: 'flex', flexDirection: 'column', minHeight: 0, overflow: narrow ? 'visible' : 'auto',
       }}
     >
       <div style={{ padding: '14px 16px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
