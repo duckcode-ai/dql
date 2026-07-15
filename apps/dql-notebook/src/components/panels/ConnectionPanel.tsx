@@ -7,6 +7,7 @@ import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
 import type { SettingsTab } from '../../store/types';
+import { Bot, Brain, Database } from 'lucide-react';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -949,19 +950,21 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     };
 
     const activeTab = state.settingsTab;
-    const tabs: Array<{ id: SettingsTab; label: string; hint: string }> = [
-      { id: 'database', label: 'Database connection', hint: 'Warehouse credentials and schema' },
-      { id: 'ai', label: 'AI providers', hint: 'The model that powers everything' },
-      { id: 'memory', label: 'Agentic memory', hint: 'What the agent has learned' },
+    const tabs: Array<{ id: SettingsTab; label: string; hint: string; Icon: typeof Database }> = [
+      { id: 'database', label: 'Database', hint: 'Warehouse credentials and schema', Icon: Database },
+      { id: 'ai', label: 'AI provider', hint: 'The model that powers everything', Icon: Bot },
+      { id: 'memory', label: 'Agent memory', hint: 'What the agent has learned', Icon: Brain },
     ];
 
     return (
       <>
         <style>{CONNECTION_PAGE_STYLES}</style>
-        <div className="dql-connection-page-stack">
-          <div role="tablist" aria-label="Settings sections" style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${t.cellBorder}`, marginBottom: 4 }}>
+        <div className="dql-settings-page-shell">
+          <aside role="tablist" aria-label="Settings sections" className="dql-settings-page-nav" style={{ background: t.cellBg, borderRight: `1px solid ${t.cellBorder}` }}>
+            <div style={{ padding: '4px 10px 12px', fontSize: 10, fontWeight: 750, letterSpacing: '0.06em', textTransform: 'uppercase', color: t.textMuted }}>Settings</div>
             {tabs.map((tab) => {
               const active = activeTab === tab.id;
+              const Icon = tab.Icon;
               return (
                 <button
                   key={tab.id}
@@ -972,24 +975,30 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                   style={{
                     appearance: 'none',
                     border: 'none',
-                    background: 'transparent',
+                    background: active ? `${t.accent}16` : 'transparent',
                     cursor: 'pointer',
-                    padding: '9px 14px',
-                    marginBottom: -1,
-                    fontSize: 13,
-                    fontWeight: active ? 700 : 500,
+                    padding: '8px 10px',
+                    borderRadius: 7,
+                    fontSize: 12.5,
+                    fontWeight: active ? 700 : 600,
                     fontFamily: t.font,
                     color: active ? t.accent : t.textSecondary,
-                    borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
-                    transition: 'color 0.15s, border-color 0.15s',
+                    transition: 'color 0.15s, background 0.15s',
+                    display: 'flex', alignItems: 'center', gap: 9, textAlign: 'left', width: '100%',
                   }}
                 >
+                  <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
                   {tab.label}
                 </button>
               );
             })}
-          </div>
+          </aside>
 
+          <main className="dql-settings-page-content">
+          <div className="dql-settings-page-heading">
+            <div style={{ fontSize: 17, fontWeight: 750, color: t.textPrimary }}>{tabs.find((tab) => tab.id === activeTab)?.label}</div>
+            <div style={{ fontSize: 12.5, color: t.textMuted, lineHeight: 1.55, marginTop: 4 }}>{tabs.find((tab) => tab.id === activeTab)?.hint}</div>
+          </div>
           {activeTab === 'database' ? (
             <div className="dql-connection-page-grid">
               <section style={panelSurface}>
@@ -1010,6 +1019,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
           ) : (
             <ConnectionRuntimeSettings embedded section="memory" />
           )}
+          </main>
         </div>
       </>
     );
@@ -1029,12 +1039,41 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
 }
 
 const CONNECTION_PAGE_STYLES = `
+.dql-settings-page-shell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.dql-settings-page-nav {
+  width: clamp(190px, 17vw, 240px);
+  flex-shrink: 0;
+  padding: 14px 8px;
+}
+
+.dql-settings-page-content {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 24px 28px 36px;
+}
+
+.dql-settings-page-heading {
+  max-width: 900px;
+  margin: 0 auto 18px;
+}
+
 .dql-connection-page-stack {
   display: grid;
   gap: 16px;
 }
 
 .dql-connection-page-grid {
+  max-width: 900px;
+  margin: 0 auto;
   display: grid;
   grid-template-columns: minmax(0, 1.18fr) minmax(320px, 0.82fr);
   gap: 16px;
@@ -1042,6 +1081,7 @@ const CONNECTION_PAGE_STYLES = `
 }
 
 @media (max-width: 920px) {
+  .dql-settings-page-nav { width: 172px; }
   .dql-connection-page-grid {
     grid-template-columns: minmax(0, 1fr);
   }

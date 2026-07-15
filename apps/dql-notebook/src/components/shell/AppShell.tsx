@@ -279,32 +279,8 @@ export function AppShell() {
 
 function ConnectionWorkspace({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
-      <div
-        style={{
-          maxWidth: 1120,
-          margin: '0 auto',
-          padding: '22px 28px 32px',
-        }}
-      >
-        <div
-          style={{
-            marginBottom: 16,
-            display: 'flex',
-            alignItems: 'flex-end',
-            justifyContent: 'space-between',
-            gap: 18,
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>Connections</div>
-            <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6, maxWidth: 660, lineHeight: 1.5 }}>
-              Manage database connections, model providers, MCP servers, OpenAI connectors, and runtime checks from one place before building blocks or asking AI.
-            </div>
-          </div>
-        </div>
-        {children}
-      </div>
+    <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex' }}>
+      {children}
     </div>
   );
 }
