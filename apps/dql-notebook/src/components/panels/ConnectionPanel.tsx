@@ -7,7 +7,7 @@ import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
 import type { SettingsTab } from '../../store/types';
-import { Bot, Brain, Database } from 'lucide-react';
+import { Bot, Brain, Database, Server, TerminalSquare } from 'lucide-react';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -322,6 +322,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const isPage = variant === 'page';
+  const [pageSection, setPageSection] = useState<'database' | 'ai' | 'memory' | 'mcp' | 'runtime'>(state.settingsTab);
 
   const [info, setInfo] = useState<ConnectionInfo | null>(null);
   const [testing, setTesting] = useState(false);
@@ -346,6 +347,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       }
     });
   }, []);
+  useEffect(() => setPageSection(state.settingsTab), [state.settingsTab]);
 
   const handleTest = async () => {
     if (!info || Object.keys(info.connections ?? {}).length === 0) {
@@ -949,11 +951,13 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)',
     };
 
-    const activeTab = state.settingsTab;
-    const tabs: Array<{ id: SettingsTab; label: string; hint: string; Icon: typeof Database }> = [
-      { id: 'database', label: 'Database', hint: 'Warehouse credentials and schema', Icon: Database },
-      { id: 'ai', label: 'AI provider', hint: 'The model that powers everything', Icon: Bot },
-      { id: 'memory', label: 'Agent memory', hint: 'What the agent has learned', Icon: Brain },
+    const activeTab = pageSection;
+    const tabs: Array<{ id: 'database' | 'ai' | 'memory' | 'mcp' | 'runtime'; label: string; hint: string; Icon: typeof Database; group: 'settings' | 'advanced' }> = [
+      { id: 'database', label: 'Database', hint: 'Warehouse credentials and schema', Icon: Database, group: 'settings' },
+      { id: 'ai', label: 'AI provider', hint: 'The model that powers everything', Icon: Bot, group: 'settings' },
+      { id: 'memory', label: 'Agent memory', hint: 'What the agent has learned', Icon: Brain, group: 'settings' },
+      { id: 'mcp', label: 'MCP servers', hint: 'Trusted remote tools and connectors', Icon: Server, group: 'advanced' },
+      { id: 'runtime', label: 'Runtime env', hint: 'Environment and local runtime status', Icon: TerminalSquare, group: 'advanced' },
     ];
 
     return (
@@ -961,16 +965,20 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
         <style>{CONNECTION_PAGE_STYLES}</style>
         <div className="dql-settings-page-shell">
           <aside role="tablist" aria-label="Settings sections" className="dql-settings-page-nav" style={{ background: t.cellBg, borderRight: `1px solid ${t.cellBorder}` }}>
-            <div style={{ padding: '4px 10px 12px', fontSize: 10, fontWeight: 750, letterSpacing: '0.06em', textTransform: 'uppercase', color: t.textMuted }}>Settings</div>
-            {tabs.map((tab) => {
+            {tabs.map((tab, index) => {
               const active = activeTab === tab.id;
               const Icon = tab.Icon;
               return (
+                <React.Fragment key={tab.id}>
+                {(index === 0 || tabs[index - 1]?.group !== tab.group) && <div style={{ padding: index === 0 ? '4px 10px 12px' : '22px 10px 8px', fontSize: 9.5, fontWeight: 800, letterSpacing: '0.07em', textTransform: 'uppercase', color: t.textMuted }}>{tab.group === 'settings' ? 'Settings' : 'Advanced'}</div>}
                 <button
                   key={tab.id}
                   role="tab"
                   aria-selected={active}
-                  onClick={() => dispatch({ type: 'SET_SETTINGS_TAB', tab: tab.id })}
+                  onClick={() => {
+                    setPageSection(tab.id);
+                    if (tab.id === 'database' || tab.id === 'ai' || tab.id === 'memory') dispatch({ type: 'SET_SETTINGS_TAB', tab: tab.id as SettingsTab });
+                  }}
                   title={tab.hint}
                   style={{
                     appearance: 'none',
@@ -990,6 +998,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                   <Icon size={14} strokeWidth={1.8} aria-hidden="true" />
                   {tab.label}
                 </button>
+                </React.Fragment>
               );
             })}
           </aside>
@@ -1016,8 +1025,12 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
             </div>
           ) : activeTab === 'ai' ? (
             <ConnectionRuntimeSettings embedded section="providers" />
-          ) : (
+          ) : activeTab === 'memory' ? (
             <ConnectionRuntimeSettings embedded section="memory" />
+          ) : activeTab === 'mcp' ? (
+            <ConnectionRuntimeSettings embedded section="mcp" />
+          ) : (
+            <ConnectionRuntimeSettings embedded section="runtime" />
           )}
           </main>
         </div>

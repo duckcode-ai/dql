@@ -51,7 +51,7 @@ export function ConnectionRuntimeSettings({
   includeMemory?: boolean;
   embedded?: boolean;
   /** When set, render only this section (for the tabbed Settings page). */
-  section?: 'providers' | 'memory' | 'advanced';
+  section?: 'providers' | 'memory' | 'mcp' | 'runtime' | 'advanced';
 }) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
@@ -62,6 +62,7 @@ export function ConnectionRuntimeSettings({
   const [memories, setMemories] = useState<AgentMemory[]>([]);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
+  const [focusedProviderId, setFocusedProviderId] = useState<ProviderSettingsId>('anthropic');
 
   const refresh = async () => {
     setLoading(true);
@@ -74,6 +75,8 @@ export function ConnectionRuntimeSettings({
       ]);
       setGroups(env.groups);
       setProviders(providerRes.providers);
+      const active = providerRes.providers.find((provider) => provider.active) ?? providerRes.providers.find((provider) => provider.enabled) ?? providerRes.providers[0];
+      if (active) setFocusedProviderId(active.id);
       setMcpSettings(mcpRes.settings);
       setMemories(memoryRes.memories);
     } finally {
@@ -142,46 +145,27 @@ export function ConnectionRuntimeSettings({
             )}
             <SectionTitle title="Model providers" detail="Connect at least one AI provider — it powers governed answers, block suggestions, and research. Sign in with a Claude or ChatGPT subscription, or use an API key / local model." t={t} />
 
-            <GroupLabel
-              title="Use your subscription"
-              detail="No API key — sign in with the provider's CLI. DQL runs each request through it using your plan."
-              t={t}
-            />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-              {SUBSCRIPTION_PROVIDER_ORDER.map((id) => {
-                const provider = providers.find((p) => p.id === id);
-                return provider ? (
-                  <ProviderCard
-                    key={id}
-                    provider={provider}
-                    cliStatus={cliStatus[id]}
-                    t={t}
-                    onSaved={(next) => setProviders(next)}
-                    onStatus={setStatus}
-                  />
-                ) : null;
-              })}
-            </div>
-
-            <GroupLabel
-              title="API key & local providers"
-              detail="Paste an API key (or set the env var), point at a gateway, or run a local model with Ollama."
-              t={t}
-            />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-              {KEY_PROVIDER_ORDER.map((id) => {
-                const provider = providers.find((p) => p.id === id);
-                return provider ? (
-                  <ProviderCard
-                    key={id}
-                    provider={provider}
-                    t={t}
-                    onSaved={(next) => setProviders(next)}
-                    onStatus={setStatus}
-                  />
-                ) : null;
-              })}
-            </div>
+            {section === 'providers' ? <div style={{ display: 'grid', gridTemplateColumns: 'minmax(210px, 280px) minmax(0, 620px)', gap: 16, alignItems: 'start', marginTop: 16 }}>
+              <div style={{ display: 'grid', gap: 12 }}>
+                <label style={{ display: 'grid', gap: 6, color: t.textSecondary, fontSize: 11.5, fontWeight: 650 }}>Provider
+                  <select aria-label="Provider" value={focusedProviderId} onChange={(event) => setFocusedProviderId(event.target.value as ProviderSettingsId)} style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textPrimary, borderRadius: 8, padding: '9px 10px', fontFamily: t.font, fontSize: 12.5 }}>
+                    {PROVIDER_ORDER.map((id) => { const item = providers.find((provider) => provider.id === id); return item ? <option key={id} value={id}>{item.label}</option> : null; })}
+                  </select>
+                </label>
+                <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 9, background: t.cellBg, padding: 13, display: 'grid', gap: 7 }}>
+                  <span style={{ color: t.textMuted, fontSize: 9.5, fontWeight: 800, letterSpacing: '.06em', textTransform: 'uppercase' }}>Active provider</span>
+                  <strong style={{ color: t.textPrimary, fontSize: 12.5 }}>{activeProvider?.label ?? 'None configured'}</strong>
+                  <span style={{ color: t.textSecondary, fontSize: 11.5, lineHeight: 1.5 }}>Choose one provider at a time. Test the connection before saving it as active.</span>
+                  <span style={{ display: 'inline-flex', width: 'fit-content', alignItems: 'center', gap: 6, color: activeProvider ? '#2e8b57' : t.textMuted, fontSize: 10.5 }}><span style={{ width: 6, height: 6, borderRadius: 999, background: activeProvider ? '#2e8b57' : t.textMuted }} />{activeProvider ? 'Ready for governed runs' : 'Setup required'}</span>
+                </div>
+              </div>
+              <div>{providers.find((provider) => provider.id === focusedProviderId) ? <ProviderCard provider={providers.find((provider) => provider.id === focusedProviderId)!} cliStatus={cliStatus[focusedProviderId]} t={t} onSaved={(next) => setProviders(next)} onStatus={setStatus} /> : null}</div>
+            </div> : <>
+              <GroupLabel title="Use your subscription" detail="No API key — sign in with the provider's CLI. DQL runs each request through it using your plan." t={t} />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>{SUBSCRIPTION_PROVIDER_ORDER.map((id) => { const item = providers.find((provider) => provider.id === id); return item ? <ProviderCard key={id} provider={item} cliStatus={cliStatus[id]} t={t} onSaved={setProviders} onStatus={setStatus} /> : null; })}</div>
+              <GroupLabel title="API key & local providers" detail="Paste an API key (or set the env var), point at a gateway, or run a local model with Ollama." t={t} />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>{KEY_PROVIDER_ORDER.map((id) => { const item = providers.find((provider) => provider.id === id); return item ? <ProviderCard key={id} provider={item} t={t} onSaved={setProviders} onStatus={setStatus} /> : null; })}</div>
+            </>}
           </section>
           )}
 
@@ -201,7 +185,7 @@ export function ConnectionRuntimeSettings({
             </section>
           )}
 
-          {(!section || section === 'providers') && (
+          {!section && (
           <details style={{ marginTop: 22, border: `1px solid ${t.headerBorder}`, borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
             <summary style={{ cursor: 'pointer', padding: '13px 16px', fontSize: 13, fontWeight: 650, listStyle: 'none', color: t.textPrimary }}>
               Advanced — MCP connections &amp; runtime status
@@ -229,6 +213,16 @@ export function ConnectionRuntimeSettings({
             </div>
           </details>
           )}
+
+          {section === 'mcp' && <section style={{ marginTop: 0 }}>
+            <SectionTitle title="MCP servers and connectors" detail="Attach trusted remote tools to provider runs. Each connection is explicit, scoped, and disabled until you enable it." t={t} />
+            <McpConnectionsEditor settings={mcpSettings} t={t} onChange={setMcpSettings} onStatus={setStatus} />
+          </section>}
+
+          {section === 'runtime' && <section style={{ marginTop: 0 }}>
+            <SectionTitle title="Runtime environment" detail="Environment variables remain supported for Docker, CI, and shell-based setup. Secret values are never returned to this page." t={t} />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14, marginTop: 14 }}>{groups.map((group) => <EnvGroupCard key={group.id} group={group} t={t} />)}</div>
+          </section>}
         </>
       )}
     </div>
