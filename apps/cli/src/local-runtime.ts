@@ -19160,6 +19160,17 @@ export interface GitStatusResult {
   error?: string;
 }
 
+/**
+ * `.dql/` is runtime-local state. It can contain connector installations,
+ * caches, provider credentials, and other machine-specific files, so the
+ * browser Source Control surface must never preview or stage it even when a
+ * parent repository has not ignored the directory correctly.
+ */
+function isProtectedLocalGitPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+  return normalized.split('/').includes('.dql');
+}
+
 async function execGit(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   const { execFile } = await import('node:child_process');
   return new Promise((resolve) => {
@@ -19204,6 +19215,7 @@ async function readGitStatus(cwd: string): Promise<GitStatusResult> {
       if (!line) continue;
       const code = line.slice(0, 2);
       const p = line.slice(3);
+      if (isProtectedLocalGitPath(p)) continue;
       changes.push({ path: p, status: code });
     }
   }
@@ -19296,9 +19308,18 @@ async function readGitDiff(
   if (!gitRoot) {
     return { inRepo: false, diff: '', before: null, after: null, diffReport: null };
   }
+  if (filePath && isProtectedLocalGitPath(filePath)) {
+    return { inRepo: true, diff: '', before: null, after: null, diffReport: null };
+  }
   const baseArgs = staged ? ['diff', '--cached', '--no-color'] : ['diff', '--no-color'];
   if (!filePath) {
-    const res = await execGit(gitRoot, baseArgs);
+    const res = await execGit(gitRoot, [
+      ...baseArgs,
+      '--',
+      '.',
+      ':(exclude).dql/**',
+      ':(exclude)**/.dql/**',
+    ]);
     return { inRepo: true, diff: res.stdout, before: null, after: null, diffReport: null };
   }
   const isSemantic = filePath.endsWith('.dql') || filePath.endsWith('.dqlnb');
@@ -19318,6 +19339,7 @@ const MAX_UNTRACKED_DIFF_FILES = 20;
 const MAX_UNTRACKED_DIFF_BYTES = 512 * 1024;
 
 async function readUntrackedTextDiff(cwd: string, filePath: string): Promise<string> {
+  if (isProtectedLocalGitPath(filePath)) return '';
   const status = await execGit(cwd, ['status', '--porcelain=v1', '--untracked-files=normal', '--', filePath]);
   if (status.code !== 0 || !status.stdout.split('\n').some((line) => line.startsWith('?? '))) {
     return '';
@@ -19400,6 +19422,7 @@ function validatePaths(cwd: string, paths: string[]): { ok: true; paths: string[
     if (typeof p !== 'string' || p.length === 0) return { ok: false, error: 'Invalid path' };
     if (p.startsWith('/')) return { ok: false, error: `Absolute path not allowed: ${p}` };
     if (p.split('/').includes('..')) return { ok: false, error: `Path escape not allowed: ${p}` };
+    if (isProtectedLocalGitPath(p)) return { ok: false, error: `Local .dql runtime state cannot be shared: ${p}` };
     const resolved = join(cwd, p);
     if (!resolved.startsWith(cwd)) return { ok: false, error: `Path outside project: ${p}` };
     cleaned.push(p);
@@ -19455,8 +19478,16 @@ async function gitCommit(cwd: string, message: string, stageAll: boolean): Promi
   const trimmed = message.trim();
   if (!trimmed) return { ok: false, error: 'Commit message required' };
   if (stageAll) {
-    const add = await execGit(gitRoot, ['add', '-A']);
+    const status = await readGitStatus(gitRoot);
+    const shareablePaths = Array.from(new Set(status.changes.map((change) => change.path)));
+    if (shareablePaths.length === 0) return { ok: false, error: 'No shareable changes to commit' };
+    const add = await execGit(gitRoot, ['add', '-A', '--', ...shareablePaths]);
     if (add.code !== 0) return { ok: false, error: gitErrorOutput(add) };
+  }
+  const staged = await execGit(gitRoot, ['diff', '--cached', '--name-only', '-z']);
+  const protectedStaged = staged.stdout.split('\0').filter(Boolean).filter(isProtectedLocalGitPath);
+  if (protectedStaged.length > 0) {
+    return { ok: false, error: `Unstage local .dql runtime state before committing: ${protectedStaged.slice(0, 3).join(', ')}` };
   }
   const res = await execGit(gitRoot, ['commit', '-m', trimmed]);
   if (res.code !== 0) return { ok: false, error: gitErrorOutput(res) };

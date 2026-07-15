@@ -59,6 +59,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
@@ -172,6 +173,51 @@ describe('local runtime network boundary', () => {
       const response = await fetch(`http://127.0.0.1:${port}/api/domain-workspaces`, { headers: { Origin: 'https://evil.example' } });
       expect(response.status).toBe(403);
       expect(response.headers.get('access-control-allow-origin')).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
+describe('Source Control local-state boundary', () => {
+  it('never lists, previews, or stages .dql runtime credentials', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-git-local-state-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'domains'), { recursive: true });
+    mkdirSync(join(projectRoot, '.dql'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    writeFileSync(join(projectRoot, 'domains', 'safe.dql'), 'block "Safe" { query = "SELECT 1" }\n');
+    writeFileSync(join(projectRoot, '.dql', 'provider-auth.json'), '{"access_token":"never-expose-me"}\n');
+    execFileSync('git', ['init'], { cwd: projectRoot, stdio: 'ignore' });
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const status = await fetch(`${base}/api/git/status`).then((response) => response.json()) as {
+        changes: Array<{ path: string }>;
+      };
+      expect(status.changes.some((change) => change.path.includes('.dql'))).toBe(false);
+      expect(status.changes.some((change) => change.path.startsWith('domains/'))).toBe(true);
+
+      const diff = await fetch(`${base}/api/git/diff?path=${encodeURIComponent('.dql/provider-auth.json')}`)
+        .then((response) => response.json()) as { diff: string };
+      expect(diff.diff).toBe('');
+      expect(JSON.stringify(diff)).not.toContain('never-expose-me');
+
+      const stageResponse = await fetch(`${base}/api/git/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: ['.dql/provider-auth.json'] }),
+      });
+      expect(stageResponse.status).toBe(400);
+      expect(await stageResponse.text()).toContain('Local .dql runtime state cannot be shared');
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }

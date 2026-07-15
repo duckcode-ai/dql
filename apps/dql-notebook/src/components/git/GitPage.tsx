@@ -262,7 +262,9 @@ export function GitPage() {
   const onRequestReview = async () => {
     const title = commitMsg.trim();
     if (!title) return flash('err', 'Review title required');
-    const paths = Array.from(new Set(entries.map((entry) => entry.path)));
+    // Only the explicitly included set enters the guided review. This keeps
+    // an unstaged local edit from riding along with an otherwise safe request.
+    const paths = Array.from(new Set(stagedFiles.map((entry) => entry.path)));
     if (paths.length === 0) return flash('err', 'No changes to request review for');
     const review = await runOp('request review', () => api.gitCreateReview({
       paths,
@@ -330,16 +332,6 @@ export function GitPage() {
         branchMenuRef={branchMenuRef}
       />
 
-      <GitFlowGuide
-        t={t}
-        changeCount={entries.length}
-        branch={branchInfo.current}
-        advancedOpen={advancedOpen}
-        onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
-        context={governedContext}
-        onEnableTracking={onEnableGovernedTracking}
-      />
-
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <FileTree
           t={t}
@@ -382,20 +374,24 @@ export function GitPage() {
           ) : (
             <DiffEmpty t={t} hasFiles={entries.length > 0} />
           )}
-          <CommitBar
-            t={t}
-            commitMsg={commitMsg}
-            setCommitMsg={setCommitMsg}
-            stagedCount={stagedFiles.length}
-            unstagedCount={unstagedFiles.length}
-            onCommit={onCommit}
-            onCommitAndPush={onCommitAndPush}
-            onRequestReview={onRequestReview}
-            advancedOpen={advancedOpen}
-            onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
-            busy={busy}
-          />
         </div>
+        <ShareFlow
+          t={t}
+          commitMsg={commitMsg}
+          setCommitMsg={setCommitMsg}
+          includedCount={stagedFiles.length}
+          totalCount={entries.length}
+          branch={branchInfo.current}
+          reviewUrl={reviewUrl}
+          onCommit={onCommit}
+          onCommitAndPush={onCommitAndPush}
+          onRequestReview={onRequestReview}
+          advancedOpen={advancedOpen}
+          onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
+          busy={busy}
+          context={governedContext}
+          onEnableTracking={onEnableGovernedTracking}
+        />
       </div>
 
       {toast && <Toast t={t} kind={toast.kind} text={toast.text} />}
@@ -1306,84 +1302,73 @@ function DiffEmpty({ t, hasFiles }: { t: Theme; hasFiles: boolean }) {
 
 // ---------- Commit Bar ----------
 
-interface CommitBarProps {
+interface ShareFlowProps {
   t: Theme;
   commitMsg: string;
   setCommitMsg: (v: string) => void;
-  stagedCount: number;
-  unstagedCount: number;
+  includedCount: number;
+  totalCount: number;
+  branch: string | null;
+  reviewUrl: string | null;
   onCommit: () => void;
   onCommitAndPush: () => void;
   onRequestReview: () => void;
   advancedOpen: boolean;
   onToggleAdvanced: () => void;
   busy: string | null;
+  context: GovernedContext | null;
+  onEnableTracking: () => void;
 }
 
-function CommitBar({ t, commitMsg, setCommitMsg, stagedCount, unstagedCount, onCommit, onCommitAndPush, onRequestReview, advancedOpen, onToggleAdvanced, busy }: CommitBarProps) {
-  const willStageAll = stagedCount === 0 && unstagedCount > 0;
-  const noChanges = stagedCount === 0 && unstagedCount === 0;
-  const hint = willStageAll
-    ? `${unstagedCount} change${unstagedCount === 1 ? '' : 's'} will be included in the review request`
-    : stagedCount > 0
-      ? `${stagedCount} change${stagedCount === 1 ? '' : 's'} prepared for review`
-      : 'No changes to share';
+function ShareFlow({ t, commitMsg, setCommitMsg, includedCount, totalCount, branch, reviewUrl, onCommit, onCommitAndPush, onRequestReview, advancedOpen, onToggleAdvanced, busy, context, onEnableTracking }: ShareFlowProps) {
+  const noChanges = totalCount === 0;
+  const steps = [
+    { title: 'Pick what to share', body: `${includedCount} of ${totalCount} change${totalCount === 1 ? '' : 's'} selected in the left panel.`, complete: includedCount > 0 },
+    { title: 'Describe your change', body: 'Use plain language so a teammate understands the intent.', complete: Boolean(commitMsg.trim()) },
+    { title: 'Share to your branch', body: `Saves only the selected work to ${branch ?? 'a review branch'}; main stays untouched.`, complete: Boolean(reviewUrl) },
+    { title: 'Ask for review', body: reviewUrl ? 'The review request is ready for a teammate.' : 'A teammate approves before anything reaches main.', complete: Boolean(reviewUrl) },
+  ];
   return (
     <div
       style={{
-        padding: '12px 20px',
-        borderTop: `1px solid ${t.headerBorder}`,
+        width: 'clamp(280px, 26vw, 350px)',
+        padding: 0,
+        borderLeft: `1px solid ${t.headerBorder}`,
         background: t.cellBg,
         flexShrink: 0,
-        display: 'flex', flexDirection: 'column', gap: 6,
+        display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ fontSize: 11, color: t.textMuted, flex: 1 }}>{hint}</div>
-        <span style={{ fontSize: 10, color: t.textMuted }}>A review branch is created when needed.</span>
+      <div style={{ padding: '14px 16px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
+        <div style={{ fontSize: 13, fontWeight: 750, color: t.textPrimary }}>Share your work</div>
+        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Four guided steps — no Git commands needed.</div>
       </div>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-        <input
-          value={commitMsg}
-          onChange={(e) => setCommitMsg(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-              e.preventDefault();
-              onRequestReview();
-            }
-          }}
-          placeholder="Describe this update for your reviewer…"
-          style={{
-            flex: 1,
-            background: t.appBg, color: t.textPrimary,
-            border: `1px solid ${t.cellBorder}`, borderRadius: 6,
-            padding: '7px 10px', fontSize: 12, outline: 'none',
-            fontFamily: t.font,
-          }}
-        />
-        <button
-          onClick={onRequestReview}
-          disabled={!!busy || noChanges || !commitMsg.trim()}
-          style={{
-            background: t.accent, color: '#fff',
-            border: `1px solid ${t.accent}`,
-            padding: '7px 14px', borderRadius: 6,
-            fontSize: 12, fontWeight: 700, cursor: 'pointer',
-            opacity: (noChanges || !commitMsg.trim()) ? 0.5 : 1,
-            fontFamily: t.font,
-          }}
-        >
-          Request review
-        </button>
-        <button onClick={onToggleAdvanced} style={miniBtn(t)}>{advancedOpen ? 'Hide details' : 'More options'}</button>
+      <div style={{ padding: '14px 16px 18px', display: 'flex', flexDirection: 'column' }}>
+        {steps.map((step, index) => (
+          <div key={step.title} style={{ display: 'flex', gap: 11 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+              <span style={{ width: 24, height: 24, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 750, background: step.complete ? `${t.success}18` : `${t.accent}12`, color: step.complete ? t.success : t.accent, border: `1.5px solid ${step.complete ? `${t.success}55` : `${t.accent}45`}` }}>{step.complete ? <Check size={13} strokeWidth={2.4} /> : index + 1}</span>
+              {index < steps.length - 1 && <span style={{ width: 1.5, flex: 1, minHeight: 22, background: t.headerBorder, margin: '4px 0' }} />}
+            </div>
+            <div style={{ flex: 1, minWidth: 0, paddingBottom: index === steps.length - 1 ? 2 : 18 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 680, color: t.textPrimary }}>{step.title}</div>
+              <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5, marginTop: 2 }}>{step.body}</div>
+              {index === 1 && !reviewUrl && <textarea value={commitMsg} onChange={(event) => setCommitMsg(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); void onRequestReview(); } }} rows={3} placeholder="What did you change, in plain words?" style={{ width: '100%', boxSizing: 'border-box', marginTop: 7, border: `1px solid ${t.cellBorder}`, background: t.appBg, color: t.textPrimary, borderRadius: 8, padding: '8px 10px', fontSize: 12, lineHeight: 1.5, fontFamily: t.font, outline: 'none', resize: 'vertical' }} />}
+              {index === 2 && !reviewUrl && <button onClick={onRequestReview} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...topBtn(t, true), marginTop: 8, opacity: (busy || noChanges || !commitMsg.trim()) ? 0.5 : 1 }}>{busy ? 'Sharing…' : 'Share & request review'}</button>}
+              {index === 3 && reviewUrl && <a href={reviewUrl} target="_blank" rel="noreferrer" style={{ ...topBtn(t, true), display: 'inline-flex', marginTop: 8, textDecoration: 'none' }}><ExternalLink size={12} /> View review request</a>}
+            </div>
+          </div>
+        ))}
+        <button onClick={onToggleAdvanced} style={{ ...miniBtn(t), alignSelf: 'flex-start', marginTop: 12 }}>{advancedOpen ? 'Hide Git details' : 'Git details'}</button>
       </div>
       {advancedOpen && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 2 }}>
-          <span style={{ fontSize: 10, color: t.textMuted, flex: 1 }}>Advanced Git actions are optional. They do not merge changes.</span>
-          <button onClick={onCommit} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...miniBtn(t), opacity: noChanges || !commitMsg.trim() ? 0.45 : 1 }}>Save locally</button>
-          <button onClick={onCommitAndPush} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...miniBtn(t), opacity: noChanges || !commitMsg.trim() ? 0.45 : 1 }}>Commit & push</button>
+        <div style={{ display: 'grid', gap: 8, margin: '0 16px 16px', padding: 10, border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.appBg }}>
+          <span style={{ fontSize: 10, color: t.textMuted }}>Optional direct Git actions. Neither action merges changes.</span>
+          <div style={{ display: 'flex', gap: 8 }}><button onClick={onCommit} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...miniBtn(t), opacity: noChanges || !commitMsg.trim() ? 0.45 : 1 }}>Save locally</button>
+          <button onClick={onCommitAndPush} disabled={!!busy || noChanges || !commitMsg.trim()} style={{ ...miniBtn(t), opacity: noChanges || !commitMsg.trim() ? 0.45 : 1 }}>Commit & push</button></div>
         </div>
       )}
+      {context && <div style={{ margin: 'auto 12px 12px' }}><GovernedContextSummary t={t} context={context} onEnableTracking={onEnableTracking} /></div>}
     </div>
   );
 }
