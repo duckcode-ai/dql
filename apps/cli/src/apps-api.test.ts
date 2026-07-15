@@ -472,6 +472,35 @@ describe('Apps command center API helpers', () => {
     }
   });
 
+  it('keeps the review-first proposal deterministic when generated tiles are disabled', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    let calls = 0;
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app and explain why revenue is changing.',
+      domain: 'revenue',
+      maxGeneratedTiles: 0,
+    }, {
+      generateGovernedAnswer: async () => {
+        calls += 1;
+        throw new Error('the review-first proposal must not call the provider');
+      },
+    });
+
+    expect(session.status).toBe('proposed');
+    expect(calls).toBe(0);
+    expect(session.proposal!.tiles.every((tile) => tile.source !== 'ai_generated')).toBe(true);
+    expect(session.proposal!.gaps.length).toBeGreaterThan(0);
+  });
+
   it('keeps gaps as research questions when no provider is available and lists other failures transparently', async () => {
     const root = createProject();
     writeBlock(root, 'revenue/total_revenue.dql', {

@@ -1176,6 +1176,7 @@ export interface GenerateAppRequest {
   force?: boolean;
   selectedBlockIds?: string[];
   plannerMode?: 'deterministic' | 'ai_assisted';
+  maxGeneratedTiles?: number;
 }
 
 export interface GeneratedAppPlan {

@@ -1565,6 +1565,7 @@ async function fillProposalGaps(
   maxGeneratedTiles: number | undefined,
 ): Promise<void> {
   if (!hooks?.generateGovernedAnswer || proposal.gaps.length === 0) return;
+  if (maxGeneratedTiles === 0) return;
   const cap = Math.min(Math.max(1, maxGeneratedTiles ?? GENERATED_TILE_DEFAULT), GENERATED_TILE_HARD_CAP);
   const toFill = proposal.gaps.slice(0, cap);
   const remaining = proposal.gaps.slice(cap);

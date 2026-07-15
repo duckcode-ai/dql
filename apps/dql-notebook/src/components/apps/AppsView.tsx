@@ -380,7 +380,11 @@ export function AppsView(): JSX.Element {
         owner: builderOwner.trim() || undefined,
         force: false,
         selectedBlockIds: preferredBlockIds,
-        plannerMode: 'ai_assisted',
+        plannerMode: 'deterministic',
+        // The first pass is a fast, no-write review proposal. Keep uncovered
+        // questions as explicit gaps; the user can opt into generated work
+        // after choosing the certified content that belongs in the app.
+        maxGeneratedTiles: 0,
       }),
       new Promise((resolve) => window.setTimeout(resolve, 1_400)),
     ]);
