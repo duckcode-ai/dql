@@ -6,6 +6,7 @@ import { themes } from '../../themes/notebook-theme';
 import { CellComponent } from '../cells/Cell';
 import { AddCellBar } from './AddCellBar';
 import { api, type NotebookResearchRun } from '../../api/client';
+import { BlockPicker, type BlockEntry } from '../blocks/BlockPicker';
 import {
   deriveCellResearchState,
   NOTEBOOK_RESEARCH_CHANGED_EVENT,
@@ -241,7 +242,6 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
           flexDirection: 'column',
         }}
       >
-        {state.appMode === 'studio' && <AddCellBar />}
         <EmptyState t={t} />
       </div>
     );
@@ -345,30 +345,98 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
 }
 
 function EmptyState({ t }: { t: Theme }) {
+  const { state, dispatch } = useNotebook();
+  const [blockPickerOpen, setBlockPickerOpen] = useState(false);
+
+  const insertBoundBlock = async (block: BlockEntry) => {
+    try {
+      await api.openBlockStudio(block.path);
+    } catch (error) {
+      console.error('Failed to bind block cell', error);
+      window.alert(`Couldn't load block ${block.path}.`);
+      return;
+    }
+    const blockReference = `@block(${JSON.stringify(block.name)})`;
+    const cell = makeCell('dql', blockReference);
+    cell.name = block.name;
+    cell.blockBinding = {
+      path: block.path,
+      state: 'bound',
+      originalContent: blockReference,
+    };
+    dispatch({ type: 'ADD_CELL', cell });
+    setBlockPickerOpen(false);
+  };
+
+  const startActionStyle: React.CSSProperties = {
+    minHeight: 58,
+    border: `1px solid ${t.cellBorder}`,
+    background: t.cellBg,
+    color: t.textPrimary,
+    borderRadius: 8,
+    padding: '9px 11px',
+    textAlign: 'left',
+    cursor: 'pointer',
+    fontFamily: t.font,
+  };
+
   return (
     <div
       style={{
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '48px 0',
-        gap: 12,
-        color: t.textMuted,
+        padding: '28px 0 56px',
+        gap: 16,
+        color: t.textSecondary,
+        width: 'min(760px, 100%)',
+        margin: '0 auto',
       }}
     >
-      <svg
-        width="40"
-        height="40"
-        viewBox="0 0 16 16"
-        fill="currentColor"
-        style={{ opacity: 0.3 }}
+      <div>
+        <div style={{ font: `750 18px ${t.font}`, color: t.textPrimary }}>
+          What are you researching?
+        </div>
+        <div style={{ marginTop: 4, font: `12px/1.5 ${t.font}`, color: t.textMuted }}>
+          Start from trusted work when it exists, or explore directly with DQL, AI, and local data.
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+        <button type="button" style={{ ...startActionStyle, borderColor: t.accent }} onClick={() => setBlockPickerOpen((open) => !open)}>
+          <strong style={{ display: 'block', color: t.accent }}>Use existing block</strong>
+          <span style={{ display: 'block', color: t.textMuted, fontSize: 10.5, marginTop: 3 }}>Search certified and draft reusable analysis.</span>
+        </button>
+        <button type="button" style={startActionStyle} onClick={() => window.dispatchEvent(new CustomEvent('dql:open-notebook-ai'))}>
+          <strong style={{ display: 'block' }}>Ask Notebook AI</strong>
+          <span style={{ display: 'block', color: t.textMuted, fontSize: 10.5, marginTop: 3 }}>Research blocks, semantic models, dbt, and data.</span>
+        </button>
+        <button type="button" style={startActionStyle} onClick={() => dispatch({ type: 'ADD_CELL', cell: makeCell('dql') })}>
+          <strong style={{ display: 'block' }}>Create DQL query</strong>
+          <span style={{ display: 'block', color: t.textMuted, fontSize: 10.5, marginTop: 3 }}>Build a governed or exploratory query.</span>
+        </button>
+        <button type="button" style={startActionStyle} onClick={() => window.dispatchEvent(new CustomEvent('dql:open-dataset-import'))}>
+          <strong style={{ display: 'block' }}>Import local data</strong>
+          <span style={{ display: 'block', color: t.textMuted, fontSize: 10.5, marginTop: 3 }}>Bring CSV, Parquet, or JSON into the research.</span>
+        </button>
+      </div>
+
+      {blockPickerOpen && (
+        <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, padding: 10, background: t.cellBg }}>
+          <BlockPicker
+            themeMode={state.themeMode}
+            compact={false}
+            onPick={(block) => void insertBoundBlock(block)}
+          />
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => dispatch({ type: 'ADD_CELL', cell: makeCell('markdown', '## Research note\n\n') })}
+        style={{ alignSelf: 'flex-start', border: 0, background: 'transparent', color: t.accent, cursor: 'pointer', font: `700 11px ${t.font}`, padding: 0 }}
       >
-        <path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 8.75 4.25V1.5ZM8.75 5.5h2.836L10.25 3.664V4.25c0 .138.112.25.25.25H8.75Z" />
-      </svg>
-      <span style={{ fontSize: 13, fontFamily: t.font }}>
-        Empty notebook. Click + to add your first cell.
-      </span>
+        + Add a research note instead
+      </button>
     </div>
   );
 }

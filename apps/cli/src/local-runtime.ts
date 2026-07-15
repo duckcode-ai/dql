@@ -18225,10 +18225,9 @@ function buildNotebookTemplate(title: string, template: string): string {
       },
       {
         id: id(),
-        type: "sql",
+        type: "dql",
         name: "analysis_data",
-        content:
-          "-- Choose a governed semantic query, block, connection, or local dataset.",
+        content: "",
       },
       {
         id: id(),
@@ -18250,16 +18249,15 @@ function buildNotebookTemplate(title: string, template: string): string {
       },
       {
         id: id(),
-        type: "sql",
+        type: "dql",
         name: "metric_trend",
-        content:
-          "-- Add the semantic metric with a time dimension and comparison period.",
+        content: "",
       },
       {
         id: id(),
-        type: "sql",
+        type: "dql",
         name: "driver_breakdown",
-        content: "-- Break the change down by compatible business dimensions.",
+        content: "",
       },
       {
         id: id(),
@@ -18278,16 +18276,15 @@ function buildNotebookTemplate(title: string, template: string): string {
       },
       {
         id: id(),
-        type: "sql",
+        type: "dql",
         name: "quality_profile",
-        content:
-          "-- Select or import a dataset, then inspect nulls, duplicates, ranges, and freshness.",
+        content: "",
       },
       {
         id: id(),
-        type: "sql",
+        type: "dql",
         name: "quality_checks",
-        content: "-- Add focused validation checks for suspected issues.",
+        content: "",
       },
       {
         id: id(),
@@ -18306,10 +18303,9 @@ function buildNotebookTemplate(title: string, template: string): string {
       },
       {
         id: id(),
-        type: "sql",
+        type: "dql",
         name: "experiment_results",
-        content:
-          "-- Build the reproducible experiment population and outcome query.",
+        content: "",
       },
       {
         id: id(),
@@ -18324,10 +18320,7 @@ function buildNotebookTemplate(title: string, template: string): string {
       },
     ];
   } else {
-    cells = [
-      { id: id(), type: 'markdown', content: `# ${title}\n\nAdd your analysis here.` },
-      { id: id(), type: 'sql', name: 'query_1', content: 'SELECT 1 AS hello' },
-    ];
+    cells = [];
   }
 
   return JSON.stringify({ dqlnbVersion: 2, version: 1, title, cells }, null, 2);

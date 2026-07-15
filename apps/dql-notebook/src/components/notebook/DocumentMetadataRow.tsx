@@ -65,6 +65,41 @@ export function DocumentMetadataRow() {
         gap: 12,
       }}
     >
+      <div
+        style={{
+          fontSize: 22,
+          fontWeight: 650,
+          color: t.textPrimary,
+          fontFamily: t.font,
+          letterSpacing: '-0.01em',
+        }}
+      >
+        {title}
+      </div>
+      <div style={{ display: 'grid', gap: 5 }}>
+        <label htmlFor="notebook-purpose" style={{ font: `700 10px ${t.font}`, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.06em' }}>
+          Research purpose
+        </label>
+        <textarea
+          id="notebook-purpose"
+          aria-label="Notebook research purpose"
+          value={meta.purpose ?? ''}
+          onChange={(event) => update({ purpose: event.target.value || undefined })}
+          placeholder="What business question or decision should this notebook answer? Include scope and important assumptions."
+          rows={2}
+          style={{
+            width: '100%',
+            boxSizing: 'border-box',
+            resize: 'vertical',
+            border: `1px solid ${t.inputBorder}`,
+            background: t.inputBg,
+            color: t.textPrimary,
+            borderRadius: 7,
+            padding: '8px 10px',
+            font: `12px/1.45 ${t.font}`,
+          }}
+        />
+      </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', position: 'relative' }}>
         <PillAnchor
           t={t}
@@ -132,7 +167,7 @@ export function DocumentMetadataRow() {
           active={open === 'description'}
           filled={descriptionSet}
           icon={<span style={{ fontFamily: t.fontMono, fontSize: 10 }}>✎</span>}
-          label={descriptionSet ? truncate(meta.description!, 48) : 'Add description'}
+          label={descriptionSet ? truncate(meta.description!, 48) : 'Add context'}
           onClick={() => setOpen(open === 'description' ? null : 'description')}
         >
           {open === 'description' && (
@@ -153,7 +188,7 @@ export function DocumentMetadataRow() {
           active={open === 'projectFilter'}
           filled={projectFilterSet}
           icon={<span style={{ fontFamily: t.fontMono, fontSize: 10 }}>⌕</span>}
-          label={projectFilterSet ? truncate(meta.projectFilter!, 32) : 'Add project filter'}
+          label={projectFilterSet ? truncate(meta.projectFilter!, 32) : 'Add scope'}
           onClick={() => setOpen(open === 'projectFilter' ? null : 'projectFilter')}
         >
           {open === 'projectFilter' && (
@@ -167,17 +202,6 @@ export function DocumentMetadataRow() {
             </Popover>
           )}
         </PillAnchor>
-      </div>
-      <div
-        style={{
-          fontSize: 22,
-          fontWeight: 600,
-          color: t.textPrimary,
-          fontFamily: t.font,
-          letterSpacing: '-0.01em',
-        }}
-      >
-        {title}
       </div>
     </div>
   );

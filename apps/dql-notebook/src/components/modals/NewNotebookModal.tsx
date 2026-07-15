@@ -1,39 +1,19 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState, useEffect, useRef } from 'react';
-import { useNotebook, makeCell } from '../../store/NotebookStore';
+import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { NotebookFile, Cell } from '../../store/types';
+import type { NotebookFile } from '../../store/types';
+import {
+  buildTemplateCells,
+  NOTEBOOK_TEMPLATE_DESCRIPTIONS,
+  NOTEBOOK_TEMPLATE_LABELS,
+  type NotebookTemplate,
+} from './notebook-templates';
 
 interface NewNotebookModalProps {
   onFileOpened: (file: NotebookFile) => void;
 }
-
-type Template =
-  | "blank"
-  | "analysis"
-  | "metric_diagnostic"
-  | "data_quality"
-  | "experiment";
-
-const TEMPLATE_LABELS: Record<Template, string> = {
-  blank: "Blank",
-  analysis: "Analysis",
-  metric_diagnostic: "Metric diagnostic",
-  data_quality: "Data-quality investigation",
-  experiment: "Experiment log",
-};
-
-const TEMPLATE_DESCRIPTIONS: Record<Template, string> = {
-  blank: "Start with an empty notebook.",
-  analysis:
-    "A decision-ready research narrative from context through takeaways.",
-  metric_diagnostic:
-    "Trace a metric change through segments, time, and validation checks.",
-  data_quality:
-    "Profile a source, document issues, and record validation evidence.",
-  experiment: "Capture a hypothesis, method, results, and decision.",
-};
 
 function slugify(name: string): string {
   return name
@@ -50,118 +30,12 @@ function validateName(name: string): string | null {
   return null;
 }
 
-function buildTemplateCells(template: Template): Cell[] {
-  switch (template) {
-    case "analysis":
-      return [
-        makeCell(
-          "markdown",
-          "# TL;DR\n\nSummarize the answer and decision here.",
-        ),
-        makeCell(
-          "markdown",
-          "## Context and methods\n\nState the business question, scope, definitions, and assumptions.",
-        ),
-        {
-          ...makeCell(
-            "sql",
-            "-- Choose a governed semantic query, block, connection, or local dataset.",
-          ),
-          name: "analysis_data",
-        },
-        makeCell(
-          "markdown",
-          "## Results\n\nExplain the material findings and uncertainty.",
-        ),
-        makeCell(
-          "markdown",
-          "## Takeaways\n\nRecord the decision, risks, and next action.",
-        ),
-      ];
-    case "metric_diagnostic":
-      return [
-        makeCell(
-          "markdown",
-          "# Metric diagnostic\n\n**Question:** What changed, when, and for whom?\n\n**Metric definition:** Add the certified definition and expected behavior.",
-        ),
-        {
-          ...makeCell(
-            "sql",
-            "-- Add the semantic metric with a time dimension and comparison period.",
-          ),
-          name: "metric_trend",
-        },
-        {
-          ...makeCell(
-            "sql",
-            "-- Break the change down by compatible business dimensions.",
-          ),
-          name: "driver_breakdown",
-          dependencies: [],
-        },
-        makeCell(
-          "markdown",
-          "## Diagnosis\n\nSeparate validated drivers from hypotheses and data limitations.",
-        ),
-      ];
-    case "data_quality":
-      return [
-        makeCell(
-          "markdown",
-          "# Data-quality investigation\n\nDocument the source, owner, freshness expectation, and affected decisions.",
-        ),
-        {
-          ...makeCell(
-            "sql",
-            "-- Select or import a dataset, then inspect nulls, duplicates, ranges, and freshness.",
-          ),
-          name: "quality_profile",
-        },
-        {
-          ...makeCell(
-            "sql",
-            "-- Add focused validation checks for suspected issues.",
-          ),
-          name: "quality_checks",
-        },
-        makeCell(
-          "markdown",
-          "## Findings and disposition\n\nRecord severity, impacted metrics, owner, and remediation.",
-        ),
-      ];
-    case "experiment":
-      return [
-        makeCell(
-          "markdown",
-          "# Experiment log\n\n**Hypothesis:**\n\n**Primary metric:**\n\n**Guardrails:**\n\n**Population and dates:**",
-        ),
-        {
-          ...makeCell(
-            "sql",
-            "-- Build the reproducible experiment population and outcome query.",
-          ),
-          name: "experiment_results",
-        },
-        makeCell(
-          "markdown",
-          "## Results\n\nReport effect size, uncertainty, guardrails, and data-quality checks.",
-        ),
-        makeCell(
-          "markdown",
-          "## Decision\n\nShip, iterate, or stop — with rationale.",
-        ),
-      ];
-    default:
-      return [makeCell('sql')];
-  }
-}
-
 export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
 
   const [name, setName] = useState('');
-  const [template, setTemplate] = useState<Template>('blank');
+  const [template, setTemplate] = useState<NotebookTemplate>('blank');
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -364,14 +238,14 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
               Template
             </label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {(Object.keys(TEMPLATE_LABELS) as Template[]).map((tmpl) => (
+              {(Object.keys(NOTEBOOK_TEMPLATE_LABELS) as NotebookTemplate[]).map((tmpl) => (
                 <TemplateOption
                   key={tmpl}
                   value={tmpl}
                   selected={template === tmpl}
                   onSelect={() => setTemplate(tmpl)}
-                  label={TEMPLATE_LABELS[tmpl]}
-                  description={TEMPLATE_DESCRIPTIONS[tmpl]}
+                  label={NOTEBOOK_TEMPLATE_LABELS[tmpl]}
+                  description={NOTEBOOK_TEMPLATE_DESCRIPTIONS[tmpl]}
                   t={t}
                 />
               ))}
@@ -440,7 +314,7 @@ function TemplateOption({
   description,
   t,
 }: {
-  value: Template;
+  value: NotebookTemplate;
   selected: boolean;
   onSelect: () => void;
   label: string;

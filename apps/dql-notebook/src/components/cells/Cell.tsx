@@ -52,6 +52,7 @@ import { CellChrome } from "@duckcodeailabs/dql-ui";
 import { CombineDataPanel, type CombineDataRequest } from '../notebook/CombineDataPanel';
 import { buildCombinedDatasetCell, findDatasetReferences, findWarehouseReferences } from '../../utils/dataset-references';
 import { BlockParameterControls } from '../parameters/BlockParameterControls';
+import { NotebookDqlParameterEditor } from '../parameters/NotebookDqlParameterEditor';
 
 interface CellProps {
   cell: Cell;
@@ -409,23 +410,59 @@ function BoundBlockParameterControls({
   onChange: (values: Record<string, unknown>) => void;
 }) {
   const [parameters, setParameters] = useState<BlockParameterDefinition[]>([]);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadError(false);
     void api.openBlockStudio(binding.path)
-      .then((payload) => { if (!cancelled) setParameters(payload.validation.parameters ?? []); })
-      .catch(() => { if (!cancelled) setParameters([]); });
+      .then((payload) => {
+        if (!cancelled) setParameters(payload.validation.parameters ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setParameters([]);
+          setLoadError(true);
+        }
+      });
     return () => { cancelled = true; };
   }, [binding.path]);
 
-  if (parameters.length === 0 || binding.state === 'forked') return null;
   const current = binding.parameterValues ?? {};
+  const parameterNames = new Set(parameters.map((parameter) => parameter.name));
+  const staleOverrides = Object.keys(current).filter((name) => !parameterNames.has(name));
+  if (parameters.length === 0 && staleOverrides.length === 0 && !loadError) return null;
   return (
     <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: t.appBg }}>
+      <div style={{ marginBottom: 6, fontSize: 10.5, fontWeight: 750, color: t.textSecondary }}>
+        Block inputs <span style={{ fontWeight: 400, color: t.textMuted }}>· defaults come from the block; notebook overrides stay here</span>
+      </div>
+      {loadError && (
+        <div style={{ marginBottom: 6, fontSize: 10.5, color: t.error }}>
+          Could not load this block's parameter contract. The saved overrides were not changed.
+        </div>
+      )}
+      {staleOverrides.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7, fontSize: 10.5, color: t.warning }}>
+          <span>Block definition changed. Unknown overrides: {staleOverrides.join(', ')}.</span>
+          <button
+            type="button"
+            onClick={() => onChange(Object.fromEntries(Object.entries(current).filter(([name]) => parameterNames.has(name))))}
+            style={binderBtnStyle(t, t.warning)}
+          >
+            Remove stale
+          </button>
+        </div>
+      )}
       <BlockParameterControls
         parameters={parameters}
         values={current}
         onChange={(name, value) => onChange({ ...current, [name]: value })}
+        onReset={(name) => {
+          const next = { ...current };
+          delete next[name];
+          onChange(next);
+        }}
         t={t}
       />
     </div>
@@ -452,9 +489,6 @@ function InlineDqlParameterControls({
         .then((validation) => {
           if (cancelled) return;
           setParameters(validation.parameters ?? []);
-          const defaults = Object.fromEntries((validation.parameters ?? []).flatMap((parameter) =>
-            parameter.default === undefined ? [] : [[parameter.name, parameter.default]]));
-          if (Object.keys(defaults).length > 0) onChange({ ...defaults, ...values });
         })
         .catch(() => { if (!cancelled) setParameters([]); });
     }, 200);
@@ -464,10 +498,18 @@ function InlineDqlParameterControls({
   if (parameters.length === 0) return null;
   return (
     <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.cellBorder}`, background: t.appBg }}>
+      <div style={{ marginBottom: 6, fontSize: 10.5, fontWeight: 750, color: t.textSecondary }}>
+        Run with <span style={{ fontWeight: 400, color: t.textMuted }}>· change values for this notebook without changing DQL defaults</span>
+      </div>
       <BlockParameterControls
         parameters={parameters}
         values={values}
         onChange={(name, value) => onChange({ ...values, [name]: value })}
+        onReset={(name) => {
+          const next = { ...values };
+          delete next[name];
+          onChange(next);
+        }}
         t={t}
       />
     </div>
@@ -478,11 +520,13 @@ function BlockBindingChip({
   binding,
   t,
   onRevert,
+  onCustomize,
   onUnbind,
 }: {
   binding: BlockBinding;
   t: Theme;
   onRevert: () => void | Promise<void>;
+  onCustomize: () => void | Promise<void>;
   onUnbind: () => void;
 }) {
   const isForked = binding.state === 'forked';
@@ -534,6 +578,15 @@ function BlockBindingChip({
           style={binderBtnStyle(t, accent)}
         >
           Revert
+        </button>
+      )}
+      {!isForked && (
+        <button
+          onClick={onCustomize}
+          title="Load the block source into this notebook and customize a local copy"
+          style={binderBtnStyle(t, accent)}
+        >
+          Customize copy
         </button>
       )}
       <button
@@ -843,6 +896,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
   const [saveAsBlockOpen, setSaveAsBlockOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [noteDraft, setNoteDraft] = useState("");
+  const [noteKind, setNoteKind] = useState<NonNullable<Cell['annotations']>[number]['kind']>('note');
   const [connectionNames, setConnectionNames] = useState<string[]>([]);
   const [defaultConnection, setDefaultConnection] = useState("default");
   const [staging, setStaging] = useState(false);
@@ -967,6 +1021,43 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
     (updates: Partial<Cell>) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates }),
     [dispatch, cell.id]
   );
+
+  const addExploreCell = useCallback((type: 'filter' | 'pivot' | 'chart' | 'single_value') => {
+    let upstream = cell.name?.trim();
+    if (!upstream) {
+      const base = `result_${index + 1}`;
+      upstream = base;
+      let suffix = 2;
+      while (state.cells.some((candidate) => candidate.id !== cell.id && candidate.name === upstream)) {
+        upstream = `${base}_${suffix}`;
+        suffix += 1;
+      }
+      dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { name: upstream } });
+    }
+
+    const next = makeCell(type);
+    next.upstream = upstream;
+    next.dependencies = [{ cellId: cell.id, output: upstream }];
+    const stepName = type === 'single_value' ? 'kpi' : type;
+    const stepBase = `${upstream}_${stepName}`;
+    let nextName = stepBase;
+    let nextSuffix = 2;
+    while (state.cells.some((candidate) => candidate.name === nextName)) {
+      nextName = `${stepBase}_${nextSuffix}`;
+      nextSuffix += 1;
+    }
+    next.name = nextName;
+    if (type === 'filter' && next.filterConfig) {
+      next.filterConfig = { ...next.filterConfig, upstream };
+    }
+    if (type === 'pivot' && next.pivotConfig) {
+      next.pivotConfig = { ...next.pivotConfig, upstream };
+    }
+    if (type === 'single_value' && next.singleValueConfig) {
+      next.singleValueConfig = { ...next.singleValueConfig, upstream };
+    }
+    dispatch({ type: 'ADD_CELL', cell: next, afterId: cell.id });
+  }, [cell.id, cell.name, dispatch, index, state.cells]);
 
   const handleRecommendChart = useCallback(async () => {
     if (!cell.result) return;
@@ -1571,26 +1662,49 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                 console.error('Failed to revert bound cell', error);
               }
             }}
+            onCustomize={async () => {
+              const binding = cell.blockBinding;
+              if (!binding) return;
+              try {
+                const payload = await api.openBlockStudio(binding.path);
+                dispatch({
+                  type: 'UPDATE_CELL',
+                  id: cell.id,
+                  updates: {
+                    content: payload.source,
+                    dqlParameterValues: { ...(binding.parameterValues ?? {}) },
+                    blockBinding: { ...binding, state: 'forked' },
+                  },
+                });
+                editorRef.current?.resetTo(payload.source);
+                setIsDirty(true);
+              } catch (error) {
+                console.error('Failed to customize bound cell', error);
+              }
+            }}
             onUnbind={() => {
               dispatch({ type: 'UPDATE_CELL', id: cell.id, updates: { blockBinding: undefined } });
             }}
           />
         )}
 
-        {cell.type === 'dql' && !cell.blockBinding && (
-          <InlineDqlParameterControls
-            source={cell.content}
-            values={cell.dqlParameterValues ?? {}}
-            t={t}
-            onChange={(dqlParameterValues) => dispatch({
-              type: 'UPDATE_CELL',
-              id: cell.id,
-              updates: { dqlParameterValues },
-            })}
-          />
+        {cell.type === 'dql' && (!cell.blockBinding || cell.blockBinding.state === 'forked') && (
+          <>
+            <NotebookDqlParameterEditor source={cell.content} onSourceChange={handleContentChange} t={t} />
+            <InlineDqlParameterControls
+              source={cell.content}
+              values={cell.dqlParameterValues ?? {}}
+              t={t}
+              onChange={(dqlParameterValues) => dispatch({
+                type: 'UPDATE_CELL',
+                id: cell.id,
+                updates: { dqlParameterValues },
+              })}
+            />
+          </>
         )}
 
-        {cell.blockBinding && (
+        {cell.blockBinding?.state === 'bound' && (
           <BoundBlockParameterControls
             binding={cell.blockBinding}
             t={t}
@@ -1650,7 +1764,9 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
           <CellNotes
             cell={cell}
             value={noteDraft}
+            kind={noteKind}
             onValueChange={setNoteDraft}
+            onKindChange={setNoteKind}
             onAdd={() => {
               const body = noteDraft.trim();
               if (!body) return;
@@ -1660,6 +1776,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                   {
                     id: `note_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
                     body,
+                    kind: noteKind,
                     createdAt: new Date().toISOString(),
                   },
                 ],
@@ -1777,6 +1894,17 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     </button>
                   </>
                 )}
+              {cell.result && (
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} aria-label="Explore this result">
+                  <span style={{ font: `700 9px ${t.font}`, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                    Explore
+                  </span>
+                  <ExploreStepButton label="Filter" t={t} onClick={() => addExploreCell('filter')} />
+                  <ExploreStepButton label="Pivot" t={t} onClick={() => addExploreCell('pivot')} />
+                  <ExploreStepButton label="Chart" t={t} onClick={() => addExploreCell('chart')} />
+                  <ExploreStepButton label="KPI" t={t} onClick={() => addExploreCell('single_value')} />
+                </div>
+              )}
               <div style={{ flex: 1 }} />
 
               {/* Chart type selector + Table toggle */}
@@ -2147,14 +2275,18 @@ function QueryTargetBar({
 function CellNotes({
   cell,
   value,
+  kind,
   onValueChange,
+  onKindChange,
   onAdd,
   onRemove,
   t,
 }: {
   cell: Cell;
   value: string;
+  kind: NonNullable<Cell['annotations']>[number]['kind'];
   onValueChange: (value: string) => void;
+  onKindChange: (kind: NonNullable<Cell['annotations']>[number]['kind']) => void;
   onAdd: () => void;
   onRemove: (id: string) => void;
   t: Theme;
@@ -2181,6 +2313,9 @@ function CellNotes({
           }}
         >
           <div style={{ flex: 1 }}>
+            <span style={{ display: 'inline-flex', marginBottom: 4, border: `1px solid ${t.btnBorder}`, borderRadius: 999, padding: '1px 6px', color: t.textMuted, font: `700 9px ${t.font}`, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+              {note.kind ?? 'note'}
+            </span>
             <div style={{ whiteSpace: "pre-wrap" }}>{note.body}</div>
             <div style={{ color: t.textMuted, fontSize: 9, marginTop: 3 }}>
               {note.author ? `${note.author} · ` : ""}
@@ -2202,7 +2337,19 @@ function CellNotes({
           </button>
         </div>
       ))}
-      <div style={{ display: "flex", gap: 6 }}>
+      <div style={{ display: "flex", gap: 6, alignItems: 'flex-start' }}>
+        <select
+          aria-label="Research note type"
+          value={kind ?? 'note'}
+          onChange={(event) => onKindChange(event.target.value as NonNullable<Cell['annotations']>[number]['kind'])}
+          style={{ background: t.inputBg, color: t.textPrimary, border: `1px solid ${t.inputBorder}`, borderRadius: 6, padding: '6px 7px', font: `11px ${t.font}` }}
+        >
+          <option value="note">Note</option>
+          <option value="assumption">Assumption</option>
+          <option value="finding">Finding</option>
+          <option value="decision">Decision</option>
+          <option value="caveat">Caveat</option>
+        </select>
         <textarea
           aria-label="Cell note"
           value={value}
@@ -2332,6 +2479,35 @@ function cellHeaderTextButtonStyle(
     cursor: 'pointer',
     whiteSpace: 'nowrap',
   };
+}
+
+function ExploreStepButton({
+  label,
+  t,
+  onClick,
+}: {
+  label: string;
+  t: Theme;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Create a reusable ${label.toLowerCase()} step from this result`}
+      style={{
+        border: `1px solid ${t.btnBorder}`,
+        background: t.btnBg,
+        color: t.textSecondary,
+        borderRadius: 4,
+        padding: '2px 6px',
+        font: `700 10px ${t.font}`,
+        cursor: 'pointer',
+      }}
+    >
+      {label}
+    </button>
+  );
 }
 
 function HeaderActionBtn({

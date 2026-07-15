@@ -152,6 +152,30 @@ export function visualParameterDefaultText(parameter: Pick<VisualBlockParameter,
   return visualDefaultValueText(parameter.default);
 }
 
+/**
+ * Parameter sections belong to a DQL block. Keep a blank notebook cell blank
+ * until the author explicitly adds a parameter, then create the smallest
+ * useful draft block and preserve any query text they already entered.
+ */
+export function ensureNotebookDqlBlockSource(content: string): string {
+  if (/^\s*block\s+"/i.test(content)) return content;
+  const query = content.trim();
+  const queryBody = query
+    ? query.split(/\r?\n/).map((line) => `    ${line}`).join('\n')
+    : '    -- Write query';
+  return `block "notebook_query" {
+  status = "draft"
+  domain = "uncategorized"
+  type = "custom"
+  description = "Notebook analysis"
+
+  query = """
+${queryBody}
+  """
+}
+`;
+}
+
 /** Write a canonical typed declaration and matching policy back into DQL source. */
 export function upsertVisualBlockParameter(
   content: string,

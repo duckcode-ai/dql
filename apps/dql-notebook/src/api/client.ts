@@ -3091,7 +3091,9 @@ export const api = {
           config: cell.chartConfig,
         },
         executionTarget: cell.executionTarget,
-        parameters: cell.blockBinding?.parameterValues ?? cell.dqlParameterValues,
+      parameters: cell.blockBinding?.state === 'bound'
+        ? cell.blockBinding.parameterValues
+        : cell.dqlParameterValues,
         executionContext,
       }),
       signal,
