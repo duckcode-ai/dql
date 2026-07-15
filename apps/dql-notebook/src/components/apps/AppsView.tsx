@@ -12,6 +12,7 @@ import {
   Check,
   ChevronDown,
   Download,
+  Eye,
   FileText,
   GitBranch,
   LayoutDashboard,
@@ -730,6 +731,7 @@ function AppLibrarySurface({
               favorite={favorites.has(app.id)}
               onToggleFavorite={() => onToggleFavorite(app.id)}
               onOpen={() => onOpenApp(app, 'view')}
+              onEdit={() => onOpenApp(app, 'build')}
             />
           ))}
         </div>
@@ -743,11 +745,13 @@ function AppCard({
   favorite,
   onToggleFavorite,
   onOpen,
+  onEdit,
 }: {
   app: AppSummary;
   favorite: boolean;
   onToggleFavorite: () => void;
   onOpen: () => void;
+  onEdit: () => void;
 }) {
   const certified = app.certification === 'certified' || app.lifecycle === 'certified';
   const draftCount = app.drafts?.length ?? 0;
@@ -789,7 +793,12 @@ function AppCard({
       </div>
       <div className="dql-app-card-depth">
         <span>{primaryOwner(app)}</span>
-        <button type="button" onClick={onOpen}>Open</button>
+        <button type="button" className="dql-app-card-act" onClick={onOpen} title="View app">
+          <Eye size={12} /> View
+        </button>
+        <button type="button" className="dql-app-card-act" onClick={onEdit} title="Edit app">
+          <Pencil size={12} /> Edit
+        </button>
       </div>
     </article>
   );
@@ -4431,6 +4440,24 @@ const APP_STYLES = `
 
 .dql-app-card-depth span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dql-app-card-depth button { border: 0; background: transparent; color: var(--dql-app-accent); cursor: pointer; font: 800 11px var(--font-ui); }
+.dql-app-card-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none !important;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--dql-app-line) !important;
+  border-radius: 6px;
+  background: var(--dql-app-surface) !important;
+  color: var(--dql-app-muted) !important;
+  font: 650 11px var(--font-ui) !important;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.dql-app-card-act:hover {
+  border-color: var(--dql-app-accent) !important;
+  color: var(--dql-app-accent) !important;
+}
 
 .dql-app-block-cite i,
 .dql-app-plan-item > i {
