@@ -12,7 +12,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   GitBranch, GitCommit, RefreshCw, ArrowUp, ArrowDown,
-  Search, ChevronDown, X, Plus, Check, ExternalLink,
+  Search, ChevronDown, X, Plus, Check, ExternalLink, ShieldCheck,
 } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -104,6 +104,7 @@ export function GitPage() {
   const [newBranchName, setNewBranchName] = useState('');
   const [reviewUrl, setReviewUrl] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [reviewMode, setReviewMode] = useState<'plain' | 'code'>('plain');
   const [governedContext, setGovernedContext] = useState<GovernedContext | null>(null);
   const branchMenuRef = useRef<HTMLDivElement>(null);
 
@@ -330,6 +331,8 @@ export function GitPage() {
         setNewBranchName={setNewBranchName}
         onCreateBranch={onCreateBranch}
         branchMenuRef={branchMenuRef}
+        advancedOpen={advancedOpen}
+        onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
       />
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
@@ -362,6 +365,8 @@ export function GitPage() {
                 onUnstage={() => onUnstage(selectedEntry.path)}
                 onDiscard={() => onDiscard(selectedEntry.path)}
                 stagedView={selectedStaged}
+                reviewMode={reviewMode}
+                onReviewMode={setReviewMode}
               />
               <DiffBody
                 t={t}
@@ -369,6 +374,7 @@ export function GitPage() {
                 entry={selectedEntry}
                 loading={diffLoading}
                 error={diffError}
+                reviewMode={reviewMode}
               />
             </>
           ) : (
@@ -423,6 +429,8 @@ interface TopBarProps {
   setNewBranchName: (v: string) => void;
   onCreateBranch: () => void;
   branchMenuRef: React.RefObject<HTMLDivElement>;
+  advancedOpen: boolean;
+  onToggleAdvanced: () => void;
 }
 
 function TopBar(p: TopBarProps) {
@@ -437,32 +445,10 @@ function TopBar(p: TopBarProps) {
         flexShrink: 0, whiteSpace: 'nowrap',
       }}
     >
-      <span
-        style={{
-          fontFamily: t.fontMono, fontSize: 10, fontWeight: 700, letterSpacing: '0.08em',
-          padding: '3px 7px', borderRadius: 3,
-          background: `${t.accent}1f`, color: t.accent,
-          border: `1px solid ${t.accent}40`,
-        }}
-      >
-        GIT
-      </span>
-      <span style={{ fontSize: 14, fontWeight: 500, color: t.textPrimary }}>Source control</span>
+      <span style={{ fontSize: 12.5, fontWeight: 650, color: t.textSecondary }}>Your workspace · <span style={{ fontFamily: t.fontMono, fontSize: 11, color: t.textPrimary }}>{p.branchCurrent ?? 'local workspace'}</span></span>
+      <span style={{ fontSize: 11, color: p.behind > 0 ? t.warning : t.success }}>{p.behind > 0 ? `${p.behind} update${p.behind === 1 ? '' : 's'} available` : p.ahead > 0 ? `${p.ahead} update${p.ahead === 1 ? '' : 's'} ready to share` : 'Everything up to date'}</span>
 
-      <div ref={p.branchMenuRef} style={{ position: 'relative' }}>
-        <button
-          onClick={() => p.setBranchMenuOpen(!p.branchMenuOpen)}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 5,
-            background: t.cellBg, border: `1px solid ${t.cellBorder}`,
-            color: t.textPrimary, padding: '3px 8px', borderRadius: 4,
-            fontSize: 11, fontFamily: t.fontMono, cursor: 'pointer',
-          }}
-        >
-          <GitBranch size={11} strokeWidth={1.75} />
-          {p.branchCurrent ?? 'detached'}
-          <ChevronDown size={10} strokeWidth={1.75} style={{ opacity: 0.6 }} />
-        </button>
+      <div ref={p.branchMenuRef} style={{ position: 'relative', display: p.advancedOpen ? 'block' : 'none' }}>
         {p.branchMenuOpen && (
           <div
             style={{
@@ -534,21 +520,6 @@ function TopBar(p: TopBarProps) {
         )}
       </div>
 
-      {p.remoteUrl && (
-        <>
-          <span style={{ fontSize: 11, color: t.textMuted }}>·</span>
-          <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis' }} title={p.remoteUrl}>
-            {prettyRemote(p.remoteUrl)}
-          </span>
-        </>
-      )}
-
-      <span style={{ fontSize: 11, color: t.textMuted }}>·</span>
-      <span style={{ fontSize: 11, color: t.success, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.success }} />
-        ready
-      </span>
-
       <div style={{ flex: 1 }} />
 
       <button onClick={p.onRefresh} title="Refresh" style={{
@@ -559,30 +530,12 @@ function TopBar(p: TopBarProps) {
       </button>
       <style>{`@keyframes dql-spin { to { transform: rotate(360deg); } }`}</style>
 
-      <button onClick={p.onPull} disabled={!!p.busy} style={topBtn(t)} title="Get updates from the shared project">
-        <ArrowDown size={12} strokeWidth={1.75} color={t.warning} />
-        Get updates
+      <button onClick={p.onPull} disabled={!!p.busy} style={topBtn(t)} title="Bring in the latest approved shared work">
+        <ArrowDown size={12} strokeWidth={1.75} />
+        Update from main
         {p.behind > 0 && <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textMuted, marginLeft: 2 }}>{p.behind}</span>}
       </button>
-      <button onClick={p.onPush} disabled={!!p.busy} style={topBtn(t, true)} title="Send the current branch to the shared project">
-        <ArrowUp size={12} strokeWidth={1.75} />
-        Send branch
-        {p.ahead > 0 && <span style={{ fontFamily: t.fontMono, fontSize: 10, opacity: 0.75, marginLeft: 2 }}>{p.ahead}</span>}
-      </button>
-      {p.prUrl && (
-        <a
-          href={p.prUrl}
-          target="_blank"
-          rel="noreferrer"
-          style={{
-            ...topBtn(t),
-            textDecoration: 'none',
-          }}
-        >
-          <ExternalLink size={12} strokeWidth={1.75} />
-          Open PR
-        </a>
-      )}
+      <button onClick={p.onToggleAdvanced} style={topBtn(t)} title="Advanced versioning tools">{p.advancedOpen ? 'Hide advanced' : 'Advanced'}</button>
     </div>
   );
 }
@@ -792,11 +745,11 @@ function FileTree(p: FileTreeProps) {
           fontSize: 10, fontWeight: 600, letterSpacing: '0.08em',
           textTransform: 'uppercase', color: t.textMuted,
         }}>
-          Source control
+          Workspace changes
         </div>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10 }}>
           <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.01em', color: t.textPrimary }}>
-            Changes
+            Your changes
           </span>
           <span style={{ fontSize: 11, color: t.textMuted }}>{p.totalCount} files</span>
           <div style={{ flex: 1 }} />
@@ -1046,9 +999,11 @@ interface FileDiffHeaderProps {
   onStage: () => void;
   onUnstage: () => void;
   onDiscard: () => void;
+  reviewMode: 'plain' | 'code';
+  onReviewMode: (mode: 'plain' | 'code') => void;
 }
 
-function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }: FileDiffHeaderProps) {
+function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard, reviewMode, onReviewMode }: FileDiffHeaderProps) {
   return (
     <div
       style={{
@@ -1074,6 +1029,10 @@ function FileDiffHeader({ t, entry, stagedView, onStage, onUnstage, onDiscard }:
           )}
         </div>
       </div>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg }}>
+        <button onClick={() => onReviewMode('plain')} style={reviewToggle(t, reviewMode === 'plain')}>What changed</button>
+        <button onClick={() => onReviewMode('code')} style={reviewToggle(t, reviewMode === 'code')}>Code view</button>
+      </div>
       {!stagedView && (
         <>
           <button onClick={onDiscard} style={miniBtn(t)}>Discard</button>
@@ -1095,12 +1054,14 @@ function DiffBody({
   entry,
   loading,
   error,
+  reviewMode,
 }: {
   t: Theme;
   diff: string;
   entry: FileEntry;
   loading: boolean;
   error: string | null;
+  reviewMode: 'plain' | 'code';
 }) {
   if (loading) {
     return <DiffStatus t={t} title="Loading diff" body="Preparing the selected change for review." />;
@@ -1108,8 +1069,23 @@ function DiffBody({
   if (error) {
     return <DiffStatus t={t} title="Could not load diff" body={error} tone="error" />;
   }
-  return <DiffPane t={t} diff={diff} entry={entry} />;
+  return reviewMode === 'plain' ? <PlainDiffSummary t={t} diff={diff} entry={entry} /> : <DiffPane t={t} diff={diff} entry={entry} />;
 }
+
+function PlainDiffSummary({ t, diff, entry }: { t: Theme; diff: string; entry: FileEntry }) {
+  const parsed = parseDiff(diff);
+  const added = parsed.filter((line) => line.kind === 'add').length;
+  const removed = parsed.filter((line) => line.kind === 'del').length;
+  const summaries = [
+    added > 0 ? { icon: '+', tone: t.success, text: `Added ${added} line${added === 1 ? '' : 's'} of reviewed workspace content.` } : null,
+    removed > 0 ? { icon: '−', tone: t.warning, text: `Updated or replaced ${removed} existing line${removed === 1 ? '' : 's'}.` } : null,
+    { icon: '✓', tone: t.accent, text: `${artifactKind(entry.path)} remains inside the same governed project scope.` },
+  ].filter(Boolean) as Array<{ icon: string; tone: string; text: string }>;
+  return <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 16, background: t.appBg }}><div style={{ maxWidth: 590, display: 'grid', gap: 10 }}><div style={{ color: t.textMuted, fontSize: 9.5, fontWeight: 800, letterSpacing: '.05em', textTransform: 'uppercase' }}>Summary of this change</div><div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>{summaries.map((item) => <div key={item.text} style={{ display: 'flex', alignItems: 'flex-start', gap: 9, padding: '10px 13px', borderBottom: `1px solid ${t.headerBorder}`, color: t.textPrimary, fontSize: 12.5, lineHeight: 1.5 }}><span style={{ width: 18, height: 18, flex: '0 0 auto', borderRadius: 5, display: 'grid', placeItems: 'center', color: item.tone, background: `${item.tone}16`, fontWeight: 800 }}>{item.icon}</span>{item.text}</div>)}</div><div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: `1px solid ${t.success}40`, background: `${t.success}0d`, borderRadius: 10, padding: '10px 13px', color: t.success, fontSize: 11.5, lineHeight: 1.5 }}><ShieldCheck size={13} style={{ flex: '0 0 auto', marginTop: 1 }} /><span>Safe to review — only the files you explicitly include will be shared. Unselected work stays in your workspace.</span></div></div></div>;
+}
+
+function artifactKind(path: string): string { if (path.includes('/blocks/')) return 'This block'; if (path.includes('/domains/')) return 'This domain definition'; if (path.includes('/apps/')) return 'This app'; if (path.includes('/notebooks/')) return 'This notebook'; return 'This file'; }
+function reviewToggle(t: Theme, active: boolean): React.CSSProperties { return { border: 0, borderRadius: 5, padding: '4px 10px', background: active ? t.cellBg : 'transparent', color: active ? t.textPrimary : t.textMuted, fontSize: 10.5, fontWeight: 650, cursor: 'pointer', boxShadow: active ? '0 1px 3px rgba(0,0,0,.08)' : undefined }; }
 
 function DiffPane({ t, diff, entry }: { t: Theme; diff: string; entry: FileEntry }) {
   if (!diff.trim()) {
@@ -1119,8 +1095,8 @@ function DiffPane({ t, diff, entry }: { t: Theme; diff: string; entry: FileEntry
         title="No text hunks to review"
         body={
           entry.status === '?'
-            ? 'This untracked item does not expose a readable text diff yet. Stage it to include it in the next commit.'
-            : 'Git reports this file changed, but there are no line-level text hunks for this selection.'
+            ? 'This new item does not expose a readable text preview yet. Include it to share the complete file.'
+            : 'This file changed, but there are no line-level text details for this selection.'
         }
       />
     );
@@ -1341,7 +1317,7 @@ function ShareFlow({ t, commitMsg, setCommitMsg, includedCount, totalCount, bran
     >
       <div style={{ padding: '14px 16px 12px', borderBottom: `1px solid ${t.headerBorder}` }}>
         <div style={{ fontSize: 13, fontWeight: 750, color: t.textPrimary }}>Share your work</div>
-        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Four guided steps — no Git commands needed.</div>
+        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Four guided steps — no command line needed.</div>
       </div>
       <div style={{ padding: '14px 16px 18px', display: 'flex', flexDirection: 'column' }}>
         {steps.map((step, index) => (
@@ -1359,7 +1335,7 @@ function ShareFlow({ t, commitMsg, setCommitMsg, includedCount, totalCount, bran
             </div>
           </div>
         ))}
-        <button onClick={onToggleAdvanced} style={{ ...miniBtn(t), alignSelf: 'flex-start', marginTop: 12 }}>{advancedOpen ? 'Hide Git details' : 'Git details'}</button>
+        <button onClick={onToggleAdvanced} style={{ ...miniBtn(t), alignSelf: 'flex-start', marginTop: 12 }}>{advancedOpen ? 'Hide advanced' : 'Advanced'}</button>
       </div>
       {advancedOpen && (
         <div style={{ display: 'grid', gap: 8, margin: '0 16px 16px', padding: 10, border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.appBg }}>
@@ -1397,9 +1373,9 @@ function NotARepo({ t }: { t: Theme }) {
       flexDirection: 'column', gap: 12, padding: 40, background: t.appBg,
     }}>
       <GitBranch size={36} strokeWidth={1.5} color={t.textMuted} style={{ opacity: 0.5 }} />
-      <div style={{ fontSize: 16, fontWeight: 600, color: t.textPrimary }}>Not a git repository</div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: t.textPrimary }}>This folder is not versioned yet</div>
       <div style={{ fontSize: 13, color: t.textMuted, maxWidth: 420, textAlign: 'center' }}>
-        Initialize this folder with <code style={{ fontFamily: t.fontMono }}>git init</code> to start tracking changes.
+        Initialize source control for this workspace before reviewing and sharing changes.
       </div>
     </div>
   );
