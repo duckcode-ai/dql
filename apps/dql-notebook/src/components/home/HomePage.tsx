@@ -1,783 +1,195 @@
-import type { Theme } from '../../themes/notebook-theme';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   Blocks,
   BookOpenText,
+  Bot,
+  Box,
   Check,
+  ChevronLeft,
   Database,
-  FileJson,
+  FileText,
   GitBranch,
+  Link2,
+  MessageCircle,
   Network,
-  Play,
   ShieldCheck,
   Sparkles,
-  Workflow,
-  type LucideIcon,
 } from 'lucide-react';
+import { api, type ProviderSettings, type ProviderSettingsId } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import type { BlockStudioDbtStatus, NotebookFile, SemanticLayerState, SettingsTab, SidebarPanel } from '../../store/types';
-import { api } from '../../api/client';
+import type { BlockStudioDbtStatus } from '../../store/types';
 import { SetupWizard } from '../modals/SetupWizard';
-import { StarterBlocks } from './StarterBlocks';
 
-type StepState = 'ready' | 'active' | 'waiting';
+const STEP_LABELS = ['How it works', 'dbt', 'Database', 'AI provider', 'Start'];
+const WAREHOUSES = [
+  { id: 'duckdb', label: 'DuckDB', glyph: '◗' },
+  { id: 'snowflake', label: 'Snowflake', glyph: '❄' },
+  { id: 'databricks', label: 'Databricks', glyph: '◆' },
+  { id: 'file', label: 'Local files', glyph: '▤' },
+] as const;
 
-interface ConnectionInfo {
-  default: string;
-  connections: Record<string, unknown>;
-  dbtProfiles?: Array<{ id: string; profileName: string; targetName: string; missingFields: string[] }>;
-}
-
-interface WorkflowStep {
-  id: string;
-  number: string;
-  title: string;
-  body: string;
-  state: StepState;
-  Icon: LucideIcon;
-  primaryLabel: string;
-  onPrimary: () => void;
-  secondaryLabel?: string;
-  onSecondary?: () => void;
-  evidence: string[];
-}
-
-const ARTIFACTS = [
-  ['dql-manifest.json', 'Compiled project graph for lineage, trust, Apps, and AI context.'],
-  ['semantic-layer/', 'Imported or authored metrics, dimensions, models, and saved queries.'],
-  ['connections', 'Warehouse credentials and schema status for executing blocks.'],
-  ['blocks/', 'Reusable DQL blocks built from dbt objects, SQL, tables, or semantic metrics.'],
-  ['notebooks/', 'Analysis workspaces where users explore, edit, and assemble blocks.'],
-  ['apps/', 'Published consumption surfaces for stakeholders.'],
-];
+type AsyncState = 'idle' | 'testing' | 'ok' | 'error';
 
 export function HomePage() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const counts = countFiles(state.files);
-  const semanticCounts = countSemanticObjects(state.semanticLayer);
-  const dbtStatus = state.blockStudioDbtStatus;
-  const sourceCounts = {
-    models: Math.max(semanticCounts.models, dbtStatus?.counts.semanticModels ?? 0, dbtStatus?.counts.models ?? 0),
-    metrics: Math.max(semanticCounts.metrics, dbtStatus?.counts.metrics ?? 0),
-    dimensions: semanticCounts.dimensions,
-    savedQueries: Math.max(semanticCounts.savedQueries, dbtStatus?.counts.savedQueries ?? 0),
-  };
-  const schemaCounts = countSchema(state.schemaTables);
+  const [step, setStep] = useState(0);
+  const [dbtStatus, setDbtStatus] = useState<BlockStudioDbtStatus | null>(state.blockStudioDbtStatus);
+  const [connections, setConnections] = useState<{ default: string; connections: Record<string, unknown> }>({ default: '', connections: {} });
+  const [providers, setProviders] = useState<ProviderSettings[]>([]);
+  const [dbtWizardOpen, setDbtWizardOpen] = useState(false);
+  const [warehouse, setWarehouse] = useState('duckdb');
+  const [authMode, setAuthMode] = useState<'credentials' | 'enterprise'>('credentials');
+  const [dbState, setDbState] = useState<AsyncState>('idle');
+  const [dbMessage, setDbMessage] = useState('');
+  const [providerId, setProviderId] = useState<ProviderSettingsId>('anthropic');
+  const [providerMode, setProviderMode] = useState('API key');
+  const [apiKey, setApiKey] = useState('');
+  const [providerState, setProviderState] = useState<AsyncState>('idle');
+  const [providerMessage, setProviderMessage] = useState('');
 
-  const [connections, setConnections] = useState<ConnectionInfo | null>(null);
-  const [aiReady, setAiReady] = useState(false);
-  const [setupWizardOpen, setSetupWizardOpen] = useState(false);
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void api.getConnections().then((info) => {
-      if (!cancelled) setConnections(info as ConnectionInfo);
-    });
-
-    // AI provider config gates the whole product — a provider counts as ready
-    // when it's enabled and either has a key or is Ollama (which needs none).
-    void api.getProviderSettings()
-      .then((res) => {
-        if (!cancelled) setAiReady(res.providers.some((p) => p.enabled && (p.hasApiKey || p.id === 'ollama')));
-      })
-      .catch(() => { /* leave aiReady false */ });
-
-    void api.getBlockStudioDbtStatus()
-      .then((status: BlockStudioDbtStatus) => {
-        if (!cancelled) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status });
-      })
-      .catch(() => {
-        if (!cancelled) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status: null });
-      });
-
-    dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
-    void api.getSemanticLayer()
-      .then((layer) => {
-        if (!cancelled) dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-      })
-      .finally(() => {
-        if (!cancelled) dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
-      });
-
-    dispatch({ type: 'SET_APPS_LOADING', loading: true });
-    void api.listApps()
-      .then((apps) => {
-        if (!cancelled) dispatch({ type: 'SET_APPS', apps });
-      })
-      .catch(() => {
-        if (!cancelled) dispatch({ type: 'SET_APPS', apps: [] });
-      })
-      .finally(() => {
-        if (!cancelled) dispatch({ type: 'SET_APPS_LOADING', loading: false });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [dispatch]);
-
-  const connectionCount = Object.keys(connections?.connections ?? {}).length;
-  const dbtProfileCount = connections?.dbtProfiles?.length ?? 0;
-  const dbtArtifactsReady = Boolean(dbtStatus?.artifacts.manifest.exists || dbtStatus?.artifacts.semanticManifest.exists);
-  const sourceReady = dbtArtifactsReady || state.semanticLayer.available || semanticCounts.total > 0 || counts.blocks > 0;
-  const connectionReady = connectionCount > 0 || state.schemaTables.length > 0;
-  const dqlReady = counts.blocks > 0;
-  const notebookReady = counts.notebooks > 0;
-  const appReady = state.apps.length > 0;
-
-  const currentStep = !sourceReady
-    ? 'source'
-    : !connectionReady
-      ? 'connection'
-      : !aiReady
-        ? 'ai'
-        : !dqlReady
-          ? 'build'
-          : 'notebook';
-
-  const openPanel = (panel: SidebarPanel) => {
-    dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
-  };
-
-  const openSettingsTab = (tab: SettingsTab) => {
-    dispatch({ type: 'SET_SETTINGS_TAB', tab });
-    dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
-  };
-
-  const openSemanticBlock = () => {
-    dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' });
-    dispatch({ type: 'OPEN_NEW_BLOCK_MODAL', blockType: 'semantic' });
-  };
-
-  const openSqlImport = () => {
-    dispatch({ type: 'SET_MAIN_VIEW', view: 'imports' });
-  };
-
-  const refreshAfterSemanticImport = async () => {
-    dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
-    try {
-      const [layer, files] = await Promise.all([
-        api.getSemanticLayer(),
-        api.listNotebooks(),
-      ]);
-      dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-      dispatch({ type: 'SET_FILES', files });
-    } finally {
-      dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
+  const refresh = async () => {
+    const [nextDbt, nextConnections, providerResult] = await Promise.all([
+      api.getBlockStudioDbtStatus().catch(() => null),
+      api.getConnections(),
+      api.getProviderSettings(),
+    ]);
+    setDbtStatus(nextDbt);
+    setConnections(nextConnections);
+    setProviders(providerResult.providers);
+    const active = providerResult.providers.find((provider) => provider.active) ?? providerResult.providers.find((provider) => provider.enabled);
+    if (active) {
+      setProviderId(active.id);
+      if (active.enabled && (active.hasApiKey || active.authMode === 'subscription_cli' || active.id === 'ollama')) setProviderState('ok');
     }
+    if (Object.keys(nextConnections.connections).length) setDbState('ok');
   };
 
-  const steps: WorkflowStep[] = useMemo(() => [
-    {
-      id: 'source',
-      number: '1',
-      title: 'Connect dbt and compile context',
-      body: 'Start with the dbt repo or semantic source. Import models, metrics, dimensions, and compile the local manifest context that DQL uses for lineage and AI.',
-      state: sourceReady ? 'ready' : currentStep === 'source' ? 'active' : 'waiting',
-      Icon: GitBranch,
-      primaryLabel: sourceReady ? 'Refresh semantic import' : 'Connect dbt repo',
-      onPrimary: () => setSetupWizardOpen(true),
-      secondaryLabel: 'Browse lineage',
-      onSecondary: () => openPanel('lineage'),
-      evidence: [
-        `${sourceCounts.models} semantic models`,
-        `${sourceCounts.metrics} metrics`,
-        `${sourceCounts.dimensions} dimensions`,
-        `${counts.blocks + counts.businessViews} DQL artifacts`,
-      ],
-    },
-    {
-      id: 'connection',
-      number: '2',
-      title: 'Connect database and test access',
-      body: 'Use dbt profiles.yml where your runtime already resolves it, or enter warehouse credentials directly. Test the connection and refresh schema before building blocks.',
-      state: connectionReady ? 'ready' : currentStep === 'connection' ? 'active' : 'waiting',
-      Icon: Database,
-      primaryLabel: connectionReady ? 'Manage connections' : 'Add database connection',
-      onPrimary: () => openSettingsTab('database'),
-      secondaryLabel: 'Open connections',
-      onSecondary: () => openSettingsTab('database'),
-      evidence: [
-        `${connectionCount} connection${connectionCount === 1 ? '' : 's'}`,
-        `${dbtProfileCount} dbt profile target${dbtProfileCount === 1 ? '' : 's'}`,
-        `${schemaCounts.tables} tables`,
-        `${schemaCounts.columns} columns`,
-      ],
-    },
-    {
-      id: 'ai',
-      number: '3',
-      title: 'Connect an AI provider',
-      body: 'AI powers everything here — governed answers, AI block suggestions, and research. Without it you only get a static catalog. Add a provider (OpenAI, Anthropic, Gemini, or a local Ollama) and set the active one.',
-      state: aiReady ? 'ready' : currentStep === 'ai' ? 'active' : 'waiting',
-      Icon: Sparkles,
-      primaryLabel: aiReady ? 'Manage AI providers' : 'Connect AI provider',
-      onPrimary: () => openSettingsTab('ai'),
-      secondaryLabel: 'Open settings',
-      onSecondary: () => openSettingsTab('ai'),
-      evidence: [
-        aiReady ? 'AI provider ready' : 'No AI provider configured',
-      ],
-    },
-    {
-      id: 'build',
-      number: '4',
-      title: 'Build governed blocks',
-      body: 'Let AI suggest reusable DQL blocks from your dbt and semantic context, then open and save the ones that fit your business. Or build one by hand in Block Studio.',
-      state: dqlReady ? 'ready' : currentStep === 'build' ? 'active' : 'waiting',
-      Icon: Blocks,
-      primaryLabel: dqlReady ? 'Open block suggestions' : 'Suggest blocks with AI',
-      onPrimary: () => dispatch({ type: 'SET_MAIN_VIEW', view: 'readiness' }),
-      secondaryLabel: 'Open Block Studio',
-      onSecondary: () => dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' }),
-      evidence: [
-        `${counts.blocks} blocks`,
-        `${counts.terms} business terms`,
-        `${counts.businessViews} business views`,
-      ],
-    },
-    {
-      id: 'notebook',
-      number: '5',
-      title: 'Analyze in notebooks and publish to Apps',
-      body: 'Search, add, and edit notebooks around reviewed blocks. When the answer is ready, promote it into an App for stakeholder consumption.',
-      state: notebookReady || appReady ? 'ready' : currentStep === 'notebook' ? 'active' : 'waiting',
-      Icon: BookOpenText,
-      primaryLabel: notebookReady ? 'Open notebooks' : 'Create notebook',
-      onPrimary: () => {
-        if (notebookReady) openPanel('files');
-        else dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' });
-      },
-      secondaryLabel: appReady ? 'Open Apps' : 'Build App',
-      onSecondary: () => openPanel('apps'),
-      evidence: [
-        `${counts.notebooks} notebooks`,
-        `${state.apps.length} apps`,
-        `${state.apps.reduce((sum, app) => sum + app.dashboards.length, 0)} dashboards`,
-      ],
-    },
-  ], [
-    aiReady,
-    appReady,
-    connectionCount,
-    connectionReady,
-    counts.blocks,
-    counts.businessViews,
-    counts.notebooks,
-    counts.terms,
-    currentStep,
-    dqlReady,
-    dbtProfileCount,
-    notebookReady,
-    schemaCounts.columns,
-    schemaCounts.tables,
-    sourceCounts.dimensions,
-    sourceCounts.metrics,
-    sourceReady,
-    state.apps,
-  ]);
+  useEffect(() => { void refresh(); }, []);
 
-  const readyCount = steps.filter((step) => step.state === 'ready').length;
-  const currentStepObj = steps.find((step) => step.id === currentStep) ?? steps[0];
-  const focusStep = steps.find((step) => step.id === selectedStepId) ?? currentStepObj;
-  const allReady = readyCount === steps.length;
+  const sourceReady = Boolean(dbtStatus?.artifacts.manifest.exists || dbtStatus?.artifacts.semanticManifest.exists);
+  const provider = providers.find((item) => item.id === providerId);
+  const providerReady = providerState === 'ok' || Boolean(provider?.enabled && (provider.hasApiKey || provider.authMode === 'subscription_cli' || provider.id === 'ollama'));
+  const connectionReady = dbState === 'ok' || Object.keys(connections.connections).length > 0;
+  const canContinue = step === 0 || step === 1 ? sourceReady || step === 0 : step === 2 ? connectionReady : step === 3 ? providerReady : true;
+  const nextLabel = ['Start setup', 'Next · Database', 'Next · AI provider', 'Next · Choose your start', ''][step];
 
-  return (
-    <div
-      style={{
-        flex: 1,
-        minWidth: 0,
-        overflow: 'auto',
-        background: t.appBg,
-      }}
-    >
-      <style>{HOME_PAGE_STYLES}</style>
-      <main className="dql-home-page">
-        <section className="dql-home-hero dql-home-fade" style={{ animationDelay: '0ms' }}>
-          <div className="dql-home-hero-copy">
-            <div className="dql-home-brand-row">
-              <span className="dql-home-logo">DQL</span>
-              <span style={{ color: t.textMuted }}>Welcome to DQL</span>
-            </div>
-            <h1 style={{ color: t.textPrimary }}>
-              {allReady ? 'Your governed workspace is ready' : "Analytics your AI can't hallucinate"}
-            </h1>
-            <p className="dql-home-lead" style={{ color: t.textSecondary }}>
-              {allReady
-                ? 'Your sources, runtime, governed blocks, notebooks, and Apps are connected. Continue from any step.'
-                : 'DQL sits on your dbt project and routes questions through governed context before AI writes SQL.'}
-            </p>
-            {!allReady && <div className="dql-home-proof-list" style={{ color: t.textSecondary }}>
-              <span><Check size={13} color={t.success} /> Models and tests stay owned by dbt</span>
-              <span><Check size={13} color={t.success} /> Certified blocks are reused before new SQL is drafted</span>
-              <span><Check size={13} color={t.success} /> Every answer keeps its sources, trust state, and review path</span>
-            </div>}
-            <div className="dql-home-cta-row">
-              <button className="dql-home-primary-btn" onClick={currentStepObj.onPrimary}>
-                <currentStepObj.Icon size={15} strokeWidth={2.2} aria-hidden="true" />
-                {allReady ? 'Continue building' : 'Start setup'}
-                <ArrowRight size={15} strokeWidth={2.2} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-          <div className="dql-home-progress-badge" style={{ borderColor: t.cellBorder, background: t.inputBg }}>
-            <ProgressRing ready={readyCount} total={steps.length} t={t} />
-            <div>
-              <strong style={{ color: t.textPrimary }}>{readyCount} of {steps.length} ready</strong>
-              <span style={{ color: t.textMuted }}>{allReady ? 'All set up' : nextActionShort(currentStep)}</span>
-            </div>
-          </div>
-        </section>
-
-        <section className="dql-home-stepper dql-home-fade" aria-label="DQL setup steps" style={{ animationDelay: '60ms' }}>
-          {steps.map((step, index) => (
-            <Stepper
-              key={step.id}
-              step={step}
-              index={index}
-              total={steps.length}
-              selected={focusStep?.id === step.id}
-              t={t}
-              onSelect={() => setSelectedStepId(step.id)}
-            />
-          ))}
-        </section>
-
-        {focusStep && (
-          <section className="dql-home-fade" style={{ animationDelay: '120ms' }}>
-            <StepFocusCard step={focusStep} t={t} />
-          </section>
-        )}
-
-        {/* First-run teaching: when the user is on the "build blocks" step and has
-            no blocks yet, show a few AI-drafted starter blocks inline so they can
-            learn the concept by example before building their own. */}
-        {focusStep?.id === 'build' && !dqlReady && (
-          <section className="dql-home-fade" style={{ animationDelay: '150ms' }}>
-            <StarterBlocks t={t} aiReady={aiReady} onSetupAi={() => openSettingsTab('ai')} />
-          </section>
-        )}
-
-        <section className="dql-home-metrics dql-home-fade" style={{ animationDelay: '180ms' }}>
-          <MetricChip label="Blocks" value={counts.blocks} Icon={Blocks} t={t} />
-          <MetricChip label="Notebooks" value={counts.notebooks} Icon={BookOpenText} t={t} />
-          <MetricChip label="Apps" value={state.apps.length} Icon={Workflow} t={t} />
-          <MetricChip label="Tables" value={schemaCounts.tables} Icon={Database} t={t} />
-          <MetricChip label="Metrics" value={sourceCounts.metrics} Icon={Network} t={t} />
-        </section>
-
-        <details className="dql-home-details dql-home-fade" style={{ animationDelay: '240ms', borderColor: t.cellBorder, background: t.cellBg }}>
-          <summary style={{ color: t.textSecondary }}>
-            <span>Project details</span>
-            <span className="dql-home-details-hint" style={{ color: t.textMuted }}>catalog, schema, and artifacts</span>
-          </summary>
-          <div className="dql-home-details-body">
-            <div className="dql-home-context-grid">
-              <ContextPanel
-                title="Source objects"
-                description="Trusted inputs from dbt and semantic imports."
-                Icon={GitBranch}
-                t={t}
-                rows={[
-                  ['dbt project', dbtStatus?.projectName ?? (dbtStatus?.configured ? 'Configured' : 'Not detected')],
-                  ['manifest.json', artifactLabel(dbtStatus?.artifacts.manifest)],
-                  ['semantic_manifest.json', artifactLabel(dbtStatus?.artifacts.semanticManifest)],
-                  ['Semantic models', String(sourceCounts.models)],
-                  ['Metrics', String(sourceCounts.metrics)],
-                  ['Dimensions', String(sourceCounts.dimensions)],
-                ]}
-                actionLabel="Connect or refresh"
-                onAction={() => setSetupWizardOpen(true)}
-              />
-              <ContextPanel
-                title="Database catalog"
-                description="Connection and schema determine whether blocks run."
-                Icon={Database}
-                t={t}
-                rows={[
-                  ['Default connection', connections?.default ?? 'Unknown'],
-                  ['Connection profiles', String(connectionCount)],
-                  ['dbt profile targets', String(dbtProfileCount)],
-                  ['Schemas', String(schemaCounts.schemas)],
-                  ['Tables', String(schemaCounts.tables)],
-                  ['Columns', String(schemaCounts.columns)],
-                ]}
-                actionLabel="Open connections"
-                onAction={() => openPanel('connection')}
-              />
-              <ContextPanel
-                title="Authoring inventory"
-                description="Versioned files that move into notebooks and Apps."
-                Icon={FileJson}
-                t={t}
-                rows={[
-                  ['Blocks', String(counts.blocks)],
-                  ['Business terms', String(counts.terms)],
-                  ['Business views', String(counts.businessViews)],
-                  ['Notebooks', String(counts.notebooks)],
-                  ['Apps', String(state.apps.length)],
-                ]}
-                actionLabel="Open Block Studio"
-                onAction={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'block_studio' })}
-              />
-            </div>
-            <div className="dql-home-artifact-list">
-              {ARTIFACTS.map(([name, description]) => (
-                <div key={name} className="dql-home-artifact-row" style={{ borderColor: t.cellBorder }}>
-                  <code style={{ color: t.textPrimary }}>{name}</code>
-                  <span style={{ color: t.textSecondary }}>{description}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </details>
-      </main>
-
-      {setupWizardOpen && (
-        <SetupWizard
-          detectedProvider={state.semanticLayer.provider}
-          onClose={() => setSetupWizardOpen(false)}
-          onImported={() => void refreshAfterSemanticImport()}
-        />
-      )}
-    </div>
-  );
-}
-
-const SUCCESS = 'var(--status-success, #16a34a)';
-
-function stepColor(state: StepState, t: Theme): string {
-  if (state === 'ready') return SUCCESS;
-  if (state === 'active') return t.warning;
-  return t.textMuted;
-}
-
-function Stepper({
-  step,
-  index,
-  total,
-  selected,
-  t,
-  onSelect,
-}: {
-  step: WorkflowStep;
-  index: number;
-  total: number;
-  selected: boolean;
-  t: Theme;
-  onSelect: () => void;
-}) {
-  const Icon = step.Icon;
-  const badgeStyle = step.state === 'ready'
-    ? { background: SUCCESS, borderColor: SUCCESS, color: '#fff' }
-    : step.state === 'active'
-      ? { background: t.cellBg, borderColor: t.warning, color: t.warning }
-      : { background: t.cellBg, borderColor: t.cellBorder, color: t.textMuted };
-  return (
-    <button
-      type="button"
-      className={`dql-home-node is-${step.state} ${selected ? 'is-selected' : ''}`}
-      onClick={onSelect}
-      style={{ color: t.textSecondary, background: selected ? t.cellBg : 'transparent' }}
-    >
-      {index < total - 1 ? (
-        <span className="dql-home-node-track" aria-hidden="true" style={{ background: step.state === 'ready' ? SUCCESS : t.cellBorder }} />
-      ) : null}
-      <span className="dql-home-node-badge" aria-hidden="true" style={badgeStyle}>
-        {step.state === 'ready' ? <Check size={18} strokeWidth={3} /> : <Icon size={18} strokeWidth={2} />}
-      </span>
-      <span className="dql-home-node-meta">
-        <span className="dql-home-node-title" style={{ color: t.textPrimary }}>{step.title.split(' ').slice(0, 3).join(' ')}</span>
-        <span className="dql-home-node-status" style={{ color: stepColor(step.state, t) }}>{statusLabel(step.state)}</span>
-      </span>
-    </button>
-  );
-}
-
-function StepFocusCard({ step, t }: { step: WorkflowStep; t: Theme }) {
-  const Icon = step.Icon;
-  return (
-    <article className={`dql-home-focus is-${step.state}`} style={{ borderColor: step.state === 'active' ? t.warning : step.state === 'ready' ? `${SUCCESS}` : t.cellBorder, background: t.cellBg }}>
-      <div className="dql-home-focus-icon" style={{ background: `${t.accent}16`, color: t.accent }}>
-        <Icon size={20} strokeWidth={2} aria-hidden="true" />
-      </div>
-      <div className="dql-home-focus-body">
-        <div className="dql-home-focus-head">
-          <h2 style={{ color: t.textPrimary }}>{step.title}</h2>
-          <span className="dql-home-status" style={{ color: stepColor(step.state, t), background: `${stepColor(step.state, t)}1f` }}>{statusLabel(step.state)}</span>
-        </div>
-        <p style={{ color: t.textSecondary }}>{step.body}</p>
-        <div className="dql-home-evidence">
-          {step.evidence.map((item) => (
-            <span key={item} style={{ borderColor: t.cellBorder, color: t.textMuted }}>{item}</span>
-          ))}
-        </div>
-        <div className="dql-home-card-actions">
-          <button className="dql-home-primary-btn dql-home-card-btn" onClick={step.onPrimary}>
-            {step.primaryLabel}
-            <ArrowRight size={15} strokeWidth={2.2} aria-hidden="true" />
-          </button>
-          {step.secondaryLabel && step.onSecondary && (
-            <button className="dql-home-secondary-btn dql-home-card-btn" onClick={step.onSecondary}>
-              {step.secondaryLabel}
-            </button>
-          )}
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function MetricChip({ label, value, Icon, t }: { label: string; value: number; Icon: LucideIcon; t: Theme }) {
-  return (
-    <div className="dql-home-metric" style={{ borderColor: t.cellBorder, background: t.cellBg }}>
-      <span className="dql-home-metric-icon" style={{ color: t.accent }}><Icon size={15} strokeWidth={2} aria-hidden="true" /></span>
-      <strong style={{ color: t.textPrimary }}>{value.toLocaleString()}</strong>
-      <span style={{ color: t.textMuted }}>{label}</span>
-    </div>
-  );
-}
-
-function ProgressRing({ ready, total, t }: { ready: number; total: number; t: Theme }) {
-  const pct = total > 0 ? ready / total : 0;
-  const r = 16;
-  const c = 2 * Math.PI * r;
-  return (
-    <svg className="dql-home-ring" width={44} height={44} viewBox="0 0 44 44" aria-hidden="true">
-      <circle cx="22" cy="22" r={r} fill="none" stroke={t.cellBorder} strokeWidth="4" />
-      <circle
-        cx="22" cy="22" r={r} fill="none"
-        stroke={SUCCESS} strokeWidth="4" strokeLinecap="round"
-        strokeDasharray={c} strokeDashoffset={c * (1 - pct)}
-        transform="rotate(-90 22 22)"
-        style={{ transition: 'stroke-dashoffset 700ms ease' }}
-      />
-      <text x="22" y="26" textAnchor="middle" fontSize="12" fontWeight="800" fill={t.textPrimary}>{ready}</text>
-    </svg>
-  );
-}
-
-function nextActionShort(currentStep: string): string {
-  if (currentStep === 'source') return 'Connect a dbt or semantic source';
-  if (currentStep === 'connection') return 'Add and test a database';
-  if (currentStep === 'ai') return 'Connect an AI provider';
-  if (currentStep === 'build') return 'Build your first DQL block';
-  return 'Open notebooks and publish an App';
-}
-
-function ContextPanel({
-  title,
-  description,
-  Icon,
-  rows,
-  actionLabel,
-  onAction,
-  t,
-}: {
-  title: string;
-  description: string;
-  Icon: LucideIcon;
-  rows: Array<[string, string]>;
-  actionLabel: string;
-  onAction: () => void;
-  t: Theme;
-}) {
-  return (
-    <section className="dql-home-context-panel" style={{ borderColor: t.cellBorder, background: t.cellBg }}>
-      <div className="dql-home-context-head">
-        <div className="dql-home-context-icon" style={{ background: `${t.accent}18`, color: t.accent }}>
-          <Icon size={18} strokeWidth={2} aria-hidden="true" />
-        </div>
-        <div>
-          <h2 style={{ color: t.textPrimary }}>{title}</h2>
-          <p style={{ color: t.textSecondary }}>{description}</p>
-        </div>
-      </div>
-      <div className="dql-home-context-rows">
-        {rows.map(([label, value]) => (
-          <div key={label} className="dql-home-context-row" style={{ borderColor: t.cellBorder }}>
-            <span style={{ color: t.textMuted }}>{label}</span>
-            <strong style={{ color: t.textPrimary }}>{value}</strong>
-          </div>
-        ))}
-      </div>
-      <button className="dql-home-link-btn" onClick={onAction}>
-        {actionLabel}
-        <ArrowRight size={15} strokeWidth={2} aria-hidden="true" />
-      </button>
-    </section>
-  );
-}
-
-function statusLabel(state: StepState): string {
-  if (state === 'ready') return 'Ready';
-  if (state === 'active') return 'Next';
-  return 'Waiting';
-}
-
-function nextActionCopy(currentStep: string): string {
-  if (currentStep === 'source') {
-    return 'Connect a dbt project or semantic source first. DQL needs source context before it can recommend useful blocks and lineage.';
-  }
-  if (currentStep === 'connection') {
-    return 'Add a database connection and test it. This confirms DQL can execute the blocks created from your source context.';
-  }
-  if (currentStep === 'build') {
-    return 'Create the first reviewed DQL block from a semantic metric, dbt model, table, or imported SQL file.';
-  }
-  return 'Open a notebook, assemble the reviewed blocks, and publish the answer into an App when it is ready for others.';
-}
-
-function artifactLabel(artifact?: { exists: boolean; count?: number }): string {
-  if (!artifact) return 'Unknown';
-  if (!artifact.exists) return 'Missing';
-  return typeof artifact.count === 'number' ? `Ready (${artifact.count})` : 'Ready';
-}
-
-function countFiles(files: NotebookFile[]) {
-  return files.reduce(
-    (acc, file) => {
-      if (file.type === 'block') acc.blocks += 1;
-      else if (file.type === 'term') acc.terms += 1;
-      else if (file.type === 'business_view') acc.businessViews += 1;
-      else if (file.type === 'notebook' || file.type === 'workbook') acc.notebooks += 1;
-      return acc;
-    },
-    { notebooks: 0, blocks: 0, terms: 0, businessViews: 0 },
-  );
-}
-
-function countSemanticObjects(layer: SemanticLayerState) {
-  const metrics = layer.metrics.length;
-  const measures = layer.measures.length;
-  const dimensions = layer.dimensions.length + layer.timeDimensions.length;
-  const models = layer.semanticModels.length;
-  const savedQueries = layer.savedQueries.length;
-  return {
-    metrics,
-    measures,
-    dimensions,
-    models,
-    savedQueries,
-    total: metrics + measures + dimensions + models + savedQueries + layer.entities.length + layer.hierarchies.length,
+  const testDatabase = async () => {
+    setDbState('testing');
+    setDbMessage('Running a read-only test query…');
+    const result = await api.testConnection();
+    setDbState(result.ok ? 'ok' : 'error');
+    setDbMessage(result.message);
   };
+
+  const testProvider = async () => {
+    setProviderState('testing');
+    setProviderMessage('Running a test prompt…');
+    const result = await api.testProviderSettings(providerId, apiKey ? { apiKey } : undefined);
+    setProviderState(result.ok ? 'ok' : 'error');
+    setProviderMessage(result.message);
+  };
+
+  const open = (view: 'ask' | 'modeling' | 'block_studio' | 'apps') => dispatch({ type: 'SET_MAIN_VIEW', view });
+
+  return <div className="dql-setup" style={{ color: t.textPrimary, background: t.appBg }}>
+    <style>{SETUP_STYLES}</style>
+    <header className="dql-setup-header" style={{ background: t.headerBg, borderColor: t.headerBorder }}>
+      <div className="dql-setup-brand"><span>DQL</span><b>Setup</b></div>
+      <div className="dql-setup-quiet">Local-first · secrets stay in <code>.dql/</code></div>
+    </header>
+
+    <nav className="dql-setup-stepper" aria-label="Setup progress" style={{ background: t.headerBg, borderColor: t.headerBorder }}>
+      {STEP_LABELS.map((label, index) => <button key={label} className={index === step ? 'active' : index < step ? 'complete' : ''} onClick={() => index <= step && setStep(index)}><span>{index < step ? <Check size={11} /> : index + 1}</span>{label}</button>)}
+    </nav>
+
+    <main className="dql-setup-body">
+      {step === 0 && <WelcomeStory />}
+      {step === 1 && <SetupSection eyebrow="Step 1 of 4" title="Connect your dbt project" description="DQL reads your manifest, catalog, tests, and semantic layer. dbt keeps ownership; DQL adds governed analytical context on top.">
+        <div className="dql-setup-card">
+          <Field label="dbt project"><input defaultValue={dbtStatus?.projectName ?? './analytics'} placeholder="./path/to/dbt-project" /></Field>
+          <Field label="Target"><select defaultValue="dev"><option>dev</option><option>prod</option></select></Field>
+          <div className="dql-setup-inline-actions"><button className="primary" onClick={() => setDbtWizardOpen(true)}>Connect &amp; run manifest</button><button className="secondary" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'lineage' })}>Preview lineage</button></div>
+          {sourceReady ? <Success title="Connected — manifest compiled" body={`${dbtStatus?.counts.models ?? 0} models · ${dbtStatus?.counts.metrics ?? 0} metrics · ${dbtStatus?.projectName ?? 'dbt project'}`} /> : <Notice>Run the manifest to verify the project before continuing.</Notice>}
+        </div>
+      </SetupSection>}
+
+      {step === 2 && <SetupSection eyebrow="Step 2 of 4" title="Connect your database" description="Where queries run. Pick your warehouse — DQL installs the matching catalog driver for you.">
+        <div className="dql-warehouse-grid">{WAREHOUSES.map((item) => <button key={item.id} className={warehouse === item.id ? 'active' : ''} onClick={() => { setWarehouse(item.id); setDbState('idle'); }}><b>{item.glyph}</b><span>{item.label}</span></button>)}</div>
+        <div className="dql-setup-card">
+          <div className="dql-driver-status"><Check size={13} />{WAREHOUSES.find((item) => item.id === warehouse)?.label} catalog driver installed</div>
+          <label className="dql-field"><span>Authenticate with</span><div className="dql-choice-row"><button className={authMode === 'credentials' ? 'active' : ''} onClick={() => setAuthMode('credentials')}><i />Credentials<small>Username, SSO, or key pair</small></button><button className={authMode === 'enterprise' ? 'active' : ''} onClick={() => setAuthMode('enterprise')}><i />Enterprise key<small>Managed by your admin</small></button></div></label>
+          {authMode === 'enterprise' ? <Field label="Enterprise connection key"><input type="password" placeholder="dqlk_….paste from your admin" /></Field> : <WarehouseFields warehouse={warehouse} />}
+          <button className="primary fit" onClick={() => void testDatabase()} disabled={dbState === 'testing'}>{dbState === 'testing' ? 'Running a read-only test query…' : 'Test connection'}</button>
+          {dbState === 'ok' && <Success title={`Connected to ${WAREHOUSES.find((item) => item.id === warehouse)?.label}`} body={dbMessage || 'dbt models matched to warehouse tables'} />}
+          {dbState === 'error' && <ErrorNotice>{dbMessage}</ErrorNotice>}
+        </div>
+      </SetupSection>}
+
+      {step === 3 && <SetupSection eyebrow="Step 3 of 4" title="Set up an AI provider" required description="Powers Ask AI, block suggestions, and research — you'll build dramatically faster with it. Use a subscription, an API key, or a local model.">
+        <div className="dql-setup-card">
+          <div className="dql-two-fields"><Field label="Provider"><select value={providerId} onChange={(event) => { setProviderId(event.target.value as ProviderSettingsId); setProviderState('idle'); }}><option value="claude-code">Claude subscription</option><option value="codex">ChatGPT subscription</option><option value="anthropic">Anthropic Claude</option><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option><option value="ollama">Ollama — local</option></select></Field><Field label="Connect with"><select value={providerMode} onChange={(event) => setProviderMode(event.target.value)}><option>{providerId === 'ollama' ? 'Local runtime' : 'API key'}</option><option>Subscription CLI</option><option>Environment variable</option></select></Field></div>
+          {providerId === 'ollama' ? <Field label="Ollama base URL"><input defaultValue="http://127.0.0.1:11434" /></Field> : providerMode === 'API key' && !['claude-code', 'codex'].includes(providerId) ? <Field label="API key (or set it in your environment)"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={providerId === 'anthropic' ? 'sk-ant-…' : 'sk-…'} /></Field> : <Notice>Your installed provider CLI will open its secure sign-in flow. DQL never reads the subscription credential.</Notice>}
+          <div className="dql-setup-inline-actions"><button className="primary fit" onClick={() => void testProvider()} disabled={providerState === 'testing'}>{providerState === 'testing' ? 'Running a test prompt…' : 'Test provider'}</button><button className="secondary" onClick={() => { dispatch({ type: 'SET_SETTINGS_TAB', tab: 'ai' }); dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' }); }}>Advanced provider settings</button></div>
+          {providerReady && <Success title={`${provider?.label ?? providerId} ready`} body={providerMessage || 'Governed prompt template verified'} />}
+          {providerState === 'error' && <ErrorNotice>{providerMessage}</ErrorNotice>}
+        </div>
+      </SetupSection>}
+
+      {step === 4 && <SetupSection eyebrow="Step 4 of 4 · You're connected" title="Where do you want to start?" centered>
+        <div className="dql-start-grid"><StartCard icon={<Network size={16} />} title="Build your domain" body="Model entities, prove joins, add skills. Domain-level setup gives the AI the highest answer accuracy." hint="~15 min · recommended →" badge="Best accuracy" onClick={() => open('modeling')} /><StartCard icon={<MessageCircle size={16} />} title="Ask AI now" body="Ask your first business question — answers are grounded in your dbt models from day one." hint="instant →" onClick={() => open('ask')} /><StartCard icon={<BookOpenText size={16} />} title="Research notebook" body="Deep-dive with SQL, DQL, and charts — save the good parts as reusable blocks." hint="for analysts →" onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })} /><StartCard icon={<Blocks size={16} />} title="Build a block" body="Turn a trusted metric or recurring query into a reusable governed answer." hint="Block Studio →" onClick={() => open('block_studio')} /><StartCard icon={<Box size={16} />} title="Generate an app" body="Compose certified blocks into a stakeholder-ready analytics experience." hint="Apps →" onClick={() => open('apps')} /></div>
+      </SetupSection>}
+    </main>
+
+    <footer className="dql-setup-footer" style={{ background: t.headerBg, borderColor: t.headerBorder }}>
+      <button className="back" onClick={() => setStep((value) => Math.max(0, value - 1))} disabled={step === 0}><ChevronLeft size={14} />Back</button>
+      <span>{step < 4 ? 'You can return to Setup at any time.' : 'Your workspace is ready.'}</span>
+      {step < 4 && <button className="primary" disabled={!canContinue} onClick={() => setStep((value) => Math.min(4, value + 1))}>{nextLabel}<ArrowRight size={14} /></button>}
+    </footer>
+
+    {dbtWizardOpen && <SetupWizard detectedProvider={state.semanticLayer.provider} onClose={() => setDbtWizardOpen(false)} onImported={() => { setDbtWizardOpen(false); void refresh(); }} />}
+  </div>;
 }
 
-function countSchema(tables: Array<{ name: string; columns: unknown[] }>) {
-  const schemas = new Set<string>();
-  let columns = 0;
-  for (const table of tables) {
-    const [schema, ...rest] = table.name.split('.');
-    schemas.add(rest.length > 0 ? schema : 'default');
-    columns += table.columns.length;
-  }
-  return { schemas: schemas.size, tables: tables.length, columns };
+function WelcomeStory() {
+  const stages = [
+    [Database, 'Sources & dbt', 'Your warehouse and models — dbt keeps ownership'],
+    [Network, 'Domains & modeling', 'Business entities, proven joins, skills'],
+    [Blocks, 'Certified blocks', 'Reusable governed answers — reviewed & certified'],
+    [MessageCircle, 'Ask & research', 'Ask AI answers + notebooks for deep dives'],
+    [Box, 'Generative apps', 'Stakeholder apps built from certified blocks'],
+  ] as const;
+  return <div className="dql-welcome">
+    <section className="dql-welcome-hero"><div><span className="eyebrow"><Sparkles size={12} />Welcome to DQL</span><h1>Analytics your AI<br />can't hallucinate</h1><div className="dql-proof-list"><span><Check size={13} />Sits on your dbt project — models and tests stay yours</span><span><Check size={13} />Questions route through <strong>certified blocks</strong> before AI writes SQL</span><span><Check size={13} />Every answer carries a trust label your stakeholders can read</span></div></div><div className="dql-answer-card"><div className="question">What was revenue last quarter?</div><div className="trust"><ShieldCheck size={12} />Certified <small>from total_revenue · 0.3s</small></div><p>Q2 revenue was <strong>$4.82M</strong>, up 6.4% from Q1.</p><div className="trace"><Link2 size={11} />Traceable from source table to this answer</div></div></section>
+    <Chapter number="01" title="How a question becomes a trusted answer" subtitle="Five stages, one direction — watch the flow."><div className="dql-pipeline">{stages.map(([Icon, title, body], index) => <React.Fragment key={title}><div><Icon size={14} /><b>{title}</b><span>{body}</span></div>{index < stages.length - 1 && <ArrowRight size={14} />}</React.Fragment>)}</div><div className="dql-rail"><i />Lineage — trace any number from source to app, across domains</div><div className="dql-rail dashed"><i />Everything versioned — review and approve changes together</div></Chapter>
+    <Chapter number="02" title="Certify once, everyone reuses" subtitle="The loop that grows trust — and cuts AI cost with every pass." right><div className="dql-loop"><span>Research freely</span><ArrowRight size={12} /><span>Review together</span><ArrowRight size={12} /><span>Certify once</span><ArrowRight size={12} /><span>Reuse everywhere</span></div></Chapter>
+    <Chapter number="03" title="What DQL adds to dbt" subtitle="A governed decision layer without copying ownership."><div className="dql-chapter-grid"><div><GitBranch size={16} /><b>dbt stays the source</b><span>Models, columns, tests, lineage, and semantic formulas stay where your team owns them.</span></div><div><ShieldCheck size={16} /><b>DQL proves safe reuse</b><span>Business identity, relationship proof, skills, blocks, and review state guide the agent.</span></div><div><Bot size={16} /><b>AI stays inside the evidence</b><span>Answers show sources, trust state, and the path to review instead of hiding uncertainty.</span></div></div></Chapter>
+  </div>;
 }
 
-const HOME_PAGE_STYLES = `
-.dql-home-page {
-  width: min(1080px, calc(100% - 48px));
-  margin: 0 auto;
-  padding: 28px 0 56px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
+function Chapter({ number, title, subtitle, children, right = false }: { number: string; title: string; subtitle: string; children: React.ReactNode; right?: boolean }) { return <section className={`dql-chapter ${right ? 'right' : ''}`}><header><span>{number}</span><div><b>{title}</b><small>{subtitle}</small></div></header>{children}</section>; }
+function SetupSection({ eyebrow, title, description, children, required, centered }: { eyebrow: string; title: string; description?: string; children: React.ReactNode; required?: boolean; centered?: boolean }) { return <section className={`dql-setup-section ${centered ? 'centered' : ''}`}><header><span>{eyebrow}</span><h1>{title}{required && <em>Required</em>}</h1>{description && <p>{description}</p>}</header>{children}</section>; }
+function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="dql-field"><span>{label}</span>{children}</label>; }
+function WarehouseFields({ warehouse }: { warehouse: string }) { const hostLabel = warehouse === 'duckdb' || warehouse === 'file' ? 'Database file' : warehouse === 'snowflake' ? 'Account / host' : 'Server hostname'; return <div className="dql-two-fields"><Field label={hostLabel}><input placeholder={warehouse === 'duckdb' ? './warehouse/analytics.duckdb' : warehouse === 'snowflake' ? 'acme.us-east-1' : 'dbc-…cloud.databricks.com'} /></Field><Field label="Database"><input placeholder="ANALYTICS" /></Field><Field label="Schema"><input placeholder="analytics" /></Field><Field label="Role"><input placeholder="ANALYST" /></Field></div>; }
+function Success({ title, body }: { title: string; body: string }) { return <div className="dql-success"><b><Check size={13} />{title}</b><span>{body}</span></div>; }
+function Notice({ children }: { children: React.ReactNode }) { return <div className="dql-notice">{children}</div>; }
+function ErrorNotice({ children }: { children: React.ReactNode }) { return <div className="dql-error">{children}</div>; }
+function StartCard({ icon, title, body, hint, badge, onClick }: { icon: React.ReactNode; title: string; body: string; hint: string; badge?: string; onClick: () => void }) { return <button className="dql-start-card" onClick={onClick}>{badge && <em>{badge}</em>}<i>{icon}</i><b>{title}</b><span>{body}</span><small>{hint}</small></button>; }
 
-@keyframes dql-home-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-.dql-home-fade { animation: dql-home-rise 480ms cubic-bezier(0.2,0.7,0.2,1) both; }
-
-.dql-home-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
-.dql-home-hero-copy { display: flex; flex-direction: column; gap: 12px; min-width: 0; flex: 1 1 420px; }
-.dql-home-brand-row { display: inline-flex; align-items: center; gap: 10px; font: 800 11px var(--font-mono, ui-monospace, monospace); letter-spacing: 0.08em; text-transform: uppercase; }
-.dql-home-logo { display: inline-flex; align-items: center; justify-content: center; height: 24px; padding: 0 9px; border-radius: 7px; background: var(--accent); color: var(--accent-fg); }
-.dql-home-hero h1 { margin: 0; font-size: 30px; line-height: 1.1; font-weight: 820; letter-spacing: -0.01em; }
-.dql-home-lead { margin: 0; font-size: 14px; line-height: 1.5; max-width: 48ch; }
-.dql-home-proof-list { display: grid; gap: 6px; font-size: 12.5px; }
-.dql-home-proof-list span { display: inline-flex; align-items: flex-start; gap: 8px; line-height: 1.45; }
-.dql-home-proof-list svg { margin-top: 2px; flex-shrink: 0; }
-.dql-home-cta-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
-
-.dql-home-primary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: var(--accent-fg); padding: 9px 15px; font: 750 13px var(--font-ui, inherit); cursor: pointer; transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease; }
-.dql-home-primary-btn:hover { filter: brightness(1.06); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 26%, transparent); transform: translateY(-1px); }
-.dql-home-secondary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border-default); border-radius: 9px; background: transparent; color: inherit; padding: 9px 14px; font: 700 13px var(--font-ui, inherit); cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
-.dql-home-secondary-btn:hover { border-color: var(--accent); }
-
-.dql-home-progress-badge { display: inline-flex; align-items: center; gap: 12px; border: 1px solid; border-radius: 12px; padding: 12px 16px; flex: none; }
-.dql-home-progress-badge > div { display: flex; flex-direction: column; }
-.dql-home-progress-badge strong { font-size: 14px; }
-.dql-home-progress-badge span { font-size: 12px; margin-top: 2px; }
-
-.dql-home-stepper { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.dql-home-node { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; border: 0; cursor: pointer; padding: 8px 8px 10px; border-radius: 12px; transition: background 140ms ease; }
-.dql-home-node-track { position: absolute; top: 30px; left: 50%; width: 100%; height: 3px; z-index: 0; border-radius: 2px; transition: background 500ms ease; }
-.dql-home-node-badge { position: relative; z-index: 1; width: 46px; height: 46px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; border: 2px solid; transition: transform 200ms ease; }
-.dql-home-node.is-ready .dql-home-node-badge { animation: dql-home-pop 380ms cubic-bezier(0.2,1.5,0.4,1) both; }
-.dql-home-node.is-active .dql-home-node-badge { animation: dql-home-pulse 1.8s ease-in-out infinite; }
-@keyframes dql-home-pop { 0% { transform: scale(0.5); } 60% { transform: scale(1.14); } 100% { transform: scale(1); } }
-@keyframes dql-home-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(217,119,6,0.40); } 50% { box-shadow: 0 0 0 8px rgba(217,119,6,0); } }
-.dql-home-node-meta { display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; }
-.dql-home-node-title { font: 750 12.5px var(--font-ui, inherit); }
-.dql-home-node-status { font: 700 9.5px var(--font-mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.05em; }
-
-.dql-home-focus { display: flex; gap: 14px; border: 1px solid; border-radius: 12px; padding: 16px 18px; }
-.dql-home-focus-icon { flex: none; width: 40px; height: 40px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; }
-.dql-home-focus-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px; }
-.dql-home-focus-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.dql-home-focus-head h2 { margin: 0; font-size: 16px; font-weight: 780; }
-.dql-home-focus-body p { margin: 0; font-size: 13px; line-height: 1.5; }
-.dql-home-status { font: 700 9.5px var(--font-mono, ui-monospace, monospace); text-transform: uppercase; letter-spacing: 0.05em; padding: 3px 9px; border-radius: 999px; }
-.dql-home-evidence { display: flex; flex-wrap: wrap; gap: 6px; }
-.dql-home-evidence span { font: 650 11px var(--font-mono, ui-monospace, monospace); border: 1px solid; border-radius: 999px; padding: 3px 9px; }
-.dql-home-card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
-.dql-home-card-btn { font-size: 12.5px; }
-
-.dql-home-metrics { display: flex; flex-wrap: wrap; gap: 10px; }
-.dql-home-metric { display: inline-flex; align-items: center; gap: 8px; border: 1px solid; border-radius: 10px; padding: 8px 13px; }
-.dql-home-metric strong { font-size: 16px; font-weight: 800; }
-.dql-home-metric span { font-size: 12px; }
-.dql-home-metric-icon { display: inline-flex; }
-
-.dql-home-details { border: 1px solid; border-radius: 12px; overflow: hidden; }
-.dql-home-details > summary { list-style: none; cursor: pointer; padding: 13px 16px; display: flex; align-items: center; gap: 10px; font: 750 13px var(--font-ui, inherit); }
-.dql-home-details > summary::-webkit-details-marker { display: none; }
-.dql-home-details > summary::after { content: "\\2304"; margin-left: auto; font-size: 14px; transition: transform 200ms ease; }
-.dql-home-details[open] > summary::after { transform: rotate(180deg); }
-.dql-home-details-hint { font: 600 11.5px var(--font-ui, inherit); }
-.dql-home-details-body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 14px; }
-
-.dql-home-context-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.dql-home-context-panel { display: flex; flex-direction: column; gap: 10px; border: 1px solid; border-radius: 10px; padding: 14px; }
-.dql-home-context-head { display: flex; gap: 10px; align-items: flex-start; }
-.dql-home-context-icon { flex: none; width: 34px; height: 34px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; }
-.dql-home-context-head h2 { margin: 0; font-size: 13.5px; font-weight: 760; line-height: 1.25; }
-.dql-home-context-head p { margin: 3px 0 0; font-size: 12px; line-height: 1.4; }
-.dql-home-context-rows { display: flex; flex-direction: column; }
-.dql-home-context-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid; font-size: 12.5px; }
-.dql-home-context-row:last-child { border-bottom: 0; }
-.dql-home-link-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: 750 12.5px var(--font-ui, inherit); padding: 2px 0; margin-top: auto; }
-.dql-home-artifact-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-.dql-home-artifact-row { display: flex; gap: 10px; align-items: baseline; border: 1px solid; border-radius: 8px; padding: 8px 11px; }
-.dql-home-artifact-row code { font: 700 12px var(--font-mono, ui-monospace, monospace); flex: none; }
-.dql-home-artifact-row span { font-size: 12px; line-height: 1.4; }
-
-@media (max-width: 880px) {
-  .dql-home-stepper { grid-template-columns: repeat(2, 1fr); }
-  .dql-home-node-track { display: none; }
-  .dql-home-context-grid, .dql-home-artifact-list { grid-template-columns: 1fr; }
-  .dql-home-hero { flex-direction: column; align-items: flex-start; }
-  .dql-home-focus { flex-direction: column; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dql-home-fade,
-  .dql-home-node.is-ready .dql-home-node-badge,
-  .dql-home-node.is-active .dql-home-node-badge { animation: none !important; }
-  .dql-home-node-track, .dql-home-primary-btn { transition: none; }
-}
+const SETUP_STYLES = `
+.dql-setup{height:100%;min-height:0;display:flex;flex-direction:column;font-family:var(--font-ui,Inter,sans-serif)}
+.dql-setup *{box-sizing:border-box}.dql-setup button,.dql-setup input,.dql-setup select{font:inherit}.dql-setup button{cursor:pointer}
+.dql-setup-header{height:48px;flex:none;border-bottom:1px solid;display:flex;align-items:center;justify-content:space-between;padding:0 18px}.dql-setup-brand{display:flex;align-items:center;gap:10px;font-size:12px}.dql-setup-brand>span{background:var(--accent);color:var(--accent-fg);border-radius:6px;padding:5px 8px;font:800 10px var(--font-mono,monospace);letter-spacing:.06em}.dql-setup-quiet{font-size:10.5px;color:var(--text-muted)}
+.dql-setup-stepper{height:52px;flex:none;border-bottom:1px solid;display:flex;align-items:center;justify-content:center;gap:3px}.dql-setup-stepper button{display:flex;align-items:center;gap:6px;border:0;background:transparent;color:var(--text-muted);padding:6px 10px;border-radius:7px;font-size:11px;font-weight:650}.dql-setup-stepper button span{width:18px;height:18px;border:1px solid var(--border-default);border-radius:999px;display:grid;place-items:center;font:700 9px var(--font-mono,monospace)}.dql-setup-stepper button.active{background:var(--accent-dim);color:var(--accent)}.dql-setup-stepper button.active span{border-color:var(--accent);background:var(--accent);color:var(--accent-fg)}.dql-setup-stepper button.complete{color:var(--text-secondary)}.dql-setup-stepper button.complete span{background:#2e8b57;border-color:#2e8b57;color:white}
+.dql-setup-body{flex:1;min-height:0;overflow:auto;padding:30px 24px 110px}.dql-welcome{width:min(860px,100%);margin:0 auto;display:grid;gap:24px;animation:dql-setup-in .25s ease-out}.dql-welcome-hero{display:grid;grid-template-columns:1.1fr .9fr;gap:28px;align-items:center}.eyebrow{display:inline-flex;align-items:center;gap:7px;border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);background:var(--accent-dim);border-radius:999px;padding:4px 12px;color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}.dql-welcome h1{margin:12px 0 0;font-size:27px;line-height:1.25;letter-spacing:-.02em}.dql-proof-list{display:grid;gap:8px;margin-top:14px;font-size:12.5px;color:var(--text-secondary)}.dql-proof-list span{display:flex;gap:8px;align-items:flex-start}.dql-proof-list svg{color:#2e8b57;flex:none;margin-top:2px}.dql-answer-card{border:1px solid var(--border-subtle);border-radius:12px;background:var(--bg-1);padding:13px 14px;box-shadow:0 8px 28px #0000000d}.dql-answer-card .question{margin-left:auto;width:fit-content;background:var(--bg-2);border-radius:12px 12px 3px 12px;padding:7px 11px;font-size:11.5px}.dql-answer-card .trust{margin-top:9px;display:flex;align-items:center;gap:6px;color:#2e8b57;font-size:10px;font-weight:700}.dql-answer-card .trust small{color:var(--text-muted);font-weight:500}.dql-answer-card p{font-size:13px;margin:7px 0}.dql-answer-card .trace{display:flex;justify-content:flex-end;gap:6px;color:var(--text-muted);font-size:10px}
+.dql-chapter{display:grid;gap:10px}.dql-chapter>header{display:flex;gap:10px;align-items:baseline}.dql-chapter>header>span{font:700 13px var(--font-mono,monospace);color:var(--text-muted)}.dql-chapter>header div{display:grid}.dql-chapter>header b{font-size:16px}.dql-chapter>header small{color:var(--text-muted);font-size:11.5px;margin-top:2px}.dql-chapter.right>header{justify-content:flex-end;text-align:right}.dql-chapter.right>header>span{order:2}.dql-pipeline{border:1px solid var(--border-subtle);border-radius:14px;background:var(--bg-1);padding:20px;display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:center;gap:6px}.dql-pipeline>div{height:112px;border:1px solid var(--border-default);border-radius:10px;background:var(--bg-0);padding:10px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:5px}.dql-pipeline>div:nth-of-type(3){border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:var(--accent-dim)}.dql-pipeline>div svg{color:var(--accent)}.dql-pipeline b{font-size:11.5px}.dql-pipeline span{font-size:9.5px;line-height:1.4;color:var(--text-muted)}.dql-pipeline>svg{color:var(--accent)}.dql-rail{display:flex;align-items:center;gap:8px;color:var(--text-muted);font-size:9.5px}.dql-rail i{height:5px;flex:1;border-radius:999px;background:linear-gradient(90deg,#4a74c966,#0a6b5e66,var(--accent),#2e8b5773)}.dql-rail.dashed i{background:repeating-linear-gradient(90deg,var(--border-strong) 0 14px,transparent 14px 20px)}.dql-loop{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:wrap}.dql-loop span{border:1px solid var(--border-default);background:var(--bg-1);border-radius:999px;padding:5px 12px;font-size:11px;font-weight:650;color:var(--accent)}.dql-chapter-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.dql-chapter-grid>div{border:1px solid var(--border-subtle);border-radius:11px;background:var(--bg-1);padding:14px;display:grid;gap:7px}.dql-chapter-grid svg{color:var(--accent)}.dql-chapter-grid b{font-size:12.5px}.dql-chapter-grid span{font-size:11px;line-height:1.5;color:var(--text-secondary)}
+.dql-setup-section{width:min(560px,100%);margin:0 auto;display:grid;gap:16px;animation:dql-setup-in .2s ease-out}.dql-setup-section.centered{width:min(760px,100%)}.dql-setup-section>header>span{font-size:10.5px;color:var(--accent);font-weight:800;letter-spacing:.06em;text-transform:uppercase}.dql-setup-section h1{font-size:21px;margin:6px 0 0;letter-spacing:-.01em}.dql-setup-section h1 em{margin-left:9px;border:1px solid #c145454d;color:#c14545;background:#fdecea;border-radius:999px;padding:2px 9px;font-size:9.5px;font-style:normal;vertical-align:middle}.dql-setup-section>header>p{margin:6px 0 0;color:var(--text-muted);font-size:12.5px;line-height:1.55}.dql-setup-section.centered>header{text-align:center}
+.dql-setup-card{border:1px solid var(--border-subtle);border-radius:12px;background:var(--bg-1);padding:18px;display:grid;gap:12px}.dql-field{display:grid;gap:5px;color:var(--text-secondary);font-size:11px;font-weight:650}.dql-field input,.dql-field select{width:100%;border:1px solid var(--border-default);background:var(--bg-1);color:var(--text-primary);border-radius:8px;padding:8px 10px;font-size:12px;outline:none}.dql-field input:focus,.dql-field select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}.dql-two-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.dql-setup .primary,.dql-setup .secondary,.dql-setup .back{height:34px;border-radius:8px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;gap:7px;font-size:12px;font-weight:700}.dql-setup .primary{border:0;background:var(--accent);color:var(--accent-fg);box-shadow:0 1px 5px color-mix(in srgb,var(--accent) 30%,transparent)}.dql-setup .primary:disabled{opacity:.38;cursor:not-allowed}.dql-setup .secondary,.dql-setup .back{border:1px solid var(--border-default);background:var(--bg-1);color:var(--text-secondary)}.dql-setup .fit{width:fit-content}.dql-setup-inline-actions{display:flex;gap:8px;flex-wrap:wrap}.dql-notice,.dql-error{border:1px solid var(--border-subtle);background:var(--bg-0);border-radius:8px;padding:9px 11px;font-size:11px;color:var(--text-muted)}.dql-error{border-color:#c145454d;background:#fdecea;color:#a52e2e}.dql-success{border:1px solid #2e8b5740;background:#e8f4ee;border-radius:10px;padding:10px 12px;display:grid;gap:5px;color:#1a5c3a}.dql-success b{display:flex;align-items:center;gap:7px;font-size:12px}.dql-success span{font-size:11px}.dql-driver-status{border:1px solid var(--border-subtle);background:var(--bg-0);border-radius:9px;padding:9px 12px;display:flex;align-items:center;gap:7px;color:#2e8b57;font-size:11.5px;font-weight:650}
+.dql-warehouse-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.dql-warehouse-grid button{display:grid;place-items:center;gap:5px;padding:12px 8px;border-radius:10px;border:1.5px solid var(--border-default);background:var(--bg-1);color:var(--text-primary)}.dql-warehouse-grid button.active{border-color:var(--accent);background:var(--accent-dim)}.dql-warehouse-grid b{font:800 16px var(--font-mono,monospace);color:var(--accent)}.dql-warehouse-grid span{font-size:11px;font-weight:700}.dql-choice-row{display:flex;gap:8px}.dql-choice-row button{position:relative;display:grid;grid-template-columns:auto 1fr;gap:2px 7px;text-align:left;border:1.5px solid var(--border-default);background:var(--bg-1);color:var(--text-primary);border-radius:9px;padding:8px 11px}.dql-choice-row button.active{border-color:var(--accent);background:var(--accent-dim)}.dql-choice-row i{grid-row:1/3;width:12px;height:12px;margin-top:2px;border:2px solid var(--border-strong);border-radius:999px}.dql-choice-row button.active i{border:4px solid var(--accent)}.dql-choice-row small{color:var(--text-muted);font-size:9.5px;font-weight:500}
+.dql-start-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.dql-start-card{position:relative;min-height:176px;display:flex;flex-direction:column;align-items:flex-start;gap:8px;text-align:left;border:1.5px solid var(--border-default);background:var(--bg-1);color:var(--text-primary);border-radius:13px;padding:16px}.dql-start-card:first-child{border-color:color-mix(in srgb,var(--accent) 45%,transparent);background:var(--accent-dim)}.dql-start-card:hover{border-color:var(--accent);box-shadow:0 4px 16px #00000012}.dql-start-card>i{width:30px;height:30px;border-radius:8px;background:var(--accent-dim);color:var(--accent);display:grid;place-items:center}.dql-start-card>b{font-size:13px}.dql-start-card>span{font-size:11px;line-height:1.5;color:var(--text-secondary)}.dql-start-card>small{margin-top:auto;color:var(--accent);font-size:10.5px;font-weight:700}.dql-start-card>em{position:absolute;right:11px;top:10px;border:1px solid #2e8b5755;background:#e8f4ee;color:#2e8b57;border-radius:999px;padding:2px 7px;font-size:8.5px;font-style:normal;font-weight:800}
+.dql-setup-footer{position:absolute;left:0;right:0;bottom:0;height:58px;border-top:1px solid;display:flex;align-items:center;gap:12px;padding:0 18px;z-index:15}.dql-setup-footer>span{flex:1;text-align:center;color:var(--text-muted);font-size:10.5px}.dql-setup-footer .back:disabled{opacity:0;pointer-events:none}
+@keyframes dql-setup-in{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+@media(max-width:980px){.dql-setup-quiet{display:none}.dql-setup-stepper{justify-content:flex-start;overflow:auto;padding:0 8px}.dql-setup-stepper button{font-size:0}.dql-setup-stepper button span{font-size:9px}.dql-welcome-hero{grid-template-columns:1fr}.dql-pipeline{grid-template-columns:1fr}.dql-pipeline>svg{transform:rotate(90deg);margin:auto}.dql-chapter-grid{grid-template-columns:1fr}.dql-setup-body{padding-inline:16px}.dql-two-fields{grid-template-columns:1fr}.dql-warehouse-grid{grid-template-columns:repeat(2,1fr)}.dql-setup-footer>span{display:none}.dql-setup-footer{justify-content:space-between}}
 `;
