@@ -61,7 +61,7 @@ export function Header() {
   const isEditorView = state.mainView === 'notebook' || state.mainView === 'block_studio';
   const hasActiveEditorFile = isEditorView && Boolean(state.activeFile);
   const VIEW_TITLES: Partial<Record<typeof state.mainView, string>> = {
-    home: 'Home',
+    home: 'Setup',
     business_artifact: state.activeFile?.name.replace(/\.(dqlnb|dql)$/i, '') ?? 'Business Definition',
     lineage: 'Lineage',
     lineage_detail: 'Lineage',

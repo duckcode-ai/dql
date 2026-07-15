@@ -302,20 +302,25 @@ export function HomePage() {
           <div className="dql-home-hero-copy">
             <div className="dql-home-brand-row">
               <span className="dql-home-logo">DQL</span>
-              <span style={{ color: t.textMuted }}>Guided setup</span>
+              <span style={{ color: t.textMuted }}>Welcome to DQL</span>
             </div>
             <h1 style={{ color: t.textPrimary }}>
-              {allReady ? 'Your workspace is ready' : 'Set up your analytics workspace'}
+              {allReady ? 'Your governed workspace is ready' : "Analytics your AI can't hallucinate"}
             </h1>
             <p className="dql-home-lead" style={{ color: t.textSecondary }}>
               {allReady
-                ? 'Source, database, blocks, notebooks and Apps are all connected. Jump back into building.'
-                : 'Connect your data, build reviewed DQL blocks, then deliver with notebooks and Apps.'}
+                ? 'Your sources, runtime, governed blocks, notebooks, and Apps are connected. Continue from any step.'
+                : 'DQL sits on your dbt project and routes questions through governed context before AI writes SQL.'}
             </p>
+            {!allReady && <div className="dql-home-proof-list" style={{ color: t.textSecondary }}>
+              <span><Check size={13} color={t.success} /> Models and tests stay owned by dbt</span>
+              <span><Check size={13} color={t.success} /> Certified blocks are reused before new SQL is drafted</span>
+              <span><Check size={13} color={t.success} /> Every answer keeps its sources, trust state, and review path</span>
+            </div>}
             <div className="dql-home-cta-row">
               <button className="dql-home-primary-btn" onClick={currentStepObj.onPrimary}>
                 <currentStepObj.Icon size={15} strokeWidth={2.2} aria-hidden="true" />
-                {currentStepObj.primaryLabel}
+                {allReady ? 'Continue building' : 'Start setup'}
                 <ArrowRight size={15} strokeWidth={2.2} aria-hidden="true" />
               </button>
             </div>
@@ -444,8 +449,7 @@ export function HomePage() {
   );
 }
 
-const ACCENT = 'var(--color-accent-blue, #2563eb)';
-const SUCCESS = 'var(--color-accent-green, #16a34a)';
+const SUCCESS = 'var(--status-success, #16a34a)';
 
 function stepColor(state: StepState, t: Theme): string {
   if (state === 'ready') return SUCCESS;
@@ -691,22 +695,25 @@ const HOME_PAGE_STYLES = `
 .dql-home-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
 .dql-home-hero-copy { display: flex; flex-direction: column; gap: 12px; min-width: 0; flex: 1 1 420px; }
 .dql-home-brand-row { display: inline-flex; align-items: center; gap: 10px; font: 800 11px var(--font-mono, ui-monospace, monospace); letter-spacing: 0.08em; text-transform: uppercase; }
-.dql-home-logo { display: inline-flex; align-items: center; justify-content: center; height: 24px; padding: 0 9px; border-radius: 7px; background: var(--color-accent-blue, #2563eb); color: var(--accent-on, #fff); }
+.dql-home-logo { display: inline-flex; align-items: center; justify-content: center; height: 24px; padding: 0 9px; border-radius: 7px; background: var(--accent); color: var(--accent-fg); }
 .dql-home-hero h1 { margin: 0; font-size: 30px; line-height: 1.1; font-weight: 820; letter-spacing: -0.01em; }
 .dql-home-lead { margin: 0; font-size: 14px; line-height: 1.5; max-width: 48ch; }
+.dql-home-proof-list { display: grid; gap: 6px; font-size: 12.5px; }
+.dql-home-proof-list span { display: inline-flex; align-items: flex-start; gap: 8px; line-height: 1.45; }
+.dql-home-proof-list svg { margin-top: 2px; flex-shrink: 0; }
 .dql-home-cta-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
 
-.dql-home-primary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--color-accent-blue, #2563eb); border-radius: 9px; background: var(--color-accent-blue, #2563eb); color: var(--accent-on, #fff); padding: 9px 15px; font: 750 13px var(--font-ui, inherit); cursor: pointer; transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease; }
-.dql-home-primary-btn:hover { filter: brightness(1.06); box-shadow: 0 8px 22px rgba(37,99,235,0.26); transform: translateY(-1px); }
-.dql-home-secondary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border-color, rgba(0,0,0,0.16)); border-radius: 9px; background: transparent; color: inherit; padding: 9px 14px; font: 700 13px var(--font-ui, inherit); cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
-.dql-home-secondary-btn:hover { border-color: var(--color-accent-blue, #2563eb); }
+.dql-home-primary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: var(--accent-fg); padding: 9px 15px; font: 750 13px var(--font-ui, inherit); cursor: pointer; transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease; }
+.dql-home-primary-btn:hover { filter: brightness(1.06); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 26%, transparent); transform: translateY(-1px); }
+.dql-home-secondary-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border-default); border-radius: 9px; background: transparent; color: inherit; padding: 9px 14px; font: 700 13px var(--font-ui, inherit); cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
+.dql-home-secondary-btn:hover { border-color: var(--accent); }
 
 .dql-home-progress-badge { display: inline-flex; align-items: center; gap: 12px; border: 1px solid; border-radius: 12px; padding: 12px 16px; flex: none; }
 .dql-home-progress-badge > div { display: flex; flex-direction: column; }
 .dql-home-progress-badge strong { font-size: 14px; }
 .dql-home-progress-badge span { font-size: 12px; margin-top: 2px; }
 
-.dql-home-stepper { display: grid; grid-template-columns: repeat(4, 1fr); }
+.dql-home-stepper { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .dql-home-node { position: relative; display: flex; flex-direction: column; align-items: center; gap: 9px; border: 0; cursor: pointer; padding: 8px 8px 10px; border-radius: 12px; transition: background 140ms ease; }
 .dql-home-node-track { position: absolute; top: 30px; left: 50%; width: 100%; height: 3px; z-index: 0; border-radius: 2px; transition: background 500ms ease; }
 .dql-home-node-badge { position: relative; z-index: 1; width: 46px; height: 46px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; border: 2px solid; transition: transform 200ms ease; }
@@ -753,7 +760,7 @@ const HOME_PAGE_STYLES = `
 .dql-home-context-rows { display: flex; flex-direction: column; }
 .dql-home-context-row { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid; font-size: 12.5px; }
 .dql-home-context-row:last-child { border-bottom: 0; }
-.dql-home-link-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--color-accent-blue, #2563eb); cursor: pointer; font: 750 12.5px var(--font-ui, inherit); padding: 2px 0; margin-top: auto; }
+.dql-home-link-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: 750 12.5px var(--font-ui, inherit); padding: 2px 0; margin-top: auto; }
 .dql-home-artifact-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .dql-home-artifact-row { display: flex; gap: 10px; align-items: baseline; border: 1px solid; border-radius: 8px; padding: 8px 11px; }
 .dql-home-artifact-row code { font: 700 12px var(--font-mono, ui-monospace, monospace); flex: none; }
