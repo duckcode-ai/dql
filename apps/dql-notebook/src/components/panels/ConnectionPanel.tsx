@@ -330,6 +330,9 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [installingDriver, setInstallingDriver] = useState<string | null>(null);
+  // Prototype settings nav: Advanced (MCP/runtime) selection lives locally —
+  // the store's SettingsTab only knows database/ai/memory.
+  const [advancedView, setAdvancedView] = useState<'advanced' | null>(null);
 
   // Edit form state
   const [editName, setEditName] = useState('');
@@ -949,67 +952,73 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     };
 
     const activeTab = state.settingsTab;
-    const tabs: Array<{ id: SettingsTab; label: string; hint: string }> = [
-      { id: 'database', label: 'Database connection', hint: 'Warehouse credentials and schema' },
-      { id: 'ai', label: 'AI providers', hint: 'The model that powers everything' },
-      { id: 'memory', label: 'Agentic memory', hint: 'What the agent has learned' },
-    ];
+    // Prototype (Settings Redesign): left settings nav rail with status dots +
+    // an Advanced group, content column to the right.
+    const showAdvanced = advancedView !== null;
+    const connected = Boolean(info && Object.keys(info.connections ?? {}).length > 0);
+    const navItem = (
+      active: boolean,
+      label: string,
+      onClick: () => void,
+      right?: React.ReactNode,
+    ) => (
+      <button
+        key={label}
+        type="button"
+        onClick={onClick}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 9, padding: '8px 10px', borderRadius: 7,
+          border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: 12.5, fontWeight: 600,
+          fontFamily: t.font, width: '100%',
+          background: active ? 'var(--accent-dim)' : 'transparent',
+          color: active ? t.accent : t.textSecondary,
+        }}
+      >
+        <span style={{ flex: 1 }}>{label}</span>
+        {right}
+      </button>
+    );
 
     return (
       <>
         <style>{CONNECTION_PAGE_STYLES}</style>
-        <div className="dql-connection-page-stack">
-          <div role="tablist" aria-label="Settings sections" style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${t.cellBorder}`, marginBottom: 4 }}>
-            {tabs.map((tab) => {
-              const active = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => dispatch({ type: 'SET_SETTINGS_TAB', tab: tab.id })}
-                  title={tab.hint}
-                  style={{
-                    appearance: 'none',
-                    border: 'none',
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    padding: '9px 14px',
-                    marginBottom: -1,
-                    fontSize: 13,
-                    fontWeight: active ? 700 : 500,
-                    fontFamily: t.font,
-                    color: active ? t.accent : t.textSecondary,
-                    borderBottom: `2px solid ${active ? t.accent : 'transparent'}`,
-                    transition: 'color 0.15s, border-color 0.15s',
-                  }}
-                >
-                  {tab.label}
-                </button>
-              );
-            })}
+        <div style={{ display: 'flex', gap: 0, alignItems: 'stretch', minHeight: 0 }}>
+          <nav aria-label="Settings sections" style={{ width: 'clamp(190px, 17vw, 240px)', flexShrink: 0, borderRight: `1px solid ${t.cellBorder}`, padding: '10px 10px 10px 0', display: 'flex', flexDirection: 'column', gap: 2, alignSelf: 'flex-start', position: 'sticky', top: 0 }}>
+            {navItem(!showAdvanced && activeTab === 'database', 'Database', () => { setAdvancedView(null); dispatch({ type: 'SET_SETTINGS_TAB', tab: 'database' }); },
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: connected ? 'var(--status-success)' : 'var(--status-warning)' }} title={connected ? 'Connected' : 'Not connected'} />)}
+            {navItem(!showAdvanced && activeTab === 'ai', 'AI provider', () => { setAdvancedView(null); dispatch({ type: 'SET_SETTINGS_TAB', tab: 'ai' }); },
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--status-success)' }} title="Configured in the AI section" />)}
+            {navItem(!showAdvanced && activeTab === 'memory', 'Agent memory', () => { setAdvancedView(null); dispatch({ type: 'SET_SETTINGS_TAB', tab: 'memory' }); })}
+            <div style={{ height: 1, background: t.cellBorder, margin: '10px 10px 10px 0' }} />
+            {navItem(advancedView === 'advanced', 'MCP servers', () => setAdvancedView('advanced'),
+              <span style={{ fontSize: 10, color: t.textMuted }}>Advanced</span>)}
+            {navItem(advancedView === 'advanced', 'Runtime env', () => setAdvancedView('advanced'),
+              <span style={{ fontSize: 10, color: t.textMuted }}>Advanced</span>)}
+          </nav>
+          <div style={{ flex: 1, minWidth: 0, padding: '0 0 24px 20px' }}>
+            {showAdvanced ? (
+              <ConnectionRuntimeSettings embedded section="advanced" />
+            ) : activeTab === 'database' ? (
+              <div className="dql-connection-page-grid">
+                <section style={panelSurface}>
+                  {connectionListSection}
+                  {dbtProfilesSection}
+                  {quickConnectSection}
+                </section>
+                <aside style={panelSurface}>
+                  <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
+                  {addConnectionSection}
+                  {saveMessageSection}
+                  {testConnectionSection}
+                  {catalogSection}
+                </aside>
+              </div>
+            ) : activeTab === 'ai' ? (
+              <ConnectionRuntimeSettings embedded section="providers" />
+            ) : (
+              <ConnectionRuntimeSettings embedded section="memory" />
+            )}
           </div>
-
-          {activeTab === 'database' ? (
-            <div className="dql-connection-page-grid">
-              <section style={panelSurface}>
-                {connectionListSection}
-                {dbtProfilesSection}
-                {quickConnectSection}
-              </section>
-              <aside style={panelSurface}>
-                <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
-                {addConnectionSection}
-                {saveMessageSection}
-                {testConnectionSection}
-                {catalogSection}
-              </aside>
-            </div>
-          ) : activeTab === 'ai' ? (
-            <ConnectionRuntimeSettings embedded section="providers" />
-          ) : (
-            <ConnectionRuntimeSettings embedded section="memory" />
-          )}
         </div>
       </>
     );

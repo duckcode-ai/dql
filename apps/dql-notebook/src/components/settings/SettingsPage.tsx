@@ -201,7 +201,30 @@ export function ConnectionRuntimeSettings({
             </section>
           )}
 
-          {(!section || section === 'providers') && (
+          {/* Prototype: MCP servers + Runtime env are their own "Advanced" nav
+              sections; the legacy no-section page keeps the collapsed details. */}
+          {section === 'advanced' && (
+            <>
+              <section>
+                <SectionTitle title="MCP servers and connectors" detail="Remote MCP servers can be attached to OpenAI and Claude SDK chat. OpenAI hosted connectors are OpenAI-only." t={t} />
+                <McpConnectionsEditor
+                  settings={mcpSettings}
+                  t={t}
+                  onChange={setMcpSettings}
+                  onStatus={setStatus}
+                />
+              </section>
+              <section style={{ marginTop: 22 }}>
+                <SectionTitle title="Runtime status" detail="Environment variables remain supported for Docker, CI, and shell-based setup." t={t} />
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
+                  {groups.map((group) => (
+                    <EnvGroupCard key={group.id} group={group} t={t} />
+                  ))}
+                </div>
+              </section>
+            </>
+          )}
+          {!section && (
           <details style={{ marginTop: 22, border: `1px solid ${t.headerBorder}`, borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
             <summary style={{ cursor: 'pointer', padding: '13px 16px', fontSize: 13, fontWeight: 650, listStyle: 'none', color: t.textPrimary }}>
               Advanced — MCP connections &amp; runtime status
