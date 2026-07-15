@@ -264,16 +264,21 @@ export function DbtFirstModelingPage() {
             // This is the domain workspace context rail, not the global app
             // navigation. Keep it on the canvas surface so Paper remains warm
             // and visually continuous from the header into the workspace.
-            background: t.appBg,
+            background: t.cellBg,
           }}
         >
           <div style={{ padding: '12px 10px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
             <label style={{ display: 'grid', gap: 6, color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>
               Domain
-              <select aria-label="Active domain" value={selectedDomain ?? ''} onChange={(event) => selectDomain(event.target.value || null)} style={{ ...inputStyle(t), minHeight: 32, padding: '6px 8px' }}>
-                <option value="">All domains</option>
-                {sortDomainPackages(data.modeling.packages).map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.id}</option>)}
-              </select>
+              <span style={{ display: 'flex', gap: 6 }}>
+                <select aria-label="Active domain" value={selectedDomain ?? ''} onChange={(event) => selectDomain(event.target.value || null)} style={{ ...inputStyle(t), minHeight: 32, padding: '6px 8px', flex: 1, minWidth: 0 }}>
+                  <option value="">All domains</option>
+                  {sortDomainPackages(data.modeling.packages).map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.id}</option>)}
+                </select>
+                <button type="button" aria-label="New domain" title="New domain" onClick={() => setEditor({ kind: 'domain' })} style={{ ...iconButtonStyle(t), width: 32, height: 32, color: t.accent, background: t.headerBg }}>
+                  <Plus size={14} strokeWidth={2.2} />
+                </button>
+              </span>
             </label>
           </div>
           <DomainWorkspaceNavigation
@@ -1042,19 +1047,30 @@ function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, v
         scrollbarWidth: 'thin',
       }}
     >
-      <IconButton t={t} title="Add dbt model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton><IconButton t={t} title="Create model area" onClick={onNewArea}><Boxes size={14} /></IconButton>
-      <select aria-label="Modeling view" value={modelingView} onChange={(event) => onModelingView(event.target.value as ModelingViewMode)} style={{ ...inputStyle(t), width: 96, padding: '5px 6px' }}><option value="business">Business</option><option value="data">Data</option></select>
-      {modelingView === 'data' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
-      <label style={{ position: 'relative', width: 138, flex: '0 0 138px' }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
-      <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
-      <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9 }}>Show <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 52, padding: '5px' }} /></label>
-      <button aria-label="Dim unrelated models" title="Dim unrelated models" onClick={() => onDimUnrelated(!dimUnrelated)} style={{ ...iconButtonStyle(t), color: dimUnrelated ? t.accent : t.textMuted }}><EyeOff size={14} /></button>
-      <button aria-label="Toggle relationship labels" title="Toggle relationship labels" onClick={() => onEdgeLabels(!showEdgeLabels)} style={{ ...iconButtonStyle(t), color: showEdgeLabels ? t.accent : t.textMuted }}><Link2 size={14} /></button>
-      <button aria-label="Relationship legend" title="Relationship legend" onClick={() => onLegend(!showLegend)} style={{ ...iconButtonStyle(t), color: showLegend ? t.accent : t.textMuted }}><Boxes size={14} /></button>
-      <button aria-label="Export diagram as SVG" title="Export diagram as SVG" onClick={onExport} style={iconButtonStyle(t)}><Download size={14} /></button>
-      <button aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} onClick={onFullscreen} style={iconButtonStyle(t)}>{fullscreen ? <XCircle size={14} /> : <Maximize2 size={14} />}</button>
-      <button aria-label="Reset to automatic layout" title="Reset to automatic layout" onClick={onReset} style={iconButtonStyle(t)}><RotateCcw size={14} /></button>
+      <strong style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>Model</strong>
+      <div role="group" aria-label="Modeling view" style={{ display: 'inline-flex', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg }}>
+        {(['business', 'data'] as const).map((mode) => <button key={mode} type="button" onClick={() => onModelingView(mode)} style={{ border: 'none', borderRadius: 5, padding: '4px 10px', background: modelingView === mode ? t.cellBg : 'transparent', color: modelingView === mode ? t.textPrimary : t.textMuted, boxShadow: modelingView === mode ? `0 1px 2px ${t.headerBorder}` : 'none', cursor: 'pointer', fontSize: 11.5, fontWeight: 650, whiteSpace: 'nowrap' }}>{mode === 'business' ? 'Business modeling' : 'Data modeling'}</button>)}
+      </div>
+      <label style={{ position: 'relative', width: 154, flex: '0 1 154px', minWidth: 100 }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find entity…" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
+      <span style={{ flex: 1 }} />
+      <Button t={t} onClick={onBindModel}><Plus size={13} /> Bind model</Button>
+      <Button t={t} onClick={onRelationship}><Link2 size={13} /> Relationship</Button>
+      <details style={{ position: 'relative' }}>
+        <summary aria-label="Diagram options" title="Diagram options" style={{ ...iconButtonStyle(t), listStyle: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>•••</summary>
+        <div style={{ position: 'absolute', zIndex: 30, right: 0, top: 34, width: 270, padding: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, border: `1px solid ${t.headerBorder}`, borderRadius: 10, background: t.cellBg, boxShadow: '0 14px 38px #0003' }}>
+          <Button t={t} onClick={onNewArea}><Boxes size={13} /> New area</Button>
+          <Button t={t} onClick={onReset}><RotateCcw size={13} /> Reset layout</Button>
+          {modelingView === 'data' && <select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant columns</option><option value="all">All columns</option></select>}
+          <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), padding: '5px 6px' }}><option value="auto">Auto layout</option><option value="grid">Grid layout</option><option value="star">Star layout</option></select>
+          <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 10 }}>Models <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 56, padding: '5px' }} /></label>
+          <button aria-label="Dim unrelated models" onClick={() => onDimUnrelated(!dimUnrelated)} style={{ ...iconButtonStyle(t), width: 'auto', color: dimUnrelated ? t.accent : t.textMuted }}><EyeOff size={14} /> Dim unrelated</button>
+          <button aria-label="Toggle relationship labels" onClick={() => onEdgeLabels(!showEdgeLabels)} style={{ ...iconButtonStyle(t), width: 'auto', color: showEdgeLabels ? t.accent : t.textMuted }}><Link2 size={14} /> Edge labels</button>
+          <button aria-label="Relationship legend" onClick={() => onLegend(!showLegend)} style={{ ...iconButtonStyle(t), width: 'auto', color: showLegend ? t.accent : t.textMuted }}><Boxes size={14} /> Legend</button>
+          <button aria-label="Export diagram as SVG" onClick={onExport} style={{ ...iconButtonStyle(t), width: 'auto' }}><Download size={14} /> Export</button>
+          <button aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen diagram'} onClick={onFullscreen} style={{ ...iconButtonStyle(t), width: 'auto', gridColumn: '1 / -1' }}>{fullscreen ? <XCircle size={14} /> : <Maximize2 size={14} />} {fullscreen ? 'Exit fullscreen' : 'Fullscreen'}</button>
+        </div>
+      </details>
     </div>
   );
 }
