@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Sparkles, Plus, MessageSquare, Trash2, Loader2 } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { UnifiedAgentRunPanel, type ThreadItem } from '../agent/UnifiedAgentRunPanel';
@@ -262,39 +262,23 @@ export function AnalyticsHome() {
       />
 
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '16px 24px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-            <div style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}14`, border: `1px solid ${t.accent}36`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Sparkles size={16} />
-            </div>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: t.textPrimary }}>Ask your data</div>
-              <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 2 }}>
-                Governed answers and deep research — grounded in your certified metrics and dbt lineage.
-              </div>
-            </div>
-          </div>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', justifyContent: 'flex-start', padding: '0 24px' }}>
-          <div style={{ width: 'min(1080px, 100%)', minHeight: 0, display: 'flex' }}>
-            <UnifiedAgentRunPanel
-              key={activeId}
-              themeMode={state.themeMode}
-              title="Analytics copilot"
-              scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ' model area' : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
-              workspaceContext={domainContext}
-              audience="stakeholder"
-              initialMode="auto"
-              initialItems={activeItems}
-              onItemsChange={handleItemsChange}
-              threadId={activeThreadId}
-              onThreadIdChange={handleThreadIdChange}
-              onRunningChange={setIsRunning}
-              onOpenResearch={openResearch}
-              onOpenApp={openApp}
-            />
-          </div>
-        </div>
+        <UnifiedAgentRunPanel
+          key={activeId}
+          themeMode={state.themeMode}
+          title="Ask your data"
+          askLayout
+          scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ' model area' : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
+          workspaceContext={domainContext}
+          audience="stakeholder"
+          initialMode="auto"
+          initialItems={activeItems}
+          onItemsChange={handleItemsChange}
+          threadId={activeThreadId}
+          onThreadIdChange={handleThreadIdChange}
+          onRunningChange={setIsRunning}
+          onOpenResearch={openResearch}
+          onOpenApp={openApp}
+        />
       </div>
     </div>
   );
@@ -432,6 +416,10 @@ function ConversationSidebar({
             );
           })
         )}
+      </div>
+      <div style={{ padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}`, display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: t.textMuted }}>
+        <ShieldCheck size={12} style={{ flexShrink: 0, color: t.success }} />
+        <span>Answers grounded in governed data</span>
       </div>
     </aside>
   );

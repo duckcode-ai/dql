@@ -2,10 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import {
   ArrowRight,
+  ArrowUp,
   Blocks,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Code2,
   Copy,
@@ -16,6 +18,7 @@ import {
   Lightbulb,
   ListTree,
   Loader2,
+  MoreHorizontal,
   Plus,
   Route,
   Send,
@@ -24,6 +27,7 @@ import {
   Sparkles,
   Square,
   Wrench,
+  X,
 } from 'lucide-react';
 import {
   api,
@@ -128,6 +132,14 @@ interface UnifiedAgentRunPanelProps {
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
   onRunningChange?: (running: boolean) => void;
+  /**
+   * Opt into the redesigned "Ask" experience: a wide chat column with a page
+   * header, centered 720px transcript of plain-text answers + trust lines +
+   * artifact chips, a right-hand inspector that opens on chip click, and
+   * select-to-follow-up. Off by default so embedded surfaces (Block Studio Ask,
+   * dashboard copilot, notebook chat) keep the compact panel unchanged.
+   */
+  askLayout?: boolean;
 }
 
 /** Payload for DQL-first cell insertion from a governed answer artifact. */
@@ -177,6 +189,7 @@ export function UnifiedAgentRunPanel({
   onOpenResearch,
   onOpenApp,
   onRunningChange,
+  askLayout = false,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
   // One clean composer everywhere: an auto-routed box — no mode chips. Capability
@@ -209,6 +222,17 @@ export function UnifiedAgentRunPanel({
   const pendingRunRef = useRef<PendingAgentRun | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryEpochRef = useRef(0);
+
+  // ── Ask redesign (askLayout) state ────────────────────────────────────────
+  // Which artifact is open in the right inspector, and its active tab. Null =
+  // inspector closed. Keyed by run+artifact id so it survives new turns.
+  const [inspector, setInspector] = useState<{ runId: string; artifactId: string; tab: AskInspectorTab } | null>(null);
+  // Select-to-follow-up popover, anchored at a text selection inside a
+  // [data-followup] zone (answer text or the inspector result table).
+  const [pop, setPop] = useState<{ text: string; source: 'answer' | 'table'; left: number; top: number } | null>(null);
+  const [popDraft, setPopDraft] = useState('');
+  const popInputRef = useRef<HTMLInputElement>(null);
+  const askScrollRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!initialInput || running) return;
@@ -525,6 +549,202 @@ export function UnifiedAgentRunPanel({
     setInput(nextPromptFor(run, action.route));
     requestAnimationFrame(() => inputRef.current?.focus());
   };
+
+  // ── Ask redesign helpers ──────────────────────────────────────────────────
+  // Open the inspector on an artifact chip. Picks a sensible starting tab.
+  const openInspector = useCallback((runId: string, artifactId: string, tab: AskInspectorTab = 'result') => {
+    setInspector({ runId, artifactId, tab });
+  }, []);
+
+  // Send a follow-up carrying the selected quote as context, then scroll down.
+  const sendFollowUp = useCallback((question: string) => {
+    const q = question.trim();
+    if (!q) return;
+    const quote = pop?.text?.trim();
+    setPop(null);
+    setPopDraft('');
+    try { window.getSelection()?.removeAllRanges(); } catch { /* ignore */ }
+    void submit(quote ? `${q}\n\nRegarding: "${quote}"` : q);
+    requestAnimationFrame(() => {
+      if (askScrollRef.current) askScrollRef.current.scrollTop = askScrollRef.current.scrollHeight;
+    });
+  }, [pop, submit]);
+
+  // Text-selection watcher for the follow-up popover (askLayout only). A
+  // selection of ≥3 chars inside a [data-followup] zone opens the popover at
+  // the selection rect; Esc or an empty selection dismisses it.
+  useEffect(() => {
+    if (!askLayout) return;
+    const onMouseUp = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && target.closest('[data-selpop]')) return;
+      window.setTimeout(() => {
+        const sel = window.getSelection();
+        const text = sel && sel.rangeCount ? sel.toString().trim() : '';
+        if (!text || text.length < 3) { setPop((p) => (p ? null : p)); return; }
+        const anchor = sel!.anchorNode;
+        const el = anchor && (anchor.nodeType === 1 ? (anchor as HTMLElement) : anchor.parentElement);
+        const zone = el?.closest('[data-followup]') as HTMLElement | null;
+        if (!zone) { setPop((p) => (p ? null : p)); return; }
+        const rect = sel!.getRangeAt(0).getBoundingClientRect();
+        const left = Math.max(12, Math.min(rect.left, window.innerWidth - 340));
+        const top = rect.bottom + 176 > window.innerHeight ? Math.max(12, rect.top - 176) : rect.bottom + 8;
+        setPop({ text: text.slice(0, 220), source: (zone.getAttribute('data-followup') as 'answer' | 'table') || 'answer', left, top });
+        setPopDraft('');
+        requestAnimationFrame(() => popInputRef.current?.focus());
+      }, 0);
+    };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setPop(null); };
+    document.addEventListener('mouseup', onMouseUp);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mouseup', onMouseUp);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [askLayout]);
+
+  // ── Redesigned Ask experience ─────────────────────────────────────────────
+  if (askLayout) {
+    const activeInspector = inspector
+      ? (() => {
+          const item = items.find((it) => it.kind === 'run' && it.run.id === inspector.runId);
+          if (!item || item.kind !== 'run') return null;
+          const artifact = item.run.artifacts.find((a) => a.id === inspector.artifactId);
+          if (!artifact) return null;
+          return { run: item.run, artifact };
+        })()
+      : null;
+    return (
+      <div style={{ display: 'flex', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: 'var(--bg-canvas)' }}>
+        {blockToSave ? (
+          <SaveAsBlockModal
+            cell={{
+              id: `agent-${blockToSave.runId}`,
+              type: blockToSave.dqlArtifact ? 'dql' : 'sql',
+              content: blockToSave.source,
+              name: blockToSave.name,
+              status: 'success',
+              ...(blockToSave.dqlArtifact ? { dqlArtifact: blockToSave.dqlArtifact } : {}),
+            } satisfies Cell}
+            initialContent={blockToSave.source}
+            initialName={blockToSave.name}
+            onClose={() => setBlockToSave(null)}
+            onSaved={() => setBlockToSave(null)}
+          />
+        ) : null}
+        <style>{ASK_KEYFRAMES(t)}</style>
+
+        {/* Chat column */}
+        <div style={{ flex: 1, minWidth: 360, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-canvas)' }}>
+          <div style={{ height: 46, flexShrink: 0, borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 9, padding: '0 24px' }}>
+            <div style={{ width: 24, height: 24, borderRadius: 7, background: 'var(--accent-dim)', border: '1px solid var(--status-info-border)', color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Sparkles size={13} />
+            </div>
+            <span style={{ fontSize: 13.5, fontWeight: 650, color: t.textPrimary, whiteSpace: 'nowrap' }}>{title === 'AI Copilot' ? 'Ask your data' : title}</span>
+            <div style={{ flex: 1 }} />
+            <span style={{ fontSize: 11, color: t.textMuted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>Certified first · semantic next · generated SQL last</span>
+          </div>
+
+          <div ref={askScrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ width: 'min(720px, 100% - 48px)', margin: '0 auto', padding: '26px 0 12px', display: 'flex', flexDirection: 'column', gap: 26 }}>
+              {items.length === 0 && !running ? (
+                <div style={{ margin: 'auto 0', display: 'grid', gap: 14, justifyItems: 'center', textAlign: 'center', color: t.textSecondary, paddingTop: 40 }}>
+                  <div style={largeIconShellStyle(t)}><Sparkles size={20} /></div>
+                  <div style={{ fontSize: 13.5, lineHeight: 1.5, maxWidth: 400, color: t.textSecondary }}>{emptyHint ?? DEFAULT_EMPTY_HINT}</div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 520 }}>
+                    {(examplePrompts ?? EXAMPLE_PROMPTS).map((ex) => (
+                      <button key={ex.label} type="button" className="dql-hover dql-lift" onClick={() => { setInput(ex.prompt); requestAnimationFrame(() => inputRef.current?.focus()); }} style={suggestionChipStyle(t)}>{ex.label}</button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {items.map((item) => item.kind === 'user' ? (
+                <div key={item.id} style={askUserBubbleStyle(t)}>{item.text}</div>
+              ) : (
+                <AskRunCard
+                  key={item.id}
+                  run={item.run}
+                  t={t}
+                  themeMode={themeMode}
+                  appContext={appContext}
+                  selectedArtifactId={inspector?.runId === item.run.id ? inspector.artifactId : undefined}
+                  onOpenArtifact={(artifactId, tab) => openInspector(item.run.id, artifactId, tab)}
+                  onOpenApp={onOpenApp}
+                  onInsertSql={onInsertSql}
+                  onInsertDql={onInsertDql}
+                  onOpenBlock={onOpenBlock}
+                  onOpenResearch={onOpenResearch}
+                  onNextAction={(action) => handleNextAction(item.run, action)}
+                />
+              ))}
+
+              {running && <RunProgress events={runningEvents} t={t} streamingAnswer={streamingAnswer} thinkingMode={thinkingMode} backgroundRun={backgroundRun} />}
+            </div>
+
+            <div style={{ width: 'min(720px, 100% - 48px)', margin: 'auto auto 0', padding: '10px 0 16px', position: 'sticky', bottom: 0, background: 'linear-gradient(to top, var(--bg-canvas) 82%, transparent)' }}>
+              {error ? <div style={{ color: t.error, fontSize: 12, marginBottom: 8 }}>{error}</div> : null}
+              <div style={{ background: 'var(--bg-2)', border: '1px solid var(--border-default)', borderRadius: 14, boxShadow: '0 1px 2px rgba(26,26,26,0.03), 0 6px 22px rgba(26,26,26,0.05)', display: 'flex', flexDirection: 'column' }}>
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(event) => { setInput(event.target.value); pendingModeRef.current = undefined; }}
+                  rows={2}
+                  placeholder="Ask anything about your data…"
+                  onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSubmit(); } }}
+                  style={{ border: 'none', background: 'transparent', resize: 'none', outline: 'none', padding: '13px 15px 4px', fontSize: 13.5, lineHeight: 1.5, color: t.textPrimary, fontFamily: t.font }}
+                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 10px 12px' }}>
+                  <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
+                  <div style={{ flex: 1 }} />
+                  {running ? (
+                    <button type="button" className="dql-hover" onClick={handleStop} title="Stop the active agent run" style={{ height: 34, padding: '0 12px', borderRadius: 10, border: `1px solid ${t.error}`, background: t.btnBg, color: t.error, display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: t.font, fontSize: 12.5, fontWeight: 600 }}>
+                      <Square size={13} fill="currentColor" /> Stop
+                    </button>
+                  ) : null}
+                  <button type="button" className="dql-hover dql-lift" title="Ask" onClick={handleSubmit} disabled={!input.trim() || running} style={{ width: 34, height: 34, borderRadius: 10, border: 'none', background: (input.trim() && !running) ? 'var(--accent)' : 'var(--bg-4)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: (input.trim() && !running) ? 'pointer' : 'default', boxShadow: (input.trim() && !running) ? '0 1px 5px rgba(107,93,211,0.3)' : 'none' }}>
+                    {running ? <Loader2 size={15} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <ArrowUp size={15} />}
+                  </button>
+                </div>
+              </div>
+              <div style={{ textAlign: 'center', fontSize: 10.5, color: t.textMuted, marginTop: 8 }}>Every answer is grounded in your certified metrics and dbt lineage.</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Inspector */}
+        {activeInspector ? (
+          <AskInspector
+            run={activeInspector.run}
+            artifact={activeInspector.artifact}
+            tab={inspector!.tab}
+            t={t}
+            themeMode={themeMode}
+            appContext={appContext}
+            onOpenApp={onOpenApp}
+            onChangeTab={(tab) => setInspector((prev) => (prev ? { ...prev, tab } : prev))}
+            onClose={() => setInspector(null)}
+            onSaveBlock={() => handleNextAction(activeInspector.run, { id: 'save-dql-block', label: 'Save as block', route: 'dql_block_draft' })}
+          />
+        ) : null}
+
+        {pop ? (
+          <FollowUpPopover
+            t={t}
+            text={pop.text}
+            source={pop.source}
+            left={pop.left}
+            top={pop.top}
+            draft={popDraft}
+            inputRef={popInputRef}
+            onDraftChange={setPopDraft}
+            onClose={() => setPop(null)}
+            onSend={sendFollowUp}
+          />
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1, minWidth: 0, width: '100%', background: t.cellBg }}>
@@ -1404,6 +1624,437 @@ function RunCard({
             ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Ask redesign — plain-text transcript, artifact chips, inspector, follow-up.
+// Adopted from "Ask AI Redesign.dc.html". Reuses the existing run/artifact
+// logic (ArtifactView, ResultView, AddToAppButton, trust helpers) so every
+// api call and handoff keeps working.
+// ══════════════════════════════════════════════════════════════════════════
+
+type AskInspectorTab = 'result' | 'chart' | 'dql' | 'sql' | 'trust';
+
+const ASK_KEYFRAMES = (t: Theme): string => `
+  @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
+  @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  @keyframes dql-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  @keyframes dql-orb { 0%, 100% { box-shadow: 0 0 0 0 ${t.accent}00; } 50% { box-shadow: 0 0 13px 1px ${t.accent}66; } }
+  @keyframes dql-step-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  .dql-hover { transition: filter .15s ease, transform .12s ease, box-shadow .15s ease, background .15s ease, color .15s ease, border-color .15s ease; }
+  .dql-hover:hover { filter: brightness(1.03); }
+  .dql-hover:active { transform: translateY(0.5px); }
+  .dql-lift:hover { transform: translateY(-1px); }
+  .dql-ask-ghost:hover { background: var(--bg-0); color: var(--text-primary) !important; }
+  .dql-ask-chip:hover { border-color: var(--accent) !important; box-shadow: 0 1px 6px rgba(107,93,211,0.12); }
+  details > summary::-webkit-details-marker { display: none; }
+`;
+
+function askUserBubbleStyle(t: Theme): React.CSSProperties {
+  return { alignSelf: 'flex-end', maxWidth: '82%', background: 'var(--bg-0)', color: t.textPrimary, borderRadius: '16px 16px 4px 16px', padding: '10px 14px', fontSize: 13.5, lineHeight: 1.5, whiteSpace: 'pre-wrap', animation: 'dql-agent-fadein 0.25s ease-out' };
+}
+
+function askGhostBtnStyle(t: Theme): React.CSSProperties {
+  return { display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 8px', borderRadius: 6, border: 'none', background: 'none', color: t.textMuted, fontSize: 11.5, fontWeight: 550, cursor: 'pointer', fontFamily: t.font };
+}
+
+/** Rich artifacts render inline (they own interactive flows); the rest chip out. */
+function isRichAskArtifact(artifact: AgentRunArtifact, payload: Record<string, unknown>): boolean {
+  return artifact.kind === 'app_proposal'
+    || artifact.kind === 'dql_block_draft'
+    || artifact.kind === 'research_run'
+    || Boolean(extractMixedSourceNotebookPlan(payload));
+}
+
+function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const result = extractResult(payload);
+  const kindLabel = artifact.kind === 'answer' ? (result?.rows?.length ? 'Table' : 'Answer')
+    : artifact.kind === 'sql_cell' ? 'SQL'
+    : artifact.kind === 'dql_block_draft' ? 'DQL block'
+    : artifact.kind === 'research_run' ? 'Research'
+    : 'Result';
+  parts.push(kindLabel);
+  if (result?.rows?.length) parts.push(`${result.rows.length} row${result.rows.length === 1 ? '' : 's'}`);
+  parts.push(artifact.trustState === 'certified' ? 'certified block' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'governed' : 'AI-generated');
+  return parts.join(' · ');
+}
+
+function AskRunCard({
+  run,
+  t,
+  themeMode,
+  appContext,
+  selectedArtifactId,
+  onOpenArtifact,
+  onOpenApp,
+  onInsertSql,
+  onInsertDql,
+  onOpenBlock,
+  onOpenResearch,
+  onNextAction,
+}: {
+  run: AgentRun;
+  t: Theme;
+  themeMode: ThemeMode;
+  appContext?: { appId?: string; dashboardId?: string };
+  selectedArtifactId?: string;
+  onOpenArtifact: (artifactId: string, tab: AskInspectorTab) => void;
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertDql?: (payload: InsertDqlPayload) => void;
+  onOpenBlock?: (path: string, name?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onNextAction: (action: AgentRun['nextActions'][number]) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  // Conversational replies stay a plain bubble — no trust line, chips, or actions.
+  if (run.route === 'conversation') {
+    const isGeneralKnowledge = run.answerKind === 'general_knowledge';
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-agent-fadein 0.3s ease-out', maxWidth: '100%' }}>
+        {isGeneralKnowledge ? (
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: t.textMuted, fontWeight: 650 }}>
+            <Lightbulb size={11} /> General knowledge — not from your data
+          </div>
+        ) : null}
+        <div data-followup="answer" style={{ fontSize: 14.5, lineHeight: 1.65, color: t.textPrimary }}>
+          {run.answer ? <StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /> : run.summary}
+        </div>
+        {run.nextActions.length > 0 ? (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {run.nextActions.map((action) => (
+              <button key={action.id} type="button" className="dql-hover dql-lift" onClick={() => onNextAction(action)} style={suggestionChipStyle(t)}>{action.label}</button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  const certified = run.trustState === 'certified';
+  const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
+  const evidence = evidenceFromRun(run);
+  const chipArtifacts = run.artifacts.filter((a) => !isRichAskArtifact(a, payloadOf(a)));
+  const richArtifacts = run.artifacts.filter((a) => isRichAskArtifact(a, payloadOf(a)));
+  const primaryArtifact = chipArtifacts[0] ?? run.artifacts[0];
+
+  // Reuse RunCard's action gating so the quiet row offers the same real actions.
+  const hasMixedSourcePlan = run.artifacts.some((a) => Boolean(extractMixedSourceNotebookPlan(payloadOf(a))));
+  const pinnable = !hasMixedSourcePlan && run.status !== 'blocked' && run.status !== 'needs_clarification'
+    && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
+  const isAnswer = run.route === 'certified_answer' || run.route === 'generated_answer';
+  const hasResearchAction = run.nextActions.some((a) => a.route === 'research');
+  const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
+  const sourceArtifact = answerDqlArtifactFromRun(run);
+  const canSaveBlock = pinnable && !sourceArtifact?.sourcePath && Boolean(sourceArtifact?.source ?? answerSqlFromRun(run));
+
+  const copyAnswer = () => {
+    const text = run.answer ? cleanAnswerText(run.answer) : run.summary;
+    if (!text) return;
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: '100%', animation: 'dql-agent-fadein 0.3s ease-out' }}>
+      {/* Trust line */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+        {certified ? <ShieldCheck size={14} color={t.success} /> : <Sparkles size={14} color={t.accent} />}
+        <span style={{ fontSize: 12, fontWeight: 650, color: t.textSecondary }}>{certified ? 'Certified answer' : 'AI-generated answer'}</span>
+        {certified && evidence[0] ? (
+          <span style={{ fontSize: 11, color: t.textMuted }}>from <span style={{ color: t.accent, fontWeight: 600 }}>{evidence[0].label}</span></span>
+        ) : primaryArtifact && passedChecks > 0 ? (
+          <button type="button" onClick={() => onOpenArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <Check size={11} color={t.success} /> {passedChecks} check{passedChecks === 1 ? '' : 's'} passed
+          </button>
+        ) : null}
+      </div>
+
+      {/* Answer (plain text, selectable for follow-up) */}
+      {run.answer ? (
+        <div data-followup="answer" style={{ fontSize: 14.5, lineHeight: 1.65, color: t.textPrimary }}>
+          <StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} />
+        </div>
+      ) : run.summary ? (
+        <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
+      ) : null}
+
+      {/* Artifact chips */}
+      {chipArtifacts.map((artifact) => {
+        const payload = payloadOf(artifact);
+        const selected = artifact.id === selectedArtifactId;
+        return (
+          <button
+            key={artifact.id}
+            type="button"
+            className="dql-ask-chip"
+            onClick={() => onOpenArtifact(artifact.id, 'result')}
+            style={{ display: 'flex', alignItems: 'center', gap: 10, width: 'fit-content', maxWidth: '100%', padding: '9px 12px', borderRadius: 10, border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`, background: 'var(--bg-2)', boxShadow: selected ? '0 1px 6px rgba(107,93,211,0.12)' : 'none', cursor: 'pointer', textAlign: 'left', fontFamily: t.font }}
+          >
+            <span style={{ width: 30, height: 30, borderRadius: 7, background: artifact.trustState === 'certified' ? 'var(--status-success-bg)' : 'var(--accent-dim)', color: artifact.trustState === 'certified' ? 'var(--status-success)' : 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <ArtifactIcon kind={artifact.kind} />
+            </span>
+            <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cleanPresentationText(artifact.title)}</span>
+              <span style={{ fontSize: 11, color: t.textMuted }}>{askArtifactMeta(artifact, payload)}</span>
+            </span>
+            <ChevronRight size={14} color={t.textMuted} style={{ flexShrink: 0, marginLeft: 6 }} />
+          </button>
+        );
+      })}
+
+      {/* Rich artifacts render inline to preserve their interactive flows */}
+      {richArtifacts.length > 0 ? (
+        <div style={{ display: 'grid', gap: 8, gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0 }}>
+          {richArtifacts.map((artifact) => (
+            <ArtifactView
+              key={artifact.id}
+              artifact={artifact}
+              t={t}
+              themeMode={themeMode}
+              onInsertSql={onInsertSql}
+              onInsertDql={onInsertDql}
+              onOpenBlock={onOpenBlock}
+              onOpenResearch={onOpenResearch}
+              onOpenApp={onOpenApp}
+              onNextAction={onNextAction}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {/* Quiet action row */}
+      {(run.answer || pinnable || canSaveBlock || showResearchDeeper || primaryArtifact) ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', marginTop: -2 }}>
+          {run.answer ? (
+            <button type="button" className="dql-ask-ghost" onClick={copyAnswer} style={askGhostBtnStyle(t)}>
+              {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
+            </button>
+          ) : null}
+          {pinnable ? <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} /> : null}
+          {canSaveBlock ? (
+            <button type="button" className="dql-ask-ghost" onClick={() => onNextAction({ id: 'save-dql-block', label: 'Save as block', route: 'dql_block_draft' })} style={askGhostBtnStyle(t)}>
+              <Blocks size={12} /> Save as block
+            </button>
+          ) : null}
+          {showResearchDeeper ? (
+            <button type="button" className="dql-ask-ghost" onClick={() => onNextAction({ id: 'research-deeper', label: 'Research this deeper', route: 'research' })} style={askGhostBtnStyle(t)}>
+              <FileSearch size={12} /> Research deeper
+            </button>
+          ) : null}
+          {primaryArtifact ? (
+            <button type="button" className="dql-ask-ghost" onClick={() => onOpenArtifact(primaryArtifact.id, 'trust')} style={askGhostBtnStyle(t)}>
+              <ListTree size={12} /> How it was answered
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AskInspector({
+  run,
+  artifact,
+  tab,
+  t,
+  themeMode,
+  appContext,
+  onOpenApp,
+  onChangeTab,
+  onClose,
+  onSaveBlock,
+}: {
+  run: AgentRun;
+  artifact: AgentRunArtifact;
+  tab: AskInspectorTab;
+  t: Theme;
+  themeMode: ThemeMode;
+  appContext?: { appId?: string; dashboardId?: string };
+  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onChangeTab: (tab: AskInspectorTab) => void;
+  onClose: () => void;
+  onSaveBlock: () => void;
+}) {
+  const payload = payloadOf(artifact);
+  const resultData = extractResult(payload);
+  const chartConfig = resultData ? extractChartConfig(payload, resultData) : undefined;
+  const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
+  const sql = answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined);
+  const evidence = evidenceFromRun(run);
+  const trustNote = trustExplainer(run);
+  const certified = artifact.trustState === 'certified';
+
+  const tabs: Array<{ id: AskInspectorTab; label: string }> = [{ id: 'result', label: 'Result' }];
+  if (chartConfig) tabs.push({ id: 'chart', label: 'Chart' });
+  if (dqlArtifact?.source) tabs.push({ id: 'dql', label: 'DQL' });
+  if (sql) tabs.push({ id: 'sql', label: 'SQL' });
+  tabs.push({ id: 'trust', label: 'Trust & steps' });
+  const activeTab = tabs.some((x) => x.id === tab) ? tab : 'result';
+
+  const badgeLabel = certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
+  const badgeColor = certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
+  const badgeBg = certified ? 'var(--status-success-bg)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent-dim)' : 'var(--status-warning-bg)';
+
+  return (
+    <div style={{ width: 'clamp(300px, 34vw, 440px)', flexShrink: 0, background: 'var(--bg-2)', borderLeft: '1px solid var(--border-default)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '14px 16px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <span style={{ width: 32, height: 32, borderRadius: 8, background: badgeBg, color: badgeColor, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: '1px solid var(--border-subtle)' }}>
+          <ArtifactIcon kind={artifact.kind} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary, lineHeight: 1.35 }}>{cleanPresentationText(artifact.title)}</div>
+          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{askArtifactMeta(artifact, payload)}</div>
+        </div>
+        <span style={{ border: `1px solid ${badgeColor}`, color: badgeColor, background: badgeBg, borderRadius: 999, padding: '2px 8px', fontSize: 10, fontWeight: 700, flexShrink: 0, marginTop: 2 }}>{badgeLabel}</span>
+        <button type="button" onClick={onClose} title="Close" className="dql-ask-ghost" style={{ width: 24, height: 24, borderRadius: 6, border: 'none', background: 'none', color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0 }}>
+          <X size={14} />
+        </button>
+      </div>
+
+      {/* Action row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} />
+        <button type="button" className="dql-hover" onClick={onSaveBlock} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 13px', borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textSecondary, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: t.font }}>
+          <Blocks size={13} /> Save as block
+        </button>
+        <div style={{ flex: 1 }} />
+        <button type="button" title="More" className="dql-hover" style={{ width: 28, height: 28, borderRadius: 7, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+          <MoreHorizontal size={14} />
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '0 16px', borderBottom: '1px solid var(--border-subtle)', flexShrink: 0 }}>
+        {tabs.map((x) => (
+          <button key={x.id} type="button" onClick={() => onChangeTab(x.id)} style={{ padding: '10px 1px', fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none', background: 'none', fontFamily: t.font, whiteSpace: 'nowrap', color: activeTab === x.id ? t.textPrimary : t.textMuted, boxShadow: activeTab === x.id ? `inset 0 -2px 0 0 ${t.accent}` : 'none' }}>{x.label}</button>
+        ))}
+      </div>
+
+      {/* Body */}
+      <div data-followup="table" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px 20px' }}>
+        {activeTab === 'result' ? (
+          resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={chartConfig} />
+            : run.answer ? <div style={{ fontSize: 13.5, lineHeight: 1.6, color: t.textPrimary }}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div>
+            : <div style={{ fontSize: 12, color: t.textMuted }}>No tabular result for this answer.</div>
+        ) : null}
+        {activeTab === 'chart' && resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={chartConfig} /> : null}
+        {activeTab === 'dql' && dqlArtifact?.source ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: t.textMuted }}>Reusable governed artifact — save it as a block to certify.</span>
+              <CopyButton text={dqlArtifact.source} t={t} title="Copy DQL" />
+            </div>
+            <pre style={codeStyle(t)}>{dqlArtifact.source}</pre>
+          </>
+        ) : null}
+        {activeTab === 'sql' && sql ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: t.textMuted }}>Compiled SQL preview — grounded against your dbt schema.</span>
+              <CopyButton text={sql} t={t} title="Copy SQL" />
+            </div>
+            <pre style={codeStyle(t)}>{sql}</pre>
+          </>
+        ) : null}
+        {activeTab === 'trust' ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {trustNote ? (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 8, background: certified ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', border: `1px solid ${certified ? 'var(--status-success-border)' : 'var(--status-warning-border)'}` }}>
+                {certified ? <ShieldCheck size={13} color="var(--status-success)" style={{ flexShrink: 0, marginTop: 1 }} /> : <ShieldAlert size={13} color="var(--status-warning)" style={{ flexShrink: 0, marginTop: 1 }} />}
+                <span style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>{trustNote}</span>
+              </div>
+            ) : null}
+            {evidence.length > 0 ? (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Evidence</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {evidence.map((ev) => (
+                    <span key={ev.label} style={evidenceChipStyle(t, ev.certified)}>
+                      {ev.certified ? <ShieldCheck size={11} /> : <FileSearch size={11} />}<span>{ev.label}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {run.evaluations.length > 0 ? (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Verification checks</div>
+                <VerificationChecks evaluations={run.evaluations} t={t} />
+              </div>
+            ) : null}
+            {run.steps.length > 0 ? (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Steps</div>
+                <StepTrace steps={run.steps} t={t} />
+              </div>
+            ) : null}
+            <AppliedLearnings run={run} t={t} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function FollowUpPopover({
+  t,
+  text,
+  source,
+  left,
+  top,
+  draft,
+  inputRef,
+  onDraftChange,
+  onClose,
+  onSend,
+}: {
+  t: Theme;
+  text: string;
+  source: 'answer' | 'table';
+  left: number;
+  top: number;
+  draft: string;
+  inputRef: React.RefObject<HTMLInputElement>;
+  onDraftChange: (value: string) => void;
+  onClose: () => void;
+  onSend: (question: string) => void;
+}) {
+  const chip = (label: string, question: string) => (
+    <button type="button" onClick={() => onSend(question)} style={{ border: '1px solid var(--border-subtle)', background: 'var(--bg-1)', color: t.textSecondary, borderRadius: 999, padding: '3px 10px', fontSize: 11, fontWeight: 550, cursor: 'pointer', fontFamily: t.font }}>{label}</button>
+  );
+  return (
+    <div data-selpop="true" style={{ position: 'fixed', left, top, zIndex: 90, width: 324, background: 'var(--bg-2)', border: '1px solid var(--border-default)', borderRadius: 12, boxShadow: '0 10px 32px rgba(26,26,26,0.16)', padding: 10, display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-agent-fadein 0.14s ease-out', fontFamily: t.font }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Sparkles size={12} color={t.accent} />
+        <span style={{ fontSize: 11, fontWeight: 700, color: t.textSecondary }}>Follow up on this</span>
+        <span style={{ fontSize: 10, color: t.textMuted }}>{source === 'table' ? 'from the result' : 'from the answer'}</span>
+        <div style={{ flex: 1 }} />
+        <button type="button" onClick={onClose} style={{ width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+      </div>
+      <div style={{ borderLeft: `2px solid ${t.accent}`, background: 'var(--accent-dim)', borderRadius: '0 6px 6px 0', padding: '5px 9px', fontSize: 11.5, color: t.textSecondary, lineHeight: 1.45, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>“{text}”</div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => onDraftChange(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onSend(draft); } }}
+          placeholder="Ask about this…"
+          style={{ flex: 1, minWidth: 0, border: '1px solid var(--border-default)', borderRadius: 8, padding: '7px 10px', fontSize: 12.5, fontFamily: t.font, color: t.textPrimary, background: 'var(--bg-1)', outline: 'none' }}
+        />
+        <button type="button" onClick={() => onSend(draft)} title="Send follow-up" style={{ width: 30, height: 30, flexShrink: 0, borderRadius: 8, border: 'none', background: 'var(--accent)', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}><ArrowUp size={13} /></button>
+      </div>
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+        {chip('Why is this?', 'Why is this happening?')}
+        {chip('Root cause', 'What is the root cause?')}
+        {chip('Break it down', 'Break this down further')}
+      </div>
     </div>
   );
 }
