@@ -556,6 +556,7 @@ export function AppsView(): JSX.Element {
           saving={builderSaving}
           error={builderError}
           onBack={() => setSurface('library')}
+          onStartOver={() => { setBuildSession(null); setGenerated(null); setProposalSelection(new Set()); setBuilderError(null); }}
           onModeChange={(nextMode) => {
             setBuilderMode(nextMode);
             if (nextMode === 'ai') setSelectedBlocks(new Set());
@@ -823,6 +824,7 @@ function AppCreateSurface({
   saving,
   error,
   onBack,
+  onStartOver,
   onModeChange,
   onAppNameChange,
   onPromptChange,
@@ -851,6 +853,7 @@ function AppCreateSurface({
   saving: boolean;
   error: string | null;
   onBack: () => void;
+  onStartOver: () => void;
   onModeChange: (mode: BuilderMode) => void;
   onAppNameChange: (value: string) => void;
   onPromptChange: (value: string) => void;
@@ -892,6 +895,22 @@ function AppCreateSurface({
         </div>
       </div>
     );
+  }
+  if (proposal && !generated) {
+    const proposalFilters = plan.globalFilters?.length ? plan.globalFilters : plan.pages[0]?.filters ?? [];
+    return <div className="dql-app-building-stage dql-app-proposal-stage">
+      <button type="button" className="dql-app-back dql-app-back-label" onClick={onBack}><ArrowLeft size={14} /><span>Apps</span></button>
+      <div className="dql-app-building-thread dql-app-proposal-thread">
+        <div className="dql-app-building-prompt">{prompt}</div>
+        <section className="dql-app-proposal-card">
+          <div className="dql-app-proposal-title"><span className="dql-app-building-orb"><Sparkles size={15} /></span><div><h1>Review the proposed app</h1><p>DQL matched certified blocks and detected reusable app filters. Choose exactly what should be created.</p></div></div>
+          <AppBuildProposalPanel proposal={proposal} t={themes[themeMode]} selected={proposalSelection} onToggle={onToggleProposalTile} onCreate={onCommitProposal} busy={committing} error={error} />
+          <details className="dql-app-proposal-more"><summary><Plus size={13} /> Add more blocks</summary><div>{catalog.filter((block) => !proposal.tiles.some((tile) => tile.blockId === block.id)).slice(0, 8).map((block) => <button key={block.id} type="button" onClick={() => onToggleBlock(block.id)} className={selectedBlocks.has(block.id) ? 'selected' : ''}><span>{selectedBlocks.has(block.id) ? <Check size={11} /> : <Plus size={11} />}</span><b>{block.name}</b><small>{block.status}</small></button>)}{!catalog.length && <span className="dql-app-proposal-empty">No additional certified blocks are available for this scope.</span>}</div></details>
+          <div className="dql-app-proposal-filters"><b>Detected filters</b><div>{proposalFilters.slice(0, 5).map((filter) => <span key={filter.id}><small>{filter.label}</small>{formatVariableValue(filter.default ?? 'Any')}</span>)}{proposalFilters.length === 0 && <><span><small>Domain</small>{contextDomainLabel}</span><span><small>Owner</small>{contextOwnerLabel}</span><span><small>Top N</small>Any</span></>}</div></div>
+          <button type="button" className="dql-apps-btn dql-apps-btn-line dql-app-proposal-reset" onClick={onStartOver}>Start over</button>
+        </section>
+      </div>
+    </div>;
   }
   return (
     <div className="dql-app-create-shell">
@@ -7966,6 +7985,26 @@ const APP_STYLES = `
 .dql-app-building-progress li:nth-child(2) { animation-delay: .18s; }
 .dql-app-building-progress li:nth-child(3) { animation-delay: .36s; }
 .dql-app-building-progress li svg { color: var(--status-success); }
+.dql-app-proposal-thread { margin-top: 24px; gap: 18px; }
+.dql-app-proposal-card { position: relative; display: grid; gap: 16px; padding: 18px; border: 1px solid var(--border-default); border-radius: 13px; background: var(--bg-2); box-shadow: 0 8px 28px color-mix(in srgb, var(--text-primary) 6%, transparent); }
+.dql-app-proposal-title { display: flex; gap: 11px; align-items: flex-start; }
+.dql-app-proposal-title h1 { margin: 2px 0 3px; color: var(--text-primary); font-size: 15px; }
+.dql-app-proposal-title p { margin: 0; color: var(--text-tertiary); font-size: 11.5px; line-height: 1.45; }
+.dql-app-proposal-more { border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+.dql-app-proposal-more summary { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 11.5px; font-weight: 700; cursor: pointer; list-style: none; }
+.dql-app-proposal-more summary::-webkit-details-marker { display: none; }
+.dql-app-proposal-more > div { display: grid; gap: 5px; margin-top: 8px; }
+.dql-app-proposal-more > div > button { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; border: 1px solid var(--border-subtle); border-radius: 7px; background: var(--bg-1); color: var(--text-primary); padding: 7px 9px; text-align: left; }
+.dql-app-proposal-more > div > button.selected { border-color: var(--accent); background: var(--accent-dim); }
+.dql-app-proposal-more > div > button span { display: grid; place-items: center; width: 16px; height: 16px; border: 1px solid var(--border-default); border-radius: 4px; color: var(--accent); }
+.dql-app-proposal-more > div > button b { font-size: 11.5px; }
+.dql-app-proposal-more > div > button small, .dql-app-proposal-empty { color: var(--text-muted); font-size: 10px; }
+.dql-app-proposal-filters { display: grid; gap: 7px; border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+.dql-app-proposal-filters > b { color: var(--text-tertiary); font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; }
+.dql-app-proposal-filters > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.dql-app-proposal-filters span { display: inline-flex; gap: 6px; border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-1); color: var(--text-secondary); padding: 4px 9px; font-size: 10.5px; }
+.dql-app-proposal-filters small { color: var(--text-muted); }
+.dql-app-proposal-reset { justify-self: start; }
 @keyframes dql-app-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @keyframes dql-app-orb { 50% { box-shadow: 0 0 13px 1px color-mix(in srgb, var(--accent) 40%, transparent); } }
 @keyframes dql-app-stage-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
