@@ -346,12 +346,19 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         action.updates.name !== undefined ||
         action.updates.executionTarget !== undefined ||
         action.updates.datasetRefs !== undefined ||
-        action.updates.dependencies !== undefined;
+        action.updates.dependencies !== undefined ||
+        action.updates.dqlParameterValues !== undefined ||
+        action.updates.blockBinding !== undefined;
       const downstream = invalidatesDependents
         ? downstreamCellIds(action.id, state.cells)
         : new Set<string>();
       const cells = state.cells.map((c) => {
-        if (c.id === action.id) return { ...c, ...action.updates };
+        if (c.id === action.id) {
+          const updated = { ...c, ...action.updates };
+          return invalidatesDependents && c.result && action.updates.stale === undefined
+            ? { ...updated, stale: true }
+            : updated;
+        }
         if (downstream.has(c.id) && c.result) return { ...c, stale: true };
         return c;
       });

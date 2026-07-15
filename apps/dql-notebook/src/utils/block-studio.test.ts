@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ensureNotebookDqlBlockSource,
   inferVisualParameterType,
   parseVisualBlockParameters,
   removeVisualBlockParameter,
@@ -42,6 +43,23 @@ describe('visual block parameters', () => {
       }),
     ]);
     expect(parseVisualBlockParameters(removeVisualBlockParameter(withParameter, 'region_set'))).toEqual([]);
+  });
+
+  it('creates a minimal draft block only when notebook parameter authoring needs one', () => {
+    expect(ensureNotebookDqlBlockSource(SOURCE)).toBe(SOURCE);
+    const source = ensureNotebookDqlBlockSource('SELECT * FROM orders');
+    const withParameter = upsertVisualBlockParameter(source, {
+      name: 'start_date',
+      type: 'date',
+      required: false,
+      defaultText: '2026-01-01',
+      policy: 'dynamic',
+    });
+
+    expect(withParameter).toContain('block "notebook_query"');
+    expect(withParameter).toContain('SELECT * FROM orders');
+    expect(withParameter).toContain('start_date: date = "2026-01-01"');
+    expect(withParameter).not.toContain('top_n');
   });
 
   it('creates a complete dynamic semantic-filter contract from visual authoring', () => {

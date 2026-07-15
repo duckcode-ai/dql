@@ -619,6 +619,7 @@ export interface CellDependency {
 export interface CellAnnotation {
   id: string;
   body: string;
+  kind?: "note" | "assumption" | "finding" | "decision" | "caveat";
   createdAt: string;
   updatedAt?: string;
   author?: string;

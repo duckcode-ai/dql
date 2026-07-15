@@ -22,6 +22,7 @@ describe(".dqlnb v2 persistence", () => {
             {
               id: "note-1",
               body: "Validate cohort boundary",
+              kind: "assumption",
               createdAt: "2026-07-10T12:00:00.000Z",
             },
           ],
@@ -59,6 +60,7 @@ describe(".dqlnb v2 persistence", () => {
       { cellId: "cell-0", output: "customers" },
     ]);
     expect(cell.annotations[0].body).toBe("Validate cohort boundary");
+    expect(cell.annotations[0].kind).toBe("assumption");
     expect(cell.dqlArtifact.metrics).toEqual(["retained_customers"]);
     expect(cell.dqlParameterValues).toEqual({ category: "Beverage", top_n: 10 });
     expect(cell.chatConfig.threadId).toBe("thread-1");

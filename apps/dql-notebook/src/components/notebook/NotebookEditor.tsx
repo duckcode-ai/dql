@@ -19,7 +19,7 @@ import {
   type InsertDqlPayload,
 } from "../agent/UnifiedAgentRunPanel";
 import { emitNotebookResearchChanged } from "../../utils/notebook-research";
-import type { Cell, NotebookFile } from "../../store/types";
+import type { Cell, NotebookDocMetadata, NotebookFile } from "../../store/types";
 import { DatasetImportPanel } from "./DatasetImportPanel";
 
 interface NotebookEditorProps {
@@ -72,6 +72,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
       buildNotebookAiContext({
         notebookPath: activeNotebookPath,
         notebookTitle: state.notebookTitle,
+        notebookMetadata: state.notebookMetadata,
         cell: aiSourceCell,
         cells: state.cells,
         datasets,
@@ -81,6 +82,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
       aiSourceCell,
       datasets,
       state.cells,
+      state.notebookMetadata,
       state.notebookTitle,
     ],
   );
@@ -391,6 +393,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         style={{
           flex: 1,
           display: 'flex',
+          position: 'relative',
           minHeight: 0,
           overflow: 'hidden',
         }}
@@ -652,15 +655,20 @@ function NotebookAiDrawer({
   return (
     <aside
       style={{
-        width: compact ? "100%" : 440,
-        maxWidth: compact ? "none" : "42vw",
-        minWidth: compact ? 0 : 360,
+        position: compact ? 'relative' : 'absolute',
+        inset: compact ? undefined : '0 0 0 auto',
+        zIndex: 30,
+        width: compact ? "100%" : 'min(520px, calc(100% - 40px))',
+        maxWidth: compact ? "none" : "52vw",
+        minWidth: compact ? 0 : 400,
         flex: "0 0 auto",
         borderLeft: compact ? "none" : `1px solid ${t.headerBorder}`,
         background: t.cellBg,
         display: 'flex',
         flexDirection: 'column',
         minHeight: 0,
+        height: '100%',
+        boxShadow: compact ? 'none' : '-16px 0 36px rgba(0,0,0,0.18)',
       }}
       aria-label="Notebook AI"
     >
@@ -862,6 +870,7 @@ function NotebookAiHistoryPanel({
 function buildNotebookAiContext(input: {
   notebookPath?: string;
   notebookTitle?: string;
+  notebookMetadata: NotebookDocMetadata;
   cell: Cell | null;
   cells: Cell[];
   datasets: DatasetSource[];
@@ -886,6 +895,46 @@ function buildNotebookAiContext(input: {
     `Notebook: ${input.notebookTitle || input.notebookPath || "Untitled notebook"}`,
   );
   if (input.notebookPath) lines.push(`Path: ${input.notebookPath}`);
+  const metadata = [
+    input.notebookMetadata.purpose ? `Purpose: ${compactText(input.notebookMetadata.purpose, 1200)}` : '',
+    input.notebookMetadata.description ? `Business context: ${compactText(input.notebookMetadata.description, 800)}` : '',
+    input.notebookMetadata.status ? `Notebook status: ${input.notebookMetadata.status}` : '',
+    input.notebookMetadata.ownerDomain ? `Owner domain: ${input.notebookMetadata.ownerDomain}` : '',
+    input.notebookMetadata.usesDomains?.length ? `Uses domains: ${input.notebookMetadata.usesDomains.join(', ')}` : '',
+    input.notebookMetadata.projectFilter ? `Scope filter: ${input.notebookMetadata.projectFilter}` : '',
+    input.notebookMetadata.categories?.length ? `Categories: ${input.notebookMetadata.categories.join(', ')}` : '',
+  ].filter(Boolean);
+  if (metadata.length > 0) lines.push(metadata.join('\n'));
+
+  const narrative = input.cells
+    .filter((cell) => cell.type === 'markdown' && cell.content.trim())
+    .slice(0, 12)
+    .map((cell, index) => `${index + 1}. ${compactText(cell.content, 700)}`);
+  if (narrative.length > 0) {
+    lines.push('Notebook research narrative:');
+    lines.push(narrative.join('\n'));
+  }
+
+  const researchEvidence = input.cells
+    .filter((cell) => cell.annotations?.length || cell.upstream || cell.dependencies?.length)
+    .slice(0, 30)
+    .map((cell) => {
+      const parts = [
+        `${cell.type.toUpperCase()}${cell.name ? ` ${cell.name}` : ` ${cell.id}`}`,
+        cell.upstream ? `upstream=${cell.upstream}` : '',
+        cell.dependencies?.length
+          ? `dependencies=${cell.dependencies.map((dependency) => dependency.output ?? dependency.cellId).join(',')}`
+          : '',
+        cell.annotations?.length
+          ? `research=${cell.annotations.map((annotation) => `${annotation.kind ?? 'note'}:${compactText(annotation.body, 240)}`).join(' | ')}`
+          : '',
+      ].filter(Boolean);
+      return `- ${parts.join(' · ')}`;
+    });
+  if (researchEvidence.length > 0) {
+    lines.push('Notebook dependency and research evidence:');
+    lines.push(researchEvidence.join('\n'));
+  }
   if (input.datasets.length > 0) {
     const selectedIds = new Set(
       input.cell?.datasetRefs?.map((reference) => reference.id) ?? [],
@@ -927,6 +976,18 @@ function buildNotebookAiContext(input: {
   }
   if (input.cell) {
     lines.push(`Selected cell: ${input.cell.type.toUpperCase()}${input.cell.name ? ` ${input.cell.name}` : ''}`);
+    const parameterValues = input.cell.blockBinding?.parameterValues
+      ?? input.cell.dqlParameterValues
+      ?? input.cell.dqlArtifact?.parameterValues;
+    if (parameterValues && Object.keys(parameterValues).length > 0) {
+      lines.push(`Selected parameters: ${compactText(JSON.stringify(parameterValues), 800)}`);
+    }
+    if (input.cell.blockBinding) {
+      lines.push(`Block binding: ${input.cell.blockBinding.path} · ${input.cell.blockBinding.state}`);
+    }
+    if (input.cell.dqlArtifact?.trustState || input.cell.dqlArtifact?.reviewState) {
+      lines.push(`Trust: ${input.cell.dqlArtifact.trustState ?? input.cell.dqlArtifact.reviewState}`);
+    }
     if (input.cell.error) lines.push(`Current error: ${input.cell.error}`);
     if (input.cell.result) {
       lines.push(`Result columns: ${input.cell.result.columns.join(', ')}`);

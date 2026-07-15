@@ -45,11 +45,26 @@ export function BlockPicker({ themeMode, onPick, autoFocus = true, compact = tru
   const filtered = useMemo(() => blocks.filter((b) => {
     if (search) {
       const needle = search.toLowerCase();
-      if (!b.name.toLowerCase().includes(needle) && !b.description.toLowerCase().includes(needle)) return false;
+      const evidence = [
+        b.name,
+        b.description,
+        b.llmContext,
+        b.domain,
+        b.status,
+        b.owner,
+        ...(b.tags ?? []),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!evidence.includes(needle)) return false;
     }
     if (domainFilter && b.domain !== domainFilter) return false;
     if (statusFilter && b.status !== statusFilter) return false;
     return true;
+  }).sort((a, b) => {
+    const certified = Number(b.status === 'certified') - Number(a.status === 'certified');
+    return certified || a.name.localeCompare(b.name);
   }), [blocks, search, domainFilter, statusFilter]);
 
   const selectStyle: React.CSSProperties = {
@@ -70,18 +85,24 @@ export function BlockPicker({ themeMode, onPick, autoFocus = true, compact = tru
           ref={inputRef}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search blocks..."
+          placeholder="Search question, block, domain, owner, or tag…"
+          aria-label="Search existing blocks"
           style={{ ...selectStyle, flex: 1, padding: '6px 8px' }}
         />
-        <select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={selectStyle}>
+        <select aria-label="Filter blocks by domain" value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={selectStyle}>
           <option value="">All domains</option>
           {domains.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={selectStyle}>
+        <select aria-label="Filter blocks by status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={selectStyle}>
           <option value="">Any</option>
           {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
+      {!loading && (
+        <div style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, padding: '0 2px' }}>
+          {filtered.length} reusable {filtered.length === 1 ? 'block' : 'blocks'} · certified results are listed first
+        </div>
+      )}
       <div
         style={{
           maxHeight: compact ? 220 : 420,
@@ -183,6 +204,9 @@ function BlockRow({
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: t.textMuted }}>
         <span style={{ background: t.pillBg, padding: '1px 6px', borderRadius: 4 }}>{block.domain || 'no domain'}</span>
         {block.owner && <span>by {block.owner}</span>}
+        {(block.tags ?? []).slice(0, compact ? 2 : 4).map((tag) => (
+          <span key={tag} style={{ background: t.pillBg, padding: '1px 6px', borderRadius: 4 }}>#{tag}</span>
+        ))}
       </div>
     </button>
   );

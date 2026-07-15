@@ -1,6 +1,6 @@
 import type { Theme } from "../../themes/notebook-theme";
 import React, { useState, useRef, useEffect } from "react";
-import { MoreHorizontal, Upload } from "lucide-react";
+import { Upload } from "lucide-react";
 import { useNotebook, makeCell } from "../../store/NotebookStore";
 import { themes } from "../../themes/notebook-theme";
 import type { Cell, CellType } from "../../store/types";
@@ -14,14 +14,9 @@ import { extractSqlFromText } from "../../utils/block-studio";
 import {
   BlockIcon,
   SQLCellIcon,
-  ChartCellIcon,
-  PivotCellIcon,
-  SingleValueCellIcon,
   ParamCellIcon,
-  FilterCellIcon,
   FileText,
   Sparkles,
-  Table,
 } from '@duckcodeailabs/dql-ui/icons';
 
 interface AddCellBarProps {
@@ -33,100 +28,52 @@ type PaletteType = CellType | "block" | "ai_sql" | "import_data";
 type PaletteEntry = {
   type: PaletteType;
   label: string;
-  shortLabel?: string;
   Icon: React.ComponentType<any>;
   color: string;
-  group: "core" | "input" | "transform" | "presentation";
 };
 
 const CORE_PALETTE: PaletteEntry[] = [
   {
-    type: "dql",
-    label: "DQL Query",
+    type: "block",
+    label: "Block",
     Icon: BlockIcon,
     color: "#6b8afd",
-    group: "core",
-  },
-  {
-    type: "sql",
-    label: "SQL (advanced)",
-    Icon: SQLCellIcon,
-    color: "#3b8ef0",
-    group: "core",
-  },
-  {
-    type: "markdown",
-    label: "Text",
-    Icon: FileText,
-    color: "#2fb97a",
-    group: "core",
   },
   {
     type: "ai_sql",
     label: "Ask AI",
     Icon: Sparkles,
     color: "#f0883e",
-    group: "core",
+  },
+  {
+    type: "dql",
+    label: "DQL",
+    Icon: BlockIcon,
+    color: "#6b8afd",
+  },
+  {
+    type: "sql",
+    label: "SQL",
+    Icon: SQLCellIcon,
+    color: "#3b8ef0",
   },
   {
     type: "import_data",
-    label: "Import data",
+    label: "Import",
     Icon: Upload,
     color: "#5dd1c8",
-    group: "core",
   },
   {
-    type: "block",
-    label: "Use block",
-    Icon: BlockIcon,
-    color: "#6b8afd",
-    group: "core",
+    type: "markdown",
+    label: "Note",
+    Icon: FileText,
+    color: "#2fb97a",
   },
-];
-
-const MORE_PALETTE: PaletteEntry[] = [
   {
     type: "param",
-    label: "Parameter",
+    label: "Input",
     Icon: ParamCellIcon,
     color: "#9aa0ae",
-    group: "input",
-  },
-  {
-    type: "filter",
-    label: "Filter",
-    Icon: FilterCellIcon,
-    color: "#f26a6a",
-    group: "transform",
-  },
-  {
-    type: "pivot",
-    label: "Pivot",
-    Icon: PivotCellIcon,
-    color: "#e5a84d",
-    group: "transform",
-  },
-  {
-    type: "chart",
-    label: "Chart",
-    Icon: ChartCellIcon,
-    color: "#b067f7",
-    group: "presentation",
-  },
-  {
-    type: "table",
-    label: "Table",
-    Icon: Table,
-    color: "#5dd1c8",
-    group: "presentation",
-  },
-  {
-    type: "single_value",
-    label: "Single value",
-    shortLabel: "Value",
-    Icon: SingleValueCellIcon,
-    color: "#b067f7",
-    group: "presentation",
   },
 ];
 
@@ -136,7 +83,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const [hovered, setHovered] = useState(false);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [blockPickerOpen, setBlockPickerOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -146,7 +92,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setPopoverOpen(false);
         setBlockPickerOpen(false);
-        setMoreOpen(false);
       }
     }
     document.addEventListener('mousedown', handler);
@@ -156,11 +101,10 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
   const closeAll = () => {
     setPopoverOpen(false);
     setBlockPickerOpen(false);
-    setMoreOpen(false);
   };
 
   const addCell = (type: CellType) => {
-    const cell = makeCell(type, type === 'dql' ? newNotebookDqlSource() : '');
+    const cell = makeCell(type);
     dispatch({ type: 'ADD_CELL', cell, afterId });
     closeAll();
   };
@@ -289,7 +233,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
                 active={entry.type === 'block' && blockPickerOpen}
                 onClick={() => {
                   if (entry.type === "block") {
-                    setMoreOpen(false);
                     setBlockPickerOpen((v) => !v);
                     return;
                   }
@@ -314,76 +257,7 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
                 t={t}
               />
             ))}
-            <button
-              type="button"
-              aria-label="More cell types"
-              data-testid="add-cell-more"
-              onClick={() => {
-                setBlockPickerOpen(false);
-                setMoreOpen((value) => !value);
-              }}
-              style={{
-                height: 48,
-                minWidth: 52,
-                borderRadius: 8,
-                border: `1px solid ${moreOpen ? t.accent : t.cellBorder}`,
-                background: moreOpen ? `${t.accent}12` : "transparent",
-                color: moreOpen ? t.accent : t.textSecondary,
-                display: "inline-flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 4,
-                font: `600 11px ${t.font}`,
-                cursor: "pointer",
-              }}
-            >
-              <MoreHorizontal size={17} aria-hidden="true" />
-              More
-            </button>
           </div>
-
-          {moreOpen && (
-            <div
-              style={{ borderTop: `1px solid ${t.cellBorder}`, paddingTop: 8 }}
-            >
-              {(["input", "transform", "presentation"] as const).map(
-                (group) => (
-                  <div
-                    key={group}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 5,
-                      marginTop: group === "input" ? 0 : 6,
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 72,
-                        color: t.textMuted,
-                        fontSize: 10,
-                        textTransform: "uppercase",
-                        letterSpacing: ".06em",
-                      }}
-                    >
-                      {group}
-                    </span>
-                    {MORE_PALETTE.filter((entry) => entry.group === group).map(
-                      (entry) => (
-                        <PaletteTile
-                          key={entry.type}
-                          entry={entry}
-                          onClick={() => addCell(entry.type as CellType)}
-                          t={t}
-                        />
-                      ),
-                    )}
-                  </div>
-                ),
-              )}
-            </div>
-          )}
 
           {blockPickerOpen && (
             <div
@@ -403,28 +277,6 @@ export function AddCellBar({ afterId }: AddCellBarProps) {
       )}
     </div>
   );
-}
-
-function newNotebookDqlSource(): string {
-  return `block "notebook_analysis" {
-  status = "draft"
-  domain = "uncategorized"
-  type = "custom"
-  description = "Notebook analysis"
-
-  params {
-    top_n: number = 10
-  }
-  parameterPolicy {
-    top_n = "dynamic"
-  }
-
-  query = """
-SELECT 1 AS value
-LIMIT \${top_n}
-  """
-}
-`;
 }
 
 function PaletteTile({
@@ -464,15 +316,16 @@ function PaletteTile({
         fontSize: 11,
         fontFamily: t.font,
         fontWeight: 600,
-        padding: '5px 6px',
-        width: 52,
-        height: 48,
-        flex: '0 0 52px',
+        padding: '0 11px',
+        width: 'auto',
+        minWidth: 'max-content',
+        height: 40,
+        flex: '0 0 auto',
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 4,
+        gap: 7,
         transition: 'all 0.12s',
       }}
     >
@@ -481,14 +334,11 @@ function PaletteTile({
       </span>
       <span
         style={{
-          maxWidth: '100%',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
           whiteSpace: 'nowrap',
           letterSpacing: 0,
         }}
       >
-        {entry.shortLabel ?? entry.label}
+        {entry.label}
       </span>
     </button>
   );
