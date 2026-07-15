@@ -261,15 +261,18 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
   return (
     <section
       style={{
-        border: `1px solid ${t.cellBorder}`,
-        borderRadius: 10,
+        border: '1px solid var(--border-subtle)',
+        borderRadius: 11,
         background: t.cellBg,
-        padding: '13px 15px',
+        padding: '12px 14px',
         display: 'flex',
         alignItems: 'flex-start',
-        gap: 14,
+        gap: 10,
       }}
     >
+      <span style={{ width: 28, height: 28, borderRadius: 7, background: 'var(--accent-dim)', color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <GraduationCap size={14} strokeWidth={1.75} />
+      </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
@@ -638,6 +641,7 @@ function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSa
 
         {/* Drawer footer */}
         <div style={drawerFooter(t)}>
+          <span style={{ fontSize: 10.5, color: t.textMuted, flex: 1, textAlign: 'left' }}>Saved to Git — review in source control before merging.</span>
           <button type="button" onClick={() => !saving && onClose()} style={ghostButton(t)}>
             Cancel
           </button>
@@ -1164,24 +1168,29 @@ function suggestionChip(t: Theme): CSSProperties {
   };
 }
 
+// Prototype skill form: a centered modal (min(860px,94vw) × min(640px,90vh),
+// radius 14, light scrim) instead of the old right-hand drawer.
 const drawerScrim: CSSProperties = {
   position: 'fixed',
   inset: 0,
-  background: 'rgba(0, 0, 0, 0.42)',
+  background: 'rgba(26, 26, 26, 0.22)',
   display: 'flex',
-  justifyContent: 'flex-end',
+  alignItems: 'center',
+  justifyContent: 'center',
   zIndex: 60,
 };
 
 function drawerPanel(t: Theme): CSSProperties {
   return {
-    width: 'min(560px, 100%)',
-    height: '100%',
-    background: t.appBg,
-    borderLeft: `1px solid ${t.headerBorder}`,
+    width: 'min(860px, 94vw)',
+    height: 'min(640px, 90vh)',
+    background: t.cellBg,
+    border: `1px solid ${t.headerBorder}`,
+    borderRadius: 14,
     display: 'flex',
     flexDirection: 'column',
-    boxShadow: '-8px 0 28px rgba(0,0,0,0.18)',
+    overflow: 'hidden',
+    boxShadow: '0 24px 70px rgba(26,26,26,0.22)',
   };
 }
 
@@ -1191,7 +1200,7 @@ function drawerHeader(t: Theme): CSSProperties {
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: '14px 18px',
-    borderBottom: `1px solid ${t.headerBorder}`,
+    borderBottom: '1px solid var(--border-subtle)',
     flexShrink: 0,
   };
 }
@@ -1202,8 +1211,9 @@ function drawerFooter(t: Theme): CSSProperties {
     alignItems: 'center',
     justifyContent: 'flex-end',
     gap: 8,
-    padding: '13px 18px',
-    borderTop: `1px solid ${t.headerBorder}`,
+    padding: '12px 18px',
+    borderTop: '1px solid var(--border-subtle)',
+    background: 'var(--bg-1)',
     flexShrink: 0,
   };
 }

@@ -283,6 +283,17 @@ export function DbtFirstModelingPage() {
             onSelect={selectSection}
             t={t}
           />
+          {/* Prototype sync footer: dbt + proven-relationship status. */}
+          <div style={{ padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', gap: 5, fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
+              dbt synced · {Object.keys(data.modeling.entities).length} model{Object.keys(data.modeling.entities).length === 1 ? '' : 's'}
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--accent)', flexShrink: 0 }} />
+              {Object.keys(data.modeling.relationships).length} relationship{Object.keys(data.modeling.relationships).length === 1 ? '' : 's'}
+            </span>
+          </div>
         </aside>
 
         <main
@@ -1042,8 +1053,12 @@ function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, v
         scrollbarWidth: 'thin',
       }}
     >
-      <IconButton t={t} title="Add dbt model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton><IconButton t={t} title="Create model area" onClick={onNewArea}><Boxes size={14} /></IconButton>
-      <select aria-label="Modeling view" value={modelingView} onChange={(event) => onModelingView(event.target.value as ModelingViewMode)} style={{ ...inputStyle(t), width: 96, padding: '5px 6px' }}><option value="business">Business</option><option value="data">Data</option></select>
+      {/* Prototype segmented Business/Data toggle. */}
+      <div role="group" aria-label="Modeling view" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, flexShrink: 0 }}>
+        <button type="button" onClick={() => onModelingView('business')} style={{ border: 'none', borderRadius: 5, padding: '4px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap', background: modelingView === 'business' ? 'var(--accent-dim)' : 'transparent', color: modelingView === 'business' ? t.accent : t.textMuted }}>Business modeling</button>
+        <button type="button" onClick={() => onModelingView('data')} style={{ border: 'none', borderRadius: 5, padding: '4px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap', background: modelingView === 'data' ? 'var(--accent-dim)' : 'transparent', color: modelingView === 'data' ? t.accent : t.textMuted }}>Data modeling</button>
+      </div>
+      <IconButton t={t} title="Bind model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton><IconButton t={t} title="Create model area" onClick={onNewArea}><Boxes size={14} /></IconButton>
       {modelingView === 'data' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <label style={{ position: 'relative', width: 138, flex: '0 0 138px' }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>

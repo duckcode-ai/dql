@@ -85,7 +85,8 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   return (
     <div style={{ height: '100%', position: 'relative' }} onClick={() => setContextMenu(null)}>
     <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
-      <Background color={theme.headerBorder} gap={20} size={1} />
+      {/* Prototype dot grid: 22px spacing on the Paper canvas. */}
+      <Background color="var(--border-strong)" gap={22} size={1} />
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable nodeColor={(node) => domainColor(String((node.data as EntityNodeData).entity.domain))} maskColor={`${theme.appBg}bb`} />
     </ReactFlow>
@@ -94,12 +95,19 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   );
 }
 
+// Prototype (Domain Studio Redesign) entity card: kind-square header with a
+// mono name + uppercase kind, business view = description + owner/grain pills,
+// data view = ER column rows with PK/FK glyphs. Handles/resize/plus preserved.
 function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   const { recordKey, entity, detail, relation, selected, viewMode, columnMode, density, theme, onAddRelatedModel, onResize } = data;
   const [collapsed, setCollapsed] = useState(density === 'compact');
   const color = domainColor(entity.domain);
+  const role = (entity.analyticalRole ?? '').toLowerCase();
+  const kindColor = role.includes('fact') ? 'var(--accent)' : role.includes('dim') ? 'var(--status-success)' : 'var(--text-tertiary)';
+  const kindLabel = entity.analyticalRole ?? 'entity';
   const columns = detail?.columns ?? [];
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
+  const fkColumns = new Set(columns.filter((column) => !keys.has(column.name) && /(^|_)id$/.test(column.name)).map((column) => column.name));
   const visibleColumns = collapsed || viewMode === 'business' ? [] : columnMode === 'all' ? columns.slice(0, 16) : columnMode === 'keys' ? columns.filter((column) => keys.has(column.name)).slice(0, 10) : columns.filter((column) => keys.has(column.name) || column.tests.length > 0).slice(0, 10);
   const concepts = entity.conceptRefs?.length ? entity.conceptRefs.join(', ') : titleCase(entity.localId ?? entity.id);
   return (
@@ -107,79 +115,49 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
       style={{
         position: 'relative',
         width: '100%',
-        minWidth: 240,
+        minWidth: 236,
         borderRadius: 10,
         overflow: 'visible',
-        border: `1px solid ${selected ? theme.accent : theme.headerBorder}`,
-        boxShadow: selected ? `0 0 0 2px ${theme.accent}2b` : '0 8px 24px #00000012',
+        border: `1.5px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`,
+        boxShadow: selected ? '0 1px 6px rgba(107,93,211,0.14)' : '0 1px 4px rgba(26,26,26,0.05)',
         background: theme.cellBg,
         color: theme.textPrimary,
       }}
     >
       <NodeResizeControl position="bottom-right" resizeDirection="horizontal" minWidth={240} maxWidth={620} onResizeEnd={(_, params) => onResize(recordKey, params.width)} style={{ width: 16, height: 16, border: 0, background: 'transparent', color: theme.textMuted }}><span title="Drag to resize model" style={{ display: 'grid', placeItems: 'center' }}><Maximize2 size={12} /></span></NodeResizeControl>
       {collapsed && viewMode === 'data' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
-      <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: recordKey }); }} style={{ position: 'absolute', right: 5, top: 16, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: `2px solid ${theme.cellBg}`, background: color, color: '#fff', cursor: 'pointer', boxShadow: `0 0 0 1px ${color}66` }}><Plus size={12} /></button>
-      <div style={{ height: 5, background: color, borderRadius: '9px 9px 0 0' }} />
-      <div style={{ padding: '10px 12px 9px' }}>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            gap: 8,
-            alignItems: 'center',
-          }}
-        >
-          <strong style={{ fontSize: 13, paddingRight: 24 }}>{viewMode === 'business' ? entity.businessName || titleCase(entity.localId ?? entity.id) : titleCase(entity.localId ?? entity.id)}</strong>{viewMode === 'data' && <button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer' }}>{collapsed ? '▾' : '▴'}</button>}
-          <span
-            style={{
-              fontSize: 9,
-              fontWeight: 700,
-              textTransform: 'uppercase',
-              color,
-              background: `${color}18`,
-              borderRadius: 999,
-              padding: '3px 6px',
-            }}
-          >
-            {entity.domain}
-          </span>
-        </div>
-        <>
-            <div title={viewMode === 'business' ? entity.businessContext : detail?.description} style={{ fontSize: 10.5, color: theme.textSecondary, marginTop: 7, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{viewMode === 'business' ? entity.businessContext || concepts : detail?.description || concepts}</div>
-            {viewMode === 'business' && <div style={{ fontSize: 9.5, color: theme.textMuted, marginTop: 5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>concepts: {concepts}</div>}
-            {viewMode === 'data' && <>
-            <div
-              style={{
-                fontSize: 10.5,
-                color: theme.textSecondary,
-                marginTop: 7,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {relation ?? entity.dbtUniqueId}
-            </div>
-            <div
-              style={{
-                display: 'flex',
-                gap: 10,
-                marginTop: 7,
-                fontSize: 9.5,
-                color: theme.textMuted,
-              }}
-            >
-              <span>grain: {entity.grain ?? detail?.dqlMeta?.grain ?? 'dbt'}</span>
-              <span>{columns.length} dbt columns</span>
-            </div>
-            <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}><NodeBadge text={entity.analyticalRole ?? 'unknown'} color={color} /><NodeBadge text={entity.status ?? 'draft'} color={entity.status === 'certified' ? '#2e9b63' : '#9a6b2f'} />{detail?.tests.length ? <NodeBadge text={`${detail.tests.length} tests`} color="#377cc8" /> : null}</div>
-            </>}
-          </>
+      <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: recordKey }); }} style={{ position: 'absolute', right: -9, top: -9, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: `2px solid ${theme.cellBg}`, background: 'var(--accent)', color: '#fff', cursor: 'pointer', boxShadow: '0 1px 4px rgba(107,93,211,0.3)' }}><Plus size={12} /></button>
+      {/* header: kind square · mono name · KIND */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '9px 12px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-1)', borderRadius: '8.5px 8.5px 0 0' }}>
+        <span style={{ width: 8, height: 8, borderRadius: 2.5, background: kindColor, flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700, color: theme.textPrimary, fontFamily: theme.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {viewMode === 'business' ? entity.businessName || titleCase(entity.localId ?? entity.id) : (entity.localId ?? entity.id)}
+        </span>
+        <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: kindColor }}>{kindLabel}</span>
+        {viewMode === 'data' && <button className="nodrag" title={collapsed ? 'Expand columns' : 'Collapse columns'} onClick={(event) => { event.stopPropagation(); setCollapsed((value) => !value); }} style={{ border: 0, background: 'transparent', color: theme.textMuted, cursor: 'pointer', padding: 0, flexShrink: 0 }}>{collapsed ? '▾' : '▴'}</button>}
       </div>
+      {viewMode === 'business' ? (
+        <>
+          <div title={entity.businessContext} style={{ padding: '9px 12px 7px', fontSize: 11.5, lineHeight: 1.5, color: theme.textSecondary, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+            {entity.businessContext || concepts}
+          </div>
+          <div style={{ display: 'flex', gap: 6, padding: '0 12px 10px', flexWrap: 'wrap' }}>
+            {entity.owner ? <span style={{ fontSize: 10, color: theme.textMuted, border: '1px solid var(--border-subtle)', background: 'var(--bg-1)', borderRadius: 999, padding: '2px 7px' }}>{entity.owner}</span> : null}
+            <span style={{ fontSize: 10, color: theme.textMuted, border: '1px solid var(--border-subtle)', background: 'var(--bg-1)', borderRadius: 999, padding: '2px 7px' }}>
+              {entity.grain ? `1 row = ${entity.grain}` : entity.domain}
+            </span>
+          </div>
+        </>
+      ) : (
+        <div style={{ padding: '7px 12px 8px' }}>
+          <div title={detail?.description} style={{ fontSize: 10.5, color: theme.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: theme.fontMono }}>{relation ?? entity.dbtUniqueId}</div>
+          <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}><NodeBadge text={entity.status ?? 'draft'} color={entity.status === 'certified' ? '#2e8b57' : '#b26b1f'} />{detail?.tests.length ? <NodeBadge text={`${detail.tests.length} tests`} color="#4a74c9" /> : null}</div>
+        </div>
+      )}
       {visibleColumns.length > 0 && (
         <div
           style={{
-            borderTop: `1px solid ${theme.headerBorder}`,
+            borderTop: '1px solid var(--border-subtle)',
             maxHeight: 242,
             overflow: 'auto',
           }}
@@ -189,19 +167,20 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
               key={column.name}
               style={{
                 position: 'relative',
-                display: 'grid',
-                gridTemplateColumns: '1fr auto',
+                display: 'flex',
+                alignItems: 'center',
                 gap: 7,
-                padding: '6px 13px',
-                borderBottom: `1px solid ${theme.headerBorder}`,
-                fontSize: 10,
+                padding: '4px 12px',
+                borderBottom: '1px solid var(--border-subtle)',
+                fontSize: 11,
               }}
             >
               <Handle id={`target:${column.name}`} type="target" position={Position.Left} style={{ ...handleStyle(color), top: '50%' }} />
-              <span style={{ fontWeight: keys.has(column.name) ? 700 : 500, display: 'flex', gap: 5, alignItems: 'center' }}>
-                {keys.has(column.name) ? <KeyRound size={10} color="#d49a22" /> : null}{column.name}
+              <span style={{ flexShrink: 0, width: 17, fontSize: 8.5, fontWeight: 700, fontFamily: theme.fontMono, color: keys.has(column.name) ? 'var(--pk)' : fkColumns.has(column.name) ? 'var(--fk)' : 'transparent' }}>
+                {keys.has(column.name) ? 'PK' : fkColumns.has(column.name) ? 'FK' : '·'}
               </span>
-              <span style={{ color: theme.textMuted, display: 'flex', gap: 3, alignItems: 'center' }}>{column.type ?? ''}{constraintBadges(column.tests, keys.has(column.name))}</span>
+              <span style={{ flex: 1, minWidth: 0, color: theme.textSecondary, fontFamily: theme.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: keys.has(column.name) ? 700 : 500 }}>{column.name}</span>
+              <span style={{ flexShrink: 0, fontSize: 9.5, color: theme.textMuted, fontFamily: theme.fontMono, display: 'flex', gap: 3, alignItems: 'center' }}>{column.type ?? ''}{constraintBadges(column.tests, keys.has(column.name))}</span>
               <Handle id={`source:${column.name}`} type="source" position={Position.Right} style={{ ...handleStyle(color), top: '50%' }} />
             </div>
           ))}
@@ -300,23 +279,25 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
         target: to,
         sourceHandle: firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : undefined,
         targetHandle: firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
-        type: 'smoothstep',
-        label: showEdgeLabels ? `${cardinalitySymbol(relationship.cardinality)}  ${label}` : undefined,
+        type: 'default',
+        label: showEdgeLabels ? `${label} · ${cardinalitySymbol(relationship.cardinality)}` : undefined,
         animated: relationship.status === 'review',
-        markerEnd: { type: MarkerType.ArrowClosed, color },
+        markerEnd: { type: MarkerType.ArrowClosed, color: selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)' },
+        // Prototype edges: quiet bezier curves; the selected edge turns accent.
         style: {
-          stroke: color,
-          strokeWidth: selectedId === recordKey ? 3 : 2,
+          stroke: selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)',
+          strokeWidth: selectedId === recordKey ? 2 : 1.5,
           cursor: 'pointer',
         },
         labelStyle: {
-          fill: theme.textSecondary,
-          fontSize: 10,
-          fontWeight: 600,
+          fill: selectedId === recordKey ? 'var(--accent)' : theme.textSecondary,
+          fontSize: 10.5,
+          fontWeight: 650,
+          cursor: 'pointer',
         },
-        labelBgStyle: { fill: theme.appBg, fillOpacity: 0.92 },
-        labelBgPadding: [5, 3] as [number, number],
-        labelBgBorderRadius: 4,
+        labelBgStyle: { fill: theme.cellBg, fillOpacity: 1, stroke: selectedId === recordKey ? 'var(--accent)' : theme.headerBorder, strokeWidth: 1 },
+        labelBgPadding: [9, 4] as [number, number],
+        labelBgBorderRadius: 999,
       };
     });
   const graph = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
