@@ -194,7 +194,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         return {
           ...state,
           sidebarPanel: 'lineage',
-          sidebarOpen: true,
+          sidebarOpen: false,
           lineageFullscreen: false,
           lineageFocusNodeId: state.mainView === 'lineage_detail' ? state.lineageFocusNodeId : null,
           lineageReturnTarget: null,

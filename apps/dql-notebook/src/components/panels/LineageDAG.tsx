@@ -100,7 +100,7 @@ function layoutGraph(nodes: Node[], edges: Edge[], mode: LayoutMode = 'flow', di
 
 function DagNode({ data, selected }: NodeProps) {
   const nodeType = data.nodeType as string;
-  const color = NODE_TYPE_COLORS[nodeType] ?? 'var(--color-text-tertiary)';
+  const color = NODE_TYPE_COLORS[nodeType] ?? 'var(--text-tertiary)';
   const label = TYPE_LABELS[nodeType] ?? nodeType.toUpperCase();
   const direction = (data.direction as Direction) ?? 'LR';
   const targetPos = direction === 'LR' ? Position.Left : Position.Top;
@@ -110,12 +110,12 @@ function DagNode({ data, selected }: NodeProps) {
       style={{
         minWidth: 156,
         maxWidth: 220,
-        background: 'var(--color-bg-card)',
-        border: `2px solid ${selected ? 'var(--color-accent-blue)' : color}`,
+        background: 'var(--bg-2)',
+        border: `2px solid ${selected ? 'var(--accent)' : color}`,
         borderRadius: 10,
         padding: '8px 10px',
         boxShadow: selected
-          ? '0 0 0 1px color-mix(in srgb, var(--color-accent-blue) 25%, transparent)'
+          ? '0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent)'
           : 'none',
       }}
     >
@@ -126,7 +126,7 @@ function DagNode({ data, selected }: NodeProps) {
             fontSize: 9,
             fontWeight: 700,
             letterSpacing: '0.04em',
-            color: 'var(--color-bg-primary)',
+            color: '#fff',
             background: color,
             borderRadius: 4,
             padding: '2px 6px',
@@ -135,14 +135,14 @@ function DagNode({ data, selected }: NodeProps) {
           {label}
         </span>
         {(data.domain as string | undefined) && (
-          <span style={{ color: 'var(--color-text-tertiary)', fontSize: 10 }}>
+          <span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>
             {data.domain as string}
           </span>
         )}
       </div>
       <div
         style={{
-          color: 'var(--color-text-primary)',
+          color: 'var(--text-primary)',
           fontSize: 11,
           fontWeight: 600,
           overflow: 'hidden',
@@ -153,7 +153,7 @@ function DagNode({ data, selected }: NodeProps) {
       >
         {data.label as string}
       </div>
-      <div style={{ color: 'var(--color-text-tertiary)', fontSize: 10, marginTop: 3 }}>
+      <div style={{ color: 'var(--text-tertiary)', fontSize: 10, marginTop: 3 }}>
         {TYPE_TITLES[nodeType] ?? nodeType}
       </div>
       <Handle type="source" position={sourcePos} style={{ width: 7, height: 7, background: color, border: 'none' }} />
@@ -179,11 +179,11 @@ function FilterChip({
       onClick={onClick}
       style={{
         borderRadius: 999,
-        border: `1px solid ${active ? color : 'var(--color-border-primary)'}`,
+        border: `1px solid ${active ? color : 'var(--border-default)'}`,
         background: active
           ? `color-mix(in srgb, ${color} 13%, transparent)`
           : 'transparent',
-        color: active ? color : 'var(--color-text-tertiary)',
+        color: active ? color : 'var(--text-tertiary)',
         fontSize: 10,
         fontWeight: 700,
         padding: '4px 8px',
@@ -290,12 +290,12 @@ export function LineageDAG() {
       source: edge.source,
       target: edge.target,
       style: {
-        stroke: EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)',
+        stroke: EDGE_TYPE_COLORS[edge.type] ?? 'var(--text-tertiary)',
         strokeWidth: 1.6,
       },
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: EDGE_TYPE_COLORS[edge.type] ?? 'var(--color-text-tertiary)',
+        color: EDGE_TYPE_COLORS[edge.type] ?? 'var(--text-tertiary)',
         width: 12,
         height: 12,
       },
@@ -343,11 +343,17 @@ export function LineageDAG() {
   }
 
   if (fullGraph.nodes.length === 0) {
-    return <div style={{ padding: 16, color: t.textMuted, fontSize: 12 }}>No lineage graph available yet.</div>;
+    return <div style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 28, background: t.appBg }}>
+      <div style={{ width: 'min(420px, 100%)', textAlign: 'center', display: 'grid', gap: 8 }}>
+        <span aria-hidden="true" style={{ margin: '0 auto 4px', width: 42, height: 42, borderRadius: 10, display: 'grid', placeItems: 'center', border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.accent, font: `700 14px ${t.fontMono}` }}>○—○</span>
+        <strong style={{ color: t.textPrimary, fontSize: 15 }}>No lineage graph yet</strong>
+        <span style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.55 }}>Compile the project or add a dbt source, DQL block, notebook, or App. Technical and business paths will appear here automatically.</span>
+      </div>
+    </div>;
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--color-bg-primary)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-canvas)' }}>
       <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, background: t.sidebarBg }}>
         {/* Layout toggle + type filters */}
         <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -361,8 +367,8 @@ export function LineageDAG() {
                 fontWeight: 700,
                 border: 'none',
                 cursor: 'pointer',
-                background: layoutMode === 'flow' ? 'var(--color-bg-tertiary)' : 'transparent',
-                color: layoutMode === 'flow' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                background: layoutMode === 'flow' ? 'var(--bg-3)' : 'transparent',
+                color: layoutMode === 'flow' ? 'var(--text-primary)' : 'var(--text-tertiary)',
               }}
             >
               Flow
@@ -376,8 +382,8 @@ export function LineageDAG() {
                 border: 'none',
                 borderLeft: `1px solid ${t.headerBorder}`,
                 cursor: 'pointer',
-                background: layoutMode === 'layered' ? 'var(--color-bg-tertiary)' : 'transparent',
-                color: layoutMode === 'layered' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                background: layoutMode === 'layered' ? 'var(--bg-3)' : 'transparent',
+                color: layoutMode === 'layered' ? 'var(--text-primary)' : 'var(--text-tertiary)',
               }}
             >
               Layered
@@ -394,8 +400,8 @@ export function LineageDAG() {
                 fontWeight: 700,
                 border: 'none',
                 cursor: 'pointer',
-                background: direction === 'LR' ? 'var(--color-bg-tertiary)' : 'transparent',
-                color: direction === 'LR' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                background: direction === 'LR' ? 'var(--bg-3)' : 'transparent',
+                color: direction === 'LR' ? 'var(--text-primary)' : 'var(--text-tertiary)',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 3,
@@ -420,8 +426,8 @@ export function LineageDAG() {
                 border: 'none',
                 borderLeft: `1px solid ${t.headerBorder}`,
                 cursor: 'pointer',
-                background: direction === 'TB' ? 'var(--color-bg-tertiary)' : 'transparent',
-                color: direction === 'TB' ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                background: direction === 'TB' ? 'var(--bg-3)' : 'transparent',
+                color: direction === 'TB' ? 'var(--text-primary)' : 'var(--text-tertiary)',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 3,
@@ -449,23 +455,28 @@ export function LineageDAG() {
                   border: 'none',
                   borderLeft: index === 0 ? 'none' : `1px solid ${t.headerBorder}`,
                   cursor: 'pointer',
-                  background: activePreset === preset.key ? 'var(--color-bg-tertiary)' : 'transparent',
-                  color: activePreset === preset.key ? 'var(--color-text-primary)' : 'var(--color-text-tertiary)',
+                  background: activePreset === preset.key ? 'var(--bg-3)' : 'transparent',
+                  color: activePreset === preset.key ? 'var(--text-primary)' : 'var(--text-tertiary)',
                 }}
               >
                 {preset.label}
               </button>
             ))}
           </div>
-          {NODE_TYPE_FILTERS.map((filter) => (
-            <FilterChip
-              key={filter.type}
-              label={filter.label}
-              active={visibleTypes[filter.type] ?? true}
-              color={NODE_TYPE_COLORS[filter.type]}
-              onClick={() => toggleType(filter.type)}
-            />
-          ))}
+          <details style={{ position: 'relative' }}>
+            <summary style={{ listStyle: 'none', cursor: 'pointer', border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: '4px 9px', color: t.textSecondary, fontSize: 10, fontWeight: 700 }}>Filters</summary>
+            <div style={{ position: 'absolute', zIndex: 40, right: 0, top: 30, width: 280, padding: 10, display: 'flex', flexWrap: 'wrap', gap: 6, border: `1px solid ${t.headerBorder}`, borderRadius: 9, background: t.cellBg, boxShadow: '0 14px 38px #0003' }}>
+              {NODE_TYPE_FILTERS.map((filter) => (
+                <FilterChip
+                  key={filter.type}
+                  label={filter.label}
+                  active={visibleTypes[filter.type] ?? true}
+                  color={NODE_TYPE_COLORS[filter.type]}
+                  onClick={() => toggleType(filter.type)}
+                />
+              ))}
+            </div>
+          </details>
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
@@ -478,7 +489,7 @@ export function LineageDAG() {
               padding: '8px 10px',
               borderRadius: 6,
               border: `1px solid ${t.headerBorder}`,
-              background: 'var(--color-bg-sunken)',
+              background: 'var(--bg-1)',
               color: t.textPrimary,
               fontSize: 12,
               outline: 'none',
@@ -502,10 +513,6 @@ export function LineageDAG() {
             </button>
           )}
         </div>
-        <div style={{ marginTop: 8, color: t.textMuted, fontSize: 11, lineHeight: 1.5 }}>
-          This graph joins technical and business lineage: source tables, dbt models, semantic objects, terms, DQL blocks, business views, dashboards, notebooks, and Apps. Search to focus one path, then switch filters to inspect either the business composition or the technical chain behind it.
-        </div>
-
         {matches.length > 0 && (
           <div style={{ marginTop: 8, border: `1px solid ${t.headerBorder}`, borderRadius: 8, overflow: 'hidden' }}>
             {matches.slice(0, 8).map((match) => (
@@ -523,7 +530,7 @@ export function LineageDAG() {
                   cursor: 'pointer',
                 }}
               >
-                <span style={{ color: NODE_TYPE_COLORS[match.node.type] ?? 'var(--color-text-tertiary)', fontSize: 10, fontWeight: 700, marginRight: 8 }}>
+                <span style={{ color: NODE_TYPE_COLORS[match.node.type] ?? 'var(--text-tertiary)', fontSize: 10, fontWeight: 700, marginRight: 8 }}>
                   {TYPE_LABELS[match.node.type] ?? match.node.type.toUpperCase()}
                 </span>
                 {match.node.name}
@@ -540,45 +547,46 @@ export function LineageDAG() {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={handleNodeClick}
+          onPaneClick={() => { if (focalNode) resetFocus(); }}
           nodeTypes={nodeTypes}
           fitView
           fitViewOptions={{ padding: 0.18 }}
           proOptions={{ hideAttribution: true }}
-          style={{ background: 'var(--color-bg-primary)' }}
+          style={{ background: 'var(--bg-canvas)' }}
         >
-          <Background color="var(--color-border-secondary)" gap={24} size={1} />
+          <Background color="var(--border-subtle)" gap={24} size={1} />
           <Controls showInteractive={false} />
           <MiniMap
-            nodeColor={(node) => NODE_TYPE_COLORS[(node.data?.nodeType as string) ?? 'source_table'] ?? 'var(--color-text-tertiary)'}
-            maskColor="color-mix(in srgb, var(--color-bg-primary) 55%, transparent)"
-            style={{ background: 'var(--color-bg-sunken)', border: '1px solid var(--color-border-primary)' }}
+            nodeColor={(node) => NODE_TYPE_COLORS[(node.data?.nodeType as string) ?? 'source_table'] ?? 'var(--text-tertiary)'}
+            maskColor="color-mix(in srgb, var(--bg-canvas) 55%, transparent)"
+            style={{ background: 'var(--bg-1)', border: '1px solid var(--border-default)' }}
           />
 
           <Panel position="top-left">
             <div
               style={{
-                background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
-                border: '1px solid var(--color-border-primary)',
+                background: 'color-mix(in srgb, var(--bg-2) 92%, transparent)',
+                border: '1px solid var(--border-default)',
                 borderRadius: 8,
                 padding: '8px 10px',
                 minWidth: 220,
-                color: 'var(--color-text-primary)',
+                color: 'var(--text-primary)',
                 fontSize: 12,
               }}
             >
               <div style={{ fontWeight: 700, marginBottom: 4 }}>
                 {focalNode ? focalNode.name : 'Full Lineage View'}
               </div>
-              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11 }}>
+              <div style={{ color: 'var(--text-tertiary)', fontSize: 11 }}>
                 {graphData.nodes.length} node(s), {graphData.edges.length} edge(s)
               </div>
-              <div style={{ color: 'var(--color-text-tertiary)', fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
+              <div style={{ color: 'var(--text-tertiary)', fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
                 {focalNode
                   ? `Focused on ${TYPE_TITLES[focalNode.type] ?? focalNode.type}. Upstream shows technical inputs and business definitions; downstream shows composition, dashboards, notebooks, and Apps.`
                   : 'Full project lineage across source tables, dbt, semantic objects, terms, DQL blocks, business views, dashboards, notebooks, and Apps.'}
               </div>
               {selectedNode && selectedSummary && (
-                <div style={{ marginTop: 8, color: 'var(--color-text-tertiary)', fontSize: 11 }}>
+                <div style={{ marginTop: 8, color: 'var(--text-tertiary)', fontSize: 11 }}>
                   {selectedSummary.incoming} upstream, {selectedSummary.outgoing} downstream
                 </div>
               )}
@@ -592,11 +600,11 @@ export function LineageDAG() {
                 gap: 10,
                 flexWrap: 'wrap',
                 maxWidth: 760,
-                background: 'color-mix(in srgb, var(--color-bg-card) 92%, transparent)',
-                border: '1px solid var(--color-border-primary)',
+                background: 'color-mix(in srgb, var(--bg-2) 92%, transparent)',
+                border: '1px solid var(--border-default)',
                 borderRadius: 8,
                 padding: '6px 10px',
-                color: 'var(--color-text-tertiary)',
+                color: 'var(--text-tertiary)',
                 fontSize: 10,
               }}
             >

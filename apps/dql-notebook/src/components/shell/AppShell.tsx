@@ -16,6 +16,7 @@ import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { BusinessArtifactView } from '../panels/BusinessArtifactView';
 import { LineageDetailView } from '../panels/LineageDetailView';
+import { LineageDAG } from '../panels/LineageDAG';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
@@ -32,7 +33,6 @@ import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
-import { LineageNodeIcon } from '@duckcodeailabs/dql-ui/icons';
 
 export function AppShell() {
   const { state, dispatch } = useNotebook();
@@ -286,57 +286,16 @@ function ConnectionWorkspace({ children }: { children: React.ReactNode }) {
 }
 
 function LineageWorkspace() {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
   return (
     <div
       style={{
         flex: 1,
         minWidth: 0,
+        minHeight: 0,
         overflow: 'hidden',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: t.appBg,
-        padding: 28,
       }}
     >
-      <div
-        style={{
-          width: 'min(520px, 100%)',
-          border: `1px solid ${t.headerBorder}`,
-          borderRadius: 8,
-          background: t.cellBg,
-          padding: 22,
-          display: 'flex',
-          alignItems: 'flex-start',
-          gap: 14,
-        }}
-      >
-        <div
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: 7,
-            background: `${t.accent}18`,
-            color: t.accent,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
-        >
-          <LineageNodeIcon size={18} />
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ color: t.textPrimary, fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
-            Select a lineage item
-          </div>
-          <div style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.55 }}>
-            Focused upstream and downstream context opens here.
-          </div>
-        </div>
-      </div>
+      <LineageDAG />
     </div>
   );
 }
