@@ -99,7 +99,7 @@ export function AppBuildProposalPanel({
           style={createButtonStyle(t, canCreate && !busy)}
         >
           {busy ? <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <CheckCircle2 size={13} />}
-          <span>{busy ? 'Creating app…' : `Create app (${selectedCount} tile${selectedCount === 1 ? '' : 's'})`}</span>
+          <span>{busy ? 'Building app…' : `Build app with ${selectedCount} block${selectedCount === 1 ? '' : 's'}`}</span>
         </button>
         <span style={{ fontSize: 11, color: t.textMuted }}>
           {!canCreate
