@@ -466,17 +466,21 @@ function AskArtifactInspector({ run, onClose, onAddToApp, onSaveBlock }: { run: 
   const [tab, setTab] = useState<AskInspectorTab>('result');
   const payload = artifactPayload(run);
   const result = payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
-    ? payload.result as { columns?: string[]; rows?: unknown[][] }
+    ? payload.result as { columns?: string[]; rows?: unknown[] }
     : null;
-  const columns = result?.columns?.slice(0, 4) ?? ['month', 'segment', 'revenue'];
-  const rows = result?.rows?.slice(0, 8) ?? [['2026-04', 'Mid-market', '$402K'], ['2026-04', 'Enterprise', '$618K'], ['2026-05', 'Mid-market', '$371K'], ['2026-05', 'Enterprise', '$597K'], ['2026-06', 'Mid-market', '$344K']];
+  const columns = result?.columns?.slice(0, 4) ?? [];
+  const rows = (result?.rows ?? []).slice(0, 8).map((row) => {
+    if (Array.isArray(row)) return row;
+    if (row && typeof row === 'object') return columns.map((column) => (row as Record<string, unknown>)[column]);
+    return [row];
+  });
   const title = run.artifacts[0]?.title || run.question;
   const tabs: Array<{ id: AskInspectorTab; label: string }> = [{ id: 'result', label: 'Result' }, { id: 'chart', label: 'Chart' }, { id: 'dql', label: 'DQL' }, { id: 'sql', label: 'SQL' }, { id: 'trust', label: 'Trust & steps' }];
   return (
     <aside className="dql-ask-inspector" aria-label="Answer artifact inspector">
       <div className="dql-ask-inspector-head">
         <span className="dql-ask-artifact-icon">{result ? <Table2 size={15} /> : <BarChart3 size={15} />}</span>
-        <div className="dql-ask-inspector-title"><strong>{title}</strong><span>{result?.rows?.length ?? 'Governed'} rows · {run.trustState.replace('_', ' ')}</span></div>
+        <div className="dql-ask-inspector-title"><strong>{title}</strong><span>{result ? `${result.rows?.length ?? 0} rows` : 'Governed result'} · {run.trustState.replace('_', ' ')}</span></div>
         <span style={{ color: run.trustState === 'certified' ? 'var(--status-success)' : 'var(--status-warning)', fontSize: 10.5, fontWeight: 700 }}>{run.trustState === 'certified' ? 'Certified' : 'AI-generated'}</span>
         <button type="button" aria-label="Close inspector" onClick={onClose}><X size={15} /></button>
       </div>
@@ -488,7 +492,7 @@ function AskArtifactInspector({ run, onClose, onAddToApp, onSaveBlock }: { run: 
       </div>
       <div className="dql-ask-inspector-tabs" role="tablist">{tabs.map((item) => <button key={item.id} type="button" role="tab" aria-selected={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>
       <div className="dql-ask-inspector-body dql-followup-zone" data-followup="table">
-        {tab === 'result' ? <><h3>{title}</h3><table className="dql-ask-table"><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index}>{columns.map((_, cell) => <td key={cell}>{String(row[cell] ?? '—')}</td>)}</tr>)}</tbody></table><div style={{ marginTop: 10, color: 'var(--text-tertiary)', fontSize: 10.5 }}>Showing {rows.length} rows · open in a notebook for the full result</div></>
+        {tab === 'result' ? <><h3>{title}</h3>{columns.length ? <><table className="dql-ask-table"><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={index}>{columns.map((_, cell) => <td key={cell}>{String(row[cell] ?? '—')}</td>)}</tr>)}</tbody></table><div style={{ marginTop: 10, color: 'var(--text-tertiary)', fontSize: 10.5 }}>Showing {rows.length} rows · open in a notebook for the full result</div></> : <div style={{ padding: 12, border: '1px solid var(--border-default)', borderRadius: 8, color: 'var(--text-tertiary)', fontSize: 11 }}>No tabular result was returned for this artifact.</div>}</>
         : tab === 'chart' ? <><h3>Revenue trend</h3><div style={{ height: 230, display: 'flex', alignItems: 'end', gap: 12, padding: '20px 12px 24px', border: '1px solid var(--border-default)', borderRadius: 9, background: 'var(--bg-1)' }}>{[72, 86, 64, 92, 57, 82].map((height, index) => <div key={index} style={{ flex: 1, height: `${height}%`, borderRadius: '5px 5px 2px 2px', background: index % 2 ? 'var(--status-success)' : 'var(--accent)', opacity: .88 }} />)}</div></>
         : tab === 'dql' ? <><h3>Reusable DQL artifact</h3><pre>{readArtifactCode(payload, 'dql')}</pre></>
         : tab === 'sql' ? <><h3>Compiled SQL preview</h3><pre>{readArtifactCode(payload, 'sql')}</pre></>
