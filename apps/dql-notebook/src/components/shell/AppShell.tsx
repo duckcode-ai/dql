@@ -16,6 +16,7 @@ import { NewBlockModal } from '../modals/NewBlockModal';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { BusinessArtifactView } from '../panels/BusinessArtifactView';
 import { LineageDetailView } from '../panels/LineageDetailView';
+import { HelpDocsPage } from '../help/HelpDocsPage';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
 import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
@@ -207,6 +208,8 @@ export function AppShell() {
             <LineageWorkspace />
           ) : state.mainView === 'lineage_detail' ? (
             <LineageDetailView />
+          ) : state.mainView === 'help' ? (
+            <HelpDocsPage />
           ) : state.mainView === 'connection' || state.mainView === 'settings' ? (
             <ConnectionWorkspace>
               <ConnectionPanel variant="page" />

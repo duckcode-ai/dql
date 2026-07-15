@@ -203,8 +203,8 @@ export function ActivityBar() {
       key: 'help',
       title: 'Help',
       icon: <HelpCircle size={16} strokeWidth={1.75} />,
-      active: false,
-      onClick: () => handlePanelClick('reference'),
+      active: state.mainView === 'help',
+      onClick: () => dispatch({ type: 'SET_MAIN_VIEW', view: 'help' }),
     },
   ];
 
