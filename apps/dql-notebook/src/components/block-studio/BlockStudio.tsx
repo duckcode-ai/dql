@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MessageSquarePlus, PanelRightClose, PanelRightOpen, Plus, Search, ShieldCheck, Sparkles, Square, X, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MessageSquarePlus, MoreHorizontal, PanelRightClose, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
@@ -61,7 +61,9 @@ import { BlockParameterControls } from '../parameters/BlockParameterControls';
 type ExplorerTab = 'blocks' | 'semantic' | 'database';
 type ResultTab = 'results' | 'parameters' | 'lineage' | 'save' | 'history';
 type BlockStudioWorkspaceMode = 'start' | 'manual' | 'import';
-type BlockStudioEditorMode = 'visual' | 'source';
+// 'detail' = the prototype's read-only block overview shown when an existing
+// block is opened from the explorer; "Open in builder" enters visual/source.
+type BlockStudioEditorMode = 'detail' | 'visual' | 'source';
 
 interface FlatSemanticRow {
   node: SemanticTreeNode;
@@ -384,6 +386,12 @@ export function BlockStudio() {
   const blockType = draftMetadata?.blockType ?? 'custom';
   const isSemanticBlock = blockType === 'semantic';
   const hasActiveDraft = Boolean(state.blockStudioDraft.trim() || state.blockStudioMetadata || state.activeBlockPath);
+
+  // Prototype flow: opening an EXISTING block lands on the read-only detail
+  // overview; new drafts (no saved path) go straight to the builder.
+  useEffect(() => {
+    if (state.activeBlockPath) setEditorMode('detail');
+  }, [state.activeBlockPath]);
 
   useEffect(() => {
     if (!activeBlockName) return;
@@ -962,7 +970,7 @@ export function BlockStudio() {
           {state.blockStudioMetadata?.reviewStatus && (
             <BlockStatusBadge status={state.blockStudioMetadata.reviewStatus} t={t} />
           )}
-          {hasActiveDraft && workspaceMode === 'manual' && (
+          {hasActiveDraft && workspaceMode === 'manual' && editorMode !== 'detail' && (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, marginLeft: 6, flexShrink: 0 }}>
               <button type="button" onClick={() => setEditorMode('visual')} style={editorModeButtonStyle(t, editorMode === 'visual')}>Visual Builder</button>
               <button type="button" onClick={() => setEditorMode('source')} style={editorModeButtonStyle(t, editorMode === 'source')}>DQL Source</button>
@@ -1047,6 +1055,27 @@ export function BlockStudio() {
               onCreateSemantic={() => beginManualDraft('semantic')}
               onImport={() => setWorkspaceMode('import')}
               onBuildDql={() => openAskAi({ kind: 'build', initialInput: 'Draft a reusable DQL block that ' })}
+              t={t}
+            />
+          ) : editorMode === 'detail' ? (
+            <BlockDetailView
+              metadata={state.blockStudioMetadata}
+              source={state.blockStudioDraft}
+              parameters={state.blockStudioValidation?.parameters ?? []}
+              preview={state.blockStudioPreview}
+              lineageDetail={lineageDetail}
+              isSemanticBlock={isSemanticBlock}
+              running={running}
+              onOpenBuilder={() => setEditorMode('visual')}
+              onOpenSource={() => setEditorMode('source')}
+              onRun={() => void handleRun()}
+              onOpenHistory={() => {
+                setResultTab('history');
+                setBottomPaneCollapsed(false);
+                if (!historyLoaded && state.activeBlockPath) {
+                  api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
+                }
+              }}
               t={t}
             />
           ) : editorMode === 'visual' ? (
@@ -2192,6 +2221,183 @@ function VisualParameterEditor({
 const PARAMETER_TYPE_OPTIONS = ['string', 'number', 'boolean', 'date', 'string[]', 'number[]', 'date[]'] as const;
 const PARAMETER_POLICY_OPTIONS = ['dynamic', 'static', 'business', 'derived', 'optional', 'ambiguous_review_required'] as const;
 
+// ── Prototype block detail (Block Studio Redesign) ──────────────────────────
+// Read-only overview for an opened block: icon tile + mono name + status pill,
+// meta line, "Open in builder", stat strip, Outputs pills, Parameters table,
+// DQL source with "Open in DQL Source", Tests checklist, collapsed Lineage.
+function BlockDetailView({
+  metadata,
+  source,
+  parameters,
+  preview,
+  lineageDetail,
+  isSemanticBlock,
+  running,
+  onOpenBuilder,
+  onOpenSource,
+  onRun,
+  onOpenHistory,
+  t,
+}: {
+  metadata: BlockStudioOpenPayload['metadata'] | null;
+  source: string;
+  parameters: BlockParameterDefinition[];
+  preview: { sql: string; result: { rows: Array<Record<string, unknown>>; rowCount?: number; executionTime?: number } } | null;
+  lineageDetail: { incoming: Array<unknown>; outgoing: Array<unknown> } | null;
+  isSemanticBlock: boolean;
+  running: boolean;
+  onOpenBuilder: () => void;
+  onOpenSource: () => void;
+  onRun: () => void;
+  onOpenHistory: () => void;
+  t: Theme;
+}) {
+  const certified = (metadata?.reviewStatus ?? '').toLowerCase() === 'certified';
+  const name = metadata?.name || 'block';
+  const semanticFields = isSemanticBlock ? parseSemanticVisualFields(source) : null;
+  const queryBody = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1]?.trim() ?? '';
+  const outputs = semanticFields
+    ? Array.from(new Set([...semanticFields.dimensions, ...(semanticFields.timeDimension ? [semanticFields.timeDimension] : []), ...semanticFields.metrics]))
+    : extractSelectAliases(queryBody);
+  const tests = (source.match(/^\s*assert\b.*$/gm) ?? []).map((line) => line.trim());
+  const upCount = lineageDetail?.incoming?.length ?? 0;
+  const downCount = lineageDetail?.outgoing?.length ?? 0;
+  const [lineageOpen, setLineageOpen] = useState(false);
+  const upstreamNames = ((lineageDetail?.incoming ?? []) as Array<{ node?: { name?: string } }>).map((item) => item.node?.name).filter(Boolean).slice(0, 3) as string[];
+  const downstreamNames = ((lineageDetail?.outgoing ?? []) as Array<{ node?: { name?: string } }>).map((item) => item.node?.name).filter(Boolean).slice(0, 3) as string[];
+  const sectionLabel: React.CSSProperties = { fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, marginBottom: 8, fontFamily: t.font };
+  const lineagePill = (label: string, accent = false): React.ReactNode => (
+    <span key={label} style={{ padding: '3px 9px', borderRadius: 999, border: `1px solid ${accent ? `${t.accent}59` : t.headerBorder}`, background: accent ? 'var(--accent-dim)' : 'var(--bg-1)', color: accent ? t.accent : t.textSecondary, fontFamily: t.fontMono, fontWeight: accent ? 600 : 400, fontSize: 11.5 }}>{label}</span>
+  );
+  const lineageArrow = <span style={{ color: t.textMuted, fontSize: 11 }}>→</span>;
+  const stats: Array<[string, string]> = [
+    ['Last run', preview?.result.executionTime ? `${(preview.result.executionTime / 1000).toFixed(1)}s` : 'Not run yet'],
+    ['Rows', preview ? String(preview.result.rowCount ?? preview.result.rows.length) : '—'],
+    ['Used in', downCount > 0 ? `${downCount} downstream` : '—'],
+    ['Tests', tests.length > 0 ? `${tests.length} declared` : 'None yet'],
+  ];
+  return (
+    <div style={{ height: '100%', overflow: 'auto', background: t.appBg }}>
+      <div style={{ width: 'min(860px, 100% - 48px)', margin: '0 auto', padding: '26px 0 40px', display: 'flex', flexDirection: 'column', gap: 20, animation: 'dql-agent-fadein 0.25s ease-out', fontFamily: t.font }}>
+        {/* header */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+          <span style={{ width: 42, height: 42, borderRadius: 10, background: certified ? 'var(--status-success-bg)' : 'var(--accent-dim)', color: certified ? 'var(--status-success)' : t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: '1px solid var(--border-subtle)' }}>
+            <Blocks size={20} strokeWidth={1.75} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 17, fontWeight: 700, color: t.textPrimary, fontFamily: t.fontMono, letterSpacing: '-0.01em' }}>{name}</span>
+              {metadata?.reviewStatus ? <BlockStatusBadge status={metadata.reviewStatus} t={t} /> : null}
+            </div>
+            <div style={{ fontSize: 12, color: t.textMuted, marginTop: 4 }}>
+              {[metadata?.domain, metadata?.owner, ...(metadata?.tags?.length ? [metadata.tags.join(', ')] : [])].filter(Boolean).join(' · ') || 'Unsaved draft'}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+            <button type="button" onClick={onOpenBuilder} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, height: 32, padding: '0 14px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12.5, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 4px rgba(107,93,211,0.25)' }}>
+              <Pencil size={13} strokeWidth={1.75} /> Open in builder
+            </button>
+            <button type="button" onClick={onRun} disabled={running} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, opacity: running ? 0.7 : 1 }}>
+              {running ? <Loader2 size={12} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Play size={11} fill="currentColor" />} Run
+            </button>
+            <button type="button" title="History and metadata" onClick={onOpenHistory} style={{ width: 32, height: 32, borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+              <MoreHorizontal size={15} />
+            </button>
+          </div>
+        </div>
+
+        {metadata?.description ? (
+          <div style={{ fontSize: 13.5, lineHeight: 1.6, color: t.textSecondary, maxWidth: 640 }}>{metadata.description}</div>
+        ) : null}
+
+        {/* stat strip */}
+        <div style={{ display: 'flex', border: '1px solid var(--border-subtle)', borderRadius: 10, background: t.cellBg, overflow: 'hidden' }}>
+          {stats.map(([label, value], index) => (
+            <div key={label} style={{ flex: 1, padding: '12px 16px', borderRight: index < stats.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>{label}</div>
+              <div style={{ fontSize: 14, fontWeight: 650, color: t.textPrimary, marginTop: 3 }}>{value}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* outputs */}
+        <div>
+          <div style={sectionLabel}>Outputs</div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {outputs.length > 0 ? outputs.map((output) => (
+              <span key={output} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, padding: '4px 10px', borderRadius: 999, background: 'var(--accent-dim)', color: t.accent, border: `1px solid ${t.accent}33`, fontFamily: t.fontMono }}>{output}</span>
+            )) : <span style={{ fontSize: 11.5, color: t.textMuted }}>Open the builder to define outputs.</span>}
+          </div>
+        </div>
+
+        {/* parameters */}
+        <div>
+          <div style={sectionLabel}>Parameters</div>
+          <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 9, overflow: 'hidden', background: t.cellBg }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr 1fr 0.9fr', gap: 8, padding: '7px 12px', background: 'var(--bg-1)', borderBottom: '1px solid var(--border-subtle)', fontSize: 10.5, fontWeight: 700, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              <span>Name</span><span>Type</span><span>Default</span><span>Policy</span>
+            </div>
+            {parameters.length === 0 ? (
+              <div style={{ padding: '9px 12px', fontSize: 12, color: t.textMuted }}>No parameters — this block always runs the same way.</div>
+            ) : parameters.map((parameter, index) => (
+              <div key={parameter.name} style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr 1fr 0.9fr', gap: 8, padding: '8px 12px', borderBottom: index < parameters.length - 1 ? '1px solid var(--border-subtle)' : 'none', fontSize: 12, alignItems: 'center' }}>
+                <span style={{ fontFamily: t.fontMono, fontWeight: 600, color: t.textPrimary }}>{parameter.name}</span>
+                <span style={{ color: t.textSecondary }}>{parameter.type}</span>
+                <span style={{ fontFamily: t.fontMono, color: parameter.default !== undefined && parameter.default !== null && parameter.default !== '' ? 'var(--status-warning)' : t.textMuted }}>
+                  {parameter.default !== undefined && parameter.default !== null && parameter.default !== '' ? JSON.stringify(parameter.default) : parameter.required ? 'required' : '—'}
+                </span>
+                <span style={{ color: t.textMuted }}>{parameter.policy}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* DQL source */}
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span style={{ ...sectionLabel, marginBottom: 0 }}>DQL source</span>
+            <button type="button" onClick={onOpenSource} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, border: 'none', background: 'none', color: t.accent, fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, padding: 0 }}>
+              Open in DQL Source <ChevronRight size={11} strokeWidth={2} />
+            </button>
+          </div>
+          <pre style={{ margin: 0, border: '1px solid var(--border-subtle)', background: t.cellBg, borderRadius: 9, padding: '13px 15px', fontSize: 11.5, lineHeight: 1.65, fontFamily: t.fontMono, whiteSpace: 'pre', overflowX: 'auto', color: t.textPrimary, maxHeight: 320, overflowY: 'auto' }}>{source.trim() || 'Open the builder to author this block.'}</pre>
+        </div>
+
+        {/* tests + lineage */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+          <div>
+            <div style={sectionLabel}>Tests</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {tests.length > 0 ? tests.map((test) => (
+                <div key={test} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                  <CheckCircle2 size={13} color="var(--status-success)" strokeWidth={2} style={{ flexShrink: 0 }} />
+                  <span style={{ fontFamily: t.fontMono, color: t.textSecondary }}>{test}</span>
+                </div>
+              )) : <span style={{ fontSize: 11.5, color: t.textMuted }}>No tests yet — add assertions in the builder before certification.</span>}
+            </div>
+          </div>
+          <div>
+            <button type="button" onClick={() => setLineageOpen((open) => !open)} style={{ display: 'flex', alignItems: 'center', gap: 6, border: 'none', background: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, marginBottom: 8 }}>
+              <ChevronRight size={11} color={t.textMuted} strokeWidth={2} style={{ transform: lineageOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.12s' }} />
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>Lineage</span>
+              {!lineageOpen ? <span style={{ fontSize: 10.5, color: t.textMuted }}>{upCount} upstream · {downCount} downstream</span> : null}
+            </button>
+            {lineageOpen ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11.5, animation: 'dql-agent-fadein 0.18s ease-out' }}>
+                {upstreamNames.length > 0 ? upstreamNames.map((upstreamName) => lineagePill(upstreamName)) : lineagePill('no upstream')}
+                {lineageArrow}
+                {lineagePill(name, true)}
+                {lineageArrow}
+                {downstreamNames.length > 0 ? downstreamNames.map((downstreamName) => lineagePill(downstreamName)) : lineagePill('no downstream yet')}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SemanticBlockBuilder({
   source,
   metadata,
@@ -2280,6 +2486,7 @@ function SemanticBlockBuilder({
             search={metricSearch}
             onSearchChange={setMetricSearch}
             matches={metricMatches}
+            pool={semanticLayer.metrics}
             selected={values.metrics}
             resolveLabel={(name) => metricByName.get(name)?.label || name}
             onToggle={toggleMetric}
@@ -2338,6 +2545,7 @@ function SemanticBlockBuilder({
             search={dimensionSearch}
             onSearchChange={setDimensionSearch}
             matches={dimensionMatches}
+            pool={allDimensions}
             selected={values.dimensions}
             resolveLabel={(name) => dimensionByName.get(name)?.label || name}
             onToggle={toggleDimension}
@@ -2435,12 +2643,17 @@ function findSemanticFieldMatches<T extends SemanticPickerField>(fields: T[], se
     .slice(0, 30);
 }
 
+// Prototype picker: selected semantic objects render as removable mono chips
+// (Σ purple for measures, green for dimensions) and "+ Add …" opens a 300px
+// searchable popover anchored right:0 with an autofocused input and a
+// "Showing top N of M · type to search all" footer.
 function EnterpriseSemanticPicker({
   kind,
   total,
   search,
   onSearchChange,
   matches,
+  pool = [],
   selected,
   resolveLabel,
   onToggle,
@@ -2454,6 +2667,8 @@ function EnterpriseSemanticPicker({
   search: string;
   onSearchChange: (value: string) => void;
   matches: SemanticPickerField[];
+  /** Full pool for the popover's default top-8 listing before a search. */
+  pool?: SemanticPickerField[];
   selected: string[];
   resolveLabel: (name: string) => string;
   onToggle: (name: string) => void;
@@ -2462,49 +2677,89 @@ function EnterpriseSemanticPicker({
   emptyHint?: string;
   t: Theme;
 }) {
-  const label = kind === 'metric' ? 'metrics' : 'dimensions';
+  const [open, setOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+  const label = kind === 'metric' ? 'measures' : 'dimensions';
+  const glyph = kind === 'metric' ? 'Σ' : 'ab';
+  const chipColor = kind === 'metric' ? 'var(--accent)' : 'var(--status-success)';
+  const chipBg = kind === 'metric' ? 'var(--accent-dim)' : 'var(--status-success-bg)';
+  const searching = search.trim().length >= 2;
+  const results = searching ? matches : pool.filter((field) => !selected.includes(field.name)).slice(0, 8);
+  const closePicker = () => { setOpen(false); onSearchChange(''); };
+  useEffect(() => {
+    if (!open) return;
+    requestAnimationFrame(() => inputRef.current?.focus());
+    const onDown = (event: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) closePicker();
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') closePicker(); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
   return (
-    <div style={{ display: 'grid', gap: 8, marginTop: 9 }}>
-      {selected.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {selected.map((name) => (
-            <button key={name} type="button" onClick={() => onToggle(name)} title={`Remove ${resolveLabel(name)}`} style={{ ...selectionChipStyle(t, true), display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <CheckSquare size={12} aria-hidden="true" /> {resolveLabel(name)} <X size={11} aria-hidden="true" />
-            </button>
-          ))}
-        </div>
-      )}
-      <label style={{ position: 'relative', display: 'block' }}>
-        <Search size={13} aria-hidden="true" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: t.textMuted }} />
-        <input
-          value={search}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 9 }}>
+      {selected.map((name) => (
+        <span key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, padding: '4px 9px', borderRadius: 999, background: chipBg, color: chipColor, border: `1px solid ${kind === 'metric' ? 'rgba(107,93,211,0.2)' : 'rgba(46,139,87,0.25)'}`, fontFamily: t.fontMono }}>
+          {kind === 'metric' ? `Σ ${resolveLabel(name)}` : resolveLabel(name)}
+          <button type="button" onClick={() => onToggle(name)} title={`Remove ${resolveLabel(name)}`} style={{ border: 'none', background: 'none', color: chipColor, cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1, fontFamily: 'inherit' }}>×</button>
+        </span>
+      ))}
+      <span ref={wrapRef} style={{ position: 'relative' }}>
+        <button
+          type="button"
           disabled={disabled}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder={disabled ? emptyHint : `Search ${total.toLocaleString()} ${label} by name, domain, or description…`}
-          style={{ ...compactBuilderInputStyle(t), width: '100%', paddingLeft: 30, opacity: disabled ? 0.62 : 1 }}
-        />
-        {search && <button type="button" onClick={() => onSearchChange('')} title="Clear search" style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', display: 'inline-flex', border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', padding: 2 }}><X size={12} /></button>}
-      </label>
-      {!disabled && search.trim().length < 2 && (
-        <div style={{ fontSize: 10, color: t.textMuted }}>Type at least two characters to search. Showing selected {label} only keeps this builder fast at enterprise scale.</div>
-      )}
-      {!disabled && search.trim().length >= 2 && (
-        <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, overflow: 'auto', maxHeight: 240, background: t.cellBg }}>
-          {matches.length === 0 ? (
-            <div style={{ padding: 10, fontSize: 11, color: t.textMuted }}>No {label} match “{search}”.</div>
-          ) : matches.map((field) => {
-            const isSelected = selected.includes(field.name);
-            const isCompatible = compatible(field.name);
-            return (
-              <button key={field.name} type="button" disabled={!isCompatible} onClick={() => onToggle(field.name)} title={isCompatible ? field.description || field.name : 'Not compatible with every selected metric'} style={{ width: '100%', display: 'grid', gridTemplateColumns: '16px minmax(0, 1fr) auto', gap: 8, alignItems: 'center', textAlign: 'left', padding: '8px 10px', border: 'none', borderBottom: `1px solid ${t.headerBorder}`, background: isSelected ? `${t.accent}10` : 'transparent', color: isCompatible ? t.textPrimary : t.textMuted, opacity: isCompatible ? 1 : .5, cursor: isCompatible ? 'pointer' : 'not-allowed' }}>
-                {isSelected ? <CheckSquare size={14} color={t.accent} /> : <Square size={14} />}
-                <span style={{ minWidth: 0 }}><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, fontWeight: 700 }}>{field.label || field.name}</span><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 10, color: t.textMuted }}>{field.description || field.name}</span></span>
-                <span style={{ fontSize: 9, color: t.textMuted, whiteSpace: 'nowrap' }}>{field.domain || field.type || ''}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+          onClick={() => setOpen((value) => !value)}
+          title={disabled ? emptyHint : `Add ${kind}`}
+          style={{ border: '1.5px dashed var(--border-strong)', background: 'transparent', borderRadius: 999, padding: '4px 10px', fontSize: 11, fontFamily: t.font, color: disabled ? t.textMuted : t.textSecondary, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.6 : 1 }}
+        >
+          + Add {kind}
+        </button>
+        {open && !disabled ? (
+          <div style={{ position: 'absolute', right: 0, top: 30, zIndex: 40, width: 300, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 10, boxShadow: '0 10px 30px rgba(26,26,26,0.14)', overflow: 'hidden', animation: 'dql-agent-fadein 0.12s ease-out' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
+              <Search size={12} color={t.textMuted} style={{ flexShrink: 0 }} />
+              <input
+                ref={inputRef}
+                value={search}
+                onChange={(event) => onSearchChange(event.target.value)}
+                placeholder={`Search ${total.toLocaleString()} ${label}…`}
+                style={{ flex: 1, border: 'none', background: 'none', outline: 'none', fontSize: 12, fontFamily: t.font, color: t.textPrimary, minWidth: 0 }}
+              />
+              <button type="button" onClick={closePicker} style={{ border: 'none', background: 'none', color: t.textMuted, cursor: 'pointer', padding: 0, fontSize: 13, lineHeight: 1 }}>×</button>
+            </div>
+            <div style={{ maxHeight: 208, overflow: 'auto' }}>
+              {results.length === 0 ? (
+                <div style={{ padding: 10, fontSize: 11, color: t.textMuted }}>{searching ? `No ${label} match “${search}”.` : `No more ${label} to add.`}</div>
+              ) : results.map((field) => {
+                const isSelected = selected.includes(field.name);
+                const isCompatible = compatible(field.name);
+                return (
+                  <button
+                    key={field.name}
+                    type="button"
+                    disabled={!isCompatible}
+                    onClick={() => { onToggle(field.name); if (!isSelected) closePicker(); }}
+                    title={isCompatible ? field.description || field.name : 'Not compatible with every selected metric'}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 10px', border: 'none', background: isSelected ? chipBg : 'none', cursor: isCompatible ? 'pointer' : 'not-allowed', textAlign: 'left', fontFamily: t.font, borderBottom: '1px solid var(--border-subtle)', opacity: isCompatible ? 1 : 0.5 }}
+                  >
+                    <span style={{ flexShrink: 0, width: 16, height: 16, borderRadius: 4, background: chipBg, color: chipColor, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: kind === 'metric' ? 10 : 9, fontWeight: 700, fontFamily: t.fontMono }}>{glyph}</span>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontFamily: t.fontMono, color: t.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{field.label || field.name}</span>
+                    <span style={{ flexShrink: 0, fontSize: 10, color: t.textMuted }}>{field.domain || field.type || ''}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ padding: '6px 10px', background: 'var(--bg-1)', fontSize: 10, color: t.textMuted }}>
+              {searching
+                ? `${results.length} match${results.length === 1 ? '' : 'es'} · certified shown first`
+                : `Showing top ${results.length} of ${total.toLocaleString()} · type to search all`}
+            </div>
+          </div>
+        ) : null}
+      </span>
     </div>
   );
 }

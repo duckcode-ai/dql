@@ -21,9 +21,10 @@ const TABS: { id: BuildTab; label: string; icon: React.ComponentType<any> }[] = 
   { id: 'blocks', label: 'Blocks', icon: Blocks },
 ];
 
+// Paper-handoff status dots: certified green · draft amber · review blue.
 const STATUS_COLOR: Record<string, string> = {
-  certified: '#16a34a', published: '#16a34a', deprecated: '#ef4444',
-  draft: '#d97706', pending: '#d97706', review: '#2563eb',
+  certified: 'var(--status-success)', published: 'var(--status-success)', deprecated: 'var(--status-error)',
+  draft: 'var(--status-warning)', pending: 'var(--status-warning)', review: '#4a74c9', in_review: '#4a74c9',
 };
 
 /**
@@ -304,8 +305,6 @@ function DatabaseList({ t, search, onInsert, onSeedBlock }: { t: Theme; search: 
             </div>
             {open && tb.columns.map((col) => {
               const relation = columnRelation(col.name, tb.name);
-              const ColIcon = relation === 'pk' ? KeyRound : relation === 'fk' ? Link2 : columnTypeIcon(col.type);
-              const iconColor = relation === 'pk' ? t.warning : relation === 'fk' ? t.accent : t.textMuted;
               return (
                 <button
                   key={col.name}
@@ -314,9 +313,12 @@ function DatabaseList({ t, search, onInsert, onSeedBlock }: { t: Theme; search: 
                   title={relation === 'pk' ? `Primary key · insert ${col.name}` : relation === 'fk' ? `Foreign key · insert ${col.name}` : `Insert column ${col.name}`}
                   style={{ ...rowStyle(t), paddingLeft: 32, gap: 7 }}
                 >
-                  <ColIcon size={12} color={iconColor} style={{ flexShrink: 0 }} />
+                  {/* Prototype ER glyphs: mono PK/FK text in the key column. */}
+                  <span style={{ flexShrink: 0, width: 18, fontSize: 8.5, fontWeight: 700, fontFamily: t.fontMono, color: relation === 'pk' ? 'var(--pk)' : relation === 'fk' ? 'var(--fk)' : t.textMuted }}>
+                    {relation === 'pk' ? 'PK' : relation === 'fk' ? 'FK' : ''}
+                  </span>
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono, color: t.textSecondary }}>{col.name}</span>
-                  <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{col.type}</span>
+                  <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0, fontFamily: t.fontMono }}>{col.type}</span>
                 </button>
               );
             })}
@@ -379,47 +381,28 @@ function BlocksList({ t, search, domain, onDomainChange }: { t: Theme; search: s
   </div>;
 }
 
+// Prototype block row: blocks glyph · mono name over a meta line · status dot.
+// A single click opens the block's detail overview (description lives there).
 function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: () => void }) {
-  const [open, setOpen] = useState(false);
+  const status = String(block.status ?? 'draft');
+  const dot = STATUS_COLOR[status] ?? t.warning;
   return (
-    <div>
-      {/* Same object-display pattern as Database/Semantic: name row → expand. */}
-      <div style={{ ...rowStyle(t), justifyContent: 'flex-start' }}>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          title={open ? 'Collapse' : 'Expand'}
-          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.textMuted, display: 'flex', padding: 0 }}
-        >
-          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        </button>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 7, padding: 0, fontFamily: t.font }}
-        >
-          <Box size={13} color={STATUS_COLOR[block.status] ?? t.textMuted} style={{ flexShrink: 0 }} />
-          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{block.name}</span>
-          <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{block.domain}</span>
-        </button>
-      </div>
-      {open && (
-        <div style={{ padding: '6px 12px 10px 30px', borderBottom: `1px solid ${t.cellBorder}`, background: `${t.tableHeaderBg}30`, display: 'grid', gap: 6 }}>
-          {block.description && <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.4 }}>{block.description}</div>}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', fontSize: 10.5, color: t.textMuted }}>
-            <BlockStatusBadge status={String(block.status)} t={t} />
-            {block.owner && <span>{block.owner}</span>}
-            {block.lastModified && <span>· {new Date(block.lastModified).toLocaleDateString()}</span>}
-          </div>
-          <button
-            type="button"
-            onClick={onOpen}
-            style={{ justifySelf: 'start', border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.accent, cursor: 'pointer', borderRadius: 6, fontSize: 10.5, fontWeight: 700, fontFamily: t.font, padding: '3px 9px' }}
-          >
-            Open in builder
-          </button>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={onOpen}
+      title={block.description || `${block.name} — open`}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8, width: '100%', boxSizing: 'border-box',
+        padding: '7px 10px', border: 'none', borderRadius: 7, margin: '1px 0',
+        background: 'transparent', cursor: 'pointer', textAlign: 'left', fontFamily: t.font,
+      }}
+    >
+      <Blocks size={14} color={t.textMuted} strokeWidth={1.75} style={{ flexShrink: 0 }} />
+      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
+        <span style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[block.domain, status].filter(Boolean).join(' · ')}</span>
+      </span>
+      <span title={status} style={{ flexShrink: 0, width: 7, height: 7, borderRadius: 999, background: dot }} />
+    </button>
   );
 }
