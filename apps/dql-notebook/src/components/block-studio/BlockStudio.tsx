@@ -48,6 +48,7 @@ import {
   setBlockName,
   setBlockArray,
   setBlockStringField,
+  setBlockQuery,
   setBlockTags,
   setDqlSectionBody,
   upsertVisualBlockParameter,
@@ -421,12 +422,34 @@ export function BlockStudio() {
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
   };
 
+  // Query-mode toggle: rebuild the draft as a semantic or raw-SQL (custom)
+  // block, preserving the identity fields. No-op if already in that mode.
+  const switchBuilderMode = (mode: 'semantic' | 'custom') => {
+    if ((mode === 'semantic') === isSemanticBlock) return;
+    const meta = state.blockStudioMetadata;
+    const name = meta?.name || (mode === 'semantic' ? 'new_semantic_block' : 'new_sql_block');
+    let next = mode === 'semantic' ? buildSemanticSkeleton(name) : buildCustomSkeleton(name);
+    next = setBlockName(next, name);
+    // Start raw SQL from an empty query so the textarea isn't pre-filled with
+    // the skeleton's placeholder SELECT.
+    if (mode === 'custom') next = setBlockQuery(next, '');
+    if (meta) {
+      next = setBlockStringField(next, 'domain', meta.domain || 'uncategorized');
+      next = setBlockStringField(next, 'description', meta.description ?? '');
+      next = setBlockStringField(next, 'owner', meta.owner ?? '');
+      next = setBlockTags(next, meta.tags ?? []);
+    }
+    handleDraftChange(next);
+    setEditorMode('visual');
+  };
+
+  // "New block" opens the builder form directly (defaulting to a semantic
+  // draft — the Query section toggles to Raw SQL) rather than the start page.
   const resetNewWorkspace = () => {
     dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
     setDraftSessionId(makeBlockStudioDraftId());
-    setWorkspaceMode('start');
-    setEditorMode('visual');
     setImportSession(null);
+    beginManualDraft('semantic');
   };
 
   const beginNewWorkspace = () => {
@@ -1079,29 +1102,37 @@ export function BlockStudio() {
               t={t}
             />
           ) : editorMode === 'visual' ? (
-            isSemanticBlock ? (
-            <SemanticBlockBuilder
-              source={state.blockStudioDraft}
-              metadata={state.blockStudioMetadata}
-              semanticLayer={state.semanticLayer}
-              domainOptions={state.semanticLayer.domains}
-              chartConfig={currentChart}
-              onChange={handleDraftChange}
-              onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
-              onOpenAi={() => openAskAi({ kind: 'edit', initialInput: 'Help resolve the selected semantic metrics and dimensions for this block: ' })}
-              t={t}
-            />
-            ) : (
-              <SqlBlockVisualBuilder
-                source={state.blockStudioDraft}
-                metadata={state.blockStudioMetadata}
-                domainOptions={state.semanticLayer.domains}
-                chartConfig={currentChart}
-                onChange={handleDraftChange}
-                onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
-                t={t}
-              />
-            )
+            <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+              <BuilderModeBar mode={isSemanticBlock ? 'semantic' : 'custom'} onModeChange={switchBuilderMode} t={t} />
+              <div style={{ flex: 1, minHeight: 0 }}>
+                {isSemanticBlock ? (
+                  <SemanticBlockBuilder
+                    key={`sem-${state.activeBlockPath ?? draftSessionId}`}
+                    source={state.blockStudioDraft}
+                    metadata={state.blockStudioMetadata}
+                    semanticLayer={state.semanticLayer}
+                    domainOptions={state.semanticLayer.domains}
+                    chartConfig={currentChart}
+                    onChange={handleDraftChange}
+                    onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
+                    onOpenAi={() => openAskAi({ kind: 'edit', initialInput: 'Help resolve the selected semantic metrics and dimensions for this block: ' })}
+                    t={t}
+                  />
+                ) : (
+                  <SqlBlockVisualBuilder
+                    key={`sql-${state.activeBlockPath ?? draftSessionId}`}
+                    source={state.blockStudioDraft}
+                    metadata={state.blockStudioMetadata}
+                    domainOptions={state.semanticLayer.domains}
+                    chartConfig={currentChart}
+                    onChange={handleDraftChange}
+                    onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
+                    onConvertToDql={() => setEditorMode('source')}
+                    t={t}
+                  />
+                )}
+              </div>
+            </div>
           ) : (
             <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               {(semanticInsertChoice || databaseInsertWarning) && (
@@ -2764,6 +2795,40 @@ function EnterpriseSemanticPicker({
   );
 }
 
+// Query-authoring mode toggle (Semantic picker / Raw SQL) shown above the
+// visual builder, per the Block Studio prototype's Query section.
+function BuilderModeBar({ mode, onModeChange, t }: { mode: 'semantic' | 'custom'; onModeChange: (mode: 'semantic' | 'custom') => void; t: Theme }) {
+  const options: Array<{ key: 'semantic' | 'custom'; label: string }> = [
+    { key: 'semantic', label: 'Semantic picker' },
+    { key: 'custom', label: 'Raw SQL' },
+  ];
+  return (
+    <div style={{ flexShrink: 0, borderBottom: `1px solid ${t.headerBorder}`, background: t.appBg }}>
+      <div style={{ width: 'min(820px, 100% - 48px)', margin: '0 auto', padding: '10px 0', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>Query</span>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg }}>
+          {options.map((option) => {
+            const active = option.key === mode;
+            return (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => onModeChange(option.key)}
+                style={{ border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, background: active ? 'var(--accent-dim)' : 'transparent', color: active ? t.accent : t.textMuted }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+        <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+          {mode === 'semantic' ? 'Pick governed metrics & dimensions — they compile to DQL.' : 'Write SQL and convert it into a governed DQL script.'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function SqlBlockVisualBuilder({
   source,
   metadata,
@@ -2771,6 +2836,7 @@ function SqlBlockVisualBuilder({
   chartConfig,
   onChange,
   onMetadataChange,
+  onConvertToDql,
   t,
 }: {
   source: string;
@@ -2779,12 +2845,20 @@ function SqlBlockVisualBuilder({
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
   onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
+  onConvertToDql: () => void;
   t: Theme;
 }) {
   const input = compactBuilderInputStyle(t);
-  const query = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1]?.trim() ?? '';
-  const outputs = extractSelectAliases(query);
+  const parsedQuery = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1]?.trim() ?? '';
+  // Local editing state so keystrokes never fight the source round-trip (the
+  // builder is remounted with a fresh key when the edited block changes).
+  const [sqlDraft, setSqlDraft] = useState(parsedQuery);
+  const outputs = extractSelectAliases(sqlDraft);
   const testsBody = getDqlSectionBody(source, 'tests');
+  const editSql = (value: string) => {
+    setSqlDraft(value);
+    onChange(setBlockQuery(source, value));
+  };
   const updateText = (field: 'name' | 'domain' | 'description' | 'owner', value: string) => {
     onMetadataChange({ [field]: value });
     onChange(field === 'name' ? setBlockName(source, value) : setBlockStringField(source, field, value));
@@ -2799,17 +2873,26 @@ function SqlBlockVisualBuilder({
         onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
         t={t}
       />
-      <PanelBox title="Query" hint="Paste raw SQL or edit in DQL Source — both compile to the DQL script." t={t}>
+      <PanelBox title="Query" hint="Write raw SQL — it compiles into a governed DQL script." t={t}>
         <textarea
-          rows={5}
-          value={query}
-          readOnly
+          rows={7}
+          value={sqlDraft}
+          onChange={(event) => editSql(event.target.value)}
+          spellCheck={false}
           style={{ border: '1px solid var(--border-default)', background: 'var(--bg-1)', borderRadius: 8, padding: '10px 12px', fontSize: 11.5, lineHeight: 1.6, fontFamily: t.fontMono, color: t.textPrimary, outline: 'none', resize: 'vertical' }}
-          placeholder="Open DQL Source to add a SELECT query."
+          placeholder={'SELECT\n  category,\n  SUM(revenue) AS revenue\nFROM {{ ref(\'orders\') }}\nGROUP BY 1'}
         />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={onConvertToDql}
+            disabled={!sqlDraft.trim()}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 12px', borderRadius: 8, border: `1px solid ${t.accent}`, background: 'var(--accent-dim)', color: t.accent, fontSize: 11.5, fontWeight: 650, cursor: sqlDraft.trim() ? 'pointer' : 'not-allowed', fontFamily: t.font, opacity: sqlDraft.trim() ? 1 : 0.6 }}
+          >
+            Convert to DQL script
+          </button>
           <span style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
-            Detects <span style={{ fontFamily: t.fontMono }}>{'${params}'}</span>, grounds tables against dbt — edit in DQL Source.
+            Detects <span style={{ fontFamily: t.fontMono }}>{'${params}'}</span> and grounds tables against dbt. Open the DQL Source editor for the full script.
           </span>
         </div>
       </PanelBox>

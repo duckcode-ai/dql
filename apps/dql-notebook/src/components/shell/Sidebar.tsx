@@ -3,7 +3,6 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { BuildSidebar } from '../panels/BuildSidebar';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
-import { ReferencePanel } from '../panels/ReferencePanel';
 import { LineagePanel } from '../panels/LineagePanel';
 import { GitPanel } from '../panels/GitPanel';
 import { AppsPanel } from '../panels/AppsPanel';
@@ -18,7 +17,6 @@ const PANEL_TITLES: Record<string, string> = {
   block_library: 'Build',
   lineage: 'Lineage',
   connection: 'Connection',
-  reference: 'Quick Reference',
   git: 'Git',
   apps: 'Apps',
 };
@@ -118,7 +116,6 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
         {panel === 'block_library' && <BuildSidebar defaultTab="blocks" onOpenFile={onOpenFile} />}
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}
-        {panel === 'reference' && <ReferencePanel themeMode={state.themeMode} />}
         {panel === 'git' && <GitPanel />}
         {panel === 'apps' && <AppsPanel onOpenFile={onOpenFile} />}
       </div>

@@ -24,7 +24,6 @@ import {
   GitBranch,
   Blocks,
   Plug,
-  BookOpen,
   FilePlus,
   BoxSelect,
   Play,
@@ -97,7 +96,6 @@ export function CommandPalette({
       ['Block Library', 'block_library', Blocks],
       ['Apps', 'apps', Network],
       ['Connections', 'connection', Plug],
-      ['Reference', 'reference', BookOpen],
     ];
     const themeOptions: Array<{ mode: 'obsidian' | 'paper' | 'white'; label: string }> = [
       { mode: 'obsidian', label: 'Obsidian' },

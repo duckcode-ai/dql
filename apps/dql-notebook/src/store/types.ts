@@ -159,9 +159,9 @@ export interface ParamConfig {
   defaultValue: string;
   options?: string[];
 }
-export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'reference' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
+export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'reference' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'modeling' | 'settings' | 'agent_log' | 'help';
+export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'modeling' | 'settings' | 'agent_log' | 'help';
 
 export type GlobalAiAudience = 'stakeholder' | 'analyst';
 
@@ -1244,6 +1244,8 @@ export interface NotebookState {
   blockStudioCatalogLoading: boolean;
   blockStudioImportOpen: boolean;
   blockStudioDbtStatus: BlockStudioDbtStatus | null;
+  /** Full-screen Setup Onboarding wizard overlay (5-step workspace setup). */
+  setupOpen: boolean;
   inspectorOpen: boolean;
   inspectorContext: InspectorContext | null;
   // Apps surface (Phase 1)
@@ -1342,5 +1344,7 @@ export type NotebookAction =
   // Global AI right rail
   | { type: 'OPEN_GLOBAL_AI'; context?: GlobalAiContext; audience?: GlobalAiAudience; autoRun?: { text: string; mode?: string } }
   | { type: 'CLOSE_GLOBAL_AI' }
+  | { type: 'OPEN_SETUP' }
+  | { type: 'CLOSE_SETUP' }
   | { type: 'TOGGLE_GLOBAL_AI'; context?: GlobalAiContext; audience?: GlobalAiAudience }
   | { type: 'SET_GLOBAL_AI_CONTEXT'; context: GlobalAiContext; audience?: GlobalAiAudience };

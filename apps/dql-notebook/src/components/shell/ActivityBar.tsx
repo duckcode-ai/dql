@@ -4,7 +4,6 @@ import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
   GitBranch,
-  BookOpen,
   HelpCircle,
   Package,
   ChevronsLeft,
@@ -122,13 +121,13 @@ export function ActivityBar() {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
     }
-    // Lineage opens as an index list. Selecting a row opens a focused
-    // inspector; we avoid mounting the whole-project graph by default.
+    // Lineage opens the full-page graph canvas (Lineage Redesign). Clicking a
+    // node focuses its path in-canvas; deep links still open the detail view.
     if (panel === 'lineage') {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel: 'lineage' });
       return;
     }
-    const fullPagePanel = panel === 'connection' || panel === 'reference' || panel === 'git' || panel === 'apps' || panel === 'readiness' || panel === 'skills' || panel === 'domains' || panel === 'settings';
+    const fullPagePanel = panel === 'connection' || panel === 'git' || panel === 'apps' || panel === 'readiness' || panel === 'skills' || panel === 'domains' || panel === 'settings';
     if (fullPagePanel) {
       dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
       return;
@@ -182,8 +181,8 @@ export function ActivityBar() {
       key: 'setup',
       title: 'Setup',
       icon: <ListChecks size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'home' || state.mainView === 'readiness',
-      onClick: () => dispatch({ type: 'SET_MAIN_VIEW', view: 'home' }),
+      active: state.setupOpen,
+      onClick: () => dispatch({ type: 'OPEN_SETUP' }),
     },
     {
       key: 'settings',
@@ -191,13 +190,6 @@ export function ActivityBar() {
       icon: <Settings size={16} strokeWidth={1.75} />,
       active: state.mainView === 'settings' || state.mainView === 'connection',
       onClick: () => handlePanelClick('settings'),
-    },
-    {
-      key: 'reference',
-      title: 'Reference',
-      icon: <BookOpen size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'reference',
-      onClick: () => handlePanelClick('reference'),
     },
     {
       key: 'help',

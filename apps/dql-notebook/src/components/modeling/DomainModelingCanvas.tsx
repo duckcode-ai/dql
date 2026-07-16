@@ -1,11 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Background, Controls, Handle, MarkerType, MiniMap, NodeResizeControl, Position, ReactFlow, useNodesState, type Connection, type Edge, type Node, type NodeProps } from '@xyflow/react';
+import React, { useEffect, useRef, useMemo, useState } from 'react';
+import { Background, Controls, Handle, MarkerType, MiniMap, NodeResizeControl, Position, ReactFlow, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import Dagre from '@dagrejs/dagre';
-import { KeyRound, Link2, Maximize2, Plus, ShieldCheck } from 'lucide-react';
+import { Link2, Maximize2, Plus } from 'lucide-react';
 import type { DbtNodeAuthoringDetail, ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
 import { themes } from '../../themes/notebook-theme';
-import { entityRecords, resolveEntityRecordKey } from './domain-studio-model';
+import { entityKindColor, entityRecords, resolveEntityRecordKey } from './domain-studio-model';
 
 export type ColumnDisplayMode = 'keys' | 'relevant' | 'all';
 export type ModelingViewMode = 'business' | 'data';
@@ -33,7 +33,7 @@ type EntityNodeData = {
   onResize: (id: string, width: number) => void;
 };
 
-export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onEditRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onEditRelationship?: (recordKey: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
+export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, focusRequest, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onEditRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; focusRequest?: { id: string; token: number }; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onEditRelationship?: (recordKey: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
   const layoutKey = `dql-model-layout:${selectedAreaId ?? selectedDomain ?? 'all'}`;
   const sizeKey = `${layoutKey}:sizes`;
   const [savedPositions, setSavedPositions] = useState<Record<string, { x: number; y: number }>>(() => readPositions(layoutKey));
@@ -88,7 +88,10 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   const popoverRelationship = relPopover ? modeling.relationships[relPopover.recordKey] : undefined;
   return (
     <div style={{ height: '100%', position: 'relative' }} onClick={() => { setContextMenu(null); setRelPopover(null); }}>
+    <style>{MODELING_CANVAS_STYLES}</style>
     <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(event, edge) => { event.stopPropagation(); onSelectRelationship(edge.id); setRelPopover({ x: Math.min(event.clientX, window.innerWidth - 340), y: Math.min(event.clientY, window.innerHeight - 320), recordKey: edge.id }); }} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+      {/* Pans/zooms to a model picked from the toolbar search. */}
+      <FocusController focusRequest={focusRequest} />
       {/* Prototype dot grid: 22px spacing on the Paper canvas. */}
       <Background color="var(--border-strong)" gap={22} size={1} />
       <Controls showInteractive={false} />
@@ -98,6 +101,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
     {relPopover && popoverRelationship && (
       <RelationshipPopover
         relationship={popoverRelationship}
+        entities={modeling.entities}
         x={relPopover.x}
         y={relPopover.y}
         theme={theme}
@@ -113,8 +117,9 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
 // Prototype (Domain Studio Redesign) relationship popover: 316px card at the
 // click point — title + proof badge, from ⇄ to chips with cardinality, the
 // join in a mono box, business context, proof status, Edit / View join proof.
-function RelationshipPopover({ relationship, x, y, theme, onClose, onEdit, onViewProof }: {
+function RelationshipPopover({ relationship, entities, x, y, theme, onClose, onEdit, onViewProof }: {
   relationship: ManifestDbtFirstModeling['relationships'][string];
+  entities: ManifestDbtFirstModeling['entities'];
   x: number;
   y: number;
   theme: Theme;
@@ -124,6 +129,11 @@ function RelationshipPopover({ relationship, x, y, theme, onClose, onEdit, onVie
 }) {
   const proven = relationship.validation?.status === 'passed';
   const joinLabel = relationship.keys.map((key) => `${key.from} = ${key.to}`).join(' and ') || 'No join keys declared';
+  // Chips read as friendly entity names, not raw "domain::entity::id" keys.
+  const nameOf = (ref: string) => {
+    const entity = entities[ref] ?? Object.values(entities).find((item) => item.id === ref || item.localId === ref);
+    return entity?.businessName || entity?.localId || ref.split('::').pop() || ref;
+  };
   const chip = (label: string) => (
     <span style={{ padding: '3px 8px', borderRadius: 6, background: 'var(--accent-dim)', color: 'var(--accent)', border: '1px solid rgba(107,93,211,0.2)', fontFamily: theme.fontMono, fontSize: 11.5, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
   );
@@ -140,9 +150,9 @@ function RelationshipPopover({ relationship, x, y, theme, onClose, onEdit, onVie
       </div>
       <div style={{ padding: '12px 13px', display: 'flex', flexDirection: 'column', gap: 11 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5 }}>
-          {chip(relationship.from)}
+          {chip(nameOf(relationship.from))}
           <span style={{ color: theme.textMuted, fontSize: 10.5, fontWeight: 650, whiteSpace: 'nowrap' }}>{relationship.cardinality.replace(/_/g, ' ')}</span>
-          {chip(relationship.to)}
+          {chip(nameOf(relationship.to))}
         </div>
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: theme.textMuted, marginBottom: 4 }}>Join</div>
@@ -177,9 +187,8 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   const { recordKey, entity, detail, relation, selected, viewMode, columnMode, density, theme, onAddRelatedModel, onResize } = data;
   const [collapsed, setCollapsed] = useState(density === 'compact');
   const color = domainColor(entity.domain);
-  const role = (entity.analyticalRole ?? '').toLowerCase();
-  const kindColor = role.includes('fact') ? 'var(--accent)' : role.includes('dim') ? 'var(--status-success)' : 'var(--text-tertiary)';
-  const kindLabel = entity.analyticalRole ?? 'entity';
+  const kindColor = entityKindColor(entity.analyticalRole);
+  const kindLabel = entity.analyticalRole && entity.analyticalRole !== 'unknown' ? entity.analyticalRole : 'entity';
   const columns = detail?.columns ?? [];
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
   const fkColumns = new Set(columns.filter((column) => !keys.has(column.name) && /(^|_)id$/.test(column.name)).map((column) => column.name));
@@ -200,7 +209,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
       }}
     >
       <NodeResizeControl position="bottom-right" resizeDirection="horizontal" minWidth={240} maxWidth={620} onResizeEnd={(_, params) => onResize(recordKey, params.width)} style={{ width: 16, height: 16, border: 0, background: 'transparent', color: theme.textMuted }}><span title="Drag to resize model" style={{ display: 'grid', placeItems: 'center' }}><Maximize2 size={12} /></span></NodeResizeControl>
-      {collapsed && viewMode === 'data' && <Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
+      {collapsed && viewMode === 'data' && <Handle className="dql-modeling-handle" id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} />}
       <button className="nodrag" title="Add a related model" onClick={(event) => { event.stopPropagation(); onAddRelatedModel({ from: recordKey }); }} style={{ position: 'absolute', right: -9, top: -9, zIndex: 5, width: 22, height: 22, display: 'grid', placeItems: 'center', padding: 0, borderRadius: 999, border: `2px solid ${theme.cellBg}`, background: 'var(--accent)', color: '#fff', cursor: 'pointer', boxShadow: '0 1px 4px rgba(107,93,211,0.3)' }}><Plus size={12} /></button>
       {/* header: kind square · mono name · KIND */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '9px 12px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-1)', borderRadius: '8.5px 8.5px 0 0' }}>
@@ -223,12 +232,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
             </span>
           </div>
         </>
-      ) : (
-        <div style={{ padding: '7px 12px 8px' }}>
-          <div title={detail?.description} style={{ fontSize: 10.5, color: theme.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: theme.fontMono }}>{relation ?? entity.dbtUniqueId}</div>
-          <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}><NodeBadge text={entity.status ?? 'draft'} color={entity.status === 'certified' ? '#2e8b57' : '#b26b1f'} />{detail?.tests.length ? <NodeBadge text={`${detail.tests.length} tests`} color="#4a74c9" /> : null}</div>
-        </div>
-      )}
+      ) : null}
       {visibleColumns.length > 0 && (
         <div
           style={{
@@ -250,13 +254,13 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
                 fontSize: 11,
               }}
             >
-              <Handle id={`target:${column.name}`} type="target" position={Position.Left} style={{ ...handleStyle(color), top: '50%' }} />
+              <Handle className="dql-modeling-handle" id={`target:${column.name}`} type="target" position={Position.Left} style={{ ...handleStyle(color), top: '50%' }} />
               <span style={{ flexShrink: 0, width: 17, fontSize: 8.5, fontWeight: 700, fontFamily: theme.fontMono, color: keys.has(column.name) ? 'var(--pk)' : fkColumns.has(column.name) ? 'var(--fk)' : 'transparent' }}>
                 {keys.has(column.name) ? 'PK' : fkColumns.has(column.name) ? 'FK' : '·'}
               </span>
               <span style={{ flex: 1, minWidth: 0, color: theme.textSecondary, fontFamily: theme.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: keys.has(column.name) ? 700 : 500 }}>{column.name}</span>
-              <span style={{ flexShrink: 0, fontSize: 9.5, color: theme.textMuted, fontFamily: theme.fontMono, display: 'flex', gap: 3, alignItems: 'center' }}>{column.type ?? ''}{constraintBadges(column.tests, keys.has(column.name))}</span>
-              <Handle id={`source:${column.name}`} type="source" position={Position.Right} style={{ ...handleStyle(color), top: '50%' }} />
+              <span style={{ flexShrink: 0, fontSize: 9.5, color: theme.textMuted, fontFamily: theme.fontMono }}>{column.type ?? ''}</span>
+              <Handle className="dql-modeling-handle" id={`source:${column.name}`} type="source" position={Position.Right} style={{ ...handleStyle(color), top: '50%' }} />
             </div>
           ))}
           {columns.length > visibleColumns.length && (
@@ -272,7 +276,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
           )}
         </div>
       )}
-      {(collapsed || viewMode === 'business') && <><Handle id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} /><Handle id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} /></>}
+      {(collapsed || viewMode === 'business') && <><Handle className="dql-modeling-handle" id="entity-target" type="target" position={Position.Left} style={handleStyle(color)} /><Handle className="dql-modeling-handle" id="entity-source" type="source" position={Position.Right} style={handleStyle(color)} /></>}
     </div>
   );
 }
@@ -346,8 +350,10 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
       const toEntity = modeling.entities[to];
       const fromColumns = fromEntity ? visibleColumnNames(fromEntity, detailsByDbtId[fromEntity.dbtUniqueId], columnMode) : new Set<string>();
       const toColumns = toEntity ? visibleColumnNames(toEntity, detailsByDbtId[toEntity.dbtUniqueId], columnMode) : new Set<string>();
-      const meaning = relationship.verb ? `${relationship.verb} · ` : '';
-      const label = `${meaning}${keyLabel} · ${relationship.fanout}`;
+      // Prototype edge pill reads as a short business phrase ("placed by · N:1");
+      // the join keys and fanout live in the relationship popover, not the label.
+      const verbLabel = relationship.verb?.trim();
+      const label = verbLabel || keyLabel;
       return {
         id: recordKey,
         source: from,
@@ -413,17 +419,26 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
 }
 
 function cardinalitySymbol(value: string): string { return value === 'one_to_one' ? '1:1' : value === 'one_to_many' ? '1:N' : value === 'many_to_one' ? 'N:1' : value === 'many_to_many' ? 'N:N' : '?'; }
-function NodeBadge({ text, color }: { text: string; color: string }) { return <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '2px 5px', fontSize: 8, fontWeight: 700 }}>{text}</span>; }
-function constraintBadges(tests: string[], primary: boolean): React.ReactNode {
-  const normalized = tests.map((test) => test.toLowerCase());
-  const badges: React.ReactNode[] = [];
-  if (primary) badges.push(<ConstraintBadge key="pk" label="PK" color="#d49a22" icon={<KeyRound size={7} />} />);
-  if (normalized.some((test) => test.includes('relationship'))) badges.push(<ConstraintBadge key="fk" label="FK" color="#7b61d1" icon={<Link2 size={7} />} />);
-  if (normalized.some((test) => test.includes('unique'))) badges.push(<ConstraintBadge key="uq" label="UQ" color="#2c8f9e" icon={<ShieldCheck size={7} />} />);
-  if (normalized.some((test) => test.includes('not_null'))) badges.push(<ConstraintBadge key="nn" label="NN" color="#c9515d" />);
-  return badges;
+// Centers the viewport on the model chosen from the toolbar search dropdown.
+function FocusController({ focusRequest }: { focusRequest?: { id: string; token: number } }) {
+  const flow = useReactFlow();
+  const lastToken = useRef(-1);
+  useEffect(() => {
+    if (!focusRequest || focusRequest.token === lastToken.current) return;
+    lastToken.current = focusRequest.token;
+    // Let the graph settle (search clearing can remount nodes) before centering.
+    const timer = window.setTimeout(() => {
+      const node = flow.getNode(focusRequest.id);
+      if (!node) return;
+      const width = Number(node.measured?.width ?? node.width ?? node.style?.width ?? 280);
+      const height = Number(node.measured?.height ?? node.height ?? node.style?.height ?? 120);
+      flow.setCenter(node.position.x + width / 2, node.position.y + height / 2, { zoom: Math.max(0.85, flow.getZoom()), duration: 500 });
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [focusRequest, flow]);
+  return null;
 }
-function ConstraintBadge({ label, color, icon }: { label: string; color: string; icon?: React.ReactNode }) { return <span title={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 1, color, border: `1px solid ${color}55`, background: `${color}12`, borderRadius: 3, padding: '1px 2px', fontSize: 7, fontWeight: 800 }}>{icon}{label}</span>; }
+
 function MenuAction({ label, onClick, theme }: { label: string; onClick: () => void; theme: Theme }) { return <button onClick={onClick} style={{ width: '100%', textAlign: 'left', border: 0, borderRadius: 4, padding: '7px 8px', background: 'transparent', color: theme.textPrimary, fontSize: 11, cursor: 'pointer' }}>{label}</button>; }
 
 function visibleColumnCount(entity: ManifestModelEntity, detail: DbtNodeAuthoringDetail | undefined, mode: ColumnDisplayMode): number {
@@ -458,8 +473,16 @@ function parseColumnHandle(handle: string | null): string | undefined {
   return handle?.includes(':') ? handle.slice(handle.indexOf(':') + 1) : undefined;
 }
 function handleStyle(color: string): React.CSSProperties {
-  return { background: color, border: '2px solid #fff', width: 12, height: 12, boxShadow: `0 0 0 1px ${color}66`, cursor: 'crosshair' };
+  return { background: color, border: '2px solid var(--color-bg-card)', width: 9, height: 9, cursor: 'crosshair' };
 }
+// Connection handles stay hidden for a clean ER view and fade in only when the
+// node is hovered — matching the prototype's dot-free tables.
+const MODELING_CANVAS_STYLES = `
+.dql-modeling-handle { opacity: 0; transition: opacity 0.12s ease; }
+.react-flow__node:hover .dql-modeling-handle,
+.dql-modeling-handle.connecting,
+.dql-modeling-handle:hover { opacity: 1; }
+`;
 function emptyAction(theme: Theme, primary = false): React.CSSProperties {
   return { display: 'inline-flex', alignItems: 'center', gap: 6, border: `1px solid ${primary ? theme.accent : theme.headerBorder}`, borderRadius: 6, padding: '7px 10px', color: primary ? theme.accent : theme.textSecondary, background: primary ? `${theme.accent}12` : theme.cellBg, cursor: 'pointer', fontSize: 11, fontWeight: 650 };
 }
