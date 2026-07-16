@@ -159,7 +159,17 @@ function chartCanRepresent(
  * over any QueryResult. Shared by Ask AI (UnifiedAgentRunPanel) and notebook query
  * cells so both render governed results identically.
  */
-export function ResultView({ result, themeMode, t, chartConfig }: { result: QueryResult; themeMode: ThemeMode; t: Theme; chartConfig?: CellChartConfig }) {
+export interface ResultViewProps {
+  result: QueryResult;
+  themeMode: ThemeMode;
+  t: Theme;
+  chartConfig?: CellChartConfig;
+  /** Removes the outer shell when Ask AI supplies the titled result card. */
+  embedded?: boolean;
+  tabLabels?: { chart: string; table: string };
+}
+
+export function ResultView({ result, themeMode, t, chartConfig, embedded = false, tabLabels }: ResultViewProps) {
   const isEmpty = result.rows.length === 0;
   // User overrides from the chart-type picker / settings gear (type / X / Y / palette …).
   const [override, setOverride] = useState<CellChartConfig | undefined>();
@@ -184,13 +194,14 @@ export function ResultView({ result, themeMode, t, chartConfig }: { result: Quer
     ? effectiveChart.chart
     : 'bar';
   return (
-    <div style={{ border: `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
+    <div style={{ border: embedded ? 'none' : `1px solid ${t.headerBorder}`, background: t.cellBg, borderRadius: embedded ? 0 : 8, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: embedded ? '9px 14px' : '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
         {/* Chart tab shows whenever the data can be plotted; the picker + gear let
             the user pick the chart type and axes manually. */}
-        {chartable && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>Chart</button>}
-        {chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>Table</button>}
-        {!chartable && !isEmpty && <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>Table</span>}
+        {embedded && chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>{tabLabels?.table ?? 'Table'}</button>}
+        {chartable && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>{tabLabels?.chart ?? 'Chart'}</button>}
+        {!embedded && chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>{tabLabels?.table ?? 'Table'}</button>}
+        {!chartable && !isEmpty && <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>{tabLabels?.table ?? 'Table'}</span>}
         {chartable && view === 'chart' ? (
           <select
             value={currentChartType}
@@ -242,7 +253,7 @@ export function ResultView({ result, themeMode, t, chartConfig }: { result: Quer
         ) : null}
         <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
-      <div style={{ padding: 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: 320, overflow: 'auto' }}>
+      <div style={{ padding: embedded ? 12 : 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: embedded ? 380 : 320, overflow: 'auto' }}>
         {isEmpty
           ? <div style={{ padding: '18px 8px', textAlign: 'center', color: t.textMuted, fontSize: 12 }}>
               The query ran successfully and matched 0 rows{result.columns.length > 0 ? ` (columns: ${result.columns.join(', ')})` : ''}.

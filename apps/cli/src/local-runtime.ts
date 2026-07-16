@@ -526,8 +526,13 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
   };
 }
 
-export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
+export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
   if (governedAnswer.kind === 'no_answer') return false;
+  // The executed rows are the presentation boundary: certified, semantic,
+  // DQL-first, and exploratory routes all deserve a separate stakeholder-facing
+  // explanation grounded in those values. Trust and query mechanics stay in the
+  // artifact/inspector instead of leaking into the primary answer.
+  if (governedAnswer.result) return true;
   if (governedAnswer.kind === 'certified' || governedAnswer.certification === 'certified') return false;
   // EXP-001: exploratory prose is part of the trust boundary. A free-form
   // synthesis pass can accidentally relabel an entity-level lifetime measure
@@ -537,6 +542,17 @@ export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer,
   const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
   if (governedAnswer.dqlArtifact && finalText) return false;
   return true;
+}
+
+function businessNarrativeGaps(warnings: string[] | undefined): string[] | undefined {
+  const businessRelevant = (warnings ?? []).filter((warning) => !(
+    /missing requested output column/i.test(warning)
+    || /\bquery plan\b/i.test(warning)
+    || /\bgrain\b/i.test(warning)
+    || /\bcolumn(?:s)?\b.*\bmissing\b/i.test(warning)
+    || /\bSQL\b|\bDBT\b|\bjoin probe\b/i.test(warning)
+  ));
+  return businessRelevant.length > 0 ? businessRelevant : undefined;
 }
 
 // ── Server-side conversation threads ────────────────────────────────────────
@@ -1538,7 +1554,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit, emitAnswerDelta }) => {
+  const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit }) => {
     let governedAnswer: AgentAnswer;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(
@@ -1757,14 +1773,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             {
               question: request.question,
               category: routeDecision?.category,
-              audience: request.audience ?? 'analyst',
+              // The primary Ask reply is always business-facing. Analysts keep
+              // the full DQL, SQL, lineage, gates, and grain in the inspector.
+              audience: 'stakeholder',
               resultPreview: preview,
               sql: sql,
               draftText: draft,
-              gaps: governedAnswer.validationWarnings,
+              gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
             },
             {
-              onDelta: emitAnswerDelta,
               complete: ({ system, user, signal, onDelta }) =>
                 streamOrGenerate(
                   provider,

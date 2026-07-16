@@ -22,11 +22,12 @@ describe("inferFormat", () => {
 });
 
 describe("synthesizeAnswer", () => {
-  it("returns the deterministic draft when no completion is injected", async () => {
+  it("uses executed values instead of a technical draft when no completion is injected", async () => {
     const input: SynthesizeInput = { question: "what is total revenue?", draftText: "Revenue is $2.8M.", resultPreview: preview([{ revenue: 2800000 }], ["revenue"]) };
     const result = await synthesizeAnswer(input);
     expect(result.source).toBe("deterministic");
-    expect(result.text).toBe("Revenue is $2.8M.");
+    expect(result.text).toContain("**Revenue:** 2,800,000");
+    expect(result.text).not.toContain("$2.8M");
   });
 
   it("uses the LLM composition when a completion is injected", async () => {
@@ -65,14 +66,55 @@ describe("synthesizeAnswer", () => {
     expect(result.text).toBe("Revenue is $2.8M.");
   });
 
-  it("builds a deterministic table for a comparison with no draft", async () => {
+  it("builds an answer-first deterministic comparison without duplicating the result table", async () => {
     const result = await synthesizeAnswer({
       question: "revenue by region",
       resultPreview: preview([{ region: "West", revenue: 10 }, { region: "East", revenue: 8 }], ["region", "revenue"]),
     });
     expect(result.format).toBe("comparison");
-    expect(result.text).toContain("| region | revenue |");
-    expect(result.text).toContain("West");
+    expect(result.text).toContain("**West** has the highest revenue at **10**");
+    expect(result.text).toContain("**East:** 8");
+    expect(result.text).not.toContain("| region | revenue |");
+  });
+
+  it("turns a one-row profile into business facts instead of a query plan", async () => {
+    const result = await synthesizeAnswer({
+      question: "what is his complete profile?",
+      draftText: "QUERY PLAN: grain = one row per customer identity.",
+      resultPreview: preview([{
+        customer_name: "Matthew Meyer",
+        customer_type: "returning",
+        count_lifetime_orders: 33,
+        lifetime_spend: 3089.8,
+        first_ordered_at: "2025-01-03",
+      }], ["customer_name", "customer_type", "count_lifetime_orders", "lifetime_spend", "first_ordered_at"]),
+    });
+
+    expect(result.text).toContain("**Matthew Meyer**");
+    expect(result.text).toContain("Customer Type");
+    expect(result.text).toContain("Lifetime Spend");
+    expect(result.text).not.toContain("QUERY PLAN");
+    expect(result.text).not.toContain("grain");
+  });
+
+  it("normalizes safe HTML-ish provider output into Markdown", async () => {
+    const result = await synthesizeAnswer(
+      { question: "why is revenue down?", resultPreview: preview([{ segment: "DACH", revenue_change: -214000 }], ["segment", "revenue_change"]) },
+      { complete: async () => '<div>Revenue fell <strong>8.2%</strong>.</div><span>Mid-market renewals declined.</span>' },
+    );
+
+    expect(result.text).toBe("Revenue fell **8.2%**.\nMid-market renewals declined.");
+    expect(result.text).not.toContain("<div");
+  });
+
+  it("removes a model-authored result table because the UI renders the real rows inline", async () => {
+    const result = await synthesizeAnswer(
+      { question: "top customers", resultPreview: preview([{ customer: "A", revenue: 10 }, { customer: "B", revenue: 8 }], ["customer", "revenue"]) },
+      { complete: async () => "A leads revenue.\n\n| Customer | Revenue |\n|---|---|\n| A | 10 |\n| B | 8 |\n\nThe gap is 2." },
+    );
+
+    expect(result.text).toBe("A leads revenue.\n\nThe gap is 2.");
+    expect(result.text).not.toContain("| Customer |");
   });
 });
 

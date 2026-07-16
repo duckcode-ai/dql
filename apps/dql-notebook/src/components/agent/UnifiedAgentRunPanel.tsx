@@ -552,7 +552,7 @@ export function UnifiedAgentRunPanel({
 
   // ── Ask redesign helpers ──────────────────────────────────────────────────
   // Open the inspector on an artifact chip. Picks a sensible starting tab.
-  const openInspector = useCallback((runId: string, artifactId: string, tab: AskInspectorTab = 'result') => {
+  const openInspector = useCallback((runId: string, artifactId: string, tab: AskInspectorTab = 'trust') => {
     setInspector({ runId, artifactId, tab });
   }, []);
 
@@ -719,7 +719,6 @@ export function UnifiedAgentRunPanel({
             artifact={activeInspector.artifact}
             tab={inspector!.tab}
             t={t}
-            themeMode={themeMode}
             appContext={appContext}
             onOpenApp={onOpenApp}
             onChangeTab={(tab) => setInspector((prev) => (prev ? { ...prev, tab } : prev))}
@@ -1635,7 +1634,7 @@ function RunCard({
 // api call and handoff keeps working.
 // ══════════════════════════════════════════════════════════════════════════
 
-type AskInspectorTab = 'result' | 'chart' | 'dql' | 'sql' | 'trust';
+export type AskInspectorTab = 'dql' | 'sql' | 'lineage' | 'trust';
 
 const ASK_KEYFRAMES = (t: Theme): string => `
   @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
@@ -1668,7 +1667,7 @@ function isRichAskArtifact(artifact: AgentRunArtifact, payload: Record<string, u
     || Boolean(extractMixedSourceNotebookPlan(payload));
 }
 
-function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<string, unknown>): string {
+export function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<string, unknown>): string {
   const parts: string[] = [];
   const result = extractResult(payload);
   const kindLabel = artifact.kind === 'answer' ? (result?.rows?.length ? 'Table' : 'Answer')
@@ -1677,9 +1676,125 @@ function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<string, unk
     : artifact.kind === 'research_run' ? 'Research'
     : 'Result';
   parts.push(kindLabel);
-  if (result?.rows?.length) parts.push(`${result.rows.length} row${result.rows.length === 1 ? '' : 's'}`);
+  const rowCount = result?.rowCount ?? result?.rows?.length;
+  if (typeof rowCount === 'number') parts.push(`${rowCount} row${rowCount === 1 ? '' : 's'}`);
+  if (typeof result?.executionTime === 'number') {
+    parts.push(result.executionTime >= 1000
+      ? `${(result.executionTime / 1000).toFixed(1)}s`
+      : `${result.executionTime.toFixed(result.executionTime < 10 ? 1 : 0)}ms`);
+  }
   parts.push(artifact.trustState === 'certified' ? 'certified block' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'governed' : 'AI-generated');
   return parts.join(' · ');
+}
+
+function resultCardTitle(run: AgentRun, artifact: AgentRunArtifact): string {
+  const generic = /^(?:certified|governed semantic|review-required|exploratory dbt-grounded) answer$/i.test(artifact.title.trim());
+  const source = generic ? run.question : artifact.title;
+  const clean = cleanPresentationText(source).replace(/[?.!]+$/, '').trim();
+  if (!clean) return 'Answer result';
+  const title = clean.charAt(0).toUpperCase() + clean.slice(1);
+  return title.length > 88 ? `${title.slice(0, 85).trimEnd()}…` : title;
+}
+
+interface AskLineageEntry {
+  name: string;
+  kind?: string;
+  detail?: string;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function lineageEntriesFromRun(run: AgentRun): AskLineageEntry[] {
+  const entries: AskLineageEntry[] = [];
+  const seen = new Set<string>();
+  const add = (value: unknown, fallbackKind?: string) => {
+    const record = recordOf(value);
+    if (!record) return;
+    const name = [record.name, record.label, record.relation, record.objectName]
+      .find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0);
+    if (!name) return;
+    const kind = typeof record.kind === 'string' ? record.kind : fallbackKind;
+    const key = `${kind ?? ''}:${name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const detail = [record.description, record.provenance, record.sourceTier, record.source]
+      .find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0);
+    entries.push({ name, kind, detail });
+  };
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const evidence = recordOf(payload.evidence);
+    for (const key of ['lineage', 'sourceTables', 'semanticObjects', 'selectedAssets'] as const) {
+      const values = evidence?.[key];
+      if (Array.isArray(values)) values.forEach((value) => add(value, key === 'sourceTables' ? 'source' : undefined));
+    }
+    const plan = recordOf(payload.analysisPlan) ?? recordOf(evidence?.analysisPlan);
+    const candidates = plan?.candidateTables;
+    if (Array.isArray(candidates)) candidates.forEach((value) => add(value, 'relation'));
+  }
+  return entries.slice(0, 24);
+}
+
+export function preferredAskInspectorTab(run: AgentRun, artifact: AgentRunArtifact): AskInspectorTab {
+  const payload = payloadOf(artifact);
+  if ((answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload))?.source) return 'dql';
+  if (answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined)) return 'sql';
+  if (lineageEntriesFromRun(run).length > 0) return 'lineage';
+  return 'trust';
+}
+
+function InlineAskResultCard({
+  run,
+  artifact,
+  selected,
+  t,
+  themeMode,
+  onInspect,
+}: {
+  run: AgentRun;
+  artifact: AgentRunArtifact;
+  selected: boolean;
+  t: Theme;
+  themeMode: ThemeMode;
+  onInspect: (tab: AskInspectorTab) => void;
+}) {
+  const payload = payloadOf(artifact);
+  const result = extractResult(payload);
+  if (!result) return null;
+  const chartConfig = inlineAskChartConfig(payload, result);
+  const inspectorTab = preferredAskInspectorTab(run, artifact);
+  return (
+    <section
+      data-followup="table"
+      aria-label={`${resultCardTitle(run, artifact)} result`}
+      style={{ border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`, borderRadius: 12, background: 'var(--bg-2)', overflow: 'hidden', boxShadow: selected ? '0 2px 10px rgba(107,93,211,0.12)' : '0 1px 3px rgba(26,26,26,0.04)' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', borderBottom: '1px solid var(--border-subtle)' }}>
+        <span style={{ width: 30, height: 30, borderRadius: 8, background: artifact.trustState === 'certified' ? 'var(--status-success-bg)' : 'var(--accent-dim)', color: artifact.trustState === 'certified' ? 'var(--status-success)' : 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <ArtifactIcon kind={artifact.kind} />
+        </span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: t.textPrimary, lineHeight: 1.35 }}>{resultCardTitle(run, artifact)}</div>
+          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{askArtifactMeta(artifact, payload)}</div>
+        </div>
+        <button type="button" className="dql-ask-ghost" onClick={() => onInspect(inspectorTab)} style={askGhostBtnStyle(t)}>
+          <ListTree size={12} /> Inspect
+        </button>
+      </div>
+      <ResultView
+        result={result}
+        themeMode={themeMode}
+        t={t}
+        chartConfig={chartConfig}
+        embedded
+        tabLabels={{ table: 'Results', chart: 'Visualization' }}
+      />
+    </section>
+  );
 }
 
 function AskRunCard({
@@ -1738,9 +1853,14 @@ function AskRunCard({
   const certified = run.trustState === 'certified';
   const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
   const evidence = evidenceFromRun(run);
-  const chipArtifacts = run.artifacts.filter((a) => !isRichAskArtifact(a, payloadOf(a)));
+  const inlineResultArtifacts = run.artifacts.filter((artifact) => {
+    const payload = payloadOf(artifact);
+    return !isRichAskArtifact(artifact, payload) && Boolean(extractResult(payload));
+  });
+  const inlineResultIds = new Set(inlineResultArtifacts.map((artifact) => artifact.id));
+  const chipArtifacts = run.artifacts.filter((a) => !isRichAskArtifact(a, payloadOf(a)) && !inlineResultIds.has(a.id));
   const richArtifacts = run.artifacts.filter((a) => isRichAskArtifact(a, payloadOf(a)));
-  const primaryArtifact = chipArtifacts[0] ?? run.artifacts[0];
+  const primaryArtifact = inlineResultArtifacts[0] ?? chipArtifacts[0] ?? run.artifacts[0];
 
   // Reuse RunCard's action gating so the quiet row offers the same real actions.
   const hasMixedSourcePlan = run.artifacts.some((a) => Boolean(extractMixedSourceNotebookPlan(payloadOf(a))));
@@ -1784,6 +1904,19 @@ function AskRunCard({
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
 
+      {/* Executed results live in the transcript; the inspector owns DQL/SQL/lineage/trust. */}
+      {inlineResultArtifacts.map((artifact) => (
+        <InlineAskResultCard
+          key={artifact.id}
+          run={run}
+          artifact={artifact}
+          selected={artifact.id === selectedArtifactId}
+          t={t}
+          themeMode={themeMode}
+          onInspect={(tab) => onOpenArtifact(artifact.id, tab)}
+        />
+      ))}
+
       {/* Artifact chips */}
       {chipArtifacts.map((artifact) => {
         const payload = payloadOf(artifact);
@@ -1793,7 +1926,7 @@ function AskRunCard({
             key={artifact.id}
             type="button"
             className="dql-ask-chip"
-            onClick={() => onOpenArtifact(artifact.id, 'result')}
+            onClick={() => onOpenArtifact(artifact.id, preferredAskInspectorTab(run, artifact))}
             style={{ display: 'flex', alignItems: 'center', gap: 10, width: 'fit-content', maxWidth: '100%', padding: '9px 12px', borderRadius: 10, border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`, background: 'var(--bg-2)', boxShadow: selected ? '0 1px 6px rgba(107,93,211,0.12)' : 'none', cursor: 'pointer', textAlign: 'left', fontFamily: t.font }}
           >
             <span style={{ width: 30, height: 30, borderRadius: 7, background: artifact.trustState === 'certified' ? 'var(--status-success-bg)' : 'var(--accent-dim)', color: artifact.trustState === 'certified' ? 'var(--status-success)' : 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -1863,7 +1996,6 @@ function AskInspector({
   artifact,
   tab,
   t,
-  themeMode,
   appContext,
   onOpenApp,
   onChangeTab,
@@ -1874,7 +2006,6 @@ function AskInspector({
   artifact: AgentRunArtifact;
   tab: AskInspectorTab;
   t: Theme;
-  themeMode: ThemeMode;
   appContext?: { appId?: string; dashboardId?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onChangeTab: (tab: AskInspectorTab) => void;
@@ -1882,20 +2013,19 @@ function AskInspector({
   onSaveBlock: () => void;
 }) {
   const payload = payloadOf(artifact);
-  const resultData = extractResult(payload);
-  const chartConfig = resultData ? extractChartConfig(payload, resultData) : undefined;
   const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
   const sql = answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined);
   const evidence = evidenceFromRun(run);
+  const lineage = lineageEntriesFromRun(run);
   const trustNote = trustExplainer(run);
   const certified = artifact.trustState === 'certified';
 
-  const tabs: Array<{ id: AskInspectorTab; label: string }> = [{ id: 'result', label: 'Result' }];
-  if (chartConfig) tabs.push({ id: 'chart', label: 'Chart' });
+  const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
   if (dqlArtifact?.source) tabs.push({ id: 'dql', label: 'DQL' });
   if (sql) tabs.push({ id: 'sql', label: 'SQL' });
+  if (lineage.length > 0) tabs.push({ id: 'lineage', label: 'Lineage' });
   tabs.push({ id: 'trust', label: 'Trust & steps' });
-  const activeTab = tabs.some((x) => x.id === tab) ? tab : 'result';
+  const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
   const badgeLabel = certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
   const badgeColor = certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
@@ -1909,7 +2039,7 @@ function AskInspector({
           <ArtifactIcon kind={artifact.kind} />
         </span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary, lineHeight: 1.35 }}>{cleanPresentationText(artifact.title)}</div>
+          <div style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary, lineHeight: 1.35 }}>{resultCardTitle(run, artifact)}</div>
           <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{askArtifactMeta(artifact, payload)}</div>
         </div>
         <span style={{ border: `1px solid ${badgeColor}`, color: badgeColor, background: badgeBg, borderRadius: 999, padding: '2px 8px', fontSize: 10, fontWeight: 700, flexShrink: 0, marginTop: 2 }}>{badgeLabel}</span>
@@ -1938,13 +2068,7 @@ function AskInspector({
       </div>
 
       {/* Body */}
-      <div data-followup="table" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px 20px' }}>
-        {activeTab === 'result' ? (
-          resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={chartConfig} />
-            : run.answer ? <div style={{ fontSize: 13.5, lineHeight: 1.6, color: t.textPrimary }}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div>
-            : <div style={{ fontSize: 12, color: t.textMuted }}>No tabular result for this answer.</div>
-        ) : null}
-        {activeTab === 'chart' && resultData ? <ResultView result={resultData} themeMode={themeMode} t={t} chartConfig={chartConfig} /> : null}
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px 20px' }}>
         {activeTab === 'dql' && dqlArtifact?.source ? (
           <>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -1962,6 +2086,20 @@ function AskInspector({
             </div>
             <pre style={codeStyle(t)}>{sql}</pre>
           </>
+        ) : null}
+        {activeTab === 'lineage' ? (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.5 }}>Governed semantic objects and physical sources used to produce this result.</div>
+            {lineage.map((entry) => (
+              <div key={`${entry.kind ?? 'asset'}:${entry.name}`} style={{ display: 'flex', alignItems: 'flex-start', gap: 9, padding: '9px 10px', border: '1px solid var(--border-subtle)', borderRadius: 8, background: 'var(--bg-1)' }}>
+                <GitBranch size={13} color={t.accent} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary }}>{entry.name}</div>
+                  <div style={{ fontSize: 10.5, color: t.textMuted, marginTop: 2 }}>{[entry.kind, entry.detail].filter(Boolean).join(' · ')}</div>
+                </div>
+              </div>
+            ))}
+          </div>
         ) : null}
         {activeTab === 'trust' ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -2988,7 +3126,12 @@ function extractResult(payload: Record<string, unknown>): QueryResult | undefine
     // renders as "0 rows matched" instead of vanishing — a run that executed and
     // matched nothing must be distinguishable from one that produced no result.
     if (rows.length === 0 && columns.length === 0 && typeof record.rowCount !== 'number') continue;
-    return { columns, rows, rowCount: typeof record.rowCount === 'number' ? record.rowCount : rows.length } as QueryResult;
+    return {
+      columns,
+      rows,
+      rowCount: typeof record.rowCount === 'number' ? record.rowCount : rows.length,
+      ...(typeof record.executionTime === 'number' ? { executionTime: record.executionTime } : {}),
+    } as QueryResult;
   }
   return undefined;
 }
@@ -3022,7 +3165,7 @@ function extractChartConfig(payload: Record<string, unknown>, result: QueryResul
     typeof raw[key] === 'string' && columns.includes(raw[key] as string) ? raw[key] as string : undefined;
   const config: CellChartConfig = {
     ...(chart ? { chart } : {}),
-    ...(chart ? { decisionSource: storedDecisionSource ?? (typeof raw.chart === 'string' ? 'authored' as const : 'agent' as const) } : {}),
+    ...(chart ? { decisionSource: storedDecisionSource ?? 'agent' as const } : {}),
     ...(typeof raw.rationale === 'string' ? { rationale: raw.rationale } : {}),
     ...(pick('x') ? { x: pick('x') } : {}),
     ...(pick('y') ? { y: pick('y') } : {}),
@@ -3032,6 +3175,18 @@ function extractChartConfig(payload: Record<string, unknown>, result: QueryResul
     ...(typeof raw.maxItems === 'number' ? { maxItems: raw.maxItems } : {}),
   };
   return Object.keys(config).length > 0 ? config : undefined;
+}
+
+export function inlineAskChartConfig(payload: Record<string, unknown>, result: QueryResult): CellChartConfig | undefined {
+  const resolved = extractChartConfig(payload, result);
+  // A backend recommendation of `table` should not remove Visualization from
+  // the transcript when the returned data is chartable. Authored/user table
+  // choices stay authoritative; agent/default choices remain suggestions.
+  return resolved?.chart === 'table'
+    && resolved.decisionSource !== 'authored'
+    && resolved.decisionSource !== 'user'
+    ? { ...resolved, chart: undefined }
+    : resolved;
 }
 
 export function resolveArtifactDqlView(payload: Record<string, unknown>): AgentConversationDqlArtifact | undefined {

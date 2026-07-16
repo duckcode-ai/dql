@@ -706,20 +706,21 @@ describe('agent run runtime API', () => {
     }
   });
 
-  it('skips synthesis for DQL-first answers that already carry final prose', () => {
+  it('synthesizes DQL-first answers when executed rows are available', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
       text: 'Top products by value are ready for review.',
+      result: { columns: ['product_name', 'revenue'], rows: [{ product_name: 'A', revenue: 10 }], rowCount: 1 },
       dqlArtifact: {
         kind: 'sql_block',
         name: 'top_products_by_value',
         source: 'block "top_products_by_value" { query = """select 1""" }',
       },
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  it('keeps synthesis only for legacy non-certified answers without a DQL artifact', () => {
+  it('synthesizes every executed result while preserving non-executed trust boundaries', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
@@ -731,6 +732,13 @@ describe('agent run runtime API', () => {
       certification: 'certified',
       text: 'Certified answer',
     })).toBe(false);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'certified',
+      certification: 'certified',
+      text: 'Answered by certified block top_customers.',
+      result: { columns: ['customer_name', 'lifetime_spend'], rows: [{ customer_name: 'Matthew', lifetime_spend: 3000 }], rowCount: 1 },
+    })).toBe(true);
 
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'no_answer',
@@ -751,6 +759,22 @@ describe('agent run runtime API', () => {
         executionStatus: 'not_executed',
       },
     })).toBe(false);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'uncertified',
+      certification: 'analyst_review_required',
+      text: 'QUERY PLAN: grain = one row per customer.',
+      result: { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 },
+      exploratoryCandidate: {
+        kind: 'dbt_grounded_exploration',
+        reason: 'unbound_relation',
+        sql: 'select 1',
+        message: 'Missing modeled relationship coverage.',
+        modeledEntityIds: [],
+        relationshipIds: [],
+        executionStatus: 'not_executed',
+      },
+    })).toBe(true);
   });
 
   it('threads conversation context through the HTTP agent-run endpoint into the route executor', async () => {

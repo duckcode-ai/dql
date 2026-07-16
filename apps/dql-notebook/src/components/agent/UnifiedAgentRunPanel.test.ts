@@ -9,6 +9,9 @@ let artifactReadyPayloadFromRun: typeof UnifiedAgentRunPanelModule.artifactReady
 let longRunGuidanceFor: typeof UnifiedAgentRunPanelModule.longRunGuidanceFor;
 let completedRunGuidanceFor: typeof UnifiedAgentRunPanelModule.completedRunGuidanceFor;
 let trustExplainer: typeof UnifiedAgentRunPanelModule.trustExplainer;
+let askArtifactMeta: typeof UnifiedAgentRunPanelModule.askArtifactMeta;
+let preferredAskInspectorTab: typeof UnifiedAgentRunPanelModule.preferredAskInspectorTab;
+let inlineAskChartConfig: typeof UnifiedAgentRunPanelModule.inlineAskChartConfig;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -21,6 +24,9 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     longRunGuidanceFor = module.longRunGuidanceFor;
     completedRunGuidanceFor = module.completedRunGuidanceFor;
     trustExplainer = module.trustExplainer;
+    askArtifactMeta = module.askArtifactMeta;
+    preferredAskInspectorTab = module.preferredAskInspectorTab;
+    inlineAskChartConfig = module.inlineAskChartConfig;
   });
 
   it('UI-003 progressively explains long SQL generation and its durable optimization path', () => {
@@ -213,6 +219,39 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       question: 'unmatched analysis',
       artifacts: [{ kind: 'answer', payload: { sql: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region' } }],
     } as any)).toMatchObject({ sql: expect.stringContaining('SELECT region') });
+  });
+
+  it('describes the full executed result count even when only a row sample is present', () => {
+    expect(askArtifactMeta({ kind: 'answer', trustState: 'certified' } as any, {
+      result: {
+        columns: ['customer_name', 'revenue'],
+        rows: Array.from({ length: 8 }, (_, index) => ({ customer_name: `C${index}`, revenue: 10 - index })),
+        rowCount: 10,
+        executionTime: 2100,
+      },
+    })).toBe('Table · 10 rows · 2.1s · certified block');
+  });
+
+  it('opens the technical inspector on DQL before SQL, lineage, or trust', () => {
+    const artifact = {
+      id: 'answer-1',
+      kind: 'answer',
+      title: 'Certified answer',
+      trustState: 'certified',
+      payload: {
+        sql: 'SELECT 1',
+        dqlArtifact: { kind: 'certified_block', name: 'top_customers', source: 'block "top_customers" {}' },
+      },
+    } as any;
+    expect(preferredAskInspectorTab({ artifacts: [artifact] } as any, artifact)).toBe('dql');
+  });
+
+  it('keeps Visualization available when the backend merely recommends a table', () => {
+    expect(inlineAskChartConfig({ result: { chartConfig: { chart: 'table' } } }, {
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'A', revenue: 10 }, { customer_name: 'B', revenue: 8 }],
+      rowCount: 2,
+    })).toMatchObject({ chart: undefined, decisionSource: 'agent' });
   });
 });
 
