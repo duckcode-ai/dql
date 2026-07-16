@@ -104,6 +104,7 @@ const initialState: NotebookState = {
   blockStudioCatalogLoading: false,
   blockStudioImportOpen: false,
   blockStudioDbtStatus: null,
+  setupOpen: false,
   inspectorOpen: false,
   inspectorContext: null,
   apps: [],
@@ -191,17 +192,19 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_SIDEBAR_PANEL': {
       if (action.panel === 'lineage') {
+        // Lineage is a full-page graph canvas (Lineage Redesign) — no sidebar
+        // index list; focus happens in-canvas.
         return {
           ...state,
           sidebarPanel: 'lineage',
-          sidebarOpen: true,
+          sidebarOpen: false,
           lineageFullscreen: false,
           lineageFocusNodeId: state.mainView === 'lineage_detail' ? state.lineageFocusNodeId : null,
           lineageReturnTarget: null,
           mainView: 'lineage',
         };
       }
-      const fullPagePanels = ['connection', 'reference', 'git', 'apps', 'readiness', 'skills', 'domains', 'settings'] as const;
+      const fullPagePanels = ['connection', 'git', 'apps', 'readiness', 'skills', 'domains', 'settings'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
       return {
@@ -214,9 +217,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         mainView:
           action.panel === 'connection'
             ? 'connection'
-            : action.panel === 'reference'
-              ? 'reference'
-              : action.panel === 'git'
+            : action.panel === 'git'
                 ? 'git'
                 : action.panel === 'apps'
                   ? 'apps'
@@ -594,6 +595,12 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
 
     case 'SET_BLOCK_STUDIO_DBT_STATUS':
       return { ...state, blockStudioDbtStatus: action.status };
+
+    case 'OPEN_SETUP':
+      return { ...state, setupOpen: true };
+
+    case 'CLOSE_SETUP':
+      return { ...state, setupOpen: false };
 
     case 'OPEN_GLOBAL_AI':
       return {

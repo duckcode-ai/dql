@@ -6,7 +6,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
-import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
+import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
@@ -22,6 +22,8 @@ type Editor =
   | { kind: 'contract' }
   | { kind: 'export' }
   | { kind: 'import' };
+
+type DiagramSearchItem = { recordKey: string; type: 'model' | 'column'; label: string; sublabel: string; role: string | undefined };
 
 export function DbtFirstModelingPage() {
   // UI-001: keep OSS domain authoring focused on Model + Skills, while Ask and
@@ -45,6 +47,8 @@ export function DbtFirstModelingPage() {
   const [columnMode, setColumnMode] = useState<ColumnDisplayMode>(savedDiagramPreferences.columnMode ?? 'relevant');
   const [diagramSearch, setDiagramSearch] = useState('');
   const [resetLayoutToken, setResetLayoutToken] = useState(0);
+  // Bumped when a model/column is picked from search, so the canvas pans to it.
+  const [focusRequest, setFocusRequest] = useState<{ id: string; token: number } | null>(null);
   const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>(savedDiagramPreferences.layoutMode ?? 'auto');
   const [diagramDensity, setDiagramDensity] = useState<DiagramDensity>(savedDiagramPreferences.density ?? 'normal');
   const [visibleLimit, setVisibleLimit] = useState(savedDiagramPreferences.visibleLimit ?? 0);
@@ -182,6 +186,20 @@ export function DbtFirstModelingPage() {
   if (!data) return <EmptyState t={t} title="Domain Studio is unavailable" detail={error ?? 'Enable manifestVersion 3 and dbt-first modeling.'} />;
 
   const relationByDbtId = Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, node.relation]));
+  // Searchable models + (already-hydrated) columns for the diagram search dropdown.
+  const diagramSearchItems: DiagramSearchItem[] = Object.entries(data.modeling.entities).flatMap(([recordKey, entity]) => {
+    const modelName = entity.businessName || entity.localId || entity.id;
+    const items: DiagramSearchItem[] = [{ recordKey, type: 'model', label: modelName, sublabel: entity.domain, role: entity.analyticalRole }];
+    for (const column of detailsByDbtId[entity.dbtUniqueId]?.columns ?? []) {
+      items.push({ recordKey, type: 'column', label: column.name, sublabel: modelName, role: entity.analyticalRole });
+    }
+    return items;
+  });
+  const handlePickModel = (recordKey: string) => {
+    setSelectedId(recordKey);
+    setDiagramSearch('');
+    setFocusRequest((previous) => ({ id: recordKey, token: (previous?.token ?? 0) + 1 }));
+  };
   const selectedAreaEntityIds = selectedArea ? new Set([...selectedArea.entityIds, ...selectedArea.referencedEntityIds]) : undefined;
   const domainEntities = domainEntityRecords(data.modeling, selectedDomain).filter(({ recordKey }) => !selectedAreaEntityIds || selectedAreaEntityIds.has(recordKey));
   const domainRelationships = Object.values(data.modeling.relationships).filter((relationship) => {
@@ -335,10 +353,10 @@ export function DbtFirstModelingPage() {
                   ...(diagramFullscreen ? { position: 'fixed', inset: 0, zIndex: 90, background: t.appBg } : {}),
                 }}
               >
-                <LayerToolbar modelingView={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={selectedAreaEntityIds?.size ?? Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onNewArea={() => setEditor({ kind: 'area' })} onModelingView={setModelingView} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
+                <LayerToolbar modelingView={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={selectedAreaEntityIds?.size ?? Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onNewArea={() => setEditor({ kind: 'area' })} onModelingView={setModelingView} onColumnMode={setColumnMode} onSearch={setDiagramSearch} searchItems={diagramSearchItems} onPickModel={handlePickModel} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} focusRequest={focusRequest ?? undefined} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
                 </div>
               </div>
             )}
@@ -1039,7 +1057,61 @@ function DomainFact({ label, value, t }: { label: string; value: string; t: Them
   );
 }
 
-function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onBindModel, onRelationship, onNewArea, onModelingView, onColumnMode, onSearch, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { modelingView: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onBindModel: () => void; onRelationship: () => void; onNewArea: () => void; onModelingView: (mode: ModelingViewMode) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
+// Toolbar search that finds a specific model or column across the whole graph
+// (even ones off-screen) and, on click, selects + pans the canvas to it.
+function DiagramSearch({ search, onSearch, items, onPick, t }: { search: string; onSearch: (value: string) => void; items: DiagramSearchItem[]; onPick: (recordKey: string) => void; t: Theme }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLLabelElement>(null);
+  const query = search.trim().toLowerCase();
+  const results = query
+    ? items
+        .filter((item) => item.label.toLowerCase().includes(query) || item.sublabel.toLowerCase().includes(query))
+        .sort((a, b) => (a.type === b.type ? a.label.localeCompare(b.label) : a.type === 'model' ? -1 : 1))
+        .slice(0, 14)
+    : [];
+  const roleColor = (role: string | undefined) => role === 'dimension' ? 'var(--status-success)' : role === 'bridge' ? 'var(--status-warning)' : role === 'event' || role === 'snapshot' ? 'var(--accent)' : 'var(--text-tertiary)';
+  // The toolbar has overflow:auto, so the results float in a fixed layer anchored
+  // to the input rather than an absolutely-positioned (clipped) child.
+  const rect = open && query ? anchorRef.current?.getBoundingClientRect() : undefined;
+  return (
+    <label ref={anchorRef} style={{ position: 'relative', width: 210, flex: '0 0 210px' }}>
+      <Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} />
+      <input
+        aria-label="Search diagram"
+        value={search}
+        onChange={(event) => { onSearch(event.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder="Find model or column"
+        style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }}
+      />
+      {rect && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 60 }} />
+          <div style={{ position: 'fixed', top: rect.bottom + 5, left: rect.left, zIndex: 61, width: 300, maxHeight: 340, overflow: 'auto', background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 9, boxShadow: '0 12px 30px rgba(26,26,26,0.16)', padding: 4 }}>
+            {results.length === 0 ? (
+              <div style={{ padding: '10px 10px', fontSize: 11.5, color: t.textMuted, fontFamily: t.font }}>No matching model or column.</div>
+            ) : (
+              results.map((item, index) => (
+                <button
+                  key={`${item.type}-${item.recordKey}-${item.label}-${index}`}
+                  type="button"
+                  onMouseDown={(event) => { event.preventDefault(); onPick(item.recordKey); setOpen(false); }}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, textAlign: 'left', padding: '7px 8px', border: 'none', borderRadius: 6, background: 'transparent', cursor: 'pointer', fontFamily: t.font }}
+                >
+                  <span style={{ width: 7, height: 7, borderRadius: 999, background: roleColor(item.role), flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: item.type === 'model' ? 650 : 500, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.label}</span>
+                  <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: t.textMuted }}>{item.type === 'model' ? 'model' : item.sublabel}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </>
+      )}
+    </label>
+  );
+}
+
+function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, visibleLimit, totalEntities, dimUnrelated, showEdgeLabels, showLegend, fullscreen, onBindModel, onRelationship, onNewArea, onModelingView, onColumnMode, onSearch, searchItems, onPickModel, onLayoutMode, onDensity, onVisibleLimit, onDimUnrelated, onEdgeLabels, onLegend, onFullscreen, onExport, onReset, t }: { modelingView: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; totalEntities: number; dimUnrelated: boolean; showEdgeLabels: boolean; showLegend: boolean; fullscreen: boolean; onBindModel: () => void; onRelationship: () => void; onNewArea: () => void; onModelingView: (mode: ModelingViewMode) => void; onColumnMode: (mode: ColumnDisplayMode) => void; onSearch: (value: string) => void; searchItems: DiagramSearchItem[]; onPickModel: (recordKey: string) => void; onLayoutMode: (mode: DiagramLayoutMode) => void; onDensity: (density: DiagramDensity) => void; onVisibleLimit: (limit: number) => void; onDimUnrelated: (value: boolean) => void; onEdgeLabels: (value: boolean) => void; onLegend: (value: boolean) => void; onFullscreen: () => void; onExport: () => void; onReset: () => void; t: Theme }) {
   return (
     <div
       style={{
@@ -1062,7 +1134,7 @@ function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, v
       </div>
       <IconButton t={t} title="Bind model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton><IconButton t={t} title="Create model area" onClick={onNewArea}><Boxes size={14} /></IconButton>
       {modelingView === 'data' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
-      <label style={{ position: 'relative', width: 138, flex: '0 0 138px' }}><Search size={12} style={{ position: 'absolute', left: 7, top: 8, color: t.textMuted }} /><input aria-label="Search diagram" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Find model or column" style={{ ...inputStyle(t), padding: '6px 7px 6px 24px' }} /></label>
+      <DiagramSearch search={search} onSearch={onSearch} items={searchItems} onPick={onPickModel} t={t} />
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
       <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
       <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9 }}>Show <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 52, padding: '5px' }} /></label>
@@ -1692,8 +1764,7 @@ function DbtInventory({ data, domain, unbound, t, onBind }: { data: DbtFirstMode
 // description, dbt-binding mono box, columns with PK/FK glyphs, relationship
 // click-through list, and an Edit entity action.
 function EntityInspector({ entity, detail, relationships = [], t, onEdit, onEditDbtSource, onSelectRelationship }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; relationships?: ManifestModelRelationship[]; t: Theme; onEdit: () => void; onEditDbtSource: () => void; onSelectRelationship?: (relationship: ManifestModelRelationship) => void }) {
-  const role = (entity.analyticalRole ?? '').toLowerCase();
-  const kindColor = role.includes('fact') ? 'var(--accent)' : role.includes('dim') ? 'var(--status-success)' : 'var(--text-tertiary)';
+  const kindColor = entityKindColor(entity.analyticalRole);
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
   const heading: React.CSSProperties = { fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, margin: '0 0 5px' };
   const related = relationships.filter((relationship) => relationship.from === entity.id || relationship.to === entity.id || relationship.from === entity.localId || relationship.to === entity.localId);

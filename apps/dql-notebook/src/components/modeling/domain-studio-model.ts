@@ -51,6 +51,19 @@ export type EntityRecord = {
 };
 
 /**
+ * Prototype kind color for a business/data entity card: dimensions are green,
+ * event/snapshot (fact-like) are accent purple, bridges warning, unknown grey.
+ * The manifest role vocabulary is event | dimension | snapshot | bridge.
+ */
+export function entityKindColor(role: string | null | undefined): string {
+  const value = (role ?? '').toLowerCase();
+  if (value === 'dimension') return 'var(--status-success)';
+  if (value === 'bridge') return 'var(--status-warning)';
+  if (value === 'event' || value === 'snapshot') return 'var(--accent)';
+  return 'var(--text-tertiary)';
+}
+
+/**
  * Manifest maps are identity-bearing records. Never derive graph identity from
  * `entity.id`: local ids may repeat in different domains.
  */

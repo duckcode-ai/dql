@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Database } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
@@ -335,10 +335,17 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   // the store's SettingsTab only knows database/ai/memory.
   const [advancedView, setAdvancedView] = useState<'advanced' | null>(null);
 
-  // Edit form state
+  // Edit form state (inline editor for the "manage all connections" list)
   const [editName, setEditName] = useState('');
   const [editDriver, setEditDriver] = useState('duckdb');
   const [editFields, setEditFields] = useState<Record<string, string>>({});
+
+  // Prototype primary form: a single always-open editor bound to the default
+  // connection (Warehouse select swaps fields → Save connection). Seeded from
+  // the default connection and re-seeded whenever its identity changes.
+  const [primaryDriver, setPrimaryDriver] = useState('duckdb');
+  const [primaryFields, setPrimaryFields] = useState<Record<string, string>>({});
+  const seededIdentityRef = useRef<string | null>(null);
 
   useEffect(() => {
     api.getConnections().then((connInfo) => {
@@ -349,6 +356,29 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       }
     });
   }, []);
+
+  // Seed the primary form from the default connection. Keyed on the connection's
+  // identity so user typing (which only updates primaryFields) never re-seeds,
+  // but a save/import/default-change (which refreshes `info`) does.
+  useEffect(() => {
+    if (!info) return;
+    const key = info.default;
+    const cfg = key ? info.connections?.[key] : undefined;
+    const identity = cfg ? `${key}::${JSON.stringify(cfg)}` : '::none';
+    if (seededIdentityRef.current === identity) return;
+    seededIdentityRef.current = identity;
+    if (cfg) {
+      setPrimaryDriver(normalizeDriverName(String(cfg.driver ?? cfg.type ?? 'duckdb')));
+      const fields: Record<string, string> = {};
+      Object.entries(cfg).forEach(([k, v]) => {
+        if (k !== 'driver' && k !== 'type') fields[normalizeFieldName(k)] = String(v ?? '');
+      });
+      setPrimaryFields(fields);
+    } else {
+      setPrimaryDriver('duckdb');
+      setPrimaryFields({});
+    }
+  }, [info]);
 
   const handleTest = async () => {
     if (!info || Object.keys(info.connections ?? {}).length === 0) {
@@ -421,16 +451,24 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     }
   };
 
-  const handleSave = async () => {
-    if (!info) return;
+  // Shared persistence used by both the inline connection editor and the
+  // prototype primary form. Builds a typed connection config, writes it, then
+  // re-tests the hot-swapped connection.
+  const persistConnection = async (opts: {
+    name: string;
+    driver: string;
+    fields: Record<string, string>;
+    previousName: string | null;
+  }): Promise<boolean> => {
+    if (!info) return false;
     setSaving(true);
     setSaveMsg(null);
 
-    const name = editName.trim() || (editing ?? 'default');
-    const newConn: Record<string, unknown> = { driver: editDriver };
-    const schema = CONNECTOR_SCHEMA_BY_DRIVER[editDriver];
+    const name = opts.name.trim() || (opts.previousName ?? 'default');
+    const newConn: Record<string, unknown> = { driver: opts.driver };
+    const schema = CONNECTOR_SCHEMA_BY_DRIVER[opts.driver];
     const fieldSchemas = new Map((schema?.fields ?? []).map((field) => [field.key, field]));
-    Object.entries(editFields).forEach(([k, v]) => {
+    Object.entries(opts.fields).forEach(([k, v]) => {
       const fieldSchema = fieldSchemas.get(k as ConnectorFieldSchema['key']);
       if (fieldSchema?.type === 'checkbox') {
         if (v !== '') newConn[k] = v === 'true';
@@ -445,10 +483,11 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
 
     const connections = { ...info.connections };
     // If renaming, remove old key
-    if (editing && editing !== name) delete connections[editing];
+    if (opts.previousName && opts.previousName !== name) delete connections[opts.previousName];
     connections[name] = newConn;
-    const nextDefault = chooseDefaultAfterSave(connections, info.default, name, editing);
+    const nextDefault = chooseDefaultAfterSave(connections, info.default, name, opts.previousName);
 
+    let ok = false;
     try {
       await api.saveConnections(connections, nextDefault);
       // Refresh
@@ -462,6 +501,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
         setTesting(true);
         const result = await api.testConnection();
         setTestResult(result);
+        ok = result.ok;
         setSaveMsg(result.ok ? 'Saved and connected' : 'Saved, but connection test failed');
         if (result.ok) setTimeout(() => setSaveMsg(null), 2000);
       } catch (e: any) {
@@ -472,6 +512,29 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     } finally {
       setSaving(false);
     }
+    return ok;
+  };
+
+  const handleSave = () => persistConnection({
+    name: editName,
+    driver: editDriver,
+    fields: editFields,
+    previousName: editing,
+  });
+
+  const handlePrimarySave = () => persistConnection({
+    name: (info?.default || 'default'),
+    driver: primaryDriver,
+    fields: primaryFields,
+    previousName: info?.default || null,
+  });
+
+  const changePrimaryDriver = (driver: string) => {
+    setPrimaryDriver(driver);
+    // Switching warehouse type clears the old driver's fields, mirroring the
+    // inline editor; a fresh field set avoids leaking incompatible keys.
+    setPrimaryFields({});
+    setTestResult(null);
   };
 
   const handleDelete = async (key: string) => {
@@ -943,15 +1006,6 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   );
 
   if (isPage) {
-    const panelSurface = {
-      background: t.cellBg,
-      border: `1px solid ${t.cellBorder}`,
-      borderRadius: 8,
-      padding: 14,
-      minWidth: 0,
-      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.03)',
-    };
-
     const activeTab = state.settingsTab;
     // Prototype (Settings Redesign): left settings nav rail with status dots +
     // an Advanced group, content column to the right.
@@ -1025,20 +1079,21 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                     {testing ? 'Testing…' : 'Test connection'}
                   </button>
                 </div>
-                <div className="dql-connection-page-grid">
-                  <section style={panelSurface}>
-                    {connectionListSection}
-                    {dbtProfilesSection}
-                    {quickConnectSection}
-                  </section>
-                  <aside style={panelSurface}>
-                    <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
-                    {addConnectionSection}
-                    {saveMessageSection}
-                    {testConnectionSection}
-                    {catalogSection}
-                  </aside>
-                </div>
+                {/* Primary form — Warehouse select swaps fields + shows the
+                    selected driver's catalog install status, then Save. */}
+                <DatabaseConnectionForm
+                  t={t}
+                  driver={primaryDriver}
+                  fields={primaryFields}
+                  onDriverChange={changePrimaryDriver}
+                  onFieldsChange={setPrimaryFields}
+                  onSave={() => void handlePrimarySave()}
+                  saving={saving}
+                  saveMessage={saveMsg}
+                  connectorStatus={connectorStatusByDriver[primaryDriver]}
+                  installing={installingDriver === primaryDriver}
+                  onInstall={() => void handleInstallConnector(primaryDriver)}
+                />
               </div>
             ) : activeTab === 'ai' ? (
               <ConnectionRuntimeSettings embedded section="providers" />
@@ -1081,6 +1136,16 @@ const CONNECTION_PAGE_STYLES = `
   .dql-connection-page-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+@keyframes dql-connector-shimmer {
+  0% { opacity: 1; }
+  50% { opacity: 0.45; }
+  100% { opacity: 1; }
+}
+
+.dql-connector-installing {
+  animation: dql-connector-shimmer 1.4s ease-in-out infinite;
 }
 `;
 
@@ -1238,5 +1303,299 @@ function ConnectionForm({
         )}
       </div>
     </div>
+  );
+}
+
+// The prototype's "Database connection" form shows a compact set of essential
+// fields per warehouse and tucks the long tail (Snowflake auth options, proxy,
+// etc.) behind "Advanced options". These are the keys shown up front per driver;
+// everything else in the connector schema falls through to Advanced.
+const PRIMARY_FIELD_KEYS: Record<string, string[]> = {
+  duckdb: ['filepath'],
+  snowflake: ['account', 'warehouse', 'database', 'schema', 'username', 'authMethod', 'password', 'token', 'privateKeyPath', 'role'],
+  databricks: ['host', 'database', 'schema', 'warehouse', 'httpPath', 'authMethod', 'token'],
+};
+
+// Fields that should span the full form width rather than sit in the 2-col grid.
+const FULL_WIDTH_FIELDS = new Set(['filepath', 'httpPath', 'accessUrl']);
+
+function DatabaseConnectionForm({
+  t,
+  driver,
+  fields,
+  onDriverChange,
+  onFieldsChange,
+  onSave,
+  saving,
+  saveMessage,
+  connectorStatus,
+  installing,
+  onInstall,
+}: {
+  t: Theme;
+  driver: string;
+  fields: Record<string, string>;
+  onDriverChange: (driver: string) => void;
+  onFieldsChange: (fields: Record<string, string>) => void;
+  onSave: () => void;
+  saving: boolean;
+  saveMessage: string | null;
+  connectorStatus?: ConnectorInstallStatus;
+  installing: boolean;
+  onInstall: () => void;
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const schema = CONNECTOR_SCHEMA_BY_DRIVER[driver];
+  const allFields = schema?.fields ?? [];
+  const primaryKeys = PRIMARY_FIELD_KEYS[driver] ?? allFields.filter((f) => f.required).map((f) => f.key);
+  const primaryKeySet = new Set(primaryKeys);
+  // Preserve the schema's declared order within each group.
+  const primaryFields = allFields.filter((f) => primaryKeySet.has(f.key));
+  const advancedFields = allFields.filter((f) => !primaryKeySet.has(f.key));
+  const setField = (key: string, value: string) => onFieldsChange({ ...fields, [key]: value });
+
+  return (
+    <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 12, background: t.cellBg, padding: 18, display: 'flex', flexDirection: 'column', gap: 13, maxWidth: 640 }}>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, maxWidth: 280 }}>
+        <span style={{ fontSize: 11, fontWeight: 650, color: t.textSecondary, fontFamily: t.font }}>Warehouse</span>
+        <select
+          value={driver}
+          onChange={(e) => onDriverChange(e.target.value)}
+          style={{ border: `1px solid ${t.cellBorder}`, background: t.cellBg, borderRadius: 8, padding: '8px 9px', fontSize: 12.5, fontFamily: t.font, color: t.textPrimary, outline: 'none' }}
+        >
+          {CONNECTOR_SCHEMAS.map(({ driver: value, label }) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+      </label>
+
+      {/* Catalog install status for the selected warehouse's connector. */}
+      <ConnectorStatusRow
+        t={t}
+        driver={driver}
+        label={schema?.label ?? driver}
+        status={connectorStatus}
+        installing={installing}
+        onInstall={onInstall}
+      />
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        {primaryFields.map((field) => (
+          <StyledField
+            key={field.key}
+            t={t}
+            field={field}
+            value={fields[field.key] ?? ''}
+            onChange={(v) => setField(field.key, v)}
+            fullWidth={FULL_WIDTH_FIELDS.has(field.key)}
+          />
+        ))}
+      </div>
+
+      {advancedFields.length > 0 && (
+        <details
+          open={advancedOpen}
+          onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+          style={{ borderTop: `1px solid ${t.headerBorder}`, paddingTop: 12 }}
+        >
+          <summary style={{ cursor: 'pointer', listStyle: 'none', display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, fontWeight: 650, color: t.textSecondary, fontFamily: t.font }}>
+            <span style={{ color: t.textMuted, fontSize: 10, transform: advancedOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', display: 'inline-block' }}>▶</span>
+            Advanced options
+            <span style={{ fontWeight: 400, color: t.textMuted, fontSize: 10.5 }}>{advancedFields.length} more</span>
+          </summary>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+            {advancedFields.map((field) => (
+              <StyledField
+                key={field.key}
+                t={t}
+                field={field}
+                value={fields[field.key] ?? ''}
+                onChange={(v) => setField(field.key, v)}
+                fullWidth={FULL_WIDTH_FIELDS.has(field.key) || field.type === 'textarea'}
+              />
+            ))}
+          </div>
+        </details>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 4, borderTop: `1px solid ${t.headerBorder}` }}>
+        <span style={{ fontSize: 10.5, color: t.textMuted, flex: 1, fontFamily: t.font }}>
+          {saveMessage ?? 'Changes apply after a successful test.'}
+        </span>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          style={{ height: 30, padding: '0 15px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12, fontWeight: 650, cursor: saving ? 'not-allowed' : 'pointer', fontFamily: t.font, boxShadow: '0 1px 4px rgba(107,93,211,0.25)', opacity: saving ? 0.7 : 1 }}
+        >
+          {saving ? 'Saving…' : 'Save connection'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Catalog install status for the selected warehouse's driver connector.
+ * Mirrors the Setup Onboarding "catalog driver row": built-in drivers show
+ * ready, installed drivers show a check, and drivers that need their package
+ * show an Install action (→ installing shimmer → installed).
+ */
+function ConnectorStatusRow({
+  t,
+  driver,
+  label,
+  status,
+  installing,
+  onInstall,
+}: {
+  t: Theme;
+  driver: string;
+  label: string;
+  status?: ConnectorInstallStatus;
+  installing: boolean;
+  onInstall: () => void;
+}) {
+  // Absent status = built-in/bundled driver (e.g. DuckDB) — treat as ready.
+  const builtIn = status?.builtIn ?? true;
+  const installed = status?.installed ?? true;
+  const needsInstall = !installed && !builtIn;
+
+  const tone = installing ? t.warning : needsInstall ? t.warning : t.success;
+  const toneBg = installing ? 'var(--status-warning-bg)' : needsInstall ? 'var(--status-warning-bg)' : 'var(--status-success-bg)';
+  const toneBorder = installing ? 'var(--status-warning-border)' : needsInstall ? 'var(--status-warning-border)' : 'var(--status-success-border)';
+  const statusText = installing
+    ? 'Installing connector package…'
+    : builtIn
+      ? 'Built in — no installation needed'
+      : installed
+        ? 'Connector installed and ready'
+        : 'Connector package required before you can connect';
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, border: `1px solid ${toneBorder}`, borderRadius: 9, background: toneBg, padding: '10px 12px' }}>
+      <DriverLogo driver={driver} size={18} fallbackColor={DRIVER_COLORS[driver] ?? t.accent} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary, fontFamily: t.font }}>{label} connector</div>
+        <div
+          className={installing ? 'dql-connector-installing' : undefined}
+          style={{ fontSize: 11, color: tone, fontFamily: t.font, marginTop: 1 }}
+        >
+          {statusText}
+        </div>
+      </div>
+      {needsInstall || installing ? (
+        <button
+          type="button"
+          onClick={onInstall}
+          disabled={installing}
+          title={status?.installCommand}
+          style={{ flexShrink: 0, height: 28, padding: '0 12px', borderRadius: 8, border: `1px solid ${t.accent}`, background: 'var(--accent-dim)', color: t.accent, fontSize: 11.5, fontWeight: 650, cursor: installing ? 'not-allowed' : 'pointer', fontFamily: t.font, opacity: installing ? 0.75 : 1 }}
+        >
+          {installing ? 'Installing…' : 'Install catalog'}
+        </button>
+      ) : (
+        <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 650, color: tone, fontFamily: t.font }}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+          {builtIn ? 'Ready' : 'Installed'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** A single labelled form control styled to the Settings-redesign prototype. */
+function StyledField({
+  t,
+  field,
+  value,
+  onChange,
+  fullWidth,
+}: {
+  t: Theme;
+  field: ConnectorFieldSchema;
+  value: string;
+  onChange: (value: string) => void;
+  fullWidth?: boolean;
+}) {
+  const [focused, setFocused] = useState(false);
+  const borderColor = focused ? t.accent : t.cellBorder;
+  const controlBase: React.CSSProperties = {
+    border: `1px solid ${borderColor}`,
+    background: t.cellBg,
+    borderRadius: 8,
+    padding: '8px 10px',
+    fontSize: 12,
+    fontFamily: t.fontMono,
+    color: t.textPrimary,
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box',
+  };
+  const wrapStyle: React.CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    gridColumn: fullWidth ? '1 / -1' : undefined,
+  };
+  const labelNode = (
+    <span style={{ fontSize: 11, fontWeight: 650, color: t.textSecondary, fontFamily: t.font }}>
+      {field.label}{field.required ? ' *' : ''}
+    </span>
+  );
+
+  if (field.type === 'checkbox') {
+    return (
+      <label style={{ ...wrapStyle, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <input
+          type="checkbox"
+          checked={value === 'true'}
+          onChange={(e) => onChange(e.target.checked ? 'true' : 'false')}
+        />
+        {labelNode}
+      </label>
+    );
+  }
+
+  return (
+    <label style={wrapStyle}>
+      {labelNode}
+      {field.type === 'select' ? (
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={{ ...controlBase, fontFamily: t.font, fontSize: 12.5, padding: '8px 9px' }}
+        >
+          <option value="">Default</option>
+          {(field.options ?? []).map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      ) : field.type === 'textarea' ? (
+        <textarea
+          value={value}
+          placeholder={field.placeholder ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={{ ...controlBase, minHeight: 72, resize: 'vertical' }}
+        />
+      ) : (
+        <input
+          type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'}
+          value={value}
+          placeholder={field.placeholder ?? ''}
+          onChange={(e) => onChange(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={controlBase}
+        />
+      )}
+      {field.helpText && (
+        <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font, lineHeight: 1.35 }}>{field.helpText}</span>
+      )}
+    </label>
   );
 }

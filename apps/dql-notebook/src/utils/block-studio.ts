@@ -592,6 +592,16 @@ export function appendSemanticRefToQuery(content: string, reference: string): st
   return normalizeBlockDocument({ ...parsed, query: nextQuery });
 }
 
+/**
+ * Set the raw SQL body of a custom (raw-SQL) block. Round-trips through the
+ * canonical block document so the `query = """…"""` field is created if absent.
+ */
+export function setBlockQuery(content: string, sql: string): string {
+  const parsed = parseBlockDocument(content);
+  if (!parsed) return content;
+  return normalizeBlockDocument({ ...parsed, blockType: 'custom', query: sql });
+}
+
 export function extractSemanticReferences(content: string): {
   metrics: string[];
   dimensions: string[];

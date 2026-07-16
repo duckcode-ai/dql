@@ -13,12 +13,13 @@ import { GlobalAiRail } from '../agent/GlobalAiRail';
 import { NotebookEditor } from '../notebook/NotebookEditor';
 import { NewNotebookModal } from '../modals/NewNotebookModal';
 import { NewBlockModal } from '../modals/NewBlockModal';
+import { SetupOnboarding } from '../modals/SetupOnboarding';
 import { BlockStudio } from '../block-studio/BlockStudio';
 import { BusinessArtifactView } from '../panels/BusinessArtifactView';
 import { LineageDetailView } from '../panels/LineageDetailView';
+import { LineageDAG } from '../panels/LineageDAG';
 import { HelpDocsPage } from '../help/HelpDocsPage';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
-import { ReferencePanel } from '../panels/ReferencePanel';
 import { GitPage } from '../git/GitPage';
 import { ReadinessPage } from '../readiness/ReadinessPage';
 import { AgentLogPage } from '../agent/AgentLogPage';
@@ -33,7 +34,6 @@ import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
-import { LineageNodeIcon } from '@duckcodeailabs/dql-ui/icons';
 
 export function AppShell() {
   const { state, dispatch } = useNotebook();
@@ -205,7 +205,9 @@ export function AppShell() {
           ) : state.mainView === 'business_artifact' ? (
             <BusinessArtifactView />
           ) : state.mainView === 'lineage' ? (
-            <LineageWorkspace />
+            <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <LineageDAG />
+            </div>
           ) : state.mainView === 'lineage_detail' ? (
             <LineageDetailView />
           ) : state.mainView === 'help' ? (
@@ -214,13 +216,6 @@ export function AppShell() {
             <ConnectionWorkspace>
               <ConnectionPanel variant="page" />
             </ConnectionWorkspace>
-          ) : state.mainView === 'reference' ? (
-            <FullPageSection
-              title="Quick Reference"
-              description="Browse the complete DQL guide, semantic workflows, and authoring patterns in a documentation-style view."
-            >
-              <ReferencePanel themeMode={state.themeMode} />
-            </FullPageSection>
           ) : state.mainView === 'git' ? (
             <GitPage />
           ) : state.mainView === 'readiness' ? (
@@ -276,93 +271,25 @@ export function AppShell() {
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       {/* Spec 14 — shared AI Build surface for the non-notebook front doors. */}
       <AiBuildDialog />
+      {/* Full-screen 5-step Setup Onboarding wizard (Setup activity / first run). */}
+      {state.setupOpen && <SetupOnboarding />}
     </div>
   );
 }
 
 function ConnectionWorkspace({ children }: { children: React.ReactNode }) {
+  // The prototype's Settings screen puts the section nav directly under the app
+  // header — each section carries its own heading, so no page-level H1 here.
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
       <div
         style={{
           maxWidth: 1120,
           margin: '0 auto',
-          padding: '22px 28px 32px',
+          padding: '18px 28px 32px',
         }}
       >
-        <div
-          style={{
-            marginBottom: 16,
-            display: 'flex',
-            alignItems: 'flex-end',
-            justifyContent: 'space-between',
-            gap: 18,
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>Connections</div>
-            <div style={{ fontSize: 13, opacity: 0.72, marginTop: 6, maxWidth: 660, lineHeight: 1.5 }}>
-              Manage database connections, model providers, MCP servers, OpenAI connectors, and runtime checks from one place before building blocks or asking AI.
-            </div>
-          </div>
-        </div>
         {children}
-      </div>
-    </div>
-  );
-}
-
-function LineageWorkspace() {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
-  return (
-    <div
-      style={{
-        flex: 1,
-        minWidth: 0,
-        overflow: 'hidden',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: t.appBg,
-        padding: 28,
-      }}
-    >
-      <div
-        style={{
-          width: 'min(520px, 100%)',
-          border: `1px solid ${t.headerBorder}`,
-          borderRadius: 8,
-          background: t.cellBg,
-          padding: 22,
-          display: 'flex',
-          alignItems: 'flex-start',
-          gap: 14,
-        }}
-      >
-        <div
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: 7,
-            background: `${t.accent}18`,
-            color: t.accent,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
-        >
-          <LineageNodeIcon size={18} />
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ color: t.textPrimary, fontSize: 15, fontWeight: 700, marginBottom: 6 }}>
-            Select a lineage item
-          </div>
-          <div style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.55 }}>
-            Focused upstream and downstream context opens here.
-          </div>
-        </div>
       </div>
     </div>
   );
