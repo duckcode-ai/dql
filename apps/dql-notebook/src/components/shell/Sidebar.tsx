@@ -1,4 +1,5 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { BuildSidebar } from '../panels/BuildSidebar';
@@ -25,11 +26,27 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [collapseHover, setCollapseHover] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(240);
+  // Match Block Studio's explorer width so all four Build tabs retain their
+  // labels and the catalog rows have the same information density.
+  const [sidebarWidth, setSidebarWidth] = useState(340);
   const [resizing, setResizing] = useState(false);
+  const [blockDomain, setBlockDomain] = useState('');
   const widthRef = useRef(sidebarWidth);
 
   const panel = state.sidebarPanel;
+  const buildPanel = panel === 'files' || panel === 'block_library';
+  const buildFooter = `${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${state.schemaTables.length} table${state.schemaTables.length === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`;
+
+  // Block Studio loads this context before rendering its footer. Do the same in
+  // the Notebook explorer so the shared footer never reports a stale 0 metrics.
+  useEffect(() => {
+    if (!buildPanel) return undefined;
+    let active = true;
+    void api.getSemanticLayer()
+      .then((layer) => { if (active) dispatch({ type: 'SET_SEMANTIC_LAYER', layer }); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [buildPanel, dispatch]);
 
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -63,12 +80,12 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
         position: 'relative',
       }}
     >
-      {/* Panel header */}
+      {/* Build owns its integrated tab/collapse header, like Block Studio. */}
       <div
         style={{
           height: 36,
           flexShrink: 0,
-          display: 'flex',
+          display: buildPanel ? 'none' : 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '0 10px 0 14px',
@@ -112,8 +129,18 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
 
       {/* Panel content */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {panel === 'files' && <BuildSidebar defaultTab="notebooks" onOpenFile={onOpenFile} />}
-        {panel === 'block_library' && <BuildSidebar defaultTab="blocks" onOpenFile={onOpenFile} />}
+        {buildPanel && (
+          <BuildSidebar
+            defaultTab={panel === 'block_library' ? 'blocks' : 'notebooks'}
+            tabs={['notebooks', 'semantic', 'database', 'blocks']}
+            onOpenFile={onOpenFile}
+            blockDomain={blockDomain}
+            onBlockDomainChange={setBlockDomain}
+            onNewBlock={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
+            onCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
+            footer={buildFooter}
+          />
+        )}
         {panel === 'lineage' && <LineagePanel />}
         {panel === 'connection' && <ConnectionPanel />}
         {panel === 'git' && <GitPanel />}

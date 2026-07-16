@@ -945,10 +945,6 @@ export function BlockStudio() {
             blockDomain={domainFilter}
             onBlockDomainChange={setDomainFilter}
             onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
-            onSeedBlock={(ref, label) => openAskAi({
-              kind: 'build',
-              autoRun: `Draft a reusable, governed DQL block from ${label} (${ref}). Give it a clear name and description, declare grain, dimensions, and outputs, and ground it in the certified/semantic context.`,
-            })}
             onNewBlock={beginNewWorkspace}
             onCollapse={() => setLeftPaneCollapsed(true)}
             footer={`${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${databaseStats.tables} table${databaseStats.tables === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`}
