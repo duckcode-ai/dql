@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Sparkles } from 'lucide-react';
 import {
   api,
   type AgentMemory,
@@ -128,18 +129,17 @@ export function ConnectionRuntimeSettings({
         <div style={{ marginTop: 24, color: t.textSecondary }}>Loading settings...</div>
       ) : (
         <>
-          {(!section || section === 'providers') && (
-          <section style={{ marginTop: section ? 0 : 22 }}>
-            {section === 'providers' && (
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-                <SummaryCard
-                  configured={configured}
-                  total={providers.length || PROVIDER_ORDER.length}
-                  activeLabel={activeProvider?.label}
-                  t={t}
-                />
-              </div>
-            )}
+          {section === 'providers' && (
+            <ProviderSettingsForm
+              providers={providers}
+              cliStatus={cliStatus}
+              t={t}
+              onSaved={(next) => setProviders(next)}
+              onStatus={setStatus}
+            />
+          )}
+          {!section && (
+          <section style={{ marginTop: 22 }}>
             <SectionTitle title="Model providers" detail="Connect at least one AI provider — it powers governed answers, block suggestions, and research. Sign in with a Claude or ChatGPT subscription, or use an API key / local model." t={t} />
 
             <GroupLabel
@@ -735,6 +735,267 @@ function SubscriptionOAuthPanel({
   );
 }
 
+// ── Prototype AI-provider section (Settings Redesign) ───────────────────────
+// One form: pick the provider brand, then "How do you want to connect?" radio
+// cards (Subscription / API key / Local — only what the brand supports) swap
+// the sub-form beneath. The active provider shows as a status card with Test.
+type ProviderBrandMode = 'subscription' | 'api' | 'local';
+const PROVIDER_BRANDS: Array<{ key: string; label: string; modes: Partial<Record<ProviderBrandMode, ProviderSettingsId>> }> = [
+  { key: 'claude', label: 'Anthropic Claude', modes: { subscription: 'claude-code', api: 'anthropic' } },
+  { key: 'openai', label: 'OpenAI', modes: { subscription: 'codex', api: 'openai' } },
+  { key: 'gemini', label: 'Google Gemini', modes: { api: 'gemini' } },
+  { key: 'ollama', label: 'Ollama — local', modes: { local: 'ollama' } },
+  { key: 'gateway', label: 'Custom gateway', modes: { api: 'custom-openai' } },
+];
+const MODE_COPY: Record<ProviderBrandMode, { label: string; hint: string }> = {
+  subscription: { label: 'Subscription', hint: 'Sign in — no API key' },
+  api: { label: 'API key', hint: 'Paste a key or use env var' },
+  local: { label: 'Local', hint: 'Runs on this machine' },
+};
+
+function brandForProviderId(id: ProviderSettingsId | undefined): string {
+  if (!id) return 'claude';
+  const brand = PROVIDER_BRANDS.find((entry) => Object.values(entry.modes).includes(id));
+  return brand?.key ?? 'claude';
+}
+
+function ProviderSettingsForm({
+  providers,
+  cliStatus,
+  t,
+  onSaved,
+  onStatus,
+}: {
+  providers: ProviderSettings[];
+  cliStatus: Partial<Record<ProviderSettingsId, ProviderCliStatus>>;
+  t: Theme;
+  onSaved: (providers: ProviderSettings[]) => void;
+  onStatus: (message: string | null) => void;
+}) {
+  const activeProvider = providers.find((provider) => provider.active);
+  const [brandKey, setBrandKey] = useState<string>(() => brandForProviderId(activeProvider?.id));
+  const brand = PROVIDER_BRANDS.find((entry) => entry.key === brandKey) ?? PROVIDER_BRANDS[0];
+  const availableModes = (Object.keys(brand.modes) as ProviderBrandMode[]);
+  const [mode, setMode] = useState<ProviderBrandMode>(() => {
+    const activeMode = availableModes.find((candidate) => brand.modes[candidate] === activeProvider?.id);
+    return activeMode ?? availableModes[0];
+  });
+  const effectiveMode = availableModes.includes(mode) ? mode : availableModes[0];
+  const providerId = brand.modes[effectiveMode]!;
+  const provider = providers.find((entry) => entry.id === providerId);
+
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? '');
+  const [model, setModel] = useState(provider?.model ?? '');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortSetting>(provider?.reasoningEffort ?? 'auto');
+  const [busy, setBusy] = useState(false);
+  const [activeTest, setActiveTest] = useState<{ state: 'idle' | 'testing' | 'done'; ok?: boolean; message?: string; seconds?: string }>({ state: 'idle' });
+
+  // Re-seed the form whenever the concrete provider changes.
+  useEffect(() => {
+    setApiKey('');
+    setBaseUrl(provider?.baseUrl ?? '');
+    setModel(provider?.model ?? '');
+    setReasoningEffort(provider?.reasoningEffort ?? 'auto');
+  }, [providerId, provider?.baseUrl, provider?.model, provider?.reasoningEffort]);
+
+  const testActive = async () => {
+    if (!activeProvider) return;
+    setActiveTest({ state: 'testing' });
+    const started = Date.now();
+    const result = await api.testProviderSettings(activeProvider.id, {});
+    const ok = result.ok !== false;
+    setActiveTest({ state: 'done', ok, message: result.message, seconds: ((Date.now() - started) / 1000).toFixed(1) });
+  };
+
+  const makeActive = async () => {
+    setBusy(true);
+    try {
+      const result = await api.saveProviderSettings({
+        id: providerId,
+        enabled: true,
+        apiKey: apiKey || undefined,
+        baseUrl,
+        model,
+        reasoningEffort,
+      });
+      onSaved(result.providers);
+      onStatus(`${brand.label} is now the active provider.`);
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOAuthConnected = async (defaultModel: string) => {
+    const chosen = model || defaultModel;
+    setModel(chosen);
+    try {
+      const result = await api.saveProviderSettings({ id: providerId, enabled: true, model: chosen });
+      onSaved(result.providers);
+      onStatus(`${brand.label} connected and activated.`);
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const fieldLabel: React.CSSProperties = { fontSize: 11, fontWeight: 650, color: t.textSecondary };
+  const input: React.CSSProperties = { ...inputStyle(t), borderRadius: 8 };
+  const footnote = effectiveMode === 'subscription'
+    ? 'Uses your existing plan through the provider’s sign-in — nothing billed per token.'
+    : effectiveMode === 'local'
+      ? 'Everything runs on this machine — no data leaves your network.'
+      : 'Keys stay in .dql/ and are never returned raw.';
+
+  return (
+    <div style={{ width: 'min(640px, 100%)', display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div>
+        <div style={{ fontSize: 17, fontWeight: 700, color: t.textPrimary }}>AI provider</div>
+        <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+          One provider powers governed answers, block suggestions, and research. Keys stay in <span style={{ fontFamily: t.fontMono, fontSize: 11.5 }}>.dql/</span> — never returned raw.
+        </div>
+      </div>
+
+      {/* active provider status card */}
+      {activeProvider ? (
+        <div style={{ border: '1px solid var(--status-success-border)', borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ width: 36, height: 36, borderRadius: 9, background: 'var(--status-success-bg)', color: 'var(--status-success)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <Sparkles size={17} strokeWidth={1.75} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>
+              Active · {activeProvider.label}{activeProvider.model ? ` — ${activeProvider.model}` : ''}
+            </div>
+            <div style={{ fontSize: 11.5, color: activeTest.state === 'done' && activeTest.ok === false ? 'var(--status-error)' : 'var(--status-success)', marginTop: 2 }}>
+              {activeTest.state === 'testing' ? 'Testing…'
+                : activeTest.state === 'done'
+                  ? (activeTest.ok ? `Test passed · ${activeTest.seconds}s` : (activeTest.message || 'Test failed'))
+                  : (activeProvider.source === 'env' ? 'Configured from environment' : 'Connected and ready')}
+            </div>
+          </div>
+          <button type="button" onClick={() => void testActive()} disabled={activeTest.state === 'testing'} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, flexShrink: 0 }}>
+            {activeTest.state === 'testing' ? 'Testing…' : 'Test'}
+          </button>
+        </div>
+      ) : null}
+
+      {/* single provider form */}
+      <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, background: t.cellBg, padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={fieldLabel}>Provider</span>
+            <select value={brand.key} onChange={(event) => { setBrandKey(event.target.value); setMode('subscription'); }} style={input}>
+              {PROVIDER_BRANDS.map((entry) => <option key={entry.key} value={entry.key}>{entry.label}</option>)}
+            </select>
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={fieldLabel}>Model</span>
+            <input value={model} onChange={(event) => setModel(event.target.value)} placeholder={provider?.model || 'Default model'} style={input} />
+          </label>
+        </div>
+
+        <div>
+          <span style={{ ...fieldLabel, display: 'block', marginBottom: 6 }}>How do you want to connect?</span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {availableModes.map((candidate) => {
+              const selected = candidate === effectiveMode;
+              return (
+                <button
+                  key={candidate}
+                  type="button"
+                  onClick={() => setMode(candidate)}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 13px', borderRadius: 9, border: `1.5px solid ${selected ? t.accent : t.headerBorder}`, background: selected ? 'var(--accent-dim)' : t.cellBg, cursor: 'pointer', fontFamily: t.font, textAlign: 'left' }}
+                >
+                  <span style={{ width: 13, height: 13, borderRadius: 999, border: `1.5px solid ${selected ? t.accent : 'var(--border-strong)'}`, background: selected ? t.accent : t.cellBg, boxShadow: selected ? `inset 0 0 0 2.5px ${t.cellBg}` : 'none', flexShrink: 0 }} />
+                  <span style={{ display: 'flex', flexDirection: 'column' }}>
+                    <span style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary }}>{MODE_COPY[candidate].label}</span>
+                    <span style={{ fontSize: 10, color: t.textMuted }}>{MODE_COPY[candidate].hint}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {effectiveMode === 'subscription' && provider ? (
+          <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 9, background: 'var(--bg-1)', padding: '11px 13px' }}>
+            <SubscriptionOAuthPanel
+              oauthProvider={oauthProviderFor(providerId)}
+              label={provider.label}
+              model={model}
+              setModel={setModel}
+              cliStatus={cliStatus[providerId]}
+              command={provider.command}
+              loginCmd={providerId === 'claude-code' ? '/login' : 'login'}
+              t={t}
+              onStatus={onStatus}
+              onConnected={handleOAuthConnected}
+            />
+          </div>
+        ) : null}
+
+        {effectiveMode === 'api' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'end' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={fieldLabel}>API key</span>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder={provider?.hasApiKey ? 'Leave blank to keep existing key' : 'API key'}
+                style={{ ...input, fontFamily: t.fontMono }}
+              />
+            </label>
+            {provider?.envVars?.[0] ? (
+              <span style={{ fontSize: 10.5, color: t.textMuted, paddingBottom: 9 }}>or set <span style={{ fontFamily: t.fontMono }}>{provider.envVars[0]}</span></span>
+            ) : null}
+            {providerId === 'custom-openai' ? (
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
+                <span style={fieldLabel}>Gateway base URL</span>
+                <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={baseUrlPlaceholder(providerId)} style={{ ...input, fontFamily: t.fontMono }} />
+              </label>
+            ) : null}
+            {provider?.supportsReasoningEffort ? (
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
+                <span style={fieldLabel}>Reasoning effort</span>
+                <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffortSetting)} style={input}>
+                  <option value="auto">Auto — pick per task (up to High)</option>
+                  <option value="low">Low — fastest, cheapest</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High — deepest reasoning</option>
+                </select>
+              </label>
+            ) : null}
+          </div>
+        ) : null}
+
+        {effectiveMode === 'local' ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span style={fieldLabel}>Host</span>
+              <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:11434" style={{ ...input, fontFamily: t.fontMono }} />
+            </label>
+            <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: 2 }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: provider?.enabled ? 'var(--status-success)' : t.textMuted }}>
+                <span style={{ width: 7, height: 7, borderRadius: 999, background: provider?.enabled ? 'var(--status-success)' : 'var(--border-strong)' }} />
+                {provider?.enabled ? 'Ollama configured' : 'Point at your Ollama host'}
+              </span>
+            </div>
+          </div>
+        ) : null}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 4, borderTop: '1px solid var(--border-subtle)' }}>
+          <span style={{ fontSize: 10.5, color: t.textMuted, flex: 1 }}>{footnote}</span>
+          <button type="button" onClick={() => void makeActive()} disabled={busy} style={{ height: 30, padding: '0 15px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 4px rgba(107,93,211,0.25)', opacity: busy ? 0.7 : 1 }}>
+            {busy ? 'Saving…' : 'Make active provider'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProviderCard({
   provider,
   cliStatus,
@@ -995,57 +1256,144 @@ function MemoryEditor({
     onStatus('Memory deleted.');
   };
 
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-      <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, padding: 14 }}>
-        <div style={{ display: 'grid', gap: 8 }}>
-          <select value={scope} onChange={(e) => setScope(e.target.value as AgentMemory['scope'])} style={inputStyle(t)}>
-            <option value="project">Project context</option>
-            <option value="user">User preference</option>
-            <option value="artifact">Artifact note</option>
-            <option value="notebook">Notebook context</option>
-            <option value="thread">Thread summary</option>
-          </select>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Memory title" style={inputStyle(t)} />
-          <textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="Business context, glossary term, rule, or analyst correction" rows={5} style={{ ...inputStyle(t), resize: 'vertical' }} />
-          <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="Tags, comma separated" style={inputStyle(t)} />
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button type="button" onClick={save} disabled={!title.trim() || !content.trim()} style={buttonStyle(t, true)}>Save Memory</button>
-          <button type="button" onClick={ensureFiles} style={buttonStyle(t, false)}>Create .dql/memory</button>
-        </div>
-      </section>
+  // ── Prototype layout: scope filter tabs · Add memory · cards · info card ──
+  const [formOpen, setFormOpen] = useState(false);
+  const [filter, setFilter] = useState<'all' | 'project' | 'me'>('all');
+  const [editingId, setEditingId] = useState<string | null>(null);
 
-      <section style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.cellBg, overflow: 'hidden' }}>
-        {memories.length === 0 ? (
-          <div style={{ padding: 14, color: t.textSecondary, fontSize: 12 }}>
-            No memory yet. Add business context by hand, or correct/certify a draft and the agent will
-            remember it here automatically.
+  const scopeBadge = (memoryScope: AgentMemory['scope']): { label: string; bg: string; color: string } => {
+    if (memoryScope === 'project') return { label: 'project', bg: 'var(--accent-dim)', color: t.accent };
+    if (memoryScope === 'user') return { label: 'just me', bg: `${t.textMuted}1f`, color: t.textMuted };
+    return { label: memoryScope, bg: 'var(--status-success-bg)', color: 'var(--status-success)' };
+  };
+  const visible = memories.filter((memory) =>
+    filter === 'all' ? true : filter === 'project' ? memory.scope === 'project' : memory.scope === 'user');
+
+  const startEdit = (memory: AgentMemory) => {
+    setEditingId(memory.id);
+    setScope(memory.scope);
+    setTitle(memory.title);
+    setContent(memory.content);
+    setTags(memory.tags.join(', '));
+    setFormOpen(true);
+  };
+  const closeForm = () => {
+    setFormOpen(false);
+    setEditingId(null);
+    setTitle('');
+    setContent('');
+    setTags('');
+  };
+  const saveFromForm = async () => {
+    if (!content.trim()) return;
+    // The prototype captures a single sentence — derive the title from it.
+    if (!title.trim()) setTitle(content.trim().slice(0, 60));
+    const effectiveTitle = title.trim() || content.trim().slice(0, 60);
+    await api.saveAgentMemory({
+      scope,
+      title: effectiveTitle,
+      content,
+      tags: tags.split(',').map((tag) => tag.trim()).filter(Boolean),
+      source: 'settings-ui',
+      confidence: 0.8,
+      importance: scope === 'project' ? 0.7 : 0.5,
+      enabled: true,
+    });
+    // Editing = replace: save the new version, then retire the old entry.
+    if (editingId) await api.deleteAgentMemory(editingId).catch(() => undefined);
+    closeForm();
+    await refresh();
+    onStatus(editingId ? 'Memory updated.' : 'Memory saved.');
+  };
+
+  const filterTab = (key: 'all' | 'project' | 'me', label: string) => (
+    <button
+      key={key}
+      type="button"
+      onClick={() => setFilter(key)}
+      style={{ border: 'none', borderRadius: 5, padding: '4px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, background: filter === key ? 'var(--accent-dim)' : 'transparent', color: filter === key ? t.accent : t.textMuted }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ width: 'min(640px, 100%)', display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg }}>
+          {filterTab('all', 'All')}
+          {filterTab('project', 'Project')}
+          {filterTab('me', 'Just me')}
+        </div>
+        <div style={{ flex: 1 }} />
+        <button type="button" onClick={() => (formOpen ? closeForm() : setFormOpen(true))} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 13px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 4px rgba(107,93,211,0.25)' }}>
+          + Add memory
+        </button>
+      </div>
+
+      {formOpen ? (
+        <div style={{ border: `1px solid ${t.accent}4d`, borderRadius: 12, background: t.cellBg, padding: '15px 17px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <textarea
+            rows={2}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder="e.g. Fiscal quarters start in February. 'Sales' means recognized revenue unless someone says bookings."
+            style={{ ...inputStyle(t), borderRadius: 8, resize: 'vertical', lineHeight: 1.55 }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: t.textSecondary }}>
+              Scope
+              <select value={scope} onChange={(e) => setScope(e.target.value as AgentMemory['scope'])} style={{ ...inputStyle(t), width: 'auto', borderRadius: 7, padding: '5px 7px' }}>
+                <option value="project">Project</option>
+                <option value="user">Just me</option>
+                <option value="artifact">Artifact note</option>
+                <option value="notebook">Notebook context</option>
+                <option value="thread">Thread summary</option>
+              </select>
+            </label>
+            <input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="Tags (optional)" style={{ ...inputStyle(t), width: 160, borderRadius: 7, padding: '5px 8px' }} />
+            <div style={{ flex: 1 }} />
+            <button type="button" onClick={closeForm} style={{ height: 28, padding: '0 12px', borderRadius: 7, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font }}>Cancel</button>
+            <button type="button" onClick={() => void saveFromForm()} disabled={!content.trim()} style={{ height: 28, padding: '0 13px', borderRadius: 7, border: 'none', background: t.accent, color: '#fff', fontSize: 11.5, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, opacity: content.trim() ? 1 : 0.6 }}>
+              {editingId ? 'Update memory' : 'Save memory'}
+            </button>
           </div>
-        ) : memories.slice(0, 20).map((memory) => {
+        </div>
+      ) : null}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {visible.length === 0 ? (
+          <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 11, background: t.cellBg, padding: '13px 15px', fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>
+            No memory yet. Add business context by hand, or correct/certify a draft and the agent will remember it here automatically.
+          </div>
+        ) : visible.slice(0, 30).map((memory) => {
           const learned = !['settings-ui', 'manual', ''].includes(memory.source);
+          const badge = scopeBadge(memory.scope);
+          const meta = learned
+            ? `Learned from ${memory.source}${typeof memory.confidence === 'number' ? ` · ${Math.round(memory.confidence * 100)}% confidence` : ''}`
+            : `Added by hand${memory.tags.length ? ` · ${memory.tags.join(', ')}` : ''}`;
           return (
-            <div key={memory.id} style={{ padding: 12, borderBottom: `1px solid ${t.headerBorder}` }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span style={{ fontSize: 10, fontFamily: t.fontMono, color: t.accent, textTransform: 'uppercase' }}>{memory.scope}</span>
-                <strong style={{ fontSize: 13 }}>{memory.title}</strong>
-                <span
-                  title={learned ? `Learned from ${memory.source}` : 'Added by hand'}
-                  style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4, background: learned ? `${t.accent}1f` : `${t.textMuted}1f`, color: learned ? t.accent : t.textMuted }}
-                >
-                  {learned ? 'learned' : 'manual'}
-                </span>
-                {typeof memory.confidence === 'number' && (
-                  <span style={{ fontSize: 10, color: t.textMuted }}>{Math.round(memory.confidence * 100)}%</span>
-                )}
-                <button type="button" onClick={() => remove(memory.id)} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer' }}>Delete</button>
+            <div key={memory.id} style={{ border: '1px solid var(--border-subtle)', borderRadius: 11, background: t.cellBg, padding: '13px 15px', display: 'flex', gap: 11, alignItems: 'flex-start' }}>
+              <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', padding: '2.5px 7px', borderRadius: 5, marginTop: 1, background: badge.bg, color: badge.color }}>{badge.label}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, color: t.textPrimary, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+                  {memory.content || memory.title}
+                </div>
+                <div style={{ fontSize: 10.5, color: t.textMuted, marginTop: 4 }}>{meta}</div>
               </div>
-              <div style={{ marginTop: 6, fontSize: 12, color: t.textSecondary, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{memory.content}</div>
-              {memory.tags.length > 0 && <div style={{ marginTop: 6, fontSize: 11, color: t.textMuted }}>{memory.tags.join(', ')}</div>}
+              <button type="button" title="Edit" onClick={() => startEdit(memory)} style={{ flexShrink: 0, width: 25, height: 25, borderRadius: 6, border: '1px solid var(--border-subtle)', background: 'var(--bg-1)', color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: 11 }}>✎</button>
+              <button type="button" title="Stop using" onClick={() => void remove(memory.id)} style={{ flexShrink: 0, width: 25, height: 25, borderRadius: 6, border: '1px solid var(--border-subtle)', background: 'var(--bg-1)', color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', fontSize: 11 }}>🗑</button>
             </div>
           );
         })}
-      </section>
+      </div>
+
+      <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: '1px solid var(--border-subtle)', background: t.cellBg, borderRadius: 10, padding: '11px 13px' }}>
+        <span style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.55 }}>
+          Memories are Git-backed files under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/memory/</span>. The agent also proposes new ones when you correct or certify a draft — they appear here for review.
+          {' '}<button type="button" onClick={() => void ensureFiles()} style={{ border: 'none', background: 'none', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 11.5, fontFamily: t.font }}>Prepare files</button>
+        </span>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Database } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
@@ -999,19 +1000,45 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
             {showAdvanced ? (
               <ConnectionRuntimeSettings embedded section="advanced" />
             ) : activeTab === 'database' ? (
-              <div className="dql-connection-page-grid">
-                <section style={panelSurface}>
-                  {connectionListSection}
-                  {dbtProfilesSection}
-                  {quickConnectSection}
-                </section>
-                <aside style={panelSurface}>
-                  <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
-                  {addConnectionSection}
-                  {saveMessageSection}
-                  {testConnectionSection}
-                  {catalogSection}
-                </aside>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* Prototype header + live status card. */}
+                <div>
+                  <div style={{ fontSize: 17, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Database connection</div>
+                  <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5, fontFamily: t.font }}>
+                    Where your dbt models and data live. Credentials stay in <span style={{ fontFamily: t.fontMono, fontSize: 11.5 }}>.dql/</span> and are never sent anywhere.
+                  </div>
+                </div>
+                <div style={{ border: `1px solid ${testResult?.ok ? 'var(--status-success-border)' : 'var(--border-subtle)'}`, borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 12, maxWidth: 640 }}>
+                  <span style={{ width: 36, height: 36, borderRadius: 9, background: connected ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', color: connected ? 'var(--status-success)' : 'var(--status-warning)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <Database size={17} strokeWidth={1.75} />
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0, fontFamily: t.font }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>
+                      {(DRIVER_LABELS[String(info?.connections?.[info?.default ?? '']?.driver ?? '')] ?? info?.connections?.[info?.default ?? '']?.driver ?? 'No connection yet')}
+                      {connected ? ' · connected' : ''}
+                    </div>
+                    <div style={{ fontSize: 11.5, marginTop: 2, color: testing ? t.textMuted : testResult ? (testResult.ok ? 'var(--status-success)' : 'var(--status-error)') : t.textMuted }}>
+                      {testing ? 'Testing…' : testResult ? testResult.message : connected ? 'Ready — run Test connection to verify.' : 'Add a connection below to get started.'}
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => void handleTest()} disabled={testing} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, flexShrink: 0 }}>
+                    {testing ? 'Testing…' : 'Test connection'}
+                  </button>
+                </div>
+                <div className="dql-connection-page-grid">
+                  <section style={panelSurface}>
+                    {connectionListSection}
+                    {dbtProfilesSection}
+                    {quickConnectSection}
+                  </section>
+                  <aside style={panelSurface}>
+                    <div style={{ ...sectionLabel, marginBottom: 8 }}>Database setup</div>
+                    {addConnectionSection}
+                    {saveMessageSection}
+                    {testConnectionSection}
+                    {catalogSection}
+                  </aside>
+                </div>
               </div>
             ) : activeTab === 'ai' ? (
               <ConnectionRuntimeSettings embedded section="providers" />
