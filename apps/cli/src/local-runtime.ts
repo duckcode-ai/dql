@@ -2955,7 +2955,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       // Rescan live when the question shape calls for it OR the stored snapshot is
       // stale/absent (P6) — otherwise a warehouse schema change between sessions is
       // silently reasoned over from a cached snapshot that never expires.
-      const runtimeScan = (shouldAugmentAgentRuntimeSchema(question) || runtimeSnapshotStale(projectRoot))
+      const runtimeScan = (shouldAugmentAgentRuntimeSchema(question, preparedContextPack?.questionPlan) || runtimeSnapshotStale(projectRoot))
         ? await scanRuntimeSchema().catch(() => undefined)
         : undefined;
       const runtimeContext = runtimeScan?.ranked ?? [];
@@ -21114,7 +21114,14 @@ const NON_ENTITY_PLURALS = new Set([
  * project vocabulary — so it fires for ANY repo's join-shaped questions, not just
  * jaffle. Over-triggering only costs a few extra bounded probes (all in try/catch).
  */
-function shouldAugmentAgentRuntimeSchema(question: string): boolean {
+export function shouldAugmentAgentRuntimeSchema(
+  question: string,
+  questionPlan?: {
+    entities?: Array<string | { text?: string; typeHint?: string }>;
+    metricTerms?: string[];
+    dimensionTerms?: string[];
+  },
+): boolean {
   const lower = question.toLowerCase();
   const wantsMetric = /\brevenu|\bsales\b|\bamount\b|\bspend\b|\bcost\b|\bcount\b|\btotal\b|\bsum\b|\bavg\b|\baverage\b|\bvalue\b|\bprice\b/.test(lower);
   const wantsDetail = /\bdetails?\b|\bcomplete\b|\bbreakdown\b|\ball\s+values?\b|\beach\b|\bevery\b/.test(lower);
@@ -21123,7 +21130,12 @@ function shouldAugmentAgentRuntimeSchema(question: string): boolean {
   // Multi-entity intent: a linking word + >= 2 distinct plural content nouns.
   const nouns = new Set((lower.match(/\b[a-z]{4,}s\b/g) ?? []).filter((word) => !NON_ENTITY_PLURALS.has(word)));
   const multiEntity = /\b(?:and|with|plus|per|for\s+each|by)\b/.test(lower) && nouns.size >= 2;
-  return explicitJoin || referencesPriorRows || (multiEntity && (wantsMetric || wantsDetail));
+  const plannedConcepts = new Set([
+    ...(questionPlan?.entities ?? []).map((entity) => typeof entity === 'string' ? entity : entity.typeHint ?? entity.text ?? ''),
+    ...(questionPlan?.dimensionTerms ?? []),
+  ].map((value) => value.trim().toLowerCase()).filter(Boolean));
+  const plannedCompositeMetric = (questionPlan?.metricTerms?.length ?? 0) > 0 && plannedConcepts.size >= 2;
+  return explicitJoin || referencesPriorRows || plannedCompositeMetric || (multiEntity && (wantsMetric || wantsDetail));
 }
 
 async function enrichAgentSchemaContextWithValueMatches(

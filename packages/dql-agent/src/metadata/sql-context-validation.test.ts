@@ -61,6 +61,105 @@ describe('validateSqlAgainstLocalContext', () => {
     });
   });
 
+  it('rejects an unqualified column shared by multiple joined relations', () => {
+    const context = pack();
+    context.allowedSqlContext.relations = [
+      {
+        relation: 'jaffle_shop.dev.order_items',
+        name: 'order_items',
+        source: 'runtime schema context',
+        columns: [
+          { name: 'product_id' },
+          { name: 'product_price' },
+          { name: 'is_drink_item' },
+        ],
+      },
+      {
+        relation: 'jaffle_shop.dev.products',
+        name: 'products',
+        source: 'runtime schema context',
+        columns: [
+          { name: 'product_id' },
+          { name: 'product_price' },
+          { name: 'is_drink_item' },
+        ],
+      },
+    ];
+
+    const result = validateSqlAgainstLocalContext(`
+      SELECT SUM(CASE WHEN is_drink_item THEN product_price ELSE 0 END) AS beverage_revenue
+      FROM jaffle_shop.dev.order_items AS oi
+      JOIN jaffle_shop.dev.products AS p ON oi.product_id = p.product_id
+    `, context);
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'unknown_column',
+      offending: { column: 'is_drink_item' },
+    });
+    if (!result.ok) {
+      expect(result.error).toContain('oi (jaffle_shop.dev.order_items)');
+      expect(result.error).toContain('p (jaffle_shop.dev.products)');
+      expect(result.error).toContain('Qualify it with the intended relation alias');
+    }
+  });
+
+  it('accepts shared columns when the intended relation alias is explicit', () => {
+    const context = pack();
+    context.allowedSqlContext.relations[1]!.columns.push({ name: 'amount' });
+
+    const result = validateSqlAgainstLocalContext(`
+      SELECT SUM(o.amount) AS revenue
+      FROM analytics.fct_orders AS o
+      JOIN analytics.dim_customers AS c ON o.customer_id = c.customer_id
+    `, context);
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('prefers complete live schema over a partial fully-qualified context card', () => {
+    const context = pack();
+    context.allowedSqlContext.relations = [
+      {
+        relation: 'jaffle_shop.dev.order_items',
+        name: 'order_items',
+        source: 'certified source SQL shape',
+        columnCompleteness: 'partial',
+        columns: [{ name: 'product_id' }, { name: 'product_price' }],
+      },
+      {
+        relation: 'jaffle_shop.dev.products',
+        name: 'products',
+        source: 'dbt catalog',
+        columns: [{ name: 'product_id' }, { name: 'product_price' }, { name: 'is_drink_item' }],
+      },
+    ];
+
+    const result = validateSqlAgainstLocalContext(`
+      SELECT SUM(CASE WHEN is_drink_item THEN product_price ELSE 0 END) AS beverage_revenue
+      FROM jaffle_shop.dev.order_items AS oi
+      JOIN jaffle_shop.dev.products AS p ON oi.product_id = p.product_id
+    `, context, {
+      runtimeSchema: [{
+        relation: 'dev.order_items',
+        name: 'order_items',
+        source: 'runtime information_schema',
+        columns: [
+          { name: 'product_id' },
+          { name: 'product_price' },
+          { name: 'is_drink_item' },
+        ],
+      }],
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'unknown_column',
+      offending: { column: 'is_drink_item' },
+    });
+    if (!result.ok) expect(result.error).toContain('multiple joined relations');
+  });
+
   it('rejects relations outside the context pack', () => {
     const result = validateSqlAgainstLocalContext(
       'SELECT order_id FROM analytics.secret_orders',

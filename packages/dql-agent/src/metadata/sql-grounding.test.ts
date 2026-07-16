@@ -157,6 +157,23 @@ describe('sql-grounding', () => {
       }
     });
 
+    it('flags an unqualified column shared by joined runtime relations', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const result = validateSqlAgainstGrounding(`
+        SELECT order_id
+        FROM dev.order_items AS oi
+        JOIN dev.stg_orders AS o ON oi.order_id = o.order_id
+      `, grounding);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe('unknown_column');
+        expect(result.offending?.column).toBe('order_id');
+        expect(result.error).toContain('oi (dev.order_items)');
+        expect(result.error).toContain('o (dev.stg_orders)');
+      }
+    });
+
     it('rejects non-SELECT statements', () => {
       const grounding = buildSchemaGrounding(artifacts);
       const result = validateSqlAgainstGrounding('DELETE FROM dev.order_items', grounding);

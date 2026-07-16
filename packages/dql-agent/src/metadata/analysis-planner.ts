@@ -156,8 +156,9 @@ export function buildAnalysisQuestionPlan(
     ...extractMetricTerms(cleanQuestion),
     ...extractFollowUpMetricTerms(followUp, lower),
   ]);
-  const dimensionTerms = extractDimensionTerms(cleanQuestion);
+  const extractedDimensionTerms = extractDimensionTerms(cleanQuestion);
   const filterTerms = extractFilterTerms(cleanQuestion, entities);
+  const dimensionTerms = removeFilterOnlyDimensionTerms(cleanQuestion, extractedDimensionTerms);
   const timeTerms = extractTimeTerms(cleanQuestion);
   const mode = inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
   const routeIntent = routeIntentForMode(mode);
@@ -641,7 +642,8 @@ function inferQuestionMode(input: {
   if (/\b(profile|overview|360|complete\s+(?:stats|statistics|view)|full\s+(?:stats|statistics|view)|all\s+(?:stats|statistics|metrics)|research|reserach)\b/i.test(lower)) return 'entity_profile';
   if (input.entities.length > 0 && (input.metricTerms.length > 0 || /\b(show|list|find|give|provide|performance|activity|history|details)\b/i.test(lower))) return 'entity_drilldown';
   if (/\b(trend|over time|by\s+(?:day|week|month|quarter|year|season)|daily|weekly|monthly|quarterly|yearly)\b/i.test(lower)) return 'trend';
-  if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|maximum|max|rank|ranking|most|leading|leader|leaders)\b/i.test(lower)) return 'ranking';
+  if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|maximum|max|rank|ranking|most|leading|leader|leaders)\b/i.test(lower)
+    || hasComparativeMetricRanking(lower)) return 'ranking';
   if (/\b(block|certified|saved|existing|approved|governed)\b/i.test(lower)) return 'exact_lookup';
   if (isDirectKpiValueQuestion(lower)) return 'exact_lookup';
   if (/\b(show|list|find|which|who|how many|how much|metric|kpi|dashboard|performance|revenue|sales|orders|customers|users)\b/i.test(lower)) return 'general_analysis';
@@ -787,6 +789,24 @@ function extractDimensionTerms(question: string): string[] {
   return uniqueStrings([...terms]).slice(0, 16);
 }
 
+function removeFilterOnlyDimensionTerms(question: string, dimensions: string[]): string[] {
+  const lower = question.toLowerCase();
+  const filterDescriptors = /\b(?:on|in|within|from|among)\s+(?:the\s+)?(?:[a-z0-9&'_-]+\s+){0,3}?((?:[a-z][a-z0-9&'_-]*\s+)?(?:category|type|segment|class|group|channel|region|market))\b/g;
+  const filterOnly = new Set<string>();
+  for (const match of lower.matchAll(filterDescriptors)) {
+    const descriptor = match[1] ?? '';
+    const outsideDescriptor = `${lower.slice(0, match.index)} ${lower.slice((match.index ?? 0) + match[0].length)}`;
+    for (const dimension of dimensions) {
+      const word = escapeRegExp(dimension);
+      if (!new RegExp(`\\b${word}s?\\b`, 'i').test(descriptor)) continue;
+      const explicitlyGrouped = new RegExp(`\\b(?:by|per|for each|group(?:ed)? by|split by)\\b[^?.!,;]{0,40}\\b${word}s?\\b`, 'i').test(lower);
+      const mentionedOutsideDescriptor = new RegExp(`\\b${word}s?\\b`, 'i').test(outsideDescriptor);
+      if (!explicitlyGrouped && !mentionedOutsideDescriptor) filterOnly.add(dimension);
+    }
+  }
+  return dimensions.filter((dimension) => !filterOnly.has(dimension));
+}
+
 function pluralizeDimensionWord(word: string): string {
   if (word.endsWith('y')) return `${word.slice(0, -1)}ies`;
   return `${word}s`;
@@ -799,6 +819,7 @@ function extractFilterTerms(question: string, entities: AnalysisEntityMention[])
   const analyticalValues: string[] = [];
   const valuePatterns = [
     /\b(?:category|segment|type|class|group|channel|region|market)\s*(?:=|:|is|equals|of)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3})/gi,
+    /\b(?:on|in|within|from|among)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,2}?)(?=\s+(?:[a-z][a-z0-9&'_-]*\s+)?(?:category|type|segment|class|group|channel|region|market)\b)/gi,
     /\b(?:spend|spends|spent|spending)\b[^?.!,;]{0,60}?\bon\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3}?)(?=\s+(?:product|products|item|items|category|segment|type)\b|[?.,!;]|$)/gi,
     /\b(?:buy|buys|bought|buying|purchase|purchases|purchased|purchasing)\s+(?:the\s+)?([a-z][a-z0-9&'_-]*(?:\s+[a-z][a-z0-9&'_-]*){0,3}?)(?=\s+(?:product|products|item|items|category|segment|type)\b|[?.,!;]|$)/gi,
   ];
@@ -819,6 +840,7 @@ function cleanAnalyticalFilterValue(value: string | undefined): string {
   return (value ?? '')
     .toLowerCase()
     .replace(/\b(?:highest|lowest|most|least|top|bottom|best|worst|the)\b/g, ' ')
+    .replace(/^.*\b(?:on|in|within)\s+/, '')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/ies$/, 'y')
@@ -948,7 +970,12 @@ function parseTopN(question: string): RequestedAnswerShape['topN'] | undefined {
 }
 
 function hasImplicitRankingRequest(lower: string): boolean {
-  return /\b(top|bottom|most|least|highest|lowest|largest|smallest|greatest|best|worst|leading)\b/.test(lower);
+  return /\b(top|bottom|most|least|highest|lowest|largest|smallest|greatest|best|worst|leading)\b/.test(lower)
+    || hasComparativeMetricRanking(lower);
+}
+
+function hasComparativeMetricRanking(lower: string): boolean {
+  return /\bmore\s+(?:amount|bookings|cost|count|margin|orders?|points?|profit|quantity|revenue|sales|score|spend|spending|tax|usage|value|volume)\b/.test(lower);
 }
 
 function wordNumberFromTopN(lower: string): number | undefined {
@@ -1229,7 +1256,8 @@ function rankingDirectionCompatible(question: string, targetText: string): boole
 function rankingDirection(value: string): 'top' | 'bottom' | undefined {
   const lower = value.toLowerCase();
   const bottom = /\b(bottom|worst|lowest|least|fewest|minimum|min|smallest)\b/.test(lower);
-  const top = /\b(top|best|highest|most|maximum|max|largest|leading|leaders?)\b/.test(lower);
+  const top = /\b(top|best|highest|most|maximum|max|largest|leading|leaders?)\b/.test(lower)
+    || hasComparativeMetricRanking(lower);
   if (bottom && !top) return 'bottom';
   if (top && !bottom) return 'top';
   return undefined;

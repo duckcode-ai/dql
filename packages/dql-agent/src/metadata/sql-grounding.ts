@@ -418,7 +418,7 @@ export function validateSqlAgainstGrounding(
   }
 
   // Column check — qualified columns must exist on their relation; unqualified
-  // columns must exist on at least one grounded relation.
+  // columns must exist on exactly one relation used by a multi-relation query.
   const outputAliases = extractSelectAliases(sql);
   for (const column of analysis.columns) {
     if (column.column === '*') continue;
@@ -438,7 +438,30 @@ export function validateSqlAgainstGrounding(
       }
       continue;
     }
-    const tablesWithCols = grounding.tables.filter((t) => t.columns.length > 0);
+    // `analyzeSqlReferences` flattens CTE aliases across scopes. Avoid a false
+    // ambiguity between an inner CTE source and an outer relation until scoped
+    // column ownership is available from the parser.
+    const owners = analysis.ctes.length === 0 ? Object.entries(analysis.aliasToRelation)
+      .filter(([, relation]) => {
+        const table = lookupTable(relation, grounding);
+        return Boolean(table?.columns.some((candidate) => candidate.name.toLowerCase() === column.column.toLowerCase()));
+      })
+      .map(([alias, relation]) => `${alias} (${relation})`)
+      .filter((owner, index, values) => values.indexOf(owner) === index) : [];
+    if (owners.length > 1) {
+      return {
+        ok: false,
+        code: 'unknown_column',
+        error: `SQL references unqualified column "${column.column}", which exists on multiple joined relations: ${owners.join(', ')}. Qualify it with the intended relation alias.`,
+        warnings,
+        referencedRelations,
+        offending: { column: column.column },
+      };
+    }
+    const referencedTables = referencedRelations
+      .map((relation) => lookupTable(relation, grounding))
+      .filter((table): table is GroundedTable => Boolean(table));
+    const tablesWithCols = referencedTables.filter((table) => table.columns.length > 0);
     if (tablesWithCols.length === 0) continue;
     if (!tablesWithCols.some((t) => t.columns.some((c) => c.name.toLowerCase() === column.column.toLowerCase()))) {
       return {

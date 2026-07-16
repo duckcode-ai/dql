@@ -22,6 +22,38 @@ describe('analysis planner', () => {
     expect(new Set(plan.searchTerms).size).toBe(plan.searchTerms.length);
   });
 
+  it('treats a product-category phrase as a filter when ranking customers by more revenue', () => {
+    const plan = buildAnalysisQuestionPlan('who are the customers who bought more revenue on beverage product category?');
+
+    expect(plan.mode).toBe('ranking');
+    expect(plan.dimensionTerms).toEqual(['customer']);
+    expect(plan.filterTerms).toContain('beverage');
+    expect(plan.requestedShape).toMatchObject({
+      grain: 'customer',
+      dimensions: ['customer'],
+      measures: ['revenue'],
+      topN: { n: 10, scope: 'overall' },
+      rankingDirection: 'top',
+    });
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['customer', 'revenue']));
+    expect(plan.requestedShape.requiredOutputs).not.toEqual(expect.arrayContaining(['product', 'category']));
+  });
+
+  it('applies the same filter-only grain rule to arbitrary entity and segment names', () => {
+    const plan = buildAnalysisQuestionPlan('which accounts generated more revenue in enterprise customer segment?');
+
+    expect(plan.mode).toBe('ranking');
+    expect(plan.dimensionTerms).toEqual(['account']);
+    expect(plan.filterTerms).toContain('enterprise');
+    expect(plan.requestedShape).toMatchObject({
+      grain: 'account',
+      dimensions: ['account'],
+      measures: ['revenue'],
+      topN: { n: 10, scope: 'overall' },
+      rankingDirection: 'top',
+    });
+  });
+
   it('extracts requested shape for product revenue rankings', () => {
     const plan = buildAnalysisQuestionPlan('Give me the most revenue products with product name, category and revenue');
 

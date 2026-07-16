@@ -190,6 +190,29 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
+  // The parser flattens aliases across CTE scopes, so only enforce this when
+  // every relation lives in one SELECT scope. DuckDB will still validate CTEs
+  // at execution, while this avoids treating an inner and outer alias as peers.
+  const ambiguousColumn = analysis.ctes.length === 0
+    ? findAmbiguousUnqualifiedColumn(
+        analysis.columns,
+        analysis.aliasToRelation,
+        allowed,
+        outputAliases,
+      )
+    : undefined;
+  if (ambiguousColumn) {
+    return {
+      ok: false,
+      code: 'unknown_column',
+      error: `SQL references unqualified column "${ambiguousColumn.column}", which exists on multiple joined relations: ${ambiguousColumn.owners.join(', ')}. Qualify it with the intended relation alias.`,
+      warnings,
+      referencedRelations,
+      referencedColumns,
+      offending: { column: ambiguousColumn.column },
+    };
+  }
+
   if (options.intent === 'diagnose_change' && !contextHasTimeLikeColumn(allowed)) {
     return {
       ok: false,
@@ -340,11 +363,14 @@ function findAllowedRelation(
   allowed: Map<string, MetadataAllowedSqlRelation>,
   relation: string,
 ): MetadataAllowedSqlRelation | undefined {
+  let partialMatch: MetadataAllowedSqlRelation | undefined;
   for (const key of relationLookupKeys(relation)) {
     const match = allowed.get(key);
-    if (match) return match;
+    if (!match) continue;
+    if (relationColumnCompleteness(match) === 'complete') return match;
+    partialMatch ??= match;
   }
-  return undefined;
+  return partialMatch;
 }
 
 function findUnknownColumn(
@@ -371,6 +397,31 @@ function findUnknownColumn(
     if (!relationsWithColumns.some((relation) => relation.columns.some((allowedColumn) => namesEqual(allowedColumn.name, column.column)))) {
       return { column: column.column };
     }
+  }
+  return undefined;
+}
+
+function findAmbiguousUnqualifiedColumn(
+  columns: Array<{ column: string; relation?: string; unqualified: boolean }>,
+  aliasToRelation: Record<string, string>,
+  allowed: Map<string, MetadataAllowedSqlRelation>,
+  outputAliases: Set<string>,
+): { column: string; owners: string[] } | undefined {
+  for (const column of columns) {
+    if (!column.unqualified || column.column === '*' || outputAliases.has(normalizeColumnName(column.column))) continue;
+    const owners = Object.entries(aliasToRelation)
+      .filter(([, relationName]) => {
+        const relation = findAllowedRelation(allowed, relationName);
+        return Boolean(
+          relation
+          && relation.columns.length > 0
+          && relationColumnCompleteness(relation) === 'complete'
+          && relation.columns.some((candidate) => namesEqual(candidate.name, column.column)),
+        );
+      })
+      .map(([alias, relationName]) => `${alias} (${relationName})`)
+      .filter((owner, index, values) => values.indexOf(owner) === index);
+    if (owners.length > 1) return { column: column.column, owners };
   }
   return undefined;
 }

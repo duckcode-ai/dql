@@ -6039,6 +6039,81 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(executed).toBe(false);
   });
 
+  it("repairs ambiguous shared columns before handing SQL to the exploratory executor", async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider([
+      [
+        "```json",
+        JSON.stringify({
+          summary: "Top beverage customers by item revenue.",
+          sql: "SELECT oi.customer_name, SUM(CASE WHEN is_drink_item THEN product_price ELSE 0 END) AS beverage_revenue FROM jaffle_shop.dev.order_items AS oi JOIN jaffle_shop.dev.products AS p ON oi.product_id = p.product_id GROUP BY oi.customer_name ORDER BY beverage_revenue DESC LIMIT 10",
+          outputs: ["customer_name", "beverage_revenue"],
+          viz: "table",
+        }),
+        "```",
+      ].join("\n"),
+      [
+        "```json",
+        JSON.stringify({
+          summary: "Top beverage customers by item revenue with explicit aliases.",
+          sql: "SELECT oi.customer_name, SUM(CASE WHEN oi.is_drink_item THEN oi.product_price ELSE 0 END) AS beverage_revenue FROM jaffle_shop.dev.order_items AS oi JOIN jaffle_shop.dev.products AS p ON oi.product_id = p.product_id GROUP BY oi.customer_name ORDER BY beverage_revenue DESC LIMIT 10",
+          outputs: ["customer_name", "beverage_revenue"],
+          viz: "table",
+        }),
+        "```",
+      ].join("\n"),
+    ]);
+    const question = "Who are the customers who bought more revenue in the beverage product category?";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      manifest: manifestWithUnmodeledProducts(),
+      contextPack: contextPackForRankedRelations(question, [
+        {
+          relation: "jaffle_shop.dev.order_items",
+          name: "order_items",
+          source: "runtime schema",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "product_id", type: "VARCHAR" },
+            { name: "product_price", type: "DECIMAL" },
+            { name: "is_drink_item", type: "BOOLEAN" },
+          ],
+          rank: 1,
+          score: 90,
+          reason: "order-item revenue fact",
+        },
+        {
+          relation: "jaffle_shop.dev.products",
+          name: "products",
+          source: "runtime schema",
+          columns: [
+            { name: "product_id", type: "VARCHAR" },
+            { name: "product_price", type: "DECIMAL" },
+            { name: "is_drink_item", type: "BOOLEAN" },
+          ],
+          rank: 2,
+          score: 80,
+          reason: "product metadata",
+        },
+      ], { metricTerms: ["revenue"], dimensionTerms: ["customer", "beverage"] }),
+    });
+
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]?.at(-1)?.content).toContain('unqualified column "is_drink_item"');
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("grounding_gap");
+    expect(result.proposedSql).toContain("oi.is_drink_item");
+    expect(result.proposedSql).toContain("oi.product_price");
+    expect(result.exploratoryCandidate?.sql).toContain("oi.is_drink_item");
+    const generationPrompt = provider.messages.map((message) => message.content).join("\n\n");
+    expect(generationPrompt).toContain("one row per requested entity, not one row per");
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Repaired after context-validation failure")]),
+    );
+  });
+
   it("EXP-001 treats a draft relationship as exploratory coverage instead of a terminal policy refusal", async () => {
     kg.rebuild([], []);
     const base = manifestWithUnmodeledProducts();

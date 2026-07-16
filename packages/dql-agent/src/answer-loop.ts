@@ -1723,19 +1723,26 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         offending?: SqlContextValidationOffending;
       };
   let contextValidation: AnswerValidation;
-  if (governedMetricAnswer) {
-    contextValidation = { ok: true, warnings: [] };
-  } else {
-    const c = contextLedger.validateSql(parsed.sql, {
-      question,
-      intent,
-      filterValues: input.followUp?.filters,
-      trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
-    });
-    contextValidation = c.ok
-      ? { ok: true, warnings: c.warnings }
-      : { ok: false, code: c.code, error: c.error, warnings: c.warnings, offending: c.offending };
-  }
+  const initialValidation = contextLedger.validateSql(parsed.sql, {
+    question,
+    intent,
+    filterValues: input.followUp?.filters,
+    trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+  });
+  contextValidation = initialValidation.ok
+    ? { ok: true, warnings: initialValidation.warnings }
+    : {
+        ok: false,
+        code: initialValidation.code,
+        error: initialValidation.error,
+        warnings: initialValidation.warnings,
+        offending: initialValidation.offending,
+      };
+  // Semantic compilation owns metric meaning, but a later dimensional join can
+  // still make a compiled bare expression ambiguous at the warehouse binder.
+  // Revoke governed trust for an invalid composition so the bounded repair lane
+  // can qualify it and keep the repaired SQL review-required.
+  if (governedMetricAnswer && !contextValidation.ok) governedMetricAnswer = false;
 
   // Spec 17, part C — semantic-metric route recovery. A metric question is often
   // catalog-routed to clarify, leaving a thin contextPack that rejects otherwise-valid
@@ -2340,7 +2347,14 @@ Rules:
    Alias calculated outputs with clear business names. Include identifiers only
    when the question asks for them or no readable field exists. Give every FROM
    and JOIN relation an explicit short alias, and use only those exact aliases in
-   SELECT, ON, WHERE, GROUP BY, and ORDER BY. Include every requested output.
+   SELECT, ON, WHERE, GROUP BY, and ORDER BY. When a query reads more than one
+   relation, qualify every column reference with its exact relation alias; never
+   emit a bare column name. Include every requested output. Match the requested
+   result grain exactly: project and GROUP BY only the entities or dimensions the
+   user asked to compare. A category/value used only to filter the result is not
+   an additional output dimension. An entity ranking filtered to a category
+   value must return one row per requested entity, not one row per
+   entity-category-member pair.
 4. In summary, state your QUERY PLAN first: the grain (one row per WHAT), the
    measures and how they aggregate, the dimensions/filters, and the exact join
    path + join keys between the grounded tables. Then make the SQL match that

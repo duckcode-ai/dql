@@ -40,6 +40,7 @@ import {
   saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
   setBlockStudioStatus,
+  shouldAugmentAgentRuntimeSchema,
   shouldSynthesizeAgentRunAnswer,
   serializeJSON,
   startLocalServer,
@@ -116,6 +117,26 @@ describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
     }
     // The prune must never delete the newest row — it's the only one ever read.
     expect(latestRuntimeSchemaSnapshotForProject(dir)?.source).toBe('scan-7');
+  });
+});
+
+describe('Ask AI runtime schema augmentation', () => {
+  it('uses the typed question plan for composite metric questions with singular nouns', () => {
+    expect(shouldAugmentAgentRuntimeSchema(
+      'who are the customers who bought more revenue on beverage product category?',
+      {
+        entities: ['customer'],
+        metricTerms: ['revenue'],
+        dimensionTerms: ['customer', 'product', 'category'],
+      },
+    )).toBe(true);
+  });
+
+  it('keeps simple one-table metric questions on the cached metadata path', () => {
+    expect(shouldAugmentAgentRuntimeSchema(
+      'what is total revenue?',
+      { metricTerms: ['revenue'], dimensionTerms: [] },
+    )).toBe(false);
   });
 });
 
