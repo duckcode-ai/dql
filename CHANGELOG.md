@@ -6,7 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-## v1.7.0 - 2026-06-27
+## v1.7.0 - 2026-07-16
 
 ### Governed agentic analytics: AI-drafts/human-certify onboarding, enforced trust, and data freshness
 
@@ -61,6 +61,15 @@ results as certified. Everything here is OSS and local-first.
 
 ### Fixed
 
+- **The redesigned application is wired end to end.** Ask AI, notebooks, Block
+  Studio, Apps, domains, source control, Setup, and Settings now use the same
+  project metadata, database connection, AI-provider state, and governed answer
+  flow. Setup recognizes an existing workspace without overwriting its saved
+  database or provider, and the Notebook catalog matches Block Studio.
+- **Ask AI now returns business-readable, result-grounded explanations.** The
+  response layer summarizes actual query results, keeps tables and charts in the
+  conversation, moves technical evidence into the detail surface, and shares the
+  same DQL-generation and follow-up behavior with Notebook and Block Studio AI.
 - **AI-generated SQL is grounded in the real warehouse.** Generated SQL used bare
   table names (`FROM order_items`) that don't exist (`Catalog Error … did you mean
   "dev.order_items"?`). Both SQL paths now share one grounding layer: tables are

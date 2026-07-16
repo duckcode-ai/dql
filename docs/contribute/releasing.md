@@ -28,9 +28,9 @@ pnpm release:publish
 5. Tag and push:
 
 ```bash
-git tag v1.6.1
+git tag v1.7.0
 git push origin main
-git push origin v1.6.1
+git push origin v1.7.0
 ```
 
 6. Smoke the published packages:
