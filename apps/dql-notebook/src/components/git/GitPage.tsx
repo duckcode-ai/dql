@@ -109,7 +109,7 @@ export function GitPage() {
   // Redesigned guided flow (Source Control Redesign.dc.html): plain-language
   // diff view, share-rail phase, and the final description shown after share.
   const [diffView, setDiffView] = useState<'plain' | 'code'>('plain');
-  const [sharedInfo, setSharedInfo] = useState<{ count: number; message: string } | null>(null);
+  const [sharedInfo, setSharedInfo] = useState<{ count: number; message: string; base: string } | null>(null);
   const [narrowLayout, setNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 980);
   useEffect(() => {
     const onResize = () => setNarrowLayout(window.innerWidth < 980);
@@ -274,13 +274,24 @@ export function GitPage() {
     // After a share the composer is cleared — fall back to the shared message.
     const title = commitMsg.trim() || sharedInfo?.message || '';
     if (!title) return flash('err', 'Review title required');
+    if (sharedInfo) {
+      const review = await runOp('request review', () => api.gitOpenReview({
+        title,
+        body: 'Created from DQL Source Control. Review the governed analytics changes before merging.',
+        base: sharedInfo.base,
+      }));
+      if (!review.ok) return;
+      setReviewUrl(review.prUrl ?? null);
+      flash('ok', review.warning ?? 'Review request opened.');
+      return;
+    }
     const paths = Array.from(new Set(entries.map((entry) => entry.path)));
     if (paths.length === 0) return flash('err', 'No changes to request review for');
     const review = await runOp('request review', () => api.gitCreateReview({
       paths,
       title,
       body: 'Created from DQL Source Control. Review the governed analytics changes before merging.',
-      base: 'main',
+      base: reviewBaseBranch(branchInfo.current),
     }));
     if (!review.ok) return;
     setCommitMsg('');
@@ -298,8 +309,8 @@ export function GitPage() {
   // "Write it for me from the changes": a deterministic plain-words summary
   // from the actual picked file names and statuses (no AI call needed).
   const suggestDescription = () => {
-    const picked = stagedFiles.length > 0 ? stagedFiles : unstagedFiles;
-    if (picked.length === 0) return;
+    const picked = stagedFiles;
+    if (picked.length === 0) return flash('err', 'Include at least one change first');
     const verb: Record<FileEntry['status'], string> = { M: 'Updated', A: 'Added', D: 'Removed', R: 'Renamed', '?': 'Added' };
     const parts = picked.slice(0, 3).map((entry) => `${verb[entry.status]} ${entry.path.split('/').pop()?.replace(/\.(dql|md|json|ya?ml|sql)$/i, '') ?? entry.path}`);
     const rest = picked.length > 3 ? ` and ${picked.length - 3} more change${picked.length - 3 === 1 ? '' : 's'}` : '';
@@ -308,14 +319,22 @@ export function GitPage() {
   // Share = commit the picked changes + push to the branch, then remember the
   // description for the stepper's done state.
   const onShareToBranch = async () => {
+    // UI-001, SEC-001, E2E-001: share only explicitly included files and never commit on main.
     const msg = commitMsg.trim();
     if (!msg) return flash('err', 'Describe your change first');
-    const count = stagedFiles.length > 0 ? stagedFiles.length : unstagedFiles.length;
-    const stageAll = stagedFiles.length === 0;
-    const committed = await runOp('commit', () => api.gitCommit(msg, stageAll));
+    if (stagedFiles.length === 0) return flash('err', 'Include at least one change first');
+    if (!remote.url) return flash('err', 'Add a Git remote before sharing changes');
+    const count = stagedFiles.length;
+    const base = reviewBaseBranch(branchInfo.current);
+    if (!branchInfo.current || branchInfo.current === 'HEAD' || branchInfo.current === 'main' || branchInfo.current === 'master') {
+      const branch = guidedReviewBranchName(msg);
+      const created = await runOp('branch', () => api.gitCreateBranch(branch, true));
+      if (!created.ok) return;
+    }
+    const committed = await runOp('commit', () => api.gitCommit(msg, false));
     if (!committed.ok) return;
     const pushed = await runOp('push', () => api.gitPush(), 'Shared to your branch');
-    if (pushed.ok) setSharedInfo({ count, message: msg });
+    if (pushed.ok) setSharedInfo({ count, message: msg, base });
     setCommitMsg('');
   };
   const onStartNewChange = () => {
@@ -441,7 +460,7 @@ export function GitPage() {
           <ShareRail
             t={t}
             branch={branchInfo.current}
-            pickedCount={stagedFiles.length > 0 ? stagedFiles.length : unstagedFiles.length}
+            pickedCount={stagedFiles.length}
             totalCount={entries.length}
             commitMsg={commitMsg}
             setCommitMsg={setCommitMsg}
@@ -688,6 +707,18 @@ function githubCompareUrl(remoteUrl: string | null, branch: string | null): stri
   return `https://github.com/${match[1]}/compare/${encodeURIComponent(branch)}?expand=1`;
 }
 
+function guidedReviewBranchName(message: string): string {
+  const slug = message.toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 46) || 'governed-update';
+  return `dql/review/${slug}-${Date.now().toString(36)}`;
+}
+
+function reviewBaseBranch(branch: string | null): string {
+  return branch === 'master' ? 'master' : 'main';
+}
+
 function sameStringList(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
@@ -727,7 +758,7 @@ function ShareRail({ t, branch, pickedCount, totalCount, commitMsg, setCommitMsg
   commitMsg: string;
   setCommitMsg: (value: string) => void;
   busy: string | null;
-  sharedInfo: { count: number; message: string } | null;
+  sharedInfo: { count: number; message: string; base: string } | null;
   reviewUrl: string | null;
   onSuggest: () => void;
   onShare: () => void;
@@ -750,7 +781,7 @@ function ShareRail({ t, branch, pickedCount, totalCount, commitMsg, setCommitMsg
     <aside style={{ width: 'clamp(280px, 26vw, 350px)', flexShrink: 0, background: t.cellBg, borderLeft: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'auto' }}>
       <div style={{ padding: '14px 16px 12px', borderBottom: '1px solid var(--border-subtle)' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Share your work</div>
-        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Three steps — no git commands needed.</div>
+        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Four steps — no git commands needed.</div>
       </div>
       <div style={{ padding: '14px 16px 20px', display: 'flex', flexDirection: 'column' }}>
         {/* Step 1 — pick */}
@@ -801,7 +832,9 @@ function ShareRail({ t, branch, pickedCount, totalCount, commitMsg, setCommitMsg
           <div style={{ flex: 1, minWidth: 0, paddingBottom: 18 }}>
             <div style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Share to your branch</div>
             <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5, marginTop: 2 }}>
-              Saves your work to <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>{branch ?? 'your branch'}</span> — main stays untouched.
+              Saves your work to {branch && branch !== 'main' && branch !== 'master'
+                ? <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>{branch}</span>
+                : 'a new review branch'} — main stays untouched.
             </div>
             {sharing ? (
               <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, backgroundImage: `linear-gradient(100deg, ${t.textPrimary} 25%, ${t.accent} 50%, ${t.textPrimary} 75%)`, backgroundSize: '220% 100%', WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent', WebkitTextFillColor: 'transparent', animation: 'dql-git-shimmer 2s linear infinite' }}>

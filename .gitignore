@@ -20,6 +20,7 @@ jaffle-shop/
 .playwright-cli/
 *.dqlnb.run.json
 *.dql.run.json
+*.run.json
 .dql/runs/
 .dql/cache/
 .dql/local/
@@ -31,4 +32,15 @@ jaffle-shop/
 **/.dql/local/
 **/.dql/imports/
 **/.dql/connectors/
+**/.dql/runs/
+**/.dql/memory/
+**/.dql/migration-staging/
+**/.dql/docker-starter/
+**/.dql/oauth-credentials.json
+**/.dql/provider-settings.json
+**/.dql/mcp-servers.json
+**/.dql-user-prefs.json
 output/
+dql-manifest.json
+*.duckdb
+*.duckdb.wal

@@ -774,6 +774,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   if (!loopback && allowedOrigins.size === 0) {
     throw new Error('Non-loopback DQL server binding requires DQL_ALLOWED_ORIGINS (or LocalServerOptions.allowedOrigins).');
   }
+  const gitRoot = await resolveGitRoot(projectRoot);
+  if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
   let connection = rawConnection ? normalizeProjectConnection(rawConnection, projectRoot) : null;
   let projectConfig = loadProjectConfig(projectRoot);
   const projectSnapshots = new ProjectSnapshotService<DQLManifest>();
@@ -6929,6 +6931,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       return;
     }
+    if (req.method === 'POST' && path === '/api/git/review/open') {
+      try {
+        const body = (await readJSON(req)) as { title?: string; body?: string; base?: string };
+        const result = await gitOpenReview(projectRoot, {
+          title: body.title ?? '',
+          body: body.body ?? '',
+          base: body.base ?? 'main',
+        });
+        res.writeHead(result.ok ? 201 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      }
+      return;
+    }
     if (req.method === 'POST' && path === '/api/git/pull') {
       try {
         const result = await gitPull(projectRoot);
@@ -7489,7 +7507,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // Only expose distinct values for a DECLARED output column — keeps the probe
         // inside the governed block contract (no arbitrary column scanning).
         const parsedMeta = parseBlockSourceMetadata(source);
-        if (parsedMeta.outputs.length > 0 && !parsedMeta.outputs.includes(column)) {
+        const validation = validateBlockStudioSource(source, semanticLayer);
+        const parameterNames = new Set((validation.parameters ?? []).map((parameter) => parameter.name));
+        if (parameterNames.has(column) || (parsedMeta.outputs.length > 0 && !parsedMeta.outputs.includes(column))) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `"${column}" is not a declared output of this block` }));
           return;
@@ -7505,7 +7525,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               detectedProvider: semanticDetectedProvider,
             })
           : null;
-        const validation = validateBlockStudioSource(source, semanticLayer);
         const baseSql = semanticCompose?.sql ?? validation.executableSql;
         if (!baseSql) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -19281,6 +19300,34 @@ function ensureGitignoreEntry(projectRoot: string, pattern: string): void {
   }
 }
 
+/**
+ * UI-001, SEC-001, E2E-001: local runtime, credential, and generated artifacts must never be offered as
+ * shareable source-control changes. Project skills are intentionally absent:
+ * `.dql/skills` remains readable during migration and can be governed in Git.
+ */
+const LOCAL_RUNTIME_GITIGNORE_RULES = [
+  'dql-manifest.json',
+  '*.duckdb',
+  '*.duckdb.wal',
+  '*.run.json',
+  '**/.dql/runs/',
+  '**/.dql/cache/',
+  '**/.dql/imports/',
+  '**/.dql/local/',
+  '**/.dql/connectors/',
+  '**/.dql/memory/',
+  '**/.dql/migration-staging/',
+  '**/.dql/docker-starter/',
+  '**/.dql/oauth-credentials.json',
+  '**/.dql/provider-settings.json',
+  '**/.dql/mcp-servers.json',
+  '**/.dql-user-prefs.json',
+] as const;
+
+export function ensureLocalRuntimeGitignore(projectRoot: string): void {
+  for (const rule of LOCAL_RUNTIME_GITIGNORE_RULES) ensureGitignoreEntry(projectRoot, rule);
+}
+
 async function readGitDiff(
   cwd: string,
   filePath: string,
@@ -19567,6 +19614,39 @@ async function gitCreateReview(cwd: string, input: { paths: string[]; title: str
   };
 }
 
+/** UI-001, SEC-001, E2E-001: open a PR for a branch already committed and pushed by the guided share flow. */
+async function gitOpenReview(cwd: string, input: { title: string; body: string; base: string }): Promise<{
+  ok: boolean; error?: string; branch?: string; prUrl?: string; warning?: string;
+}> {
+  const gitRoot = await resolveGitRoot(cwd);
+  if (!gitRoot) return { ok: false, error: 'Not a git repository' };
+  const title = input.title.trim();
+  if (!title) return { ok: false, error: 'Review title required' };
+  const base = input.base.trim() || 'main';
+  const status = await readGitStatus(gitRoot);
+  const branch = status.branch;
+  if (!branch || branch === 'HEAD' || branch === base || branch === 'master') {
+    return { ok: false, error: 'Share the changes to a review branch before opening a review request.' };
+  }
+  const remote = await readGitRemote(gitRoot);
+  if (!remote.url) return { ok: false, error: 'Add a Git remote before requesting review.' };
+  const compareUrl = gitHubCompareUrl(remote.url, branch, base);
+  const pr = await execGh(gitRoot, [
+    'pr', 'create', '--base', base, '--head', branch, '--title', title,
+    '--body', input.body.trim() || `Review governed analytics changes: ${title}`,
+  ]);
+  if (pr.code === 0) {
+    const prUrl = pr.stdout.match(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/)?.[0] ?? compareUrl;
+    return { ok: true, branch, prUrl };
+  }
+  return {
+    ok: true,
+    branch,
+    prUrl: compareUrl,
+    warning: `Branch is ready. Open the compare page to create the PR: ${gitErrorOutput(pr) || 'GitHub CLI is not available or authenticated.'}`,
+  };
+}
+
 async function gitPull(cwd: string): Promise<{ ok: boolean; error?: string; output?: string }> {
   const gitRoot = await resolveGitRoot(cwd);
   if (!gitRoot) return { ok: false, error: 'Not a git repository' };
@@ -19673,8 +19753,7 @@ async function enableGitGovernedContextTracking(cwd: string): Promise<{ ok: bool
   const existing = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf-8') : '';
   const lines = existing.split(/\r?\n/);
   const next = lines.filter((line) => !/^\s*\/?\.dql\/\s*$/.test(line));
-  const keepLocal = ['.dql/runs/', '.dql/cache/', '.dql/imports/', '.dql/local/', '.dql/docker-starter/'];
-  for (const rule of keepLocal) {
+  for (const rule of LOCAL_RUNTIME_GITIGNORE_RULES) {
     if (!next.some((line) => line.trim() === rule)) next.push(rule);
   }
   const rendered = `${next.join('\n').replace(/\n+$/, '')}\n`;

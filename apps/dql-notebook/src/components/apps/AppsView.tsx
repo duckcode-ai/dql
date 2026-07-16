@@ -50,6 +50,7 @@ import { StructuredAnswerText } from '../agent/AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from './AppBuildProposalPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
+import { defaultParameterFilterValue, deriveDashboardFilters } from './dashboard-filters';
 
 type AppSurface = 'library' | 'create' | 'workspace';
 type AppExperience = AppWorkspaceExperience;
@@ -2955,7 +2956,7 @@ function DashboardFilterInput({
   // upgrade the free-text box to a real dropdown (low-cardinality only).
   const sourceBlockId = (filter as { sourceBlockId?: string }).sourceBlockId;
   const column = filter.bindsTo || filter.id;
-  const wantsOptions = (filter.type === 'text' || filter.type === 'select') && Boolean(sourceBlockId) && !filter.options?.length;
+  const wantsOptions = (filter.type === 'string' || filter.type === 'select') && Boolean(sourceBlockId) && !filter.options?.length;
   const [fetchedOptions, setFetchedOptions] = useState<string[] | null>(null);
   useEffect(() => {
     if (!wantsOptions || !sourceBlockId) return;
@@ -3038,81 +3039,6 @@ function filterIconForDashboardFilter(filter: DashboardFilter): ReactNode {
     return <CalendarDays size={13} />;
   }
   return <BarChart3 size={13} />;
-}
-
-function deriveDashboardFilters(dashboard: DashboardDocumentResponse['dashboard'] | null): DashboardFilter[] {
-  if (!dashboard) return [];
-  const filters = new Map<string, DashboardFilter>();
-  for (const filter of dashboard.filters ?? []) {
-    if (isUsefulDashboardFilter(filter)) filters.set(filter.id, { ...filter });
-  }
-  const blockIdOf = (item: DashboardLayoutItem): string | undefined =>
-    item.block?.blockId ?? item.block?.ref;
-  for (const item of dashboard.layout.items ?? []) {
-    const bid = blockIdOf(item);
-    for (const binding of item.parameterBindings ?? []) {
-      const id = binding.filter || binding.field || binding.param;
-      if (!id) continue;
-      const existing = filters.get(id);
-      if (existing) {
-        // Remember a tile that backs this filter, so its values can be fetched.
-        if (bid && !(existing as { sourceBlockId?: string }).sourceBlockId) {
-          (existing as { sourceBlockId?: string }).sourceBlockId = bid;
-        }
-        continue;
-      }
-      if (isCoveredByExistingDashboardFilter(filters, binding)) continue;
-      filters.set(id, { ...filterFromParameterBinding(binding), sourceBlockId: bid } as DashboardFilter);
-    }
-  }
-  return Array.from(filters.values());
-}
-
-function isUsefulDashboardFilter(filter: DashboardFilter): boolean {
-  if (filter.type === 'select' && !filter.options?.length && filter.default === undefined) return false;
-  return true;
-}
-
-function filterFromParameterBinding(
-  binding: NonNullable<DashboardLayoutItem['parameterBindings']>[number],
-): DashboardFilter {
-  const id = binding.filter || binding.field || binding.param;
-  return {
-    id,
-    type: parameterFilterType(id, binding.parameterType),
-    default: binding.default ?? defaultParameterFilterValue(id),
-    bindsTo: binding.param,
-  };
-}
-
-function isCoveredByExistingDashboardFilter(
-  filters: Map<string, DashboardFilter>,
-  binding: NonNullable<DashboardLayoutItem['parameterBindings']>[number],
-): boolean {
-  return Array.from(filters.values()).some((filter) => {
-    if (binding.filter && filter.id === binding.filter) return true;
-    if (binding.field && filter.bindsTo === binding.field) return true;
-    return Boolean(binding.param && filter.bindsTo === binding.param);
-  });
-}
-
-function parameterFilterType(id: string, parameterType?: string): DashboardFilter['type'] {
-  if (parameterType === 'number' || parameterType === 'number[]') return 'number';
-  if (parameterType === 'boolean') return 'boolean';
-  if (parameterType === 'date' || parameterType === 'date[]') return 'date';
-  // Time-ish columns get a date-RANGE picker (the runtime applies BETWEEN). Covers
-  // the common dbt/warehouse naming (`ordered_at`, `_at`, `_date`, `_time`, `_ts`).
-  if (/(_at$|_date$|_time$|_ts$|date|time|day|week|month|quarter|period)/i.test(id)) return 'daterange';
-  if (/(top[_-]?n|limit|count|number|year|season)/i.test(id)) return 'number';
-  return 'text';
-}
-
-function defaultParameterFilterValue(id: string): unknown {
-  const normalized = id.toLowerCase();
-  if (/(top[_-]?n|limit)/.test(normalized)) return 5;
-  if (/(season|year).*start|start.*(season|year)/.test(normalized)) return 2016;
-  if (/(season|year).*end|end.*(season|year)/.test(normalized)) return 2017;
-  return '';
 }
 
 function filterOptions(filter: DashboardFilter): Array<[string, string]> {

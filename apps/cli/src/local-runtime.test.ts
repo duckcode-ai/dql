@@ -58,6 +58,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import type { Server } from 'node:http';
 import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
@@ -232,6 +233,13 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
         expect.objectContaining({ name: 'top_n', type: 'number', policy: 'dynamic' }),
       ]));
 
+      const parameterOptionsResponse = await fetch(`${base}/api/dashboard/filter-options?block=${encodeURIComponent('Runtime Parameter')}&column=category`);
+      expect(parameterOptionsResponse.status).toBe(400);
+      await expect(parameterOptionsResponse.json()).resolves.toMatchObject({
+        error: '"category" is not a declared output of this block',
+      });
+      expect(executeQuery).not.toHaveBeenCalled();
+
       const invokeResponse = await fetch(`${base}/api/blocks/invoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -277,6 +285,46 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
       expect(executeQuery).toHaveBeenCalledTimes(2);
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+});
+
+describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', () => {
+  it('repairs local-only ignore rules on notebook startup without hiding governed skills', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-local-ignore-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    writeFileSync(join(projectRoot, '.gitignore'), 'node_modules/\n');
+    execFileSync('git', ['init'], { cwd: projectRoot, stdio: 'ignore' });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const gitignore = readFileSync(join(projectRoot, '.gitignore'), 'utf-8');
+      expect(gitignore).toContain('.dql/connectors/');
+      expect(gitignore).toContain('.dql/oauth-credentials.json');
+      expect(gitignore).toContain('.dql/provider-settings.json');
+      expect(gitignore).toContain('.dql/mcp-servers.json');
+      expect(gitignore).toContain('.dql/memory/');
+      expect(gitignore).not.toContain('.dql/skills/');
+
+      const prematureReview = await fetch(`http://127.0.0.1:${port}/api/git/review/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Review local changes', base: 'main' }),
+      });
+      expect(prematureReview.status).toBe(400);
+      await expect(prematureReview.json()).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining('Share the changes to a review branch'),
+      });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
 });

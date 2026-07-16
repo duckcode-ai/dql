@@ -1,0 +1,16 @@
+dql-manifest.json
+*.duckdb
+*.duckdb.wal
+*.run.json
+**/.dql/runs/
+**/.dql/cache/
+**/.dql/imports/
+**/.dql/local/
+**/.dql/connectors/
+**/.dql/memory/
+**/.dql/migration-staging/
+**/.dql/docker-starter/
+**/.dql/oauth-credentials.json
+**/.dql/provider-settings.json
+**/.dql/mcp-servers.json
+**/.dql-user-prefs.json

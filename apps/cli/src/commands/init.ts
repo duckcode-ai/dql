@@ -93,10 +93,10 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     connections?: Record<string, { driver?: string }>;
   };
 
-  // Create .gitignore for DQL artifacts
+  // UI-001, SEC-001, E2E-001: keep generated runtime and credential artifacts local.
   const gitignorePath = join(targetDir, '.gitignore');
   const dqlIgnoreEntries =
-    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n.dql/cache/\n.dql/imports/\n.dql/local/\n*.dqlnb.run.json\n*.dql.run.json\n';
+    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n.dql/cache/\n.dql/imports/\n.dql/local/\n.dql/connectors/\n.dql/memory/\n.dql/migration-staging/\n.dql/docker-starter/\n.dql/oauth-credentials.json\n.dql/provider-settings.json\n.dql/mcp-servers.json\n.dql-user-prefs.json\n*.run.json\n';
   if (existsSync(gitignorePath)) {
     const existing = readFileSync(gitignorePath, 'utf-8');
     if (!existing.includes('dql-manifest.json')) {
