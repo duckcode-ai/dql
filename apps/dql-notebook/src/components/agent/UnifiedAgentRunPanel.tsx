@@ -692,7 +692,7 @@ export function UnifiedAgentRunPanel({
                   rows={2}
                   placeholder="Ask anything about your data…"
                   onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSubmit(); } }}
-                  style={{ border: 'none', background: 'transparent', resize: 'none', outline: 'none', padding: '13px 15px 4px', fontSize: 13.5, lineHeight: 1.5, color: t.textPrimary, fontFamily: t.font }}
+                  style={{ border: 'none', background: 'transparent', resize: 'none', outline: 'none', boxShadow: 'none', padding: '13px 15px 4px', fontSize: 13.5, lineHeight: 1.5, color: t.textPrimary, fontFamily: t.font }}
                 />
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 10px 12px' }}>
                   <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
@@ -3539,6 +3539,7 @@ function inputStyle(t: Theme): React.CSSProperties {
     lineHeight: 1.45,
     fontFamily: t.font,
     outline: 'none',
+    boxShadow: 'none',
   };
 }
 
