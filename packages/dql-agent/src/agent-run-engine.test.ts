@@ -7,6 +7,7 @@ import {
   FileAgentRunStore,
   InMemoryAgentRunStore,
   defaultAgentRunStorePath,
+  resolveClarificationContinuation,
   selectRoute,
   routeReasoningEffort,
   type AgentRouteExecutorResult,
@@ -814,6 +815,35 @@ describe("AgentRunEngine audience", () => {
     expect(run.route).toBe("generated_answer");
   });
 
+  it("lets the governed answer loop handle a router-only clarification for an analyst", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-router-anyway",
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: "clarify",
+          confidence: 0.82,
+          reason: "The ranking could be interpreted in more than one way.",
+          clarifyingQuestion: "Rank by spend or by product variety?",
+          followsUp: false,
+        }),
+      },
+      executors: {
+        generated_answer: () => ({ answer: "Melissa leads by beverage spend and product variety." }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "Who are the top customers buying different beverage products?",
+      intent: "ad_hoc_ranking",
+      audience: "analyst",
+    });
+
+    expect(run.route).toBe("generated_answer");
+    expect(run.status).not.toBe("needs_clarification");
+    expect(run.answer).toContain("Melissa");
+  });
+
   it("keeps a genuine analyst clarify (explicit missing context) as clarify", async () => {
     const engine = new AgentRunEngine({ idGenerator: () => "run-analyst-missing", now: fixedClock() });
     const run = await engine.run({
@@ -845,6 +875,99 @@ describe("AgentRunEngine audience", () => {
     expect(run.nextActions.some((action) => action.id === "create-block")).toBe(false);
     expect(run.nextActions.some((action) => action.id === "drill")).toBe(true);
     expect(run.nextActions.some((action) => action.id === "request-certification")).toBe(true);
+  });
+});
+
+describe("clarification continuations", () => {
+  it("recovers the original question and actual clarifying question from persisted turns", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "yes",
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [{
+            question: "Who are the top customers buying different beverage products?",
+            answerSummary: "Do you want total beverage spend or a per-product breakdown?",
+            route: "clarify",
+          }],
+        },
+      },
+    });
+
+    expect(continuation).toMatchObject({
+      sourceQuestion: "Who are the top customers buying different beverage products?",
+      clarifyingQuestion: "Do you want total beverage spend or a per-product breakdown?",
+      reply: "yes",
+    });
+    expect(continuation?.resolvedQuestion).toContain("User clarification: yes");
+    expect(continuation?.resolvedQuestion).toContain("Do not repeat the same clarification");
+  });
+
+  it("recovers the analytical question from an already repeated clarification chain", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "yes, per product",
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [
+            {
+              question: "Who are the top customers buying different beverage products?",
+              answerSummary: "Rank by spend or by product variety?",
+              route: "clarify",
+            },
+            {
+              question: "yes",
+              answerSummary: "Do you mean individual products or total beverage revenue?",
+              route: "clarify",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(continuation?.sourceQuestion).toBe("Who are the top customers buying different beverage products?");
+    expect(continuation?.clarifyingQuestion).toBe("Do you mean individual products or total beverage revenue?");
+    expect(continuation?.resolvedQuestion).toContain("User clarification: yes, per product");
+  });
+
+  it("bypasses another router clarification and executes DQL against the resolved question", async () => {
+    let routed = false;
+    let executedQuestion = "";
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-clarification-follow-up",
+      now: fixedClock(),
+      router: {
+        decide: () => {
+          routed = true;
+          return { action: "clarify", confidence: 0.9, reason: "Ask again", followsUp: true };
+        },
+      },
+      executors: {
+        generated_answer: ({ request }) => {
+          executedQuestion = request.question;
+          return { answer: "Melissa leads across five beverage product types." };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: "yes",
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [{
+            question: "Who are the top customers buying different beverage products?",
+            answerSummary: "Do you want total beverage spend or a per-product breakdown?",
+            route: "clarify",
+          }],
+        },
+      },
+    });
+
+    expect(routed).toBe(false);
+    expect(executedQuestion).toContain("Who are the top customers buying different beverage products?");
+    expect(executedQuestion).toContain("User clarification: yes");
+    expect(run.question).toBe("yes");
+    expect(run.route).toBe("generated_answer");
+    expect(run.answer).toContain("five beverage product types");
+    expect(run.events[0]?.payload).toMatchObject({ question: "yes", clarificationResolved: true });
   });
 });
 

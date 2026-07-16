@@ -12,6 +12,7 @@ let trustExplainer: typeof UnifiedAgentRunPanelModule.trustExplainer;
 let askArtifactMeta: typeof UnifiedAgentRunPanelModule.askArtifactMeta;
 let preferredAskInspectorTab: typeof UnifiedAgentRunPanelModule.preferredAskInspectorTab;
 let inlineAskChartConfig: typeof UnifiedAgentRunPanelModule.inlineAskChartConfig;
+let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryFromItems;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -27,6 +28,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     askArtifactMeta = module.askArtifactMeta;
     preferredAskInspectorTab = module.preferredAskInspectorTab;
     inlineAskChartConfig = module.inlineAskChartConfig;
+    agentRunHistoryFromItems = module.agentRunHistoryFromItems;
   });
 
   it('UI-003 progressively explains long SQL generation and its durable optimization path', () => {
@@ -252,6 +254,23 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       rows: [{ customer_name: 'A', revenue: 10 }, { customer_name: 'B', revenue: 8 }],
       rowCount: 2,
     })).toMatchObject({ chart: undefined, decisionSource: 'agent' });
+  });
+
+  it('sends the actual clarification question in client fallback history', () => {
+    expect(agentRunHistoryFromItems([
+      { kind: 'user', id: 'q1', text: 'Who are the top beverage customers?' },
+      {
+        kind: 'run',
+        id: 'r1',
+        run: {
+          summary: 'Needs clarification before a governed answer can be produced.',
+          answer: 'Rank by total beverage spend or by individual product?',
+        } as any,
+      },
+    ])).toEqual([
+      { role: 'user', text: 'Who are the top beverage customers?' },
+      { role: 'assistant', text: 'Rank by total beverage spend or by individual product?' },
+    ]);
   });
 });
 

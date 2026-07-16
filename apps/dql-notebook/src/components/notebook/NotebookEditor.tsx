@@ -749,6 +749,8 @@ function NotebookAiDrawer({
           onThreadIdChange={agentThread.onThreadIdChange}
           onInsertSql={onInsertSql}
           onInsertDql={onInsertDql}
+          answerFirstCards
+          insertDqlActionLabel="Add to notebook"
           onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
           onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}
         />

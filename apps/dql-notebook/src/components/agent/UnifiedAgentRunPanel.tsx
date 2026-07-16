@@ -64,6 +64,19 @@ export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
 
+/**
+ * Build the compact client history used when a persisted server thread is not
+ * available. Clarification turns must carry the actual question in `answer`;
+ * the generic run summary ("Needs clarification...") cannot resolve a reply.
+ */
+export function agentRunHistoryFromItems(items: ThreadItem[]): Array<{ role: 'user' | 'assistant'; text: string }> {
+  return items.map((item) => (
+    item.kind === 'user'
+      ? { role: 'user' as const, text: item.text }
+      : { role: 'assistant' as const, text: item.run.answer?.trim() || item.run.summary }
+  )).slice(-12);
+}
+
 /** A submitted run that may outlive this mounted panel (tab switch, reload, or navigation). */
 interface PendingAgentRun {
   id: string;
@@ -132,6 +145,10 @@ interface UnifiedAgentRunPanelProps {
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
   onRunningChange?: (running: boolean) => void;
+  /** Use Ask's answer-first narrative/result card inside a compact authoring panel. */
+  answerFirstCards?: boolean;
+  /** Add a contextual DQL insertion action to an answer-first card. */
+  insertDqlActionLabel?: string;
   /**
    * Opt into the redesigned "Ask" experience: a wide chat column with a page
    * header, centered 720px transcript of plain-text answers + trust lines +
@@ -189,6 +206,8 @@ export function UnifiedAgentRunPanel({
   onOpenResearch,
   onOpenApp,
   onRunningChange,
+  answerFirstCards = false,
+  insertDqlActionLabel,
   askLayout = false,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
@@ -241,14 +260,7 @@ export function UnifiedAgentRunPanel({
     setInput(initialInput);
   }, [initialInput, running]);
 
-  const history = useMemo(
-    (): Array<{ role: 'user' | 'assistant'; text: string }> => items.map((item) => (
-      item.kind === 'user'
-        ? { role: 'user' as const, text: item.text }
-        : { role: 'assistant' as const, text: item.run.summary }
-    )).slice(-12),
-    [items],
-  );
+  const history = useMemo(() => agentRunHistoryFromItems(items), [items]);
 
   // Report thread changes to a host (for conversation persistence) without
   // re-subscribing when the callback identity changes each render.
@@ -797,6 +809,21 @@ export function UnifiedAgentRunPanel({
 
         {items.map((item) => item.kind === 'user' ? (
           <div key={item.id} style={userBubbleStyle(t)}>{item.text}</div>
+        ) : answerFirstCards ? (
+          <AskRunCard
+            key={item.id}
+            run={item.run}
+            t={t}
+            themeMode={themeMode}
+            appContext={appContext}
+            onOpenApp={onOpenApp}
+            onInsertSql={onInsertSql}
+            onInsertDql={onInsertDql}
+            insertDqlActionLabel={insertDqlActionLabel}
+            onOpenBlock={onOpenBlock}
+            onOpenResearch={onOpenResearch}
+            onNextAction={(action) => handleNextAction(item.run, action)}
+          />
         ) : (
           <RunCard
             key={item.id}
@@ -1807,6 +1834,7 @@ function AskRunCard({
   onOpenApp,
   onInsertSql,
   onInsertDql,
+  insertDqlActionLabel,
   onOpenBlock,
   onOpenResearch,
   onNextAction,
@@ -1816,15 +1844,18 @@ function AskRunCard({
   themeMode: ThemeMode;
   appContext?: { appId?: string; dashboardId?: string };
   selectedArtifactId?: string;
-  onOpenArtifact: (artifactId: string, tab: AskInspectorTab) => void;
+  onOpenArtifact?: (artifactId: string, tab: AskInspectorTab) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onInsertSql?: (sql: string, title?: string) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
+  insertDqlActionLabel?: string;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
+  const { dispatch } = useNotebook();
   const [copied, setCopied] = useState(false);
+  const openArtifact = onOpenArtifact ?? (() => dispatch({ type: 'OPEN_AGENT_LOG', run }));
 
   // Conversational replies stay a plain bubble — no trust line, chips, or actions.
   if (run.route === 'conversation') {
@@ -1866,11 +1897,12 @@ function AskRunCard({
   const hasMixedSourcePlan = run.artifacts.some((a) => Boolean(extractMixedSourceNotebookPlan(payloadOf(a))));
   const pinnable = !hasMixedSourcePlan && run.status !== 'blocked' && run.status !== 'needs_clarification'
     && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
-  const isAnswer = run.route === 'certified_answer' || run.route === 'generated_answer';
+  const isAnswer = run.route === 'certified_answer' || run.route === 'semantic_answer' || run.route === 'generated_answer';
   const hasResearchAction = run.nextActions.some((a) => a.route === 'research');
   const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
   const sourceArtifact = answerDqlArtifactFromRun(run);
   const canSaveBlock = pinnable && !sourceArtifact?.sourcePath && Boolean(sourceArtifact?.source ?? answerSqlFromRun(run));
+  const insertionPayload = insertDqlActionLabel && onInsertDql ? artifactReadyPayloadFromRun(run) : undefined;
 
   const copyAnswer = () => {
     const text = run.answer ? cleanAnswerText(run.answer) : run.summary;
@@ -1889,7 +1921,7 @@ function AskRunCard({
         {certified && evidence[0] ? (
           <span style={{ fontSize: 11, color: t.textMuted }}>from <span style={{ color: t.accent, fontWeight: 600 }}>{evidence[0].label}</span></span>
         ) : primaryArtifact && passedChecks > 0 ? (
-          <button type="button" onClick={() => onOpenArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <button type="button" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Check size={11} color={t.success} /> {passedChecks} check{passedChecks === 1 ? '' : 's'} passed
           </button>
         ) : null}
@@ -1913,7 +1945,7 @@ function AskRunCard({
           selected={artifact.id === selectedArtifactId}
           t={t}
           themeMode={themeMode}
-          onInspect={(tab) => onOpenArtifact(artifact.id, tab)}
+          onInspect={(tab) => openArtifact(artifact.id, tab)}
         />
       ))}
 
@@ -1926,7 +1958,7 @@ function AskRunCard({
             key={artifact.id}
             type="button"
             className="dql-ask-chip"
-            onClick={() => onOpenArtifact(artifact.id, preferredAskInspectorTab(run, artifact))}
+            onClick={() => openArtifact(artifact.id, preferredAskInspectorTab(run, artifact))}
             style={{ display: 'flex', alignItems: 'center', gap: 10, width: 'fit-content', maxWidth: '100%', padding: '9px 12px', borderRadius: 10, border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`, background: 'var(--bg-2)', boxShadow: selected ? '0 1px 6px rgba(107,93,211,0.12)' : 'none', cursor: 'pointer', textAlign: 'left', fontFamily: t.font }}
           >
             <span style={{ width: 30, height: 30, borderRadius: 7, background: artifact.trustState === 'certified' ? 'var(--status-success-bg)' : 'var(--accent-dim)', color: artifact.trustState === 'certified' ? 'var(--status-success)' : 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -1962,8 +1994,13 @@ function AskRunCard({
       ) : null}
 
       {/* Quiet action row */}
-      {(run.answer || pinnable || canSaveBlock || showResearchDeeper || primaryArtifact) ? (
+      {(run.answer || insertionPayload || pinnable || canSaveBlock || showResearchDeeper || primaryArtifact) ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', marginTop: -2 }}>
+          {insertionPayload && onInsertDql ? (
+            <button type="button" className="dql-ask-ghost" onClick={() => onInsertDql(insertionPayload)} style={askGhostBtnStyle(t)}>
+              <Plus size={12} /> {insertDqlActionLabel}
+            </button>
+          ) : null}
           {run.answer ? (
             <button type="button" className="dql-ask-ghost" onClick={copyAnswer} style={askGhostBtnStyle(t)}>
               {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
@@ -1981,7 +2018,7 @@ function AskRunCard({
             </button>
           ) : null}
           {primaryArtifact ? (
-            <button type="button" className="dql-ask-ghost" onClick={() => onOpenArtifact(primaryArtifact.id, 'trust')} style={askGhostBtnStyle(t)}>
+            <button type="button" className="dql-ask-ghost" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={askGhostBtnStyle(t)}>
               <ListTree size={12} /> How it was answered
             </button>
           ) : null}

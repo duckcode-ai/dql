@@ -429,9 +429,122 @@ export function answerAnywayRoute(
 ): AgentRunRoute {
   if (route !== "clarify") return route;
   const explicitMissing = (request.signals?.missingContext?.length ?? 0) > 0;
+  const explicitClarifyIntent = request.intent === "clarify" || request.intent === "trust_gap_review";
+  // A router suggestion alone is not enough to dead-end an answerable data
+  // question. Let the governed answer loop search certified/semantic context and
+  // generate review-required DQL; it can still return a precise clarification if
+  // execution genuinely lacks required context.
+  if (!explicitMissing && !explicitClarifyIntent) return "generated_answer";
   if (decision?.clarifySoft === true && !explicitMissing) return "generated_answer";
   if (audience === "stakeholder" && !explicitMissing) return "generated_answer";
   return "clarify";
+}
+
+export interface ClarificationContinuation {
+  sourceQuestion: string;
+  clarifyingQuestion: string;
+  reply: string;
+  resolvedQuestion: string;
+}
+
+/**
+ * Resolve the turn immediately after a persisted clarification. The visible run
+ * still keeps the user's short reply (for example, "yes"), while executors receive
+ * the original analytical question plus the reply so metadata retrieval does not
+ * restart from a context-free word and ask the same clarification again.
+ */
+export function resolveClarificationContinuation(request: AgentRunRequest): ClarificationContinuation | undefined {
+  const reply = request.question.trim();
+  if (!reply || looksLikeNewQuestionAfterClarification(reply)) return undefined;
+
+  const fromServer = latestClarificationFromConversationContext(request.conversationContext);
+  const fromHistory = latestClarificationFromHistory(request.history);
+  const pending = fromServer ?? fromHistory;
+  if (!pending || pending.sourceQuestion.trim().toLowerCase() === reply.toLowerCase()) return undefined;
+
+  return {
+    ...pending,
+    reply,
+    resolvedQuestion: [
+      pending.sourceQuestion.trim(),
+      `Clarification asked: ${pending.clarifyingQuestion.trim()}`,
+      `User clarification: ${reply}`,
+      'Proceed with the most specific governed interpretation supported by the original request and this reply. Do not repeat the same clarification. If the reply does not select one of several options explicitly, choose the narrowest concrete interpretation consistent with the original wording and state that assumption in the answer.',
+    ].join('\n\n'),
+  };
+}
+
+function looksLikeNewQuestionAfterClarification(value: string): boolean {
+  const words = value.split(/\s+/).filter(Boolean);
+  if (words.length > 40) return true;
+  return words.length > 6
+    && /^(?:who|what|why|where|when|how|show|give|list|compare|build|create|which)\b/i.test(value)
+    && /\?\s*$/.test(value);
+}
+
+function latestClarificationFromHistory(
+  history: AgentRunRequest['history'],
+): Pick<ClarificationContinuation, 'sourceQuestion' | 'clarifyingQuestion'> | undefined {
+  if (!history?.length) return undefined;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const turn = history[index];
+    if (turn.role !== 'assistant' || !turn.text.trim().endsWith('?')) continue;
+    let fallbackQuestion: string | undefined;
+    for (let prior = index - 1; prior >= 0; prior -= 1) {
+      if (history[prior].role === 'user' && history[prior].text.trim()) {
+        fallbackQuestion = history[prior].text;
+        if (looksLikeNewQuestionAfterClarification(history[prior].text)) {
+          return { sourceQuestion: history[prior].text, clarifyingQuestion: turn.text };
+        }
+      }
+    }
+    if (fallbackQuestion) return { sourceQuestion: fallbackQuestion, clarifyingQuestion: turn.text };
+  }
+  return undefined;
+}
+
+function latestClarificationFromConversationContext(
+  context: Record<string, unknown> | undefined,
+): Pick<ClarificationContinuation, 'sourceQuestion' | 'clarifyingQuestion'> | undefined {
+  const contextRecord = clarificationRecord(context);
+  const snapshot = clarificationRecord(contextRecord?.serverSnapshot);
+  const sources = [snapshot?.recentTurns, contextRecord?.turns];
+  for (const source of sources) {
+    if (!Array.isArray(source) || source.length === 0) continue;
+    const latestIndex = source.length - 1;
+    const latest = clarificationRecord(source[latestIndex]);
+    const route = clarificationString(latest?.route);
+    const clarifyingQuestion = clarificationString(latest?.answerSummary);
+    if (route !== 'clarify' || !clarifyingQuestion) continue;
+
+    // A previously deployed client may already have persisted a repeated
+    // clarification chain (original question -> "yes" -> clarify again). Walk
+    // back through that chain so the next reply recovers the analytical request,
+    // not the terse intermediate reply.
+    let sourceQuestion = clarificationString(latest?.question);
+    for (let index = latestIndex; index >= 0; index -= 1) {
+      const candidate = clarificationRecord(source[index]);
+      if (clarificationString(candidate?.route) !== 'clarify') break;
+      const question = clarificationString(candidate?.question);
+      if (!question) continue;
+      sourceQuestion = question;
+      if (looksLikeNewQuestionAfterClarification(question)) break;
+    }
+    if (sourceQuestion) {
+      return { sourceQuestion, clarifyingQuestion };
+    }
+  }
+  return undefined;
+}
+
+function clarificationRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function clarificationString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
 /**
@@ -647,6 +760,11 @@ export class AgentRunEngine {
     onEvent?: (event: AgentRunEvent) => void,
     onAnswerDelta?: (delta: string) => void,
   ): Promise<AgentRun> {
+    const submittedQuestion = request.question;
+    const clarificationContinuation = resolveClarificationContinuation(request);
+    if (clarificationContinuation) {
+      request = { ...request, question: clarificationContinuation.resolvedQuestion };
+    }
     const runId = request.runId ?? this.idGenerator();
     const startedAt = this.timestamp();
     const requestedMode = request.requestedMode ?? "auto";
@@ -666,14 +784,23 @@ export class AgentRunEngine {
       type: "run.started",
       message: "Started governed agent run.",
       payload: {
-        question: request.question,
+        question: submittedQuestion,
         requestedMode,
         selectedObject: request.selectedObject,
+        ...(clarificationContinuation ? { clarificationResolved: true } : {}),
       },
     });
 
     const audience = resolveAudience(request);
-    const routeDecision = await this.decideRoute(request);
+    const routeDecision: IntentDecision = clarificationContinuation
+      ? {
+          action: "answer",
+          confidence: 1,
+          reason: "This continues a pending clarification, so I will resolve it against the original analytical question and produce a governed answer instead of asking again.",
+          followsUp: true,
+          source: "heuristic",
+        }
+      : await this.decideRoute(request);
     const defaultRoute = answerAnywayRoute(
       constrainRouteForAudience(selectRoute(request, routeDecision), audience),
       request,
@@ -981,6 +1108,7 @@ export class AgentRunEngine {
         budgetUsage: cascadeBudgetTrace(budgets),
         events,
       });
+      run.question = submittedQuestion;
       emit({
         type: "run.completed",
         message: `Agent run completed with status ${run.status}.`,
@@ -1003,7 +1131,7 @@ export class AgentRunEngine {
       });
       const run: AgentRun = {
         id: runId,
-        question: request.question,
+        question: submittedQuestion,
         requestedMode,
         route: "blocked",
         status: "blocked",

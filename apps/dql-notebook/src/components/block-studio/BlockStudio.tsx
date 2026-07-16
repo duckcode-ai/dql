@@ -1430,6 +1430,7 @@ export function BlockStudio() {
               onInsertSql={(sql, title) => handleAiSqlInsert(sql, { question: title ?? activeBlockName ?? 'analysis', title })}
               onInsertDql={insertGeneratedDqlIntoDraft}
               onArtifactReady={(payload) => insertGeneratedDqlIntoDraft(payload)}
+              answerFirstCards
               emptyHint="Describe the governed block you need. DQL checks certified blocks and semantic metrics before creating a review-required draft."
               examplePrompts={[
                 { label: 'Build from business question', prompt: 'Build a reusable governed DQL block for this business question: ' },
