@@ -18,7 +18,8 @@ import {
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { ProviderSettingsId } from '../../api/client';
+import type { ProviderSettings, ProviderSettingsId } from '../../api/client';
+import type { BlockStudioDbtStatus } from '../../store/types';
 
 type Phase = 'idle' | 'testing' | 'ok' | 'error';
 type Driver = 'duckdb' | 'snowflake' | 'databricks';
@@ -35,6 +36,19 @@ type ConnectorStatus = {
   installed: boolean;
   builtIn: boolean;
   installPath: string;
+};
+
+type ConnectedWorkspaceItem = {
+  label: string;
+  value: string;
+  detail: string;
+};
+
+type ConnectedWorkspace = {
+  loading: boolean;
+  project: ConnectedWorkspaceItem | null;
+  database: ConnectedWorkspaceItem | null;
+  ai: ConnectedWorkspaceItem | null;
 };
 
 const WH_META: Record<Driver, { name: string; glyph: string; color: string; host: string; ph: string }> = {
@@ -91,6 +105,53 @@ function pruneEmpty(obj: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v.trim().length > 0));
 }
 
+function recordString(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function connectionDriver(record: Record<string, unknown>): Driver | null {
+  const raw = recordString(record, ['driver', 'type']).toLowerCase();
+  return raw === 'duckdb' || raw === 'snowflake' || raw === 'databricks' ? raw : null;
+}
+
+function connectionLocation(driver: Driver, record: Record<string, unknown>): string {
+  if (driver === 'duckdb') return recordString(record, ['filepath', 'path']) || 'In-memory database';
+  if (driver === 'snowflake') return recordString(record, ['account', 'host']) || 'Configured account';
+  return recordString(record, ['host', 'server_hostname']) || 'Configured workspace';
+}
+
+function dbtConnectionSummary(status: BlockStudioDbtStatus): ConnectedWorkspaceItem {
+  const counts = [
+    `${status.counts.models} models`,
+    `${status.counts.sources} sources`,
+    `${status.counts.metrics} metrics`,
+  ].join(' · ');
+  return {
+    label: 'dbt project',
+    value: status.projectName || status.projectPath || 'Configured project',
+    detail: `${counts}${status.projectPath ? ` · ${status.projectPath}` : ''}`,
+  };
+}
+
+function providerConnectionSummary(provider: ProviderSettings): ConnectedWorkspaceItem {
+  const source = provider.authMode === 'subscription_cli'
+    ? 'Subscription sign-in'
+    : provider.source === 'env'
+      ? 'Environment configuration'
+      : provider.id === 'ollama'
+        ? 'Local model'
+        : 'Project-local configuration';
+  return {
+    label: 'AI provider',
+    value: provider.label,
+    detail: `${provider.model || 'Default model'} · ${source}`,
+  };
+}
+
 export function SetupOnboarding() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -120,31 +181,85 @@ export function SetupOnboarding() {
   const [aiPhase, setAiPhase] = useState<Phase>('idle');
   const [aiSummary, setAiSummary] = useState('');
   const [aiError, setAiError] = useState('');
+  const [connectedWorkspace, setConnectedWorkspace] = useState<ConnectedWorkspace>({
+    loading: true,
+    project: null,
+    database: null,
+    ai: null,
+  });
 
-  // Prefill from live server state on open.
+  // Read existing project-local state on open. This is intentionally read-only:
+  // opening Setup must never replace a working database or AI provider.
   useEffect(() => {
     let alive = true;
     (async () => {
-      const [conns, onboarding, providers] = await Promise.all([
+      const [conns, onboarding, dbtStatus, providers] = await Promise.all([
         api.getConnections().catch(() => null),
         api.getOnboardingStatus().catch(() => null),
+        api.getBlockStudioDbtStatus().catch(() => null),
         api.getProviderSettings().catch(() => null),
       ]);
       if (!alive) return;
+      let projectItem: ConnectedWorkspaceItem | null = null;
+      let databaseItem: ConnectedWorkspaceItem | null = null;
+      let aiItem: ConnectedWorkspaceItem | null = null;
+
       if (conns?.connectorStatus?.length) {
         setConnectorStatus(conns.connectorStatus as ConnectorStatus[]);
-        const def = typeof conns.default === 'string' ? (conns.connections?.[conns.default] as any) : null;
-        const defDriver = def?.driver as Driver | undefined;
-        if (defDriver && WH_META[defDriver]) setWh(defDriver);
       }
-      if (onboarding?.dbt?.projectDir) setDbtRepo(onboarding.dbt.projectDir);
+
+      const connectionName = typeof conns?.default === 'string' && conns.connections?.[conns.default]
+        ? conns.default
+        : Object.keys(conns?.connections ?? {})[0];
+      const connection = connectionName && conns?.connections?.[connectionName]
+        && typeof conns.connections[connectionName] === 'object'
+        ? conns.connections[connectionName] as Record<string, unknown>
+        : null;
+      const existingDriver = connection ? connectionDriver(connection) : null;
+      if (connection && existingDriver) {
+        setWh(existingDriver);
+        setDbFields({
+          host: existingDriver === 'duckdb'
+            ? recordString(connection, ['filepath', 'path'])
+            : existingDriver === 'snowflake'
+              ? recordString(connection, ['account', 'host'])
+              : recordString(connection, ['host', 'server_hostname']),
+          database: recordString(connection, ['database', 'dbname', 'catalog']),
+          schema: recordString(connection, ['schema', 'dataset']),
+        });
+        const location = connectionLocation(existingDriver, connection);
+        const databaseLabel = WH_META[existingDriver].name;
+        const summary = `${connectionName} · ${location}`;
+        setDbSummary(summary);
+        setDbPhase('ok');
+        databaseItem = { label: 'Database', value: databaseLabel, detail: summary };
+      }
+
+      if (dbtStatus?.configured && dbtStatus.artifacts.manifest.exists) {
+        const configuredPath = dbtStatus.projectPath || onboarding?.dbt?.projectDir || '';
+        setDbtRepo(configuredPath);
+        projectItem = dbtConnectionSummary(dbtStatus);
+        setDbtSummary(projectItem.detail);
+        setDbtPhase('ok');
+      } else if (onboarding?.dbt?.projectDir) {
+        setDbtRepo(onboarding.dbt.projectDir);
+      }
+
       const active = providers?.providers?.find((p) => p.active || p.enabled);
       if (active) {
         const match = (Object.keys(PROVIDER_META) as AiProvider[]).find((k) =>
           PROVIDER_META[k].modes.some((m) => m.id === active.id),
         );
-        if (match) setAiProvider(match);
+        if (match) {
+          const modeIndex = PROVIDER_META[match].modes.findIndex((mode) => mode.id === active.id);
+          setAiProvider(match);
+          setAiModeIdx(Math.max(0, modeIndex));
+          aiItem = providerConnectionSummary(active);
+          setAiSummary(aiItem.detail);
+          setAiPhase('ok');
+        }
       }
+      setConnectedWorkspace({ loading: false, project: projectItem, database: databaseItem, ai: aiItem });
     })();
     return () => {
       alive = false;
@@ -156,7 +271,7 @@ export function SetupOnboarding() {
     [dbtPhase, dbPhase, aiPhase],
   );
   const hints = [
-    '≈ 2 minute read',
+    connectedWorkspace.project || connectedWorkspace.database || connectedWorkspace.ai ? 'Existing connections loaded — nothing changed' : '≈ 2 minute read',
     done[1] ? 'dbt connected — continue' : 'You can test later, but answers need the manifest',
     done[2] ? 'Database connected' : 'Test to verify credentials',
     done[3] ? 'AI ready' : 'Required for AI assistance',
@@ -169,6 +284,7 @@ export function SetupOnboarding() {
   const catalogInstalling = Boolean(installing[wh]);
   const providerMeta = PROVIDER_META[aiProvider];
   const activeMode = providerMeta.modes[Math.min(aiModeIdx, providerMeta.modes.length - 1)];
+  const hasExistingSetup = Boolean(connectedWorkspace.project || connectedWorkspace.database || connectedWorkspace.ai);
 
   // ── Actions ───────────────────────────────────────────────────
   const runDbt = useCallback(async () => {
@@ -177,6 +293,11 @@ export function SetupOnboarding() {
     try {
       const projectDir = dbtRepo.trim();
       const res = await api.previewDbtOnboarding(projectDir ? { projectDir } : {});
+      await api.applyDbtOnboarding({
+        projectDir: res.projectDir,
+        manifestPath: res.manifestPath,
+        expectedFingerprint: res.fingerprint,
+      });
       const c = res.counts ?? ({} as Record<string, number>);
       const parts = [
         `${c.models ?? 0} models`,
@@ -186,6 +307,14 @@ export function SetupOnboarding() {
       if (res.projectName) parts.push(res.projectName);
       setDbtSummary(parts.join(' · '));
       setDbtPhase('ok');
+      setConnectedWorkspace((current) => ({
+        ...current,
+        project: {
+          label: 'dbt project',
+          value: res.projectName || res.projectDir,
+          detail: `${parts.join(' · ')} · ${res.projectDir}`,
+        },
+      }));
     } catch (e) {
       setDbtError(e instanceof Error ? e.message : 'Could not compile the dbt manifest');
       setDbtPhase('error');
@@ -214,8 +343,13 @@ export function SetupOnboarding() {
   const testDb = useCallback(async () => {
     setDbPhase('testing');
     setDbError('');
+    let previousConnections: Record<string, unknown> | null = null;
+    let previousDefault = '';
+    let candidateSaved = false;
     try {
       const current = await api.getConnections();
+      previousConnections = { ...(current.connections ?? {}) };
+      previousDefault = current.default;
       const connections = { ...(current.connections ?? {}) } as Record<string, any>;
       const name =
         typeof current.default === 'string' && connections[current.default]
@@ -224,19 +358,37 @@ export function SetupOnboarding() {
       const existing = connections[name] ?? {};
       const patch =
         dbAuth === 'creds'
-          ? pruneEmpty({ host: dbFields.host, database: dbFields.database, schema: dbFields.schema })
+          ? pruneEmpty({
+              [wh === 'duckdb' ? 'filepath' : wh === 'snowflake' ? 'account' : 'host']: dbFields.host,
+              database: dbFields.database,
+              schema: dbFields.schema,
+            })
           : pruneEmpty({ enterpriseKey });
       connections[name] = { ...existing, driver: wh, ...patch };
       await api.saveConnections(connections, name);
+      candidateSaved = true;
       const res = await api.testConnection();
       if (res.ok) {
         setDbSummary(res.message || `Connected to ${whMeta.name}`);
         setDbPhase('ok');
+        setConnectedWorkspace((currentWorkspace) => ({
+          ...currentWorkspace,
+          database: {
+            label: 'Database',
+            value: whMeta.name,
+            detail: `${name} · ${dbFields.host || 'Configured connection'}`,
+          },
+        }));
       } else {
+        await api.saveConnections(previousConnections, previousDefault);
+        candidateSaved = false;
         setDbError(res.message || 'Connection failed');
         setDbPhase('error');
       }
     } catch (e) {
+      if (candidateSaved && previousConnections) {
+        await api.saveConnections(previousConnections, previousDefault).catch(() => undefined);
+      }
       setDbError(e instanceof Error ? e.message : 'Connection failed');
       setDbPhase('error');
     }
@@ -250,9 +402,16 @@ export function SetupOnboarding() {
       const overrides = providerMeta.needsKey && aiKey.trim() ? { apiKey: aiKey.trim() } : undefined;
       const res = await api.testProviderSettings(id, overrides);
       if (res.ok) {
-        await api.saveProviderSettings({ id, enabled: true, apiKey: overrides?.apiKey });
+        const saved = await api.saveProviderSettings({ id, enabled: true, apiKey: overrides?.apiKey });
+        const configured = saved.providers.find((provider) => provider.active || provider.id === id);
         setAiSummary(res.message || `${providerMeta.name} ready`);
         setAiPhase('ok');
+        if (configured) {
+          setConnectedWorkspace((currentWorkspace) => ({
+            ...currentWorkspace,
+            ai: providerConnectionSummary(configured),
+          }));
+        }
       } else {
         setAiError(res.message || 'Provider test failed');
         setAiPhase('error');
@@ -479,14 +638,14 @@ export function SetupOnboarding() {
             fontFamily: 'inherit',
           }}
         >
-          Skip for now
+          {hasExistingSetup ? 'Close' : 'Skip for now'}
         </button>
       </div>
 
       {/* ══ Body ══ */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         <div style={{ width: 'min(860px, 100% - 48px)', margin: '0 auto', padding: '30px 0 40px' }}>
-          {step === 0 && <WelcomeStep t={t} />}
+          {step === 0 && <WelcomeStep t={t} workspace={connectedWorkspace} />}
 
           {step === 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560, margin: '0 auto', animation: 'dql-setup-fadein 0.25s ease-out' }}>
@@ -520,7 +679,12 @@ export function SetupOnboarding() {
                     </span>
                   </div>
                 ) : (
-                  okBox('Connected — manifest compiled', dbtSummary)
+                  <>
+                    {okBox('Connected — manifest ready', dbtSummary)}
+                    <button type="button" onClick={() => setDbtPhase('idle')} style={{ ...primaryBtn, background: 'transparent', color: t.accent, border: `1px solid ${t.accent}`, boxShadow: 'none' }}>
+                      Connect a different project
+                    </button>
+                  </>
                 )}
                 {dbtPhase === 'error' && errBox(dbtError)}
               </div>
@@ -719,7 +883,12 @@ export function SetupOnboarding() {
                 ) : dbPhase === 'testing' ? (
                   <span style={shimmer}>Running a read-only test query…</span>
                 ) : (
-                  okBox(`Connected to ${whMeta.name}`, dbSummary)
+                  <>
+                    {okBox(`Connected to ${whMeta.name}`, dbSummary)}
+                    <button type="button" onClick={() => setDbPhase('idle')} style={{ ...primaryBtn, background: 'transparent', color: t.accent, border: `1px solid ${t.accent}`, boxShadow: 'none' }}>
+                      Change database connection
+                    </button>
+                  </>
                 )}
                 {dbPhase === 'error' && errBox(dbError)}
               </div>
@@ -796,7 +965,12 @@ export function SetupOnboarding() {
                 ) : aiPhase === 'testing' ? (
                   <span style={shimmer}>Running a test prompt…</span>
                 ) : (
-                  okBox(`${providerMeta.name} ready`, aiSummary)
+                  <>
+                    {okBox(`${providerMeta.name} ready`, aiSummary)}
+                    <button type="button" onClick={() => setAiPhase('idle')} style={{ ...primaryBtn, background: 'transparent', color: t.accent, border: `1px solid ${t.accent}`, boxShadow: 'none' }}>
+                      Change AI provider
+                    </button>
+                  </>
                 )}
                 {aiPhase === 'error' && errBox(aiError)}
               </div>
@@ -888,7 +1062,7 @@ export function SetupOnboarding() {
         <span style={{ fontSize: 11, color: t.textMuted }}>{hints[step]}</span>
         {hasNext ? (
           <button onClick={() => setStep((s) => Math.min(4, s + 1))} style={{ ...primaryBtn, padding: '0 18px' }}>
-            {NEXT_LABELS[step]}
+            {step === 0 && hasExistingSetup ? 'Review setup' : NEXT_LABELS[step]}
             <ArrowRight size={13} strokeWidth={2} />
           </button>
         ) : (
@@ -1002,7 +1176,9 @@ function StartCard({
   );
 }
 
-function WelcomeStep({ t }: { t: (typeof themes)[keyof typeof themes] }) {
+function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]; workspace: ConnectedWorkspace }) {
+  const connectedItems = [workspace.project, workspace.database, workspace.ai].filter((item): item is ConnectedWorkspaceItem => Boolean(item));
+  const hasConnections = connectedItems.length > 0;
   const stages = [
     { icon: <Database size={13} strokeWidth={1.75} />, color: BLUE, title: 'Sources & dbt', body: 'Your warehouse and models — dbt keeps ownership', tint: false },
     { icon: <Boxes size={13} strokeWidth={1.75} />, color: '#0a6b5e', title: 'Domains & modeling', body: 'Business entities, proven joins, skills', tint: 'green' },
@@ -1047,18 +1223,26 @@ function WelcomeStep({ t }: { t: (typeof themes)[keyof typeof themes] }) {
               color: t.accent,
             }}
           >
-            <Sparkles size={12} strokeWidth={1.75} />
-            Welcome to DQL
+            {hasConnections ? <Check size={12} strokeWidth={2} /> : <Sparkles size={12} strokeWidth={1.75} />}
+            {hasConnections ? 'Current workspace' : 'Welcome to DQL'}
           </div>
           <h1 style={{ margin: '12px 0 0', fontSize: 27, fontWeight: 700, letterSpacing: '-0.02em', color: t.textPrimary, lineHeight: 1.25 }}>
-            Analytics your AI<br />can't hallucinate
+            {hasConnections ? (
+              <>{workspace.project?.value || 'Your workspace'}<br />is already connected</>
+            ) : (
+              <>Analytics your AI<br />can't hallucinate</>
+            )}
           </h1>
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 9 }}>
-            {[
+            {(hasConnections ? [
+              'Existing database and AI settings are kept until you explicitly change them',
+              'Review any step to test or replace its current connection',
+              'Ask AI, notebooks, blocks, and apps all use this same project context',
+            ] : [
               'Sits on your dbt project — models and tests stay yours',
               'Questions route through certified blocks before AI writes SQL',
               'Every answer carries a trust label your stakeholders can read',
-            ].map((line) => (
+            ]).map((line) => (
               <div key={line} style={{ display: 'flex', gap: 9, alignItems: 'flex-start' }}>
                 <Check size={13} strokeWidth={2} color={t.success} style={{ flexShrink: 0, marginTop: 3 }} />
                 <span style={{ fontSize: 13, color: t.textSecondary, lineHeight: 1.55 }}>{line}</span>
@@ -1066,8 +1250,23 @@ function WelcomeStep({ t }: { t: (typeof themes)[keyof typeof themes] }) {
             ))}
           </div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-setup-float 4s ease-in-out infinite' }}>
-          <div style={{ border: `1px solid ${t.tableBorder}`, borderRadius: 12, background: t.cellBg, padding: '12px 14px', boxShadow: '0 8px 28px rgba(26,26,26,0.06)' }}>
+        {hasConnections ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {connectedItems.map((item) => (
+              <div key={item.label} style={{ border: `1px solid ${t.tableBorder}`, borderRadius: 10, background: t.cellBg, padding: '10px 12px', display: 'flex', alignItems: 'flex-start', gap: 9 }}>
+                <Check size={13} strokeWidth={2} color={t.success} style={{ marginTop: 2, flexShrink: 0 }} />
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                  <span style={{ fontSize: 10.5, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{item.label}</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: t.textPrimary }}>{item.value}</span>
+                  <span style={{ fontSize: 10.5, color: t.textMuted, overflowWrap: 'anywhere' }}>{item.detail}</span>
+                </span>
+              </div>
+            ))}
+            {workspace.loading ? <span style={{ fontSize: 11, color: t.textMuted }}>Checking project connections…</span> : null}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-setup-float 4s ease-in-out infinite' }}>
+            <div style={{ border: `1px solid ${t.tableBorder}`, borderRadius: 12, background: t.cellBg, padding: '12px 14px', boxShadow: '0 8px 28px rgba(26,26,26,0.06)' }}>
             <div style={{ background: t.pillBg, borderRadius: '12px 12px 3px 12px', padding: '7px 11px', fontSize: 11.5, color: t.textPrimary, width: 'fit-content', marginLeft: 'auto' }}>
               What was revenue last quarter?
             </div>
@@ -1082,11 +1281,12 @@ function WelcomeStep({ t }: { t: (typeof themes)[keyof typeof themes] }) {
               Q2 revenue was <strong>$4.82M</strong>, up 6.4% from Q1.
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, justifyContent: 'flex-end', fontSize: 10.5, color: t.textMuted, paddingRight: 4 }}>
-            <Network size={11} strokeWidth={1.75} color={t.accent} />
-            Traceable from source table to this answer
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, justifyContent: 'flex-end', fontSize: 10.5, color: t.textMuted, paddingRight: 4 }}>
+              <Network size={11} strokeWidth={1.75} color={t.accent} />
+              Traceable from source table to this answer
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* chapter 01 */}
