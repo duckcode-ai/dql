@@ -43,7 +43,9 @@ export function buildExecutionPlan(
     // Resolve @metric(name) and @dim(name) references in SQL cells
     let resolvedSql = cell.source;
     if (options?.semanticLayer && hasSemanticRefs(cell.source)) {
-      const resolution = resolveSemanticRefs(cell.source, options.semanticLayer);
+      const resolution = resolveSemanticRefs(cell.source, options.semanticLayer, {
+        tableMapping: options.tableMapping,
+      });
       if (resolution.unresolvedRefs.length > 0) {
         throw new Error(
           `Unresolved semantic references in SQL cell: ${resolution.unresolvedRefs.join(', ')}. ` +

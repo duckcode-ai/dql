@@ -36,6 +36,17 @@ export function hasDbtSemanticManifest(projectRoot: string, configuredPath?: str
   return existsSync(join(resolveDbtProjectRoot(projectRoot, configuredPath), 'target', 'semantic_manifest.json'));
 }
 
+/** Check whether the configured MetricFlow executable is callable. */
+export function hasMetricFlowCli(): boolean {
+  const bin = process.env.DQL_METRICFLOW_BIN || process.env.METRICFLOW_BIN || 'mf';
+  const result = spawnSync(bin, ['--version'], {
+    encoding: 'utf-8',
+    env: process.env,
+    timeout: 3000,
+  });
+  return !result.error && result.status === 0;
+}
+
 export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricFlowCompileResult {
   const dbtRoot = resolveDbtProjectRoot(request.projectRoot, request.dbtProjectPath);
   if (!existsSync(join(dbtRoot, 'target', 'semantic_manifest.json'))) {

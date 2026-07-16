@@ -14,6 +14,7 @@ import {
   generateProposeDrafts,
   generateSemanticCompostingDrafts,
   buildSemanticLayerDiagnostics,
+  buildSemanticTableMapping,
   createBlockArtifacts,
   createDqlArtifactGenerationSessionForProject,
   createDqlGenerationSessionForProject,
@@ -73,6 +74,35 @@ afterEach(() => {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe('semantic runtime table mapping', () => {
+  it('qualifies tables owned only by dbt measures or semantic models', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'commerce',
+        sql: 'revenue', type: 'custom', table: '', metricType: 'simple',
+        typeParams: { measure: { name: 'revenue' } },
+      }],
+      dimensions: [],
+      measures: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'commerce',
+        agg: 'sum', expr: 'amount', table: 'order_items',
+      }],
+      semanticModels: [{
+        name: 'customers', label: 'Customers', description: '', table: 'customers',
+        entities: [], measures: [], dimensions: [], timeDimensions: [],
+      }],
+    });
+
+    expect(buildSemanticTableMapping(semanticLayer, [
+      { table_schema: 'analytics', table_name: 'order_items' },
+      { table_schema: 'analytics', table_name: 'customers' },
+    ])).toEqual({
+      order_items: 'analytics.order_items',
+      customers: 'analytics.customers',
+    });
+  });
 });
 
 describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
@@ -2175,6 +2205,39 @@ describe('EXP-001 exploratory join probes', () => {
 
     expect(result.blockedReason).toContain('allocation policy');
     expect(result.sql).toContain('SUM(c.lifetime_tax_paid)');
+  });
+
+  it('renames a percent-style alias when the generated expression is an amount', () => {
+    const result = repairExploratorySqlBeforeExecution(`
+      SELECT c.customer_name,
+        SUM(CASE WHEN p.category = 'beverage' THEN oi.product_price ELSE 0 END) AS beverage_revenue_pct
+      FROM customers c
+      JOIN order_items oi ON c.customer_id = oi.customer_id
+      JOIN products p ON oi.product_id = p.product_id
+      GROUP BY c.customer_name
+      ORDER BY beverage_revenue_pct DESC
+    `, [], 'Which customers bought the most beverage revenue?');
+
+    expect(result.sql).toContain('AS beverage_revenue');
+    expect(result.sql).toContain('ORDER BY beverage_revenue DESC');
+    expect(result.sql).not.toContain('beverage_revenue_pct');
+    expect(result.repairs).toContainEqual(expect.stringContaining('returns an amount'));
+  });
+
+  it('preserves percentage aliases for percentage questions and ratio expressions', () => {
+    const percentageQuestion = repairExploratorySqlBeforeExecution(
+      'SELECT SUM(revenue) AS revenue_pct FROM orders',
+      [],
+      'What percentage of revenue is from beverages?',
+    );
+    const ratioExpression = repairExploratorySqlBeforeExecution(
+      'SELECT SUM(beverage_revenue) / SUM(revenue) * 100 AS revenue_pct FROM orders',
+      [],
+      'Show beverage revenue',
+    );
+
+    expect(percentageQuestion.sql).toContain('AS revenue_pct');
+    expect(ratioExpression.sql).toContain('AS revenue_pct');
   });
 
   it('uses safely quoted identifiers and fixed bounded samples', () => {

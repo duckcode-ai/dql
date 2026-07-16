@@ -44,8 +44,10 @@ import {
   deserializeNotebook,
   getConnectorFormSchemas,
   hasSemanticRefs,
+  hasStandaloneSemanticRef,
   resolveSemanticRefs,
   type NotebookCell,
+  type SemanticRefResolutionOptions,
 } from '@duckcodeailabs/dql-notebook';
 import {
   loadSemanticLayerFromDir,
@@ -306,6 +308,7 @@ import {
   MetricFlowUnavailableError,
   compileMetricFlowQuery,
   hasDbtSemanticManifest,
+  hasMetricFlowCli,
 } from "./metricflow.js";
 import {
   NotebookDatasetWorkspace,
@@ -9101,9 +9104,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         source: q.source ?? null,
       }));
       const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
-      const dbtExecutionReady = provider === 'dbt'
+      const dbtManifestReady = provider === 'dbt'
         ? hasDbtSemanticManifest(projectRoot, semanticConfig?.projectPath)
         : false;
+      const metricFlowReady = provider === 'dbt' ? hasMetricFlowCli() : false;
+      const dbtExecutionReady = dbtManifestReady && metricFlowReady;
+      const dbtExecutionSetup = dbtExecutionReady
+        ? null
+        : !dbtManifestReady && !metricFlowReady
+          ? 'Run `dbt parse` or `dbt build` so target/semantic_manifest.json exists, and install MetricFlow so `mf` is on PATH.'
+          : !dbtManifestReady
+            ? 'Run `dbt parse` or `dbt build` so target/semantic_manifest.json exists.'
+            : 'Install MetricFlow so `mf` is on PATH, or set DQL_METRICFLOW_BIN to the MetricFlow executable.';
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
         available: true,
@@ -9112,9 +9124,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? {
               engine: 'metricflow',
               ready: dbtExecutionReady,
-              setup: dbtExecutionReady
-                ? null
-                : 'Run `dbt parse` or `dbt build` so target/semantic_manifest.json exists, and install MetricFlow so `mf` is on PATH.',
+              setup: dbtExecutionSetup,
             }
           : { engine: 'native', ready: true, setup: null },
         errors: semanticLayerErrors,
@@ -9923,7 +9933,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
           return;
         }
-        const semantic = prepareSemanticSql(body.sql, semanticLayer);
+        const executionConnection = await resolveExecutionConnection(
+          body as Record<string, unknown>,
+        );
+        const tableMapping = hasStandaloneSemanticRef(body.sql)
+          ? await resolveSemanticTableMapping(executor, executionConnection, semanticLayer)
+          : undefined;
+        const semantic = prepareSemanticSql(body.sql, semanticLayer, { tableMapping });
         if (semantic.unresolvedRefs.length > 0) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({
@@ -9935,9 +9951,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }));
           return;
         }
-        const executionConnection = await resolveExecutionConnection(
-          body as Record<string, unknown>,
-        );
         const prepared = prepareLocalExecution(
           semantic.sql,
           executionConnection,
@@ -13720,6 +13733,7 @@ export function repairExploratorySqlBeforeExecution(
   let repairedSql = qualifyExploratoryRelationsFromSchema(sql, schemaContext, repairs);
   repairedSql = repairExploratoryRelationQualifiers(repairedSql, repairs);
   repairedSql = repairExploratoryLifetimeMeasureSelection(repairedSql, schemaContext, question, repairs);
+  repairedSql = repairExploratoryMisleadingPercentAliases(repairedSql, question, repairs);
   const grainRepair = repairExploratoryNonAdditiveAggregates(repairedSql, schemaContext, repairs);
   repairedSql = grainRepair.sql;
   return {
@@ -13727,6 +13741,37 @@ export function repairExploratorySqlBeforeExecution(
     repairs,
     ...(grainRepair.blockedReason ? { blockedReason: grainRepair.blockedReason } : {}),
   };
+}
+
+/**
+ * Prevent a generated amount/count from being presented as a percentage.
+ * The repair is intentionally conservative: percent-intent questions and
+ * expressions that visibly calculate a ratio/percentage are left untouched.
+ */
+function repairExploratoryMisleadingPercentAliases(
+  sql: string,
+  question: string,
+  repairs: string[],
+): string {
+  if (/\b(percent(?:age)?|pct|share|ratio|rate|proportion)\b/i.test(question)) return sql;
+
+  const aggregateAlias = /((?:SUM|AVG|COUNT|MIN|MAX)\s*\([^)]*\))\s+AS\s+([a-zA-Z_][a-zA-Z0-9_]*?)(?:_pct|_percent|_percentage)\b/gi;
+  const aliases = new Map<string, string>();
+  for (const match of sql.matchAll(aggregateAlias)) {
+    const expression = match[1];
+    const oldAlias = match[0].match(/\bAS\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*$/i)?.[1];
+    const newAlias = match[2];
+    if (!oldAlias || !newAlias) continue;
+    if (/\/|\bpercent(?:age)?\b|\bratio\b|\brate\b|\*\s*100\b|\b100\s*\*/i.test(expression)) continue;
+    aliases.set(oldAlias, newAlias);
+  }
+
+  let repaired = sql;
+  for (const [oldAlias, newAlias] of aliases) {
+    repaired = repaired.replace(new RegExp(`\\b${escapeExploratoryRegex(oldAlias)}\\b`, 'g'), newAlias);
+    repairs.push(`Renamed misleading percentage alias ${oldAlias} to ${newAlias}; the expression returns an amount, not a percentage.`);
+  }
+  return repaired;
 }
 
 /**
@@ -14091,11 +14136,12 @@ export interface PreparedSemanticSql {
 export function prepareSemanticSql(
   sql: string,
   semanticLayer: SemanticLayer | undefined,
+  options?: SemanticRefResolutionOptions,
 ): PreparedSemanticSql {
   if (!hasSemanticRefs(sql)) {
     return { sql, semanticRefs: { metrics: [], dimensions: [] }, unresolvedRefs: [] };
   }
-  const resolution = resolveSemanticRefs(sql, semanticLayer);
+  const resolution = resolveSemanticRefs(sql, semanticLayer, options);
   return {
     sql: resolution.resolvedSql,
     semanticRefs: {
@@ -14807,7 +14853,10 @@ export function buildSemanticTableMapping(
   const allSemanticTables = new Set<string>();
   for (const metric of semanticLayer.listMetrics()) allSemanticTables.add(metric.table);
   for (const dimension of semanticLayer.listDimensions()) allSemanticTables.add(dimension.table);
+  for (const measure of semanticLayer.listMeasures()) allSemanticTables.add(measure.table);
+  for (const model of semanticLayer.listSemanticModels()) allSemanticTables.add(model.table);
   for (const semTable of allSemanticTables) {
+    if (!semTable) continue;
     if (dbTableNames.has(semTable) && schemaQualified.has(semTable)) {
       tableMapping[semTable] = schemaQualified.get(semTable)!;
     }
@@ -14845,23 +14894,30 @@ function composeRuntimeSemanticQuery(
     const dbtProjectPath = effectiveSemanticConfig?.provider === 'dbt'
       ? effectiveSemanticConfig.projectPath
       : context.projectConfig.dbt?.projectDir;
-    const compiled = compileMetricFlowQuery({
-      projectRoot: context.projectRoot,
-      dbtProjectPath,
-      metrics: request.metrics,
-      dimensions: request.dimensions,
-      filters: request.filters,
-      timeDimension: request.timeDimension,
-      orderBy: request.orderBy,
-      limit: request.limit,
-      savedQuery: request.savedQuery,
-    });
-    return {
-      sql: compiled.sql,
-      joins: [],
-      tables: [],
-      engine: 'metricflow',
-    };
+    try {
+      const compiled = compileMetricFlowQuery({
+        projectRoot: context.projectRoot,
+        dbtProjectPath,
+        metrics: request.metrics,
+        dimensions: request.dimensions,
+        filters: request.filters,
+        timeDimension: request.timeDimension,
+        orderBy: request.orderBy,
+        limit: request.limit,
+        savedQuery: request.savedQuery,
+      });
+      return {
+        sql: compiled.sql,
+        joins: [],
+        tables: [],
+        engine: 'metricflow',
+      };
+    } catch (error) {
+      // An explicit MetricFlow request must retain its strict engine contract.
+      // For the default dbt path, a missing local CLI may fall back only if the
+      // native composer can safely materialize the requested simple metrics.
+      if (request.engine === 'metricflow' || !(error instanceof MetricFlowUnavailableError)) throw error;
+    }
   }
 
   const composed = semanticLayer.composeQuery({

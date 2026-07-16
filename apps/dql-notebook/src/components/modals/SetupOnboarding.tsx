@@ -592,7 +592,7 @@ export function SetupOnboarding() {
                     <>
                       <Download size={13} strokeWidth={1.75} color={t.textMuted} />
                       <span style={{ flex: 1, fontSize: 12, color: t.textSecondary }}>
-                        Catalog driver for <strong>{whMeta.name}</strong> is not installed
+                        Connector package for <strong>{whMeta.name}</strong> is not installed
                       </span>
                       <button
                         onClick={installCatalog}
@@ -609,7 +609,7 @@ export function SetupOnboarding() {
                           fontFamily: 'inherit',
                         }}
                       >
-                        Install catalog
+                        Install connector
                       </button>
                     </>
                   )}

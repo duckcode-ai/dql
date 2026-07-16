@@ -399,6 +399,46 @@ describe('SemanticLayer', () => {
     expect(layer.listCompatibleDimensions(['revenue']).map((dimension) => dimension.name)).toEqual(['region']);
     expect(layer.listCompatibleDimensions(['revenue', 'orders']).map((dimension) => dimension.name)).toEqual(['region']);
   });
+
+  it('composes dbt simple metrics natively through their input measures', () => {
+    const layer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'sales',
+        sql: 'revenue', type: 'custom', table: '', metricType: 'simple',
+        typeParams: { measure: { name: 'revenue' } },
+      }],
+      dimensions: [{
+        name: 'category', label: 'Category', description: '', domain: 'sales',
+        sql: 'category', type: 'string', table: 'order_items',
+      }],
+      measures: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'sales',
+        agg: 'sum', expr: 'product_price', table: 'order_items',
+      }],
+    });
+
+    const composed = layer.composeQuery({
+      metrics: ['revenue'],
+      dimensions: ['category'],
+      tableMapping: { order_items: 'analytics.order_items' },
+    });
+
+    expect(composed?.sql).toContain('SUM(product_price) AS revenue');
+    expect(composed?.sql).toContain('FROM analytics.order_items');
+    expect(composed?.sql).toContain('GROUP BY category');
+  });
+
+  it('refuses to natively compose a dbt derived metric without a physical table', () => {
+    const layer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue_ratio', label: 'Revenue ratio', description: '', domain: 'sales',
+        sql: 'revenue_ratio', type: 'custom', table: '', metricType: 'ratio',
+      }],
+      dimensions: [],
+    });
+
+    expect(layer.composeQuery({ metrics: ['revenue_ratio'], dimensions: [] })).toBeNull();
+  });
 });
 
 describe('parseMetricDefinition', () => {

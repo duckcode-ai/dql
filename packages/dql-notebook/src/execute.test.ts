@@ -23,6 +23,29 @@ describe('buildExecutionPlan', () => {
     expect(plan?.sqlParams).toEqual([]);
   });
 
+  it('builds an executable query for a standalone semantic dimension cell', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [],
+      dimensions: [{
+        name: 'product_name', label: 'Product name', description: '', domain: 'commerce',
+        sql: 'product_name', type: 'string', table: 'products',
+      }],
+    });
+
+    const plan = buildExecutionPlan({
+      id: 'cell-semantic-dimension',
+      type: 'sql',
+      title: 'Product name',
+      source: '@dim(product_name)',
+    }, {
+      semanticLayer,
+      tableMapping: { products: 'analytics.products' },
+    });
+
+    expect(plan?.sql).toContain('FROM analytics.products AS products');
+    expect(plan?.sql).toContain('SELECT DISTINCT product_name AS product_name');
+  });
+
   it('applies semantic table mapping when composing semantic block SQL', () => {
     const semanticLayer = new SemanticLayer({
       metrics: [{

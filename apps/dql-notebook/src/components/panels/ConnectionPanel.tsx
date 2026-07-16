@@ -1492,7 +1492,7 @@ function ConnectorStatusRow({
           title={status?.installCommand}
           style={{ flexShrink: 0, height: 28, padding: '0 12px', borderRadius: 8, border: `1px solid ${t.accent}`, background: 'var(--accent-dim)', color: t.accent, fontSize: 11.5, fontWeight: 650, cursor: installing ? 'not-allowed' : 'pointer', fontFamily: t.font, opacity: installing ? 0.75 : 1 }}
         >
-          {installing ? 'Installing…' : 'Install catalog'}
+          {installing ? 'Installing…' : 'Install connector'}
         </button>
       ) : (
         <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 650, color: tone, fontFamily: t.font }}>

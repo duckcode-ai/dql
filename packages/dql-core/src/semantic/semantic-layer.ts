@@ -577,9 +577,9 @@ export class SemanticLayer {
 
     // Resolve metric definitions
     const resolvedMetrics = metrics
-      .map((m) => this.metrics.get(m))
+      .map((m) => this.resolveComposableMetric(m))
       .filter(Boolean) as MetricDefinition[];
-    if (resolvedMetrics.length === 0) return null;
+    if (resolvedMetrics.length !== metrics.length) return null;
 
     // Resolve dimension definitions
     const resolvedDimensions = dimensions
@@ -830,6 +830,51 @@ export class SemanticLayer {
         ...resolvedDimensions.map((dimension) => dimension.name),
         ...(timeDimDef && timeDimension ? [`${timeDimDef.name}_${timeDimension.granularity}`] : []),
       ],
+    };
+  }
+
+  /**
+   * dbt simple metrics may store physical ownership on their input measure
+   * instead of duplicating it on the metric node. Materialize that contract for
+   * native composition; derived/ratio/cumulative metrics remain MetricFlow-only.
+   */
+  private resolveComposableMetric(name: string): MetricDefinition | undefined {
+    const metric = this.metrics.get(name);
+    if (!metric) return undefined;
+    if (metric.table) return metric;
+    if (metric.metricType && metric.metricType !== 'simple') return undefined;
+
+    const measureNames: string[] = [];
+    const direct = metric.typeParams?.measure;
+    if (typeof direct === 'string') measureNames.push(direct);
+    else if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+      const directName = (direct as Record<string, unknown>).name;
+      if (typeof directName === 'string') measureNames.push(directName);
+    }
+    const inputs = metric.typeParams?.input_measures;
+    if (Array.isArray(inputs)) {
+      for (const input of inputs) {
+        if (typeof input === 'string') measureNames.push(input);
+        else if (input && typeof input === 'object' && !Array.isArray(input)) {
+          const inputName = (input as Record<string, unknown>).name;
+          if (typeof inputName === 'string') measureNames.push(inputName);
+        }
+      }
+    }
+    measureNames.push(metric.name);
+
+    const measure = measureNames
+      .map((measureName) => this.measures.get(measureName))
+      .find((candidate) => Boolean(candidate?.table));
+    if (!measure || measure.nonAdditiveDimension) return undefined;
+    const type = normalizeMeasureMetricType(measure.agg);
+    if (!type) return undefined;
+    return {
+      ...metric,
+      table: measure.table,
+      cube: metric.cube ?? measure.cube,
+      sql: measure.expr?.trim() || (type === 'count' ? '*' : measure.name),
+      type,
     };
   }
 
@@ -1314,6 +1359,22 @@ function renderMetricExpression(metric: MetricDefinition): string {
     case 'custom':
     default:
       return sql;
+  }
+}
+
+function normalizeMeasureMetricType(agg: string): MetricDefinition['type'] | null {
+  switch (agg.toLowerCase()) {
+    case 'sum':
+    case 'count':
+    case 'count_distinct':
+    case 'avg':
+    case 'min':
+    case 'max':
+      return agg.toLowerCase() as MetricDefinition['type'];
+    case 'average':
+      return 'avg';
+    default:
+      return null;
   }
 }
 

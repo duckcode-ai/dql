@@ -133,14 +133,14 @@ export function HelpDocsPage() {
             <pre style={codeBlock}>cd my-dbt-project{'\n'}dql notebook</pre>
             <div style={{ margin: '14px 0 0', display: 'flex', gap: 9, alignItems: 'flex-start', border: '1px solid var(--status-info-border)', background: 'var(--accent-dim)', borderRadius: 10, padding: '11px 13px' }}>
               <Info size={13} color={t.accent} style={{ flexShrink: 0, marginTop: 2 }} />
-              <span style={{ fontSize: 12.5, lineHeight: 1.6, color: t.textSecondary }}><strong>Requirements:</strong> Node 20+, git, and a dbt project (dbt-core 1.6+ or dbt Cloud). No database drivers needed — DQL bundles them.</span>
+              <span style={{ fontSize: 12.5, lineHeight: 1.6, color: t.textSecondary }}><strong>Requirements:</strong> Node 20+, git, and a dbt project (dbt-core 1.6+ or dbt Cloud). DQL includes DuckDB and can install supported warehouse connectors into the project when needed.</span>
             </div>
             {shot('The workbench opens on localhost with your project loaded.', 'Screenshot: terminal after `dql notebook` opens the workbench')}
           </div>
 
           <div ref={setSectionRef(1)} style={{ marginTop: 44 }}>
             {h2('02', 'Connect your database')}
-            <p style={para}>Open <strong>Settings → Database</strong>. Pick your warehouse and the form adjusts to what that warehouse needs — DuckDB just wants a file path; Snowflake wants an account URL and SSO.</p>
+            <p style={para}>Open <strong>Settings → Database</strong>. Pick your warehouse and the form adjusts to what that warehouse needs — DuckDB uses a file path, while Snowflake supports password, key-pair, SSO, OAuth, and workload-identity authentication.</p>
             <ol style={{ margin: '12px 0 0', paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 8 }}>
               <li>Choose your warehouse from the dropdown.</li>
               <li>Fill the connection fields (credentials stay in <span style={inlineCode}>.dql/</span>, never leave your machine).</li>
@@ -212,4 +212,3 @@ export function HelpDocsPage() {
     </div>
   );
 }
-
