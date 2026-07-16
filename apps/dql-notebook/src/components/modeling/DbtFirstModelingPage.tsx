@@ -338,7 +338,7 @@ export function DbtFirstModelingPage() {
                 <LayerToolbar modelingView={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={selectedAreaEntityIds?.size ?? Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onNewArea={() => setEditor({ kind: 'area' })} onModelingView={setModelingView} onColumnMode={setColumnMode} onSearch={setDiagramSearch} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
+                  <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
                 </div>
               </div>
             )}
@@ -378,6 +378,7 @@ export function DbtFirstModelingPage() {
             <EntityInspector
               entity={selectedEntity}
               detail={nodeDetail}
+              relationships={domainRelationships}
               t={t}
               onEdit={() =>
                 setEditor({
@@ -387,6 +388,7 @@ export function DbtFirstModelingPage() {
                 })
               }
               onEditDbtSource={() => setDbtSourceEntity(selectedEntity)}
+              onSelectRelationship={(relationship) => setSelectedId(relationshipRecordKey(data.modeling.relationships, relationship))}
             />
           ) : selectedRelationship ? (
             <RelationshipInspector
@@ -1686,43 +1688,74 @@ function DbtInventory({ data, domain, unbound, t, onBind }: { data: DbtFirstMode
   );
 }
 
-function EntityInspector({ entity, detail, t, onEdit, onEditDbtSource }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; t: Theme; onEdit: () => void; onEditDbtSource: () => void }) {
+// Prototype entity inspector: kind square + mono name + uppercase kind,
+// description, dbt-binding mono box, columns with PK/FK glyphs, relationship
+// click-through list, and an Edit entity action.
+function EntityInspector({ entity, detail, relationships = [], t, onEdit, onEditDbtSource, onSelectRelationship }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; relationships?: ManifestModelRelationship[]; t: Theme; onEdit: () => void; onEditDbtSource: () => void; onSelectRelationship?: (relationship: ManifestModelRelationship) => void }) {
+  const role = (entity.analyticalRole ?? '').toLowerCase();
+  const kindColor = role.includes('fact') ? 'var(--accent)' : role.includes('dim') ? 'var(--status-success)' : 'var(--text-tertiary)';
+  const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
+  const heading: React.CSSProperties = { fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, margin: '0 0 5px' };
+  const related = relationships.filter((relationship) => relationship.from === entity.id || relationship.to === entity.id || relationship.from === entity.localId || relationship.to === entity.localId);
   return (
     <Inspector t={t}>
-      <InspectorTitle title={entity.businessName || entity.localId} subtitle={entity.domain} t={t} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 12 }}>
+        <span style={{ width: 8, height: 8, borderRadius: 2.5, background: kindColor, flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 700, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entity.businessName || entity.localId}</span>
+        <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: kindColor }}>{entity.analyticalRole ?? 'entity'}</span>
+      </div>
+      <p style={{ margin: '0 0 12px', color: t.textSecondary, fontSize: 12, lineHeight: 1.6 }}>{entity.businessContext || `Add the DQL-owned business context for ${entity.localId}. dbt descriptions remain physical-source documentation.`}</p>
+      <div style={{ marginBottom: 12 }}>
+        <div style={heading}>dbt binding</div>
+        <div style={{ fontSize: 11, fontFamily: t.fontMono, color: t.textPrimary, background: 'var(--bg-1)', border: '1px solid var(--border-subtle)', borderRadius: 7, padding: '7px 9px', overflowWrap: 'anywhere' }}>
+          {detail?.relation ?? entity.dbtUniqueId}
+        </div>
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <div style={heading}>Columns · {detail?.columns.length ?? '…'}</div>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {detail?.columns.slice(0, 16).map((column) => (
+            <div key={column.name} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '4px 2px', borderBottom: '1px solid var(--border-subtle)', fontSize: 11.5 }}>
+              <span style={{ flexShrink: 0, width: 17, fontSize: 8.5, fontWeight: 700, fontFamily: t.fontMono, color: keys.has(column.name) ? 'var(--pk)' : /(^|_)id$/.test(column.name) ? 'var(--fk)' : 'transparent' }}>
+                {keys.has(column.name) ? 'PK' : /(^|_)id$/.test(column.name) ? 'FK' : '·'}
+              </span>
+              <span style={{ flex: 1, minWidth: 0, color: t.textSecondary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{column.name}</span>
+              <span style={{ flexShrink: 0, fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>{column.type ?? '—'}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {related.length > 0 && onSelectRelationship ? (
+        <div style={{ marginBottom: 12 }}>
+          <div style={heading}>Relationships</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {related.map((relationship) => (
+              <button
+                key={relationship.qualifiedId ?? relationship.localId}
+                type="button"
+                onClick={() => onSelectRelationship(relationship)}
+                style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '6px 8px', borderRadius: 7, border: '1px solid var(--border-subtle)', background: 'var(--bg-1)', cursor: 'pointer', textAlign: 'left', fontFamily: t.font, fontSize: 11, color: t.textSecondary }}
+              >
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{relationship.localId}</span>
+                <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{relationship.cardinality === 'one_to_one' ? '1:1' : relationship.cardinality === 'one_to_many' ? '1:N' : relationship.cardinality === 'many_to_one' ? 'N:1' : 'N:N'}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <details style={{ marginBottom: 12 }}>
+        <summary style={{ ...heading, cursor: 'pointer' }}>More metadata</summary>
+        <Property label="concepts" value={entity.conceptRefs?.join(', ') || 'Not mapped'} t={t} />
+        <Property label="owner" value={entity.owner ?? 'Not declared'} t={t} />
+        <Property label="grain" value={entity.grain ?? detail?.dqlMeta?.grain ?? 'Not declared'} t={t} />
+        <Property label="keys" value={(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? [])).join(', ') || 'Not declared'} t={t} />
+        <Property label="source" value={detail?.sourcePath ?? entity.sourcePath} t={t} />
+        <Property label="dbt description" value={detail?.description ?? 'Not declared'} t={t} />
+      </details>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <Button t={t} onClick={onEdit}>Edit DQL binding</Button>
+        <Button primary t={t} onClick={onEdit}>Edit entity</Button>
         <Button t={t} onClick={onEditDbtSource}>Preview dbt source patch</Button>
       </div>
-      <h3 style={inspectorHeading(t)}>Business context</h3>
-      <p style={{ margin: '0 0 8px', color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>{entity.businessContext || `Add the DQL-owned business context for ${entity.localId}. dbt descriptions remain physical-source documentation.`}</p>
-      <Property label="concepts" value={entity.conceptRefs?.join(', ') || 'Not mapped'} t={t} />
-      <Property label="analytical role" value={entity.analyticalRole ?? 'Not declared'} t={t} />
-      <Property label="owner" value={entity.owner ?? 'Not declared'} t={t} />
-      <h3 style={inspectorHeading(t)}>Analytics identity</h3>
-      <Property label="dbt unique id" value={entity.dbtUniqueId} t={t} />
-      <Property label="relation" value={detail?.relation ?? 'Loading…'} t={t} />
-      <Property label="grain" value={entity.grain ?? detail?.dqlMeta?.grain ?? 'Not declared'} t={t} />
-      <Property label="keys" value={(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? [])).join(', ') || 'Not declared'} t={t} />
-      <Property label="source" value={detail?.sourcePath ?? entity.sourcePath} t={t} />
-      <Property label="dbt description" value={detail?.description ?? 'Not declared'} t={t} />
-      <h3 style={inspectorHeading(t)}>dbt columns ({detail?.columns.length ?? '…'})</h3>
-      {detail?.columns.slice(0, 16).map((column) => (
-        <div
-          key={column.name}
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            gap: 8,
-            padding: '6px 0',
-            borderBottom: `1px solid ${t.headerBorder}`,
-            fontSize: 11,
-          }}
-        >
-          <span>{column.name}</span>
-          <span style={{ color: t.textMuted }}>{column.type ?? '—'}</span>
-        </div>
-      ))}
     </Inspector>
   );
 }
@@ -1832,19 +1865,59 @@ function RelationshipInspector({ relationship, t, onEdit }: { relationship: Mani
   );
 }
 
+// Prototype nothing-selected inspector: stat cards, guidance line, and a
+// Model health checklist computed from real bindings/proofs/descriptions.
 function StudioSummary({ data, domainEntities, domainRelationships, t, onSelectRelationship }: { data: DbtFirstModelingResponse; domainEntities: ManifestModelEntity[]; domainRelationships: ManifestModelRelationship[]; t: Theme; onSelectRelationship: (relationship: ManifestModelRelationship) => void }) {
+  const domainLabel = domainEntities[0]?.domain ?? 'All domains';
+  const provenCount = domainRelationships.filter((relationship) => relationship.validation?.status === 'passed').length;
+  const boundCount = domainEntities.filter((entity) => Boolean(entity.dbtUniqueId)).length;
+  const missingContext = domainEntities.filter((entity) => !entity.businessContext);
+  const heading: React.CSSProperties = { fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, margin: '14px 0 5px' };
+  const statCard = (value: number, label: string) => (
+    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 9, padding: '10px 12px', background: 'var(--bg-1)' }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: t.textPrimary }}>{value}</div>
+      <div style={{ fontSize: 10.5, color: t.textMuted }}>{label}</div>
+    </div>
+  );
+  const check = (ok: boolean, text: string) => (
+    <span key={text} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, fontSize: 11.5, color: t.textSecondary, lineHeight: 1.45 }}>
+      <span style={{ color: ok ? 'var(--status-success)' : 'var(--status-warning)', flexShrink: 0, fontWeight: 700 }}>{ok ? '✓' : '△'}</span>
+      {text}
+    </span>
+  );
   return (
     <Inspector t={t}>
-      <InspectorTitle title="Domain overview" subtitle="Select a model or relationship to inspect it." t={t} />
-      <Metric value={domainEntities.length} label="Analytical entities" color={t.accent} t={t} />
-      <div style={{ height: 8 }} />
-      <Metric value={domainRelationships.length} label="Relationships" color="#377cc8" t={t} />
-      <h3 style={inspectorHeading(t)}>Relationships</h3>
-      {domainRelationships.length ? domainRelationships.map((relationship) => <button key={relationship.qualifiedId} onClick={() => onSelectRelationship(relationship)} style={{ width: '100%', textAlign: 'left', border: 0, borderBottom: `1px solid ${t.headerBorder}`, background: 'transparent', color: t.textPrimary, padding: '8px 2px', cursor: 'pointer', fontSize: 10.5 }}><b>{relationship.localId}</b><span style={{ display: 'block', color: t.textMuted, marginTop: 3 }}>{relationship.from} → {relationship.to} · {relationship.cardinality.replace(/_/g, ' ')}</span></button>) : <p style={{ color: t.textMuted, fontSize: 10.5 }}>Drag between two column handles to create the first relationship.</p>}
-      <div style={{ height: 8 }} />
-      <Metric value={Object.keys(data.modeling.contracts).length} label="Contracts" color="#2e9b63" t={t} />
-      <h3 style={inspectorHeading(t)}>Ownership boundary</h3>
-      <p style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.55 }}>dbt owns tables, columns, descriptions, tests, and metrics. DQL owns domain membership, analytical identity, safe relationship proof, contracts, certified blocks, and agent policy. Shared apps and notebooks reference this domain without moving inside it.</p>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>{domainLabel} model</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+        {statCard(domainEntities.length, domainEntities.length === 1 ? 'entity' : 'entities')}
+        {statCard(domainRelationships.length, domainRelationships.length === 1 ? 'relationship' : 'relationships')}
+      </div>
+      <p style={{ margin: '12px 0 0', color: t.textSecondary, fontSize: 12, lineHeight: 1.6 }}>
+        Select an entity to see its columns and dbt binding, or click a relationship label to review its join, cardinality, and business context.
+      </p>
+      <div style={heading}>Model health</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {domainRelationships.length > 0
+          ? check(provenCount === domainRelationships.length, provenCount === domainRelationships.length ? 'All relationships have join proofs' : `${provenCount} of ${domainRelationships.length} relationships have join proofs`)
+          : check(false, 'No relationships yet — drag between column handles to create one')}
+        {check(boundCount === domainEntities.length && domainEntities.length > 0, domainEntities.length === 0 ? 'No entities bound yet — use Bind model' : `${boundCount} of ${domainEntities.length} entities bound to dbt`)}
+        {missingContext.length > 0
+          ? check(false, `${missingContext[0].localId}${missingContext.length > 1 ? ` and ${missingContext.length - 1} more` : ''} ha${missingContext.length > 1 ? 've' : 's'} no business description`)
+          : domainEntities.length > 0 ? check(true, 'Every entity has a business description') : null}
+      </div>
+      <div style={heading}>Relationships</div>
+      {domainRelationships.length ? domainRelationships.map((relationship) => (
+        <button
+          key={relationship.qualifiedId}
+          onClick={() => onSelectRelationship(relationship)}
+          style={{ display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left', border: '1px solid var(--border-subtle)', borderRadius: 7, background: 'var(--bg-1)', color: t.textSecondary, padding: '6px 8px', marginBottom: 4, cursor: 'pointer', fontSize: 11, fontFamily: t.font }}
+        >
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{relationship.localId}</span>
+          <span style={{ fontFamily: t.fontMono, fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{relationship.cardinality === 'one_to_one' ? '1:1' : relationship.cardinality === 'one_to_many' ? '1:N' : relationship.cardinality === 'many_to_one' ? 'N:1' : 'N:N'}</span>
+        </button>
+      )) : <p style={{ color: t.textMuted, fontSize: 10.5, margin: 0 }}>Drag between two column handles to create the first relationship.</p>}
+      <div style={heading}>Ownership boundary</div>
+      <p style={{ color: t.textSecondary, fontSize: 11, lineHeight: 1.55, margin: 0 }}>dbt owns tables, columns, descriptions, tests, and metrics. DQL owns domain membership, analytical identity, safe relationship proof, contracts, certified blocks, and agent policy. Shared apps and notebooks reference this domain without moving inside it.</p>
     </Inspector>
   );
 }

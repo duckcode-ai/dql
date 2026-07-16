@@ -33,7 +33,7 @@ type EntityNodeData = {
   onResize: (id: string, width: number) => void;
 };
 
-export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
+export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onEditRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onEditRelationship?: (recordKey: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
   const layoutKey = `dql-model-layout:${selectedAreaId ?? selectedDomain ?? 'all'}`;
   const sizeKey = `${layoutKey}:sizes`;
   const [savedPositions, setSavedPositions] = useState<Record<string, { x: number; y: number }>>(() => readPositions(layoutKey));
@@ -48,6 +48,9 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
     setSavedSizes({});
   }, [resetLayoutToken]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+  // Prototype relationship popover: clicking an edge (or its pill label) opens
+  // a 316px context card at the pointer with join, cardinality, and proof.
+  const [relPopover, setRelPopover] = useState<{ x: number; y: number; recordKey: string } | null>(null);
   const handleResize = (id: string, width: number) => { const next = { ...savedSizes, [id]: Math.round(width) }; setSavedSizes(next); localStorage.setItem(sizeKey, JSON.stringify(next)); };
   const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, handleResize, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, theme]);
   const [nodes, setNodes, onNodesChange] = useNodesState(graphNodes);
@@ -82,15 +85,87 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
       toColumn: parseColumnHandle(connection.targetHandle),
     });
   };
+  const popoverRelationship = relPopover ? modeling.relationships[relPopover.recordKey] : undefined;
   return (
-    <div style={{ height: '100%', position: 'relative' }} onClick={() => setContextMenu(null)}>
-    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(_, edge) => onSelectRelationship(edge.id)} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+    <div style={{ height: '100%', position: 'relative' }} onClick={() => { setContextMenu(null); setRelPopover(null); }}>
+    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(event, edge) => { event.stopPropagation(); onSelectRelationship(edge.id); setRelPopover({ x: Math.min(event.clientX, window.innerWidth - 340), y: Math.min(event.clientY, window.innerHeight - 320), recordKey: edge.id }); }} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
       {/* Prototype dot grid: 22px spacing on the Paper canvas. */}
       <Background color="var(--border-strong)" gap={22} size={1} />
       <Controls showInteractive={false} />
       <MiniMap pannable zoomable nodeColor={(node) => domainColor(String((node.data as EntityNodeData).entity.domain))} maskColor={`${theme.appBg}bb`} />
     </ReactFlow>
     {contextMenu && <div style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y, zIndex: 50, width: 178, border: `1px solid ${theme.headerBorder}`, borderRadius: 7, background: theme.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }} onClick={(event) => event.stopPropagation()}><MenuAction label="Inspect entity" onClick={() => { onSelectEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Edit Domain Model binding" onClick={() => { onEditEntity(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Ask AI about entity" onClick={() => { onOpenAi(contextMenu.nodeId); setContextMenu(null); }} theme={theme} /><MenuAction label="Start relationship" onClick={() => { onDraftRelationship({ from: contextMenu.nodeId, to: '' }); setContextMenu(null); }} theme={theme} /></div>}
+    {relPopover && popoverRelationship && (
+      <RelationshipPopover
+        relationship={popoverRelationship}
+        x={relPopover.x}
+        y={relPopover.y}
+        theme={theme}
+        onClose={() => setRelPopover(null)}
+        onEdit={onEditRelationship ? () => { onEditRelationship(relPopover.recordKey); setRelPopover(null); } : undefined}
+        onViewProof={() => { onSelectRelationship(relPopover.recordKey); setRelPopover(null); }}
+      />
+    )}
+    </div>
+  );
+}
+
+// Prototype (Domain Studio Redesign) relationship popover: 316px card at the
+// click point — title + proof badge, from ⇄ to chips with cardinality, the
+// join in a mono box, business context, proof status, Edit / View join proof.
+function RelationshipPopover({ relationship, x, y, theme, onClose, onEdit, onViewProof }: {
+  relationship: ManifestDbtFirstModeling['relationships'][string];
+  x: number;
+  y: number;
+  theme: Theme;
+  onClose: () => void;
+  onEdit?: () => void;
+  onViewProof: () => void;
+}) {
+  const proven = relationship.validation?.status === 'passed';
+  const joinLabel = relationship.keys.map((key) => `${key.from} = ${key.to}`).join(' and ') || 'No join keys declared';
+  const chip = (label: string) => (
+    <span style={{ padding: '3px 8px', borderRadius: 6, background: 'var(--accent-dim)', color: 'var(--accent)', border: '1px solid rgba(107,93,211,0.2)', fontFamily: theme.fontMono, fontSize: 11.5, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+  );
+  return (
+    <div
+      onClick={(event) => event.stopPropagation()}
+      style={{ position: 'fixed', left: x, top: y, zIndex: 60, width: 316, background: theme.cellBg, border: `1px solid ${theme.headerBorder}`, borderRadius: 12, boxShadow: '0 12px 34px rgba(26,26,26,0.16)', overflow: 'hidden', fontFamily: theme.font }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 13px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-1)' }}>
+        <Link2 size={14} color="var(--accent)" style={{ flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700, color: theme.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{relationship.localId}</span>
+        <span style={{ flexShrink: 0, border: `1px solid ${proven ? 'var(--status-success-border)' : 'var(--status-warning-border)'}`, color: proven ? 'var(--status-success)' : 'var(--status-warning)', background: proven ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', borderRadius: 999, padding: '2px 8px', fontSize: 9.5, fontWeight: 700 }}>{proven ? 'Proven' : 'Unproven'}</span>
+        <button type="button" onClick={onClose} title="Close" style={{ flexShrink: 0, width: 20, height: 20, borderRadius: 5, border: 'none', background: 'none', color: theme.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0 }}>×</button>
+      </div>
+      <div style={{ padding: '12px 13px', display: 'flex', flexDirection: 'column', gap: 11 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5 }}>
+          {chip(relationship.from)}
+          <span style={{ color: theme.textMuted, fontSize: 10.5, fontWeight: 650, whiteSpace: 'nowrap' }}>{relationship.cardinality.replace(/_/g, ' ')}</span>
+          {chip(relationship.to)}
+        </div>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: theme.textMuted, marginBottom: 4 }}>Join</div>
+          <div style={{ fontSize: 11, fontFamily: theme.fontMono, color: theme.textPrimary, background: 'var(--bg-1)', border: '1px solid var(--border-subtle)', borderRadius: 7, padding: '7px 9px', overflowWrap: 'anywhere' }}>{joinLabel}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: theme.textMuted, marginBottom: 4 }}>Business context</div>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: theme.textSecondary }}>
+            {relationship.description || `${relationship.from} ${relationship.verb ?? 'relates to'} ${relationship.to}. Add a business description so agents can pick this route with confidence.`}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: proven ? 'var(--status-success)' : 'var(--status-warning)' }}>
+          {proven
+            ? `Join proof passed — ${relationship.validation?.joinedRows ?? '?'} rows joined, agents may use this route.`
+            : 'No warehouse proof yet — automatic agent joins stay blocked.'}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {onEdit ? (
+            <button type="button" onClick={onEdit} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 27, padding: '0 11px', borderRadius: 7, border: 'none', background: 'var(--accent)', color: '#fff', fontSize: 11.5, fontWeight: 650, cursor: 'pointer', fontFamily: theme.font }}>Edit relationship</button>
+          ) : null}
+          <button type="button" onClick={onViewProof} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 27, padding: '0 11px', borderRadius: 7, border: `1px solid ${theme.headerBorder}`, background: theme.cellBg, color: theme.textSecondary, fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font }}>View join proof</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -277,8 +352,9 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
         id: recordKey,
         source: from,
         target: to,
-        sourceHandle: firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : undefined,
-        targetHandle: firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
+        // Business view renders only entity-level handles, so column handles would make ReactFlow drop the edge.
+        sourceHandle: viewMode === 'data' && firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : undefined,
+        targetHandle: viewMode === 'data' && firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
         type: 'default',
         label: showEdgeLabels ? `${label} · ${cardinalitySymbol(relationship.cardinality)}` : undefined,
         animated: relationship.status === 'review',

@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, BookMarked, Tags, ChevronDown, ChevronUp } from 'lucide-react';
+import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -176,7 +176,7 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
                 lineHeight: 1.5,
               }}
             >
-              Teach the AI your business context — definitions, rules, vocabulary, and the metrics and blocks it should prefer. Skills are Git-backed project guidance and are applied only when their domain and triggers match.
+              Definitions, rules, and vocabulary the AI follows when answering{domainFilter ? ' in this domain' : ''}. Applied only when their triggers match — drafts never guide answers.
             </div>
           </div>
           <div
@@ -233,7 +233,7 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
       </div>
 
       {/* Add / Edit drawer */}
-      {form ? <SkillFormDrawer mode={form} options={options} domains={domains} existingIds={skills.map((s) => s.id)} t={t} onClose={() => setForm(null)} onSaved={handleSaved} /> : null}
+      {form ? <SkillFormDrawer mode={form} options={options} domains={domains} defaultDomain={domainFilter} existingIds={skills.map((s) => s.id)} t={t} onClose={() => setForm(null)} onSaved={handleSaved} /> : null}
 
       {/* Delete confirm */}
       {pendingDelete ? (
@@ -254,8 +254,10 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
 
 // ── List row ─────────────────────────────────────────────────────────────────
 
+// Prototype skill card: icon tile + mono id + badges header row, one-line
+// description, and a Details toggle that opens the 2-col Apply-when /
+// Prefer-these-metrics grid with the full-width Guidance box.
 function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEdit: () => void; onDelete: () => void }): JSX.Element {
-  const vocabCount = Object.keys(skill.vocabulary ?? {}).length;
   const [expanded, setExpanded] = useState(false);
   const domains = skill.domains?.length ? skill.domains : skill.domain ? [skill.domain] : [];
   return (
@@ -264,138 +266,104 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
         border: '1px solid var(--border-subtle)',
         borderRadius: 11,
         background: t.cellBg,
-        padding: '12px 14px',
-        display: 'flex',
-        alignItems: 'flex-start',
-        gap: 10,
+        overflow: 'hidden',
       }}
     >
-      <span style={{ width: 28, height: 28, borderRadius: 7, background: 'var(--accent-dim)', color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        <GraduationCap size={14} strokeWidth={1.75} />
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            flexWrap: 'wrap',
-          }}
-        >
-          <span
-            style={{
-              fontSize: 13.5,
-              fontWeight: 750,
-              color: t.textPrimary,
-              fontFamily: t.fontMono,
-            }}
-          >
-            {skill.id}
-          </span>
-          {skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
-          {skill.status === 'active' || !skill.status ? <span style={activeBadge(t)}>active</span> : null}
-          {domains.map((domain) => (
-            <span key={domain} style={domainBadge(t)}>
-              {domain}
-            </span>
-          ))}
-          {skill.isStarter ? (
-            <span style={starterBadge(t)} title="A dbt-seeded starter — edit it to make it yours">
-              <Sparkles size={10} strokeWidth={2.2} /> starter — edit me
-            </span>
-          ) : null}
-        </div>
-        {skill.description ? (
-          <div
-            style={{
-              fontSize: 12.5,
-              color: t.textSecondary,
-              marginTop: 5,
-              lineHeight: 1.5,
-            }}
-          >
-            {skill.description}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '12px 14px' }}>
+        <span style={{ width: 28, height: 28, borderRadius: 7, background: 'var(--accent-dim)', color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <GraduationCap size={14} strokeWidth={1.75} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, fontWeight: 650, color: t.textPrimary, fontFamily: t.fontMono }}>{skill.id}</span>
+            {skill.status === 'draft' ? <span style={starterBadge(t)}>draft — inactive</span> : null}
+            {skill.status === 'active' || !skill.status ? <span style={activeBadge(t)}>active</span> : null}
+            {domains.map((domain) => (
+              <span key={domain} style={domainBadge(t)}>
+                {domain}
+              </span>
+            ))}
+            {skill.isStarter ? (
+              <span style={starterBadge(t)} title="A dbt-seeded starter — edit it to make it yours">
+                <Sparkles size={10} strokeWidth={2.2} /> starter — edit me
+              </span>
+            ) : null}
           </div>
-        ) : (
           <div
             style={{
               fontSize: 12,
-              color: t.textMuted,
-              marginTop: 5,
-              fontStyle: 'italic',
+              color: skill.description ? t.textSecondary : t.textMuted,
+              fontStyle: skill.description ? undefined : 'italic',
+              marginTop: 2,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
             }}
           >
-            No description yet.
+            {skill.description || 'No description yet.'}
           </div>
-        )}
-        <div style={{ display: 'flex', gap: 7, marginTop: 9, flexWrap: 'wrap' }}>
-          <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="metrics" count={skill.preferredMetrics?.length ?? 0} />
-          <CountPill t={t} icon={<BookMarked size={11} strokeWidth={2} />} label="blocks" count={skill.preferredBlocks?.length ?? 0} />
-          <CountPill t={t} icon={<Tags size={11} strokeWidth={2} />} label="vocabulary" count={vocabCount} />
         </div>
-        {expanded ? (
-          <div
-            style={{
-              display: 'grid',
-              gap: 9,
-              marginTop: 12,
-              paddingTop: 11,
-              borderTop: `1px solid ${t.btnBorder}`,
-            }}
-          >
-            <SkillChipField t={t} label="Use these metrics" values={skill.preferredMetrics} empty="No preferred metrics" />
-            <SkillChipField t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" />
-            <SkillChipField t={t} label="Focus on model areas" values={skill.modelAreaRefs} empty="All areas in the skill domain" />
-            <SkillChipField t={t} label="Apply when" values={skill.triggers} empty="No trigger phrases defined" />
-            <SkillChipField t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
-            <SkillChipField t={t} label="Avoid when" values={skill.exclusions} empty="No exclusion rule defined" />
-            {skill.body ? (
-              <div style={{ display: 'grid', gap: 5 }}>
-                <strong style={{ color: t.textMuted, fontSize: 11.5 }}>Guidance the agent reads</strong>
-                <pre
-                  style={{
-                    margin: 0,
-                    padding: '10px 11px',
-                    borderRadius: 7,
-                    background: t.appBg,
-                    color: t.textSecondary,
-                    fontFamily: t.font,
-                    fontSize: 12,
-                    whiteSpace: 'pre-wrap',
-                    lineHeight: 1.5,
-                    maxHeight: 220,
-                    overflow: 'auto',
-                  }}
-                >
-                  {skill.body}
-                </pre>
+        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), height: 26, padding: '0 10px', fontSize: 11 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>
+          {expanded ? 'Hide details' : 'Details'}
+        </button>
+        <button type="button" onClick={onEdit} style={{ ...iconButton(t), width: 26, height: 26 }} title="Edit skill">
+          <Pencil size={12} strokeWidth={1.75} />
+        </button>
+        <button type="button" onClick={onDelete} style={{ ...iconButton(t), width: 26, height: 26 }} title="Delete skill">
+          <Trash2 size={12} strokeWidth={1.75} />
+        </button>
+      </div>
+      {expanded ? (
+        <div
+          style={{
+            borderTop: '1px solid var(--border-subtle)',
+            padding: '12px 14px',
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: '12px 20px',
+          }}
+        >
+          <SkillPillGroup t={t} label="Apply when" values={skill.triggers} empty="No trigger phrases defined" />
+          <SkillPillGroup t={t} label="Prefer these metrics" values={skill.preferredMetrics} empty="No preferred metrics" accent mono />
+          <SkillPillGroup t={t} label="Reuse these blocks" values={skill.preferredBlocks} empty="No preferred blocks" accent mono />
+          <SkillPillGroup t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
+          {skill.exclusions?.length ? <SkillPillGroup t={t} label="Avoid when" values={skill.exclusions} empty="" /> : null}
+          {skill.modelAreaRefs?.length ? <SkillPillGroup t={t} label="Focus on model areas" values={skill.modelAreaRefs} empty="" mono /> : null}
+          {skill.body ? (
+            <div style={{ gridColumn: '1 / -1' }}>
+              <div style={sectionEyebrow(t)}>Guidance</div>
+              <div
+                style={{
+                  fontSize: 12,
+                  lineHeight: 1.6,
+                  color: t.textSecondary,
+                  background: 'var(--bg-1)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 8,
+                  padding: '10px 12px',
+                  whiteSpace: 'pre-wrap',
+                  maxHeight: 220,
+                  overflow: 'auto',
+                }}
+              >
+                {skill.body}
               </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), padding: '5px 7px', fontSize: 11.5 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>
-          {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          {expanded ? 'Less' : 'Details'}
-        </button>
-        <button type="button" onClick={onEdit} style={iconButton(t)} title="Edit skill">
-          <Pencil size={13} strokeWidth={2} />
-        </button>
-        <button type="button" onClick={onDelete} style={iconButton(t)} title="Delete skill">
-          <Trash2 size={13} strokeWidth={2} />
-        </button>
-      </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
 
 // ── Form drawer (add / edit) ─────────────────────────────────────────────────
 
-function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[] }; domains: Domain[]; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
+function SkillFormDrawer({ mode, options, domains, defaultDomain = null, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[] }; domains: Domain[]; defaultDomain?: string | null; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
   const { dispatch } = useNotebook();
   const editing = mode.kind === 'edit';
-  const [draft, setDraft] = useState<Skill>(() => (mode.kind === 'edit' ? { ...mode.skill } : emptyDraft()));
+  // New skills authored from a domain-scoped list belong to that domain by
+  // default — otherwise they would save fine but vanish from the filtered list.
+  const [draft, setDraft] = useState<Skill>(() => (mode.kind === 'edit' ? { ...mode.skill } : { ...emptyDraft(), domain: defaultDomain ?? undefined, domains: defaultDomain ? [defaultDomain] : [] }));
   // Track whether the user has manually edited the id slug so name→slug
   // auto-fill stops once they take control (create only).
   const [idTouched, setIdTouched] = useState(editing);
@@ -446,196 +414,193 @@ function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSa
   return (
     <div style={drawerScrim} onClick={() => !saving && onClose()}>
       <div style={drawerPanel(t)} onClick={(e) => e.stopPropagation()}>
-        {/* Drawer header */}
+        {/* Drawer header — prototype: icon tile + title + git subtitle */}
         <div style={drawerHeader(t)}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <GraduationCap size={16} strokeWidth={2} color={t.accent} />
-            <div style={{ fontSize: 15, fontWeight: 700, color: t.textPrimary }}>{editing ? 'Edit skill' : 'New skill'}</div>
+          <span style={{ width: 30, height: 30, borderRadius: 8, background: 'var(--accent-dim)', color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <GraduationCap size={15} strokeWidth={1.75} />
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary }}>{editing ? 'Edit skill' : 'New skill'}</div>
+            <div style={{ fontSize: 11, color: t.textMuted, marginTop: 1 }}>Git-backed guidance · applied only when triggers match</div>
           </div>
-          <button type="button" onClick={() => !saving && onClose()} style={iconButton(t)} title="Close">
-            <X size={15} strokeWidth={2} />
+          <button type="button" onClick={() => !saving && onClose()} style={{ ...iconButton(t), width: 26, height: 26, border: 'none', background: 'none' }} title="Close">
+            <X size={14} strokeWidth={2} />
           </button>
         </div>
 
-        {/* Drawer body */}
+        {/* Drawer body — prototype two-column grid: Identity | When to apply,
+            Guidance (spans 2 rows) | Prefer these assets. */}
         <div
           style={{
             flex: 1,
             minHeight: 0,
             overflow: 'auto',
-            padding: '16px 18px',
+            padding: '18px 22px',
             display: 'grid',
-            gap: 16,
+            gridTemplateColumns: '1fr 1fr',
+            gap: '20px 28px',
+            alignContent: 'start',
           }}
         >
-          {/* Name + id */}
-          <Field label="Name" t={t} hint={editing ? undefined : 'A short, human label for this skill.'}>
-            <input type="text" value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="Metrics glossary" style={inputStyle(t)} />
-          </Field>
-          <Field label="ID (slug)" t={t} hint="Used as the file name. Letters, numbers, and dashes.">
-            <input
-              type="text"
-              value={draft.id}
-              disabled={editing}
-              onChange={(e) => {
-                setIdTouched(true);
-                set('id', slugify(e.target.value));
-              }}
-              placeholder="metrics-glossary"
-              style={{
-                ...inputStyle(t),
-                fontFamily: t.fontMono,
-                opacity: editing ? 0.7 : 1,
-              }}
-            />
-            {idCollision ? (
-              <InlineNote t={t} tone="error">
-                A skill with this id already exists.
-              </InlineNote>
-            ) : null}
-          </Field>
-
-          {/* Description */}
-          <Field label="Description" t={t} hint="One line shown in the list and in the 'guided by' note on AI results.">
-            <input type="text" value={draft.description ?? ''} onChange={(e) => set('description', e.target.value)} placeholder="How we define and name our core revenue metrics." style={inputStyle(t)} />
-          </Field>
-
-          {/* Domain picker (Spec 17 part B) */}
-          <Field label="Domain" t={t} hint="Which business domain this skill belongs to. Domains are the top of the hierarchy.">
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                flexWrap: 'wrap',
-              }}
-            >
-              <select
-                value={draft.domain ?? ''}
-                onChange={(e) => {
-                  const domain = e.target.value || undefined;
-                  set('domain', domain);
-                  set('domains', domain ? [domain] : []);
-                }}
-                style={{
-                  ...inputStyle(t),
-                  flex: 1,
-                  cursor: 'pointer',
-                  color: draft.domain ? t.textPrimary : t.textMuted,
-                }}
-              >
-                <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
-                {domains.map((domain) => (
-                  <option key={domain.id} value={domain.id}>
-                    {domain.name}
-                  </option>
-                ))}
-              </select>
-              <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={ghostButton(t)} title="Create a new domain on the Domains page">
-                <Plus size={12} strokeWidth={2.2} /> New domain
-              </button>
+          {/* Identity */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={sectionEyebrow(t)}>Identity</div>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Name</span>
+              <input type="text" value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="e.g. Revenue definition" style={inputStyle(t)} />
+              <span style={{ fontSize: 10.5, color: t.textMuted }}>
+                Saved as{' '}
+                <input
+                  type="text"
+                  value={`skills/${draft.id}.skill.md`}
+                  disabled={editing}
+                  onChange={(e) => {
+                    setIdTouched(true);
+                    set('id', slugify(e.target.value.replace(/^skills\//, '').replace(/\.skill\.md$/, '')));
+                  }}
+                  title="File name — letters, numbers, and dashes"
+                  style={{ border: 'none', background: 'none', outline: 'none', padding: 0, fontFamily: t.fontMono, fontSize: 10.5, color: t.textSecondary, width: `${Math.max(20, draft.id.length + 15)}ch`, borderBottom: editing ? 'none' : `1px dashed ${t.btnBorder}` }}
+                />
+              </span>
+              {idCollision ? (
+                <InlineNote t={t} tone="error">
+                  A skill with this id already exists.
+                </InlineNote>
+              ) : null}
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <label style={formLabelCol}>
+                <span style={formLabelText(t)}>Domain</span>
+                <select
+                  value={draft.domain ?? ''}
+                  onChange={(e) => {
+                    const domain = e.target.value || undefined;
+                    set('domain', domain);
+                    set('domains', domain ? [domain] : []);
+                  }}
+                  style={{ ...inputStyle(t), cursor: 'pointer', color: draft.domain ? t.textPrimary : t.textMuted }}
+                >
+                  <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
+                  {domains.map((domain) => (
+                    <option key={domain.id} value={domain.id}>
+                      {domain.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={formLabelCol}>
+                <span style={formLabelText(t)}>Type</span>
+                <select value={draft.kind ?? 'custom'} onChange={(e) => set('kind', e.target.value as Skill['kind'])} style={{ ...inputStyle(t), cursor: 'pointer' }}>
+                  <option value="custom">Custom guidance</option>
+                  <option value="domain_reference">Domain reference — broad context</option>
+                  <option value="metric_policy">Policy — focused rule</option>
+                  <option value="glossary">Glossary</option>
+                  <option value="analysis_pattern">Analysis pattern</option>
+                  <option value="sql_policy">SQL policy</option>
+                </select>
+              </label>
             </div>
-          </Field>
+            <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={{ border: 'none', background: 'none', padding: 0, fontSize: 10.5, color: t.accent, cursor: 'pointer', fontFamily: t.font, alignSelf: 'flex-start' }} title="Create a new domain on the Domains page">
+              + New domain
+            </button>
+            <div>
+              <span style={{ ...formLabelText(t), display: 'block', marginBottom: 5 }}>Lifecycle</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.btnBorder}`, borderRadius: 7, background: 'var(--bg-1)' }}>
+                {(['active', 'draft', 'deprecated'] as const).map((status) => {
+                  const selected = (draft.status ?? 'active') === status;
+                  return (
+                    <button
+                      key={status}
+                      type="button"
+                      onClick={() => set('status', status)}
+                      style={{ border: 'none', borderRadius: 5, padding: '4px 12px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, background: selected ? t.cellBg : 'transparent', color: selected ? t.textPrimary : t.textMuted, boxShadow: selected ? '0 1px 3px rgba(26,26,26,0.1)' : 'none', textTransform: 'capitalize' }}
+                    >
+                      {status}
+                    </button>
+                  );
+                })}
+              </div>
+              <span style={{ fontSize: 10.5, color: t.textMuted, marginLeft: 8 }}>
+                {(draft.status ?? 'active') === 'active' ? 'Guides matching answers.' : draft.status === 'draft' ? 'Drafts never guide answers.' : 'Kept in Git for history only.'}
+              </span>
+            </div>
+          </div>
 
-          <Field label="Focused model areas (optional)" t={t} hint="Comma-separated area ids from the Model workspace. This boosts the skill only inside its selected domain; it never expands access.">
-            <input
-              value={(draft.modelAreaRefs ?? []).join(', ')}
-              onChange={(e) => set('modelAreaRefs', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
-              placeholder="customer_lifecycle, revenue_reporting"
-              style={inputStyle(t)}
-            />
-          </Field>
+          {/* When to apply */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={sectionEyebrow(t)}>When to apply</div>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Apply when the question mentions</span>
+              <ChipInput t={t} values={draft.triggers ?? []} onChange={(next) => set('triggers', next)} placeholder="Add phrase, press Enter" />
+            </label>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Ask first when</span>
+              <input
+                value={(draft.clarifyWhen ?? []).join(', ')}
+                onChange={(e) => set('clarifyWhen', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
+                placeholder="e.g. 'sales' could mean revenue or order count"
+                style={inputStyle(t)}
+              />
+            </label>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Avoid when</span>
+              <input
+                value={(draft.exclusions ?? []).join(', ')}
+                onChange={(e) => set('exclusions', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
+                placeholder="e.g. question is about pipeline or bookings"
+                style={inputStyle(t)}
+              />
+            </label>
+          </div>
 
-          <Field label="Skill type" t={t} hint="Domain references provide broad context; policies encode a focused, reusable rule.">
-            <select value={draft.kind ?? 'custom'} onChange={(e) => set('kind', e.target.value as Skill['kind'])} style={inputStyle(t)}>
-              <option value="custom">Custom guidance</option>
-              <option value="domain_reference">Domain reference</option>
-              <option value="metric_policy">Metric policy</option>
-              <option value="glossary">Glossary</option>
-              <option value="analysis_pattern">Analysis pattern</option>
-              <option value="sql_policy">SQL policy</option>
-            </select>
-          </Field>
+          {/* Guidance — spans both rows of the left column */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, gridRow: 'span 2' }}>
+            <div style={sectionEyebrow(t)}>Guidance</div>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>One-line summary</span>
+              <input type="text" value={draft.description ?? ''} onChange={(e) => set('description', e.target.value)} placeholder="What rule does this skill encode?" style={inputStyle(t)} />
+            </label>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Full guidance</span>
+              <textarea value={draft.body} onChange={(e) => set('body', e.target.value)} rows={9} placeholder="Definitions, exclusions, edge cases — written for the agent." style={textareaStyle(t)} />
+            </label>
+          </div>
 
-          <Field label="Lifecycle" t={t} hint="Draft skills are stored in Git but do not affect agent answers until activated.">
-            <select value={draft.status ?? 'active'} onChange={(e) => set('status', e.target.value as Skill['status'])} style={inputStyle(t)}>
-              <option value="active">Active</option>
-              <option value="draft">Draft — inactive</option>
-              <option value="deprecated">Deprecated</option>
-            </select>
-          </Field>
+          {/* Prefer these assets */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={sectionEyebrow(t)}>Prefer these assets</div>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Metrics</span>
+              <MultiSelect t={t} options={options.metrics} optionKind="metrics" selected={draft.preferredMetrics} onChange={(next) => set('preferredMetrics', next)} placeholder="Search metrics…" emptyOptionsHint="No metrics available from the project yet." />
+            </label>
+            <label style={formLabelCol}>
+              <span style={formLabelText(t)}>Blocks</span>
+              <MultiSelect t={t} options={options.blocks} optionKind="blocks" selected={draft.preferredBlocks} onChange={(next) => set('preferredBlocks', next)} placeholder="Search blocks…" emptyOptionsHint="No blocks available from the project yet." />
+            </label>
+          </div>
 
-          {/* Business-context body */}
-          <Field label="Business context" t={t} hint="The guidance the AI follows — definitions, rules, and how to interpret a question.">
-            <textarea value={draft.body} onChange={(e) => set('body', e.target.value)} rows={7} placeholder={'e.g. "Revenue means recognized revenue, not bookings. Always exclude test accounts (account_type = \'test\'). When someone asks for ARR, use the arr metric."'} style={textareaStyle(t)} />
-          </Field>
-
-          {/* Preferred metrics + blocks */}
-          <Field label="Preferred metrics" t={t} hint="Metrics the AI should reach for first when answering.">
-            <MultiSelect t={t} options={options.metrics} optionKind="metrics" selected={draft.preferredMetrics} onChange={(next) => set('preferredMetrics', next)} placeholder="Add a metric…" emptyOptionsHint="No metrics available from the project yet." />
-          </Field>
-          <Field label="Preferred blocks" t={t} hint="Certified blocks the AI should prefer to reuse.">
-            <MultiSelect t={t} options={options.blocks} optionKind="blocks" selected={draft.preferredBlocks} onChange={(next) => set('preferredBlocks', next)} placeholder="Add a block…" emptyOptionsHint="No blocks available from the project yet." />
-          </Field>
-
-          <Field label="Triggers" t={t} hint="Comma-separated phrases that make this skill relevant.">
-            <input
-              value={(draft.triggers ?? []).join(', ')}
-              onChange={(e) =>
-                set(
-                  'triggers',
-                  e.target.value
-                    .split(',')
-                    .map((value) => value.trim())
-                    .filter(Boolean),
-                )
-              }
-              placeholder="recognized revenue, net sales"
-              style={inputStyle(t)}
-            />
-          </Field>
-          <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">
-            <input
-              value={(draft.preferredDimensions ?? []).join(', ')}
-              onChange={(e) =>
-                set(
-                  'preferredDimensions',
-                  e.target.value
-                    .split(',')
-                    .map((value) => value.trim())
-                    .filter(Boolean),
-                )
-              }
-              placeholder="region, month"
-              style={inputStyle(t)}
-            />
-          </Field>
-          <Field label="Clarify when" t={t} hint="Ambiguities that should prompt one focused follow-up question.">
-            <input
-              value={(draft.clarifyWhen ?? []).join(', ')}
-              onChange={(e) =>
-                set(
-                  'clarifyWhen',
-                  e.target.value
-                    .split(',')
-                    .map((value) => value.trim())
-                    .filter(Boolean),
-                )
-              }
-              placeholder="currency is not specified"
-              style={inputStyle(t)}
-            />
-          </Field>
-
-          {/* Vocabulary editor */}
-          <Field label="Vocabulary" t={t} hint="Map your terms to a target, e.g. arr → metric:arr or revenue → block:revenue_by_region.">
-            <VocabularyEditor t={t} value={draft.vocabulary} onChange={(next) => set('vocabulary', next)} />
-          </Field>
+          {/* Advanced fields the prototype folds away — all wiring preserved. */}
+          <details style={{ gridColumn: '1 / -1' }}>
+            <summary style={{ fontSize: 11.5, fontWeight: 650, color: t.accent, cursor: 'pointer' }}>Advanced — model areas, dimensions, and vocabulary</summary>
+            <div style={{ display: 'grid', gap: 14, marginTop: 12 }}>
+              <Field label="Focused model areas (optional)" t={t} hint="Comma-separated area ids from the Model workspace. This boosts the skill only inside its selected domain; it never expands access.">
+                <input value={(draft.modelAreaRefs ?? []).join(', ')} onChange={(e) => set('modelAreaRefs', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="customer_lifecycle, revenue_reporting" style={inputStyle(t)} />
+              </Field>
+              <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">
+                <input value={(draft.preferredDimensions ?? []).join(', ')} onChange={(e) => set('preferredDimensions', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="region, month" style={inputStyle(t)} />
+              </Field>
+              <Field label="Vocabulary" t={t} hint="Map your terms to a target, e.g. arr → metric:arr or revenue → block:revenue_by_region.">
+                <VocabularyEditor t={t} value={draft.vocabulary} onChange={(next) => set('vocabulary', next)} />
+              </Field>
+            </div>
+          </details>
 
           {error ? (
-            <InlineNote t={t} tone="error">
-              {error}
-            </InlineNote>
+            <div style={{ gridColumn: '1 / -1' }}>
+              <InlineNote t={t} tone="error">
+                {error}
+              </InlineNote>
+            </div>
           ) : null}
         </div>
 
@@ -651,6 +616,48 @@ function SkillFormDrawer({ mode, options, domains, existingIds, t, onClose, onSa
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Chip input (trigger phrases) ─────────────────────────────────────────────
+
+// Prototype chip box: accent pills with × inside a bordered box, plus an
+// inline borderless input. Enter (or comma) adds the phrase.
+function ChipInput({ t, values, onChange, placeholder }: { t: Theme; values: string[]; onChange: (next: string[]) => void; placeholder: string }): JSX.Element {
+  const [query, setQuery] = useState('');
+  const add = (value: string) => {
+    const v = value.trim().replace(/,$/, '');
+    if (!v || values.includes(v)) return;
+    onChange([...values, v]);
+    setQuery('');
+  };
+  return (
+    <div style={chipBox(t)}>
+      {values.map((value) => (
+        <span key={value} style={accentPill(t)}>
+          {value}
+          <button type="button" onClick={() => onChange(values.filter((s) => s !== value))} style={pillRemove(t)} title="Remove">
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ',') {
+            e.preventDefault();
+            add(query);
+          } else if (e.key === 'Backspace' && !query && values.length) {
+            onChange(values.slice(0, -1));
+          }
+        }}
+        onBlur={() => add(query)}
+        placeholder={values.length ? '' : placeholder}
+        style={chipBoxInput(t)}
+      />
     </div>
   );
 }
@@ -694,32 +701,30 @@ function MultiSelect({ t, options, optionKind, selected, onChange, placeholder, 
   };
 
   return (
-    <div style={{ display: 'grid', gap: 7 }}>
-      {selected.length > 0 ? (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-          {selected.map((value) => (
-            <span key={value} style={selectedChip(t)}>
-              {value}
-              <button type="button" onClick={() => onChange(selected.filter((s) => s !== value))} style={chipRemoveButton(t)} title="Remove">
-                <X size={11} strokeWidth={2.4} />
-              </button>
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <input
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            add(query);
-          }
-        }}
-        placeholder={placeholder}
-        style={inputStyle(t)}
-      />
+    <div style={{ display: 'grid', gap: 6 }}>
+      <div style={chipBox(t)}>
+        {selected.map((value) => (
+          <span key={value} style={{ ...accentPill(t), fontFamily: t.fontMono }}>
+            {value}
+            <button type="button" onClick={() => onChange(selected.filter((s) => s !== value))} style={pillRemove(t)} title="Remove">
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              add(query);
+            }
+          }}
+          placeholder={selected.length ? '' : placeholder}
+          style={chipBoxInput(t)}
+        />
+      </div>
       {available.length > 0 ? (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
           {available.map((option) => (
@@ -897,49 +902,43 @@ function ConfirmDeleteDialog({ skill, t, deleting, error, onCancel, onConfirm }:
 
 // ── Small shared pieces ──────────────────────────────────────────────────────
 
-function CountPill({ t, icon, label, count }: { t: Theme; icon: React.ReactNode; label: string; count: number }): JSX.Element {
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        fontSize: 11,
-        fontWeight: 600,
-        color: count > 0 ? t.textSecondary : t.textMuted,
-        background: t.btnBg,
-        border: `1px solid ${t.btnBorder}`,
-        borderRadius: 6,
-        padding: '3px 8px',
-      }}
-    >
-      {icon}
-      {count} {label}
-    </span>
-  );
+function sectionEyebrow(t: Theme): CSSProperties {
+  return {
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase',
+    color: t.textMuted,
+    marginBottom: 5,
+  };
 }
 
-function SkillChipField({ t, label, values, empty }: { t: Theme; label: string; values?: string[]; empty: string }): JSX.Element {
+// Prototype expanded-card cell: uppercase eyebrow + pill row. Accent pills for
+// preferred assets, quiet pills for trigger phrases.
+function SkillPillGroup({ t, label, values, empty, accent = false, mono = false }: { t: Theme; label: string; values?: string[]; empty: string; accent?: boolean; mono?: boolean }): JSX.Element {
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: '118px minmax(0, 1fr)',
-        gap: 10,
-        fontSize: 12,
-        lineHeight: 1.5,
-      }}
-    >
-      <strong style={{ color: t.textMuted }}>{label}</strong>
+    <div style={{ minWidth: 0 }}>
+      <div style={sectionEyebrow(t)}>{label}</div>
       <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
         {values?.length ? (
           values.map((value) => (
-            <span key={value} style={skillChip(t)}>
+            <span
+              key={value}
+              style={{
+                fontSize: 11,
+                padding: '3px 9px',
+                borderRadius: 999,
+                background: accent ? 'var(--accent-dim)' : 'var(--bg-1)',
+                color: accent ? t.accent : t.textSecondary,
+                border: accent ? `1px solid ${t.accent}33` : '1px solid var(--border-subtle)',
+                fontFamily: mono ? t.fontMono : undefined,
+              }}
+            >
               {value}
             </span>
           ))
         ) : (
-          <span style={{ color: t.textMuted, fontStyle: 'italic' }}>{empty}</span>
+          <span style={{ fontSize: 11.5, color: t.textMuted, fontStyle: 'italic' }}>{empty}</span>
         )}
       </div>
     </div>
@@ -1121,33 +1120,72 @@ function starterBadge(t: Theme): CSSProperties {
   };
 }
 
-function selectedChip(t: Theme): CSSProperties {
+// Prototype chip-box primitives shared by ChipInput and MultiSelect.
+function chipBox(t: Theme): CSSProperties {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    flexWrap: 'wrap',
+    border: `1px solid ${t.btnBorder}`,
+    background: t.cellBg,
+    borderRadius: 7,
+    padding: '6px 8px',
+  };
+}
+
+function chipBoxInput(t: Theme): CSSProperties {
+  return {
+    flex: 1,
+    minWidth: 110,
+    border: 'none',
+    background: 'none',
+    outline: 'none',
+    fontSize: 11.5,
+    fontFamily: t.font,
+    color: t.textPrimary,
+    padding: 2,
+  };
+}
+
+function accentPill(t: Theme): CSSProperties {
   return {
     display: 'inline-flex',
     alignItems: 'center',
     gap: 4,
-    fontSize: 11.5,
-    fontWeight: 600,
-    color: t.textPrimary,
-    background: `${t.accent}14`,
-    border: `1px solid ${t.accent}38`,
-    borderRadius: 6,
-    padding: '3px 4px 3px 9px',
-    fontFamily: t.fontMono,
+    fontSize: 11,
+    padding: '2.5px 8px',
+    borderRadius: 999,
+    background: 'var(--accent-dim)',
+    color: t.accent,
+    border: `1px solid ${t.accent}33`,
   };
 }
 
-function chipRemoveButton(t: Theme): CSSProperties {
+function pillRemove(t: Theme): CSSProperties {
   return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
     border: 'none',
-    background: 'transparent',
-    color: t.textMuted,
+    background: 'none',
+    color: t.accent,
     cursor: 'pointer',
-    padding: 2,
-    borderRadius: 4,
+    padding: 0,
+    fontSize: 12,
+    lineHeight: 1,
+    fontFamily: t.font,
+  };
+}
+
+const formLabelCol: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+};
+
+function formLabelText(t: Theme): CSSProperties {
+  return {
+    fontSize: 11,
+    fontWeight: 650,
+    color: t.textSecondary,
   };
 }
 
@@ -1198,7 +1236,7 @@ function drawerHeader(t: Theme): CSSProperties {
   return {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: 10,
     padding: '14px 18px',
     borderBottom: '1px solid var(--border-subtle)',
     flexShrink: 0,
