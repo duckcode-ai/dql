@@ -48,6 +48,7 @@ import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '..
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText } from '../agent/AgentAnswerCard';
 import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH } from '../agent/AiSidePanel';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import { AppBuildProposalPanel, defaultProposalSelection } from './AppBuildProposalPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
@@ -1612,7 +1613,7 @@ function AppWorkspaceSurface({
             )}
           </div>
           {copilotVisible ? (
-            <AppCopilotPanel
+            <UnifiedAppAiPanel
               app={app}
               appDoc={appDoc}
               dashboardDoc={dashboardDoc}
@@ -1620,11 +1621,8 @@ function AppWorkspaceSurface({
               variables={variables}
               selectedBlockId={selectedBlockId}
               askSeed={askSeed}
-              activeInvestigation={section === 'research' ? activeInvestigation : null}
               themeMode={themeMode}
               expanded={explainExpanded}
-              onSelectBlock={setSelectedBlockId}
-              onStartResearch={handleStartResearch}
               onToggleExpanded={() => onExplainExpandedChange(!explainExpanded)}
               onClose={() => onExplainChange(false)}
             />
@@ -1780,7 +1778,110 @@ function DashboardPagePicker({
   );
 }
 
-function AppCopilotPanel({
+function UnifiedAppAiPanel({
+  app,
+  appDoc,
+  dashboardDoc,
+  dashboardRun,
+  variables,
+  selectedBlockId,
+  askSeed,
+  themeMode,
+  expanded,
+  onToggleExpanded,
+  onClose,
+}: {
+  app: AppSummary | null;
+  appDoc: AppDocumentSummary | null;
+  dashboardDoc: DashboardDocumentResponse | null;
+  dashboardRun: DashboardRunResponse | null;
+  variables: Record<string, unknown>;
+  selectedBlockId: string | null;
+  askSeed?: { text: string; nonce: number } | null;
+  themeMode: ThemeMode;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onClose: () => void;
+}) {
+  const t = themes[themeMode];
+  const dashboard = dashboardDoc?.dashboard ?? null;
+  const blockTiles = useMemo(() => getCopilotBlockTiles(dashboard, dashboardRun), [dashboard, dashboardRun]);
+  const selectedBlock = blockTiles.find((item) => item.blockId === selectedBlockId) ?? null;
+  const selectedTileRun = selectedBlock
+    ? dashboardRun?.tiles.find((tile) => tile.tileId === selectedBlock.tileId || tile.blockId === selectedBlock.blockId)
+    : null;
+  const appId = app?.id ?? appDoc?.app.id ?? 'app';
+  const dashboardId = dashboard?.id ?? 'dashboard';
+  const agentThread = usePersistedAgentThreadId(`app:${appId}:${dashboardId}`);
+  const appTitle = formatBusinessLabel(app?.name ?? appDoc?.app.name ?? dashboard?.metadata.title ?? 'App workspace');
+  const dashboardTitle = formatBusinessLabel(dashboard?.metadata.title ?? 'Dashboard');
+  const scopeHint = selectedBlock
+    ? `Focused on ${formatBusinessLabel(selectedBlock.title)} in ${dashboardTitle}`
+    : `Scoped to ${dashboardTitle}`;
+  const selectedObject = selectedBlock
+    ? { kind: 'block' as const, id: selectedBlock.blockId, title: selectedBlock.title }
+    : dashboard
+      ? { kind: 'dashboard' as const, id: dashboard.id, title: dashboard.metadata.title }
+      : { kind: 'app' as const, id: appId, title: appTitle };
+  const workspaceContext = useMemo(() => ({
+    surface: 'apps',
+    appId,
+    appName: app?.name ?? appDoc?.app.name,
+    appDomain: app?.domain ?? appDoc?.app.domain,
+    appDescription: app?.description ?? appDoc?.app.description,
+    dashboardId: dashboard?.id,
+    dashboardTitle: dashboard?.metadata.title,
+    dashboardDescription: dashboard?.metadata.description,
+    dashboardFilters: variables,
+    selectedBlock: selectedBlock ? {
+      blockId: selectedBlock.blockId,
+      tileId: selectedBlock.tileId,
+      title: selectedBlock.title,
+      visualization: selectedBlock.viz,
+      status: selectedTileRun?.status,
+      certificationStatus: selectedTileRun?.certificationStatus,
+      rowCount: selectedTileRun?.result?.rowCount,
+      columns: selectedTileRun?.result?.columns?.slice(0, 12),
+      sampleRows: sampleDashboardRows(selectedTileRun?.result?.rows, selectedTileRun?.result?.columns),
+    } : undefined,
+  }), [app, appDoc, appId, dashboard, selectedBlock, selectedTileRun, variables]);
+
+  return (
+    <AiSidePanel
+      t={t}
+      title="App AI"
+      subtitle={appTitle}
+      expanded={expanded}
+      onToggleExpanded={onToggleExpanded}
+      onClose={onClose}
+      ariaLabel="App AI"
+      className="dql-app-explain-panel dql-app-assistant-panel"
+    >
+      <UnifiedAgentRunPanel
+        key={`${appId}:${dashboardId}`}
+        themeMode={themeMode}
+        title="App AI"
+        scopeHint={scopeHint}
+        audience="stakeholder"
+        selectedObject={selectedObject}
+        workspaceContext={workspaceContext}
+        initialMode="auto"
+        autoRun={askSeed?.text ? { text: askSeed.text, mode: 'ask', nonce: askSeed.nonce } : undefined}
+        threadId={agentThread.threadId}
+        onThreadIdChange={agentThread.onThreadIdChange}
+        answerFirstCards
+        examplePrompts={[
+          { label: 'Explain this dashboard', prompt: 'Explain the most important business story in this dashboard and what action it suggests.' },
+          { label: 'Find the main driver', prompt: 'What is the main driver behind the current result? Use the active app filters and governed evidence.' },
+          { label: 'Check this result', prompt: 'Validate the current result against its certified block, semantic definitions, and lineage.' },
+        ]}
+      />
+    </AiSidePanel>
+  );
+}
+
+/** Retained temporarily for reading older persisted App-copilot sessions; no longer mounted. */
+function LegacyAppCopilotPanel({
   app,
   appDoc,
   dashboardDoc,
