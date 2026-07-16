@@ -33,6 +33,35 @@ Required scenarios (`E2E-001`):
 6. A global notebook using both domains appears in both Related Products views
    and reports required export compatibility.
 
+Required App scenarios (`E2E-002`):
+
+1. A beverage-customer stakeholder request reuses compatible certified blocks,
+   fills only uncovered requirements with governed semantic queries, and shows
+   any remaining gap without raw AI SQL as a primary tile.
+2. Proposal makes no product writes; source preflight failures are unselectable;
+   snapshot drift rejects commit; a successful commit writes all product files
+   atomically with derived domain/export context and no local AI-pin identity.
+3. The built `dql notebook` renders filters first and a Business Story second.
+   Applying category and period filters updates every tile and story from the
+   same fingerprints.
+4. Rapid filter run A then B never renders A's late story. With no AI provider,
+   the deterministic multi-tile story remains available and meaningful.
+5. Invented numeric claims, unsupported causality, mismatched grain/filter
+   claims, and app-scoped persona mismatches fail closed.
+
+Required dbt connection scenarios (`E2E-003`):
+
+1. A DQL workspace colocated with dbt and one pointing at an external local or
+   Git checkout both discover profiles and compile the configured manifest.
+2. `profiles.yml`, `profiles.yaml`, `profile.yml`, and `profile.yaml` resolve the
+   matching dbt project profile; relative DuckDB paths resolve from the dbt
+   project, not the DQL workspace.
+3. With no saved DQL connection, a complete default dbt target supplies the
+   runtime connection. Existing saved database and AI-provider configuration
+   remains byte-for-byte present after dbt-first onboarding apply.
+4. Artifact generation passes the discovered profiles directory to `dbt parse`,
+   and the built CLI opens Domain Studio from the resulting manifest-v3 snapshot.
+
 ## Scale fixture
 
 Generate deterministic artifacts representing 10,000 dbt models, 30 columns

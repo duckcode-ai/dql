@@ -54,6 +54,7 @@ import {
   normalizeDqlArtifactReference,
   serializeMetricDefinitionToYaml,
   resolveSemanticLayerAsync,
+  resolveRepoSource,
   getDialect,
   Parser,
   NodeKind,
@@ -84,6 +85,7 @@ import {
   type Business360ResultV2,
   type AppDocument,
   type DashboardDocument,
+  type DashboardDisplayTrustState,
   type DashboardGridItem,
   type DQLManifest,
   type ManifestBlock,
@@ -148,6 +150,7 @@ import {
   createLlmAgentRunPlanner,
   createHybridRouter,
   computeResultStats,
+  buildDeterministicDashboardStory,
   synthesizeAnswer,
   streamOrGenerate,
   type SynthesizeResultPreview,
@@ -193,7 +196,8 @@ import {
   invalidateAgentProjectState,
   resolveDomainContextEnvelope,
   defaultKgPath,
-  planApp,
+  planAppFromPrompt,
+  KGStore,
   planResearch,
   loadSemanticMetrics,
   cascadeTraceToEvidenceRouteSteps,
@@ -332,6 +336,10 @@ export interface ProjectConfig {
   dbt?: {
     projectDir?: string;
     manifestPath?: string;
+    profilesDir?: string;
+    repoUrl?: string;
+    branch?: string;
+    subPath?: string;
   };
   preview?: {
     port?: number;
@@ -795,13 +803,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   }
   const gitRoot = await resolveGitRoot(projectRoot);
   if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
-  let connection = rawConnection ? normalizeProjectConnection(rawConnection, projectRoot) : null;
   let projectConfig = loadProjectConfig(projectRoot);
+  const configuredConnection = rawConnection
+    ? normalizeProjectConnection(rawConnection, projectRoot)
+    : projectConfig.defaultConnection
+      ? normalizeProjectConnection(projectConfig.defaultConnection, projectRoot)
+      : null;
+  let connection = configuredConnection ?? resolveDbtProfileRuntimeConnection(projectRoot, projectConfig);
   const projectSnapshots = new ProjectSnapshotService<DQLManifest>();
+  const dashboardRunEvidence = new Map<string, {
+    appId: string;
+    dashboardId: string;
+    snapshotId: string;
+    filterFingerprint: string;
+    resultFingerprint: string;
+    personaFingerprint: string;
+    facts: ReturnType<typeof buildDeterministicDashboardStory>['facts'];
+    story: ReturnType<typeof buildDeterministicDashboardStory>['story'];
+    expiresAt: number;
+  }>();
   const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
   const onboardingJobs = new Map<string, { id: string; kind: string; status: 'completed' | 'failed' | 'cancelled'; createdAt: string; result?: unknown; error?: string }>();
   const projectSnapshot = () => {
-    const dbtManifestPath = resolveDbtManifestPath(projectRoot) ?? undefined;
+    const dbtManifestPath = resolveDbtManifestPath(projectRoot, projectConfig) ?? undefined;
     const inputs = collectInputFiles({ projectRoot, dbtManifestPath });
     const signatureHash = createHash('sha256');
     for (const input of inputs.sort()) {
@@ -825,14 +849,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
   const onboardingDbtPaths = (body: Record<string, unknown> = {}) => {
-    const projectDirInput = typeof body.projectDir === 'string' ? body.projectDir : projectConfig.dbt?.projectDir ?? '.';
+    const repoUrl = typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : undefined;
+    const branch = typeof body.branch === 'string' && body.branch.trim() ? body.branch.trim() : undefined;
+    const subPath = typeof body.subPath === 'string' && body.subPath.trim() ? body.subPath.trim() : undefined;
+    const repo = repoUrl ? resolveRepoSource({
+      provider: 'dbt', source: repoUrl.includes('gitlab') ? 'gitlab' : 'github', repoUrl, branch, subPath,
+    }, projectRoot) : undefined;
+    const projectDirInput = repo?.localPath ?? (typeof body.projectDir === 'string' ? body.projectDir : projectConfig.dbt?.projectDir ?? '.');
     const dbtProjectDir = resolve(projectRoot, projectDirInput);
     const manifestInput = typeof body.manifestPath === 'string' ? body.manifestPath : projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
     const manifestPath = resolve(dbtProjectDir, manifestInput);
     if (!(manifestPath === dbtProjectDir || manifestPath.startsWith(`${dbtProjectDir}/`))) {
       throw Object.assign(new Error('dbt manifestPath must stay inside dbt projectDir.'), { code: 'DBT_ARTIFACT_INVALID' });
     }
-    return { dbtProjectDir, manifestPath, projectDirInput, manifestInput };
+    const profilesDirInput = typeof body.profilesDir === 'string'
+      ? body.profilesDir
+      : projectConfig.dbt?.profilesDir;
+    const configuredProfilesDir = profilesDirInput ? resolve(projectRoot, profilesDirInput) : undefined;
+    const profilePath = findDbtProfilePaths(projectRoot, dbtProjectDir, configuredProfilesDir)[0];
+    const profilesDir = configuredProfilesDir ?? (profilePath ? dirname(profilePath) : undefined);
+    return { dbtProjectDir, manifestPath, projectDirInput, manifestInput, profilesDir, repoUrl, branch, subPath, repoWarnings: repo?.warnings ?? [] };
   };
   const previewDbtOnboarding = (body: Record<string, unknown> = {}) => {
     const paths = onboardingDbtPaths(body);
@@ -846,8 +882,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     const fingerprint = createHash('sha256').update(readFileSync(paths.manifestPath)).digest('hex');
     return {
-      projectDir: relative(projectRoot, paths.dbtProjectDir).replace(/\\/g, '/') || '.',
+      projectDir: portableProjectPath(projectRoot, paths.dbtProjectDir),
       manifestPath: relative(paths.dbtProjectDir, paths.manifestPath).replace(/\\/g, '/'),
+      ...(paths.profilesDir ? { profilesDir: portableProjectPath(projectRoot, paths.profilesDir) } : {}),
+      ...(paths.repoUrl ? { repoUrl: paths.repoUrl, branch: paths.branch, subPath: paths.subPath } : {}),
+      ...(paths.repoWarnings.length ? { warnings: paths.repoWarnings } : {}),
       fingerprint,
       projectName: typeof (raw.metadata as Record<string, unknown> | undefined)?.project_name === 'string' ? (raw.metadata as Record<string, unknown>).project_name : undefined,
       counts: {
@@ -2510,17 +2549,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       // A real app needs a certified anchor: only offer confirmation when at least
       // one certified tile is present. Otherwise fall through to the escalate path
       // (research / draft the missing blocks) so the user isn't sent to a dead end.
-      const proposed = Boolean(proposal && proposal.tiles.some((tile) => tile.certification === 'certified' && !tile.error));
+      const proposed = Boolean(proposal && proposal.tiles.some((tile) => (tile.certification === 'certified' || tile.certification === 'reviewed_semantic') && !tile.error));
       const sessionPlan = agentRunRecord(session.plan);
       const appTitle = agentRunString(sessionPlan?.name) ?? 'App proposal';
       const certifiedCount = proposal?.coverage.certifiedTiles ?? 0;
       const generatedCount = proposal?.coverage.generatedTiles ?? 0;
+      const semanticCount = proposal?.coverage.semanticTiles ?? 0;
       const gapCount = proposal?.coverage.gaps ?? 0;
       // A coverage gap is NOT terminal — leave status open so the gate can escalate to
       // drafting the missing blocks. Only genuine infra errors (the catch above) block.
       return {
         summary: proposed
           ? `Proposed ${certifiedCount} certified tile${certifiedCount === 1 ? '' : 's'}`
+            + (semanticCount > 0 ? ` + ${semanticCount} reviewed semantic tile${semanticCount === 1 ? '' : 's'}` : '')
             + (generatedCount > 0 ? ` + ${generatedCount} AI-generated (review required)` : '')
             + (gapCount > 0 ? `; ${gapCount} question${gapCount === 1 ? '' : 's'} still uncovered` : '')
             + '. Review the list and confirm to create the app.'
@@ -2534,6 +2575,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           dashboardId: session.dashboardId,
           plan: session.plan,
           proposal,
+          proposalHash: session.proposalHash,
           warnings: session.warnings,
         }, session.appId)] : [],
         evaluations: [
@@ -4197,8 +4239,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/onboarding/status') {
       const requestId = apiRequestId('onboarding-status');
-      const dbtProjectDir = resolve(projectRoot, projectConfig.dbt?.projectDir ?? '.');
+      const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
       const manifestPath = resolve(dbtProjectDir, projectConfig.dbt?.manifestPath ?? 'target/manifest.json');
+      const configuredProfilesDir = projectConfig.dbt?.profilesDir ? resolve(projectRoot, projectConfig.dbt.profilesDir) : undefined;
+      const profilePath = findDbtProfilePaths(projectRoot, dbtProjectDir, configuredProfilesDir)[0];
       const registry = loadDomainPackageRegistry(projectRoot);
       const manifestFound = existsSync(manifestPath);
       let snapshotId: string | undefined;
@@ -4218,6 +4262,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           configured: Boolean(projectConfig.dbt),
           projectDir: projectConfig.dbt?.projectDir,
           manifestPath: projectConfig.dbt?.manifestPath,
+          profilesDir: configuredProfilesDir
+            ? portableProjectPath(projectRoot, configuredProfilesDir)
+            : profilePath ? portableProjectPath(projectRoot, dirname(profilePath)) : undefined,
+          repoUrl: projectConfig.dbt?.repoUrl,
+          branch: projectConfig.dbt?.branch,
+          subPath: projectConfig.dbt?.subPath,
           projectFound: existsSync(join(dbtProjectDir, 'dbt_project.yml')),
           manifestFound,
         },
@@ -4262,7 +4312,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           if (code !== 'DBT_MANIFEST_MISSING' || body.buildArtifacts !== true) throw error;
           const { dbtProjectDir } = onboardingDbtPaths(body);
           try {
-            execFileSync('dbt', ['parse', '--project-dir', dbtProjectDir], {
+            const { profilesDir } = onboardingDbtPaths(body);
+            const parseArgs = buildDbtParseArgs(dbtProjectDir, profilesDir);
+            execFileSync('dbt', parseArgs, {
               cwd: dbtProjectDir,
               timeout: 120_000,
               maxBuffer: 1024 * 1024,
@@ -4287,16 +4339,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ...projectConfig,
           manifestVersion: 3,
           modeling: { mode: 'dbt-first' },
-          dbt: { projectDir: preview.projectDir, manifestPath: preview.manifestPath },
+          dbt: {
+            projectDir: preview.projectDir,
+            manifestPath: preview.manifestPath,
+            ...(preview.profilesDir ? { profilesDir: preview.profilesDir } : {}),
+            ...(preview.repoUrl ? { repoUrl: preview.repoUrl, branch: preview.branch, subPath: preview.subPath } : {}),
+          },
           semanticLayer: { provider: 'dbt', projectPath: preview.projectDir },
         };
         const configPath = join(projectRoot, 'dql.config.json');
         const previousConfigSource = readFileSync(configPath, 'utf8');
         const previousProjectConfig = projectConfig;
+        const previousConnection = connection;
         const tempPath = `${configPath}.tmp-${process.pid}`;
         writeFileSync(tempPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
         renameSync(tempPath, configPath);
         projectConfig = nextConfig;
+        if (!configuredConnection) connection = resolveDbtProfileRuntimeConnection(projectRoot, nextConfig);
         projectSnapshots.invalidate();
         invalidateAgentProjectState(projectRoot);
         let snapshotId: string;
@@ -4307,6 +4366,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           writeFileSync(rollbackPath, previousConfigSource, { encoding: 'utf8', mode: 0o600 });
           renameSync(rollbackPath, configPath);
           projectConfig = previousProjectConfig;
+          connection = previousConnection;
           projectSnapshots.invalidate();
           invalidateAgentProjectState(projectRoot);
           throw Object.assign(new Error(`dbt-first configuration did not compile and was rolled back: ${error instanceof Error ? error.message : String(error)}`), { code: 'SNAPSHOT_BUILD_FAILED' });
@@ -5961,6 +6021,34 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    const appStoryRun = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/story$/);
+    if (req.method === 'POST' && appStoryRun) {
+      const body = await readJSON(req).catch(() => ({}));
+      const runId = typeof body.runId === 'string' ? body.runId : '';
+      const evidence = dashboardRunEvidence.get(runId);
+      const appId = decodeURIComponent(appStoryRun[1]);
+      const dashboardId = decodeURIComponent(appStoryRun[2]);
+      if (!evidence || evidence.expiresAt < Date.now() || evidence.appId !== appId || evidence.dashboardId !== dashboardId) {
+        dashboardRunEvidence.delete(runId);
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Dashboard run evidence expired or does not match this App. Run the dashboard again.' }));
+        return;
+      }
+      // The endpoint accepts runId only. Optional provider wording can be added
+      // here later; the claim-checked deterministic brief is always available.
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        runId,
+        snapshotId: evidence.snapshotId,
+        filterFingerprint: evidence.filterFingerprint,
+        resultFingerprint: evidence.resultFingerprint,
+        personaFingerprint: evidence.personaFingerprint,
+        facts: evidence.facts,
+        story: evidence.story,
+      }));
+      return;
+    }
+
     const appDashRun = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/run$/);
     if (req.method === 'POST' && appDashRun) {
       try {
@@ -5971,6 +6059,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!loaded) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `Dashboard "${dashboardId}" not found in app "${appId}"` }));
+          return;
+        }
+        const activeApp = activePersonaAppId();
+        if (activeApp && activeApp !== appId) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `The active persona belongs to App "${activeApp}", not "${appId}".` }));
           return;
         }
 
@@ -6074,6 +6168,65 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 name: pin.title,
               },
             });
+            continue;
+          }
+          if (item.semantic) {
+            try {
+              if (!semanticLayer) throw new Error('Semantic layer is not available for this governed query.');
+              const knownMetrics = new Set(semanticLayer.listMetrics().map((metric) => metric.name));
+              const missingMetrics = item.semantic.metrics.filter((metric) => !knownMetrics.has(metric));
+              if (missingMetrics.length) throw new Error(`Semantic definition changed; missing metric(s): ${missingMetrics.join(', ')}`);
+              const knownModels = new Set(semanticLayer.listSemanticModels().map((model) => model.name));
+              const missingModels = item.semantic.semanticModelRefs.filter((model) => !knownModels.has(model));
+              if (missingModels.length) throw new Error(`Semantic definition changed; missing model(s): ${missingModels.join(', ')}`);
+              const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
+              const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
+              const activeFilters = Object.entries(dashboardVariables)
+                .filter(([field, value]) => item.semantic!.dimensions?.includes(field) && value !== undefined && value !== null && value !== '')
+                .map(([dimension, value]) => ({ dimension, operator: 'equals', values: Array.isArray(value) ? value.map(String) : [String(value)] }));
+              const staticFilters = (item.semantic.filters ?? []).map((filter) => ({
+                dimension: filter.field,
+                operator: filter.operator,
+                values: Array.isArray(filter.value) ? filter.value.map(String) : [String(filter.value)],
+              }));
+              const composed = composeRuntimeSemanticQuery({
+                metrics: item.semantic.metrics,
+                dimensions: item.semantic.dimensions ?? [],
+                filters: [...staticFilters, ...activeFilters],
+                ...(item.semantic.timeDimension ? { timeDimension: { name: item.semantic.timeDimension, granularity: 'month' } } : {}),
+                orderBy: item.semantic.orderBy?.map((order) => ({ name: order.field, direction: order.direction })),
+                limit: item.semantic.limit,
+                engine: item.semantic.provider,
+              }, semanticLayer, {
+                projectRoot,
+                projectConfig,
+                detectedProvider: semanticDetectedProvider,
+                driver: targetConnection.driver,
+                tableMapping,
+              });
+              if (!composed) throw new Error('The governed semantic query could not be composed.');
+              const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
+              const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
+              tiles.push({
+                tileId: item.i,
+                status: 'ok',
+                tileType: 'semantic',
+                title: item.title ?? item.semantic.id,
+                viz: item.viz,
+                result: normalizeQueryResult(result),
+                trustState: 'review_required',
+                citation: { kind: 'semantic_query', name: item.semantic.id },
+              });
+            } catch (err) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                tileType: 'semantic',
+                title: item.title ?? item.semantic.id,
+                error: err instanceof Error ? err.message : String(err),
+                trustState: 'review_required',
+              });
+            }
             continue;
           }
           const block = resolveDashboardItemBlock(item, manifest);
@@ -6212,12 +6365,53 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         }
         localApps?.close();
+        const snapshot = projectSnapshot();
+        const filterFingerprint = createHash('sha256').update(JSON.stringify(dashboardVariables)).digest('hex');
+        const resultFingerprint = createHash('sha256').update(JSON.stringify(tiles.map((tile) => ({ tileId: tile.tileId, status: tile.status, result: tile.result })))).digest('hex');
+        const personaFingerprint = createHash('sha256').update(activePersonaAppId() ?? 'global').digest('hex');
+        const runId = `app_run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const storyResult = buildDeterministicDashboardStory({
+          goal: loaded.dashboard.story?.goal ?? loaded.dashboard.metadata.businessOutcome ?? loaded.dashboard.metadata.title,
+          audience: loaded.dashboard.story?.audience ?? loaded.dashboard.metadata.audience,
+          filters: dashboardVariables,
+          tiles: tiles.map((tile) => ({
+            tileId: tile.tileId,
+            title: typeof tile.title === 'string' ? tile.title : tile.tileId,
+            status: tile.status,
+            trustState: (tile.trustState === 'certified' || tile.trustState === 'review_required' || tile.trustState === 'draft_ready'
+              ? tile.trustState
+              : tile.certificationStatus === 'certified' ? 'certified' : 'review_required') as DashboardDisplayTrustState,
+            result: tile.result as { columns?: unknown[]; rows?: unknown[]; rowCount?: number } | undefined,
+            citation: tile.citation,
+          })),
+          eligibleTileIds: loaded.dashboard.story?.eligibleTileIds,
+          driverTileIds: loaded.dashboard.story?.driverTileIds,
+        });
+        dashboardRunEvidence.set(runId, {
+          appId,
+          dashboardId,
+          snapshotId: snapshot.snapshotId,
+          filterFingerprint,
+          resultFingerprint,
+          personaFingerprint,
+          facts: storyResult.facts,
+          story: storyResult.story,
+          expiresAt: Date.now() + 15 * 60_000,
+        });
+        for (const [id, evidence] of dashboardRunEvidence) if (evidence.expiresAt < Date.now()) dashboardRunEvidence.delete(id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           appId,
           dashboardId,
           persona: activePersonaAppId() ? { appId: activePersonaAppId() } : null,
+          runId,
+          snapshotId: snapshot.snapshotId,
+          filterFingerprint,
+          resultFingerprint,
+          personaFingerprint,
           tiles,
+          facts: storyResult.facts,
+          story: storyResult.story,
         }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -7585,15 +7779,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'goal is required' }));
           return;
         }
-        const certifiedOnly = body.certifiedOnly !== false;
-        const metrics = loadSemanticMetrics(projectRoot);
-        let blocks = collectPlanBlocks(projectRoot, { certifiedOnly });
-        // If nothing is certified yet, fall back to all drafts so the plan still
-        // shows what COULD be assembled (every section then reads as a gap to certify).
-        if (blocks.length === 0 && certifiedOnly) blocks = collectPlanBlocks(projectRoot, { certifiedOnly: false });
-        const plan = await planApp({ goal, metrics, blocks });
+        const snapshot = projectSnapshot();
+        const kgPath = defaultKgPath(projectRoot);
+        await reindexProject(projectRoot, { kgPath, manifest: snapshot.manifest });
+        const kg = new KGStore(kgPath);
+        let plan;
+        try {
+          plan = planAppFromPrompt({
+            prompt: goal,
+            kg,
+            domain: typeof body.domain === 'string' ? body.domain : undefined,
+            audience: typeof body.audience === 'string' ? body.audience : undefined,
+            mode: body.mode === 'personal' ? 'personal' : 'stakeholder',
+            snapshotId: snapshot.snapshotId,
+          });
+        } finally {
+          kg.close();
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ plan, blockCount: blocks.length, metricCount: metrics.length, certifiedOnly }));
+        res.end(serializeJSON({ plan, snapshotId: snapshot.snapshotId }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -8523,9 +8727,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ?? Object.keys(connections)[0]
         ?? 'default';
       const dbtProfiles = discoverDbtProfileConnections(projectRoot, cfg);
+      const activeDbtProfile = dbtProfiles.find((candidate) =>
+        candidate.missingFields.length === 0
+        && !candidate.warnings.some((warning) => warning.startsWith('DuckDB file not found'))
+        && !candidate.warnings.some((warning) => warning.startsWith('Not the default dbt target'))
+      );
+      const activeConnection = connection ? {
+        source: Object.keys(connections).length > 0 ? 'dql_config' : activeDbtProfile ? 'dbt_profile' : 'runtime',
+        driver: connection.driver,
+        ...(Object.keys(connections).length === 0 && activeDbtProfile ? { profileId: activeDbtProfile.id } : {}),
+      } : null;
       const connectorStatus = getConnectorInstallStatuses(projectRoot);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles, connectorStatus }));
+      res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles, activeConnection, connectorStatus }));
       return;
     }
 
@@ -18529,7 +18743,10 @@ interface DbtProfileTextResult {
 export function discoverDbtProfileConnections(projectRoot: string, projectConfig: ProjectConfig): DbtProfileConnectionCandidate[] {
   const dbtProjectPath = findDbtProjectPath(projectRoot, projectConfig);
   const projectProfileName = readDbtProjectProfileName(dbtProjectPath);
-  const profilePaths = findDbtProfilePaths(projectRoot, dbtProjectPath);
+  const configuredProfilesDir = projectConfig.dbt?.profilesDir
+    ? resolve(projectRoot, projectConfig.dbt.profilesDir)
+    : undefined;
+  const profilePaths = findDbtProfilePaths(projectRoot, dbtProjectPath, configuredProfilesDir);
   const candidates: DbtProfileConnectionCandidate[] = [];
 
   for (const profilePath of profilePaths) {
@@ -18588,6 +18805,30 @@ export function discoverDbtProfileConnections(projectRoot: string, projectConfig
   return candidates.slice(0, 20);
 }
 
+export function buildDbtParseArgs(dbtProjectDir: string, profilesDir?: string): string[] {
+  return [
+    'parse',
+    '--project-dir', dbtProjectDir,
+    ...(profilesDir ? ['--profiles-dir', profilesDir] : []),
+  ];
+}
+
+/** CFG-003: use a complete default dbt target when no saved DQL connection exists. */
+export function resolveDbtProfileRuntimeConnection(
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+): ConnectionConfig | null {
+  const candidates = discoverDbtProfileConnections(projectRoot, projectConfig);
+  const complete = candidates.filter((candidate) =>
+    candidate.missingFields.length === 0
+    && !candidate.warnings.some((warning) => warning.startsWith('DuckDB file not found'))
+  );
+  const defaultTarget = complete.find((candidate) =>
+    !candidate.warnings.some((warning) => warning.startsWith('Not the default dbt target'))
+  );
+  return defaultTarget?.connection ?? (complete.length === 1 ? complete[0].connection : null);
+}
+
 function findDbtProjectPath(projectRoot: string, projectConfig: ProjectConfig): string {
   const configuredDbtDir = projectConfig.dbt?.projectDir
     ? resolve(projectRoot, projectConfig.dbt.projectDir)
@@ -18610,8 +18851,19 @@ function findDbtProjectPath(projectRoot: string, projectConfig: ProjectConfig): 
     ?? projectRoot;
 }
 
-function findDbtProfilePaths(projectRoot: string, dbtProjectPath: string): string[] {
+function portableProjectPath(projectRoot: string, absolutePath: string): string {
+  const normalizedAbsolute = resolve(absolutePath).replace(/\\/g, '/');
+  const relativePath = relative(projectRoot, absolutePath).replace(/\\/g, '/');
+  return !relativePath
+    ? '.'
+    : relativePath === '..' || relativePath.startsWith('../')
+      ? normalizedAbsolute
+      : relativePath;
+}
+
+function findDbtProfilePaths(projectRoot: string, dbtProjectPath: string, configuredProfilesDir?: string): string[] {
   const dirs = [
+    configuredProfilesDir,
     process.env.DBT_PROFILES_DIR,
     dbtProjectPath,
     projectRoot,
@@ -18620,7 +18872,7 @@ function findDbtProfilePaths(projectRoot: string, dbtProjectPath: string): strin
 
   const paths: string[] = [];
   for (const dir of dirs) {
-    for (const filename of ['profiles.yml', 'profiles.yaml']) {
+    for (const filename of ['profiles.yml', 'profiles.yaml', 'profile.yml', 'profile.yaml']) {
       const profilePath = resolve(dir, filename);
       if (existsSync(profilePath) && !paths.includes(profilePath)) {
         paths.push(profilePath);

@@ -385,6 +385,12 @@ interface ProjectConfig {
     projectDir?: string;
     /** Path to the dbt manifest.json, relative to `projectDir`. Default: target/manifest.json */
     manifestPath?: string;
+    /** Directory containing dbt profiles.yml; used by runtime onboarding, never copied into the manifest. */
+    profilesDir?: string;
+    /** Optional remote source provenance retained by dbt-first onboarding. */
+    repoUrl?: string;
+    branch?: string;
+    subPath?: string;
   };
   /** Optional interop path to a DataLex compiler manifest. DQL itself does not require DataLex. */
   datalex?: {

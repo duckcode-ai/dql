@@ -191,6 +191,60 @@ describe('parseDashboardDocument', () => {
     });
   });
 
+  it('round-trips governed semantic queries and a runtime story evidence plan', () => {
+    const doc = {
+      ...minimal,
+      story: {
+        version: 1,
+        goal: 'Explain beverage revenue and its customer drivers.',
+        audience: 'Revenue leadership',
+        eligibleTileIds: ['beverage-revenue'],
+        driverTileIds: ['beverage-revenue'],
+      },
+      layout: {
+        ...minimal.layout,
+        items: [{
+          i: 'beverage-revenue', x: 0, y: 0, w: 8, h: 4,
+          semantic: {
+            id: 'beverage-revenue',
+            provider: 'metricflow',
+            metrics: ['revenue'],
+            dimensions: ['customer_name', 'product_category'],
+            filters: [{ field: 'product_category', operator: '=', value: 'Beverage' }],
+            orderBy: [{ field: 'revenue', direction: 'desc' }],
+            limit: 10,
+            semanticModelRefs: ['orders'],
+            definitionFingerprint: 'sha256:semantic-v1',
+            snapshotId: 'snapshot-1',
+          },
+          viz: { type: 'bar' },
+          trustState: 'review_required',
+        }],
+      },
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+    expect(errors).toEqual([]);
+    expect(document?.story).toMatchObject({ goal: 'Explain beverage revenue and its customer drivers.' });
+    expect(document?.layout.items[0]?.semantic).toMatchObject({ metrics: ['revenue'], provider: 'metricflow' });
+  });
+
+  it('rejects semantic sources without reviewed model references or fingerprints', () => {
+    const bad = {
+      ...minimal,
+      layout: {
+        ...minimal.layout,
+        items: [{
+          i: 'semantic', x: 0, y: 0, w: 8, h: 4,
+          semantic: { id: 'semantic', provider: 'native', metrics: ['revenue'], semanticModelRefs: [] },
+          viz: { type: 'bar' },
+        }],
+      },
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(bad));
+    expect(document).toBeNull();
+    expect(errors.map((error) => error.message).join('\n')).toMatch(/semanticModelRefs|definitionFingerprint/);
+  });
+
   it('errors on unknown viz type', () => {
     const bad = {
       ...minimal,
@@ -222,7 +276,7 @@ describe('parseDashboardDocument', () => {
     };
     const { document, errors } = parseDashboardDocument(JSON.stringify(bad));
     expect(document).toBeNull();
-    expect(errors[0].message).toMatch(/block must be \{ blockId \} or \{ ref \}/);
+    expect(errors[0].message).toMatch(/must have a block, semantic, text, or aiPin source/);
   });
 
   it('rejects non-grid layouts (single supported kind today)', () => {

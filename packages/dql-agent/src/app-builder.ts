@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import {
   parseAppDocument,
@@ -7,6 +8,8 @@ import {
   type AppDocument,
   type DashboardDisplayMetadata,
   type DashboardDocument,
+  type DashboardSemanticQueryRef,
+  type DashboardStoryEvidencePlan,
   type DashboardSection,
   type DashboardTileFilterBinding,
   type DashboardTileParameterBinding,
@@ -17,6 +20,31 @@ import {
 import type { KGNode } from "./kg/types.js";
 import type { KGStore } from "./kg/sqlite-fts.js";
 import type { NarrateResult } from "./narrate.js";
+import { buildAnalysisQuestionPlan } from "./metadata/analysis-planner.js";
+import { certifiedFitAllowsTier1, evaluateCertifiedBlockFit } from "./metadata/block-fit.js";
+
+export type AppMode = "personal" | "stakeholder";
+
+export interface AppRequirement {
+  id: string;
+  question: string;
+  role: "kpi" | "trend" | "breakdown" | "detail";
+  measures: string[];
+  dimensions: string[];
+  filters: string[];
+  grain?: string;
+  ranking?: { direction: "top" | "bottom"; limit: number };
+}
+
+export interface RequirementCoverage {
+  requirementId: string;
+  status: "covered" | "gap";
+  source: "certified_block" | "semantic_query" | "gap";
+  tileId?: string;
+  sourceId?: string;
+  trustState: AppPlanTrustState;
+  reasons: string[];
+}
 
 export type AppBuilderSkillId =
   | "interpret_business_intent"
@@ -28,6 +56,7 @@ export type AppBuilderSkillId =
 
 export type AppPlanTileKind =
   | "certified_block"
+  | "semantic_query"
   | "draft_placeholder"
   | "narrative";
 
@@ -119,6 +148,8 @@ export interface AppPlanTile {
   kind: AppPlanTileKind;
   description?: string;
   blockId?: string;
+  semantic?: DashboardSemanticQueryRef;
+  requirementIds?: string[];
   sourceNodeId?: string;
   viz: DashboardVizConfig["type"];
   certification: "certified" | "uncertified";
@@ -176,7 +207,12 @@ export interface AppBuilderSkill {
 }
 
 export interface AppPlan {
-  version: 1;
+  version: 2;
+  mode: AppMode;
+  snapshotId?: string;
+  requirements: AppRequirement[];
+  requirementCoverage: RequirementCoverage[];
+  storyEvidencePlan: DashboardStoryEvidencePlan;
   appId: string;
   name: string;
   prompt: string;
@@ -237,6 +273,9 @@ export interface PlanAppFromPromptInput {
   preferredBlockIds?: string[];
   maxCertifiedTiles?: number;
   plannerMode?: "deterministic" | "ai_assisted";
+  mode?: AppMode;
+  snapshotId?: string;
+  allowSemanticQueries?: boolean;
 }
 
 export interface AppPlanValidationIssue {
@@ -307,6 +346,180 @@ export const APP_BUILDER_SKILLS: AppBuilderSkill[] = [
   },
 ];
 
+function appRequirementsForPrompt(prompt: string): AppRequirement[] {
+  const analysis = buildAnalysisQuestionPlan(prompt);
+  const measures = analysis.requestedShape.measures.length
+    ? analysis.requestedShape.measures
+    : analysis.metricTerms;
+  const dimensions = analysis.requestedShape.dimensions;
+  const filters = analysis.requestedShape.filters;
+  const ranking = analysis.requestedShape.topN
+    ? { direction: analysis.requestedShape.rankingDirection ?? "top" as const, limit: analysis.requestedShape.topN.n }
+    : undefined;
+  const requirements: AppRequirement[] = [{
+    id: "primary",
+    question: prompt,
+    role: ranking ? "detail" : dimensions.length ? "breakdown" : "kpi",
+    measures,
+    dimensions,
+    filters,
+    grain: analysis.requestedShape.grain,
+    ...(ranking ? { ranking } : {}),
+  }];
+  const wantsTrend = analysis.mode === "trend" || /\btrend|over time|weekly|monthly|quarterly\b/i.test(prompt);
+  if (wantsTrend && !requirements.some((requirement) => requirement.role === "trend")) {
+    requirements.push({
+      id: "trend",
+      question: `${measures.join(" and ") || "primary metric"} over time`,
+      role: "trend",
+      measures,
+      dimensions: analysis.timeTerms.length ? analysis.timeTerms : ["time"],
+      filters,
+    });
+  }
+  for (const dimension of dimensions.slice(0, 2)) {
+    if (requirements[0]?.dimensions.includes(dimension) && dimensions.length === 1) continue;
+    requirements.push({
+      id: `by-${slugify(dimension)}`,
+      question: `${measures.join(" and ") || "primary metric"} by ${dimension}`,
+      role: "breakdown",
+      measures,
+      dimensions: [dimension],
+      filters,
+    });
+  }
+  return requirements;
+}
+
+function certifiedCoverageForRequirement(
+  requirement: AppRequirement,
+  nodes: KGNode[],
+): { node?: KGNode; reasons: string[] } {
+  const plan = buildAnalysisQuestionPlan(requirement.question);
+  const ranked = nodes.map((node) => ({
+    node,
+    fit: evaluateCertifiedBlockFit({ question: requirement.question, plan, block: node }),
+    requirementFit: certifiedNodeCoversRequirement(node, requirement),
+  }));
+  const exact = ranked.find((candidate) => certifiedFitAllowsTier1(candidate.fit) && candidate.requirementFit.ok);
+  if (exact) return { node: exact.node, reasons: exact.fit.reasons };
+  return {
+    reasons: Array.from(new Set(ranked.flatMap((candidate) => [
+      ...(certifiedFitAllowsTier1(candidate.fit) && !candidate.requirementFit.ok ? [] : candidate.fit.reasons),
+      ...candidate.requirementFit.reasons,
+    ]))).slice(0, 5),
+  };
+}
+
+/**
+ * App requirements are already structured, so they are a stronger contract than
+ * reparsing the short requirement question.  This guard prevents descriptive
+ * metadata from making (for example) a product ranking look like a time trend,
+ * or an all-customer lifetime ranking look like a beverage-filtered ranking.
+ */
+function certifiedNodeCoversRequirement(
+  node: KGNode,
+  requirement: AppRequirement,
+): { ok: boolean; reasons: string[] } {
+  const haystack = canonicalRequirementText(JSON.stringify(node));
+  const missingDimensions = requirement.dimensions.filter((dimension) =>
+    !requirementTermAliases(dimension).some((alias) => haystack.includes(` ${alias} `)),
+  );
+  const filterTerms = requirement.filters.flatMap((filter) =>
+    canonicalRequirementText(filter).trim().split(/\s+/).filter((term) =>
+      term.length > 2 && !REQUIREMENT_FILTER_STOP_WORDS.has(term)
+    ),
+  );
+  const missingFilters = filterTerms.filter((term) =>
+    !requirementTermAliases(term).some((alias) => haystack.includes(` ${alias} `)),
+  );
+  const reasons = [
+    missingDimensions.length ? `certified source does not prove dimensions: ${missingDimensions.join(", ")}` : "",
+    missingFilters.length ? `certified source does not prove filters: ${missingFilters.join(", ")}` : "",
+  ].filter(Boolean);
+  return { ok: reasons.length === 0, reasons };
+}
+
+const REQUIREMENT_FILTER_STOP_WORDS = new Set([
+  "and", "for", "from", "with", "different", "type", "types", "specific", "only", "all",
+]);
+
+function canonicalRequirementText(value: string): string {
+  return ` ${value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+}
+
+function requirementTermAliases(value: string): string[] {
+  const term = canonicalRequirementText(value).trim();
+  if (["time", "date"].includes(term)) return ["time", "date", "day", "week", "month", "quarter", "year", "ordered at"];
+  if (["beverage", "beverages"].includes(term)) return ["beverage", "beverages", "drink", "drinks"];
+  if (["customer", "customers"].includes(term)) return ["customer", "customers", "customer name", "customer id"];
+  if (["product", "products"].includes(term)) return ["product", "products", "product name", "product id", "item", "sku"];
+  return [term];
+}
+
+function semanticTileForRequirement(
+  kg: KGStore,
+  requirement: AppRequirement,
+  domain: string,
+  snapshotId?: string,
+): AppPlanTile | null {
+  if (requirement.measures.length === 0) return null;
+  const hits = kg.search({
+    query: requirement.question,
+    domain: domain === "general" ? undefined : domain,
+    kinds: ["metric", "measure", "semantic_model", "dimension"],
+    limit: 24,
+  }).map((hit) => hit.node);
+  const metricNodes = hits.filter((node) => node.kind === "metric" || node.kind === "measure");
+  const modelNodes = hits.filter((node) => node.kind === "semantic_model");
+  if (metricNodes.length === 0 || modelNodes.length === 0) return null;
+  const requested = new Set(requirement.measures.map((measure) => slugify(measure).replace(/-/g, "_")));
+  const metric = metricNodes.find((node) => requested.has(slugify(node.name).replace(/-/g, "_"))) ?? metricNodes[0];
+  if (!metric) return null;
+  const semanticModelRefs = Array.from(new Set(modelNodes.map((node) => node.name))).slice(0, 4);
+  const id = `semantic-${requirement.id}`;
+  const fingerprintPayload = JSON.stringify({
+    metric: metric.nodeId,
+    dimensions: requirement.dimensions,
+    filters: requirement.filters,
+    models: semanticModelRefs,
+    snapshotId,
+  });
+  const semantic: DashboardSemanticQueryRef = {
+    id,
+    provider: metric.provenance?.toLowerCase().includes("metricflow") ? "metricflow" : "native",
+    metrics: [metric.name],
+    ...(requirement.dimensions.length ? { dimensions: requirement.dimensions } : {}),
+    ...(requirement.ranking ? {
+      orderBy: [{ field: metric.name, direction: requirement.ranking.direction === "bottom" ? "asc" : "desc" }],
+      limit: requirement.ranking.limit,
+    } : {}),
+    semanticModelRefs,
+    definitionFingerprint: `sha256:${createHash("sha256").update(fingerprintPayload).digest("hex")}`,
+    ...(snapshotId ? { snapshotId } : {}),
+  };
+  const viz: DashboardVizConfig["type"] = requirement.role === "kpi"
+    ? "single_value"
+    : requirement.role === "trend" ? "line" : requirement.ranking ? "bar" : "table";
+  return {
+    id,
+    title: requirement.question,
+    kind: "semantic_query",
+    semantic,
+    requirementIds: [requirement.id],
+    viz,
+    certification: "uncertified",
+    reviewStatus: "review_required",
+    trustState: "review_required",
+    rationale: "Governed semantic coverage for a requirement not fully covered by a compatible certified block.",
+    sourceEvidence: [
+      { source: metric.nodeId, nodeId: metric.nodeId, kind: metric.kind, reason: "Reviewed semantic metric", trustState: "review_required" },
+      ...modelNodes.slice(0, 4).map((node) => ({ source: node.nodeId, nodeId: node.nodeId, kind: node.kind, reason: "Semantic model used by the canonical query", trustState: "review_required" as const })),
+    ],
+    reviewTasks: ["Review semantic definition freshness and result shape before stakeholder publication."],
+  };
+}
+
 export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error("prompt is required");
@@ -340,9 +553,62 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   const blockFilters = filtersFromCertifiedNodes(certifiedNodes);
   const filters = blockFilters.length > 0 ? mergeAppFilters(blockFilters, promptFilters) : promptFilters;
 
-  const certifiedTiles = certifiedNodes.map((node, index) =>
+  const candidateCertifiedTiles = certifiedNodes.map((node, index) =>
     tileFromCertifiedNode(node, index, analysisIntent, filters),
   );
+  const requirements = appRequirementsForPrompt(prompt);
+  const coverage: RequirementCoverage[] = [];
+  const selectedCertifiedIds = new Set<string>();
+  const semanticTiles: AppPlanTile[] = [];
+  for (const requirement of requirements) {
+    const match = certifiedCoverageForRequirement(requirement, certifiedNodes);
+    if (match.node) {
+      const tileId = slugify(match.node.name) || match.node.nodeId;
+      selectedCertifiedIds.add(match.node.nodeId);
+      coverage.push({
+        requirementId: requirement.id,
+        status: "covered",
+        source: "certified_block",
+        tileId,
+        sourceId: match.node.nodeId,
+        trustState: "certified",
+        reasons: match.reasons,
+      });
+      continue;
+    }
+    const semanticTile = input.allowSemanticQueries === false
+      ? null
+      : semanticTileForRequirement(input.kg, requirement, domain, input.snapshotId);
+    if (semanticTile) {
+      semanticTiles.push(semanticTile);
+      coverage.push({
+        requirementId: requirement.id,
+        status: "covered",
+        source: "semantic_query",
+        tileId: semanticTile.id,
+        sourceId: semanticTile.semantic?.id,
+        trustState: "review_required",
+        reasons: ["No fully compatible certified block; covered by a governed semantic query."],
+      });
+    } else {
+      coverage.push({
+        requirementId: requirement.id,
+        status: "gap",
+        source: "gap",
+        trustState: "draft_ready",
+        reasons: match.reasons.length ? match.reasons : ["No compatible certified block or reviewed semantic definition was found."],
+      });
+    }
+  }
+  // Keep compatible certified context only. For legacy unshaped prompts, retain
+  // the best certified candidates so existing simple App generation stays useful.
+  // Requirement coverage is strict, while explicitly discovered certified
+  // context may still appear as supporting evidence tiles. It never closes a
+  // requirement unless the compatibility check above succeeds.
+  // Compatible blocks close requirements; other strongly related certified
+  // blocks may still appear as supporting context, but never change coverage.
+  const certifiedTiles = candidateCertifiedTiles;
+  const dashboardTiles = [...certifiedTiles, ...semanticTiles];
   const scopedReports = inferScopedReports(
     prompt,
     domain,
@@ -376,7 +642,18 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   });
 
   return {
-    version: 1,
+    version: 2,
+    mode: input.mode ?? "stakeholder",
+    ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+    requirements,
+    requirementCoverage: coverage,
+    storyEvidencePlan: {
+      version: 1,
+      goal: prompt,
+      audience,
+      eligibleTileIds: dashboardTiles.map((tile) => tile.id),
+      driverTileIds: dashboardTiles.filter((tile) => tile.display?.role === "breakdown" || tile.requirementIds?.some((id) => id.startsWith("by-"))).map((tile) => tile.id),
+    },
     appId,
     name: appName,
     prompt,
@@ -442,7 +719,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
         title: inferDashboardTitle(prompt, domain, appName),
         description: `Certified app surface for ${audience}. Draft gaps stay in reports until reviewed.`,
         filters,
-        tiles: certifiedTiles,
+        tiles: dashboardTiles,
       },
     ],
     caveats: [
@@ -459,10 +736,10 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     ],
     coverage: {
       certifiedTiles: certifiedTiles.length,
-      gaps: scopedReports.length,
+      gaps: coverage.filter((item) => item.status === "gap").length,
       ratio:
-        certifiedTiles.length + scopedReports.length > 0
-          ? certifiedTiles.length / (certifiedTiles.length + scopedReports.length)
+        coverage.length > 0
+          ? coverage.filter((item) => item.status === "covered").length / coverage.length
           : 0,
     },
   };
@@ -476,7 +753,7 @@ export function validateAppPlan(
   let certifiedTiles = 0;
   let draftTiles = 0;
 
-  if (plan.version !== 1)
+  if (plan.version !== 2)
     issues.push(error("version", "unsupported app plan version"));
   if (!plan.appId || !/^[a-z0-9][a-z0-9_-]*$/i.test(plan.appId)) {
     issues.push(error("appId", "appId must be folder-safe"));
@@ -526,6 +803,18 @@ export function validateAppPlan(
           issues.push(
             error(path, "certified block tiles must be visibly certified"),
           );
+        }
+      } else if (tile.kind === "semantic_query") {
+        draftTiles += 1;
+        if (!tile.semantic) {
+          issues.push(error(`${path}.semantic`, "semantic query tile requires a canonical semantic reference"));
+        } else {
+          if (tile.semantic.metrics.length === 0) issues.push(error(`${path}.semantic.metrics`, "semantic query requires a metric"));
+          if (tile.semantic.semanticModelRefs.length === 0) issues.push(error(`${path}.semantic.semanticModelRefs`, "semantic query requires reviewed model references"));
+          if (!tile.semantic.definitionFingerprint) issues.push(error(`${path}.semantic.definitionFingerprint`, "semantic query requires a definition fingerprint"));
+        }
+        if (tile.certification === "certified" || tile.reviewStatus === "certified") {
+          issues.push(error(path, "semantic query tiles cannot be presented as certified blocks"));
         }
       } else {
         draftTiles += 1;
@@ -589,6 +878,15 @@ export function generateAppFromPlan(
   }
 
   const dashboardId = plan.pages[0]?.id || "overview";
+  const sourceNodes = plan.pages.flatMap((page) => page.tiles)
+    .flatMap((tile) => tile.sourceEvidence ?? [])
+    .map((evidence) => evidence.nodeId ? kg.getNode(evidence.nodeId) : undefined)
+    .filter((node): node is KGNode => Boolean(node));
+  const usedDomains = Array.from(new Set([plan.domain, ...sourceNodes.map((node) => node.domain).filter((domain): domain is string => Boolean(domain))]));
+  const requiredExports = Array.from(new Set(sourceNodes.flatMap((node) => {
+    const value = node.payload?.requiredExports;
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  })));
   const app: AppDocument = {
     version: 1,
     id: plan.appId,
@@ -602,10 +900,10 @@ export function generateAppFromPlan(
       "Certified tiles must reference existing certified blocks.",
     ],
     caveats: plan.caveats,
-    visibility: "shared",
+    visibility: plan.mode === "personal" ? "private" : "shared",
     ownerDomain: plan.domain,
-    usesDomains: [plan.domain],
-    requiredExports: [],
+    usesDomains: usedDomains,
+    requiredExports,
     domain: plan.domain,
     audience: plan.audience,
     lifecycle: plan.lifecycle,
@@ -665,16 +963,16 @@ export function generateAppFromPlan(
     (page, pageIndex): DashboardDocument => ({
       version: 1,
       id: page.id,
-      // Story layout on the primary page when a narration was supplied.
       ...(options.narration && pageIndex === 0
         ? { sections: buildStorySections(page.tiles, options.narration) }
         : {}),
+      ...(pageIndex === 0 ? { story: plan.storyEvidencePlan } : {}),
       metadata: {
         title: page.title,
         description: page.description ?? plan.planning.displayStrategy,
         domain: plan.domain,
         audience: plan.audience,
-        visibility: "shared",
+        visibility: plan.mode === "personal" ? "private" : "shared",
         lifecycle: "draft",
         tags: plan.tags,
         businessOutcome: plan.planning.normalizedGoal,
@@ -1618,8 +1916,10 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
       trustState: tile.trustState ?? tile.display?.trustState ?? (tile.certification === "certified" ? "certified" : "draft_ready"),
       reviewStatus: tile.reviewStatus,
     };
-    if (isDashboardTile(tile)) {
+    if (tile.kind === "certified_block" && tile.blockId) {
       item.block = { blockId: tile.blockId };
+    } else if (tile.kind === "semantic_query" && tile.semantic) {
+      item.semantic = tile.semantic;
     } else {
       item.text = { markdown: markdownForGeneratedPlanTile(tile) };
     }
@@ -1651,10 +1951,10 @@ function markdownForGeneratedPlanTile(tile: AppPlanTile): string {
 }
 
 function isDashboardTile(tile: AppPlanTile): tile is AppPlanTile & {
-  kind: "certified_block";
-  blockId: string;
+  kind: "certified_block" | "semantic_query";
 } {
-  return tile.kind === "certified_block" && tile.certification === "certified" && Boolean(tile.blockId);
+  return (tile.kind === "certified_block" && tile.certification === "certified" && Boolean(tile.blockId))
+    || (tile.kind === "semantic_query" && Boolean(tile.semantic));
 }
 
 function appPlanReadme(

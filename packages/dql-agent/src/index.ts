@@ -180,6 +180,13 @@ export {
   type SynthesizeColumnStat,
 } from "./synthesize.js";
 export {
+  buildDeterministicDashboardStory,
+  validateDashboardStoryBrief,
+  type DashboardStoryBuildInput,
+  type DashboardStoryBuildResult,
+  type DashboardStoryTileResult,
+} from "./dashboard-story.js";
+export {
   planApp,
   type AppPlan as AgentAppPlan,
   type AppPlanSection,
@@ -337,6 +344,9 @@ export {
 export type {
   AppBuilderSkill,
   AppBuilderSkillId,
+  AppMode,
+  AppRequirement,
+  RequirementCoverage,
   AppPlan,
   AppPlanAnalysisIntent,
   AppPlanFilter,

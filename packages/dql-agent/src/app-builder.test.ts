@@ -171,6 +171,88 @@ describe("planAppFromPrompt — convergence (filters bound to real blocks)", () 
 });
 
 describe("planAppFromPrompt", () => {
+  it("does not let broad inferred blocks close filtered customer, product, or trend requirements", () =>
+    withKg([
+      {
+        nodeId: "block:top_products",
+        kind: "block",
+        name: "top_products",
+        domain: "commerce",
+        status: "certified",
+        description: "Top products by total revenue",
+        sourceTier: "certified_artifact",
+      },
+      {
+        nodeId: "block:top_customers",
+        kind: "block",
+        name: "top_customers",
+        domain: "commerce",
+        status: "certified",
+        description: "Top customers by lifetime spend",
+        sourceTier: "certified_artifact",
+      },
+    ], (kg) => {
+      const plan = planAppFromPrompt({
+        prompt: "top customers by beverage revenue, revenue by product, and revenue trend",
+        kg,
+        domain: "commerce",
+        allowSemanticQueries: false,
+      });
+
+      expect(plan.requirementCoverage.every((coverage) => coverage.status === "gap")).toBe(true);
+      expect(plan.pages[0].tiles.every((tile) => tile.kind === "certified_block")).toBe(true);
+      expect(plan.requirementCoverage.flatMap((coverage) => coverage.reasons).join(" ")).toMatch(/does not prove (dimensions|filters)/);
+    }));
+
+  it("plans requirement-first, uses semantic coverage only when a certified block is incompatible", () =>
+    withKg([
+      {
+        nodeId: "block:revenue_total",
+        kind: "block",
+        name: "revenue_total",
+        domain: "commerce",
+        status: "certified",
+        description: "Overall revenue with no category breakdown",
+        sourceTier: "certified_artifact",
+        declaredOutputs: ["revenue"],
+      },
+      {
+        nodeId: "metric:revenue",
+        kind: "metric",
+        name: "revenue",
+        domain: "commerce",
+        status: "review",
+        description: "Governed order revenue",
+        sourceTier: "semantic_layer",
+        provenance: "MetricFlow semantic manifest",
+      },
+      {
+        nodeId: "semantic_model:orders",
+        kind: "semantic_model",
+        name: "orders",
+        domain: "commerce",
+        status: "review",
+        description: "Orders semantic model with product category and customer",
+        sourceTier: "semantic_layer",
+      },
+    ], (kg) => {
+      const plan = planAppFromPrompt({
+        prompt: "top customers by revenue for beverage product category",
+        kg,
+        domain: "commerce",
+        snapshotId: "snapshot-1",
+        preferredBlockIds: ["revenue_total"],
+      });
+      expect(plan.version).toBe(2);
+      expect(plan.requirements.length).toBeGreaterThan(0);
+      expect(plan.requirementCoverage).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: "semantic_query", status: "covered", trustState: "review_required" }),
+      ]));
+      const semantic = plan.pages[0].tiles.find((tile) => tile.kind === "semantic_query");
+      expect(semantic?.semantic).toMatchObject({ metrics: ["revenue"], semanticModelRefs: ["orders"], snapshotId: "snapshot-1" });
+      expect(plan.storyEvidencePlan.eligibleTileIds).toContain(semantic?.id);
+    }));
+
   it("builds a reviewable local app plan from certified DQL context", () =>
     withKg(revenueNodes, (kg) => {
       const plan = planAppFromPrompt({

@@ -305,7 +305,7 @@ export function DbtFirstModelingPage() {
           <div style={{ padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}`, display: 'flex', flexDirection: 'column', gap: 5, fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
-              dbt synced · {Object.keys(data.modeling.entities).length} model{Object.keys(data.modeling.entities).length === 1 ? '' : 's'}
+              dbt synced · {Object.keys(data.dbtProvenance.nodes).length} model{Object.keys(data.dbtProvenance.nodes).length === 1 ? '' : 's'}
             </span>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--accent)', flexShrink: 0 }} />

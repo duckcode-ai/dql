@@ -28,6 +28,7 @@ interface ConnectorFormSchema {
 interface ConnectionInfo {
   default: string;
   connections: Record<string, any>;
+  activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
   dbtProfiles?: DbtProfileConnectionCandidate[];
   connectorStatus?: ConnectorInstallStatus[];
 }
@@ -722,12 +723,14 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     <>
       {!addingNew && !editing && dbtProfileCandidates.length > 0 && (
         <>
-          <div style={{ ...sectionLabel, marginTop: 8 }}>dbt profiles.yml</div>
+          <div style={{ ...sectionLabel, marginTop: 8 }}>dbt profiles</div>
           <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
             {dbtProfileCandidates.map((profile) => {
               const driver = normalizeDriverName(String(profile.connection.driver ?? profile.adapter));
               const color = DRIVER_COLORS[driver] ?? t.accent;
               const ready = profile.missingFields.length === 0;
+              const activeFromProfile = info?.activeConnection?.source === 'dbt_profile'
+                && info.activeConnection.profileId === profile.id;
               return (
                 <div
                   key={profile.id}
@@ -754,7 +757,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                     </div>
                     <div style={{ fontSize: 10, color: ready ? t.success : t.warning, fontFamily: t.font, marginTop: 2 }}>
                       {ready
-                        ? 'Ready to test after import'
+                        ? activeFromProfile ? 'Active runtime connection · import to save' : 'Ready to test after import'
                         : `Needs ${profile.missingFields.join(', ')}`}
                     </div>
                   </div>

@@ -10,12 +10,14 @@ integrator sets `verified`.
 | SPEC-002 | Each workstream has independent commit-scoped verification. | handoff | W08 | specified | — |
 | CFG-001 | New dbt init produces v3/dbt-first without copying dbt facts. | 03 | W03 | specified | — |
 | CFG-002 | Existing projects are never silently upgraded. | 03, 08 | W06 | specified | — |
+| CFG-003 | Configured local/Git dbt paths drive profile discovery, runtime connection fallback, artifacts, snapshots, and Domain Studio without overwriting existing DQL connections. | 03, 07 | W02/W03 | implemented | `apps/cli/src/local-runtime.ts`, `apps/cli/src/local-runtime.test.ts`, `apps/dql-notebook/src/components/modals/SetupOnboarding.tsx` |
 | ID-001 | Same local IDs in different domains compile and retrieve without collision. | 02 | W01 | specified | — |
 | DOM-001 | Domain source contains only sparse analytical assertions. | 02, 04 | W01 | specified | — |
 | DOM-002 | Parent/child domain relation grants no implicit join/import. | 02, 04 | W01 | specified | — |
 | PRD-001 | Apps, Ask, and Notebooks remain global surfaces. | 01, 05 | W05 | specified | — |
 | PRD-002 | Domain Related Products derives backlinks without duplicated product files. | 05, 07 | W05 | specified | — |
 | PRD-003 | Apps/Notebooks round-trip exact `ProductDomainContext`. | 02 | W01/W05 | specified | — |
+| PRD-004 | App requirements are covered by fully compatible certified blocks first, governed semantic queries only for uncovered requirements, and typed visible gaps otherwise. | 01, 06 | W04/W05 | implemented | `packages/dql-agent/src/app-builder.ts`, `packages/dql-agent/src/app-builder.test.ts` |
 | REL-001 | dbt DAG/shared names alone never authorize a generated join. | 04, 06 | W04 | specified | — |
 | REL-002 | Missing keys, changed validation, expired evidence, stale proof, unsafe fanout, or missing export revokes auto-join. | 04, 06 | W04 | specified | — |
 | CONTRACT-001 | Cross-domain route requires matching certified relationship, export/import, purpose, and contract. | 04 | W04 | specified | — |
@@ -30,18 +32,26 @@ integrator sets `verified`.
 | AGT-004 | Candidate entity scope follows the question; unrelated retrieved cross-domain policy failures retain their exact code and do not trigger retries or a misleading clarification. | 06 | W04 | specified | — |
 | AGT-005 | Question planning grounds measures, dimensions, categorical values, filters, ranking, and grain before routing across certified, MetricFlow, domain, and dbt candidate classes. | 06 | W04 | implemented | — |
 | AGT-006 | Certified assets terminate only when their contract covers every requested measure, output, dimension, grain, filter/value, ranking direction, and parameter. | 06 | W04 | implemented | — |
+| AGT-007 | App Build and Unified Analysis use separate orchestrators over the same immutable context and trust contracts. | 01, 06, 07 | W04/W05 | implemented | `packages/dql-agent/src/app-builder.ts`, `apps/cli/src/local-runtime.ts` |
+| AGT-008 | Business Story claims are grounded in server-computed multi-tile facts and reject invented values, unproved comparisons/causality, and incompatible grain/filter evidence. | 06, 07 | W04/W05 | implemented | `packages/dql-agent/src/dashboard-story.ts`, `packages/dql-agent/src/dashboard-story.test.ts` |
 | EXP-001 | Exploratory DBT-grounded SQL is read-only, bounded, single-domain, provenance-recorded, review-required, and never treated as governed relationship proof. | 06 | W04 | specified | — |
 | EXP-002 | Exploratory answers offer only explicit provenance-backed draft creation; they never auto-write, promote, or certify blocks or modeling. | 03, 06 | W03/W04 | specified | — |
 | EXP-003 | Successful exploratory recovery persists its executed outcome, typed result contract, context/snapshot reference, provenance, bounds, and review-required trust state instead of an earlier refusal. | 06, 07 | W04 | implemented | — |
 | API-001 | Stable APIs return request/snapshot IDs, codes, bounds, and conflict guards. | 03, 07 | W02/W03 | specified | — |
+| API-002 | Proposal is write-free; commit is snapshot/hash guarded and atomic; run/story responses use server-owned run evidence and stable snapshot/filter/result/persona fingerprints. | 07 | W02/W05 | implemented | `apps/cli/src/apps-api.ts`, `apps/cli/src/apps-api.test.ts`, `apps/cli/src/local-runtime.ts` |
 | UI-001 | Global rail/context sidebar/deep links and canvas UX pass CLI-backed browser tests. | 05 | W05 | specified | — |
 | UI-002 | dbt edits use previewed source patches; DQL edits touch package source only. | 04, 05 | W05 | specified | — |
 | UI-003 | Materially long Ask/Research turns explain active governed work and accurately guide users toward modeling, semantic metrics, and reviewed block certification for faster repeat questions. | 05 | W05 | implemented | — |
+| UI-004 | Generated Apps show an apply/reset filter row, live Business Story row, KPI band, analyses, details, and reviewer appendix in that order. | 01, 05 | W05 | implemented | `apps/dql-notebook/src/components/apps/AppsView.tsx`, `apps/dql-notebook/src/components/apps/DashboardRenderer.tsx` |
+| UI-005 | App Copilot receives canonical App run context, supports close/expand consistently, and performs no silent App mutation. | 05, 07 | W05 | implemented | `apps/dql-notebook/src/components/apps/DashboardRenderer.tsx`, `apps/cli/src/apps-api.ts` |
 | MIG-001 | v2 and legacy product/modeling layouts remain readable through 3.x. | 08 | W06 | specified | — |
 | MIG-002 | Migration is deterministic/idempotent, loss-reporting, lifecycle-preserving. | 08 | W06 | specified | — |
 | PERF-001 | Reference scale fixture meets every recorded budget. | 07, 09 | W02/W07 | specified | — |
 | SEC-001 | Non-loopback without auth/allowed origins fails closed. | 08 | W06 | specified | — |
+| SEC-002 | App clients cannot inject trusted snapshot, source, result, lineage, fact, or claim evidence. | 07, 08 | W05/W06 | implemented | `apps/cli/src/apps-api.ts`, `apps/cli/src/local-runtime.ts` |
 | E2E-001 | Functional fixture, agent eval, browser, security, migration, performance, and embed gates pass. | 09 | W07/W08 | specified | — |
+| E2E-002 | Built CLI browser coverage proves certified-first planning, semantic fallback, atomic commit, filter-consistent stories, stale response rejection, and deterministic story fallback. | 09 | W07/W08 | implemented | `apps/cli/src/apps-api.test.ts`, `packages/dql-agent/src/dashboard-story.test.ts`, built CLI at `127.0.0.1:3474` |
+| E2E-003 | Built CLI coverage proves colocated/external dbt paths, profile filename compatibility, saved-connection preservation, profile-backed runtime use, and manifest-v3 Domain Studio availability. | 03, 09 | W07/W08 | implemented | `apps/cli/src/local-runtime.test.ts`, `apps/dql-notebook/src/components/modeling/DbtFirstModelingPage.tsx`, built CLI at `127.0.0.1:3474` |
 
 ## Evidence format
 

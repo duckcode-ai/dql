@@ -225,6 +225,10 @@ export interface DbtOnboardingStatusResponse {
     configured?: boolean;
     projectDir?: string;
     manifestPath?: string;
+    profilesDir?: string;
+    repoUrl?: string;
+    branch?: string;
+    subPath?: string;
     projectFound?: boolean;
     manifestFound?: boolean;
     artifactState?: 'missing' | 'ready' | 'stale' | 'invalid' | 'building';
@@ -247,6 +251,10 @@ export interface DbtOnboardingStatusResponse {
 export interface DbtOnboardingPreviewRequest {
   projectDir?: string;
   manifestPath?: string;
+  profilesDir?: string;
+  repoUrl?: string;
+  branch?: string;
+  subPath?: string;
   catalogPath?: string;
   semanticManifestPath?: string;
 }
@@ -256,6 +264,11 @@ export interface DbtOnboardingPreviewResponse {
   snapshotId?: string;
   projectDir: string;
   manifestPath: string;
+  profilesDir?: string;
+  repoUrl?: string;
+  branch?: string;
+  subPath?: string;
+  warnings?: string[];
   fingerprint: string;
   projectName?: string;
   counts: { models: number; sources: number; metrics: number; [key: string]: number };
@@ -1067,6 +1080,14 @@ export interface DashboardDocumentResponse {
       narrative?: string;
       order: number;
     }>;
+    story?: {
+      version: 1;
+      goal: string;
+      audience?: string;
+      eligibleTileIds?: string[];
+      driverTileIds?: string[];
+      vocabulary?: string[];
+    };
     layout: {
       kind: 'grid';
       cols: number;
@@ -1077,6 +1098,19 @@ export interface DashboardDocumentResponse {
         block?: { blockId?: string; ref?: string; version?: string };
         text?: { markdown: string };
         aiPin?: { id: string };
+        semantic?: {
+          id: string;
+          provider: 'metricflow' | 'native';
+          metrics: string[];
+          dimensions?: string[];
+          filters?: Array<{ field: string; operator: string; value: unknown }>;
+          timeDimension?: string;
+          orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
+          limit?: number;
+          semanticModelRefs: string[];
+          definitionFingerprint: string;
+          snapshotId?: string;
+        };
         viz: { type: string; options?: Record<string, unknown> };
         display?: DashboardDisplayMetadata;
         filterBindings?: DashboardTileFilterBinding[];
@@ -1096,10 +1130,17 @@ export interface DashboardRunResponse {
   appId: string;
   dashboardId: string;
   persona: unknown;
+  runId: string;
+  snapshotId: string;
+  filterFingerprint: string;
+  resultFingerprint: string;
+  personaFingerprint: string;
+  facts: DashboardStoryFact[];
+  story: DashboardStoryBrief;
   tiles: Array<{
     tileId: string;
     status: 'ok' | 'unauthorized' | 'error' | 'unresolved';
-    tileType?: 'block' | 'text' | 'aiPin';
+    tileType?: 'block' | 'text' | 'aiPin' | 'semantic';
     blockId?: string;
     blockPath?: string;
     certificationStatus?: string | null;
@@ -1125,6 +1166,27 @@ export interface DashboardRunResponse {
     citation?: { kind: string; name: string; path?: string };
     error?: string;
   }>;
+}
+
+export interface DashboardStoryFact {
+  id: string;
+  tileId: string;
+  kind: 'value' | 'rank' | 'share' | 'delta' | 'trend' | 'driver' | 'scope' | 'freshness';
+  label: string;
+  value: string | number | boolean | null;
+  evidenceRef: string;
+  trustState: 'certified' | 'review_required' | 'draft_ready';
+}
+
+export interface DashboardStoryBrief {
+  headline: string;
+  paragraphs: string[];
+  implication?: string;
+  caveat?: string;
+  claims: Array<{ text: string; factIds: string[]; kind: string }>;
+  evidenceRefs: string[];
+  trustState: 'certified' | 'review_required' | 'draft_ready';
+  generatedBy: 'deterministic' | 'ai';
 }
 
 export interface AppBlockRecommendation {
@@ -1176,10 +1238,16 @@ export interface GenerateAppRequest {
   force?: boolean;
   selectedBlockIds?: string[];
   plannerMode?: 'deterministic' | 'ai_assisted';
+  mode?: 'personal' | 'stakeholder';
 }
 
 export interface GeneratedAppPlan {
-  version: 1;
+  version: 2;
+  mode: 'personal' | 'stakeholder';
+  snapshotId?: string;
+  requirements: Array<{ id: string; question: string; role: string; measures: string[]; dimensions: string[]; filters: string[] }>;
+  requirementCoverage: Array<{ requirementId: string; status: 'covered' | 'gap'; source: 'certified_block' | 'semantic_query' | 'gap'; tileId?: string; sourceId?: string; trustState: string; reasons: string[] }>;
+  storyEvidencePlan: NonNullable<DashboardDocumentResponse['dashboard']['story']>;
   appId: string;
   name: string;
   prompt: string;
@@ -1219,9 +1287,10 @@ export interface GeneratedAppPlan {
     tiles: Array<{
       id: string;
       title: string;
-      kind: 'certified_block' | 'draft_placeholder' | 'narrative';
+      kind: 'certified_block' | 'semantic_query' | 'draft_placeholder' | 'narrative';
       description?: string;
       blockId?: string;
+      semantic?: DashboardDocumentResponse['dashboard']['layout']['items'][number]['semantic'];
       sourceNodeId?: string;
       viz: string;
       certification: 'certified' | 'uncertified';
@@ -1292,15 +1361,16 @@ export interface GenerateAppResponse {
 /** One confirmable entry in the pre-create app proposal list. */
 export interface AppBuildProposalTile {
   id: string;
-  source: 'certified_block' | 'ai_generated';
+  source: 'certified_block' | 'semantic_query' | 'ai_generated';
   title: string;
   description?: string;
   blockId?: string;
   question?: string;
   sql?: string;
   answer?: string;
+  semantic?: DashboardDocumentResponse['dashboard']['layout']['items'][number]['semantic'];
   viz: string;
-  certification: 'certified' | 'ai_generated';
+  certification: 'certified' | 'reviewed_semantic' | 'ai_generated';
   preview?: { columns: string[]; rows: Array<Record<string, unknown>>; rowCount?: number };
   error?: string;
   selectedByDefault: boolean;
@@ -1317,7 +1387,7 @@ export interface AppBuildProposal {
   tiles: AppBuildProposalTile[];
   gaps: AppBuildProposalGap[];
   followUps: string[];
-  coverage: { certifiedTiles: number; generatedTiles: number; gaps: number };
+  coverage: { certifiedTiles: number; semanticTiles: number; generatedTiles: number; gaps: number };
 }
 
 export interface AppAiBuildSession {
@@ -1333,6 +1403,8 @@ export interface AppAiBuildSession {
   plan?: GeneratedAppPlan;
   validation?: GenerateAppResponse['validation'];
   proposal?: AppBuildProposal;
+  snapshotId?: string;
+  proposalHash?: string;
   committedTileIds?: string[];
   warnings: string[];
   reviewTasks: string[];
@@ -3541,6 +3613,7 @@ export const api = {
   async getConnections(): Promise<{
     default: string;
     connections: Record<string, unknown>;
+    activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
     connectorStatus?: Array<{
       driver: 'duckdb' | 'snowflake' | 'databricks';
       label: string;
@@ -3566,6 +3639,7 @@ export const api = {
       return await request<{
         default: string;
         connections: Record<string, unknown>;
+        activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
         connectorStatus?: Array<{
           driver: 'duckdb' | 'snowflake' | 'databricks';
           label: string;
@@ -4345,7 +4419,7 @@ export const api = {
   },
 
   /** Two-phase build, step 2: the user confirmed — create the app from the selection. */
-  async commitAppAiBuild(sessionId: string, input: { selectedTileIds?: string[]; force?: boolean } = {}): Promise<
+  async commitAppAiBuild(sessionId: string, input: { selectedTileIds?: string[]; force?: boolean; expectedProposalHash?: string } = {}): Promise<
     { ok: true; session: AppAiBuildSession; app: AppSummary | null; dashboardId: string | null } | { ok: false; error: string }
   > {
     try {
@@ -4798,6 +4872,17 @@ export const api = {
       return await request<DashboardRunResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
         { method: 'POST', body: JSON.stringify({ variables: variables ?? {} }) },
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async getDashboardStory(appId: string, dashboardId: string, runId: string): Promise<Pick<DashboardRunResponse, 'runId' | 'snapshotId' | 'filterFingerprint' | 'resultFingerprint' | 'personaFingerprint' | 'facts' | 'story'> | null> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/story`,
+        { method: 'POST', body: JSON.stringify({ runId }) },
       );
     } catch {
       return null;

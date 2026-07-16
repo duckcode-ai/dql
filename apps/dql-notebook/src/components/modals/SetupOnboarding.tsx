@@ -152,6 +152,10 @@ function providerConnectionSummary(provider: ProviderSettings): ConnectedWorkspa
   };
 }
 
+function looksLikeGitRepository(value: string): boolean {
+  return /^(?:https?:\/\/|ssh:\/\/|git@|file:\/\/)/i.test(value.trim());
+}
+
 export function SetupOnboarding() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -233,6 +237,20 @@ export function SetupOnboarding() {
         setDbSummary(summary);
         setDbPhase('ok');
         databaseItem = { label: 'Database', value: databaseLabel, detail: summary };
+      } else if (conns?.activeConnection?.source === 'dbt_profile' && conns.activeConnection.profileId) {
+        const profile = conns.dbtProfiles?.find((candidate) => candidate.id === conns.activeConnection?.profileId);
+        const profileConnection = profile?.connection && typeof profile.connection === 'object'
+          ? profile.connection as Record<string, unknown>
+          : null;
+        const profileDriver = profileConnection ? connectionDriver(profileConnection) : null;
+        if (profile && profileConnection && profileDriver) {
+          setWh(profileDriver);
+          const location = connectionLocation(profileDriver, profileConnection);
+          const summary = `${profile.profileName}/${profile.targetName} · ${location}`;
+          setDbSummary(summary);
+          setDbPhase('ok');
+          databaseItem = { label: 'Database', value: WH_META[profileDriver].name, detail: `${summary} · active from dbt profile` };
+        }
       }
 
       if (dbtStatus?.configured && dbtStatus.artifacts.manifest.exists) {
@@ -292,10 +310,15 @@ export function SetupOnboarding() {
     setDbtError('');
     try {
       const projectDir = dbtRepo.trim();
-      const res = await api.previewDbtOnboarding(projectDir ? { projectDir } : {});
+      const res = await api.previewDbtOnboarding(projectDir
+        ? looksLikeGitRepository(projectDir) ? { repoUrl: projectDir } : { projectDir }
+        : {});
       await api.applyDbtOnboarding({
-        projectDir: res.projectDir,
+        ...(res.repoUrl
+          ? { repoUrl: res.repoUrl, branch: res.branch, subPath: res.subPath }
+          : { projectDir: res.projectDir }),
         manifestPath: res.manifestPath,
+        profilesDir: res.profilesDir,
         expectedFingerprint: res.fingerprint,
       });
       const c = res.counts ?? ({} as Record<string, number>);

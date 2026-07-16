@@ -81,6 +81,11 @@ export function DbtOnboardingFlow({
   const [status, setStatus] = useState<DbtOnboardingStatusResponse | null>(null);
   const [projectDir, setProjectDir] = useState(initialProjectDir || '.');
   const [manifestPath, setManifestPath] = useState('target/manifest.json');
+  const [profilesDir, setProfilesDir] = useState('');
+  const [sourceMode, setSourceMode] = useState<'local' | 'repo'>('local');
+  const [repoUrl, setRepoUrl] = useState('');
+  const [branch, setBranch] = useState('');
+  const [subPath, setSubPath] = useState('');
   const [preview, setPreview] = useState<DbtOnboardingPreviewResponse | null>(null);
   const [job, setJob] = useState<DbtOnboardingJob | null>(null);
   const [discovery, setDiscovery] = useState<DomainDiscoveryResponse | null>(null);
@@ -125,6 +130,13 @@ export function DbtOnboardingFlow({
         setStatus(result);
         if (result.dbt?.projectDir) setProjectDir(result.dbt.projectDir);
         if (result.dbt?.manifestPath) setManifestPath(result.dbt.manifestPath);
+        if (result.dbt?.profilesDir) setProfilesDir(result.dbt.profilesDir);
+        if (result.dbt?.repoUrl) {
+          setSourceMode('repo');
+          setRepoUrl(result.dbt.repoUrl);
+          setBranch(result.dbt.branch ?? '');
+          setSubPath(result.dbt.subPath ?? '');
+        }
         setStage(resolveDbtResumeStage(result));
       })
       .catch(() => {
@@ -138,18 +150,27 @@ export function DbtOnboardingFlow({
     setLoading(true);
     setError(null);
     try {
-      const result = await api.previewDbtOnboarding({ projectDir: projectDir || '.', manifestPath });
+      const result = await api.previewDbtOnboarding(sourceMode === 'repo'
+        ? { repoUrl, branch: branch || undefined, subPath: subPath || undefined, manifestPath, profilesDir: profilesDir || undefined }
+        : { projectDir: projectDir || '.', manifestPath, profilesDir: profilesDir || undefined });
       if (!mounted.current) return;
       setPreview(result);
       setProjectDir(result.projectDir || projectDir || '.');
       setManifestPath(result.manifestPath || manifestPath);
+      setProfilesDir(result.profilesDir || profilesDir);
+      if (result.repoUrl) {
+        setSourceMode('repo');
+        setRepoUrl(result.repoUrl);
+        setBranch(result.branch ?? '');
+        setSubPath(result.subPath ?? '');
+      }
       setStage('inspect');
     } catch (nextError) {
       if (mounted.current) setError(nextError);
     } finally {
       if (mounted.current) setLoading(false);
     }
-  }, [manifestPath, projectDir]);
+  }, [branch, manifestPath, profilesDir, projectDir, repoUrl, sourceMode, subPath]);
 
   const discoverDomains = useCallback(async (preferAi = useAi) => {
     setLoading(true);
@@ -206,8 +227,11 @@ export function DbtOnboardingFlow({
     setStage('building');
     try {
       const applied = await api.applyDbtOnboarding({
-        projectDir: projectDir || '.',
+        ...(sourceMode === 'repo'
+          ? { repoUrl, branch: branch || undefined, subPath: subPath || undefined }
+          : { projectDir: projectDir || '.' }),
         manifestPath,
+        profilesDir: profilesDir || undefined,
         expectedFingerprint: preview?.fingerprint,
         buildArtifacts,
       });
@@ -230,7 +254,7 @@ export function DbtOnboardingFlow({
     } finally {
       if (mounted.current) setLoading(false);
     }
-  }, [discoverDomains, manifestPath, pollJob, preview, projectDir, useAi]);
+  }, [branch, discoverDomains, manifestPath, pollJob, preview, profilesDir, projectDir, repoUrl, sourceMode, subPath, useAi]);
 
   useEffect(() => {
     if (stage === 'domains' && !discovery && !loading && !statusLoading && !error) void discoverDomains(useAi);
@@ -340,11 +364,30 @@ export function DbtOnboardingFlow({
 
         {stage === 'connect' && !statusLoading && (
           <Section title="1. Connect the dbt project" description="Point DQL at the existing dbt project and artifact. DQL reads these files in place; it does not create a second semantic copy." t={t}>
-            <Field label="dbt project directory" hint="Folder containing dbt_project.yml" t={t}>
-              <input aria-label="dbt project directory" value={projectDir} onChange={(event) => setProjectDir(event.target.value)} placeholder="." style={inputStyle} />
-            </Field>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" onClick={() => setSourceMode('local')} style={sourceMode === 'local' ? primaryButton(t) : secondaryButton(t)}>Local path</button>
+              <button type="button" onClick={() => setSourceMode('repo')} style={sourceMode === 'repo' ? primaryButton(t) : secondaryButton(t)}>Git repository</button>
+            </div>
+            {sourceMode === 'local' ? (
+              <Field label="dbt project directory" hint="Folder containing dbt_project.yml" t={t}>
+                <input aria-label="dbt project directory" value={projectDir} onChange={(event) => setProjectDir(event.target.value)} placeholder="." style={inputStyle} />
+              </Field>
+            ) : (
+              <>
+                <Field label="Repository URL" hint="HTTPS, SSH, or file URL for a dbt Git repository" t={t}>
+                  <input aria-label="dbt repository URL" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/org/dbt-project.git" style={inputStyle} />
+                </Field>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <Field label="Branch" hint="Defaults to main" t={t}><input aria-label="dbt repository branch" value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="main" style={inputStyle} /></Field>
+                  <Field label="Sub-path" hint="Optional dbt project folder" t={t}><input aria-label="dbt repository sub-path" value={subPath} onChange={(event) => setSubPath(event.target.value)} placeholder="analytics/dbt" style={inputStyle} /></Field>
+                </div>
+              </>
+            )}
             <Field label="Manifest path" hint="Relative to the dbt project directory" t={t}>
               <input aria-label="dbt manifest path" value={manifestPath} onChange={(event) => setManifestPath(event.target.value)} placeholder="target/manifest.json" style={inputStyle} />
+            </Field>
+            <Field label="dbt profiles directory" hint="Optional; auto-detected from the dbt project, DQL project, DBT_PROFILES_DIR, or ~/.dbt" t={t}>
+              <input aria-label="dbt profiles directory" value={profilesDir} onChange={(event) => setProfilesDir(event.target.value)} placeholder="Auto-detect" style={inputStyle} />
             </Field>
             <OwnershipCallout t={t} />
           </Section>
@@ -359,8 +402,10 @@ export function DbtOnboardingFlow({
               <ArtifactRow label="manifest.json" value={artifactLabel(preview.artifacts.manifest)} required t={t} />
               <ArtifactRow label="catalog.json" value={artifactLabel(preview.artifacts.catalog)} t={t} />
               <ArtifactRow label="semantic_manifest.json" value={artifactLabel(preview.artifacts.semanticManifest)} t={t} />
+              <ArtifactRow label="profiles directory" value={preview.profilesDir || 'Optional · not detected'} t={t} />
             </div>
             <Notice t={t} title="What changes" body="DQL writes project configuration and a rebuildable snapshot. dbt SQL/YAML and MetricFlow formulas remain the source of truth and are never copied into Domain Packages." />
+            {preview.warnings?.map((warning) => <Notice key={warning} t={t} title="Repository note" body={warning} />)}
           </Section>
         )}
 
@@ -493,7 +538,7 @@ export function DbtOnboardingFlow({
         <div style={{ display: 'flex', gap: 8 }}>
           {showWelcome && <button onClick={() => setShowWelcome(false)} style={primaryButton(t)}>Next — connect your dbt project</button>}
           {!showWelcome && stage === 'connect' && errorView?.code === 'DBT_MANIFEST_MISSING' && <button disabled={loading} onClick={() => void buildSnapshot(true)} style={secondaryButton(t)}>Build artifacts with DQL</button>}
-          {!showWelcome && stage === 'connect' && <button disabled={loading || !projectDir.trim()} onClick={() => void inspect()} style={primaryButton(t, loading || !projectDir.trim())}>{loading ? 'Inspecting…' : errorView?.code === 'DBT_MANIFEST_MISSING' ? 'I ran dbt parse — retry' : 'Inspect artifacts'}</button>}
+          {!showWelcome && stage === 'connect' && <button disabled={loading || (sourceMode === 'repo' ? !repoUrl.trim() : !projectDir.trim())} onClick={() => void inspect()} style={primaryButton(t, loading || (sourceMode === 'repo' ? !repoUrl.trim() : !projectDir.trim()))}>{loading ? 'Inspecting…' : errorView?.code === 'DBT_MANIFEST_MISSING' ? 'I ran dbt parse — retry' : 'Inspect artifacts'}</button>}
           {!showWelcome && stage === 'inspect' && <button disabled={loading} onClick={() => void buildSnapshot(false)} style={primaryButton(t, loading)}>{loading ? 'Building…' : 'Apply & build snapshot'}</button>}
           {!showWelcome && stage === 'domains' && !discovery && <button disabled={loading} onClick={() => { setError(null); void discoverDomains(useAi); }} style={primaryButton(t, loading)}>{loading ? 'Discovering…' : 'Retry discovery'}</button>}
           {!showWelcome && stage === 'domains' && discovery && (domainApply?.preview?.length ?? 0) === 0 && <button disabled={loading} onClick={() => void saveDomains('preview')} style={primaryButton(t, loading)}>{loading ? 'Preparing preview…' : selectedCount > 0 ? `Review ${selectedCount} draft domain${selectedCount === 1 ? '' : 's'}` : 'Continue without domains'}</button>}

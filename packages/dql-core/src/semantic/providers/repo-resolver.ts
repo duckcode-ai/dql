@@ -10,7 +10,7 @@
 
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import type { SemanticLayerProviderConfig } from './provider.js';
@@ -94,7 +94,12 @@ export function resolveRepoSource(
 
     // Cache is stale — try to pull
     try {
-      execSync(`git -C "${cloneDir}" fetch --depth=1 origin ${branch} && git -C "${cloneDir}" reset --hard origin/${branch}`, {
+      execFileSync('git', ['-C', cloneDir, 'fetch', '--depth=1', 'origin', branch], {
+        timeout: 30_000,
+        stdio: 'pipe',
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      });
+      execFileSync('git', ['-C', cloneDir, 'reset', '--hard', `origin/${branch}`], {
         timeout: 30_000,
         stdio: 'pipe',
         env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
@@ -110,8 +115,9 @@ export function resolveRepoSource(
       const tokenEnv = getAuthEnv(repoUrl);
       const authUrl = injectToken(repoUrl, tokenEnv);
 
-      execSync(
-        `git clone --depth=1 --branch "${branch}" --single-branch "${authUrl}" "${cloneDir}"`,
+      execFileSync(
+        'git',
+        ['clone', '--depth=1', '--branch', branch, '--single-branch', authUrl, cloneDir],
         {
           timeout: 60_000,
           stdio: 'pipe',
@@ -188,7 +194,12 @@ export function pullCachedRepo(repoUrl: string, branch: string = 'main'): RepoRe
   }
 
   try {
-    execSync(`git -C "${cloneDir}" fetch --depth=1 origin ${branch} && git -C "${cloneDir}" reset --hard origin/${branch}`, {
+    execFileSync('git', ['-C', cloneDir, 'fetch', '--depth=1', 'origin', branch], {
+      timeout: 30_000,
+      stdio: 'pipe',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    execFileSync('git', ['-C', cloneDir, 'reset', '--hard', `origin/${branch}`], {
       timeout: 30_000,
       stdio: 'pipe',
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },

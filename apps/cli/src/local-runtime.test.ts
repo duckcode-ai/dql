@@ -8,6 +8,7 @@ import {
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
   buildDbtStatus,
+  buildDbtParseArgs,
   buildProposeReadiness,
   buildProposeCandidatePreview,
   buildSemanticCompostingChangeset,
@@ -20,6 +21,7 @@ import {
   createDqlGenerationSessionForProject,
   createSemanticBuilderBlock,
   discoverDbtProfileConnections,
+  resolveDbtProfileRuntimeConnection,
   evaluateBlockInvariants,
   extractAgentValueSearchTerms,
   extractBlockInvariants,
@@ -381,11 +383,86 @@ describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', ()
 });
 
 describe('dbt-first onboarding runtime API', () => {
+  it('clones and previews a Git dbt repository without semantic copying (CFG-003, E2E-003)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-git-workspace-'));
+    const dbtRoot = mkdtempSync(join(tmpdir(), 'dbt-git-source-'));
+    tempDirs.push(projectRoot, dbtRoot);
+    mkdirSync(join(dbtRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{"project":"git-workspace"}\n');
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: git_shop\nprofile: git_shop\n');
+    writeFileSync(join(dbtRoot, 'profiles.yml'), 'git_shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: warehouse.duckdb\n');
+    writeFileSync(join(dbtRoot, 'warehouse.duckdb'), '');
+    writeFileSync(join(dbtRoot, 'target', 'manifest.json'), JSON.stringify({ metadata: { project_name: 'git_shop' }, nodes: {}, sources: {}, metrics: {} }));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: dbtRoot });
+    execFileSync('git', ['add', '.'], { cwd: dbtRoot });
+    execFileSync('git', ['-c', 'user.name=DQL Test', '-c', 'user.email=dql@example.com', 'commit', '-m', 'fixture'], { cwd: dbtRoot });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const response = await fetch(`http://127.0.0.1:${port}/api/onboarding/dbt/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repoUrl: `file://${dbtRoot}`, branch: 'main', manifestPath: 'target/manifest.json' }),
+      });
+      expect(response.status).toBe(200);
+      const preview = await response.json() as { repoUrl: string; projectName: string; projectDir: string; profilesDir: string };
+      expect(preview).toMatchObject({ repoUrl: `file://${dbtRoot}`, projectName: 'git_shop' });
+      expect(preview.projectDir).toContain('.dql/cache/repos/');
+      expect(preview.profilesDir).toBe(preview.projectDir);
+      expect(existsSync(join(projectRoot, 'semantic-layer'))).toBe(false);
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('compiles Domain Studio from a configured external dbt checkout (CFG-003, E2E-003)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-external-workspace-'));
+    const dbtRoot = mkdtempSync(join(tmpdir(), 'dbt-external-repo-'));
+    tempDirs.push(projectRoot, dbtRoot);
+    mkdirSync(join(dbtRoot, 'target'), { recursive: true });
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: external_shop\nprofile: external_shop\n');
+    writeFileSync(join(dbtRoot, 'profiles.yml'), 'external_shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: warehouse.duckdb\n');
+    writeFileSync(join(dbtRoot, 'warehouse.duckdb'), '');
+    writeFileSync(join(dbtRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'external_shop' },
+      nodes: {
+        'model.external_shop.orders': {
+          unique_id: 'model.external_shop.orders', resource_type: 'model', name: 'orders',
+          original_file_path: 'models/orders.sql', columns: {}, depends_on: { nodes: [] }, tags: [],
+        },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'workspace', manifestVersion: 3, modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: dbtRoot, manifestPath: 'target/manifest.json' },
+      semanticLayer: { provider: 'dbt', projectPath: dbtRoot },
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const response = await fetch(`http://127.0.0.1:${port}/api/modeling/dbt-first`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { manifestVersion: number; dbtProvenance: { projectName: string } };
+      expect(body).toMatchObject({ manifestVersion: 3, dbtProvenance: { projectName: 'external_shop' } });
+      const connections = await (await fetch(`http://127.0.0.1:${port}/api/connections`)).json() as {
+        activeConnection: { source: string; driver: string; profileId?: string };
+      };
+      expect(connections.activeConnection).toMatchObject({ source: 'dbt_profile', driver: 'duckdb', profileId: expect.any(String) });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
   it('previews, drift-checks, and applies dbt-first config without copying dbt semantics', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-onboarding-dbt-'));
     tempDirs.push(projectRoot);
     mkdirSync(join(projectRoot, 'target'), { recursive: true });
-    writeFileSync(join(projectRoot, 'dql.config.json'), '{"project":"shop"}\n');
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'shop',
+      connections: { warehouse: { driver: 'duckdb', filepath: ':memory:' } },
+      defaultConnectionName: 'warehouse',
+      aiProviders: { default: 'ollama', ollama: { model: 'qwen-test' } },
+    }));
     writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: shop\nversion: 1\n');
     const manifestPath = join(projectRoot, 'target', 'manifest.json');
     writeFileSync(manifestPath, JSON.stringify({ metadata: { project_name: 'shop' }, nodes: { 'model.shop.orders': { resource_type: 'model', name: 'orders' } }, sources: {}, metrics: {} }));
@@ -411,6 +488,8 @@ describe('dbt-first onboarding runtime API', () => {
       expect(applyResponse.status).toBe(200);
       const config = JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8')) as any;
       expect(config).toMatchObject({ manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' }, semanticLayer: { provider: 'dbt' } });
+      expect(config.connections).toEqual({ warehouse: { driver: 'duckdb', filepath: ':memory:' } });
+      expect(config.aiProviders).toEqual({ default: 'ollama', ollama: { model: 'qwen-test' } });
       expect(existsSync(join(projectRoot, 'semantic-layer'))).toBe(false);
       const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean } };
       expect(status.requestId).toMatch(/^onboarding-status-/);
@@ -1735,6 +1814,36 @@ describe('loadProjectConfig', () => {
 });
 
 describe('discoverDbtProfileConnections', () => {
+  it('passes the discovered profiles directory to dbt parse (CFG-003)', () => {
+    expect(buildDbtParseArgs('/repos/shop', '/secrets/dbt')).toEqual([
+      'parse', '--project-dir', '/repos/shop', '--profiles-dir', '/secrets/dbt',
+    ]);
+  });
+
+  it('loads a compatibility profile.yaml from a configured external dbt repo and activates its default target (CFG-003, E2E-003)', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-profile-workspace-'));
+    const dbtRoot = mkdtempSync(join(tmpdir(), 'dbt-profile-repo-'));
+    tempDirs.push(projectRoot, dbtRoot);
+    writeFileSync(join(dbtRoot, 'dbt_project.yml'), 'name: shop\nprofile: shop\n', 'utf-8');
+    writeFileSync(join(dbtRoot, 'profile.yaml'), [
+      'shop:',
+      '  target: dev',
+      '  outputs:',
+      '    dev:',
+      '      type: duckdb',
+      '      path: warehouse.duckdb',
+    ].join('\n'), 'utf-8');
+    writeFileSync(join(dbtRoot, 'warehouse.duckdb'), '', 'utf-8');
+    const config = { dbt: { projectDir: dbtRoot, profilesDir: dbtRoot } };
+
+    const candidates = discoverDbtProfileConnections(projectRoot, config);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ profileName: 'shop', targetName: 'dev', missingFields: [] });
+    expect(resolveDbtProfileRuntimeConnection(projectRoot, config)).toMatchObject({
+      driver: 'duckdb', filepath: join(dbtRoot, 'warehouse.duckdb'),
+    });
+  });
+
   it('maps only lightweight-supported dbt profiles.yml targets into DQL connection drafts', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-profiles-'));
     tempDirs.push(projectRoot);
@@ -1820,6 +1929,7 @@ describe('discoverDbtProfileConnections', () => {
 
     expect(candidate?.connection.filepath).toBe(join(projectRoot, 'not_built_yet.duckdb'));
     expect(candidate?.warnings.some((w) => w.includes('DuckDB file not found'))).toBe(true);
+    expect(resolveDbtProfileRuntimeConnection(projectRoot, {})).toBeNull();
   });
 
   it('maps Snowflake dbt key-pair profiles from inline keys and key files', () => {

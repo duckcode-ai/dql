@@ -20,6 +20,15 @@ New dbt-backed projects created by `dql init` produce:
 Optional artifact paths are omitted when absent. Existing configs are never
 rewritten without an explicit apply operation (`CFG-001`, `CFG-002`).
 
+`dbt.projectDir` may be absolute or relative to the DQL project and remains the
+authoritative root for artifact compilation and Domain Studio. Profile lookup
+checks an explicit `dbt.profilesDir`, `DBT_PROFILES_DIR`, the dbt project, the
+DQL project, and `~/.dbt`. Canonical `profiles.yml`/`profiles.yaml` and the
+legacy singular `profile.yml`/`profile.yaml` are readable. A complete default
+profile target may supply an in-memory runtime connection when no saved DQL
+connection exists; it never overwrites `connections`, `defaultConnection`, or
+AI-provider configuration (`CFG-003`).
+
 ## Onboarding APIs
 
 | Method | Path | Purpose |
@@ -65,6 +74,10 @@ leaves the prior active snapshot usable.
 Artifact generation commands, environment requirements, and redacted stderr
 are visible to the user. Secrets are never stored in project source or API job
 records.
+
+When DQL runs `dbt parse`, it passes the discovered/configured profiles
+directory explicitly. The applied configuration records only the profiles
+directory path, never resolved secrets or profile contents.
 
 ## Domain discovery evidence
 

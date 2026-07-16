@@ -62,3 +62,34 @@ resolve, all automatically used joins have fresh certified proof, required
 exports/imports match, evaluations pass, and the current snapshot has no
 blocking diagnostics. Readiness is reported per capability, not as a single
 misleading project-wide green check.
+
+## Governed App Builder
+
+App Builder is a composition workflow, not another Ask surface. It decomposes
+the requested stakeholder outcome into typed analytical requirements and covers
+each requirement from one immutable server-resolved snapshot. A compatible
+certified block is selected only when its metric, grain, dimensions, outputs,
+filters, parameters, ranking, freshness, and purpose fully cover the
+requirement. Governed semantic queries cover only remaining requirements;
+uncovered needs remain visible typed gaps (`PRD-004`, `AGT-007`).
+
+Proposal is write-free. Selected sources are preflighted before commit, and a
+snapshot or proposal-hash change fails with a conflict. Commit writes the App,
+dashboard, and derived `ProductDomainContext` atomically. Personal Apps begin as
+private drafts; stakeholder Apps must satisfy governed publication gates.
+
+Generated App pages use this reading order (`UI-004`):
+
+1. page title and navigation;
+2. full-width filters with draft values and explicit Apply/Reset;
+3. full-width live Business Story;
+4. KPI band;
+5. trends and driver breakdowns;
+6. detail/evidence tables; and
+7. a collapsed reviewer appendix.
+
+The dashboard persists a story evidence plan, never result-specific prose.
+After Apply, one settled dashboard run supplies all tiles and a deterministic
+story from the same snapshot, persona, filters, and results. Optional richer AI
+wording may replace it only after claim validation, and stale responses are
+ignored. Provider failure leaves the deterministic story usable (`AGT-008`).

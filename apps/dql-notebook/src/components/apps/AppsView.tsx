@@ -190,7 +190,7 @@ export function AppsView(): JSX.Element {
   const [addPageTitle, setAddPageTitle] = useState('');
   const [addPageError, setAddPageError] = useState<string | null>(null);
   const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
-  const [smartView, setSmartView] = useState(false);
+  const [appliedDashboardFilterValues, setAppliedDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [explainOpen, setExplainOpen] = useState(false);
   const [explainExpanded, setExplainExpanded] = useState(false);
   const handleExplainChange = useCallback((open: boolean) => {
@@ -280,6 +280,11 @@ export function AppsView(): JSX.Element {
       for (const filter of filters) {
         next[filter.id] = current[filter.id] ?? defaultDashboardFilterValue(filter);
       }
+      return shallowEqualRecords(current, next) ? current : next;
+    });
+    setAppliedDashboardFilterValues((current) => {
+      const next: Record<string, unknown> = {};
+      for (const filter of filters) next[filter.id] = current[filter.id] ?? defaultDashboardFilterValue(filter);
       return shallowEqualRecords(current, next) ? current : next;
     });
   }, [dashboardDoc?.dashboard.id, dashboardFilterKey, dashboardFilters]);
@@ -384,10 +389,6 @@ export function AppsView(): JSX.Element {
       : Array.from(new Set([
           ...Array.from(selectedBlocks),
           ...extras,
-          ...catalog
-            .filter((block) => block.status === 'certified')
-            .slice(0, 6)
-            .map((block) => block.id),
         ]));
     // Two-phase build: propose first (no files) — the user reviews the content
     // list with per-tile toggles and confirms before anything is created.
@@ -450,6 +451,7 @@ export function AppsView(): JSX.Element {
     setBuilderError(null);
     const result = await api.commitAppAiBuild(buildSession.id, {
       selectedTileIds: Array.from(proposalSelection),
+      expectedProposalHash: buildSession.proposalHash,
     });
     setCommitting(false);
     if (!result.ok) {
@@ -535,10 +537,7 @@ export function AppsView(): JSX.Element {
     await refreshApps(state.activeAppId, result.dashboard.id, 'workspace');
   };
 
-  const dashboardVariables = useMemo(() => ({
-    ...dashboardFilterValues,
-    smartView,
-  }), [dashboardFilterValues, smartView]);
+  const dashboardVariables = useMemo(() => ({ ...appliedDashboardFilterValues }), [appliedDashboardFilterValues]);
 
   const handleDashboardFilterChange = useCallback((filter: DashboardFilter, value: unknown) => {
     setDashboardFilterValues((current) => ({
@@ -546,6 +545,14 @@ export function AppsView(): JSX.Element {
       [filter.id]: coerceDashboardFilterValue(filter, value),
     }));
   }, []);
+  const applyDashboardFilters = useCallback(() => {
+    setAppliedDashboardFilterValues({ ...dashboardFilterValues });
+  }, [dashboardFilterValues]);
+  const resetDashboardFilters = useCallback(() => {
+    const defaults = Object.fromEntries(dashboardFilters.map((filter) => [filter.id, defaultDashboardFilterValue(filter)]));
+    setDashboardFilterValues(defaults);
+    setAppliedDashboardFilterValues(defaults);
+  }, [dashboardFilters]);
 
   return (
     <div className={`dql-apps-waterline dql-apps-theme-${appTheme}`}>
@@ -618,14 +625,14 @@ export function AppsView(): JSX.Element {
           explainExpanded={explainExpanded}
           dashboardFilters={dashboardFilters}
           dashboardFilterValues={dashboardFilterValues}
-          smartView={smartView}
           themeMode={state.themeMode}
           variables={dashboardVariables}
           onBack={() => setSurface('library')}
           onExperienceChange={setExperience}
           onSectionChange={setSection}
           onDashboardFilterChange={handleDashboardFilterChange}
-          onSmartViewChange={setSmartView}
+          onApplyDashboardFilters={applyDashboardFilters}
+          onResetDashboardFilters={resetDashboardFilters}
           onExplainChange={handleExplainChange}
           onExplainExpandedChange={setExplainExpanded}
           onAddPage={() => setAddPageOpen(true)}
@@ -929,6 +936,7 @@ function AppCreateSurface({
   if (mode === 'ai') {
     const tiles = proposal?.tiles ?? [];
     const certifiedTileCount = tiles.filter((tile) => tile.certification === 'certified').length;
+    const semanticTileCount = tiles.filter((tile) => tile.certification === 'reviewed_semantic').length;
     const selectedCount = tiles.filter((tile) => proposalSelection.has(tile.id)).length;
     const proposalBlockIds = new Set(tiles.map((tile) => tile.blockId).filter(Boolean));
     const addNeedle = addQuery.trim().toLowerCase();
@@ -982,13 +990,14 @@ function AppCreateSurface({
               <span className="dql-app-buildorb still"><Sparkles size={14} /></span>
               <div className="dql-app-buildbody wide">
                 <div className="dql-app-proposal-lede">
-                  Found <strong>{certifiedTileCount} certified block{certifiedTileCount === 1 ? '' : 's'}</strong> for your app.
+                  Found <strong>{certifiedTileCount} certified block{certifiedTileCount === 1 ? '' : 's'}</strong>{semanticTileCount > 0 ? ` and ${semanticTileCount} reviewed semantic view${semanticTileCount === 1 ? '' : 's'}` : ''} for your app.
                   Uncheck any you don&apos;t need, or add more — everything ships governed.
                 </div>
                 <div className="dql-app-proposal-card">
                   {tiles.map((tile) => {
                     const on = proposalSelection.has(tile.id);
                     const certifiedTile = tile.certification === 'certified';
+                    const semanticTile = tile.certification === 'reviewed_semantic';
                     return (
                       <button key={tile.id} type="button" className={`dql-app-proposal-row ${on ? '' : 'off'}`} onClick={() => onToggleProposalTile(tile.id)}>
                         <span className={`dql-app-prop-check ${on ? 'on' : ''}`}>{on ? <Check size={10} strokeWidth={3.2} /> : null}</span>
@@ -997,7 +1006,7 @@ function AppCreateSurface({
                           <b>{tile.blockId ?? tile.title}</b>
                           <small>{tile.description ?? tile.question ?? tile.title}</small>
                         </span>
-                        <span className={`dql-app-prop-badge ${certifiedTile ? 'certified' : 'draft'}`}>{certifiedTile ? 'Certified' : 'Draft'}</span>
+                        <span className={`dql-app-prop-badge ${certifiedTile ? 'certified' : 'draft'}`}>{certifiedTile ? 'Certified' : semanticTile ? 'Reviewed semantic' : 'Draft'}</span>
                         <span className="dql-app-prop-viz">{vizLabel(tile.viz)}</span>
                       </button>
                     );
@@ -1048,7 +1057,7 @@ function AppCreateSurface({
                 <div className="dql-app-flow-actions">
                   <button type="button" className="dql-app-flow-build" onClick={onCommitProposal} disabled={committing || selectedCount === 0}>
                     <LayoutDashboard size={13} />
-                    {committing ? 'Building app…' : `Build app with ${selectedCount} block${selectedCount === 1 ? '' : 's'}`}
+                    {committing ? 'Building app…' : `Build app with ${selectedCount} governed tile${selectedCount === 1 ? '' : 's'}`}
                   </button>
                   <button type="button" className="dql-app-flow-reset" onClick={onBack}>Start over</button>
                 </div>
@@ -1269,14 +1278,14 @@ function AppWorkspaceSurface({
   explainExpanded,
   dashboardFilters,
   dashboardFilterValues,
-  smartView,
   themeMode,
   variables,
   onBack,
   onExperienceChange,
   onSectionChange,
   onDashboardFilterChange,
-  onSmartViewChange,
+  onApplyDashboardFilters,
+  onResetDashboardFilters,
   onExplainChange,
   onExplainExpandedChange,
   onAddPage,
@@ -1295,14 +1304,14 @@ function AppWorkspaceSurface({
   explainExpanded: boolean;
   dashboardFilters: DashboardFilter[];
   dashboardFilterValues: Record<string, unknown>;
-  smartView: boolean;
   themeMode: ThemeMode;
   variables: Record<string, unknown>;
   onBack: () => void;
   onExperienceChange: (experience: AppExperience) => void;
   onSectionChange: (section: AppSection) => void;
   onDashboardFilterChange: (filter: DashboardFilter, value: unknown) => void;
-  onSmartViewChange: (value: boolean) => void;
+  onApplyDashboardFilters: () => void;
+  onResetDashboardFilters: () => void;
   onExplainChange: (value: boolean) => void;
   onExplainExpandedChange: (value: boolean) => void;
   onAddPage: () => void;
@@ -1481,15 +1490,6 @@ function AppWorkspaceSurface({
           </button>
         </div>
 
-        <div className="dql-app-topbar-filters">
-          <DashboardFilterControls
-            filters={dashboardFilters}
-            values={dashboardFilterValues}
-            onChange={onDashboardFilterChange}
-          />
-          <Toggle label="Smart view" checked={smartView} onChange={onSmartViewChange} />
-        </div>
-
         <div className="dql-app-view-actions">
           <PersonaSwitcher app={appDoc?.app ?? null} />
           {experience === 'build' ? (
@@ -1571,6 +1571,23 @@ function AppWorkspaceSurface({
 
         <div className={`dql-app-view-layout ${copilotVisible ? '' : 'no-explain'}`}>
           <div className="dql-app-main-column">
+            {section === 'dashboards' && dashboardDoc && dashboardFilters.length > 0 ? (
+              <section className="dql-app-filter-row" aria-label="Dashboard filters">
+                <div className="dql-app-filter-row-copy">
+                  <b>Filters</b>
+                  <span>Set the business scope, then apply once to refresh the full story.</span>
+                </div>
+                <DashboardFilterControls
+                  filters={dashboardFilters}
+                  values={dashboardFilterValues}
+                  onChange={onDashboardFilterChange}
+                />
+                <div className="dql-app-filter-row-actions">
+                  <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onResetDashboardFilters}>Reset</button>
+                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply</button>
+                </div>
+              </section>
+            ) : null}
             {loading ? (
               <EmptyPanel title="Loading app..." detail="Reading dashboard files and running local blocks." />
             ) : section === 'dashboards' && dashboardDoc && app ? (
@@ -4238,7 +4255,19 @@ function planFromSelection(
     rationale: 'Selected from the certified block palette.',
   }));
   return {
-    version: 1,
+    version: 2,
+    mode: 'stakeholder',
+    requirements: [{ id: 'primary', question: prompt, role: 'detail', measures: [], dimensions: [], filters: [] }],
+    requirementCoverage: tiles.map((tile) => ({
+      requirementId: 'primary',
+      status: 'covered' as const,
+      source: 'certified_block' as const,
+      tileId: tile.id,
+      sourceId: tile.sourceNodeId,
+      trustState: 'certified',
+      reasons: ['Explicitly selected certified block.'],
+    })),
+    storyEvidencePlan: { version: 1, goal: prompt, audience: 'stakeholder', eligibleTileIds: tiles.map((tile) => tile.id) },
     appId: slugify(name) || 'new-app',
     name,
     prompt,
@@ -6276,6 +6305,22 @@ const APP_STYLES = `
 
 .dql-app-view-layout.no-explain { grid-template-columns: minmax(0, 1fr); }
 .dql-app-main-column { min-width: 0; }
+.dql-app-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 12px;
+  background: var(--dql-app-surface);
+}
+.dql-app-filter-row-copy { display: grid; gap: 2px; min-width: 170px; }
+.dql-app-filter-row-copy b { font-size: 12px; color: var(--dql-app-ink); }
+.dql-app-filter-row-copy span { font-size: 10.5px; color: var(--dql-app-faint); }
+.dql-app-filter-row .dql-app-topbar-filters { flex: 1; }
+.dql-app-filter-row-actions { display: flex; gap: 7px; margin-left: auto; }
 
 .dql-app-explain-panel {
   position: sticky;
@@ -8306,6 +8351,9 @@ const APP_STYLES = `
     flex: 1 1 100%;
     order: 2;
   }
+  .dql-app-filter-row { align-items: stretch; }
+  .dql-app-filter-row-copy, .dql-app-filter-row-actions { width: 100%; }
+  .dql-app-filter-row-actions { justify-content: flex-end; }
   .dql-app-view-actions {
     flex: 1 1 100%;
     justify-content: flex-start;

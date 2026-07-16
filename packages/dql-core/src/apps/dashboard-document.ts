@@ -141,6 +141,66 @@ export type DashboardAiPinRef = {
   id: string;
 };
 
+/** Canonical governed semantic query. This stores intent and reviewed semantic
+ * references, never copied/generated SQL. The runtime compiles it against the
+ * active snapshot before every execution. */
+export type DashboardSemanticQueryRef = {
+  id: string;
+  provider: 'metricflow' | 'native';
+  metrics: string[];
+  dimensions?: string[];
+  filters?: Array<{ field: string; operator: string; value: unknown }>;
+  timeDimension?: string;
+  orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
+  limit?: number;
+  semanticModelRefs: string[];
+  definitionFingerprint: string;
+  snapshotId?: string;
+};
+
+export type DashboardStoryEvidencePlan = {
+  version: 1;
+  goal: string;
+  audience?: string;
+  /** Tile ids eligible to contribute facts. Empty means every governed data tile. */
+  eligibleTileIds?: string[];
+  /** Tile ids whose verified results may support driver language. */
+  driverTileIds?: string[];
+  /** Preferred business terms to retain in the story. */
+  vocabulary?: string[];
+};
+
+export type DashboardStoryFact = {
+  id: string;
+  tileId: string;
+  kind: 'value' | 'rank' | 'share' | 'delta' | 'trend' | 'driver' | 'scope' | 'freshness';
+  label: string;
+  value: string | number | boolean | null;
+  unit?: string;
+  comparison?: { baseline: string | number; delta?: string | number };
+  grain?: string;
+  filters?: Record<string, unknown>;
+  evidenceRef: string;
+  trustState: DashboardDisplayTrustState;
+};
+
+export type DashboardStoryClaim = {
+  text: string;
+  factIds: string[];
+  kind: 'observation' | 'comparison' | 'driver' | 'implication' | 'caveat';
+};
+
+export type DashboardStoryBrief = {
+  headline: string;
+  paragraphs: string[];
+  implication?: string;
+  caveat?: string;
+  claims: DashboardStoryClaim[];
+  evidenceRefs: string[];
+  trustState: DashboardDisplayTrustState;
+  generatedBy: 'deterministic' | 'ai';
+};
+
 export type DashboardGridItem = {
   /** Stable layout id — used by the grid editor for positioning persistence. */
   i: string;
@@ -154,6 +214,8 @@ export type DashboardGridItem = {
   text?: DashboardTextTile;
   /** Local AI-generated answer pin stored in .dql/local/apps.sqlite. */
   aiPin?: DashboardAiPinRef;
+  /** Governed semantic query compiled against the current snapshot. */
+  semantic?: DashboardSemanticQueryRef;
   viz: DashboardVizConfig;
   /** Governed GenUI/display contract for this specific App or notebook tile. */
   display?: DashboardDisplayMetadata;
@@ -211,6 +273,8 @@ export interface DashboardDocument {
   filters?: DashboardFilter[];
   /** Story layout sections (optional). Old dashboards simply have none. */
   sections?: DashboardSection[];
+  /** Runtime story evidence contract. Result-specific prose is never persisted. */
+  story?: DashboardStoryEvidencePlan;
   layout: {
     kind: 'grid';
     cols: number;
@@ -329,6 +393,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   const params = readParams(obj.params, err);
   const filters = readFilters(obj.filters, err);
   const sections = readSections(obj.sections, err);
+  const story = readStoryEvidencePlan(obj.story, err);
   const layout = readLayout(obj.layout, err);
 
   if (errors.length > 0) {
@@ -343,9 +408,32 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
       params: params.length > 0 ? params : undefined,
       filters: filters.length > 0 ? filters : undefined,
       sections: sections.length > 0 ? sections : undefined,
+      ...(story ? { story } : {}),
       layout,
     },
     errors: [],
+  };
+}
+
+function readStoryEvidencePlan(raw: unknown, err: (m: string) => void): DashboardStoryEvidencePlan | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err('story must be an object when present');
+    return undefined;
+  }
+  const story = raw as Record<string, unknown>;
+  if (story.version !== 1) err('story.version must be 1');
+  if (typeof story.goal !== 'string' || !story.goal.trim()) {
+    err('story.goal must be a non-empty string');
+    return undefined;
+  }
+  return {
+    version: 1,
+    goal: story.goal,
+    audience: typeof story.audience === 'string' ? story.audience : undefined,
+    eligibleTileIds: stringArrayOrUndefined(story.eligibleTileIds, 'story.eligibleTileIds', err),
+    driverTileIds: stringArrayOrUndefined(story.driverTileIds, 'story.driverTileIds', err),
+    vocabulary: stringArrayOrUndefined(story.vocabulary, 'story.vocabulary', err),
   };
 }
 
@@ -520,6 +608,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const blockRaw = it.block as Record<string, unknown> | undefined;
     const textRaw = it.text as Record<string, unknown> | undefined;
     const aiPinRaw = it.aiPin as Record<string, unknown> | undefined;
+    const semantic = readSemanticQueryRef(it.semantic, i, err);
     let block: DashboardBlockRef | null = null;
     if (blockRaw && typeof blockRaw.blockId === 'string') {
       block = { blockId: blockRaw.blockId, version: typeof blockRaw.version === 'string' ? blockRaw.version : undefined };
@@ -532,8 +621,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const aiPin = aiPinRaw && typeof aiPinRaw.id === 'string'
       ? { id: aiPinRaw.id }
       : null;
-    if (!block && !text && !aiPin) {
-      err(`layout.items[${i}].block must be { blockId } or { ref }, or item must have text or aiPin source`);
+    if (!block && !text && !aiPin && !semantic) {
+      err(`layout.items[${i}] must have a block, semantic, text, or aiPin source`);
       continue;
     }
 
@@ -565,6 +654,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(block ? { block } : {}),
       ...(text ? { text } : {}),
       ...(aiPin ? { aiPin } : {}),
+      ...(semantic ? { semantic } : {}),
       viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
       ...(display ? { display } : {}),
       ...(filterBindings.length > 0 ? { filterBindings } : {}),
@@ -578,6 +668,68 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
   }
 
   return { kind: 'grid', cols, rowHeight, items };
+}
+
+function readSemanticQueryRef(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardSemanticQueryRef | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`layout.items[${index}].semantic must be an object`);
+    return undefined;
+  }
+  const item = raw as Record<string, unknown>;
+  const provider = enumValue(item.provider, ['metricflow', 'native'] as const, `layout.items[${index}].semantic.provider`, err);
+  const metrics = stringArrayOrUndefined(item.metrics, `layout.items[${index}].semantic.metrics`, err) ?? [];
+  const modelRefs = stringArrayOrUndefined(item.semanticModelRefs, `layout.items[${index}].semantic.semanticModelRefs`, err) ?? [];
+  if (typeof item.id !== 'string' || !item.id) err(`layout.items[${index}].semantic.id must be a non-empty string`);
+  if (metrics.length === 0) err(`layout.items[${index}].semantic.metrics must include at least one metric`);
+  if (modelRefs.length === 0) err(`layout.items[${index}].semantic.semanticModelRefs must include at least one reference`);
+  if (typeof item.definitionFingerprint !== 'string' || !item.definitionFingerprint) {
+    err(`layout.items[${index}].semantic.definitionFingerprint must be a non-empty string`);
+  }
+  const filters: DashboardSemanticQueryRef['filters'] = [];
+  if (item.filters !== undefined) {
+    if (!Array.isArray(item.filters)) err(`layout.items[${index}].semantic.filters must be an array`);
+    else item.filters.forEach((candidate, filterIndex) => {
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+        err(`layout.items[${index}].semantic.filters[${filterIndex}] must be an object`);
+        return;
+      }
+      const filter = candidate as Record<string, unknown>;
+      if (typeof filter.field !== 'string' || typeof filter.operator !== 'string') {
+        err(`layout.items[${index}].semantic.filters[${filterIndex}] requires field and operator`);
+        return;
+      }
+      filters.push({ field: filter.field, operator: filter.operator, value: filter.value });
+    });
+  }
+  const orderBy: NonNullable<DashboardSemanticQueryRef['orderBy']> = [];
+  if (item.orderBy !== undefined) {
+    if (!Array.isArray(item.orderBy)) err(`layout.items[${index}].semantic.orderBy must be an array`);
+    else item.orderBy.forEach((candidate, orderIndex) => {
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return;
+      const order = candidate as Record<string, unknown>;
+      const direction = enumValue(order.direction, ['asc', 'desc'] as const, `layout.items[${index}].semantic.orderBy[${orderIndex}].direction`, err);
+      if (typeof order.field === 'string' && direction) orderBy.push({ field: order.field, direction });
+    });
+  }
+  if (!provider || typeof item.id !== 'string' || !item.id || metrics.length === 0 || modelRefs.length === 0 || typeof item.definitionFingerprint !== 'string' || !item.definitionFingerprint) return undefined;
+  return {
+    id: item.id,
+    provider,
+    metrics,
+    dimensions: stringArrayOrUndefined(item.dimensions, `layout.items[${index}].semantic.dimensions`, err),
+    ...(filters.length ? { filters } : {}),
+    timeDimension: typeof item.timeDimension === 'string' ? item.timeDimension : undefined,
+    ...(orderBy.length ? { orderBy } : {}),
+    limit: typeof item.limit === 'number' && item.limit > 0 ? Math.floor(item.limit) : undefined,
+    semanticModelRefs: modelRefs,
+    definitionFingerprint: item.definitionFingerprint,
+    snapshotId: typeof item.snapshotId === 'string' ? item.snapshotId : undefined,
+  };
 }
 
 function readDisplayMetadata(

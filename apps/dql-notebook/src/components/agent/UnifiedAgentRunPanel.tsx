@@ -2505,6 +2505,7 @@ function AppProposalArtifact({
   const proposal = payload.proposal && typeof payload.proposal === 'object'
     ? payload.proposal as AppBuildProposal
     : undefined;
+  const proposalHash = typeof payload.proposalHash === 'string' ? payload.proposalHash : undefined;
   const [selected, setSelected] = useState<Set<string>>(() => (proposal ? defaultProposalSelection(proposal) : new Set()));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2525,7 +2526,7 @@ function AppProposalArtifact({
   const commit = async () => {
     setBusy(true);
     setError(null);
-    const result = await api.commitAppAiBuild(sessionId, { selectedTileIds: Array.from(selected) });
+    const result = await api.commitAppAiBuild(sessionId, { selectedTileIds: Array.from(selected), expectedProposalHash: proposalHash });
     setBusy(false);
     if (!result.ok) {
       setError(result.error);

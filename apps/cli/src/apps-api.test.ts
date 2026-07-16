@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { defaultLocalAppsDbPath, LocalAppStorage } from '@duckcodeailabs/dql-project';
+import { defaultLocalAppsDbPath, defaultPersonaRegistry, LocalAppStorage } from '@duckcodeailabs/dql-project';
 import {
   __test__,
   commitAppAiBuild,
@@ -35,6 +35,7 @@ interface TestBlockSpec {
 }
 
 afterEach(() => {
+  defaultPersonaRegistry.clear();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -374,7 +375,7 @@ describe('Apps command center API helpers', () => {
     expect(session.status).toBe('proposed');
     const selected = session.proposal!.tiles.map((tile) => tile.id);
 
-    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected });
+    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected, expectedProposalHash: session.proposalHash });
     expect(committed.ok).toBe(true);
     if (!committed.ok) return;
     expect(committed.session.status).toBe('ready');
@@ -385,12 +386,12 @@ describe('Apps command center API helpers', () => {
     }
 
     // Double-commit is refused — the app already exists.
-    const again = await commitAppAiBuild(root, session.id, { selectedTileIds: selected });
+    const again = await commitAppAiBuild(root, session.id, { selectedTileIds: selected, expectedProposalHash: session.proposalHash });
     expect(again.ok).toBe(false);
     if (!again.ok) expect(again.status).toBe(409);
   });
 
-  it('fills coverage gaps with bounded review-required generated tiles and commits them as aiPins', async () => {
+  it('keeps uncovered requirements as visible gaps and never persists generated SQL or local aiPins', async () => {
     const root = createProject();
     writeBlock(root, 'revenue/total_revenue.dql', {
       name: 'Total Revenue',
@@ -429,47 +430,27 @@ describe('Apps command center API helpers', () => {
     });
 
     expect(session.status).toBe('proposed');
-    expect(asked.length).toBeGreaterThan(0);
-    expect(asked.length).toBeLessThanOrEqual(3);
+    expect(asked).toEqual([]);
     const generatedTiles = session.proposal!.tiles.filter((tile) => tile.source === 'ai_generated');
-    expect(generatedTiles.length).toBe(asked.length);
-    // AI never auto-certifies: gap-fill tiles stay ai_generated regardless of match.
-    expect(generatedTiles.every((tile) => tile.certification === 'ai_generated')).toBe(true);
-    expect(generatedTiles.every((tile) => Boolean(tile.sql) && Boolean(tile.preview))).toBe(true);
-    expect(session.proposal!.coverage.generatedTiles).toBe(generatedTiles.length);
+    expect(generatedTiles).toEqual([]);
+    expect(session.proposal!.coverage.generatedTiles).toBe(0);
+    expect(session.proposal!.gaps.length).toBeGreaterThan(0);
 
     const selected = session.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id);
-    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected });
+    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected, expectedProposalHash: session.proposalHash });
     expect(committed.ok).toBe(true);
     if (!committed.ok) return;
 
     const dashboardPath = committed.session.generatedPaths.find((path) => path.endsWith('.dqld'));
     expect(dashboardPath).toBeTruthy();
     const doc = JSON.parse(readFileSync(join(root, dashboardPath!), 'utf-8')) as {
-      sections?: Array<{ id: string; kind: string; narrative?: string }>;
+      story?: { goal: string; eligibleTileIds?: string[] };
       layout: { items: Array<{ aiPin?: { id: string }; text?: { markdown: string }; sectionId?: string; trustState?: string; reviewStatus?: string }> };
     };
     const aiPinItems = doc.layout.items.filter((item) => item.aiPin);
-    expect(aiPinItems.length).toBe(generatedTiles.length);
-    expect(aiPinItems.every((item) => item.trustState === 'review_required' && item.reviewStatus === 'review_required')).toBe(true);
-
-    // Story layout: deterministic narration guarantees sections + a narrated
-    // exec-summary tile even without an LLM; generated tiles land in the appendix.
-    expect(doc.sections?.some((section) => section.kind === 'exec_summary')).toBe(true);
-    expect(doc.sections?.some((section) => section.kind === 'appendix')).toBe(true);
-    const execTile = doc.layout.items.find((item) => item.sectionId === 'exec_summary');
-    expect(execTile?.text?.markdown).toBeTruthy();
-    expect(aiPinItems.every((item) => item.sectionId === 'appendix')).toBe(true);
-
-    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
-    try {
-      const pin = storage.getAiPin(aiPinItems[0]!.aiPin!.id);
-      expect(pin?.certification).toBe('ai_generated');
-      expect(pin?.reviewStatus).toBe('needs_review');
-      expect(pin?.sql).toContain('revenue_by_region');
-    } finally {
-      storage.close();
-    }
+    expect(aiPinItems).toEqual([]);
+    expect(doc.story?.goal).toContain('explain why revenue is changing');
+    expect(doc.layout.items.some((item) => item.text?.markdown?.includes('SELECT '))).toBe(false);
   });
 
   it('keeps gaps as research questions when no provider is available and lists other failures transparently', async () => {
@@ -497,7 +478,8 @@ describe('Apps command center API helpers', () => {
     expect(offline.proposal!.tiles.some((tile) => tile.error)).toBe(false);
     expect(offline.proposal!.gaps.length).toBeGreaterThan(0);
 
-    // A genuine generation failure IS listed (not thrown), unselectable.
+    // Provider failures cannot change the proposal because App Builder does not
+    // use generated SQL as dashboard content.
     const failed = await proposeAppAiBuild(root, {
       prompt: 'Build a revenue app for leadership and explain why revenue is changing.',
       domain: 'revenue',
@@ -509,8 +491,8 @@ describe('Apps command center API helpers', () => {
     });
     expect(failed.status).toBe('proposed');
     const errorTiles = failed.proposal!.tiles.filter((tile) => tile.error);
-    expect(errorTiles.length).toBeGreaterThan(0);
-    expect(errorTiles.every((tile) => !tile.selectedByDefault)).toBe(true);
+    expect(errorTiles).toEqual([]);
+    expect(failed.proposal!.gaps.length).toBeGreaterThan(0);
   });
 
   it('refuses to commit a proposal with no certified tiles (apps need a certified anchor)', async () => {
@@ -528,6 +510,7 @@ describe('Apps command center API helpers', () => {
       expect(certifiedIds).toEqual([]);
       const committed = await commitAppAiBuild(root, session.id, {
         selectedTileIds: session.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id),
+        expectedProposalHash: session.proposalHash,
       });
       // Rejected either way (no selectable tiles → 400, or the certified-coverage
       // guard → 409). What matters: no certified-less app is ever created.
@@ -556,9 +539,38 @@ describe('Apps command center API helpers', () => {
       domain: 'revenue',
       owner: 'owner@local',
     });
-    const rejected = await commitAppAiBuild(root, session.id, { selectedTileIds: [] });
+    const rejected = await commitAppAiBuild(root, session.id, { selectedTileIds: [], expectedProposalHash: session.proposalHash });
     expect(rejected.ok).toBe(false);
     if (!rejected.ok) expect(rejected.error).toContain('at least one tile');
+  });
+
+  it('rejects stale proposal hashes and source drift without writing an App', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue', domain: 'revenue', status: 'certified', tags: ['revenue'], description: 'Revenue KPI', chart: 'single_value',
+    });
+    const session = await proposeAppAiBuild(root, { prompt: 'Build a revenue app', domain: 'revenue', owner: 'owner@local' });
+    expect(session.status).toBe('proposed');
+    const ids = session.proposal!.tiles.map((tile) => tile.id);
+    const staleHash = await commitAppAiBuild(root, session.id, { selectedTileIds: ids, expectedProposalHash: 'wrong' });
+    expect(staleHash.ok).toBe(false);
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue', domain: 'revenue', status: 'certified', tags: ['revenue'], description: 'Revenue KPI changed after proposal', chart: 'single_value',
+    });
+    const drifted = await commitAppAiBuild(root, session.id, { selectedTileIds: ids, expectedProposalHash: session.proposalHash });
+    expect(drifted.ok).toBe(false);
+    if (!drifted.ok) expect(drifted.status).toBe(409);
+    expect(existsSync(join(root, 'apps'))).toBe(false);
+  });
+
+  it('rejects existing-App updates until patch semantics are explicit', async () => {
+    const root = createProject();
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Update the revenue app', existingAppId: 'revenue-app', domain: 'revenue', owner: 'owner@local',
+    });
+    expect(session.status).toBe('error');
+    expect(session.error).toMatch(/not supported yet/i);
+    expect(existsSync(join(root, 'apps'))).toBe(false);
   });
 
   it('returns a research proposal without creating an investigation when context is required', async () => {
@@ -612,6 +624,20 @@ describe('Apps command center API helpers', () => {
       reviewRequired: true,
       blockId: 'Top Scorers',
     });
+  });
+
+  it('fails App Copilot closed when the active persona belongs to another App', async () => {
+    const root = createProject();
+    const first = createAppPackage(root, { name: 'Revenue App', domain: 'revenue', dashboardTitle: 'Revenue', owners: ['owner@local'], selectedBlockIds: [] });
+    const second = createAppPackage(root, { name: 'Growth App', domain: 'growth', dashboardTitle: 'Growth', owners: ['owner@local'], selectedBlockIds: [] });
+    expect(first.ok && second.ok).toBe(true);
+    defaultPersonaRegistry.set({ userId: 'owner@local', roles: ['owner'], attributes: {}, rlsContext: {}, appId: 'growth-app' });
+    const result = await __test__.askAppQuestion({
+      projectRoot: root, req: {} as any, res: {} as any,
+      url: new URL('http://local.test/api/apps/revenue-app/ask'), path: '/api/apps/revenue-app/ask',
+    }, 'revenue-app', { question: 'What changed?' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/active persona belongs to App "growth-app"/);
   });
 
   it('routes an OFF-tile question through the governed answer loop, not the focused tile', async () => {

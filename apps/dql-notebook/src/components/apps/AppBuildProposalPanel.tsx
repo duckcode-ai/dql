@@ -37,9 +37,9 @@ export function AppBuildProposalPanel({
   const failed = proposal.tiles.filter((tile) => tile.error);
   const selectedCount = selectable.filter((tile) => selected.has(tile.id)).length;
   const generatedSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'ai_generated').length;
-  // An app must be anchored by at least one certified tile (commit enforces this too).
+  const semanticSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'reviewed_semantic').length;
   const certifiedSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'certified').length;
-  const canCreate = certifiedSelected > 0;
+  const canCreate = certifiedSelected + semanticSelected > 0;
 
   return (
     <div style={{ display: 'grid', gap: 10 }}>
@@ -47,6 +47,7 @@ export function AppBuildProposalPanel({
         <span style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary }}>Proposed app content</span>
         <span style={{ fontSize: 11, color: t.textMuted }}>
           {proposal.coverage.certifiedTiles} certified
+          {proposal.coverage.semanticTiles > 0 ? ` · ${proposal.coverage.semanticTiles} reviewed semantic` : ''}
           {proposal.coverage.generatedTiles > 0 ? ` · ${proposal.coverage.generatedTiles} AI-generated` : ''}
           {proposal.coverage.gaps > 0 ? ` · ${proposal.coverage.gaps} uncovered` : ''}
         </span>
@@ -103,7 +104,9 @@ export function AppBuildProposalPanel({
         </button>
         <span style={{ fontSize: 11, color: t.textMuted }}>
           {!canCreate
-            ? 'Select at least one certified tile — an app needs a certified anchor.'
+            ? 'Select at least one certified block or reviewed semantic tile.'
+            : semanticSelected > 0
+              ? `${semanticSelected} semantic tile${semanticSelected === 1 ? '' : 's'} will compile against the governed semantic layer at run time.`
             : generatedSelected > 0
               ? `${generatedSelected} AI-generated tile${generatedSelected === 1 ? '' : 's'} will stay review-required until certified.`
               : 'Nothing is created until you confirm.'}
@@ -128,6 +131,7 @@ function ProposalTileRow({
 }) {
   const [open, setOpen] = useState(false);
   const certified = tile.certification === 'certified';
+  const semantic = tile.certification === 'reviewed_semantic';
   const hasDetail = Boolean(tile.sql || tile.answer || (tile.preview && tile.preview.rows.length > 0));
   return (
     <div style={tileRowStyle(t)}>
@@ -144,6 +148,10 @@ function ProposalTileRow({
           {certified ? (
             <span style={badgeStyle(t.success)}>
               <ShieldCheck size={10} /> certified
+            </span>
+          ) : semantic ? (
+            <span style={badgeStyle(t.accent)}>
+              <Sparkles size={10} /> reviewed semantic
             </span>
           ) : (
             <span style={badgeStyle(t.warning)}>

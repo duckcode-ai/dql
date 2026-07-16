@@ -87,6 +87,32 @@ filter cannot be answered by an unparameterized block that aggregates across
 that category. Unknown filter/grain capability is context-only for a shaped
 analytical request, not evidence of compatibility (`AGT-006`).
 
+## App composition and Business Story
+
+App planning uses a dedicated requirement-first orchestrator. It shares the
+same immutable `DomainContextEnvelope`, compatibility checks, semantic
+compiler, trust vocabulary, and evidence records as Ask, but it optimizes for a
+coherent reusable dashboard rather than one terminal answer (`AGT-007`). The
+client may express intent and select proposal candidates; source discovery,
+eligibility, preflight, and trust classification remain server-owned.
+
+Every dashboard run computes a typed fact pack from all eligible governed
+tiles: active filters and time scope, app goal/audience/domain, metric units and
+definitions, tile roles and grain, full-result statistics, approved deltas,
+shares, ranks, trends, driver evidence, freshness, lineage, trust, and exact
+evidence references. The deterministic Business Story is produced immediately
+from those facts. Optional provider output may verbalize only those facts; it
+does not calculate. Validation rejects an unreferenced number, a comparison
+without a baseline, causal language without validated driver evidence, and a
+claim whose grain or filters differ from its evidence. Story trust is the
+least-trusted contributing source (`AGT-008`, `SEC-002`).
+
+`POST .../run` returns a server-owned `runId`, snapshot/filter/result
+fingerprints, tile results, verified facts, and the deterministic story.
+`POST .../story` accepts only `runId`; the server reads bounded run evidence.
+Clients cache by app/dashboard/snapshot/filter/result/persona fingerprint and
+ignore an older story response after a newer run (`API-002`).
+
 The exploratory lane is distinct from governed SQL. It may use dbt catalog,
 schema, tests, lineage, and descriptions to propose a bounded single-domain
 join hypothesis, but none of those facts is relationship proof and it must not

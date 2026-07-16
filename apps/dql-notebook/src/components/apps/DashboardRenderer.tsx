@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, X } from 'lucide-react';
-import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse } from '../../api/client';
+import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse, type DashboardStoryBrief } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
@@ -99,6 +99,8 @@ export function DashboardRenderer({
   const { state } = useNotebook();
   const t = themes[state.themeMode as NotebookThemeMode];
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
+  const [businessStory, setBusinessStory] = useState<DashboardStoryBrief | null>(null);
+  const latestRunIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -141,10 +143,10 @@ export function DashboardRenderer({
   // the client-computed story strip and the flat grid; edit mode keeps the classic
   // grid so drag/drop tooling is untouched. Old dashboards have no sections.
   const storySections = useMemo(
-    () => (!editable && dashboard.sections && dashboard.sections.length > 0
+    () => (!editable && !dashboard.story && dashboard.sections && dashboard.sections.length > 0
       ? [...dashboard.sections].sort((a, b) => a.order - b.order)
       : null),
-    [dashboard.sections, editable],
+    [dashboard.sections, dashboard.story, editable],
   );
   // Story mode intentionally SHOWS review-required tiles: the appendix exists to
   // surface AI-generated analysis, clearly badged — so it bypasses the stakeholder
@@ -165,8 +167,17 @@ export function DashboardRenderer({
     void api.runDashboard(appId, dashboard.id, runVariables).then((result) => {
       if (cancelled) return;
       setRun(result);
+      setBusinessStory(result?.story ?? null);
+      latestRunIdRef.current = result?.runId ?? null;
       onRunChange?.(result);
       if (!result) setError('Dashboard run failed.');
+      if (result?.runId) {
+        void api.getDashboardStory(appId, dashboard.id, result.runId).then((storyResult) => {
+          if (cancelled || !storyResult || latestRunIdRef.current !== storyResult.runId) return;
+          if (storyResult.snapshotId !== result.snapshotId || storyResult.filterFingerprint !== result.filterFingerprint || storyResult.resultFingerprint !== result.resultFingerprint || storyResult.personaFingerprint !== result.personaFingerprint) return;
+          setBusinessStory(storyResult.story);
+        });
+      }
     }).catch((err) => {
       if (!cancelled) {
         setError(err instanceof Error ? err.message : String(err));
@@ -190,6 +201,8 @@ export function DashboardRenderer({
       void api.runDashboard(appId, dashboard.id, runVariables).then((nextRun) => {
         if (nextRun) {
           setRun(nextRun);
+          setBusinessStory(nextRun.story);
+          latestRunIdRef.current = nextRun.runId;
           onRunChange?.(nextRun);
         }
       });
@@ -208,7 +221,10 @@ export function DashboardRenderer({
   const chatContext = useMemo(() => {
     const tiles = dashboard.layout.items.map((item) => {
       const tile = tileResults.get(item.i);
-      const blockRef = item.block ? ('blockId' in item.block ? item.block.blockId : item.block.ref) : item.aiPin ? `aiPin:${item.aiPin.id}` : 'text';
+      const blockRef = item.block
+        ? ('blockId' in item.block ? item.block.blockId : item.block.ref)
+        : item.semantic ? `semantic:${item.semantic.id}`
+          : item.aiPin ? `aiPin:${item.aiPin.id}` : 'text';
       return {
         title: item.title,
         blockRef,
@@ -229,9 +245,18 @@ export function DashboardRenderer({
       domain: dashboard.metadata.domain,
       filters: dashboard.filters,
       variables: runVariables,
+      run: run ? {
+        runId: run.runId,
+        snapshotId: run.snapshotId,
+        filterFingerprint: run.filterFingerprint,
+        resultFingerprint: run.resultFingerprint,
+        personaFingerprint: run.personaFingerprint,
+        story: run.story,
+        facts: run.facts,
+      } : null,
       tiles,
     }, null, 2);
-  }, [appId, dashboard, runVariables, tileResults]);
+  }, [appId, dashboard, run, runVariables, tileResults]);
 
   const saveItems = useCallback(async (items: DashboardDocumentResponse['dashboard']['layout']['items']) => {
     setSaving(true);
@@ -498,7 +523,9 @@ export function DashboardRenderer({
       )}
       {editable && <div style={dashboardEditHintStyle}>Drag tiles, select a block for Copilot context, or use the tile controls for sizing and chart settings.</div>}
 
-      {dashboardStory ? <DashboardStoryStrip story={dashboardStory} /> : null}
+      {!editable && businessStory ? (
+        <BusinessStoryPanel story={businessStory} onResearch={openCopilot} onEvidence={openLineage} />
+      ) : dashboardStory ? <DashboardStoryStrip story={dashboardStory} /> : null}
 
       {visibleItems.length === 0 ? (
         <div
@@ -663,6 +690,7 @@ export function DashboardRenderer({
           ))}
         </div>
       )}
+      {!editable && run ? <ReviewAppendix run={run} variables={runVariables} /> : null}
       </div>
 
       {lineageOpen && !onOpenLineageNode && (
@@ -762,6 +790,8 @@ function DashboardTile({
   const canAsk = Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
     ? `block:${blockId}`
+    : item.semantic
+      ? `semantic:${item.semantic.id}`
     : item.aiPin
       ? `aiPin:${item.aiPin.id}`
       : 'text';
@@ -1143,6 +1173,126 @@ function DashboardStoryStrip({ story }: { story: DashboardStory }): JSX.Element 
     </section>
   );
 }
+
+function BusinessStoryPanel({
+  story,
+  onEvidence,
+  onResearch,
+}: {
+  story: DashboardStoryBrief;
+  onEvidence: () => void;
+  onResearch: () => void;
+}): JSX.Element {
+  return (
+    <section style={{ ...dashboardStoryStripStyle, padding: '20px 22px', marginBottom: 16 }} aria-label="Business Story">
+      <div style={dashboardStoryHeaderStyle}>
+        <div style={dashboardStoryIconStyle}><Sparkles size={15} strokeWidth={2.2} /></div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={dashboardStoryKickerStyle}>Business Story · current filters</div>
+          <h2 style={{ ...dashboardStoryTitleStyle, fontSize: 19 }}>{story.headline}</h2>
+        </div>
+        <TrustPill trust={story.trustState} />
+      </div>
+      <div style={{ display: 'grid', gap: 10, marginTop: 12, maxWidth: 920 }}>
+        {story.paragraphs.slice(0, 2).map((paragraph, index) => (
+          <p key={index} style={{ ...dashboardStorySummaryStyle, margin: 0, fontSize: 14, lineHeight: 1.65 }}>
+            {storyInlineText(paragraph)}
+          </p>
+        ))}
+        {story.implication ? (
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55, fontWeight: 650 }}>What this means: {storyInlineText(story.implication)}</p>
+        ) : null}
+      </div>
+      <div style={{ ...dashboardStoryChipRowStyle, marginTop: 14 }}>
+        <span style={dashboardStorySourceChipStyle}>{story.generatedBy === 'ai' ? 'AI wording · verified facts' : 'Verified result summary'}</span>
+        <span style={dashboardStoryChipStyle}>{story.evidenceRefs.length} evidence source{story.evidenceRefs.length === 1 ? '' : 's'}</span>
+        {story.caveat ? <span style={dashboardStoryChipStyle}>{story.caveat}</span> : null}
+        <span style={{ flex: 1 }} />
+        <button type="button" onClick={onEvidence} style={storyActionButtonStyle}>View evidence</button>
+        <button type="button" onClick={onResearch} style={storyActionButtonStyle}>Research deeper</button>
+      </div>
+    </section>
+  );
+}
+
+function ReviewAppendix({
+  run,
+  variables,
+}: {
+  run: DashboardRunResponse;
+  variables: Record<string, unknown>;
+}): JSX.Element {
+  const issues = run.tiles.filter((tile) => tile.status !== 'ok');
+  const activeFilters = Object.entries(variables).filter(([, value]) => value !== undefined && value !== null && value !== '');
+  return (
+    <details style={reviewAppendixStyle} aria-label="Evidence and review appendix">
+      <summary style={reviewAppendixSummaryStyle}>
+        Evidence & review appendix
+        <span style={{ opacity: 0.62, fontWeight: 600 }}>
+          {run.story.evidenceRefs.length} sources · {issues.length ? `${issues.length} issue${issues.length === 1 ? '' : 's'}` : 'all visible sources ran'}
+        </span>
+      </summary>
+      <div style={{ display: 'grid', gap: 12, padding: '0 16px 16px' }}>
+        <div style={reviewAppendixGridStyle}>
+          <div><strong>Run</strong><br /><span>{run.runId}</span></div>
+          <div><strong>Snapshot</strong><br /><span>{run.snapshotId}</span></div>
+          <div><strong>Trust</strong><br /><span>{run.story.trustState}</span></div>
+          <div><strong>Filters</strong><br /><span>{activeFilters.length ? activeFilters.map(([key, value]) => `${key}: ${String(value)}`).join(' · ') : 'Current unfiltered scope'}</span></div>
+        </div>
+        <div>
+          <strong style={{ fontSize: 12 }}>Evidence used by the story</strong>
+          <div style={{ ...dashboardStoryChipRowStyle, marginTop: 7 }}>
+            {run.story.evidenceRefs.map((ref) => <span key={ref} style={dashboardStoryChipStyle}>{ref}</span>)}
+          </div>
+        </div>
+        {issues.length ? (
+          <div>
+            <strong style={{ fontSize: 12 }}>Items requiring review</strong>
+            <ul style={{ margin: '7px 0 0', paddingLeft: 18, fontSize: 12, lineHeight: 1.55 }}>
+              {issues.map((tile) => <li key={tile.tileId}>{tile.title ?? tile.tileId}: {tile.error ?? tile.status}</li>)}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function storyInlineText(value: string): Array<string | JSX.Element> {
+  return value.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) =>
+    part.startsWith('**') && part.endsWith('**')
+      ? <strong key={index}>{part.slice(2, -2)}</strong>
+      : part,
+  );
+}
+
+const reviewAppendixStyle: CSSProperties = {
+  marginTop: 16,
+  border: '1px solid var(--dql-app-line, var(--border-color, rgba(15,23,42,0.10)))',
+  borderRadius: 8,
+  background: 'var(--dql-app-surface, var(--surface, rgba(0,0,0,0.02)))',
+  color: 'var(--dql-app-text, var(--text-primary, #0f172a))',
+};
+
+const reviewAppendixSummaryStyle: CSSProperties = {
+  cursor: 'pointer',
+  padding: '12px 16px',
+  fontSize: 12.5,
+  fontWeight: 760,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+};
+
+const reviewAppendixGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+  gap: 10,
+  fontSize: 11.5,
+  lineHeight: 1.45,
+  color: 'var(--dql-app-text-muted, var(--text-secondary, #64748b))',
+};
 
 const askHintStyle: CSSProperties = {
   position: 'absolute',
@@ -2728,6 +2878,17 @@ const dashboardStorySourceChipStyle: CSSProperties = {
   color: 'var(--dql-app-accent, #4f46e5)',
   borderColor: 'rgba(79,70,229,0.22)',
   background: 'var(--dql-app-accent-soft, rgba(79,70,229,0.08))',
+};
+
+const storyActionButtonStyle: CSSProperties = {
+  border: '1px solid var(--dql-app-line-2, var(--border-color, rgba(15,23,42,0.14)))',
+  borderRadius: 8,
+  background: 'var(--dql-app-surface, var(--surface, #fff))',
+  color: 'var(--dql-app-text, var(--text-primary, #0f172a))',
+  padding: '6px 10px',
+  fontSize: 11.5,
+  fontWeight: 720,
+  cursor: 'pointer',
 };
 
 function dashboardChatDrawerStyle(expanded: boolean): CSSProperties {
