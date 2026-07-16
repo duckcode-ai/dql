@@ -1,9 +1,9 @@
-import React from 'react';
-import { X } from 'lucide-react';
+import { useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from './UnifiedAgentRunPanel';
 import type { AgentRunSelectedObject } from '../../api/client';
+import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH, AI_SIDE_PANEL_WIDTH } from './AiSidePanel';
 
 /**
  * The global, context-aware stakeholder copilot rail. Mounted once at the shell
@@ -18,55 +18,46 @@ export function GlobalAiRail() {
   // One rolling server-persisted conversation for the global rail — a page
   // refresh resumes the same thread.
   const agentThread = usePersistedAgentThreadId('global-rail');
+  const [expanded, setExpanded] = useState(false);
 
   return (
-    <aside
+    <AiSidePanel
+      t={t}
+      title={context.title ?? 'AI copilot'}
+      subtitle={context.scopeHint ?? 'Ask a follow-up about what you are viewing'}
+      expanded={expanded}
+      onToggleExpanded={() => setExpanded((value) => !value)}
+      onClose={() => dispatch({ type: 'CLOSE_GLOBAL_AI' })}
+      ariaLabel="App AI"
       style={{
-        width: 380,
-        maxWidth: '42vw',
+        width: expanded
+          ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, calc(100vw - 96px))`
+          : `min(${AI_SIDE_PANEL_WIDTH}px, calc(100vw - 64px))`,
+        maxWidth: expanded ? '62vw' : '46vw',
         minWidth: 320,
-        borderLeft: `1px solid ${t.headerBorder}`,
-        background: t.cellBg,
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
+        flex: '0 0 auto',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: t.textSecondary }}>
-          {context.title ?? 'AI copilot'}
-        </span>
-        <button
-          type="button"
-          aria-label="Close copilot"
-          onClick={() => dispatch({ type: 'CLOSE_GLOBAL_AI' })}
-          style={{ border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'inline-flex', padding: 4, borderRadius: 6 }}
-        >
-          <X size={15} />
-        </button>
-      </div>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <UnifiedAgentRunPanel
-          themeMode={state.themeMode}
-          title={context.title ?? 'AI copilot'}
-          scopeHint={context.scopeHint ?? 'Ask a follow-up about what you are viewing'}
-          audience={audience}
-          selectedObject={selectedObject}
-          workspaceContext={context.workspaceContext}
-          examplePrompts={Array.isArray(context.suggestedQuestions) && context.suggestedQuestions.length > 0
-            ? context.suggestedQuestions
-                .filter((question): question is string => typeof question === 'string')
-                .slice(0, 4)
-                .map((question) => ({ label: question, prompt: question }))
-            : undefined}
-          autoRun={state.globalAi.autoRun
-            ? { text: state.globalAi.autoRun.text, mode: state.globalAi.autoRun.mode as never, nonce: state.globalAi.autoRun.nonce }
-            : undefined}
-          threadId={agentThread.threadId}
-          onThreadIdChange={agentThread.onThreadIdChange}
-          initialMode="auto"
-        />
-      </div>
-    </aside>
+      <UnifiedAgentRunPanel
+        themeMode={state.themeMode}
+        title={context.title ?? 'AI copilot'}
+        scopeHint={context.scopeHint ?? 'Ask a follow-up about what you are viewing'}
+        audience={audience}
+        selectedObject={selectedObject}
+        workspaceContext={context.workspaceContext}
+        examplePrompts={Array.isArray(context.suggestedQuestions) && context.suggestedQuestions.length > 0
+          ? context.suggestedQuestions
+              .filter((question): question is string => typeof question === 'string')
+              .slice(0, 4)
+              .map((question) => ({ label: question, prompt: question }))
+          : undefined}
+        autoRun={state.globalAi.autoRun
+          ? { text: state.globalAi.autoRun.text, mode: state.globalAi.autoRun.mode as never, nonce: state.globalAi.autoRun.nonce }
+          : undefined}
+        threadId={agentThread.threadId}
+        onThreadIdChange={agentThread.onThreadIdChange}
+        initialMode="auto"
+      />
+    </AiSidePanel>
   );
 }

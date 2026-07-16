@@ -1,6 +1,6 @@
 import type { Theme } from "../../themes/notebook-theme";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Clock3, History, Sparkles, X } from "lucide-react";
+import { Clock3, History, Sparkles } from "lucide-react";
 import { makeCell, useNotebook } from "../../store/NotebookStore";
 import { themes } from "../../themes/notebook-theme";
 import {
@@ -18,6 +18,11 @@ import {
   usePersistedAgentThreadId,
   type InsertDqlPayload,
 } from "../agent/UnifiedAgentRunPanel";
+import {
+  AiSidePanel,
+  AiSidePanelAction,
+  AI_SIDE_PANEL_EXPANDED_WIDTH,
+} from "../agent/AiSidePanel";
 import { emitNotebookResearchChanged } from "../../utils/notebook-research";
 import type { Cell, NotebookDocMetadata, NotebookFile } from "../../store/types";
 import { DatasetImportPanel } from "./DatasetImportPanel";
@@ -628,6 +633,7 @@ function NotebookAiDrawer({
   // Server-persisted conversation thread, keyed per notebook so a page refresh
   // resumes the same conversation.
   const agentThread = usePersistedAgentThreadId(`notebook:${notebookPath ?? 'notebook'}`);
+  const [expanded, setExpanded] = useState(false);
   const sourceTitle = sourceCell
     ? `${sourceCell.type.toUpperCase()} cell${sourceCell.name ? ` · ${sourceCell.name}` : ''}`
     : 'Whole notebook';
@@ -653,76 +659,40 @@ function NotebookAiDrawer({
   };
 
   return (
-    <aside
+    <AiSidePanel
+      t={t}
+      title="Notebook AI"
+      subtitle={sourceTitle}
+      expanded={expanded}
+      onToggleExpanded={() => setExpanded((value) => !value)}
+      onClose={onClose}
+      compact={compact}
+      ariaLabel="Notebook AI"
+      headerActions={(
+        <AiSidePanelAction
+          t={t}
+          label={historyOpen ? 'Hide AI history' : 'Show AI history'}
+          onClick={onToggleHistory}
+          active={historyOpen}
+        >
+          <History size={14} />
+        </AiSidePanelAction>
+      )}
       style={{
         position: compact ? 'relative' : 'absolute',
         inset: compact ? undefined : '0 0 0 auto',
         zIndex: 30,
-        width: compact ? "100%" : 'min(520px, calc(100% - 40px))',
-        maxWidth: compact ? "none" : "52vw",
+        width: compact
+          ? '100%'
+          : expanded
+            ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, calc(100% - 40px))`
+            : 'min(520px, calc(100% - 40px))',
+        maxWidth: compact ? 'none' : expanded ? '72vw' : '52vw',
         minWidth: compact ? 0 : 400,
         flex: "0 0 auto",
-        borderLeft: compact ? "none" : `1px solid ${t.headerBorder}`,
-        background: t.cellBg,
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
-        height: '100%',
         boxShadow: compact ? 'none' : '-16px 0 36px rgba(0,0,0,0.18)',
       }}
-      aria-label="Notebook AI"
     >
-      <div
-        style={{
-          minHeight: 48,
-          padding: '9px 12px',
-          borderBottom: `1px solid ${t.headerBorder}`,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-        }}
-      >
-        <div
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: 8,
-            background: `${t.accent}14`,
-            border: `1px solid ${t.accent}36`,
-            color: t.accent,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flex: '0 0 auto',
-          }}
-        >
-          <Sparkles size={16} strokeWidth={2.2} />
-        </div>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>Notebook AI</div>
-          <div
-            title={sourceTitle}
-            style={{
-              fontSize: 11,
-              color: t.textMuted,
-              fontFamily: t.font,
-              marginTop: 2,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {sourceTitle}
-          </div>
-        </div>
-        <button type="button" onClick={onToggleHistory} title={historyOpen ? 'Hide AI history' : 'Show AI history'} style={drawerIconButtonStyle(t, historyOpen)}>
-          <History size={14} />
-        </button>
-        <button type="button" onClick={onClose} title="Close AI" style={drawerIconButtonStyle(t, false)}>
-          <X size={14} />
-        </button>
-      </div>
-
       {historyOpen && (
         <NotebookAiHistoryPanel
           t={t}
@@ -755,7 +725,7 @@ function NotebookAiDrawer({
           onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}
         />
       </div>
-    </aside>
+    </AiSidePanel>
   );
 }
 
@@ -1049,21 +1019,6 @@ function historyRunTone(run: NotebookResearchRun, t: Theme): string {
   if (run.reviewStatus === 'certified' || run.reviewStatus === 'completed') return t.success;
   if (run.reviewStatus === 'draft_created') return t.accent;
   return t.warning;
-}
-
-function drawerIconButtonStyle(t: Theme, active: boolean): React.CSSProperties {
-  return {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    border: `1px solid ${active ? t.accent : t.btnBorder}`,
-    background: active ? `${t.accent}16` : t.btnBg,
-    color: active ? t.accent : t.textSecondary,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    cursor: 'pointer',
-  };
 }
 
 function Breadcrumb({ t }: { t: Theme }) {

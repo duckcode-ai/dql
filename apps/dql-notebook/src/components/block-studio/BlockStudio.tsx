@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MessageSquarePlus, MoreHorizontal, PanelRightClose, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, X, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
@@ -32,6 +32,7 @@ import { SemanticTreeNode as TreeRow } from '../panels/SemanticTreeNode';
 import type { AiSqlDraftMeta } from '../agent/AiSqlDraftDialog';
 import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
+import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH } from '../agent/AiSidePanel';
 import {
   appendSemanticRefToQuery,
   buildSemanticRef,
@@ -148,6 +149,7 @@ export function BlockStudio() {
   const [editorMode, setEditorMode] = useState<BlockStudioEditorMode>('visual');
   const [aiDockOpen, setAiDockOpen] = useState(() => readBlockStudioBoolean('dql.block-studio.ai.open', false));
   const [aiDockWidth, setAiDockWidth] = useState(() => readBlockStudioNumber('dql.block-studio.ai.width', 420, 360, 520));
+  const [aiDockExpanded, setAiDockExpanded] = useState(false);
   const [aiRunning, setAiRunning] = useState(false);
   const [agentPanelEpoch, setAgentPanelEpoch] = useState(0);
   const [importSession, setImportSession] = useState<BlockStudioImportSession | null>(null);
@@ -903,7 +905,7 @@ export function BlockStudio() {
   const bottomPaneVisible = hasActiveDraft && !bottomPaneCollapsed;
   const rootGridColumns = compactLayout
     ? 'minmax(0, 1fr)'
-    : `${leftPaneCollapsed ? 0 : leftPaneWidth}px ${leftPaneCollapsed ? 0 : 6}px minmax(0, 1fr) ${aiDockOpen ? 6 : 0}px ${aiDockOpen ? aiDockWidth : 0}px`;
+    : `${leftPaneCollapsed ? 0 : leftPaneWidth}px ${leftPaneCollapsed ? 0 : 6}px minmax(0, 1fr) ${aiDockOpen ? 6 : 0}px ${aiDockOpen ? (aiDockExpanded ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, 52vw)` : `${aiDockWidth}px`) : 0}`;
   const rootGridRows = compactLayout
     ? leftPaneCollapsed
       ? !bottomPaneVisible
@@ -1357,51 +1359,23 @@ export function BlockStudio() {
       )}
 
       {aiDockOpen && (
-        <aside
-          aria-label="Block Studio AI"
+        <AiSidePanel
+          t={t}
+          title="Block AI"
+          subtitle={activeBlockName ? `Current block: ${activeBlockName}` : 'Unsaved governed block draft'}
+          expanded={aiDockExpanded}
+          onToggleExpanded={() => setAiDockExpanded((value) => !value)}
+          onClose={() => { setAiDockOpen(false); setAiDockExpanded(false); }}
+          onNewChat={() => { agentThread.resetThreadId(); setAgentPanelEpoch((value) => value + 1); }}
+          running={aiRunning}
+          compact={compactLayout}
+          ariaLabel="Block Studio AI"
           style={{
             gridColumn: compactLayout ? '1' : '5',
             gridRow: compactLayout ? editorGridRow : '1 / 4',
-            minWidth: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            borderLeft: compactLayout ? 'none' : `1px solid ${t.headerBorder}`,
-            background: t.cellBg,
           }}
         >
-          <div style={askOverlayHeaderStyle(t)}>
-            {compactLayout && (
-              <button type="button" onClick={() => setAiDockOpen(false)} title="Back to block" style={closeAskButtonStyle(t)}>
-                <ChevronLeft size={15} strokeWidth={2} />
-              </button>
-            )}
-            <div style={askOverlayIconStyle(t)}><Sparkles size={16} strokeWidth={2} /></div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 850, color: t.textPrimary, fontFamily: t.font }}>
-                Block AI
-                {aiRunning && <Loader2 size={12} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} />}
-              </div>
-              <div title={activeBlockName ?? 'Unsaved draft'} style={{ fontSize: 10, color: t.textMuted, marginTop: 2, fontFamily: t.font, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {activeBlockName ? `Current block: ${activeBlockName}` : 'Unsaved governed block draft'}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => { agentThread.resetThreadId(); setAgentPanelEpoch((value) => value + 1); }}
-              title="New AI chat"
-              style={closeAskButtonStyle(t)}
-            >
-              <MessageSquarePlus size={15} strokeWidth={2} />
-            </button>
-            {!compactLayout && (
-              <button type="button" onClick={() => setAiDockOpen(false)} title="Collapse AI" style={closeAskButtonStyle(t)}>
-                <PanelRightClose size={15} strokeWidth={2} />
-              </button>
-            )}
-          </div>
-          <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <UnifiedAgentRunPanel
+          <UnifiedAgentRunPanel
               key={`${agentScope}:${agentPanelEpoch}`}
               themeMode={state.themeMode}
               title="Block AI"
@@ -1433,9 +1407,8 @@ export function BlockStudio() {
                 { label: 'Find reusable blocks', prompt: 'Which certified DQL blocks already answer this analysis, and what should be reused instead of duplicated?' },
                 { label: 'Review this block', prompt: 'Review this block for grain, compatible metrics and dimensions, parameters, tests, and certification gaps.' },
               ]}
-            />
-          </div>
-        </aside>
+          />
+        </AiSidePanel>
       )}
 
       {!aiDockOpen && !compactLayout && (
@@ -1621,47 +1594,6 @@ function OutputTab({ active, onClick, label, t }: { active: boolean; onClick: ()
       {label}
     </button>
   );
-}
-
-function askOverlayHeaderStyle(t: Theme): React.CSSProperties {
-  return {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-    padding: '14px 16px',
-    borderBottom: `1px solid ${t.headerBorder}`,
-    background: t.cellBg,
-  };
-}
-
-function askOverlayIconStyle(t: Theme): React.CSSProperties {
-  return {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    background: `${t.accent}15`,
-    border: `1px solid ${t.accent}35`,
-    color: t.accent,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: '0 0 auto',
-  };
-}
-
-function closeAskButtonStyle(t: Theme): React.CSSProperties {
-  return {
-    width: 30,
-    height: 30,
-    borderRadius: 7,
-    border: `1px solid ${t.btnBorder}`,
-    background: t.btnBg,
-    color: t.textSecondary,
-    cursor: 'pointer',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  };
 }
 
 // Prototype segmented toggle: 2px-padded track, active = accent tint + accent text.

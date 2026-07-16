@@ -47,6 +47,7 @@ import {
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
 import { StructuredAnswerText } from '../agent/AgentAnswerCard';
+import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH } from '../agent/AiSidePanel';
 import { AppBuildProposalPanel, defaultProposalSelection } from './AppBuildProposalPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
@@ -190,6 +191,11 @@ export function AppsView(): JSX.Element {
   const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [smartView, setSmartView] = useState(false);
   const [explainOpen, setExplainOpen] = useState(false);
+  const [explainExpanded, setExplainExpanded] = useState(false);
+  const handleExplainChange = useCallback((open: boolean) => {
+    setExplainOpen(open);
+    if (!open) setExplainExpanded(false);
+  }, []);
   // Redesigned build flow: a nonce bumped by startAiBuilder auto-runs the
   // proposal once the create surface mounts (library send → building stream).
   const [autoBuildNonce, setAutoBuildNonce] = useState(0);
@@ -608,6 +614,7 @@ export function AppsView(): JSX.Element {
           experience={experience}
           section={section}
           explainOpen={explainOpen}
+          explainExpanded={explainExpanded}
           dashboardFilters={dashboardFilters}
           dashboardFilterValues={dashboardFilterValues}
           smartView={smartView}
@@ -618,7 +625,8 @@ export function AppsView(): JSX.Element {
           onSectionChange={setSection}
           onDashboardFilterChange={handleDashboardFilterChange}
           onSmartViewChange={setSmartView}
-          onExplainChange={setExplainOpen}
+          onExplainChange={handleExplainChange}
+          onExplainExpandedChange={setExplainExpanded}
           onAddPage={() => setAddPageOpen(true)}
           onOpenDashboard={(dashboardId) => dispatch({ type: 'OPEN_DASHBOARD', dashboardId })}
           onDashboardChanged={(dashboard) => {
@@ -1257,6 +1265,7 @@ function AppWorkspaceSurface({
   experience,
   section,
   explainOpen,
+  explainExpanded,
   dashboardFilters,
   dashboardFilterValues,
   smartView,
@@ -1268,6 +1277,7 @@ function AppWorkspaceSurface({
   onDashboardFilterChange,
   onSmartViewChange,
   onExplainChange,
+  onExplainExpandedChange,
   onAddPage,
   onOpenDashboard,
   onDashboardChanged,
@@ -1281,6 +1291,7 @@ function AppWorkspaceSurface({
   experience: AppExperience;
   section: AppSection;
   explainOpen: boolean;
+  explainExpanded: boolean;
   dashboardFilters: DashboardFilter[];
   dashboardFilterValues: Record<string, unknown>;
   smartView: boolean;
@@ -1292,6 +1303,7 @@ function AppWorkspaceSurface({
   onDashboardFilterChange: (filter: DashboardFilter, value: unknown) => void;
   onSmartViewChange: (value: boolean) => void;
   onExplainChange: (value: boolean) => void;
+  onExplainExpandedChange: (value: boolean) => void;
   onAddPage: () => void;
   onOpenDashboard: (dashboardId: string) => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
@@ -1610,8 +1622,11 @@ function AppWorkspaceSurface({
               askSeed={askSeed}
               activeInvestigation={section === 'research' ? activeInvestigation : null}
               themeMode={themeMode}
+              expanded={explainExpanded}
               onSelectBlock={setSelectedBlockId}
               onStartResearch={handleStartResearch}
+              onToggleExpanded={() => onExplainExpandedChange(!explainExpanded)}
+              onClose={() => onExplainChange(false)}
             />
           ) : null}
         </div>
@@ -1775,8 +1790,11 @@ function AppCopilotPanel({
   askSeed,
   activeInvestigation,
   themeMode,
+  expanded,
   onSelectBlock,
   onStartResearch,
+  onToggleExpanded,
+  onClose,
 }: {
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
@@ -1787,8 +1805,11 @@ function AppCopilotPanel({
   askSeed?: { text: string; nonce: number } | null;
   activeInvestigation?: LocalAppInvestigation | null;
   themeMode: ThemeMode;
+  expanded: boolean;
   onSelectBlock: (blockId: string | null) => void;
   onStartResearch: (seed: Omit<AppResearchSeed, 'nonce'>) => void;
+  onToggleExpanded: () => void;
+  onClose: () => void;
 }) {
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [directQuestion, setDirectQuestion] = useState('');
@@ -2121,24 +2142,18 @@ Decision this should support:`;
   };
   const visibleAnalysisHandoff = analysisHandoff ?? activeAnalysisHandoff;
   return (
-    <aside className="dql-app-explain-panel dql-app-assistant-panel">
+    <AiSidePanel
+      t={answerTheme}
+      title="App AI"
+      subtitle={formatBusinessLabel(app?.name ?? dashboardMeta?.title ?? 'App workspace')}
+      expanded={expanded}
+      onToggleExpanded={onToggleExpanded}
+      onClose={onClose}
+      ariaLabel="App AI"
+      className="dql-app-explain-panel dql-app-assistant-panel"
+      style={{ background: 'linear-gradient(180deg, var(--dql-app-surface), var(--dql-app-surface-muted))' }}
+    >
       <div className="dql-app-assistant-top">
-        <div className="dql-app-assistant-title-row">
-          <div className="dql-app-assistant-icon"><Bot size={15} /></div>
-          <div className="dql-app-assistant-heading">
-            <span className="dql-app-assistant-kicker">App Copilot</span>
-            <h3 title={app?.name ?? dashboardMeta?.title ?? focusTitle}>{formatBusinessLabel(app?.name ?? dashboardMeta?.title ?? 'App workspace')}</h3>
-          </div>
-          <button
-            type="button"
-            className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
-            onClick={() => setEvidenceOpen((value) => !value)}
-            title="Show app grounding context"
-          >
-            Context
-            <ChevronDown size={13} />
-          </button>
-        </div>
         <label className="dql-app-assistant-focus">
           <span>Focus</span>
           <select
@@ -2154,6 +2169,15 @@ Decision this should support:`;
             ))}
           </select>
         </label>
+        <button
+          type="button"
+          className={`dql-app-assistant-context-btn ${evidenceOpen ? 'on' : ''}`}
+          onClick={() => setEvidenceOpen((value) => !value)}
+          title="Show app grounding context"
+        >
+          Context
+          <ChevronDown size={13} />
+        </button>
       </div>
 
       {evidenceOpen ? (
@@ -2315,7 +2339,7 @@ Decision this should support:`;
           {directError ? <div className="dql-app-error">{directError}</div> : null}
         </div>
       </div>
-    </aside>
+    </AiSidePanel>
   );
 }
 
@@ -6168,6 +6192,11 @@ const APP_STYLES = `
   box-shadow: 0 20px 60px rgba(15, 23, 42, 0.14);
 }
 
+.dql-app-explain-panel[data-expanded="true"] {
+  width: min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, 52vw);
+  max-width: min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, 52vw);
+}
+
 .dql-app-copilot-panel {
   display: flex;
   flex-direction: column;
@@ -6184,57 +6213,13 @@ const APP_STYLES = `
 
 .dql-app-assistant-top {
   display: grid;
-  gap: 11px;
-  padding: 15px 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--dql-app-line);
   flex: none;
   background: var(--dql-app-surface);
-}
-
-.dql-app-assistant-title-row {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-}
-
-.dql-app-assistant-icon {
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border-radius: 11px;
-  background: var(--dql-app-accent-soft);
-  border: 1px solid rgba(79, 99, 215, 0.28);
-  color: var(--dql-app-accent);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.dql-app-assistant-heading {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.dql-app-assistant-kicker {
-  color: var(--dql-app-muted);
-  font: 800 9px var(--font-mono);
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-.dql-app-assistant-heading h3 {
-  margin: 0;
-  color: var(--dql-app-ink);
-  font-size: 15px;
-  line-height: 1.2;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .dql-app-assistant-focus {
@@ -8243,6 +8228,10 @@ const APP_STYLES = `
     resize: none;
     max-height: none;
   }
+  .dql-app-explain-panel[data-expanded="true"] {
+    width: 100%;
+    max-width: none;
+  }
 }
 
 @media (max-width: 760px) {
@@ -8335,11 +8324,8 @@ const APP_STYLES = `
     margin-bottom: 12px;
   }
   .dql-app-assistant-top {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-  .dql-app-assistant-heading {
-    flex: 1 1 calc(100% - 46px);
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
   }
   .dql-app-assistant-focus {
     flex: 1 1 100%;
@@ -8350,7 +8336,7 @@ const APP_STYLES = `
   }
   .dql-app-assistant-context-btn {
     position: static;
-    justify-self: end;
+    justify-self: start;
   }
   .dql-app-direct-ask-row {
     grid-template-columns: minmax(0, 1fr);

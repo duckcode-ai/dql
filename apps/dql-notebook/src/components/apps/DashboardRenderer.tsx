@@ -7,6 +7,7 @@ import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types'
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
+import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH, AI_SIDE_PANEL_WIDTH } from '../agent/AiSidePanel';
 import { renderMarkdown } from '../cells/MarkdownCellEditor';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
 import { classifyColumns } from '../../utils/semantic-fields';
@@ -96,6 +97,7 @@ export function DashboardRenderer({
   onRunChange?: (run: DashboardRunResponse | null) => void;
 }): JSX.Element {
   const { state } = useNotebook();
+  const t = themes[state.themeMode as NotebookThemeMode];
   const [run, setRun] = useState<DashboardRunResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -670,36 +672,29 @@ export function DashboardRenderer({
       )}
 
       {chatOpen && !onCopilotChange && (
-        <aside style={dashboardChatDrawerStyle(chatExpanded)}>
-          <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-            <div style={dashboardChatHeaderStyle}>
-              <div style={dashboardChatHeaderIconStyle}><Sparkles size={14} strokeWidth={2} /></div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--dql-app-text, #0f172a)' }}>Dashboard AI</div>
-                <div style={{ fontSize: 11, color: 'var(--dql-app-text-muted, #64748b)', marginTop: 1 }}>Scoped to this App dashboard first</div>
-              </div>
-              <button type="button" onClick={() => setChatExpanded((value) => !value)} title={chatExpanded ? 'Collapse' : 'Expand'} style={dashboardChatIconBtnStyle}>
-                <Maximize2 size={14} strokeWidth={2} />
-              </button>
-              <button type="button" onClick={() => { setChatOpen(false); setChatExpanded(false); }} title="Close" style={dashboardChatIconBtnStyle}>
-                <X size={15} strokeWidth={2} />
-              </button>
-            </div>
-            <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-              <UnifiedAgentRunPanel
-                key={`${appId}:${dashboard.id}`}
-                themeMode={state.themeMode}
-                title="Dashboard AI"
-                scopeHint="Scoped to this App dashboard first"
-                audience="stakeholder"
-                workspaceContext={{ appId, dashboardId: dashboard.id, dashboardContext: chatContext }}
-                initialMode="auto"
-                threadId={agentThread.threadId}
-                onThreadIdChange={agentThread.onThreadIdChange}
-              />
-            </div>
-          </div>
-        </aside>
+        <AiSidePanel
+          t={t}
+          title="Dashboard AI"
+          subtitle="Scoped to this App dashboard first"
+          expanded={chatExpanded}
+          onToggleExpanded={() => setChatExpanded((value) => !value)}
+          onClose={() => { setChatOpen(false); setChatExpanded(false); }}
+          floating
+          ariaLabel="Dashboard AI"
+          style={dashboardChatDrawerStyle(chatExpanded)}
+        >
+          <UnifiedAgentRunPanel
+            key={`${appId}:${dashboard.id}`}
+            themeMode={state.themeMode}
+            title="Dashboard AI"
+            scopeHint="Scoped to this App dashboard first"
+            audience="stakeholder"
+            workspaceContext={{ appId, dashboardId: dashboard.id, dashboardContext: chatContext }}
+            initialMode="auto"
+            threadId={agentThread.threadId}
+            onThreadIdChange={agentThread.onThreadIdChange}
+          />
+        </AiSidePanel>
       )}
 
       {catalogOpen && (
@@ -2742,48 +2737,12 @@ function dashboardChatDrawerStyle(expanded: boolean): CSSProperties {
     top: 76,
     bottom: 24,
     zIndex: 70,
-    width: expanded ? 'min(760px, calc(100vw - 96px))' : 'min(420px, calc(100vw - 64px))',
+    width: expanded
+      ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, calc(100vw - 96px))`
+      : `min(${AI_SIDE_PANEL_WIDTH}px, calc(100vw - 64px))`,
     minWidth: 0,
-    border: '1px solid var(--dql-app-line-2, var(--border-color, rgba(0,0,0,0.12)))',
-    borderRadius: 10,
-    overflow: 'hidden',
-    boxShadow: '0 18px 60px rgba(15,23,42,0.22)',
-    background: 'var(--dql-app-surface, var(--color-bg, #fff))',
   };
 }
-
-const dashboardChatHeaderStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  padding: '10px 12px',
-  borderBottom: '1px solid var(--dql-app-line-2, var(--border-color, rgba(0,0,0,0.1)))',
-  flexShrink: 0,
-};
-
-const dashboardChatHeaderIconStyle: CSSProperties = {
-  width: 26,
-  height: 26,
-  borderRadius: 7,
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  background: 'var(--dql-app-accent-soft, rgba(37,99,235,0.1))',
-  color: 'var(--dql-app-accent, #2563eb)',
-  flexShrink: 0,
-};
-
-const dashboardChatIconBtnStyle: CSSProperties = {
-  border: 'none',
-  background: 'transparent',
-  color: 'var(--dql-app-text-muted, #64748b)',
-  cursor: 'pointer',
-  display: 'inline-flex',
-  alignItems: 'center',
-  padding: 5,
-  borderRadius: 6,
-  flexShrink: 0,
-};
 
 const dialogInputStyle: CSSProperties = {
   width: '100%',
