@@ -169,6 +169,8 @@ import {
   latestRuntimeSchemaSnapshotForProject,
   loadSkills,
   migrateLegacySkills,
+  configuredSkillsPath,
+  skillsDir,
   draftDomainSkillBootstrap,
   buildDomainSkillBootstrapPrompt,
   mergeDomainSkillBootstrapEnrichment,
@@ -5320,6 +5322,52 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // ── Skills (spec 16) — user-authored business context. AI drafts, humans
     //    certify; skills never carry certification. PROJECT skills (user empty)
     //    are shared; PERSONAL skills (user set) are user-bound. ────────────────
+    if (req.method === 'GET' && path === '/api/skills/settings') {
+      try {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(buildSkillPathSettings(projectRoot)));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'PUT' && path === '/api/skills/settings') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { path?: unknown };
+        const requestedPath = typeof body.path === 'string' ? body.path.trim() : '';
+        if (!requestedPath || requestedPath.includes('\0')) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Provide an existing Skills folder path.' }));
+          return;
+        }
+        const resolvedPath = resolve(projectRoot, requestedPath);
+        if (!existsSync(resolvedPath) || !statSync(resolvedPath).isDirectory()) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Skills folder not found: ${resolvedPath}` }));
+          return;
+        }
+        const configPath = join(projectRoot, 'dql.config.json');
+        const raw = existsSync(configPath)
+          ? JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+          : {};
+        const layout = raw.layout && typeof raw.layout === 'object' && !Array.isArray(raw.layout)
+          ? raw.layout as Record<string, unknown>
+          : {};
+        raw.layout = { ...layout, skillsPath: requestedPath };
+        writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf-8');
+        projectConfig = loadProjectConfig(projectRoot);
+        invalidateAgentProjectState(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(buildSkillPathSettings(projectRoot)));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/skills') {
       try {
         const skills = loadSkills(projectRoot).skills
@@ -8740,6 +8788,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const connectorStatus = getConnectorInstallStatuses(projectRoot);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles, activeConnection, connectorStatus }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/connections/dbt-profiles/preview') {
+      const body = await readJSON(req).catch(() => ({})) as { path?: unknown };
+      const profilePath = typeof body.path === 'string' ? body.path.trim() : '';
+      if (!profilePath) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Enter a profiles.yml file or folder path.' }));
+        return;
+      }
+      const dbtProfiles = discoverDbtProfileConnections(projectRoot, loadProjectConfig(projectRoot), profilePath);
+      if (dbtProfiles.length === 0) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'No supported dbt profile targets were found at that path.' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ dbtProfiles }));
       return;
     }
 
@@ -12221,6 +12288,27 @@ export function loadProjectConfig(projectRoot: string): ProjectConfig {
   }
 
   return config;
+}
+
+export interface SkillPathSettings {
+  path: string;
+  resolvedPath: string;
+  exists: boolean;
+  skillCount: number;
+  errorCount: number;
+}
+
+/** Current Git-backed Skills folder and what the loader can read from it. */
+export function buildSkillPathSettings(projectRoot: string): SkillPathSettings {
+  const resolvedPath = skillsDir(projectRoot);
+  const loaded = loadSkills(projectRoot);
+  return {
+    path: configuredSkillsPath(projectRoot),
+    resolvedPath,
+    exists: existsSync(resolvedPath) && statSync(resolvedPath).isDirectory(),
+    skillCount: loaded.skills.filter((skill) => skill.scope === 'project').length,
+    errorCount: loaded.errors.length,
+  };
 }
 
 function dbtFirstOwnsSemanticAuthoring(config: ProjectConfig): boolean {
@@ -18740,18 +18828,23 @@ interface DbtProfileTextResult {
   envRefs: string[];
 }
 
-export function discoverDbtProfileConnections(projectRoot: string, projectConfig: ProjectConfig): DbtProfileConnectionCandidate[] {
+export function discoverDbtProfileConnections(projectRoot: string, projectConfig: ProjectConfig, explicitPath?: string): DbtProfileConnectionCandidate[] {
   const dbtProjectPath = findDbtProjectPath(projectRoot, projectConfig);
-  const projectProfileName = readDbtProjectProfileName(dbtProjectPath);
+  const projectProfileName = explicitPath ? null : readDbtProjectProfileName(dbtProjectPath);
   const configuredProfilesDir = projectConfig.dbt?.profilesDir
     ? resolve(projectRoot, projectConfig.dbt.profilesDir)
     : undefined;
-  const profilePaths = findDbtProfilePaths(projectRoot, dbtProjectPath, configuredProfilesDir);
+  const profilePaths = explicitPath
+    ? findExplicitDbtProfilePaths(projectRoot, explicitPath)
+    : findDbtProfilePaths(projectRoot, dbtProjectPath, configuredProfilesDir);
   const candidates: DbtProfileConnectionCandidate[] = [];
 
   for (const profilePath of profilePaths) {
     const profiles = readYamlFile(profilePath);
     if (!profiles) continue;
+    const profileRelativeBase = explicitPath && existsSync(join(dirname(profilePath), 'dbt_project.yml'))
+      ? dirname(profilePath)
+      : dbtProjectPath;
 
     for (const [profileName, rawProfile] of Object.entries(profiles)) {
       if (!rawProfile || typeof rawProfile !== 'object') continue;
@@ -18775,7 +18868,7 @@ export function discoverDbtProfileConnections(projectRoot: string, projectConfig
           mapped.connection.filepath !== ':memory:'
         ) {
           if (!isAbsoluteLikePath(mapped.connection.filepath)) {
-            mapped.connection.filepath = resolve(dbtProjectPath, mapped.connection.filepath);
+            mapped.connection.filepath = resolve(profileRelativeBase, mapped.connection.filepath);
           }
           if (!existsSync(mapped.connection.filepath)) {
             mapped.warnings.push(
@@ -18880,6 +18973,23 @@ function findDbtProfilePaths(projectRoot: string, dbtProjectPath: string, config
     }
   }
   return paths;
+}
+
+function findExplicitDbtProfilePaths(projectRoot: string, input: string): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) return [];
+  const expanded = trimmed === '~'
+    ? homedir()
+    : trimmed.startsWith('~/')
+      ? join(homedir(), trimmed.slice(2))
+      : trimmed;
+  const absolute = resolve(projectRoot, expanded);
+  if (!existsSync(absolute)) return [];
+  if (!statSync(absolute).isDirectory()) return [absolute];
+
+  return ['profiles.yml', 'profiles.yaml', 'profile.yml', 'profile.yaml']
+    .map((filename) => join(absolute, filename))
+    .filter((profilePath) => existsSync(profilePath));
 }
 
 function readDbtProjectProfileName(dbtProjectPath: string): string | null {

@@ -6,7 +6,7 @@ Make the complete domain model—not only blocks or dbt lineage—available to A
 tools, MCP, and final SQL safety through one snapshot-scoped context path.
 
 Acceptance IDs: `REL-001`, `REL-002`, `CONTRACT-001`, `SKILL-001`, `SKILL-002`,
-`CTX-001`, `CTX-002`, `AGT-001`, `AGT-002`, `AGT-003`.
+`CTX-001`, `CTX-002`, `CTX-004`, `AGT-001`, `AGT-002`, `AGT-003`.
 Dependencies: verified W01/W02; W03 discovery contracts available.
 
 ## Required implementation

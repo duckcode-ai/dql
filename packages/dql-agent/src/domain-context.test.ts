@@ -19,6 +19,11 @@ describe('resolveDomainContextEnvelope', () => {
           domain: 'growth', name: 'Acquisition', intentExamples: [], entityIds: [], relationshipIds: [], referencedEntityIds: [],
           sourcePath: 'domains/growth/modeling/areas/acquisition.dql.yaml',
         },
+        'commerce::model_area::acquisition': {
+          id: 'commerce::model_area::acquisition', localId: 'acquisition', qualifiedId: 'commerce::model_area::acquisition',
+          domain: 'commerce', name: 'Customer acquisition', intentExamples: [], entityIds: [], relationshipIds: [], referencedEntityIds: [],
+          sourcePath: 'domains/commerce/modeling/areas/acquisition.dql.yaml',
+        },
       },
       entities: {}, relationships: {}, contracts: {
         'commerce::contract::customer_contract': {
@@ -64,8 +69,10 @@ describe('resolveDomainContextEnvelope', () => {
   });
 
   it('accepts a focused area only within the active domain', () => {
-    const context = resolveDomainContextEnvelope({ manifest, activeDomain: 'growth', modelAreaId: 'growth::model_area::acquisition' });
+    const context = resolveDomainContextEnvelope({ manifest, activeDomain: 'growth', modelAreaId: 'acquisition' });
     expect(context.modelAreaId).toBe('growth::model_area::acquisition');
-    expect(() => resolveDomainContextEnvelope({ manifest, activeDomain: 'commerce', modelAreaId: 'acquisition' })).toThrow('does not belong');
+    expect(resolveDomainContextEnvelope({ manifest, activeDomain: 'commerce', modelAreaId: 'acquisition' }).modelAreaId).toBe('commerce::model_area::acquisition');
+    expect(() => resolveDomainContextEnvelope({ manifest, activeDomain: 'commerce', modelAreaId: 'growth::model_area::acquisition' })).toThrow('does not belong');
+    expect(() => resolveDomainContextEnvelope({ manifest, modelAreaId: 'acquisition' })).toThrow('Ambiguous model area');
   });
 });

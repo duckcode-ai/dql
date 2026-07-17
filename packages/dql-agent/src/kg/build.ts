@@ -381,6 +381,27 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
     if (pkg.parent) edges.push({ src: `domain:${pkg.parent}`, dst: `domain:${pkg.id}`, kind: 'parent_domain' });
   }
 
+  for (const area of Object.values(modeling.areas)) {
+    const nodeId = `model_area:${area.qualifiedId}`;
+    nodes.push({
+      nodeId,
+      kind: 'model_area',
+      name: area.name,
+      domain: area.domain,
+      description: area.description,
+      examples: area.intentExamples.map((question) => ({ question })),
+      sourcePath: area.sourcePath,
+      sourceTier: 'business_context',
+      provenance: 'DQL focused Model Area',
+      llmContext: [
+        area.description ? `scope: ${area.description}` : '',
+        area.intentExamples.length ? `example questions: ${area.intentExamples.join('; ')}` : '',
+      ].filter(Boolean).join('\n'),
+      payload: { ...area },
+    });
+    edges.push({ src: `domain:${area.domain}`, dst: nodeId, kind: 'contains' });
+  }
+
   for (const entity of Object.values(modeling.entities)) {
     const nodeId = `entity:${entity.qualifiedId ?? entity.id}`;
     const dbtNode = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
@@ -405,6 +426,7 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
       payload: { ...entity, relation: dbtNode?.relation },
     });
     edges.push({ src: `domain:${entity.domain}`, dst: nodeId, kind: 'contains' });
+    if (entity.areaId) edges.push({ src: `model_area:${entity.areaId}`, dst: nodeId, kind: 'contains' });
     const dbtNodeId = `dbt_model:${entity.dbtUniqueId}`;
     if (!nodes.some((node) => node.nodeId === dbtNodeId)) {
       nodes.push({
@@ -445,6 +467,7 @@ function appendDbtFirstModelingGraph(manifest: DQLManifest, nodes: KGNode[], edg
     });
     edges.push({ src: entityNodeId(relationship.from), dst: nodeId, kind: 'proves_join' });
     edges.push({ src: nodeId, dst: entityNodeId(relationship.to), kind: 'proves_join' });
+    if (relationship.areaId) edges.push({ src: `model_area:${relationship.areaId}`, dst: nodeId, kind: 'contains' });
   }
 
   for (const contract of Object.values(modeling.contracts)) {

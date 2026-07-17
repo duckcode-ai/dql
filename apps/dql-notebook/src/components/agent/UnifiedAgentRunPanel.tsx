@@ -101,6 +101,7 @@ interface UnifiedAgentRunPanelProps {
   themeMode: ThemeMode;
   title?: string;
   scopeHint?: string;
+  onClearScope?: () => void;
   /** Override the empty-state suggestion chips so a surface can offer tailored prompts. */
   examplePrompts?: ExamplePrompt[];
   /** Override the empty-state hint line above the suggestion chips. */
@@ -186,6 +187,7 @@ export function UnifiedAgentRunPanel({
   themeMode,
   title = 'AI Copilot',
   scopeHint = 'Auto routes to answer, research, SQL, block, or app',
+  onClearScope,
   examplePrompts,
   emptyHint,
   notebookPath,
@@ -696,6 +698,12 @@ export function UnifiedAgentRunPanel({
 
             <div style={{ width: 'min(720px, 100% - 48px)', margin: 'auto auto 0', padding: '10px 0 16px', position: 'sticky', bottom: 0, background: 'linear-gradient(to top, var(--bg-canvas) 82%, transparent)' }}>
               {error ? <div style={{ color: t.error, fontSize: 12, marginBottom: 8 }}>{error}</div> : null}
+              {onClearScope ? (
+                <div style={{ width: 'fit-content', maxWidth: '100%', marginBottom: 7, padding: '4px 7px 4px 9px', border: '1px solid var(--border-default)', borderRadius: 999, background: 'var(--bg-2)', color: t.textMuted, fontSize: 10.5, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{scopeHint}</span>
+                  <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 1 }}><X size={12} /></button>
+                </div>
+              ) : null}
               <div style={{ background: 'var(--bg-2)', border: '1px solid var(--border-default)', borderRadius: 14, boxShadow: '0 1px 2px rgba(26,26,26,0.03), 0 6px 22px rgba(26,26,26,0.05)', display: 'flex', flexDirection: 'column' }}>
                 <textarea
                   ref={inputRef}
@@ -847,8 +855,9 @@ export function UnifiedAgentRunPanel({
 
       <div style={{ padding: '10px 16px 14px', borderTop: `1px solid ${t.headerBorder}`, display: 'grid', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 11, color: t.textMuted, flex: 1, minWidth: 180 }}>
-            {scopeHint}
+          <div style={{ fontSize: 11, color: t.textMuted, flex: 1, minWidth: 180, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>{scopeHint}</span>
+            {onClearScope ? <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 2 }}><X size={12} /></button> : null}
           </div>
           <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
         </div>

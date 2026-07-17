@@ -17,7 +17,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join, basename, dirname, relative } from 'node:path';
+import { join, basename, dirname, relative, isAbsolute, resolve } from 'node:path';
 import * as yaml from 'js-yaml';
 import { loadDomainPackageRegistry } from '@duckcodeailabs/dql-core';
 
@@ -183,7 +183,32 @@ function qualifySkill(skill: Skill, inferredDomain?: string): Skill {
 
 /** Visible Git-owned skills directory for new and upgraded OSS projects. */
 export function skillsDir(projectRoot: string): string {
-  return join(projectRoot, 'skills');
+  const configured = configuredSkillsPath(projectRoot);
+  return isAbsolute(configured) ? resolve(configured) : resolve(projectRoot, configured);
+}
+
+/**
+ * Repository-relative Skills folder configured by `layout.skillsPath`.
+ *
+ * The setting has existed in generated DQL projects since the OSS dbt layout
+ * was introduced. Keep `skills` as the fallback so older projects continue to
+ * work, while allowing a DQL workspace nested inside a dbt repo to point at an
+ * existing sibling folder such as `../skills` without copying files.
+ */
+export function configuredSkillsPath(projectRoot: string): string {
+  const configPath = join(projectRoot, 'dql.config.json');
+  if (!existsSync(configPath)) return 'skills';
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+      layout?: { skillsPath?: unknown };
+    };
+    const value = typeof config.layout?.skillsPath === 'string'
+      ? config.layout.skillsPath.trim()
+      : '';
+    return value || 'skills';
+  } catch {
+    return 'skills';
+  }
 }
 
 /** Historical local-state location, retained only as a read/migration source. */

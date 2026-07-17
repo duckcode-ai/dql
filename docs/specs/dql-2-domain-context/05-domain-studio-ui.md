@@ -27,6 +27,12 @@ interfaces, evaluations, related products, and dbt scope are contextual
 inspector/readiness details—not top-level authoring destinations in this first
 OSS workflow. Global Apps/Ask/Notebooks behavior is unchanged (`UI-001`).
 
+The Domain selector presents nested Domain Packages parent-first. Domain and
+Area selection round-trip through `domain`, `modelArea`, and `domainSection`
+URL parameters. The same Area selector is available in Model and Skills, new
+Skills created there inherit the Area, and “Ask” carries the qualified Area ID
+into a visible, removable Ask scope (`UI-006`).
+
 Long-running Ask and Research turns progressively explain the active governed
 work instead of showing generic loading copy. After the initial wait, the UI
 states that DQL is checking certified blocks, semantic metrics, domain

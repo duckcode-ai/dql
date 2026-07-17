@@ -42,12 +42,20 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
     parent = packages[parent]?.parent;
   }
   const purpose = input.purpose?.trim() || undefined;
-  const modelAreaId = input.modelAreaId?.trim() || undefined;
-  if (modelAreaId) {
-    const area = input.manifest.modeling?.areas?.[modelAreaId]
-      ?? Object.values(input.manifest.modeling?.areas ?? {}).find((candidate) => candidate.localId === modelAreaId);
-    if (!area) throw new Error(`Unknown model area: ${modelAreaId}`);
-    if (activeDomain && area.domain !== activeDomain) throw new Error(`Model area "${modelAreaId}" does not belong to domain "${activeDomain}"`);
+  const requestedModelAreaId = input.modelAreaId?.trim() || undefined;
+  let modelAreaId: string | undefined;
+  if (requestedModelAreaId) {
+    const areas = Object.values(input.manifest.modeling?.areas ?? {});
+    const exact = input.manifest.modeling?.areas?.[requestedModelAreaId];
+    const localMatches = areas.filter((candidate) => candidate.localId === requestedModelAreaId
+      && (!activeDomain || candidate.domain === activeDomain));
+    const area = exact ?? (localMatches.length === 1 ? localMatches[0] : undefined);
+    if (!area) {
+      if (localMatches.length > 1) throw new Error(`Ambiguous model area: ${requestedModelAreaId}`);
+      throw new Error(`Unknown model area: ${requestedModelAreaId}`);
+    }
+    if (activeDomain && area.domain !== activeDomain) throw new Error(`Model area "${requestedModelAreaId}" does not belong to domain "${activeDomain}"`);
+    modelAreaId = area.qualifiedId;
   }
   const imports = Object.values(input.manifest.modeling?.interfaces?.imports ?? {});
   const exports = input.manifest.modeling?.interfaces?.exports ?? {};

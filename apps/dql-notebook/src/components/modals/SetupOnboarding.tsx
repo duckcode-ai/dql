@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -18,15 +18,27 @@ import {
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { ProviderSettings, ProviderSettingsId } from '../../api/client';
+import { DriverLogo } from '../panels/DriverLogo';
+import type { DbtProfileConnectionCandidate, ProviderSettings, ProviderSettingsId } from '../../api/client';
 import type { BlockStudioDbtStatus } from '../../store/types';
 
 type Phase = 'idle' | 'testing' | 'ok' | 'error';
 type Driver = 'duckdb' | 'snowflake' | 'databricks';
 type AiProvider = 'claude' | 'openai' | 'gemini' | 'ollama';
+type SetupDbFields = {
+  host: string;
+  database: string;
+  schema: string;
+  warehouse: string;
+  username: string;
+  password: string;
+  httpPath: string;
+  token: string;
+  privateKeyPath: string;
+  privateKeyPassphrase: string;
+};
 
-const STEP_LABELS = ['How it works', 'dbt', 'Database', 'AI provider', 'Start'];
-const NEXT_LABELS = ['Start setup', 'Next · Database', 'Next · AI provider', 'Next · Choose your start', ''];
+const CONTINUE_LABELS = ['Start setup', 'Continue to database', 'Continue to AI provider', 'Choose where to start'];
 
 const BLUE = '#4a74c9';
 
@@ -51,12 +63,24 @@ type ConnectedWorkspace = {
   ai: ConnectedWorkspaceItem | null;
 };
 
-const WH_META: Record<Driver, { name: string; glyph: string; color: string; host: string; ph: string }> = {
-  duckdb: { name: 'DuckDB', glyph: '◗', color: '#b26b1f', host: 'Database file', ph: './warehouse/analytics.duckdb' },
-  snowflake: { name: 'Snowflake', glyph: '❄', color: BLUE, host: 'Account URL', ph: 'acme-xy12345.snowflakecomputing.com' },
-  databricks: { name: 'Databricks', glyph: '▲', color: '#c14545', host: 'Workspace URL', ph: 'dbc-1234.cloud.databricks.com' },
+const WH_META: Record<Driver, { name: string; description: string; host: string; ph: string }> = {
+  duckdb: { name: 'DuckDB', description: 'Local database file', host: 'Database file', ph: './warehouse/analytics.duckdb' },
+  snowflake: { name: 'Snowflake', description: 'Cloud data warehouse', host: 'Account URL', ph: 'acme-xy12345.snowflakecomputing.com' },
+  databricks: { name: 'Databricks', description: 'SQL warehouse', host: 'Workspace URL', ph: 'https://adb-123.cloud.databricks.com' },
 };
 const DRIVER_ORDER: Driver[] = ['duckdb', 'snowflake', 'databricks'];
+const EMPTY_DB_FIELDS: SetupDbFields = {
+  host: '',
+  database: '',
+  schema: '',
+  warehouse: '',
+  username: '',
+  password: '',
+  httpPath: '',
+  token: '',
+  privateKeyPath: '',
+  privateKeyPassphrase: '',
+};
 
 const PROVIDER_META: Record<AiProvider, { name: string; modes: { name: string; id: ProviderSettingsId }[]; keyPh: string; needsKey: boolean }> = {
   claude: {
@@ -124,6 +148,13 @@ function connectionLocation(driver: Driver, record: Record<string, unknown>): st
   return recordString(record, ['host', 'server_hostname']) || 'Configured workspace';
 }
 
+function connectionNameFromDbtProfile(profile: DbtProfileConnectionCandidate): string {
+  return `${profile.profileName}_${profile.targetName}`
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'dbt_profile';
+}
+
 function dbtConnectionSummary(status: BlockStudioDbtStatus): ConnectedWorkspaceItem {
   const counts = [
     `${status.counts.models} models`,
@@ -159,6 +190,7 @@ function looksLikeGitRepository(value: string): boolean {
 export function SetupOnboarding() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
+  const supportingText = ['paper', 'white', 'light', 'arctic'].includes(state.themeMode) ? t.textSecondary : t.textMuted;
   const [step, setStep] = useState(0);
 
   // ── Step 1 · dbt ──────────────────────────────────────────────
@@ -169,14 +201,18 @@ export function SetupOnboarding() {
 
   // ── Step 2 · database ─────────────────────────────────────────
   const [wh, setWh] = useState<Driver>('duckdb');
-  const [dbAuth, setDbAuth] = useState<'creds' | 'enterprise'>('creds');
-  const [dbFields, setDbFields] = useState({ host: '', database: '', schema: '' });
-  const [enterpriseKey, setEnterpriseKey] = useState('');
+  const [dbFields, setDbFields] = useState<SetupDbFields>(EMPTY_DB_FIELDS);
   const [dbPhase, setDbPhase] = useState<Phase>('idle');
   const [dbSummary, setDbSummary] = useState('');
   const [dbError, setDbError] = useState('');
   const [connectorStatus, setConnectorStatus] = useState<ConnectorStatus[]>([]);
   const [installing, setInstalling] = useState<Partial<Record<Driver, boolean>>>({});
+  const [dbtProfiles, setDbtProfiles] = useState<DbtProfileConnectionCandidate[]>([]);
+  const [profilePath, setProfilePath] = useState('');
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const [snowflakeAuthMethod, setSnowflakeAuthMethod] = useState<'password' | 'key_pair' | 'external_browser' | 'oauth'>('password');
+  const [databricksAuthMethod, setDatabricksAuthMethod] = useState<'token' | 'oauth'>('token');
 
   // ── Step 3 · AI provider ──────────────────────────────────────
   const [aiProvider, setAiProvider] = useState<AiProvider>('claude');
@@ -191,6 +227,10 @@ export function SetupOnboarding() {
     database: null,
     ai: null,
   });
+  // The initial read can finish after a user has already picked a warehouse.
+  // Preserve that explicit choice instead of snapping the wizard back to the
+  // project's existing default connection.
+  const databaseSelectionTouched = useRef(false);
 
   // Read existing project-local state on open. This is intentionally read-only:
   // opening Setup must never replace a working database or AI provider.
@@ -211,6 +251,7 @@ export function SetupOnboarding() {
       if (conns?.connectorStatus?.length) {
         setConnectorStatus(conns.connectorStatus as ConnectorStatus[]);
       }
+      setDbtProfiles(conns?.dbtProfiles ?? []);
 
       const connectionName = typeof conns?.default === 'string' && conns.connections?.[conns.default]
         ? conns.default
@@ -221,8 +262,7 @@ export function SetupOnboarding() {
         : null;
       const existingDriver = connection ? connectionDriver(connection) : null;
       if (connection && existingDriver) {
-        setWh(existingDriver);
-        setDbFields({
+        const existingFields: SetupDbFields = {
           host: existingDriver === 'duckdb'
             ? recordString(connection, ['filepath', 'path'])
             : existingDriver === 'snowflake'
@@ -230,12 +270,30 @@ export function SetupOnboarding() {
               : recordString(connection, ['host', 'server_hostname']),
           database: recordString(connection, ['database', 'dbname', 'catalog']),
           schema: recordString(connection, ['schema', 'dataset']),
-        });
+          warehouse: recordString(connection, ['warehouse', 'warehouse_id']),
+          username: recordString(connection, ['username', 'user']),
+          password: recordString(connection, ['password']),
+          httpPath: recordString(connection, ['httpPath', 'http_path']),
+          token: recordString(connection, ['token']),
+          privateKeyPath: recordString(connection, ['privateKeyPath', 'private_key_path']),
+          privateKeyPassphrase: recordString(connection, ['privateKeyPassphrase', 'private_key_passphrase']),
+        };
+        if (!databaseSelectionTouched.current) {
+          setWh(existingDriver);
+          setDbFields(existingFields);
+          if (existingDriver === 'snowflake') {
+            const method = recordString(connection, ['authMethod', 'auth_method']);
+            if (method === 'key_pair' || method === 'external_browser' || method === 'oauth' || method === 'password') setSnowflakeAuthMethod(method);
+          }
+          if (existingDriver === 'databricks') {
+            setDatabricksAuthMethod(recordString(connection, ['authMethod', 'auth_method']) === 'oauth' ? 'oauth' : 'token');
+          }
+          setDbPhase('ok');
+        }
         const location = connectionLocation(existingDriver, connection);
         const databaseLabel = WH_META[existingDriver].name;
         const summary = `${connectionName} · ${location}`;
-        setDbSummary(summary);
-        setDbPhase('ok');
+        if (!databaseSelectionTouched.current) setDbSummary(summary);
         databaseItem = { label: 'Database', value: databaseLabel, detail: summary };
       } else if (conns?.activeConnection?.source === 'dbt_profile' && conns.activeConnection.profileId) {
         const profile = conns.dbtProfiles?.find((candidate) => candidate.id === conns.activeConnection?.profileId);
@@ -244,11 +302,13 @@ export function SetupOnboarding() {
           : null;
         const profileDriver = profileConnection ? connectionDriver(profileConnection) : null;
         if (profile && profileConnection && profileDriver) {
-          setWh(profileDriver);
           const location = connectionLocation(profileDriver, profileConnection);
           const summary = `${profile.profileName}/${profile.targetName} · ${location}`;
-          setDbSummary(summary);
-          setDbPhase('ok');
+          if (!databaseSelectionTouched.current) {
+            setWh(profileDriver);
+            setDbSummary(summary);
+            setDbPhase('ok');
+          }
           databaseItem = { label: 'Database', value: WH_META[profileDriver].name, detail: `${summary} · active from dbt profile` };
         }
       }
@@ -330,6 +390,12 @@ export function SetupOnboarding() {
       if (res.projectName) parts.push(res.projectName);
       setDbtSummary(parts.join(' · '));
       setDbtPhase('ok');
+      if (res.profilesDir) {
+        setProfilePath(res.profilesDir);
+        api.previewDbtProfiles(res.profilesDir)
+          .then((profiles) => setDbtProfiles(profiles.dbtProfiles))
+          .catch(() => undefined);
+      }
       setConnectedWorkspace((current) => ({
         ...current,
         project: {
@@ -363,6 +429,103 @@ export function SetupOnboarding() {
     }
   }, [wh]);
 
+  const previewSetupProfiles = useCallback(async () => {
+    if (!profilePath.trim()) {
+      setProfileError('Enter a profiles.yml file or folder path.');
+      return;
+    }
+    setProfileLoading(true);
+    setProfileError('');
+    try {
+      const result = await api.previewDbtProfiles(profilePath.trim());
+      setDbtProfiles((current) => {
+        const merged = new Map(current.map((profile) => [profile.id, profile]));
+        result.dbtProfiles.forEach((profile) => merged.set(profile.id, profile));
+        return [...merged.values()];
+      });
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : 'Could not read that profiles.yml path.');
+    } finally {
+      setProfileLoading(false);
+    }
+  }, [profilePath]);
+
+  const useDbtProfile = useCallback(async (profile: DbtProfileConnectionCandidate) => {
+    const connection = profile.connection && typeof profile.connection === 'object'
+      ? profile.connection as Record<string, unknown>
+      : null;
+    const driver = connection ? connectionDriver(connection) : null;
+    if (!connection || !driver) {
+      setProfileError('This dbt adapter is not supported by the local DQL runtime.');
+      return;
+    }
+    databaseSelectionTouched.current = true;
+    setProfileLoading(true);
+    setProfileError('');
+    setDbPhase('testing');
+    try {
+      const current = await api.getConnections();
+      const previousConnections = { ...(current.connections ?? {}) };
+      const name = connectionNameFromDbtProfile(profile);
+      await api.saveConnections({ ...previousConnections, [name]: connection }, name);
+      const location = connectionLocation(driver, connection);
+      const summary = `${profile.profileName}/${profile.targetName} · ${location}`;
+      setWh(driver);
+      setDbFields({
+        host: driver === 'duckdb'
+          ? recordString(connection, ['filepath', 'path'])
+          : driver === 'snowflake'
+            ? recordString(connection, ['account', 'host'])
+            : recordString(connection, ['host', 'server_hostname']),
+        database: recordString(connection, ['database', 'dbname', 'catalog']),
+        schema: recordString(connection, ['schema', 'dataset']),
+        warehouse: recordString(connection, ['warehouse', 'warehouse_id']),
+        username: recordString(connection, ['username', 'user']),
+        password: recordString(connection, ['password']),
+        httpPath: recordString(connection, ['httpPath', 'http_path']),
+        token: recordString(connection, ['token']),
+        privateKeyPath: recordString(connection, ['privateKeyPath', 'private_key_path']),
+        privateKeyPassphrase: recordString(connection, ['privateKeyPassphrase', 'private_key_passphrase']),
+      });
+      if (driver === 'snowflake') {
+        const method = recordString(connection, ['authMethod', 'auth_method']);
+        if (method === 'key_pair' || method === 'external_browser' || method === 'oauth' || method === 'password') setSnowflakeAuthMethod(method);
+      }
+      if (driver === 'databricks') {
+        setDatabricksAuthMethod(recordString(connection, ['authMethod', 'auth_method']) === 'oauth' ? 'oauth' : 'token');
+      }
+      setDbSummary(summary);
+      setConnectedWorkspace((workspace) => ({
+        ...workspace,
+        database: { label: 'Database', value: WH_META[driver].name, detail: `${summary} · imported from dbt profile` },
+      }));
+      const profileConnector = connectorStatus.find((candidate) => candidate.driver === driver);
+      const canTestProfile = driver === 'duckdb' || Boolean(profileConnector?.builtIn || profileConnector?.installed);
+      if (!canTestProfile) {
+        setDbError(`Imported. Install the ${WH_META[driver].name} connector before testing it.`);
+        setDbPhase('error');
+        return;
+      }
+      if (profile.missingFields.length > 0) {
+        setDbError(`Imported. Set ${profile.missingFields.join(', ')} and test the connection.`);
+        setDbPhase('error');
+        return;
+      }
+      const result = await api.testConnection();
+      if (result.ok) {
+        setDbPhase('ok');
+      } else {
+        setDbError(`Imported, but the connection test failed: ${result.message || 'Connection failed'}`);
+        setDbPhase('error');
+      }
+    } catch (error) {
+      setDbError(`Profile import failed: ${error instanceof Error ? error.message : 'Connection failed'}`);
+      setDbPhase('error');
+    } finally {
+      setProfileLoading(false);
+    }
+  }, [connectorStatus]);
+
   const testDb = useCallback(async () => {
     setDbPhase('testing');
     setDbError('');
@@ -380,14 +543,35 @@ export function SetupOnboarding() {
           : Object.keys(connections)[0] ?? 'default';
       const existing = connections[name] ?? {};
       const patch =
-        dbAuth === 'creds'
-          ? pruneEmpty({
-              [wh === 'duckdb' ? 'filepath' : wh === 'snowflake' ? 'account' : 'host']: dbFields.host,
-              database: dbFields.database,
-              schema: dbFields.schema,
-            })
-          : pruneEmpty({ enterpriseKey });
-      connections[name] = { ...existing, driver: wh, ...patch };
+        wh === 'duckdb'
+          ? pruneEmpty({ filepath: dbFields.host })
+          : wh === 'snowflake'
+            ? pruneEmpty({
+                account: dbFields.host,
+                warehouse: dbFields.warehouse,
+                database: dbFields.database,
+                schema: dbFields.schema,
+                username: dbFields.username,
+                authMethod: snowflakeAuthMethod,
+                ...(snowflakeAuthMethod === 'password' ? { password: dbFields.password } : {}),
+                ...(snowflakeAuthMethod === 'key_pair' ? {
+                  privateKeyPath: dbFields.privateKeyPath,
+                  privateKeyPassphrase: dbFields.privateKeyPassphrase,
+                } : {}),
+                ...(snowflakeAuthMethod === 'oauth' ? { token: dbFields.token } : {}),
+                ...(snowflakeAuthMethod === 'external_browser' ? { authenticator: 'EXTERNALBROWSER' } : {}),
+              })
+            : pruneEmpty({
+                host: dbFields.host,
+                httpPath: dbFields.httpPath,
+                database: dbFields.database,
+                schema: dbFields.schema,
+                token: dbFields.token,
+                authMethod: databricksAuthMethod,
+              });
+      connections[name] = connectionDriver(existing as Record<string, unknown>) === wh
+        ? { ...existing, driver: wh, ...patch }
+        : { driver: wh, ...patch };
       await api.saveConnections(connections, name);
       candidateSaved = true;
       const res = await api.testConnection();
@@ -415,7 +599,7 @@ export function SetupOnboarding() {
       setDbError(e instanceof Error ? e.message : 'Connection failed');
       setDbPhase('error');
     }
-  }, [dbAuth, dbFields, enterpriseKey, wh, whMeta.name]);
+  }, [databricksAuthMethod, dbFields, snowflakeAuthMethod, wh, whMeta.name]);
 
   const testAi = useCallback(async () => {
     setAiPhase('testing');
@@ -500,6 +684,20 @@ export function SetupOnboarding() {
     width: 'fit-content',
     boxShadow: `0 1px 5px ${hexToRgba(t.accent, 0.3)}`,
   };
+  const secondaryBtn: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    height: 34,
+    padding: '0 14px',
+    borderRadius: 8,
+    border: `1px solid ${t.headerBorder}`,
+    background: t.cellBg,
+    color: t.textSecondary,
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  };
   const shimmer: React.CSSProperties = {
     fontSize: 12.5,
     fontWeight: 700,
@@ -548,6 +746,7 @@ export function SetupOnboarding() {
 
   const hasPrev = step > 0;
   const hasNext = step < 4;
+  const nextLabel = step === 0 && hasExistingSetup ? 'Review setup' : CONTINUE_LABELS[step];
 
   return (
     <div
@@ -601,103 +800,59 @@ export function SetupOnboarding() {
           <span style={{ color: '#ffffff', fontSize: 10, fontWeight: 700, fontFamily: t.fontMono, letterSpacing: '-0.5px' }}>DQL</span>
         </div>
         <span style={{ fontSize: 13.5, fontWeight: 650, color: t.textPrimary }}>Set up your workspace</span>
-        <div style={{ flex: 1 }} />
-
-        {/* stepper */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          {STEP_LABELS.map((s, i) => {
-            const isCurrent = step === i;
-            const isDone = done[i] && i < 4;
-            return (
-              <button
-                key={s}
-                onClick={() => setStep(i)}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }} aria-label={step === 0 ? 'Four setup steps' : `Step ${step} of 4`}>
+          <span style={{ fontSize: 11.5, color: supportingText, fontWeight: 650 }}>
+            {step === 0 ? '4 simple steps' : `Step ${step} of 4`}
+          </span>
+          <div style={{ display: 'flex', gap: 4 }} aria-hidden>
+            {[1, 2, 3, 4].map((number) => (
+              <span
+                key={number}
                 style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '5px 10px',
+                  width: 22,
+                  height: 4,
                   borderRadius: 999,
-                  border: `1px solid ${isCurrent ? hexToRgba(t.accent, 0.4) : t.headerBorder}`,
-                  background: isCurrent ? t.sidebarItemActive : t.cellBg,
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
+                  background: step >= number ? t.accent : t.pillBg,
                 }}
-              >
-                <span
-                  style={{
-                    width: 16,
-                    height: 16,
-                    borderRadius: 999,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: 9,
-                    fontWeight: 700,
-                    background: isCurrent ? t.accent : isDone ? hexToRgba(t.success, 0.14) : t.pillBg,
-                    color: isCurrent ? '#ffffff' : isDone ? t.success : t.textMuted,
-                  }}
-                >
-                  {isDone && !isCurrent ? '✓' : i + 1}
-                </span>
-                <span style={{ fontSize: 11, fontWeight: 650, color: isCurrent ? t.accent : isDone ? t.success : t.textMuted }}>{s}</span>
-              </button>
-            );
-          })}
+              />
+            ))}
+          </div>
         </div>
-        <div style={{ flex: 1 }} />
-        <button
-          onClick={close}
-          style={{
-            height: 28,
-            padding: '0 11px',
-            borderRadius: 7,
-            border: 'none',
-            background: 'none',
-            color: t.textMuted,
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: 'pointer',
-            fontFamily: 'inherit',
-          }}
-        >
-          {hasExistingSetup ? 'Close' : 'Skip for now'}
-        </button>
       </div>
 
       {/* ══ Body ══ */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        <div style={{ width: 'min(860px, 100% - 48px)', margin: '0 auto', padding: '30px 0 40px' }}>
-          {step === 0 && <WelcomeStep t={t} workspace={connectedWorkspace} />}
+        <div style={{ width: 'min(760px, 100% - 36px)', margin: '0 auto', padding: '24px 0 32px' }}>
+          {step === 0 && <WelcomeStep t={t} workspace={connectedWorkspace} supportingText={supportingText} />}
 
           {step === 1 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560, margin: '0 auto', animation: 'dql-setup-fadein 0.25s ease-out' }}>
               <div>
                 <div style={eyebrow}>Step 1 of 4</div>
                 <h2 style={{ margin: '6px 0 0', fontSize: 21, fontWeight: 700, letterSpacing: '-0.01em', color: t.textPrimary }}>Connect your dbt project</h2>
-                <div style={{ marginTop: 6, fontSize: 12.5, color: t.textMuted, lineHeight: 1.55 }}>
-                  DQL reads your dbt manifest for models, tests, and lineage. dbt keeps ownership — DQL never edits your models.
+                <div style={{ marginTop: 6, fontSize: 12.5, color: supportingText, lineHeight: 1.55 }}>
+                  Start with a local dbt folder or remote Git URL. DQL reads the manifest, models, tests, and lineage without editing your project.
                 </div>
               </div>
               <div style={card}>
                 <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <span style={label}>dbt repo</span>
+                  <span style={label}>Local dbt folder or Git URL</span>
                   <input
                     value={dbtRepo}
                     onChange={(e) => setDbtRepo(e.target.value)}
-                    placeholder="git@github.com:acme/analytics-dbt.git"
+                    placeholder="/Users/me/analytics-dbt or git@github.com:acme/analytics-dbt.git"
                     style={inputStyle}
                     onFocus={(e) => (e.currentTarget.style.borderColor = t.accent)}
                     onBlur={(e) => (e.currentTarget.style.borderColor = t.inputBorder)}
                   />
-                  <span style={{ fontSize: 10.5, color: t.textMuted }}>Git URL or a local folder path. Leave blank to use the configured project.</span>
+                  <span style={{ fontSize: 11, color: supportingText }}>Leave blank to keep the project already connected to this workspace.</span>
                 </label>
                 {dbtPhase === 'idle' || dbtPhase === 'error' ? (
-                  <button onClick={runDbt} style={primaryBtn}>Connect &amp; run manifest</button>
+                  <button onClick={runDbt} style={primaryBtn}>Connect dbt project</button>
                 ) : dbtPhase === 'testing' ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     <span style={shimmer}>Compiling manifest…</span>
-                    <span style={{ fontSize: 11, color: t.textMuted }}>
+                    <span style={{ fontSize: 11, color: supportingText }}>
                       Runs <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>dbt compile</span> and reads the artifacts.
                     </span>
                   </div>
@@ -719,8 +874,8 @@ export function SetupOnboarding() {
               <div>
                 <div style={eyebrow}>Step 2 of 4</div>
                 <h2 style={{ margin: '6px 0 0', fontSize: 21, fontWeight: 700, letterSpacing: '-0.01em', color: t.textPrimary }}>Connect your database</h2>
-                <div style={{ marginTop: 6, fontSize: 12.5, color: t.textMuted, lineHeight: 1.55 }}>
-                  Where queries run. Pick your warehouse — DQL installs the matching catalog driver for you.
+                <div style={{ marginTop: 6, fontSize: 12.5, color: supportingText, lineHeight: 1.55 }}>
+                  Choose where DQL runs queries. If the dbt project has a profile, it appears below ready to import.
                 </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: `repeat(${DRIVER_ORDER.length}, 1fr)`, gap: 8 }}>
@@ -731,15 +886,17 @@ export function SetupOnboarding() {
                     <button
                       key={driver}
                       onClick={() => {
+                        databaseSelectionTouched.current = true;
                         setWh(driver);
+                        setDbFields(EMPTY_DB_FIELDS);
                         setDbPhase('idle');
                       }}
                       style={{
                         display: 'flex',
                         flexDirection: 'column',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '13px 8px',
+                        alignItems: 'flex-start',
+                        gap: 5,
+                        padding: '12px',
                         borderRadius: 10,
                         border: `1.5px solid ${on ? t.accent : t.headerBorder}`,
                         background: on ? t.sidebarItemActive : t.cellBg,
@@ -747,8 +904,9 @@ export function SetupOnboarding() {
                         fontFamily: 'inherit',
                       }}
                     >
-                      <span style={{ fontSize: 16, fontWeight: 700, fontFamily: t.fontMono, color: meta.color }}>{meta.glyph}</span>
-                      <span style={{ fontSize: 11.5, fontWeight: 650, color: t.textPrimary }}>{meta.name}</span>
+                      <DriverLogo driver={driver} size={22} />
+                      <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{meta.name}</span>
+                      <span style={{ fontSize: 10.5, color: supportingText, lineHeight: 1.35 }}>{meta.description}</span>
                     </button>
                   );
                 })}
@@ -772,14 +930,14 @@ export function SetupOnboarding() {
                     <>
                       <Check size={13} strokeWidth={2} color={t.success} />
                       <span style={{ flex: 1, fontSize: 12, color: t.success, fontWeight: 600 }}>
-                        {selectedConnector?.builtIn ? `${whMeta.name} catalog is built in — no driver needed` : `${whMeta.name} catalog driver installed`}
+                        {selectedConnector?.builtIn ? `${whMeta.name} is ready — no connector install needed` : `${whMeta.name} connector is ready`}
                       </span>
                     </>
                   ) : (
                     <>
-                      <Download size={13} strokeWidth={1.75} color={t.textMuted} />
+                      <Download size={13} strokeWidth={1.75} color={supportingText} />
                       <span style={{ flex: 1, fontSize: 12, color: t.textSecondary }}>
-                        Connector package for <strong>{whMeta.name}</strong> is not installed
+                        <strong>{whMeta.name}</strong> connector needs installing before a connection can be tested
                       </span>
                       <button
                         onClick={installCatalog}
@@ -796,112 +954,111 @@ export function SetupOnboarding() {
                           fontFamily: 'inherit',
                         }}
                       >
-                        Install connector
+                        Install {whMeta.name}
                       </button>
                     </>
                   )}
                 </div>
 
-                {/* auth mode */}
-                <div>
-                  <span style={{ ...label, display: 'block', marginBottom: 6 }}>Authenticate with</span>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    {(
-                      [
-                        { key: 'creds' as const, title: 'Credentials', sub: 'Username, SSO, or key pair' },
-                        { key: 'enterprise' as const, title: 'Enterprise key', sub: 'Managed by your admin' },
-                      ]
-                    ).map((opt) => {
-                      const on = dbAuth === opt.key;
-                      return (
-                        <button
-                          key={opt.key}
-                          onClick={() => setDbAuth(opt.key)}
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 7,
-                            padding: '8px 13px',
-                            borderRadius: 9,
-                            border: `1.5px solid ${on ? t.accent : t.headerBorder}`,
-                            background: on ? t.sidebarItemActive : t.cellBg,
-                            cursor: 'pointer',
-                            fontFamily: 'inherit',
-                          }}
-                        >
-                          <span
-                            style={{
-                              width: 13,
-                              height: 13,
-                              borderRadius: 999,
-                              border: `1.5px solid ${on ? t.accent : t.scrollbarThumb}`,
-                              background: on ? t.accent : t.cellBg,
-                              boxShadow: on ? `inset 0 0 0 2.5px ${t.sidebarItemActive}` : 'none',
-                            }}
-                          />
-                          <span style={{ display: 'flex', flexDirection: 'column', textAlign: 'left' }}>
-                            <span style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary }}>{opt.title}</span>
-                            <span style={{ fontSize: 10, color: t.textMuted }}>{opt.sub}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
+                <div style={{ border: `1px solid ${t.tableBorder}`, background: t.appBg, borderRadius: 9, padding: '11px 12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <FileText size={13} color={t.accent} />
+                    <span style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary }}>Import dbt profiles.yml</span>
                   </div>
+                  <div style={{ marginTop: 3, fontSize: 11, color: supportingText, lineHeight: 1.45 }}>
+                    Choose a target to import it as the active connection. Local and remote dbt projects are both supported.
+                  </div>
+                  <div style={{ display: 'flex', gap: 7, marginTop: 8 }}>
+                    <input
+                      aria-label="Setup dbt profile file or folder path"
+                      value={profilePath}
+                      onChange={(event) => setProfilePath(event.target.value)}
+                      onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void previewSetupProfiles(); } }}
+                      placeholder="~/.dbt/profiles.yml or /path/to/profile.yaml"
+                      style={{ ...inputStyle, flex: 1, minWidth: 0, fontFamily: t.fontMono, fontSize: 11 }}
+                    />
+                    <button type="button" onClick={() => void previewSetupProfiles()} disabled={profileLoading} style={{ ...primaryBtn, width: 'auto', marginTop: 0, padding: '0 12px', minHeight: 34, boxShadow: 'none' }}>
+                      {profileLoading ? 'Reading…' : 'Find profiles'}
+                    </button>
+                  </div>
+                  {profileError ? <div role="alert" style={{ marginTop: 6, color: t.error, fontSize: 10.5 }}>{profileError}</div> : null}
+                  {dbtProfiles.length > 0 ? (
+                    <div style={{ display: 'grid', gap: 6, marginTop: 9 }}>
+                      {dbtProfiles.map((profile) => {
+                        const ready = profile.missingFields.length === 0;
+                        const profileDriver = connectionDriver(profile.connection);
+                        const profileConnector = profileDriver ? connectorStatus.find((candidate) => candidate.driver === profileDriver) : undefined;
+                        const canTestProfile = profileDriver === 'duckdb' || Boolean(profileConnector?.builtIn || profileConnector?.installed);
+                        return (
+                          <div key={profile.id} style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px solid ${t.tableBorder}`, paddingTop: 7 }}>
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ fontSize: 11.5, fontWeight: 650, color: t.textPrimary }}>{profile.profileName} · {profile.targetName}</div>
+                              <div style={{ fontSize: 10.5, color: ready ? supportingText : t.warning, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {profile.adapter} · {ready ? profile.path : `Needs ${profile.missingFields.join(', ')}`}
+                              </div>
+                            </div>
+                            <button type="button" onClick={() => void useDbtProfile(profile)} disabled={profileLoading} style={{ height: 27, padding: '0 10px', borderRadius: 6, border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.textSecondary, fontSize: 10.5, fontWeight: 650, cursor: profileLoading ? 'wait' : 'pointer', fontFamily: 'inherit' }}>
+                              {ready && canTestProfile ? 'Import & test' : 'Import'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
 
-                {dbAuth === 'creds' ? (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, animation: 'dql-setup-fadein 0.18s ease-out' }}>
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
-                      <span style={label}>{whMeta.host}</span>
-                      <input
-                        value={dbFields.host}
-                        onChange={(e) => setDbFields((f) => ({ ...f, host: e.target.value }))}
-                        placeholder={whMeta.ph}
-                        style={inputStyle}
-                        onFocus={(e) => (e.currentTarget.style.borderColor = t.accent)}
-                        onBlur={(e) => (e.currentTarget.style.borderColor = t.inputBorder)}
-                      />
-                    </label>
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <span style={label}>Database</span>
-                      <input
-                        value={dbFields.database}
-                        onChange={(e) => setDbFields((f) => ({ ...f, database: e.target.value }))}
-                        placeholder="ANALYTICS"
-                        style={inputStyle}
-                        onFocus={(e) => (e.currentTarget.style.borderColor = t.accent)}
-                        onBlur={(e) => (e.currentTarget.style.borderColor = t.inputBorder)}
-                      />
-                    </label>
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <span style={label}>Schema</span>
-                      <input
-                        value={dbFields.schema}
-                        onChange={(e) => setDbFields((f) => ({ ...f, schema: e.target.value }))}
-                        placeholder="analytics"
-                        style={inputStyle}
-                        onFocus={(e) => (e.currentTarget.style.borderColor = t.accent)}
-                        onBlur={(e) => (e.currentTarget.style.borderColor = t.inputBorder)}
-                      />
-                    </label>
-                  </div>
-                ) : (
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 4, animation: 'dql-setup-fadein 0.18s ease-out' }}>
-                    <span style={label}>Enterprise connection key</span>
-                    <input
-                      type="password"
-                      value={enterpriseKey}
-                      onChange={(e) => setEnterpriseKey(e.target.value)}
-                      placeholder="dqlk_….paste from your admin"
-                      style={inputStyle}
-                      onFocus={(e) => (e.currentTarget.style.borderColor = t.accent)}
-                      onBlur={(e) => (e.currentTarget.style.borderColor = t.inputBorder)}
-                    />
-                    <span style={{ fontSize: 10.5, color: t.textMuted }}>One key carries the warehouse, role, and access policy set by your data team.</span>
-                  </label>
-                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: supportingText, fontSize: 10.5 }}>
+                  <span style={{ height: 1, background: t.tableBorder, flex: 1 }} />
+                  Or enter the connection manually
+                  <span style={{ height: 1, background: t.tableBorder, flex: 1 }} />
+                </div>
 
-                {dbPhase === 'idle' || dbPhase === 'error' ? (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, animation: 'dql-setup-fadein 0.18s ease-out' }}>
+                  <SetupConnectionField label={whMeta.host} value={dbFields.host} placeholder={whMeta.ph} full t={t} inputStyle={inputStyle} onChange={(host) => setDbFields((fields) => ({ ...fields, host }))} />
+                  {wh === 'snowflake' ? (
+                    <>
+                      <SetupConnectionField label="Warehouse" value={dbFields.warehouse} placeholder="ANALYTICS_WH" t={t} inputStyle={inputStyle} onChange={(warehouse) => setDbFields((fields) => ({ ...fields, warehouse }))} />
+                      <SetupConnectionField label="Database" value={dbFields.database} placeholder="ANALYTICS" t={t} inputStyle={inputStyle} onChange={(database) => setDbFields((fields) => ({ ...fields, database }))} />
+                      <SetupConnectionField label="Schema" value={dbFields.schema} placeholder="PUBLIC" t={t} inputStyle={inputStyle} onChange={(schema) => setDbFields((fields) => ({ ...fields, schema }))} />
+                      <SetupConnectionField label="Username" value={dbFields.username} placeholder="ANALYST" t={t} inputStyle={inputStyle} onChange={(username) => setDbFields((fields) => ({ ...fields, username }))} />
+                      <SetupSelectField label="Authentication" value={snowflakeAuthMethod} options={[
+                        { value: 'password', label: 'Password' },
+                        { value: 'key_pair', label: 'Key pair / private key' },
+                        { value: 'external_browser', label: 'SSO in browser' },
+                        { value: 'oauth', label: 'OAuth token' },
+                      ]} t={t} inputStyle={inputStyle} onChange={(value) => setSnowflakeAuthMethod(value as typeof snowflakeAuthMethod)} />
+                      {snowflakeAuthMethod === 'password' ? <SetupConnectionField label="Password" value={dbFields.password} placeholder="Password" password t={t} inputStyle={inputStyle} onChange={(password) => setDbFields((fields) => ({ ...fields, password }))} /> : null}
+                      {snowflakeAuthMethod === 'key_pair' ? <>
+                        <SetupConnectionField label="Private key file" value={dbFields.privateKeyPath} placeholder="~/.ssh/snowflake_key.p8" full t={t} inputStyle={inputStyle} onChange={(privateKeyPath) => setDbFields((fields) => ({ ...fields, privateKeyPath }))} />
+                        <SetupConnectionField label="Key passphrase (optional)" value={dbFields.privateKeyPassphrase} placeholder="Passphrase" password full t={t} inputStyle={inputStyle} onChange={(privateKeyPassphrase) => setDbFields((fields) => ({ ...fields, privateKeyPassphrase }))} />
+                      </> : null}
+                      {snowflakeAuthMethod === 'oauth' ? <SetupConnectionField label="OAuth token" value={dbFields.token} placeholder="Token" password t={t} inputStyle={inputStyle} onChange={(token) => setDbFields((fields) => ({ ...fields, token }))} /> : null}
+                      {snowflakeAuthMethod === 'external_browser' ? <div style={{ gridColumn: '1 / -1', fontSize: 11, color: supportingText, lineHeight: 1.45 }}>DQL opens your organization’s Snowflake SSO sign-in when you test the connection.</div> : null}
+                    </>
+                  ) : wh === 'databricks' ? (
+                    <>
+                      <SetupConnectionField label="SQL warehouse ID or path" value={dbFields.httpPath} placeholder="/sql/1.0/warehouses/abc123" full t={t} inputStyle={inputStyle} onChange={(httpPath) => setDbFields((fields) => ({ ...fields, httpPath }))} />
+                      <SetupConnectionField label="Catalog / database" value={dbFields.database} placeholder="main" t={t} inputStyle={inputStyle} onChange={(database) => setDbFields((fields) => ({ ...fields, database }))} />
+                      <SetupConnectionField label="Schema" value={dbFields.schema} placeholder="analytics" t={t} inputStyle={inputStyle} onChange={(schema) => setDbFields((fields) => ({ ...fields, schema }))} />
+                      <SetupSelectField label="Authentication" value={databricksAuthMethod} options={[
+                        { value: 'token', label: 'Personal or service-principal token' },
+                        { value: 'oauth', label: 'OAuth bearer token' },
+                      ]} t={t} inputStyle={inputStyle} onChange={(value) => setDatabricksAuthMethod(value as typeof databricksAuthMethod)} />
+                      <SetupConnectionField label={databricksAuthMethod === 'oauth' ? 'OAuth bearer token' : 'Access token'} value={dbFields.token} placeholder="dapi…" password t={t} inputStyle={inputStyle} onChange={(token) => setDbFields((fields) => ({ ...fields, token }))} />
+                    </>
+                  ) : null}
+                </div>
+                {wh !== 'duckdb' ? (
+                  <div style={{ fontSize: 11, color: supportingText, lineHeight: 1.45 }}>
+                    Importing a dbt profile is the fastest path for existing enterprise credentials, including SSO, key pair, and service-principal setup.
+                  </div>
+                ) : null}
+
+                {!catalogReady ? (
+                  <div style={{ fontSize: 11, color: supportingText, lineHeight: 1.45 }}>
+                    Install {whMeta.name} above to test credentials or a profile import.
+                  </div>
+                ) : dbPhase === 'idle' || dbPhase === 'error' ? (
                   <button onClick={testDb} style={primaryBtn}>Test connection</button>
                 ) : dbPhase === 'testing' ? (
                   <span style={shimmer}>Running a read-only test query…</span>
@@ -928,8 +1085,8 @@ export function SetupOnboarding() {
                     Required
                   </span>
                 </h2>
-                <div style={{ marginTop: 6, fontSize: 12.5, color: t.textMuted, lineHeight: 1.55 }}>
-                  Powers Ask AI, block suggestions, and research — you'll build dramatically faster with it. Use a subscription, an API key, or a local model.
+                <div style={{ marginTop: 6, fontSize: 12.5, color: supportingText, lineHeight: 1.55 }}>
+                  This powers Ask AI, block suggestions, and research. Choose a subscription, API key, or local model.
                 </div>
               </div>
               <div style={card}>
@@ -970,7 +1127,7 @@ export function SetupOnboarding() {
                 {providerMeta.needsKey && activeMode.id !== 'claude-code' && activeMode.id !== 'codex' && (
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     <span style={label}>
-                      API key <span style={{ color: t.textMuted, fontWeight: 500 }}>(or sign in via CLI on the next screen)</span>
+                      API key <span style={{ color: supportingText, fontWeight: 500 }}>(or sign in with the selected subscription)</span>
                     </span>
                     <input
                       type="password"
@@ -1026,7 +1183,7 @@ export function SetupOnboarding() {
                   title="Ask AI now"
                   body="Ask your first business question — answers are grounded in your dbt models from day one."
                   cta="instant →"
-                  ctaColor={t.textMuted}
+                  ctaColor={supportingText}
                   onClick={() => finishTo('ask')}
                 />
                 <StartCard
@@ -1036,11 +1193,11 @@ export function SetupOnboarding() {
                   title="Research notebook"
                   body="Deep-dive with SQL, DQL, and charts — save the good parts as reusable blocks."
                   cta="for analysts →"
-                  ctaColor={t.textMuted}
+                  ctaColor={supportingText}
                   onClick={() => finishTo('notebook', true)}
                 />
               </div>
-              <div style={{ textAlign: 'center', fontSize: 11.5, color: t.textMuted }}>You can do all three — this just picks your first screen.</div>
+              <div style={{ textAlign: 'center', fontSize: 11.5, color: supportingText }}>You can do all three — this simply chooses your first screen.</div>
             </div>
           )}
         </div>
@@ -1082,10 +1239,13 @@ export function SetupOnboarding() {
           </button>
         )}
         <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 11, color: t.textMuted }}>{hints[step]}</span>
+        <span style={{ fontSize: 11, color: supportingText }}>{hints[step]}</span>
+        <button onClick={close} style={secondaryBtn}>
+          {hasExistingSetup ? 'Close setup' : 'Skip setup'}
+        </button>
         {hasNext ? (
           <button onClick={() => setStep((s) => Math.min(4, s + 1))} style={{ ...primaryBtn, padding: '0 18px' }}>
-            {step === 0 && hasExistingSetup ? 'Review setup' : NEXT_LABELS[step]}
+            {nextLabel}
             <ArrowRight size={13} strokeWidth={2} />
           </button>
         ) : (
@@ -1113,6 +1273,72 @@ export function SetupOnboarding() {
         )}
       </div>
     </div>
+  );
+}
+
+function SetupConnectionField({
+  label,
+  value,
+  placeholder,
+  onChange,
+  full = false,
+  password = false,
+  t,
+  inputStyle,
+}: {
+  label: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+  full?: boolean;
+  password?: boolean;
+  t: (typeof themes)[keyof typeof themes];
+  inputStyle: React.CSSProperties;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, ...(full ? { gridColumn: '1 / -1' } : {}) }}>
+      <span style={{ fontSize: 11, fontWeight: 650, color: t.textSecondary }}>{label}</span>
+      <input
+        type={password ? 'password' : 'text'}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        style={inputStyle}
+        onFocus={(event) => (event.currentTarget.style.borderColor = t.accent)}
+        onBlur={(event) => (event.currentTarget.style.borderColor = t.inputBorder)}
+      />
+    </label>
+  );
+}
+
+function SetupSelectField({
+  label,
+  value,
+  options,
+  onChange,
+  t,
+  inputStyle,
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+  t: (typeof themes)[keyof typeof themes];
+  inputStyle: React.CSSProperties;
+}) {
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <span style={{ fontSize: 11, fontWeight: 650, color: t.textSecondary }}>{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        style={{ ...inputStyle, fontFamily: 'inherit', cursor: 'pointer' }}
+        onFocus={(event) => (event.currentTarget.style.borderColor = t.accent)}
+        onBlur={(event) => (event.currentTarget.style.borderColor = t.inputBorder)}
+      >
+        {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+    </label>
   );
 }
 
@@ -1199,7 +1425,15 @@ function StartCard({
   );
 }
 
-function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]; workspace: ConnectedWorkspace }) {
+function WelcomeStep({
+  t,
+  workspace,
+  supportingText,
+}: {
+  t: (typeof themes)[keyof typeof themes];
+  workspace: ConnectedWorkspace;
+  supportingText: string;
+}) {
   const connectedItems = [workspace.project, workspace.database, workspace.ai].filter((item): item is ConnectedWorkspaceItem => Boolean(item));
   const hasConnections = connectedItems.length > 0;
   const stages = [
@@ -1279,13 +1513,13 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
               <div key={item.label} style={{ border: `1px solid ${t.tableBorder}`, borderRadius: 10, background: t.cellBg, padding: '10px 12px', display: 'flex', alignItems: 'flex-start', gap: 9 }}>
                 <Check size={13} strokeWidth={2} color={t.success} style={{ marginTop: 2, flexShrink: 0 }} />
                 <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                  <span style={{ fontSize: 10.5, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{item.label}</span>
+                  <span style={{ fontSize: 10.5, color: supportingText, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{item.label}</span>
                   <span style={{ fontSize: 12.5, fontWeight: 700, color: t.textPrimary }}>{item.value}</span>
-                  <span style={{ fontSize: 10.5, color: t.textMuted, overflowWrap: 'anywhere' }}>{item.detail}</span>
+                  <span style={{ fontSize: 10.5, color: supportingText, overflowWrap: 'anywhere' }}>{item.detail}</span>
                 </span>
               </div>
             ))}
-            {workspace.loading ? <span style={{ fontSize: 11, color: t.textMuted }}>Checking project connections…</span> : null}
+            {workspace.loading ? <span style={{ fontSize: 11, color: supportingText }}>Checking project connections…</span> : null}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'dql-setup-float 4s ease-in-out infinite' }}>
@@ -1298,13 +1532,13 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
               <span style={{ fontSize: 10, fontWeight: 700, color: t.success, background: hexToRgba(t.success, 0.12), border: `1px solid ${hexToRgba(t.success, 0.3)}`, borderRadius: 999, padding: '1.5px 8px' }}>
                 Certified
               </span>
-              <span style={{ fontSize: 10, color: t.textMuted }}>from total_revenue · 0.3s</span>
+              <span style={{ fontSize: 10, color: supportingText }}>from total_revenue · 0.3s</span>
             </div>
             <div style={{ marginTop: 6, fontSize: 13, color: t.textPrimary }}>
               Q2 revenue was <strong>$4.82M</strong>, up 6.4% from Q1.
             </div>
           </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, justifyContent: 'flex-end', fontSize: 10.5, color: t.textMuted, paddingRight: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, justifyContent: 'flex-end', fontSize: 10.5, color: supportingText, paddingRight: 4 }}>
               <Network size={11} strokeWidth={1.75} color={t.accent} />
               Traceable from source table to this answer
             </div>
@@ -1317,7 +1551,7 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
         <span style={{ fontSize: 13, fontWeight: 700, color: '#b0b2ba', fontFamily: t.fontMono }}>01</span>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: t.textPrimary, letterSpacing: '-0.01em' }}>How a question becomes a trusted answer</div>
-          <div style={{ fontSize: 12, color: t.textMuted, marginTop: 2 }}>Five stages, one direction.</div>
+          <div style={{ fontSize: 12, color: supportingText, marginTop: 2 }}>Five stages, one direction.</div>
         </div>
       </div>
       <div style={{ border: `1px solid ${t.tableBorder}`, borderRadius: 14, background: t.cellBg, padding: '22px 20px 16px' }}>
@@ -1330,7 +1564,7 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
                   {s.icon}
                 </div>
                 <div style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary, marginTop: 6 }}>{s.title}</div>
-                <div style={{ fontSize: 10, color: t.textMuted, lineHeight: 1.45, marginTop: 3 }}>{s.body}</div>
+                <div style={{ fontSize: 10, color: supportingText, lineHeight: 1.45, marginTop: 3 }}>{s.body}</div>
               </div>
             </React.Fragment>
           ))}
@@ -1347,11 +1581,11 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
                 animation: 'dql-setup-flowrail 5s linear infinite',
               }}
             />
-            <span style={{ fontSize: 10, color: t.textMuted, whiteSpace: 'nowrap' }}>Lineage — trace any number from source to app, across domains</span>
+            <span style={{ fontSize: 10, color: supportingText, whiteSpace: 'nowrap' }}>Lineage — trace any number from source to app, across domains</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ flex: 1, height: 5, borderRadius: 999, background: `repeating-linear-gradient(90deg, ${t.scrollbarThumb} 0 14px, transparent 14px 20px)`, animation: 'dql-setup-gitdash 1.6s linear infinite' }} />
-            <span style={{ fontSize: 10, color: t.textMuted, whiteSpace: 'nowrap' }}>Everything Git-versioned — branch, review, approve like code</span>
+            <span style={{ fontSize: 10, color: supportingText, whiteSpace: 'nowrap' }}>Everything Git-versioned — branch, review, approve like code</span>
           </div>
         </div>
       </div>
@@ -1361,7 +1595,7 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
         <span style={{ fontSize: 13, fontWeight: 700, color: '#b0b2ba', fontFamily: t.fontMono }}>02</span>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: t.textPrimary, letterSpacing: '-0.01em' }}>Why it holds up in the boardroom</div>
-          <div style={{ fontSize: 12, color: t.textMuted, marginTop: 2 }}>Four guarantees behind every number.</div>
+          <div style={{ fontSize: 12, color: supportingText, marginTop: 2 }}>Four guarantees behind every number.</div>
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10 }}>
@@ -1371,7 +1605,7 @@ function WelcomeStep({ t, workspace }: { t: (typeof themes)[keyof typeof themes]
               {g.icon}
               {g.title}
             </div>
-            <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.5, marginTop: 4 }}>{g.body}</div>
+            <div style={{ fontSize: 11, color: supportingText, lineHeight: 1.5, marginTop: 4 }}>{g.body}</div>
           </div>
         ))}
       </div>

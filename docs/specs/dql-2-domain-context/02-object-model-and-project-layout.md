@@ -117,6 +117,10 @@ evidence. Ambiguous membership remains unresolved until reviewed.
   domain graph: they are source ownership, diagram, and retrieval-ranking
   hints, never a second semantic model or authorization boundary. An entity has
   one owning area; another area may show it only as a read-only reference.
+- Model Area identity is always compiled as `<domain>::model_area::<localId>`.
+  A local Area ID may repeat in another domain; APIs and persisted product
+  context return the qualified identity even when authoring accepts an
+  unambiguous domain-local ID (`DOM-003`, `CTX-004`).
 - Product ownership is stewardship only; authorization remains a runtime/Cloud
   concern.
 

@@ -19,6 +19,7 @@ export type KGNodeKind =
   | 'dimension'
   | 'measure'
   | 'entity'
+  | 'model_area'
   | 'semantic_model'
   | 'saved_query'
   | 'domain'

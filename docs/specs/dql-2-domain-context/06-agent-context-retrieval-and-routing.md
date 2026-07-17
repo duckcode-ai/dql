@@ -19,6 +19,14 @@ the Area's entities and matching skills only after active-domain/import/lifecycl
 eligibility is established; it cannot authorize an import, relationship, tool,
 or generated join.
 
+The snapshot index represents each Area as a searchable node containing its
+name, business scope, intent examples, owned entities/relationships, and
+read-only boundary references. Explicit Area selection wins. Without an
+explicit Area, retrieval may infer one only inside the already-resolved active
+domain and only when its evidence is unambiguous; otherwise the whole domain
+remains active. Area focus boosts its typed graph neighborhood but does not
+replace whole-domain retrieval when other evidence is needed (`CTX-004`).
+
 ## Context pack contents
 
 Context packs are compact, ranked, and source-attributed. They may include:

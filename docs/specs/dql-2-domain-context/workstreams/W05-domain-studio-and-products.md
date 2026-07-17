@@ -5,7 +5,7 @@
 Ship the unified vertical Domain Studio and connect global Apps/Notebooks/Ask to
 domain context without duplicating product storage.
 
-Acceptance IDs: `PRD-001`, `PRD-002`, `PRD-003`, `AGT-003`, `UI-001`, `UI-002`.
+Acceptance IDs: `PRD-001`, `PRD-002`, `PRD-003`, `AGT-003`, `UI-001`, `UI-002`, `UI-006`.
 Dependencies: verified W01/W02 contracts and stable W03/W04 APIs.
 
 ## Required implementation

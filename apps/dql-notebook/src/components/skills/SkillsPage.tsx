@@ -12,11 +12,12 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
+import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, FolderOpen } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
-import type { Skill, Domain } from '../../store/types';
+import type { Skill, SkillPathSettings, Domain } from '../../store/types';
+import { skillMatchesModelingScope } from './modeling-scope';
 
 type FormMode = { kind: 'create' } | { kind: 'edit'; skill: Skill };
 
@@ -42,7 +43,7 @@ function emptyDraft(): Skill {
   };
 }
 
-export function SkillsPage({ embedded = false, domainFilter = null }: { embedded?: boolean; domainFilter?: string | null } = {}): JSX.Element {
+export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFilter = null }: { embedded?: boolean; domainFilter?: string | null; modelAreaFilter?: string | null } = {}): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
 
@@ -55,6 +56,11 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
   }>({ metrics: [], blocks: [] });
   // Spec 17 (part B) — domains feed the form's domain picker. Best-effort.
   const [domains, setDomains] = useState<Domain[]>([]);
+  const [pathSettings, setPathSettings] = useState<SkillPathSettings | null>(null);
+  const [showPathEditor, setShowPathEditor] = useState(false);
+  const [pathDraft, setPathDraft] = useState('skills');
+  const [savingPath, setSavingPath] = useState(false);
+  const [pathError, setPathError] = useState<string | null>(null);
   const [form, setForm] = useState<FormMode | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Skill | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -100,6 +106,16 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
       .catch(() => {
         if (!cancelled) setDomains([]);
       });
+    void api
+      .getSkillPathSettings()
+      .then((result) => {
+        if (cancelled) return;
+        setPathSettings(result);
+        setPathDraft(result.path);
+      })
+      .catch(() => {
+        if (!cancelled) setPathSettings(null);
+      });
     return () => {
       cancelled = true;
     };
@@ -107,7 +123,9 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
 
   useEffect(() => load(), [load]);
 
-  const sorted = useMemo(() => skills.filter((skill) => !domainFilter || skill.domain === domainFilter || skill.domains?.includes(domainFilter)).sort((a, b) => a.id.localeCompare(b.id)), [skills, domainFilter]);
+  const sorted = useMemo(() => {
+    return skills.filter((skill) => skillMatchesModelingScope(skill, domainFilter, modelAreaFilter)).sort((a, b) => a.id.localeCompare(b.id));
+  }, [skills, domainFilter, modelAreaFilter]);
 
   const handleSaved = useCallback((saved: Skill) => {
     setSkills((prev) => {
@@ -134,6 +152,22 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
       setDeleting(false);
     }
   }, [pendingDelete]);
+
+  const saveSkillPath = useCallback(async () => {
+    setSavingPath(true);
+    setPathError(null);
+    try {
+      const result = await api.updateSkillPath(pathDraft);
+      setPathSettings(result);
+      setPathDraft(result.path);
+      setShowPathEditor(false);
+      load();
+    } catch (error) {
+      setPathError(error instanceof Error && error.message ? error.message : 'Could not use this Skills folder.');
+    } finally {
+      setSavingPath(false);
+    }
+  }, [load, pathDraft]);
 
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg }}>
@@ -164,7 +198,7 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
                   color: t.textPrimary,
                 }}
               >
-                {domainFilter ? `${domainFilter} skills` : 'Skills'}
+                {modelAreaFilter ? `${modelAreaFilter.split('::').at(-1)?.replace(/_/g, ' ')} skills` : domainFilter ? `${domainFilter} skills` : 'Skills'}
               </div>
             </div>
             <div
@@ -176,7 +210,13 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
                 lineHeight: 1.5,
               }}
             >
-              Definitions, rules, and vocabulary the AI follows when answering{domainFilter ? ' in this domain' : ''}. Applied only when their triggers match — drafts never guide answers.
+              Definitions, vocabulary, and instructions the AI follows when answering{modelAreaFilter ? ' in this model area' : domainFilter ? ' in this domain' : ''}. Applied only when their triggers match — drafts never guide answers.
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 7, color: t.textMuted, fontSize: 10.5, minWidth: 0 }}>
+              <FolderOpen size={12} strokeWidth={1.8} />
+              <span>Skill folder</span>
+              <code style={{ color: t.textSecondary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pathSettings?.path ?? 'skills'}</code>
+              {pathSettings ? <span>· {pathSettings.exists ? `${pathSettings.skillCount} loaded` : 'not found'}</span> : null}
             </div>
           </div>
           <div
@@ -190,11 +230,39 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
             <button type="button" onClick={() => load()} title="Refresh" style={ghostButton(t)}>
               <RefreshCw size={13} strokeWidth={2} /> Refresh
             </button>
+            <button type="button" onClick={() => { setPathError(null); setShowPathEditor((value) => !value); }} style={ghostButton(t)}>
+              <FolderOpen size={13} strokeWidth={2} /> Skill folder
+            </button>
             <button type="button" onClick={() => setForm({ kind: 'create' })} style={primaryButton(t)}>
               <Plus size={14} strokeWidth={2.2} /> Add skill
             </button>
           </div>
         </div>
+
+        {showPathEditor ? (
+          <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 10, background: t.cellBg, padding: '12px 14px', marginBottom: 16, display: 'grid', gap: 8 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: t.textPrimary }}>Use an existing Skills folder</div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                aria-label="Existing Skills folder"
+                value={pathDraft}
+                onChange={(event) => setPathDraft(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter' && pathDraft.trim() && !savingPath) void saveSkillPath(); }}
+                placeholder="skills or ../skills"
+                style={{ ...inputStyle(t), flex: 1, fontFamily: t.fontMono }}
+              />
+              <button type="button" onClick={() => setShowPathEditor(false)} disabled={savingPath} style={ghostButton(t)}>Cancel</button>
+              <button type="button" onClick={() => void saveSkillPath()} disabled={!pathDraft.trim() || savingPath} style={{ ...primaryButton(t), opacity: pathDraft.trim() && !savingPath ? 1 : 0.55 }}>
+                {savingPath ? <Loader2 size={13} strokeWidth={2} /> : null}{savingPath ? 'Connecting…' : 'Use folder'}
+              </button>
+            </div>
+            <div style={{ fontSize: 10.5, lineHeight: 1.45, color: t.textMuted }}>
+              Relative paths start from the DQL project. If DQL is in a <code style={{ fontFamily: t.fontMono }}>/dql</code> folder inside your dbt repo, use <code style={{ fontFamily: t.fontMono }}>../skills</code>. Existing <code style={{ fontFamily: t.fontMono }}>.skill.md</code> and Markdown skill files are loaded in place and stay Git-owned by that repo.
+            </div>
+            {pathSettings?.resolvedPath ? <div style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.fontMono, overflowWrap: 'anywhere' }}>Resolved: {pathSettings.resolvedPath}</div> : null}
+            {pathError ? <InlineNote t={t} tone="error">{pathError}</InlineNote> : null}
+          </div>
+        ) : null}
 
         {/* Body states */}
         {loading ? (
@@ -233,7 +301,7 @@ export function SkillsPage({ embedded = false, domainFilter = null }: { embedded
       </div>
 
       {/* Add / Edit drawer */}
-      {form ? <SkillFormDrawer mode={form} options={options} domains={domains} defaultDomain={domainFilter} existingIds={skills.map((s) => s.id)} t={t} onClose={() => setForm(null)} onSaved={handleSaved} /> : null}
+      {form ? <SkillFormDrawer mode={form} options={options} domains={domains} defaultDomain={domainFilter} defaultModelArea={modelAreaFilter} existingIds={skills.map((s) => s.id)} t={t} onClose={() => setForm(null)} onSaved={handleSaved} /> : null}
 
       {/* Delete confirm */}
       {pendingDelete ? (
@@ -358,12 +426,12 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
 
 // ── Form drawer (add / edit) ─────────────────────────────────────────────────
 
-function SkillFormDrawer({ mode, options, domains, defaultDomain = null, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[] }; domains: Domain[]; defaultDomain?: string | null; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
+function SkillFormDrawer({ mode, options, domains, defaultDomain = null, defaultModelArea = null, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[] }; domains: Domain[]; defaultDomain?: string | null; defaultModelArea?: string | null; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
   const { dispatch } = useNotebook();
   const editing = mode.kind === 'edit';
   // New skills authored from a domain-scoped list belong to that domain by
   // default — otherwise they would save fine but vanish from the filtered list.
-  const [draft, setDraft] = useState<Skill>(() => (mode.kind === 'edit' ? { ...mode.skill } : { ...emptyDraft(), domain: defaultDomain ?? undefined, domains: defaultDomain ? [defaultDomain] : [] }));
+  const [draft, setDraft] = useState<Skill>(() => (mode.kind === 'edit' ? { ...mode.skill } : { ...emptyDraft(), domain: defaultDomain ?? undefined, domains: defaultDomain ? [defaultDomain] : [], modelAreaRefs: defaultModelArea ? [defaultModelArea] : [] }));
   // Track whether the user has manually edited the id slug so name→slug
   // auto-fill stops once they take control (create only).
   const [idTouched, setIdTouched] = useState(editing);

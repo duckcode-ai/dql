@@ -367,6 +367,8 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
 interface ProjectConfig {
   project?: string;
+  /** Git-owned OSS workspace layout. Skills may live in the surrounding dbt repo. */
+  layout?: { version?: number; mode?: string; skillsPath?: string };
   /** Manifest v3 is opt-in and only active with `modeling.mode: "dbt-first"`. */
   manifestVersion?: 1 | 2 | 3;
   modeling?: {

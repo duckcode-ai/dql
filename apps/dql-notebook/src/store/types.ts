@@ -469,6 +469,15 @@ export interface Skill {
   sourceRefs?: string[];
 }
 
+export interface SkillPathSettings {
+  /** Value stored in dql.config.json; relative paths resolve from the DQL project root. */
+  path: string;
+  resolvedPath: string;
+  exists: boolean;
+  skillCount: number;
+  errorCount: number;
+}
+
 /** Skills that shaped an AI answer — surfaced as the "guided by" line. */
 export interface AppliedSkill {
   id: string;

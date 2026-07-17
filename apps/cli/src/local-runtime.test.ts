@@ -1844,6 +1844,32 @@ describe('discoverDbtProfileConnections', () => {
     });
   });
 
+  it('previews an explicitly selected profiles.yml or profile.yaml path without filtering to the dbt project profile', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-explicit-profile-workspace-'));
+    const profileRoot = mkdtempSync(join(tmpdir(), 'dql-explicit-profile-file-'));
+    tempDirs.push(projectRoot, profileRoot);
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: shop\nprofile: shop\n', 'utf-8');
+    writeFileSync(join(profileRoot, 'dbt_project.yml'), 'name: finance\nprofile: finance\n', 'utf-8');
+    writeFileSync(join(profileRoot, 'warehouse.duckdb'), '', 'utf-8');
+    const profilePath = join(profileRoot, 'profile.yaml');
+    writeFileSync(profilePath, [
+      'finance:',
+      '  target: local',
+      '  outputs:',
+      '    local:',
+      '      type: duckdb',
+      '      path: warehouse.duckdb',
+    ].join('\n'), 'utf-8');
+
+    const fromFile = discoverDbtProfileConnections(projectRoot, {}, profilePath);
+    const fromFolder = discoverDbtProfileConnections(projectRoot, {}, profileRoot);
+
+    expect(fromFile).toHaveLength(1);
+    expect(fromFile[0]).toMatchObject({ profileName: 'finance', targetName: 'local', adapter: 'duckdb', missingFields: [] });
+    expect(fromFile[0]?.connection.filepath).toBe(join(profileRoot, 'warehouse.duckdb'));
+    expect(fromFolder).toEqual(fromFile);
+  });
+
   it('maps only lightweight-supported dbt profiles.yml targets into DQL connection drafts', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-profiles-'));
     tempDirs.push(projectRoot);
@@ -3783,5 +3809,43 @@ describe('skills carry an optional domain (spec 17, part B)', () => {
     upsertSkill(projectRoot, { id: 'cxo-review', scope: 'project', domain: 'Finance', body: 'Board review.' });
     const reloaded = loadSkills(projectRoot).skills.find((s) => s.id === 'cxo-review');
     expect(reloaded?.domain).toBe('Finance');
+  });
+});
+
+describe('configured Skills folder API', () => {
+  it('uses an existing sibling dbt-repo folder for listing and writing Skills', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'dql-skill-path-api-'));
+    const projectRoot = join(repoRoot, 'dql');
+    const sharedSkills = join(repoRoot, 'skills');
+    tempDirs.push(repoRoot);
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(sharedSkills, { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
+    writeFileSync(join(sharedSkills, 'existing.skill.md'), '---\nid: existing\n---\nExisting shared guidance', 'utf-8');
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const configured = await fetch(`${base}/api/skills/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: '../skills' }),
+      }).then((response) => response.json()) as { path: string; resolvedPath: string; exists: boolean };
+      expect(configured).toMatchObject({ path: '../skills', resolvedPath: sharedSkills, exists: true });
+
+      const existing = await fetch(`${base}/api/skills`).then((response) => response.json()) as { skills: Array<{ id: string }> };
+      expect(existing.skills.map((skill) => skill.id)).toContain('existing');
+
+      const created = await fetch(`${base}/api/skills`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skill: { id: 'new-guidance', scope: 'project', body: 'New shared guidance' } }),
+      });
+      expect(created.ok).toBe(true);
+      expect(readFileSync(join(sharedSkills, 'new-guidance.skill.md'), 'utf-8')).toContain('New shared guidance');
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
   });
 });

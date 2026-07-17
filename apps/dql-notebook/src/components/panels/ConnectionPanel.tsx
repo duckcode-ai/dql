@@ -3,7 +3,7 @@ import { Database } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
-import { api } from '../../api/client';
+import { api, type DbtProfileConnectionCandidate } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
@@ -31,17 +31,6 @@ interface ConnectionInfo {
   activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
   dbtProfiles?: DbtProfileConnectionCandidate[];
   connectorStatus?: ConnectorInstallStatus[];
-}
-
-interface DbtProfileConnectionCandidate {
-  id: string;
-  profileName: string;
-  targetName: string;
-  adapter: string;
-  path: string;
-  connection: Record<string, unknown>;
-  missingFields: string[];
-  warnings: string[];
 }
 
 interface ConnectorInstallStatus {
@@ -150,11 +139,11 @@ const CONNECTOR_SCHEMAS: ConnectorFormSchema[] = [
     driver: 'databricks',
     label: 'Databricks SQL',
     fields: [
-      { key: 'host', label: 'Server hostname', type: 'text', required: true },
+      { key: 'host', label: 'Workspace URL', type: 'text', required: true, placeholder: 'https://adb-123.cloud.databricks.com' },
       { key: 'database', label: 'Catalog / database', type: 'text' },
       { key: 'schema', label: 'Schema', type: 'text' },
       { key: 'warehouse', label: 'Warehouse ID', type: 'text', helpText: 'Use the SQL warehouse ID when you have it.' },
-      { key: 'httpPath', label: 'HTTP path', type: 'text', placeholder: '/sql/1.0/warehouses/abc123', helpText: 'Paste the dbt/JDBC HTTP path and DQL will extract the warehouse ID.' },
+      { key: 'httpPath', label: 'SQL warehouse ID or path', type: 'text', placeholder: '/sql/1.0/warehouses/abc123', helpText: 'Paste the warehouse ID or its JDBC/HTTP path.' },
       {
         key: 'authMethod',
         label: 'Authentication',
@@ -254,6 +243,16 @@ function connectionNameFromProfile(profile: DbtProfileConnectionCandidate): stri
   return name || 'dbt_profile';
 }
 
+function connectionFieldsFromProfile(profile: DbtProfileConnectionCandidate): Record<string, string> {
+  const fields: Record<string, string> = {};
+  Object.entries(profile.connection ?? {}).forEach(([key, value]) => {
+    if (key !== 'driver' && value !== undefined && value !== null) {
+      fields[normalizeFieldName(key)] = String(value);
+    }
+  });
+  return fields;
+}
+
 function shortPath(path: string): string {
   const marker = '/.dbt/';
   const markerIndex = path.indexOf(marker);
@@ -332,6 +331,9 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [installingDriver, setInstallingDriver] = useState<string | null>(null);
+  const [profilePath, setProfilePath] = useState('');
+  const [previewingProfiles, setPreviewingProfiles] = useState(false);
+  const [profileImportError, setProfileImportError] = useState<string | null>(null);
   // Prototype settings nav: Advanced (MCP/runtime) selection lives locally —
   // the store's SettingsTab only knows database/ai/memory.
   const [advancedView, setAdvancedView] = useState<'advanced' | null>(null);
@@ -411,21 +413,6 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     setEditName('');
     setEditDriver('duckdb');
     setEditFields({});
-  };
-
-  const startAddFromDbtProfile = (profile: DbtProfileConnectionCandidate) => {
-    setAddingNew(true);
-    setEditing(null);
-    setEditName(connectionNameFromProfile(profile));
-    setEditDriver(normalizeDriverName(String(profile.connection.driver ?? profile.adapter ?? 'duckdb')));
-    const fields: Record<string, string> = {};
-    Object.entries(profile.connection ?? {}).forEach(([key, value]) => {
-      if (key !== 'driver' && value !== undefined && value !== null) {
-        fields[normalizeFieldName(key)] = String(value);
-      }
-    });
-    setEditFields(fields);
-    setTestResult(null);
   };
 
   const cancelEdit = () => {
@@ -514,6 +501,48 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       setSaving(false);
     }
     return ok;
+  };
+
+  const startAddFromDbtProfile = (profile: DbtProfileConnectionCandidate) => {
+    const driver = normalizeDriverName(String(profile.connection.driver ?? profile.adapter ?? 'duckdb'));
+    const fields = connectionFieldsFromProfile(profile);
+    setTestResult(null);
+
+    if (isPage) {
+      setPrimaryDriver(driver);
+      setPrimaryFields(fields);
+    }
+    setAddingNew(false);
+    setEditing(null);
+    void persistConnection({
+      name: connectionNameFromProfile(profile),
+      driver,
+      fields,
+      previousName: null,
+    });
+  };
+
+  const previewProfilePath = async () => {
+    const path = profilePath.trim();
+    if (!path) {
+      setProfileImportError('Enter a profiles.yml file or folder path.');
+      return;
+    }
+    setPreviewingProfiles(true);
+    setProfileImportError(null);
+    try {
+      const result = await api.previewDbtProfiles(path);
+      setInfo((current) => {
+        if (!current) return current;
+        const merged = new Map((current.dbtProfiles ?? []).map((profile) => [profile.id, profile]));
+        result.dbtProfiles.forEach((profile) => merged.set(profile.id, profile));
+        return { ...current, dbtProfiles: [...merged.values()] };
+      });
+    } catch (error) {
+      setProfileImportError(error instanceof Error ? error.message : 'Could not read that profiles.yml path.');
+    } finally {
+      setPreviewingProfiles(false);
+    }
   };
 
   const handleSave = () => persistConnection({
@@ -719,6 +748,34 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     </>
   );
 
+  const profilePathSection = (
+    <div style={{ ...card, marginBottom: 12 }}>
+      <div style={{ fontSize: 12, fontWeight: 650, color: t.textPrimary, fontFamily: t.font }}>Import dbt profiles.yml</div>
+      <div style={{ marginTop: 3, fontSize: 10.5, color: t.textMuted, lineHeight: 1.45, fontFamily: t.font }}>
+        Load a profiles.yml, profiles.yaml, profile.yml, or profile.yaml file. DuckDB, Snowflake, and Databricks targets are supported.
+      </div>
+      <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
+        <input
+          aria-label="dbt profile file or folder path"
+          value={profilePath}
+          onChange={(event) => setProfilePath(event.target.value)}
+          onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void previewProfilePath(); } }}
+          placeholder="~/.dbt/profiles.yml or /path/to/profile.yaml"
+          style={{ flex: 1, minWidth: 0, border: `1px solid ${t.inputBorder}`, borderRadius: 6, background: t.inputBg, color: t.textPrimary, padding: '7px 9px', fontSize: 11.5, fontFamily: t.fontMono, outline: 'none' }}
+        />
+        <button
+          type="button"
+          onClick={() => void previewProfilePath()}
+          disabled={previewingProfiles}
+          style={{ border: `1px solid ${t.btnBorder}`, borderRadius: 6, background: t.btnBg, color: t.textSecondary, padding: '0 11px', fontSize: 11, fontWeight: 650, fontFamily: t.font, cursor: previewingProfiles ? 'wait' : 'pointer' }}
+        >
+          {previewingProfiles ? 'Reading…' : 'Find profiles'}
+        </button>
+      </div>
+      {profileImportError ? <div role="alert" style={{ marginTop: 6, color: t.error, fontSize: 10.5, fontFamily: t.font }}>{profileImportError}</div> : null}
+    </div>
+  );
+
   const dbtProfilesSection = (
     <>
       {!addingNew && !editing && dbtProfileCandidates.length > 0 && (
@@ -757,17 +814,19 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                     </div>
                     <div style={{ fontSize: 10, color: ready ? t.success : t.warning, fontFamily: t.font, marginTop: 2 }}>
                       {ready
-                        ? activeFromProfile ? 'Active runtime connection · import to save' : 'Ready to test after import'
-                        : `Needs ${profile.missingFields.join(', ')}`}
+                        ? activeFromProfile ? 'Active runtime connection · import to save' : 'Ready to import and test'
+                        : `Imports now · needs ${profile.missingFields.join(', ')}`}
                     </div>
                   </div>
                   <button
                     onClick={() => startAddFromDbtProfile(profile)}
+                    disabled={saving}
+                    title={profile.warnings.join(' ') || undefined}
                     style={{
                       background: t.btnBg,
                       border: `1px solid ${t.btnBorder}`,
                       borderRadius: 4,
-                      cursor: 'pointer',
+                      cursor: saving ? 'wait' : 'pointer',
                       color: t.textSecondary,
                       fontSize: 11,
                       fontFamily: t.font,
@@ -775,7 +834,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                       flexShrink: 0,
                     }}
                   >
-                    Import
+                    Import & test
                   </button>
                 </div>
               );
@@ -1082,6 +1141,10 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
                     {testing ? 'Testing…' : 'Test connection'}
                   </button>
                 </div>
+                <div style={{ maxWidth: 640 }}>
+                  {profilePathSection}
+                  {dbtProfilesSection}
+                </div>
                 {/* Primary form — Warehouse select swaps fields + shows the
                     selected driver's catalog install status, then Save. */}
                 <DatabaseConnectionForm
@@ -1112,6 +1175,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   return (
     <PanelFrame title="Connections" bodyPadding={12}>
       {connectionListSection}
+      {profilePathSection}
       {dbtProfilesSection}
       {quickConnectSection}
       {addConnectionSection}
@@ -1309,15 +1373,35 @@ function ConnectionForm({
   );
 }
 
-// The prototype's "Database connection" form shows a compact set of essential
-// fields per warehouse and tucks the long tail (Snowflake auth options, proxy,
-// etc.) behind "Advanced options". These are the keys shown up front per driver;
-// everything else in the connector schema falls through to Advanced.
-const PRIMARY_FIELD_KEYS: Record<string, string[]> = {
-  duckdb: ['filepath'],
-  snowflake: ['account', 'warehouse', 'database', 'schema', 'username', 'authMethod', 'password', 'token', 'privateKeyPath', 'role'],
-  databricks: ['host', 'database', 'schema', 'warehouse', 'httpPath', 'authMethod', 'token'],
-};
+// Keep the manual enterprise path short: show shared connection context plus
+// the credentials for the selected auth method. Everything uncommon remains
+// available under Advanced options or is carried through untouched from dbt.
+function primaryFieldKeys(driver: string, fields: Record<string, string>): string[] {
+  if (driver === 'duckdb') return ['filepath'];
+  if (driver === 'databricks') return ['host', 'httpPath', 'database', 'schema', 'authMethod', 'token'];
+  if (driver !== 'snowflake') return [];
+
+  const common = ['account', 'warehouse', 'database', 'schema', 'username', 'authMethod'];
+  switch (fields.authMethod || 'password') {
+    case 'key_pair':
+      return [...common, 'privateKeyPath', 'privateKey', 'privateKeyPassphrase'];
+    case 'external_browser':
+      return common;
+    case 'oauth':
+    case 'programmatic_access_token':
+      return [...common, 'token'];
+    case 'oauth_authorization_code':
+      return [...common, 'oauthClientId', 'oauthClientSecret'];
+    case 'oauth_client_credentials':
+      return [...common, 'oauthClientId', 'oauthClientSecret', 'oauthTokenRequestUrl'];
+    case 'workload_identity':
+      return [...common, 'workloadIdentityProvider', 'token'];
+    case 'mfa':
+      return [...common, 'password', 'passcode'];
+    default:
+      return [...common, 'password'];
+  }
+}
 
 // Fields that should span the full form width rather than sit in the 2-col grid.
 const FULL_WIDTH_FIELDS = new Set(['filepath', 'httpPath', 'accessUrl']);
@@ -1350,7 +1434,7 @@ function DatabaseConnectionForm({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const schema = CONNECTOR_SCHEMA_BY_DRIVER[driver];
   const allFields = schema?.fields ?? [];
-  const primaryKeys = PRIMARY_FIELD_KEYS[driver] ?? allFields.filter((f) => f.required).map((f) => f.key);
+  const primaryKeys = primaryFieldKeys(driver, fields);
   const primaryKeySet = new Set(primaryKeys);
   // Preserve the schema's declared order within each group.
   const primaryFields = allFields.filter((f) => primaryKeySet.has(f.key));

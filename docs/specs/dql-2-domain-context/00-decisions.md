@@ -13,6 +13,7 @@ an acceptance-matrix update.
 | ID-001 | Every domain-owned object has a domain-qualified compiled identity. |
 | DOM-001 | Domains own semantics and governance, not physical dbt schema. |
 | DOM-002 | Domain hierarchy scopes organization/retrieval; it grants no join or access rights. |
+| DOM-003 | A domain may contain multiple focused Model Areas; Areas compile into one domain graph and never become a second semantic model or authorization boundary. |
 | PRD-001 | Apps, Ask, and Notebooks remain global shared product surfaces. |
 | PRD-002 | Domain Studio shows Apps/Notebooks as Related Products backlinks. |
 | PRD-003 | Global products declare owner/used domains and required exports. |
@@ -24,6 +25,7 @@ an acceptance-matrix update.
 | SKILL-002 | Skill exclusions are negative constraints and never positive retrieval tokens. |
 | CTX-001 | One server-resolved `DomainContextEnvelope` scopes every governed answer. |
 | CTX-002 | One immutable `snapshotId` is used from retrieval through final validation. |
+| CTX-004 | Model Area identity is domain-qualified; explicit or inferred Area focus narrows modeling and Skill retrieval inside its owning domain. |
 | AGT-001 | Route order is certified block, MetricFlow, governed generation, clarify/refuse. |
 | AGT-002 | AI discovery produces evidence-cited drafts only and never auto-certifies. |
 | AGT-003 | Ask is available before domain setup only in limited-context, review-required mode. |
@@ -35,6 +37,7 @@ an acceptance-matrix update.
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
 | UI-005 | App Copilot uses the canonical App run context and cannot mutate an App without an explicit previewed user action. |
+| UI-006 | Domain Studio presents the nested Domain Package hierarchy and focused Areas with shareable deep links; Ask visibly preserves and can clear the selected Area context. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
@@ -43,6 +46,7 @@ an acceptance-matrix update.
 | E2E-001 | Release requires CLI-backed browser, agent-eval, migration, performance, and embed-contract proof. |
 | E2E-002 | Release proves certified-first App planning, semantic fallback, atomic commit, filter-consistent multi-tile stories, stale-response rejection, and deterministic no-provider fallback in the built CLI UI. |
 | E2E-003 | Release proves colocated and external dbt repositories, canonical and compatibility profile filenames, existing connection preservation, profile-backed runtime execution, and manifest-v3 Domain Studio compilation. |
+| E2E-004 | Release proves duplicate local Area IDs across domains, explicit and inferred Area focus, Area-scoped Skills, hierarchy/deep-link round trips, and bounded context reduction in the built CLI. |
 
 ## OSS and Cloud boundary
 

@@ -51,6 +51,7 @@ export {
   upsertSkill,
   deleteSkill,
   migrateLegacySkills,
+  configuredSkillsPath,
   skillsDir,
   legacySkillsDir,
   skillPath,

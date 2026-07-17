@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildLocalContextPack,
+  buildMetadataSnapshot,
   defaultMetadataPath,
   ensureMetadataCatalogFresh,
   MetadataCatalog,
@@ -11,9 +12,10 @@ import {
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
   recordQueryRun,
+  upsertMetadataSnapshot,
 } from './catalog.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
-import { resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
+import { resolveSemanticLayerWithDiagnostics, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { recordCorrectionTrace, reviewHint } from '../hints/git-store.js';
 import { defaultKgPath, reindexProject } from '../index.js';
 import { KGStore } from '../kg/sqlite-fts.js';
@@ -275,6 +277,78 @@ Use player scoring facts with a revised tie-break rule.
     const second = await reindexProject(projectRoot);
     expect(second.metadataRefreshed).toBe(true);
     expect(second.metadataFingerprint).not.toBe(first.metadataFingerprint);
+  });
+
+  it('CTX-004 indexes Model Areas, scopes Skills, and infers a focused Area inside the active domain', async () => {
+    mkdirSync(join(projectRoot, 'skills'), { recursive: true });
+    writeFileSync(join(projectRoot, 'skills', 'scoring.skill.md'), `---
+id: scoring-guide
+domain: nba
+model_areas: [scoring]
+description: Explain player points and scoring leaderboards.
+triggers: [points, scoring, leaders]
+---
+Use the scoring model area.
+`, 'utf-8');
+    writeFileSync(join(projectRoot, 'skills', 'finance.skill.md'), `---
+id: finance-guide
+domain: nba
+model_areas: [finance]
+description: Explain salary and payroll spending.
+triggers: [salary, payroll, spending]
+---
+Use the finance model area.
+`, 'utf-8');
+
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
+      domains: { nba: { id: 'nba', name: 'NBA', filePath: 'domains/nba/domain.dql' } },
+      blocks: {}, businessViews: {}, terms: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {}, sources: {},
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'area-snapshot', nodes: {}, metricFlow: {} },
+      modeling: {
+        mode: 'dbt-first',
+        packages: { nba: { id: 'nba', filePath: 'domains/nba/domain.dql', exports: [] } },
+        areas: {
+          'nba::model_area::scoring': {
+            id: 'nba::model_area::scoring', localId: 'scoring', qualifiedId: 'nba::model_area::scoring', domain: 'nba', name: 'Player scoring',
+            description: 'Points, scoring leaders, and player performance.', intentExamples: ['Who leads the league in points?'],
+            entityIds: ['nba::entity::performance'], relationshipIds: [], referencedEntityIds: [], sourcePath: 'domains/nba/modeling/areas/scoring.dql.yaml',
+          },
+          'nba::model_area::finance': {
+            id: 'nba::model_area::finance', localId: 'finance', qualifiedId: 'nba::model_area::finance', domain: 'nba', name: 'Team finance',
+            description: 'Salary, payroll, and team spending.', intentExamples: ['Which team has the largest payroll?'],
+            entityIds: [], relationshipIds: [], referencedEntityIds: [], sourcePath: 'domains/nba/modeling/areas/finance.dql.yaml',
+          },
+        },
+        entities: {
+          'nba::entity::performance': {
+            id: 'nba::entity::performance', localId: 'performance', qualifiedId: 'nba::entity::performance', domain: 'nba',
+            areaId: 'nba::model_area::scoring', dbtUniqueId: 'model.nba.performance', keys: [], sourcePath: 'domains/nba/modeling/areas/scoring.dql.yaml', identityFingerprint: 'p',
+          },
+        },
+        relationships: {}, contracts: {}, conformance: {}, rules: {}, interfaces: { exports: {}, imports: {} }, domainLineage: [],
+      },
+    } as unknown as DQLManifest;
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest);
+    upsertMetadataSnapshot(projectRoot, snapshot);
+
+    const explicit = await buildLocalContextPack(projectRoot, {
+      question: 'Who are the points leaders?', preparedMetadataFingerprint: snapshot.fingerprint,
+      domainContext: { activeDomain: 'nba', ancestors: [], allowedImports: [], modelAreaId: 'nba::model_area::scoring', source: 'explicit_api', confidence: 'high', snapshotId: 'area-snapshot' },
+    });
+    expect(explicit.retrievalDiagnostics).toMatchObject({ focusedModelAreaId: 'nba::model_area::scoring', modelAreaSource: 'explicit' });
+    expect(explicit.objects.map((object) => object.objectType)).toContain('model_area');
+    expect(explicit.objects.map((object) => object.objectKey)).toContain('semantic:entity:performance');
+    expect(explicit.skills.map((skill) => skill.id)).toEqual(['scoring-guide']);
+
+    const inferred = await buildLocalContextPack(projectRoot, {
+      question: 'Which team has the largest salary payroll spending?', preparedMetadataFingerprint: snapshot.fingerprint,
+      domainContext: { activeDomain: 'nba', ancestors: [], allowedImports: [], source: 'explicit_api', confidence: 'high', snapshotId: 'area-snapshot' },
+    });
+    expect(inferred.retrievalDiagnostics).toMatchObject({ focusedModelAreaId: 'nba::model_area::finance', modelAreaSource: 'inferred' });
+    expect(inferred.skills.map((skill) => skill.id)).toEqual(['finance-guide']);
   });
 
   it('lets reindexProject skip unchanged KG rebuilds by graph fingerprint', async () => {

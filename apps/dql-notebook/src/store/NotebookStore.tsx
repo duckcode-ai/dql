@@ -44,8 +44,16 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
   return 'paper';
 }
 
+function readInitialMainView(): NotebookState['mainView'] {
+  if (typeof window === 'undefined') return 'apps';
+  const params = new URLSearchParams(window.location.search);
+  return params.has('domain') || params.has('domainSection') || params.has('modelArea')
+    ? 'domains'
+    : 'apps';
+}
+
 const initialState: NotebookState = {
-  mainView: 'apps',
+  mainView: readInitialMainView(),
   agentLogRun: undefined,
   settingsTab: 'database',
   themeMode: readInitialThemeMode(),

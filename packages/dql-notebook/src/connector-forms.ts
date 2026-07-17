@@ -95,13 +95,13 @@ const schemas: ConnectorFormSchema[] = [
     driver: 'databricks',
     label: 'Databricks SQL',
     category: 'lakehouse',
-    description: 'Databricks SQL warehouse hostname, path, and access token.',
+    description: 'Databricks workspace, SQL warehouse, and bearer token.',
     fields: [
-      { key: 'host', label: 'Server hostname', type: 'text', required: true },
+      { key: 'host', label: 'Workspace URL', type: 'text', required: true, placeholder: 'https://adb-123.cloud.databricks.com' },
       { key: 'database', label: 'Catalog / database', type: 'text' },
       { key: 'schema', label: 'Schema', type: 'text' },
       { key: 'warehouse', label: 'Warehouse ID', type: 'text', helpText: 'Use the SQL warehouse ID when you have it.' },
-      { key: 'httpPath', label: 'HTTP path', type: 'text', placeholder: '/sql/1.0/warehouses/abc123', helpText: 'Paste the dbt/JDBC HTTP path and DQL will extract the warehouse ID.' },
+      { key: 'httpPath', label: 'SQL warehouse ID or path', type: 'text', placeholder: '/sql/1.0/warehouses/abc123', helpText: 'Paste the warehouse ID or its JDBC/HTTP path.' },
       {
         key: 'authMethod',
         label: 'Authentication',

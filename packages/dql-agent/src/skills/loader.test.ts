@@ -61,6 +61,21 @@ Body content.`;
 });
 
 describe('loadSkills', () => {
+  it('loads and writes Skills from layout.skillsPath relative to the DQL project', () => {
+    const repoRoot = join(root, 'dbt-repo');
+    const dqlRoot = join(repoRoot, 'dql');
+    const sharedSkills = join(repoRoot, 'skills');
+    mkdirSync(dqlRoot, { recursive: true });
+    mkdirSync(sharedSkills, { recursive: true });
+    writeFileSync(join(dqlRoot, 'dql.config.json'), JSON.stringify({ layout: { skillsPath: '../skills' } }), 'utf-8');
+    writeFileSync(join(sharedSkills, 'existing.skill.md'), '---\nid: existing\n---\nExisting dbt-repo guidance', 'utf-8');
+
+    expect(loadSkills(dqlRoot).skills.find((skill) => skill.id === 'existing')?.body).toBe('Existing dbt-repo guidance');
+    expect(skillPath(dqlRoot, 'new-guidance')).toBe(join(sharedSkills, 'new-guidance.skill.md'));
+    writeSkill(dqlRoot, { id: 'new-guidance', scope: 'project', body: 'New guidance' });
+    expect(existsSync(join(sharedSkills, 'new-guidance.skill.md'))).toBe(true);
+  });
+
   it('keeps the same local skill id in different Domain Packages collision-free', () => {
     for (const domain of ['commerce', 'growth']) {
       mkdirSync(join(root, 'domains', domain, 'skills'), { recursive: true });

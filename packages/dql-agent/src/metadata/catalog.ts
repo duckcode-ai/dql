@@ -489,6 +489,9 @@ export interface LocalContextPack {
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
     strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context' | 'full_catalog';
+    /** Qualified focused Model Area selected explicitly or inferred inside the active domain. */
+    focusedModelAreaId?: string;
+    modelAreaSource?: 'explicit' | 'inferred';
     /** How many times this pack lineage has been widened by expand_context. */
     regroundAttempts?: number;
     selectedObjects: number;
@@ -823,7 +826,15 @@ export async function buildLocalContextPack(
       buildFollowUpSearchQuery(request.question, followUp),
       ...questionPlan.searchQueries,
     ]);
-    const scopeObjects = (rows: MetadataObject[]) => filterMetadataObjectsByDomainContext(rows, request.domainContext);
+    const areaObjects = filterMetadataObjectsByDomainContext(
+      catalog.listObjects({ objectTypes: ['model_area'], limit: 500 }),
+      request.domainContext,
+    );
+    const focusedArea = resolveFocusedModelArea(request.domainContext, request.question, areaObjects);
+    const effectiveDomainContext = focusedArea && request.domainContext
+      ? { ...request.domainContext, modelAreaId: focusedArea.id }
+      : request.domainContext;
+    const scopeObjects = (rows: MetadataObject[]) => filterMetadataObjectsByDomainContext(rows, effectiveDomainContext);
     // Skill guidance is injected only through selectContextPackSkills below.
     // Leaving it in generic FTS results would bypass status/domain/area/exclusion
     // eligibility simply because a word in its body matched the question.
@@ -841,10 +852,11 @@ export async function buildLocalContextPack(
     const exact = exactCandidate && retrievalObjects([exactCandidate]).length > 0 ? exactCandidate : null;
     const ranked = rankMetadataObjects({
       rows: retrievalObjects(mergeObjects(exact
-        ? [exact, ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]
-        : [...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects])),
+        ? [exact, ...(focusedArea ? [focusedArea.object] : []), ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects]
+        : [...(focusedArea ? [focusedArea.object] : []), ...followUpSourceObjects, ...followUpObjects, ...searchRows, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects, ...priorSeedObjects])),
       question: searchQueries.join(' '),
       questionPlan,
+      modelAreaId: focusedArea?.id,
       limit: request.limit ?? 80,
     });
     // Advisory 'contextual' carry: the prior turn's block competes on rank (it is
@@ -861,6 +873,7 @@ export async function buildLocalContextPack(
       rows: retrievalObjects(mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects])),
       question: searchQueries.join(' '),
       questionPlan,
+      modelAreaId: focusedArea?.id,
       limit: request.limit ?? 120,
     }).selected;
     const sqlParentObjects = sqlParentObjectsForSelectedColumns(
@@ -881,7 +894,7 @@ export async function buildLocalContextPack(
     const selectedSkills = selectContextPackSkills(
       catalog.listObjects({ objectTypes: ['skill'], limit: 500 }),
       request.question,
-      request.domainContext,
+      effectiveDomainContext,
     );
     const selectedSkillObjects = selectedSkills.map((item) => item.object);
     const objects = fullCatalogObjects
@@ -918,6 +931,7 @@ export async function buildLocalContextPack(
       rows: retrievalObjects(mergeObjects([...searchRows, ...schemaShapeObjects, ...objects])),
       question: searchQueries.join(' '),
       questionPlan,
+      modelAreaId: focusedArea?.id,
       limit: request.limit ?? 120,
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
@@ -974,6 +988,8 @@ export async function buildLocalContextPack(
       hintConflicts: hintResult.conflicts,
       retrievalDiagnostics: {
         strategy: usedFullCatalog ? 'full_catalog' : 'sqlite_fts',
+        focusedModelAreaId: focusedArea?.id,
+        modelAreaSource: focusedArea?.source,
         selectedObjects: objects.length,
         selectedEvidence: reranked.ranked.slice(0, 20).map((item) => ({
           objectKey: item.row.objectKey,
@@ -2041,6 +2057,7 @@ function manifestDiagnosticToMetadataDiagnostic(diagnostic: ManifestDiagnostic):
 
 function objectFromKGNode(node: KGNode): MetadataObject {
   const payload: Record<string, unknown> = {
+    ...(node.payload ?? {}),
     kgNodeId: node.nodeId,
     tags: node.tags ?? [],
     examples: node.examples ?? [],
@@ -5779,6 +5796,7 @@ function rankMetadataObjects(args: {
   rows: MetadataObject[];
   question: string;
   questionPlan?: AnalysisQuestionPlan;
+  modelAreaId?: string;
   limit: number;
 }): {
   selected: MetadataObject[];
@@ -5789,12 +5807,13 @@ function rankMetadataObjects(args: {
   const scored = mergeObjects(args.rows).map((row) => {
     const baseScore = scoreMetadataObject(row, terms);
     const planScore = args.questionPlan ? scoreMetadataObjectWithAnalysisPlan(row, args.questionPlan) : { score: 0, reasons: [] };
-    const score = Number((baseScore + planScore.score).toFixed(3));
+    const areaScore = modelAreaAffinityScore(row, args.modelAreaId);
+    const score = Number((baseScore + planScore.score + areaScore).toFixed(3));
     return {
       row,
       rank: 0,
       score,
-      reason: selectionReason(row, score, planScore.reasons),
+      reason: selectionReason(row, score, areaScore > 0 ? [...planScore.reasons, 'focused Model Area match'] : planScore.reasons),
       priorityTier: priorityTier(row),
     };
   });
@@ -5820,6 +5839,15 @@ function rankMetadataObjects(args: {
       rejectedRank: item.rank,
     })),
   };
+}
+
+function modelAreaAffinityScore(row: MetadataObject, modelAreaId: string | undefined): number {
+  if (!modelAreaId) return 0;
+  const qualifiedId = stringValue(row.payload?.qualifiedId);
+  const areaId = stringValue(row.payload?.areaId);
+  if (row.objectType === 'model_area' && qualifiedId === modelAreaId) return 48;
+  if (areaId === modelAreaId) return 30;
+  return 0;
 }
 
 function selectRankedMetadataObjects(ranked: RankedMetadataObject[], limit: number): RankedMetadataObject[] {
@@ -5911,6 +5939,34 @@ function reasonForObject(row: MetadataObject): string {
   if (row.objectType.startsWith('dbt_') || row.objectType === 'warehouse_table' || row.objectType === 'warehouse_column') return 'dbt or warehouse metadata supplies physical context';
   if (row.objectType === 'app' || row.objectType === 'dashboard') return 'Published consumption context';
   return 'Relevant project metadata';
+}
+
+function resolveFocusedModelArea(
+  context: DomainContextEnvelope | undefined,
+  question: string,
+  areaObjects: MetadataObject[],
+): { id: string; object: MetadataObject; source: 'explicit' | 'inferred' } | undefined {
+  if (!context?.activeDomain) return undefined;
+  const candidates = areaObjects.filter((object) => object.objectType === 'model_area' && object.domain === context.activeDomain);
+  if (context.modelAreaId) {
+    const object = candidates.find((candidate) => stringValue(candidate.payload?.qualifiedId) === context.modelAreaId);
+    return object ? { id: context.modelAreaId, object, source: 'explicit' } : undefined;
+  }
+  const terms = tokenize(question);
+  if (terms.length === 0) return undefined;
+  const ranked = candidates.map((object) => {
+    const searchable = [
+      object.name,
+      object.description ?? '',
+      ...metadataStringArray(object.payload?.intentExamples),
+    ].join(' ');
+    return { object, score: scoreText(searchable, terms) };
+  }).sort((a, b) => b.score - a.score || a.object.name.localeCompare(b.object.name));
+  const first = ranked[0];
+  const second = ranked[1];
+  if (!first || first.score < 1 || (second && first.score === second.score)) return undefined;
+  const id = stringValue(first.object.payload?.qualifiedId);
+  return id ? { id, object: first.object, source: 'inferred' } : undefined;
 }
 
 function filterMetadataObjectsByDomainContext(rows: MetadataObject[], context?: DomainContextEnvelope): MetadataObject[] {

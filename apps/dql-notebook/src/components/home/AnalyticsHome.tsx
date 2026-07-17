@@ -150,7 +150,7 @@ function relativeTime(iso: string): string {
 export function AnalyticsHome() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const [domainContext] = useState(() => consumePendingDomainContext());
+  const [domainContext, setDomainContext] = useState(() => consumePendingDomainContext());
 
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
   // Keep the selected thread across a page remount/reload. The panel's pending-run
@@ -267,7 +267,8 @@ export function AnalyticsHome() {
           themeMode={state.themeMode}
           title="Ask your data"
           askLayout
-          scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ' model area' : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
+          scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ` · ${domainContext.modelAreaId.split('::').at(-1)?.replace(/_/g, ' ')}` : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
+          onClearScope={domainContext ? () => setDomainContext(undefined) : undefined}
           workspaceContext={domainContext}
           audience="stakeholder"
           initialMode="auto"

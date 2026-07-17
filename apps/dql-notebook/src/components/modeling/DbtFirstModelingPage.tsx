@@ -6,7 +6,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
-import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
+import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
@@ -36,8 +36,8 @@ export function DbtFirstModelingPage() {
   const initialLocation = useMemo(() => readDomainStudioLocation(), []);
   const [tab, setTab] = useState<Tab>(initialLocation.section);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialLocation.domain);
-  const [selectedAreaId, setSelectedAreaId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedAreaId, setSelectedAreaId] = useState<string | null>(initialLocation.modelAreaId);
+  const [selectedId, setSelectedId] = useState<string | null>(initialLocation.selectedId);
   const [nodeDetail, setNodeDetail] = useState<DbtNodeAuthoringDetail | null>(null);
   const [detailsByDbtId, setDetailsByDbtId] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
   const detailRequests = useRef(new Map<string, Promise<DbtNodeAuthoringDetail | undefined>>());
@@ -84,26 +84,29 @@ export function DbtFirstModelingPage() {
       return;
     }
     setTab(section);
-    writeDomainStudioLocation(selectedDomain, section);
-  }, [dispatch, selectedDomain]);
+    writeDomainStudioLocation(selectedDomain, section, false, selectedAreaId, selectedId);
+  }, [dispatch, selectedAreaId, selectedDomain, selectedId]);
   const selectDomain = useCallback((domain: string | null) => {
     setSelectedDomain(domain);
     setSelectedAreaId(null);
     setSelectedId(null);
-    writeDomainStudioLocation(domain, tab);
+    writeDomainStudioLocation(domain, tab, false, null, null);
   }, [tab]);
 
   useEffect(() => {
     const onPopState = () => {
       const next = readDomainStudioLocation();
       setSelectedDomain(next.domain);
-      setSelectedAreaId(null);
-      setSelectedId(null);
+      setSelectedAreaId(next.modelAreaId);
+      setSelectedId(next.selectedId);
       setTab(next.section);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
+  useEffect(() => {
+    writeDomainStudioLocation(selectedDomain, tab, true, selectedAreaId, selectedId);
+  }, [selectedAreaId, selectedDomain, selectedId, tab]);
 
   const refresh = async () => {
     setLoading(true);
@@ -133,8 +136,9 @@ export function DbtFirstModelingPage() {
   );
   const selectedArea = data?.modeling.areas[selectedAreaId ?? ''];
   useEffect(() => {
+    if (!data) return;
     if (selectedAreaId && !domainAreas.some((area) => area.qualifiedId === selectedAreaId)) setSelectedAreaId(null);
-  }, [domainAreas, selectedAreaId]);
+  }, [data, domainAreas, selectedAreaId]);
   const loadNodeDetail = useCallback((uniqueId: string): Promise<DbtNodeAuthoringDetail | undefined> => {
     const active = detailRequests.current.get(uniqueId);
     if (active) return active;
@@ -290,7 +294,7 @@ export function DbtFirstModelingPage() {
               Domain
               <select aria-label="Active domain" value={selectedDomain ?? ''} onChange={(event) => selectDomain(event.target.value || null)} style={{ ...inputStyle(t), minHeight: 32, padding: '6px 8px' }}>
                 <option value="">All domains</option>
-                {sortDomainPackages(data.modeling.packages).map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.id}</option>)}
+                {domainPackageTree(data.modeling.packages).map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.label}</option>)}
               </select>
             </label>
           </div>
@@ -337,7 +341,20 @@ export function DbtFirstModelingPage() {
             <strong style={{ fontSize: 11 }}>{domainStudioSectionLabel(tab)}</strong>
             <span style={{ width: 1, height: 15, background: t.headerBorder }} />
             <span style={{ color: t.textMuted, fontSize: 10 }}>{selectedDomain ?? 'All domains'}</span>
-            {tab === 'diagram' && selectedDomain && <label style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 5, color: t.textMuted, fontSize: 10 }}>Area <select aria-label="Active model area" value={selectedAreaId ?? ''} onChange={(event) => { setSelectedAreaId(event.target.value || null); setSelectedId(null); }} style={{ ...inputStyle(t), minWidth: 146, padding: '4px 6px' }}><option value="">All domain</option>{domainAreas.map((area) => <option key={area.qualifiedId} value={area.qualifiedId}>{area.name}</option>)}</select></label>}
+            {(tab === 'diagram' || tab === 'skills') && selectedDomain && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 5 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}>
+                  Area
+                  <select aria-label="Active model area" value={selectedAreaId ?? ''} onChange={(event) => { setSelectedAreaId(event.target.value || null); setSelectedId(null); }} style={{ ...inputStyle(t), minWidth: 146, padding: '4px 6px' }}>
+                    <option value="">All domain</option>
+                    {domainAreas.map((area) => <option key={area.qualifiedId} value={area.qualifiedId}>{area.name}</option>)}
+                  </select>
+                </label>
+                <button aria-label="Add model area" title="Add model area" onClick={() => setEditor({ kind: 'area' })} style={{ ...iconButtonStyle(t), width: 27, height: 27 }}>
+                  <Plus size={13} />
+                </button>
+              </div>
+            )}
             {tab === 'diagram' && <button ref={inspectorToggleRef} aria-expanded={inspectorOpen} aria-controls="domain-studio-inspector" aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'} title={inspectorOpen ? 'Hide inspector' : 'Show inspector'} onClick={toggleInspector} style={{ ...iconButtonStyle(t), marginLeft: 'auto' }}>
               {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
             </button>}
@@ -354,6 +371,7 @@ export function DbtFirstModelingPage() {
                 }}
               >
                 <LayerToolbar modelingView={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} totalEntities={selectedAreaEntityIds?.size ?? Object.keys(data.modeling.entities).length} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} showLegend={showLegend} fullscreen={diagramFullscreen} onBindModel={() => setEditor({ kind: 'entity' })} onRelationship={() => setEditor({ kind: 'relationship' })} onNewArea={() => setEditor({ kind: 'area' })} onModelingView={setModelingView} onColumnMode={setColumnMode} onSearch={setDiagramSearch} searchItems={diagramSearchItems} onPickModel={handlePickModel} onLayoutMode={setLayoutMode} onDensity={setDiagramDensity} onVisibleLimit={setVisibleLimit} onDimUnrelated={setDimUnrelated} onEdgeLabels={setShowEdgeLabels} onLegend={setShowLegend} onFullscreen={() => setDiagramFullscreen((value) => !value)} onExport={() => exportDiagramSvg()} onReset={() => setResetLayoutToken((value) => value + 1)} t={t} />
+                {selectedArea ? <div style={{ padding: '7px 14px', borderBottom: `1px solid ${t.headerBorder}`, background: 'var(--accent-dim)', color: t.textSecondary, display: 'flex', alignItems: 'center', gap: 8, fontSize: 10.5 }}><Boxes size={13} color={t.accent} /><strong style={{ color: t.textPrimary }}>{selectedArea.name}</strong><span>{selectedArea.description ?? 'Focused business modeling area'}</span><span style={{ marginLeft: 'auto', color: t.textMuted }}>{selectedArea.entityIds.length} model{selectedArea.entityIds.length === 1 ? '' : 's'} · {selectedArea.intentExamples.length} example question{selectedArea.intentExamples.length === 1 ? '' : 's'}</span></div> : null}
                 {showLegend && <DiagramLegend t={t} />}
                 <div style={{ flex: 1, minHeight: 0 }}>
                   <DomainModelingCanvas modeling={data.modeling} relationByDbtId={relationByDbtId} detailsByDbtId={detailsByDbtId} selectedDomain={selectedDomain} selectedAreaId={selectedAreaId} selectedId={selectedId} viewMode={modelingView} columnMode={columnMode} search={diagramSearch} layoutMode={layoutMode} density={diagramDensity} visibleLimit={visibleLimit} dimUnrelated={dimUnrelated} showEdgeLabels={showEdgeLabels} resetLayoutToken={resetLayoutToken} focusRequest={focusRequest ?? undefined} onVisibleDbtIdsChange={loadVisibleNodeDetails} onSelectEntity={setSelectedId} onSelectRelationship={setSelectedId} onEditRelationship={(recordKey) => { const relationship = data.modeling.relationships[recordKey]; if (relationship) setEditor({ kind: 'relationship', relationship }); }} onDraftRelationship={(draft) => setEditor({ kind: 'relationship', draft })} onAddRelatedModel={(origin) => setEditor({ kind: 'entity', relationshipFrom: origin })} onDropDbtModel={(dbtUniqueId) => setEditor({ kind: 'entity', dbtUniqueId })} onCreateDomain={() => setEditor({ kind: 'domain' })} onEditEntity={(id) => { const entity = data.modeling.entities[id]; if (entity) setEditor({ kind: 'entity', entity, dbtUniqueId: entity.dbtUniqueId }); }} onOpenAi={(id) => { setSelectedId(id); selectSection('ai'); }} theme={t} />
@@ -361,7 +379,7 @@ export function DbtFirstModelingPage() {
               </div>
             )}
             {tab === 'terms' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['terms']} title="Domain terms" detail="Business vocabulary owned by this domain and available to governed retrieval." t={t} />}
-            {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} />}
+            {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} modelAreaFilter={selectedAreaId} />}
             {tab === 'blocks' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['blocks']} title="Certified blocks" detail="Reusable analytical building blocks governed by this domain." t={t} />}
             {tab === 'views' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['views']} title="Business views" detail="Domain-owned business views that compose governed models and blocks." t={t} />}
             {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} selectedId={selectedId} data={data} t={t} onOpenSkills={() => selectSection('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship', draft: selectedEntity && selectedId ? { from: selectedId, to: '' } : undefined })} />}
@@ -496,23 +514,21 @@ function domainStudioSectionLabel(section: Tab): string {
   return DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items).find((item) => item.id === section)?.label ?? section;
 }
 
-function readDomainStudioLocation(): { domain: string | null; section: Tab } {
-  if (typeof window === 'undefined') return { domain: null, section: 'diagram' };
+function readDomainStudioLocation(): { domain: string | null; section: Tab; modelAreaId: string | null; selectedId: string | null } {
+  if (typeof window === 'undefined') return { domain: null, section: 'diagram', modelAreaId: null, selectedId: null };
   const params = new URL(window.location.href).searchParams;
   const section = params.get('domainSection');
   return {
     domain: params.get('domain'),
     section: isDomainStudioSection(section) ? section : 'diagram',
+    modelAreaId: params.get('modelArea'),
+    selectedId: params.get('domainObject'),
   };
 }
 
-function writeDomainStudioLocation(domain: string | null, section: Tab, replace = false) {
+function writeDomainStudioLocation(domain: string | null, section: Tab, replace = false, modelAreaId: string | null = null, selectedId: string | null = null) {
   if (typeof window === 'undefined') return;
-  const url = new URL(window.location.href);
-  if (domain) url.searchParams.set('domain', domain);
-  else url.searchParams.delete('domain');
-  url.searchParams.set('domainSection', section);
-  const next = `${url.pathname}${url.search}${url.hash}`;
+  const next = domainStudioLocationHref(window.location.href, { domain, section, modelAreaId, selectedId });
   if (replace) window.history.replaceState(window.history.state, '', next);
   else window.history.pushState(window.history.state, '', next);
 }
@@ -2335,21 +2351,6 @@ function readDiagramPreferences(): Partial<{ viewMode: ModelingViewMode; columnM
   try { return JSON.parse(localStorage.getItem('dql-modeling-preferences') ?? '{}') as Partial<{ viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }>; }
   catch { return {}; }
 }
-function domainDepth(id: string, packages: DbtFirstModelingResponse['modeling']['packages']): number {
-  let depth = 0;
-  let current = packages[id]?.parent;
-  const seen = new Set<string>();
-  while (current && !seen.has(current)) {
-    seen.add(current);
-    depth += 1;
-    current = packages[current]?.parent;
-  }
-  return depth;
-}
-function sortDomainPackages(packages: DbtFirstModelingResponse['modeling']['packages']) {
-  return Object.values(packages).sort((a, b) => `${a.parent ?? ''}/${a.id}`.localeCompare(`${b.parent ?? ''}/${b.id}`));
-}
-
 const twoColumns: React.CSSProperties = {
   display: 'grid',
   gridTemplateColumns: '1fr 1fr',

@@ -55,6 +55,7 @@ import type {
   AiBuildTarget,
   AiBuildMode,
   Skill,
+  SkillPathSettings,
   Domain,
 } from '../store/types';
 
@@ -2250,6 +2251,34 @@ export interface DatasetSource {
   schemaOverrides?: Record<string, string>;
 }
 
+export interface DbtProfileConnectionCandidate {
+  id: string;
+  profileName: string;
+  targetName: string;
+  adapter: string;
+  path: string;
+  connection: Record<string, unknown>;
+  missingFields: string[];
+  warnings: string[];
+}
+
+export interface ConnectionsResponse {
+  default: string;
+  connections: Record<string, unknown>;
+  activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
+  connectorStatus?: Array<{
+    driver: 'duckdb' | 'snowflake' | 'databricks';
+    label: string;
+    packageName?: string;
+    packageSpec?: string;
+    installed: boolean;
+    builtIn: boolean;
+    installPath: string;
+    installCommand?: string;
+  }>;
+  dbtProfiles?: DbtProfileConnectionCandidate[];
+}
+
 export const api = {
   /** Read the compiled dbt-first overlay. dbt-owned details stay in dbt artifacts. */
   async getDbtFirstModeling(): Promise<DbtFirstModelingResponse | null> {
@@ -3610,60 +3639,19 @@ export const api = {
     }
   },
 
-  async getConnections(): Promise<{
-    default: string;
-    connections: Record<string, unknown>;
-    activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
-    connectorStatus?: Array<{
-      driver: 'duckdb' | 'snowflake' | 'databricks';
-      label: string;
-      packageName?: string;
-      packageSpec?: string;
-      installed: boolean;
-      builtIn: boolean;
-      installPath: string;
-      installCommand?: string;
-    }>;
-    dbtProfiles?: Array<{
-      id: string;
-      profileName: string;
-      targetName: string;
-      adapter: string;
-      path: string;
-      connection: Record<string, unknown>;
-      missingFields: string[];
-      warnings: string[];
-    }>;
-  }> {
+  async getConnections(): Promise<ConnectionsResponse> {
     try {
-      return await request<{
-        default: string;
-        connections: Record<string, unknown>;
-        activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
-        connectorStatus?: Array<{
-          driver: 'duckdb' | 'snowflake' | 'databricks';
-          label: string;
-          packageName?: string;
-          packageSpec?: string;
-          installed: boolean;
-          builtIn: boolean;
-          installPath: string;
-          installCommand?: string;
-        }>;
-        dbtProfiles?: Array<{
-          id: string;
-          profileName: string;
-          targetName: string;
-          adapter: string;
-          path: string;
-          connection: Record<string, unknown>;
-          missingFields: string[];
-          warnings: string[];
-        }>;
-      }>('/api/connections');
+      return await request<ConnectionsResponse>('/api/connections');
     } catch {
       return { default: 'unknown', connections: {} };
     }
+  },
+
+  async previewDbtProfiles(path: string): Promise<{ dbtProfiles: DbtProfileConnectionCandidate[] }> {
+    return request<{ dbtProfiles: DbtProfileConnectionCandidate[] }>('/api/connections/dbt-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    });
   },
 
   async saveConnections(
@@ -4946,6 +4934,19 @@ export const api = {
   /** List all skills (project + personal). → GET /api/skills */
   async getSkills(): Promise<{ skills: Skill[] }> {
     return request<{ skills: Skill[] }>('/api/skills');
+  },
+
+  /** Read the configured Git-backed Skills folder. */
+  async getSkillPathSettings(): Promise<SkillPathSettings> {
+    return request<SkillPathSettings>('/api/skills/settings');
+  },
+
+  /** Point Skills at an existing folder in this or the surrounding dbt repo. */
+  async updateSkillPath(path: string): Promise<SkillPathSettings> {
+    return request<SkillPathSettings>('/api/skills/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ path }),
+    });
   },
 
   /** Multi-select options for the preferred metrics/blocks fields. → GET /api/skills/options */

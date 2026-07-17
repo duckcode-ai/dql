@@ -409,8 +409,16 @@ describe('buildKGFromManifest', () => {
       modeling: {
         mode: 'dbt-first',
         packages: { commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] } },
+        areas: {
+          lifecycle: {
+            id: 'commerce::model_area::lifecycle', localId: 'lifecycle', qualifiedId: 'commerce::model_area::lifecycle',
+            domain: 'commerce', name: 'Customer lifecycle', description: 'Repeat purchase and retention questions.',
+            intentExamples: ['Which customers purchased again?'], entityIds: ['order'], relationshipIds: ['order_to_customer'],
+            referencedEntityIds: ['customer'], sourcePath: 'domains/commerce/modeling/areas/lifecycle.dql.yaml',
+          },
+        },
         entities: {
-          order: { id: 'order', domain: 'commerce', dbtUniqueId: 'model.shop.orders', grain: 'order_id', keys: ['customer_id'], sourcePath: 'entities', identityFingerprint: 'o' },
+          order: { id: 'order', domain: 'commerce', areaId: 'commerce::model_area::lifecycle', dbtUniqueId: 'model.shop.orders', grain: 'order_id', keys: ['customer_id'], sourcePath: 'entities', identityFingerprint: 'o' },
           customer: { id: 'customer', domain: 'commerce', dbtUniqueId: 'model.shop.customers', grain: 'customer_id', keys: ['customer_id'], sourcePath: 'entities', identityFingerprint: 'c' },
         },
         relationships: {
@@ -429,11 +437,14 @@ describe('buildKGFromManifest', () => {
 
     const graph = buildKGFromManifest(manifest);
     expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'model_area:commerce::model_area::lifecycle', name: 'Customer lifecycle', domain: 'commerce' }),
       expect.objectContaining({ nodeId: 'entity:order', payload: expect.objectContaining({ dbtUniqueId: 'model.shop.orders' }) }),
       expect.objectContaining({ nodeId: 'relationship:order_to_customer', certification: 'certified' }),
       expect.objectContaining({ nodeId: 'contract:revenue', certification: 'certified' }),
     ]));
     expect(graph.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ src: 'domain:commerce', dst: 'model_area:commerce::model_area::lifecycle', kind: 'contains' }),
+      expect.objectContaining({ src: 'model_area:commerce::model_area::lifecycle', dst: 'entity:order', kind: 'contains' }),
       expect.objectContaining({ src: 'entity:order', dst: 'relationship:order_to_customer', kind: 'proves_join' }),
       expect.objectContaining({ src: 'entity:order', dst: 'dbt_model:model.shop.orders', kind: 'binds_to' }),
     ]));

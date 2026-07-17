@@ -7,7 +7,7 @@ membership resolver, and deterministic qualified identities used by every later
 workstream.
 
 Acceptance IDs: `CFG-001`, `CFG-002`, `ID-001`, `DOM-001`, `DOM-002`,
-`PRD-003`.
+`DOM-003`, `PRD-003`, `CTX-004`.
 
 ## Required implementation
 
