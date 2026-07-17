@@ -1,22 +1,22 @@
-// Acceptance: PRD-001, CTX-001, AGT-005, AGT-006, E2E-001.
-// A connection-independent certified fixture for typed consumer input parity.
+// dql-format: 1
+
 block "Runtime Parameter Acceptance" {
   domain = "commerce"
   type = "custom"
   status = "certified"
   description = "Verifies that certified typed values rerun consistently across Ask, Apps, Notebooks, Block Studio, CLI, and MCP."
   owner = "commerce@company.test"
-  params {
-    category: string = "Beverage"
-    top_n: number = 10
-  }
   parameterPolicy {
     category = "dynamic"
     top_n = "dynamic"
   }
+  params {
+    category: string = "Beverage"
+    top_n: number = 10
+  }
   query = """
     SELECT
-      ${category} AS selected_category,
-      ${top_n} AS selected_limit
+    ${category} AS selected_category,
+    ${top_n} AS selected_limit
   """
 }
