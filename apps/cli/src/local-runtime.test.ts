@@ -408,7 +408,7 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
-  }, 30_000);
+  });
 });
 
 describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', () => {
@@ -645,7 +645,7 @@ describe('dbt-first onboarding runtime API', () => {
     } finally {
       await new Promise<void>((done) => server ? server.close(() => done()) : done());
     }
-  }, 30_000);
+  });
 
   it('reports disabled modeling separately from a missing dbt manifest (CFG-003, UI-007, E2E-003)', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-studio-disabled-'));
@@ -765,7 +765,7 @@ describe('dbt-first onboarding runtime API', () => {
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
-  }, 30_000);
+  });
 
   it('discovers evidence-cited domains, previews without writes, and applies only draft declarations', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-onboarding-domains-'));
