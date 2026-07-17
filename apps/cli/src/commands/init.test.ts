@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { runInit } from './init.js';
 import { loadSkills } from '@duckcodeailabs/dql-agent';
 
@@ -50,6 +50,22 @@ metrics:
 `;
 
 describe('runInit', () => {
+  it('prints project-local-safe next commands for existing-repo installs (E2E-005)', async () => {
+    const targetDir = mkdtempSync(join(tmpdir(), 'dql-init-commands-'));
+    const projectDir = join(targetDir, 'demo-project');
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      await runInit(projectDir, { ...INIT_FLAGS, format: 'text' });
+
+      const output = spy.mock.calls.flat().join('\n');
+      expect(output).toContain('npx dql doctor');
+      expect(output).toContain('npx dql notebook');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('scaffolds a domain-first OSS project with visible shared skills', async () => {
     const targetDir = mkdtempSync(join(tmpdir(), 'dql-init-'));
     const projectDir = join(targetDir, 'demo-project');

@@ -59,6 +59,7 @@ describe('runDoctor', () => {
     const output = spy.mock.calls.flat().join('\n');
     expect(output).toContain('DQL Doctor');
     expect(output).toContain('blocks/');
+    expect(output).toContain('npx dql notebook');
     expect(output).not.toContain('add duckdb for file/duckdb local preview support');
   });
 

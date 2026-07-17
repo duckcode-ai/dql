@@ -181,11 +181,14 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
   console.log('  Next steps:');
   const step = targetArg && targetArg !== '.' ? 1 : 0;
   if (step === 1) console.log(`    ${step}. cd ${targetArg}`);
-  console.log(`    ${step + 1}. dql doctor`);
-  console.log(`    ${step + 2}. dql notebook`);
+  // E2E-005: `npx dql` works for both project-local and global installs. A
+  // bare `dql` only works after a global install and was misleading for the
+  // recommended existing-repo `npm i -D` path.
+  console.log(`    ${step + 1}. npx dql doctor`);
+  console.log(`    ${step + 2}. npx dql notebook`);
   if (isDbt) {
-    console.log(`    ${step + 3}. dql compile .`);
-    console.log(`    ${step + 4}. dql sync dbt .`);
+    console.log(`    ${step + 3}. npx dql compile .`);
+    console.log(`    ${step + 4}. npx dql sync dbt .`);
   }
   console.log('');
 

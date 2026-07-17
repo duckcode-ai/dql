@@ -6,10 +6,22 @@ Use the CLI to scaffold projects, validate blocks, preview charts locally, and b
 
 ## Install
 
-For local preview with file/DuckDB-backed starter data, use Node 20 or 22 LTS. Node 23 is not supported for native local drivers. If you change Node versions after installing dependencies, rerun `npm install` or `pnpm install` so native modules are rebuilt for the active runtime.
+Use Node 20 or newer. If you change Node versions after installing native
+database drivers, reinstall those project-local dependencies for the active
+runtime.
 
 ```bash
-npm i -D @duckcodeailabs/dql-cli
+npm i -D @duckcodeailabs/dql-cli@latest
+npx dql --version
+```
+
+Project-local installation is recommended for existing repositories. npm puts
+the executable in `node_modules/.bin`, so use `npx dql ...` or the repository's
+`npm run ...` scripts. A bare shell command requires a global installation:
+
+```bash
+npm i -g @duckcodeailabs/dql-cli@latest
+dql --version
 ```
 
 Or run it without adding a dependency:

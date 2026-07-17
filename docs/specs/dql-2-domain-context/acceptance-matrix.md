@@ -11,6 +11,7 @@ integrator sets `verified`.
 | CFG-001 | New dbt init produces v3/dbt-first without copying dbt facts. | 03 | W03 | specified | — |
 | CFG-002 | Existing projects are never silently upgraded. | 03, 08 | W06 | specified | — |
 | CFG-003 | Configured local/Git dbt paths drive profile discovery, runtime connection fallback, artifacts, snapshots, and Domain Studio without overwriting existing DQL connections. | 03, 07 | W02/W03 | implemented | `apps/cli/src/local-runtime.ts`, `apps/cli/src/local-runtime.test.ts`, `apps/dql-notebook/src/components/modals/SetupOnboarding.tsx` |
+| CFG-004 | One redacted provider contract drives Setup, Settings, Home, and runtime readiness; enterprise draft values use governed adapters; secrets are never returned and blank keys preserve stored values. | 03, 07 | W03/W05 | implemented | `apps/cli/src/settings/provider-settings.ts`, `apps/cli/src/local-runtime.ts`, `apps/cli/src/local-runtime.test.ts`, `apps/dql-notebook/src/components/settings/SettingsPage.tsx` |
 | ID-001 | Same local IDs in different domains compile and retrieve without collision. | 02 | W01 | specified | — |
 | DOM-001 | Domain source contains only sparse analytical assertions. | 02, 04 | W01 | specified | — |
 | DOM-002 | Parent/child domain relation grants no implicit join/import. | 02, 04 | W01 | specified | — |
@@ -47,6 +48,7 @@ integrator sets `verified`.
 | UI-004 | Generated Apps show an apply/reset filter row, live Business Story row, KPI band, analyses, details, and reviewer appendix in that order. | 01, 05 | W05 | implemented | `apps/dql-notebook/src/components/apps/AppsView.tsx`, `apps/dql-notebook/src/components/apps/DashboardRenderer.tsx` |
 | UI-005 | App Copilot receives canonical App run context, supports close/expand consistently, and performs no silent App mutation. | 05, 07 | W05 | implemented | `apps/dql-notebook/src/components/apps/DashboardRenderer.tsx`, `apps/cli/src/apps-api.ts` |
 | UI-006 | Domain Studio hierarchy, Area-aware Skills, Ask scope, and URL deep links round-trip in the built CLI. | 05 | W05 | implemented | `apps/dql-notebook/src/components/modeling/DbtFirstModelingPage.tsx`, `apps/dql-notebook/src/components/skills/SkillsPage.tsx`, `apps/dql-notebook/src/components/home/AnalyticsHome.tsx` |
+| UI-007 | Govern contains one Settings hub; Guided Setup launches from it and once per project on first install/version change, embedding the same dbt, database, and provider editors with optional-AI behavior and truthful states. | 03, 05 | W03/W05 | implemented | `apps/cli/src/local-runtime.ts`, `apps/dql-notebook/src/components/shell/AppShell.tsx`, `apps/dql-notebook/src/components/panels/ConnectionPanel.tsx`, `apps/dql-notebook/src/components/settings/DbtProjectEditor.tsx`, `apps/dql-notebook/src/components/modals/SetupOnboarding.tsx` |
 | MIG-001 | v2 and legacy product/modeling layouts remain readable through 3.x. | 08 | W06 | specified | — |
 | MIG-002 | Migration is deterministic/idempotent, loss-reporting, lifecycle-preserving. | 08 | W06 | specified | — |
 | PERF-001 | Reference scale fixture meets every recorded budget. | 07, 09 | W02/W07 | specified | — |
@@ -56,6 +58,7 @@ integrator sets `verified`.
 | E2E-002 | Built CLI browser coverage proves certified-first planning, semantic fallback, atomic commit, filter-consistent stories, stale response rejection, and deterministic story fallback. | 09 | W07/W08 | implemented | `apps/cli/src/apps-api.test.ts`, `packages/dql-agent/src/dashboard-story.test.ts`, built CLI at `127.0.0.1:3474` |
 | E2E-003 | Built CLI coverage proves colocated/external dbt paths, profile filename compatibility, saved-connection preservation, profile-backed runtime use, and manifest-v3 Domain Studio availability. | 03, 09 | W07/W08 | implemented | `apps/cli/src/local-runtime.test.ts`, `apps/dql-notebook/src/components/modeling/DbtFirstModelingPage.tsx`, built CLI at `127.0.0.1:3474` |
 | E2E-004 | Built CLI coverage proves duplicate Area IDs across domains, explicit/inferred focus, Area-scoped Skills, hierarchy/deep-link round trips, and bounded retrieval. | 05, 06, 09 | W07/W08 | implemented | focused Core/Agent/UI tests plus built CLI browser evidence |
+| E2E-005 | Built CLI coverage proves Setup/Settings parity, one-time first-install/version-upgrade setup prompts, provider modes and enterprise URLs, preserved dbt/database/provider config, rollback on failed candidates, optional AI, accurate readiness, clean local/global npm command installation, PATH-independent internal npm resolution, and Cloud embed compatibility. | 03, 05, 09 | W07/W08 | implemented | focused setup-launch/provider/runtime/UI/npm-resolution tests, published-package install smoke, plus built CLI browser evidence |
 
 ## Evidence format
 

@@ -55,7 +55,7 @@ function readInitialMainView(): NotebookState['mainView'] {
 const initialState: NotebookState = {
   mainView: readInitialMainView(),
   agentLogRun: undefined,
-  settingsTab: 'database',
+  settingsTab: 'overview',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
   sidebarPanel: null,

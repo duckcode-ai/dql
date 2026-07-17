@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import {
   dirname,
   extname,
@@ -30,8 +31,7 @@ import {
   planMixedSourceNotebookSql,
   planMixedSourceSql,
 } from "./mixed-source-sql.js";
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
+import { resolveNpmInvocation } from './npm-runtime.js';
 import {
   QueryExecutor,
   type ConnectionConfig,
@@ -158,7 +158,6 @@ import {
   type NarrateInput,
   type NarrateResult,
   type NarrateResultData,
-  normalizeAnthropicBaseUrl,
   buildProposePreview,
   buildFromPrompt,
   defaultAgentRunStorePath,
@@ -757,6 +756,20 @@ function apiRequestId(scope: string): string {
   return `${scope}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** UI-007 / E2E-005: report the installed CLI version that owns this runtime. */
+export function readDqlRuntimeVersion(runtimeUrl = import.meta.url): string {
+  const runtimeDir = dirname(fileURLToPath(runtimeUrl));
+  for (const packagePath of [join(runtimeDir, 'package.json'), join(runtimeDir, '../package.json')]) {
+    try {
+      const parsed = JSON.parse(readFileSync(packagePath, 'utf-8')) as { version?: unknown };
+      if (typeof parsed.version === 'string' && parsed.version.trim()) return parsed.version.trim();
+    } catch {
+      // Source and published layouts place package.json at different levels.
+    }
+  }
+  return 'unknown';
+}
+
 function apiErrorEnvelope(input: {
   requestId: string;
   code: string;
@@ -794,6 +807,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
   const authToken = opts.authToken ?? process.env.DQL_SERVER_TOKEN;
+  const runtimeVersion = readDqlRuntimeVersion();
   const allowedOrigins = new Set((opts.allowedOrigins ?? (process.env.DQL_ALLOWED_ORIGINS ?? '').split(','))
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean));
@@ -4235,7 +4249,35 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/health') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ status: 'ok' }));
+      res.end(serializeJSON({ status: 'ok', version: runtimeVersion }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/onboarding/launch') {
+      const requestId = apiRequestId('onboarding-launch');
+      const acknowledgedVersion = readUserPrefs(userPrefsPath).setup?.acknowledgedVersion ?? null;
+      const shouldOpen = acknowledgedVersion !== runtimeVersion;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        version: runtimeVersion,
+        acknowledgedVersion,
+        shouldOpen,
+        reason: shouldOpen ? (acknowledgedVersion ? 'version_upgrade' : 'first_install') : null,
+      }));
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/onboarding/acknowledge') {
+      const requestId = apiRequestId('onboarding-acknowledge');
+      const prefs = readUserPrefs(userPrefsPath);
+      prefs.setup = {
+        acknowledgedVersion: runtimeVersion,
+        acknowledgedAt: new Date().toISOString(),
+      };
+      writeUserPrefs(userPrefsPath, prefs);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ requestId, version: runtimeVersion, acknowledged: true }));
       return;
     }
 
@@ -4243,6 +4285,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requestId = apiRequestId('onboarding-status');
       const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
       const manifestPath = resolve(dbtProjectDir, projectConfig.dbt?.manifestPath ?? 'target/manifest.json');
+      const configuredDbtSource = projectConfig.dbt?.repoUrl ?? projectConfig.dbt?.projectDir;
+      const dbtConfigured = existsSync(join(dbtProjectDir, 'dbt_project.yml'))
+        || Boolean(configuredDbtSource && !/\{\{[^}]+\}\}/.test(configuredDbtSource));
       const configuredProfilesDir = projectConfig.dbt?.profilesDir ? resolve(projectRoot, projectConfig.dbt.profilesDir) : undefined;
       const profilePath = findDbtProfilePaths(projectRoot, dbtProjectDir, configuredProfilesDir)[0];
       const registry = loadDomainPackageRegistry(projectRoot);
@@ -4261,7 +4306,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         requestId,
         snapshotId,
         dbt: {
-          configured: Boolean(projectConfig.dbt),
+          configured: dbtConfigured,
           projectDir: projectConfig.dbt?.projectDir,
           manifestPath: projectConfig.dbt?.manifestPath,
           profilesDir: configuredProfilesDir
@@ -4591,11 +4636,65 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // provenance references and the sparse DQL overlay, never copied dbt YAML.
     if (req.method === 'GET' && path === '/api/modeling/dbt-first') {
       const requestId = apiRequestId('modeling-dbt-first');
-      const snapshot = projectSnapshot();
+      const modelingEnabled = projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first';
+      if (!modelingEnabled) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          code: 'DBT_FIRST_NOT_ENABLED',
+          message: 'dbt-first modeling is not enabled. Connect and apply a dbt project from Settings → Project & dbt.',
+          details: {
+            manifestVersion: projectConfig.manifestVersion ?? 2,
+            modelingMode: projectConfig.modeling?.mode ?? null,
+          },
+          nextActions: ['Open Settings → Project & dbt and apply a valid dbt project.'],
+        })));
+        return;
+      }
+
+      const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
+      const configuredManifestPath = projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
+      const expectedManifestPath = resolve(dbtProjectDir, configuredManifestPath);
+      if (!existsSync(expectedManifestPath)) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          code: 'DBT_MANIFEST_NOT_FOUND',
+          message: `The configured dbt manifest was not found at ${configuredManifestPath}.`,
+          details: {
+            projectDir: projectConfig.dbt?.projectDir ?? portableProjectPath(projectRoot, dbtProjectDir),
+            manifestPath: configuredManifestPath,
+          },
+          nextActions: ['Run dbt parse, dbt compile, or dbt build in the configured dbt project, then refresh Domain Studio.'],
+        })));
+        return;
+      }
+
+      let snapshot: ReturnType<typeof projectSnapshot>;
+      try {
+        snapshot = projectSnapshot();
+      } catch (error) {
+        res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          code: 'DBT_MANIFEST_COMPILE_FAILED',
+          message: apiErrorMessage(error),
+          details: { manifestPath: configuredManifestPath },
+          nextActions: ['Fix or rebuild the dbt manifest, then refresh Domain Studio.'],
+        })));
+        return;
+      }
       const manifest = snapshot.manifest;
       if (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance) {
-        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DBT_FIRST_NOT_ENABLED', message: 'dbt-first modeling is not enabled. Set manifestVersion: 3 and modeling.mode: "dbt-first" in dql.config.json.', nextActions: ['Use Setup to connect dbt and enable dbt-first modeling.'] })));
+        res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          snapshotId: snapshot.snapshotId,
+          code: 'DBT_MANIFEST_COMPILE_FAILED',
+          message: snapshot.error ?? 'DQL could not compile Domain Studio from the configured dbt manifest.',
+          details: { manifestPath: configuredManifestPath },
+          nextActions: ['Review the dbt artifact and DQL compile diagnostics, rebuild the dbt manifest, then refresh Domain Studio.'],
+        })));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -11600,7 +11699,7 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
   const preferred: ProviderId[] = ['openai', 'gemini', 'anthropic', 'custom-openai', 'ollama'];
   for (const id of preferred) {
     const provider = settings.find((item) => item.id === id);
-    if (provider?.enabled && provider.hasApiKey) return id;
+    if (provider?.enabled && provider.configured) return id;
   }
   return null;
 }
@@ -13411,9 +13510,10 @@ function installConnectorPackage(projectRoot: string, driver: string): Connector
     );
   }
 
+  const npm = resolveNpmInvocation();
   execFileSync(
-    'npm',
-    ['install', '--prefix', installRoot, '--no-audit', '--no-fund', definition.packageSpec],
+    npm.command,
+    [...npm.argsPrefix, 'install', '--prefix', installRoot, '--no-audit', '--no-fund', definition.packageSpec],
     {
       cwd: projectRoot,
       encoding: 'utf-8',
@@ -14814,6 +14914,10 @@ function scanDataFiles(projectRoot: string): { name: string; path: string; colum
 interface UserPrefs {
   favorites: string[];
   recentlyUsed: string[];
+  setup?: {
+    acknowledgedVersion: string;
+    acknowledgedAt?: string;
+  };
 }
 
 function readUserPrefs(userPrefsPath: string): UserPrefs {
@@ -14822,9 +14926,18 @@ function readUserPrefs(userPrefsPath: string): UserPrefs {
       return { favorites: [], recentlyUsed: [] };
     }
     const raw = JSON.parse(readFileSync(userPrefsPath, 'utf-8')) as Partial<UserPrefs>;
+    const acknowledgedVersion = typeof raw.setup?.acknowledgedVersion === 'string'
+      ? raw.setup.acknowledgedVersion.trim()
+      : '';
     return {
       favorites: Array.isArray(raw.favorites) ? raw.favorites.map(String) : [],
       recentlyUsed: Array.isArray(raw.recentlyUsed) ? raw.recentlyUsed.map(String) : [],
+      ...(acknowledgedVersion ? {
+        setup: {
+          acknowledgedVersion,
+          ...(typeof raw.setup?.acknowledgedAt === 'string' ? { acknowledgedAt: raw.setup.acknowledgedAt } : {}),
+        },
+      } : {}),
     };
   } catch {
     return { favorites: [], recentlyUsed: [] };
@@ -17664,7 +17777,7 @@ async function createBlockStudioAssistProvider(
   // Subscription CLI providers (Claude Code / Codex) carry no API key — they're
   // usable when enabled; their real "installed + logged in" check runs in available().
   const isUsable = (provider: RedactedProviderSettings): boolean =>
-    provider.enabled && (provider.hasApiKey || provider.authMode === 'subscription_cli');
+    provider.enabled && provider.configured;
   const selected = requestedProvider
     ? settings.find((provider) => provider.id === requestedProvider && isUsable(provider))
     : settings.find((provider) => provider.id === activeProvider && provider.enabled)
@@ -19651,7 +19764,12 @@ async function readGitStatus(cwd: string): Promise<GitStatusResult> {
     ahead = Number(match[1] ?? 0);
   }
 
-  const statusRes = await execGit(gitRoot, ['status', '--porcelain=v1', '--untracked-files=normal']);
+  // UI-001, E2E-001: the Source Control surface is file-oriented. Git's
+  // "normal" untracked mode collapses a new directory into a single `?? dir/`
+  // record, which prevents the UI from showing or diffing the files inside it.
+  // Enumerate every untracked path so tracked and untracked changes share the
+  // same per-file review contract.
+  const statusRes = await execGit(gitRoot, ['status', '--porcelain=v1', '--untracked-files=all']);
   const changes: Array<{ path: string; status: string }> = [];
   if (statusRes.code === 0) {
     for (const line of statusRes.stdout.split('\n')) {
@@ -20337,7 +20455,11 @@ async function testProviderConfig(
   const base = getEffectiveProviderConfig(projectRoot, id);
   // When the user supplies inline values (testing what they typed before saving),
   // merge them over the saved config and test reachability regardless of enabled.
-  const inline = Boolean(overrides && (overrides.apiKey || overrides.baseUrl || overrides.model));
+  // The test route always passes an override object, even when every draft field
+  // is blank. That still means "test this candidate before save" and must allow
+  // a previously configured-but-disabled provider to be reactivated without
+  // forcing the user to paste its redacted secret again.
+  const inline = overrides !== undefined;
   const config = {
     ...base,
     ...(overrides?.apiKey ? { apiKey: overrides.apiKey } : {}),
@@ -20421,15 +20543,19 @@ async function testOpenAIProviderConfig(
     return { ok: false, message: `${label} is not configured${details}. Add an API key in Settings or OPENAI_API_KEY.` };
   }
   try {
-    const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
-    const response = await client.responses.create({
-      model: config.model ?? 'gpt-5.5',
-      input: 'Reply with exactly: OK',
-      max_output_tokens: 16,
-    } as never) as unknown as { output_text?: string };
+    // Use the same provider adapter as governed Ask so enterprise gateways are
+    // tested against the runtime path users will actually execute.
+    const provider = new OpenAIProvider({
+      apiKey: config.apiKey,
+      baseUrl: config.baseUrl,
+      model: config.model,
+    });
+    const response = await provider.generate([
+      { role: 'user', content: 'Reply with exactly: OK' },
+    ], { maxTokens: 16, temperature: 0 });
     return {
       ok: true,
-      message: `${label} SDK responded${details}: ${(response.output_text ?? 'OK').trim().slice(0, 80) || 'OK'}`,
+      message: `${label} responded through the governed runtime${details}: ${response.trim().slice(0, 80) || 'OK'}`,
     };
   } catch (error) {
     return {
@@ -20448,20 +20574,17 @@ async function testAnthropicProviderConfig(
     return { ok: false, message: `${label} is not configured${details}. Add an API key in Settings or ANTHROPIC_API_KEY.` };
   }
   try {
-    const client = new Anthropic({
+    const provider = new ClaudeProvider({
       apiKey: config.apiKey,
-      ...(config.baseUrl ? { baseURL: normalizeAnthropicBaseUrl(config.baseUrl) } : {}),
+      baseUrl: config.baseUrl,
+      model: config.model,
     });
-    const response = await client.messages.create({
-      model: config.model ?? 'claude-opus-4-8',
-      max_tokens: 16,
-      temperature: 0,
-      messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
-    } as never) as unknown as { content?: Array<{ type?: string; text?: string }> };
-    const text = response.content?.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('') ?? '';
+    const response = await provider.generate([
+      { role: 'user', content: 'Reply with exactly: OK' },
+    ], { maxTokens: 16, temperature: 0 });
     return {
       ok: true,
-      message: `${label} SDK responded${details}: ${text.trim().slice(0, 80) || 'OK'}`,
+      message: `${label} responded through the governed runtime${details}: ${response.trim().slice(0, 80) || 'OK'}`,
     };
   } catch (error) {
     return {

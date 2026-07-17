@@ -16,6 +16,7 @@ import {
 } from '../local-runtime.js';
 import { listRemoteMcpSettings } from '../llm/mcp-config.js';
 import { listProviderSettings } from '../settings/provider-settings.js';
+import { describeNpmInvocation, resolveNpmInvocation } from '../npm-runtime.js';
 
 interface Check {
   name: string;
@@ -55,6 +56,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
 
   const checks: Check[] = [
     checkNodeVersion(),
+    checkNpmExecutable(),
     checkProjectCliVersion(projectRoot),
     {
       name: 'Project root',
@@ -105,12 +107,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   }
 
   const passed = checks.filter((check) => check.ok).length;
-  const nextSteps = [
-    'npm run notebook    # open the local DQL workspace',
-    'npm run validate    # check DQL files and semantic references',
-    'npm run compile     # write dql-manifest.json',
-    'npm run lineage     # inspect source -> block -> dashboard -> App lineage',
-  ];
+  const nextSteps = buildDoctorNextSteps(projectRoot);
 
   if (flags.format === 'json') {
     console.log(JSON.stringify({
@@ -558,9 +555,48 @@ function checkNodeVersion(): Check {
   const major = match ? Number(match[1]) : 0;
   return {
     name: 'Node.js',
-    ok: major >= 20 && major < 23,
-    detail: `version=${process.versions.node} (requires Node 20 or 22 LTS; Node 23 is not supported for native local drivers)`,
+    ok: major >= 20,
+    detail: `version=${process.versions.node} (requires Node 20 or newer)`,
   };
+}
+
+function buildDoctorNextSteps(projectRoot: string): string[] {
+  let scripts: Record<string, string> = {};
+  try {
+    const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf-8')) as {
+      scripts?: Record<string, string>;
+    };
+    scripts = pkg.scripts ?? {};
+  } catch {
+    // Existing repositories do not need package.json. Use npx below.
+  }
+
+  const command = (script: string, args: string) => scripts[script]
+    ? `npm run ${script}`
+    : `npx dql ${args}`;
+  return [
+    `${command('notebook', 'notebook')}    # open the local DQL workspace`,
+    `${command('validate', 'validate')}    # check DQL files and semantic references`,
+    `${command('compile', 'compile')}     # write dql-manifest.json`,
+    `${command('lineage', 'lineage')}     # inspect source -> block -> dashboard -> App lineage`,
+  ];
+}
+
+function checkNpmExecutable(): Check {
+  try {
+    const invocation = resolveNpmInvocation();
+    return {
+      name: 'npm executable',
+      ok: true,
+      detail: `${describeNpmInvocation(invocation)} (resolved via ${invocation.source})`,
+    };
+  } catch (error) {
+    return {
+      name: 'npm executable',
+      ok: false,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function checkProjectCliVersion(projectRoot: string): Check {
@@ -779,7 +815,7 @@ function checkAiRuntime(projectRoot: string): Check[] {
   const active = providers.find((provider) => provider.active);
   const usableProviders = providers.filter((provider) =>
     provider.enabled &&
-    provider.hasApiKey &&
+    provider.configured &&
     (provider.id !== 'ollama' || provider.active || provider.source !== 'none')
   );
   const mcp = listRemoteMcpSettings(projectRoot);
@@ -790,7 +826,7 @@ function checkAiRuntime(projectRoot: string): Check[] {
   return [
     {
       name: 'AI provider',
-      ok: Boolean(active?.enabled && active.hasApiKey) || usableProviders.length > 0,
+      ok: Boolean(active?.enabled && active.configured) || usableProviders.length > 0,
       detail: active
         ? `${active.label} is active${active.model ? `, model=${active.model}` : ''}, source=${active.source}`
         : usableProviders.length > 0

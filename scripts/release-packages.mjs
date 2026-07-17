@@ -224,6 +224,14 @@ try {
       ], cwd);
     }
   }
+  if (publish) {
+    const cli = JSON.parse(readFileSync(path.join(root, 'apps/cli/package.json'), 'utf-8'));
+    console.log(`\n==> Verifying clean local/global install for ${cli.name}@${cli.version}`);
+    await run(process.execPath, [
+      path.join(root, 'scripts/smoke-cli-install.mjs'),
+      `${cli.name}@${cli.version}`,
+    ], root);
+  }
 } catch (err) {
   console.error(`\nPublish failed: ${err.message}`);
   exitCode = 1;

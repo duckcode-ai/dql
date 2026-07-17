@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Boxes, MessageCircle, Settings, ListChecks } from 'lucide-react';
+import { Boxes, MessageCircle, Settings } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -166,6 +166,7 @@ export function ActivityBar() {
       items: [
         { key: 'domains', title: 'Domains', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
+        { key: 'settings', title: 'Settings', icon: <Settings size={16} strokeWidth={1.75} />, active: state.mainView === 'settings' || state.mainView === 'connection' },
       ],
     },
   ];
@@ -177,20 +178,6 @@ export function ActivityBar() {
     active: boolean;
     onClick: () => void;
   }> = [
-    {
-      key: 'setup',
-      title: 'Setup',
-      icon: <ListChecks size={16} strokeWidth={1.75} />,
-      active: state.setupOpen,
-      onClick: () => dispatch({ type: 'OPEN_SETUP' }),
-    },
-    {
-      key: 'settings',
-      title: 'Settings',
-      icon: <Settings size={16} strokeWidth={1.75} />,
-      active: state.mainView === 'settings' || state.mainView === 'connection',
-      onClick: () => handlePanelClick('settings'),
-    },
     {
       key: 'help',
       title: 'Help',

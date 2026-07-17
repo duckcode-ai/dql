@@ -63,4 +63,14 @@ describe('release manifests stay installable on current Node', () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  it('publishes the dql executable contract (E2E-005)', () => {
+    const cli = manifests.find((manifest) => manifest.name === '@duckcodeailabs/dql-cli');
+    expect(cli).toBeDefined();
+    expect(cli?.pkg.bin).toEqual({ dql: './dist/index.js' });
+    expect(cli?.pkg.files).toContain('dist');
+
+    const sourceEntry = readFileSync(join(dirname(cli!.path), 'src', 'index.ts'), 'utf-8');
+    expect(sourceEntry.startsWith('#!/usr/bin/env node\n')).toBe(true);
+  });
 });

@@ -5,7 +5,7 @@
 Ship the unified vertical Domain Studio and connect global Apps/Notebooks/Ask to
 domain context without duplicating product storage.
 
-Acceptance IDs: `PRD-001`, `PRD-002`, `PRD-003`, `AGT-003`, `UI-001`, `UI-002`, `UI-006`.
+Acceptance IDs: `PRD-001`, `PRD-002`, `PRD-003`, `AGT-003`, `UI-001`, `UI-002`, `UI-006`, `UI-007`.
 Dependencies: verified W01/W02 contracts and stable W03/W04 APIs.
 
 ## Required implementation
@@ -22,6 +22,8 @@ Dependencies: verified W01/W02 contracts and stable W03/W04 APIs.
   changes only to Domain Package source.
 - Add `ProductDomainContext` authoring/display to global Apps/Notebooks and
   “Ask in domain” shortcuts; derive Related Products backlinks.
+- Open shared Guided Setup before the product once per project on first install
+  and each CLI version change; acknowledge locally without mutating connections.
 - Preserve the Cloud embed design contract exactly.
 
 ## Suggested ownership

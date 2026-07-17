@@ -28,7 +28,7 @@ import { DbtFirstModelingPage } from '../modeling/DbtFirstModelingPage';
 import { AppsView } from '../apps/AppsView';
 import { LineageDrawer } from '../lineage/LineageDrawer';
 import { AiBuildDialog } from '../agent/AiBuildDialog';
-import { api } from '../../api/client';
+import { api, type SetupLaunchResponse } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
@@ -42,6 +42,27 @@ export function AppShell() {
   const blockWorkspaceOpen = state.mainView === 'block_studio' || state.mainView === 'imports';
 
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [setupLaunch, setSetupLaunch] = useState<SetupLaunchResponse | null>(null);
+  const [setupLaunchChecked, setSetupLaunchChecked] = useState(false);
+
+  // UI-007 / E2E-005: a fresh install and each installed CLI version get one
+  // project-local setup review before the user enters the product.
+  useEffect(() => {
+    let alive = true;
+    void api.getSetupLaunch()
+      .then((launch) => {
+        if (!alive) return;
+        setSetupLaunch(launch);
+        if (launch.shouldOpen) dispatch({ type: 'OPEN_SETUP' });
+      })
+      .catch(() => {
+        // A launch-check failure must not trap users outside the local product.
+      })
+      .finally(() => {
+        if (alive) setSetupLaunchChecked(true);
+      });
+    return () => { alive = false; };
+  }, [dispatch]);
 
   // Global keyboard shortcuts
   useKeyboardShortcuts();
@@ -271,8 +292,32 @@ export function AppShell() {
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       {/* Spec 14 — shared AI Build surface for the non-notebook front doors. */}
       <AiBuildDialog />
-      {/* Full-screen 5-step Setup Onboarding wizard (Setup activity / first run). */}
-      {state.setupOpen && <SetupOnboarding />}
+      {/* Short Guided Setup workflow launched from Settings Overview or first run. */}
+      {state.setupOpen && (
+        <SetupOnboarding
+          launch={setupLaunch?.shouldOpen ? setupLaunch : undefined}
+          onAcknowledged={() => setSetupLaunch((current) => current ? { ...current, shouldOpen: false, reason: null } : current)}
+        />
+      )}
+      {!setupLaunchChecked && <SetupLaunchGate t={t} />}
+    </div>
+  );
+}
+
+function SetupLaunchGate({ t }: { t: (typeof themes)[keyof typeof themes] }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1100, display: 'grid', placeItems: 'center',
+        background: t.appBg, color: t.textSecondary, fontFamily: t.font,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5 }}>
+        <span style={{ width: 8, height: 8, borderRadius: 999, background: t.accent }} />
+        Checking workspace setup…
+      </div>
     </div>
   );
 }

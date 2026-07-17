@@ -1208,11 +1208,11 @@ export interface BlockStudioOpenPayload {
   validation: BlockStudioValidation;
 }
 
-export type SettingsTab = 'database' | 'ai' | 'memory';
+export type SettingsTab = 'overview' | 'project' | 'database' | 'ai' | 'memory' | 'advanced';
 
 export interface NotebookState {
   mainView: MainView;
-  /** Active tab on the Settings page (Database / AI providers / Agentic memory). */
+  /** Active section in the canonical Settings hub. */
   settingsTab: SettingsTab;
   themeMode: ThemeMode;
   appMode: AppMode;

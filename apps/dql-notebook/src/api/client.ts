@@ -207,6 +207,14 @@ export type OnboardingCapabilities = {
   ai?: OnboardingCapability | boolean;
 };
 
+export interface SetupLaunchResponse {
+  requestId: string;
+  version: string;
+  acknowledgedVersion: string | null;
+  shouldOpen: boolean;
+  reason: 'first_install' | 'version_upgrade' | null;
+}
+
 export type DbtOnboardingErrorCode =
   | 'DBT_PROJECT_NOT_FOUND'
   | 'DBT_MANIFEST_MISSING'
@@ -1604,6 +1612,8 @@ export interface ProviderSettings {
   enabled: boolean;
   active: boolean;
   hasApiKey: boolean;
+  /** Required non-secret configuration is present; reachability still requires an explicit test. */
+  configured: boolean;
   apiKeyPreview?: string;
   baseUrl?: string;
   model?: string;
@@ -2281,12 +2291,8 @@ export interface ConnectionsResponse {
 
 export const api = {
   /** Read the compiled dbt-first overlay. dbt-owned details stay in dbt artifacts. */
-  async getDbtFirstModeling(): Promise<DbtFirstModelingResponse | null> {
-    try {
-      return await request<DbtFirstModelingResponse>('/api/modeling/dbt-first');
-    } catch {
-      return null;
-    }
+  async getDbtFirstModeling(): Promise<DbtFirstModelingResponse> {
+    return request<DbtFirstModelingResponse>('/api/modeling/dbt-first');
   },
 
   async getDbtModelingNode(uniqueId: string): Promise<DbtNodeAuthoringDetail> {
@@ -3736,6 +3742,14 @@ export const api = {
 
   async getSemanticObject(id: string): Promise<SemanticObjectDetail> {
     return request<SemanticObjectDetail>(`/api/semantic-layer/object/${encodeURIComponent(id)}`);
+  },
+
+  async getSetupLaunch(): Promise<SetupLaunchResponse> {
+    return request<SetupLaunchResponse>('/api/onboarding/launch');
+  },
+
+  async acknowledgeSetupLaunch(): Promise<{ requestId: string; version: string; acknowledged: true }> {
+    return request('/api/onboarding/acknowledge', { method: 'POST', body: '{}' });
   },
 
   async getOnboardingStatus(): Promise<DbtOnboardingStatusResponse> {

@@ -5,8 +5,8 @@
 Prove the complete product behavior and scale budgets on deterministic fixtures;
 repair integration defects without weakening safety contracts.
 
-Acceptance IDs: every functional ID, with primary ownership of `PERF-001` and
-`E2E-001`. Dependencies: verified W01–W06.
+Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
+`E2E-001`, and `E2E-005`. Dependencies: verified W01–W06.
 
 ## Required implementation
 
@@ -19,6 +19,12 @@ Acceptance IDs: every functional ID, with primary ownership of `PERF-001` and
   eager all-node loading/reparsing and unbounded graph/context behavior.
 - Run the built CLI notebook runtime for browser acceptance and restart after
   builds to prevent stale localhost evidence.
+- Verify the published CLI in clean project-local and global npm prefixes so
+  `npx dql` and bare `dql` are both executable, and exercise internal npm
+  resolution without relying on an interactive-shell PATH.
+- Verify first-install and version-upgrade Guided Setup prompts in the built CLI,
+  including one-time acknowledgement and preservation of user preferences and
+  every project-local connection setting.
 
 ## Suggested ownership
 

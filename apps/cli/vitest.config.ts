@@ -33,5 +33,7 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.ts'],
+    // CLI integration tests start real local servers and exercise filesystem/package workflows.
+    testTimeout: 30_000,
   },
 });

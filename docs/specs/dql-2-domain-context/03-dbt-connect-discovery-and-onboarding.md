@@ -29,6 +29,21 @@ profile target may supply an in-memory runtime connection when no saved DQL
 connection exists; it never overwrites `connections`, `defaultConnection`, or
 AI-provider configuration (`CFG-003`).
 
+Provider configuration uses one project-local contract across Settings, Guided
+Setup, Home, and governed Ask (`CFG-004`). Redacted responses expose
+`configured` but never raw secrets. A blank key update preserves the stored key.
+OpenAI, Anthropic, and Gemini accept an optional Base URL/model for enterprise
+routing; Ollama accepts a local endpoint/model; custom OpenAI-compatible
+requires Base URL/model and may omit the key. Unsaved draft tests execute through
+the same provider adapters as governed Ask. Saving/activation follows a
+successful requested test, so a failing candidate leaves the prior provider
+configuration active.
+
+Settings is the canonical configuration hub. Guided Setup is the short
+Project → Database → optional AI → Finish workflow launched by Settings Overview
+or first-run prompts. Both surfaces embed the same project, profile/database,
+and provider editors and readiness rules (`UI-007`).
+
 ## Onboarding APIs
 
 | Method | Path | Purpose |

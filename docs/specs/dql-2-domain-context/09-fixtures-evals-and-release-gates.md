@@ -62,6 +62,34 @@ Required dbt connection scenarios (`E2E-003`):
 4. Artifact generation passes the discovered profiles directory to `dbt parse`,
    and the built CLI opens Domain Studio from the resulting manifest-v3 snapshot.
 
+Required unified configuration scenarios (`E2E-005`):
+
+1. The built `dql notebook` exposes one Govern → Settings destination with
+   Overview, Project & dbt, Database, AI provider, Agent memory, and Advanced;
+   Guided Setup launches from Overview and has no separate rail item.
+2. Settings and Guided Setup render the same dbt, profile/database, and provider
+   capabilities, reload the same project-local values, and report Missing,
+   Configured, Test passed, and Test failed without calling untested values ready.
+3. OpenAI and Anthropic enterprise URLs and unsaved keys/models traverse the
+   governed runtime adapters. Native Gemini enterprise routing, Ollama,
+   subscriptions, and custom OpenAI-compatible requirements remain selectable.
+4. Blank provider keys retain saved secrets; APIs never return raw secrets; a
+   failing dbt apply, connection test, or provider test preserves the prior
+   working configuration. Relative DuckDB and enterprise Snowflake/Databricks
+   profile behavior from `E2E-003` remains unchanged.
+5. AI can be skipped with limited-AI guidance and without blocking deterministic
+   or non-AI paths. Browser verification has no console errors and the Cloud
+   embed theme/token/persistence contract remains unchanged.
+6. A clean published-package smoke proves project-local installation exposes
+   `npx dql`, global installation exposes bare `dql`, both report the requested
+   version, and connector installation resolves npm beside the running Node
+   executable even when an interactive-shell PATH is unavailable.
+7. A clean project opens Guided Setup before the product on first launch. After
+   acknowledgement it stays closed for the same CLI version, then reopens once
+   when the installed version changes. The project-local acknowledgement keeps
+   existing favorites, recent items, dbt/database/provider settings, and secrets
+   unchanged.
+
 ## Scale fixture
 
 Generate deterministic artifacts representing 10,000 dbt models, 30 columns

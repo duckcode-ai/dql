@@ -232,6 +232,75 @@ describe('local runtime network boundary', () => {
   });
 });
 
+describe('unified provider draft testing (CFG-004)', () => {
+  it('tests unsaved OpenAI and Anthropic enterprise URLs through governed adapters without persisting drafts', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-draft-test-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const nativeFetch = globalThis.fetch;
+    const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://openai.enterprise.example/')) {
+        requests.push({ url, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? '{}')) });
+        return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (url.startsWith('https://anthropic.enterprise.example/')) {
+        requests.push({ url, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? '{}')) });
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'OK' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return nativeFetch(input, init);
+    }));
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const openai = await nativeFetch(`http://127.0.0.1:${port}/api/settings/providers/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'openai', apiKey: 'openai-draft-secret', baseUrl: 'https://openai.enterprise.example/v1', model: 'gpt-enterprise' }),
+      });
+      const anthropic = await nativeFetch(`http://127.0.0.1:${port}/api/settings/providers/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'anthropic', apiKey: 'anthropic-draft-secret', baseUrl: 'https://anthropic.enterprise.example/proxy/v1', model: 'claude-enterprise' }),
+      });
+
+      expect(openai.status).toBe(200);
+      expect(anthropic.status).toBe(200);
+      expect(requests.map((request) => request.url)).toEqual([
+        'https://openai.enterprise.example/v1/chat/completions',
+        'https://anthropic.enterprise.example/proxy/v1/messages',
+      ]);
+      expect(requests[0].headers.get('authorization')).toBe('Bearer openai-draft-secret');
+      expect(requests[0].body).toMatchObject({ model: 'gpt-enterprise', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] });
+      expect(requests[1].headers.get('x-api-key')).toBe('anthropic-draft-secret');
+      expect(requests[1].body).toMatchObject({ model: 'claude-enterprise', messages: [{ role: 'user', content: 'Reply with exactly: OK' }] });
+      expect(existsSync(providerSettingsPath(projectRoot))).toBe(false);
+
+      saveProviderSettings(projectRoot, { id: 'openai', enabled: true, apiKey: 'stored-redacted-secret', baseUrl: 'https://openai.enterprise.example/v1', model: 'gpt-stored' });
+      saveProviderSettings(projectRoot, { id: 'openai', enabled: false });
+      const disabledCandidate = await nativeFetch(`http://127.0.0.1:${port}/api/settings/providers/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'openai' }),
+      });
+      const disabledBody = await disabledCandidate.text();
+      expect(disabledCandidate.status).toBe(200);
+      expect(requests[2].headers.get('authorization')).toBe('Bearer stored-redacted-secret');
+      expect(disabledBody).not.toContain('stored-redacted-secret');
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
 describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-002, AGT-006, EXP-002)', () => {
   it('returns the typed contract and reruns only the named certified block with explicit values', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-certified-parameter-api-'));
@@ -343,6 +412,37 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
 });
 
 describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', () => {
+  it('reports every untracked file instead of collapsing nested folders (UI-001, E2E-001)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-git-status-files-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'blocks', 'cards'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    writeFileSync(join(projectRoot, 'blocks', 'cards', 'approval-rate.dql'), 'block "Approval rate" {}\n');
+    writeFileSync(join(projectRoot, 'blocks', 'cards', 'fraud-alerts.dql'), 'block "Fraud alerts" {}\n');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectRoot, stdio: 'ignore' });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/git/status`);
+      const status = await response.json() as { changes: Array<{ path: string; status: string }> };
+
+      expect(status.changes).toEqual(expect.arrayContaining([
+        { path: 'blocks/cards/approval-rate.dql', status: '??' },
+        { path: 'blocks/cards/fraud-alerts.dql', status: '??' },
+      ]));
+      expect(status.changes).not.toContainEqual({ path: 'blocks/', status: '??' });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('repairs local-only ignore rules on notebook startup without hiding governed skills', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-local-ignore-'));
     tempDirs.push(projectRoot);
@@ -378,6 +478,100 @@ describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', ()
       });
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
+describe('version-aware Guided Setup launch (UI-007, E2E-005)', () => {
+  it('opens for first install and version upgrades, then preserves the acknowledgement with other user preferences', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-setup-launch-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+
+      const firstLaunch = await (await fetch(`${base}/api/onboarding/launch`)).json() as {
+        version: string;
+        acknowledgedVersion: string | null;
+        shouldOpen: boolean;
+        reason: string | null;
+      };
+      expect(firstLaunch).toMatchObject({
+        acknowledgedVersion: null,
+        shouldOpen: true,
+        reason: 'first_install',
+      });
+      expect(firstLaunch.version).not.toBe('unknown');
+
+      const acknowledged = await (await fetch(`${base}/api/onboarding/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })).json() as { version: string; acknowledged: boolean };
+      expect(acknowledged).toMatchObject({ version: firstLaunch.version, acknowledged: true });
+      await expect((await fetch(`${base}/api/onboarding/launch`)).json()).resolves.toMatchObject({
+        version: firstLaunch.version,
+        acknowledgedVersion: firstLaunch.version,
+        shouldOpen: false,
+        reason: null,
+      });
+
+      writeFileSync(join(projectRoot, '.dql-user-prefs.json'), JSON.stringify({
+        favorites: ['revenue'],
+        recentlyUsed: ['orders'],
+        setup: { acknowledgedVersion: '0.0.1', acknowledgedAt: '2026-01-01T00:00:00.000Z' },
+      }));
+      await expect((await fetch(`${base}/api/onboarding/launch`)).json()).resolves.toMatchObject({
+        version: firstLaunch.version,
+        acknowledgedVersion: '0.0.1',
+        shouldOpen: true,
+        reason: 'version_upgrade',
+      });
+
+      await fetch(`${base}/api/onboarding/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(JSON.parse(readFileSync(join(projectRoot, '.dql-user-prefs.json'), 'utf-8'))).toMatchObject({
+        favorites: ['revenue'],
+        recentlyUsed: ['orders'],
+        setup: { acknowledgedVersion: firstLaunch.version, acknowledgedAt: expect.any(String) },
+      });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('does not describe unresolved starter placeholders as a configured dbt project', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-setup-placeholder-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: '{{PROJECT_NAME}}',
+      dbt: { projectDir: '{{DBT_PROJECT_DIR}}', manifestPath: 'target/manifest.json' },
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      await expect((await fetch(`http://127.0.0.1:${port}/api/onboarding/status`)).json()).resolves.toMatchObject({
+        dbt: { configured: false, projectFound: false, manifestFound: false },
+      });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
     }
   });
 });
@@ -448,6 +642,79 @@ describe('dbt-first onboarding runtime API', () => {
         activeConnection: { source: string; driver: string; profileId?: string };
       };
       expect(connections.activeConnection).toMatchObject({ source: 'dbt_profile', driver: 'duckdb', profileId: expect.any(String) });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('reports disabled modeling separately from a missing dbt manifest (CFG-003, UI-007, E2E-003)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-studio-disabled-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'workspace',
+      dbt: { projectDir: '.', manifestPath: 'target/manifest.json' },
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const response = await fetch(`http://127.0.0.1:${port}/api/modeling/dbt-first`);
+      expect(response.status).toBe(404);
+      const body = await response.json() as { code: string; details: { manifestVersion: number; modelingMode: string | null } };
+      expect(body).toMatchObject({
+        code: 'DBT_FIRST_NOT_ENABLED',
+        details: { manifestVersion: 2, modelingMode: null },
+      });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('reports a missing compiled dbt artifact when dbt-first modeling is enabled (CFG-003, UI-007, E2E-003)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-studio-missing-manifest-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'workspace',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: '.', manifestPath: 'build/manifest.json' },
+    }));
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: workspace\nprofile: workspace\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const response = await fetch(`http://127.0.0.1:${port}/api/modeling/dbt-first`);
+      expect(response.status).toBe(409);
+      const body = await response.json() as { code: string; details: { manifestPath: string }; nextActions: string[] };
+      expect(body).toMatchObject({
+        code: 'DBT_MANIFEST_NOT_FOUND',
+        details: { manifestPath: 'build/manifest.json' },
+      });
+      expect(body.nextActions[0]).toContain('dbt parse');
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('reports an unreadable dbt artifact as a load failure, not a setup failure (CFG-003, UI-007, E2E-003)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-studio-invalid-manifest-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'workspace',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: '.', manifestPath: 'target/manifest.json' },
+    }));
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: workspace\nprofile: workspace\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), '{ invalid json');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const response = await fetch(`http://127.0.0.1:${port}/api/modeling/dbt-first`);
+      expect(response.status).toBe(422);
+      const body = await response.json() as { code: string; message: string };
+      expect(body.code).toBe('DBT_MANIFEST_COMPILE_FAILED');
+      expect(body.message).not.toContain('not enabled');
     } finally {
       await new Promise<void>((done) => server ? server.close(() => done()) : done());
     }
@@ -1276,7 +1543,7 @@ describe('AI provider settings', () => {
     expect(governed?.runner).not.toBe(getRunner('claude-code'));
   });
 
-  it('clears the active default when that provider is disabled', () => {
+  it('clears the active default without falling back to unconfigured Ollama', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-provider-disable-'));
     tempDirs.push(projectRoot);
 
@@ -1291,7 +1558,7 @@ describe('AI provider settings', () => {
     });
 
     expect(getActiveProvider(projectRoot)).toBeUndefined();
-    expect(resolveDefaultLLMProvider(projectRoot)).toBe('ollama');
+    expect(resolveDefaultLLMProvider(projectRoot)).toBeNull();
   });
 
   it('normalizes structured AI metadata arrays during SQL import', async () => {
