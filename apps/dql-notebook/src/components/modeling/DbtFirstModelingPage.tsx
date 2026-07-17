@@ -7,6 +7,7 @@ import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
+import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
@@ -32,7 +33,7 @@ export function DbtFirstModelingPage() {
   const t = themes[state.themeMode];
   const [data, setData] = useState<DbtFirstModelingResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState<DomainStudioUnavailableState | null>(null);
   const initialLocation = useMemo(() => readDomainStudioLocation(), []);
   const [tab, setTab] = useState<Tab>(initialLocation.section);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialLocation.domain);
@@ -110,10 +111,10 @@ export function DbtFirstModelingPage() {
 
   const refresh = async () => {
     setLoading(true);
-    const result = await api.getDbtFirstModeling();
-    setData(result);
-    setError(result ? null : 'dbt-first modeling is not enabled or the local server could not compile manifest v3.');
-    if (result) {
+    try {
+      const result = await api.getDbtFirstModeling();
+      setData(result);
+      setUnavailable(null);
       const nextDomain = selectedDomain && result.modeling.packages[selectedDomain]
         ? selectedDomain
         : (Object.keys(result.modeling.packages).sort()[0] ?? null);
@@ -121,8 +122,12 @@ export function DbtFirstModelingPage() {
         setSelectedDomain(nextDomain);
         writeDomainStudioLocation(nextDomain, tab, true);
       }
+    } catch (error) {
+      setData(null);
+      setUnavailable(domainStudioUnavailableState(error));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
   useEffect(() => {
     void refresh();
@@ -187,7 +192,10 @@ export function DbtFirstModelingPage() {
   }, [loadNodeDetail]);
 
   if (loading && !data) return <EmptyState t={t} title="Loading Domain Studio…" detail="Compiling dbt provenance and the sparse DQL analytical overlay." />;
-  if (!data) return <EmptyState t={t} title="Domain Studio is unavailable" detail={error ?? 'Enable manifestVersion 3 and dbt-first modeling.'} />;
+  if (!data) {
+    const state = unavailable ?? domainStudioUnavailableState(null);
+    return <EmptyState t={t} title={state.title} detail={state.detail} status={state.status} />;
+  }
 
   const relationByDbtId = Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, node.relation]));
   // Searchable models + (already-hydrated) columns for the diagram search dropdown.
@@ -2033,7 +2041,7 @@ function Evidence({ evidence, t }: { evidence: NonNullable<ManifestModelRelation
   );
 }
 
-function EmptyState({ t, title, detail }: { t: Theme; title: string; detail: string }) {
+function EmptyState({ t, title, detail, status }: { t: Theme; title: string; detail: string; status?: string }) {
   return (
     <div
       style={{
@@ -2048,7 +2056,7 @@ function EmptyState({ t, title, detail }: { t: Theme; title: string; detail: str
         <Boxes size={34} color={t.accent} />
         <h1 style={{ fontSize: 20 }}>{title}</h1>
         <p style={{ color: t.textSecondary, lineHeight: 1.6 }}>{detail}</p>
-        <code style={{ fontSize: 12 }}>manifestVersion: 3 · modeling.mode: dbt-first</code>
+        {status && <code style={{ fontSize: 12 }}>{status}</code>}
       </div>
     </div>
   );

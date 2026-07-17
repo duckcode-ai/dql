@@ -153,7 +153,7 @@ async function main() {
 
   if (dbtSibling) {
     console.log(c.dim(`  detected sibling dbt project at ${dbtSibling}`));
-    console.log(c.dim(`  wired into dql.config.json — run 'dql sync dbt' to import\n`));
+    console.log(c.dim(`  wired into dql.config.json — run the generated 'sync' npm script to import\n`));
   }
 
   // Best-effort: `git init` for a clean first commit — but never nest a

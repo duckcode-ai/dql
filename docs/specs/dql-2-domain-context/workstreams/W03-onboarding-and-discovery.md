@@ -5,7 +5,7 @@
 Deliver the end-to-end connect → artifact → snapshot → domain proposal → apply
 flow with deterministic manual behavior and evidence-bounded AI assistance.
 
-Acceptance IDs: `CFG-001`, `CFG-002`, `AGT-002`, `API-001`.
+Acceptance IDs: `CFG-001`, `CFG-002`, `CFG-004`, `AGT-002`, `API-001`.
 Dependencies: verified W01 and W02.
 
 ## Required implementation

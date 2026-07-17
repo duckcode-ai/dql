@@ -22,7 +22,7 @@ import { api } from '../../api/client';
 import { SetupWizard } from '../modals/SetupWizard';
 import { StarterBlocks } from './StarterBlocks';
 
-type StepState = 'ready' | 'active' | 'waiting';
+type StepState = 'ready' | 'active' | 'waiting' | 'optional';
 
 interface ConnectionInfo {
   default: string;
@@ -79,11 +79,11 @@ export function HomePage() {
       if (!cancelled) setConnections(info as ConnectionInfo);
     });
 
-    // AI provider config gates the whole product — a provider counts as ready
-    // when it's enabled and either has a key or is Ollama (which needs none).
+    // AI is optional. This flag means a provider has a complete saved/env
+    // configuration; reachability is still established by an explicit test.
     void api.getProviderSettings()
       .then((res) => {
-        if (!cancelled) setAiReady(res.providers.some((p) => p.enabled && (p.hasApiKey || p.id === 'ollama')));
+        if (!cancelled) setAiReady(res.providers.some((p) => p.enabled && p.configured));
       })
       .catch(() => { /* leave aiReady false */ });
 
@@ -134,11 +134,9 @@ export function HomePage() {
     ? 'source'
     : !connectionReady
       ? 'connection'
-      : !aiReady
-        ? 'ai'
-        : !dqlReady
-          ? 'build'
-          : 'notebook';
+      : !dqlReady
+        ? 'build'
+        : 'notebook';
 
   const openPanel = (panel: SidebarPanel) => {
     dispatch({ type: 'SET_SIDEBAR_PANEL', panel });
@@ -212,23 +210,23 @@ export function HomePage() {
     {
       id: 'ai',
       number: '3',
-      title: 'Connect an AI provider',
-      body: 'AI powers everything here — governed answers, AI block suggestions, and research. Without it you only get a static catalog. Add a provider (OpenAI, Anthropic, Gemini, or a local Ollama) and set the active one.',
-      state: aiReady ? 'ready' : currentStep === 'ai' ? 'active' : 'waiting',
+      title: 'Connect an AI provider (optional)',
+      body: 'AI powers governed Ask and assisted authoring. Without it, SQL execution, dbt metadata, lineage, deterministic helpers, and other non-AI paths remain available.',
+      state: aiReady ? 'ready' : 'optional',
       Icon: Sparkles,
       primaryLabel: aiReady ? 'Manage AI providers' : 'Connect AI provider',
       onPrimary: () => openSettingsTab('ai'),
       secondaryLabel: 'Open settings',
       onSecondary: () => openSettingsTab('ai'),
       evidence: [
-        aiReady ? 'AI provider ready' : 'No AI provider configured',
+        aiReady ? 'Provider configured — test in Settings to verify' : 'Optional · limited-AI mode',
       ],
     },
     {
       id: 'build',
       number: '4',
       title: 'Build governed blocks',
-      body: 'Let AI suggest reusable DQL blocks from your dbt and semantic context, then open and save the ones that fit your business. Or build one by hand in Block Studio.',
+      body: 'Build reviewed reusable DQL blocks from dbt and semantic context. Use AI suggestions when configured, or work deterministically in Block Studio.',
       state: dqlReady ? 'ready' : currentStep === 'build' ? 'active' : 'waiting',
       Icon: Blocks,
       primaryLabel: dqlReady ? 'Open block suggestions' : 'Suggest blocks with AI',
@@ -282,10 +280,10 @@ export function HomePage() {
     state.apps,
   ]);
 
-  const readyCount = steps.filter((step) => step.state === 'ready').length;
+  const readyCount = steps.filter((step) => step.state === 'ready' || step.state === 'optional').length;
   const currentStepObj = steps.find((step) => step.id === currentStep) ?? steps[0];
   const focusStep = steps.find((step) => step.id === selectedStepId) ?? currentStepObj;
-  const allReady = readyCount === steps.length;
+  const allReady = steps.every((step) => step.state === 'ready' || step.state === 'optional');
 
   return (
     <div
@@ -323,7 +321,7 @@ export function HomePage() {
           <div className="dql-home-progress-badge" style={{ borderColor: t.cellBorder, background: t.inputBg }}>
             <ProgressRing ready={readyCount} total={steps.length} t={t} />
             <div>
-              <strong style={{ color: t.textPrimary }}>{readyCount} of {steps.length} ready</strong>
+              <strong style={{ color: t.textPrimary }}>{readyCount} of {steps.length} satisfied</strong>
               <span style={{ color: t.textMuted }}>{allReady ? 'All set up' : nextActionShort(currentStep)}</span>
             </div>
           </div>
@@ -450,6 +448,7 @@ const SUCCESS = 'var(--color-accent-green, #16a34a)';
 function stepColor(state: StepState, t: Theme): string {
   if (state === 'ready') return SUCCESS;
   if (state === 'active') return t.warning;
+  if (state === 'optional') return t.accent;
   return t.textMuted;
 }
 
@@ -613,6 +612,7 @@ function ContextPanel({
 function statusLabel(state: StepState): string {
   if (state === 'ready') return 'Ready';
   if (state === 'active') return 'Next';
+  if (state === 'optional') return 'Optional';
   return 'Waiting';
 }
 

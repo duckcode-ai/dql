@@ -12,6 +12,7 @@
     "clean": "turbo run clean",
     "release:dry-run": "pnpm build && pnpm test && node ./scripts/release-packages.mjs --dry-run",
     "release:publish": "node ./scripts/release-packages.mjs --publish",
+    "test:install:published": "node ./scripts/smoke-cli-install.mjs",
     "release:extension": "pnpm --filter dql-language-support package",
     "perf:scale:unit": "node --test scripts/performance/dql2-scale-fixture.test.mjs",
     "perf:scale": "node scripts/performance/dql2-scale-benchmark.mjs",

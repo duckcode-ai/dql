@@ -10,6 +10,7 @@ an acceptance-matrix update.
 | CFG-001 | New dbt-backed projects default to manifest v3 and `modeling.mode: dbt-first`. |
 | CFG-002 | Existing projects migrate explicitly; init/sync never silently upgrade them. |
 | CFG-003 | A configured local or Git dbt project path is authoritative for profile discovery, artifact compilation, and Domain Studio; complete default dbt profile targets may supply the runtime connection without overwriting saved DQL connections. |
+| CFG-004 | Setup, Settings, Home, and governed runtime share one redacted provider contract and readiness definition. Native OpenAI, Anthropic, and Gemini support optional enterprise Base URL/model routing; custom OpenAI-compatible requires Base URL/model; unsaved tests use the governed adapter; blank secret inputs preserve stored secrets. |
 | ID-001 | Every domain-owned object has a domain-qualified compiled identity. |
 | DOM-001 | Domains own semantics and governance, not physical dbt schema. |
 | DOM-002 | Domain hierarchy scopes organization/retrieval; it grants no join or access rights. |
@@ -38,6 +39,7 @@ an acceptance-matrix update.
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
 | UI-005 | App Copilot uses the canonical App run context and cannot mutate an App without an explicit previewed user action. |
 | UI-006 | Domain Studio presents the nested Domain Package hierarchy and focused Areas with shareable deep links; Ask visibly preserves and can clear the selected Area context. |
+| UI-007 | One Settings hub under Govern owns Overview, Project & dbt, Database, AI provider, Agent memory, and Advanced. Guided Setup launches from Settings and automatically once per project on first install and each installed CLI version change; it embeds the same project, database, and provider editors, AI is optional, saved settings remain untouched without successful test/apply, and Setup has no separate rail destination. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
@@ -47,6 +49,7 @@ an acceptance-matrix update.
 | E2E-002 | Release proves certified-first App planning, semantic fallback, atomic commit, filter-consistent multi-tile stories, stale-response rejection, and deterministic no-provider fallback in the built CLI UI. |
 | E2E-003 | Release proves colocated and external dbt repositories, canonical and compatibility profile filenames, existing connection preservation, profile-backed runtime execution, and manifest-v3 Domain Studio compilation. |
 | E2E-004 | Release proves duplicate local Area IDs across domains, explicit and inferred Area focus, Area-scoped Skills, hierarchy/deep-link round trips, and bounded context reduction in the built CLI. |
+| E2E-005 | Release proves built-CLI parity across Settings and Guided Setup, one-time first-install/version-upgrade setup prompts, all provider modes and enterprise URLs, dbt/profile/database preservation and rollback, optional-AI behavior, accurate readiness states, project-local/global npm command availability, PATH-independent internal npm resolution, and unchanged Cloud embed contracts. |
 
 ## OSS and Cloud boundary
 

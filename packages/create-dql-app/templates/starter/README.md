@@ -12,7 +12,7 @@ The core path is:
 source data -> DQL block -> business_view -> dashboard/app/AI answer
 ```
 
-Run `dql compile .` to produce `dql-manifest.json`, the local manifest that
+Run `npm run compile` to produce `dql-manifest.json`, the local manifest that
 connects technical lineage with business lineage.
 
 ## Connect your warehouse

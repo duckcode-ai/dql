@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Database } from 'lucide-react';
+import { CheckCircle2, Database, GitBranch, Settings2, Sparkles } from 'lucide-react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
-import { api, type DbtProfileConnectionCandidate } from '../../api/client';
+import { api, type DbtProfileConnectionCandidate, type ProviderSettings } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
-import type { SettingsTab } from '../../store/types';
+import { DbtProjectEditor } from '../settings/DbtProjectEditor';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -318,10 +318,17 @@ function chooseFallbackDefault(connections: Record<string, any>): string | undef
   return keys.find((key) => !isPlaceholderLocalConnection(connections[key])) ?? keys[0];
 }
 
-export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'page' } = {}) {
+export function ConnectionPanel({
+  variant = 'panel',
+  onConfigured,
+}: {
+  variant?: 'panel' | 'page' | 'setup';
+  onConfigured?: (detail: string) => void;
+} = {}) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const isPage = variant === 'page';
+  const isSetup = variant === 'setup';
 
   const [info, setInfo] = useState<ConnectionInfo | null>(null);
   const [testing, setTesting] = useState(false);
@@ -334,9 +341,8 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   const [profilePath, setProfilePath] = useState('');
   const [previewingProfiles, setPreviewingProfiles] = useState(false);
   const [profileImportError, setProfileImportError] = useState<string | null>(null);
-  // Prototype settings nav: Advanced (MCP/runtime) selection lives locally —
-  // the store's SettingsTab only knows database/ai/memory.
-  const [advancedView, setAdvancedView] = useState<'advanced' | null>(null);
+  const [providerReadiness, setProviderReadiness] = useState<ProviderSettings[]>([]);
+  const [dbtConfigured, setDbtConfigured] = useState(false);
 
   // Edit form state (inline editor for the "manage all connections" list)
   const [editName, setEditName] = useState('');
@@ -353,12 +359,26 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
   useEffect(() => {
     api.getConnections().then((connInfo) => {
       setInfo(connInfo);
-      // Auto-test if connections exist
-      if (Object.keys(connInfo.connections).length > 0) {
+      // Auto-test only a real configured connection. The starter in-memory
+      // DuckDB placeholder is intentionally reported as Missing everywhere.
+      if (Object.values(connInfo.connections).some((connection) => !isPlaceholderLocalConnection(connection))) {
         api.testConnection().then(setTestResult);
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (!isPage) return;
+    let alive = true;
+    void Promise.all([api.getProviderSettings(), api.getOnboardingStatus(), api.getBlockStudioDbtStatus().catch(() => null)])
+      .then(([providerResult, onboarding, dbt]) => {
+        if (!alive) return;
+        setProviderReadiness(providerResult.providers);
+        setDbtConfigured(onboarding.dbt?.configured === true || Boolean(dbt?.configured && dbt.artifacts.manifest.exists));
+      })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [isPage]);
 
   // Seed the primary form from the default connection. Keyed on the connection's
   // identity so user typing (which only updates primaryFields) never re-seeds,
@@ -392,6 +412,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     setTestResult(null);
     const result = await api.testConnection();
     setTestResult(result);
+    if (result.ok) onConfigured?.(result.message);
     setTesting(false);
   };
 
@@ -469,6 +490,8 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       }
     });
 
+    const previousConnections = { ...info.connections };
+    const previousDefault = info.default;
     const connections = { ...info.connections };
     // If renaming, remove old key
     if (opts.previousName && opts.previousName !== name) delete connections[opts.previousName];
@@ -490,13 +513,27 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
         const result = await api.testConnection();
         setTestResult(result);
         ok = result.ok;
-        setSaveMsg(result.ok ? 'Saved and connected' : 'Saved, but connection test failed');
-        if (result.ok) setTimeout(() => setSaveMsg(null), 2000);
+        if (result.ok) {
+          setSaveMsg('Test passed. Connection saved and activated.');
+          onConfigured?.(result.message);
+          setTimeout(() => setSaveMsg(null), 2000);
+        } else {
+          await api.saveConnections(previousConnections, previousDefault || undefined);
+          const rolledBack = await api.getConnections();
+          setInfo(rolledBack);
+          setSaveMsg(`Test failed. Previous connection preserved: ${result.message}`);
+        }
       } catch (e: any) {
-        setSaveMsg(`Saved, but connection test failed: ${e.message ?? 'Connection failed'}`);
+        await api.saveConnections(previousConnections, previousDefault || undefined).catch(() => undefined);
+        const rolledBack = await api.getConnections().catch(() => null);
+        if (rolledBack) setInfo(rolledBack);
+        setSaveMsg(`Test failed. Previous connection preserved: ${e.message ?? 'Connection failed'}`);
       } finally { setTesting(false); }
     } catch (e: any) {
-      setSaveMsg(`Error: ${e.message}`);
+      await api.saveConnections(previousConnections, previousDefault || undefined).catch(() => undefined);
+      const rolledBack = await api.getConnections().catch(() => null);
+      if (rolledBack) setInfo(rolledBack);
+      setSaveMsg(`Test or save failed. Previous connection preserved: ${e.message}`);
     } finally {
       setSaving(false);
     }
@@ -508,7 +545,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     const fields = connectionFieldsFromProfile(profile);
     setTestResult(null);
 
-    if (isPage) {
+    if (isPage || isSetup) {
       setPrimaryDriver(driver);
       setPrimaryFields(fields);
     }
@@ -585,6 +622,7 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
 
   const handleMakeDefault = async (key: string) => {
     if (!info) return;
+    const previousDefault = info.default;
     setSaving(true);
     setSaveMsg(null);
     try {
@@ -595,10 +633,21 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       setTesting(true);
       const result = await api.testConnection();
       setTestResult(result);
-      setSaveMsg(result.ok ? 'Default updated and connected' : 'Default updated, but connection test failed');
-      if (result.ok) setTimeout(() => setSaveMsg(null), 2000);
+      if (result.ok) {
+        setSaveMsg('Test passed. Default connection updated.');
+        onConfigured?.(result.message);
+        setTimeout(() => setSaveMsg(null), 2000);
+      } else {
+        await api.saveConnections(info.connections, previousDefault || undefined);
+        const rolledBack = await api.getConnections();
+        setInfo(rolledBack);
+        setSaveMsg(`Test failed. Previous default preserved: ${result.message}`);
+      }
     } catch (e: any) {
-      setSaveMsg(`Error: ${e.message}`);
+      await api.saveConnections(info.connections, previousDefault || undefined).catch(() => undefined);
+      const rolledBack = await api.getConnections().catch(() => null);
+      if (rolledBack) setInfo(rolledBack);
+      setSaveMsg(`Test or save failed. Previous default preserved: ${e.message}`);
     } finally {
       setTesting(false);
       setSaving(false);
@@ -1067,12 +1116,57 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
     </>
   );
 
+  const connected = Boolean(info && Object.values(info.connections ?? {}).some((connection) => !isPlaceholderLocalConnection(connection)));
+  const databaseEditor = (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div>
+        <div style={{ fontSize: 17, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Database connection</div>
+        <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5, fontFamily: t.font }}>
+          Import a dbt profile or configure the warehouse directly. The candidate is tested before it replaces the active connection.
+        </div>
+      </div>
+      <div style={{ border: `1px solid ${testResult?.ok ? 'var(--status-success-border)' : 'var(--border-subtle)'}`, borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 12, maxWidth: 640 }}>
+        <span style={{ width: 36, height: 36, borderRadius: 9, background: connected ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', color: connected ? 'var(--status-success)' : 'var(--status-warning)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <Database size={17} strokeWidth={1.75} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0, fontFamily: t.font }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>
+            {(DRIVER_LABELS[String(info?.connections?.[info?.default ?? '']?.driver ?? '')] ?? info?.connections?.[info?.default ?? '']?.driver ?? 'No connection yet')}
+            {connected ? ' · configured' : ''}
+          </div>
+          <div style={{ fontSize: 11.5, marginTop: 2, color: testing ? t.textMuted : testResult ? (testResult.ok ? 'var(--status-success)' : 'var(--status-error)') : t.textMuted }}>
+            {testing ? 'Testing…' : testResult ? (testResult.ok ? `Test passed · ${testResult.message}` : `Test failed · ${testResult.message}`) : connected ? 'Configured — run Test connection to verify.' : 'Add a connection below to get started.'}
+          </div>
+        </div>
+        <button type="button" onClick={() => void handleTest()} disabled={testing || !connected} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: connected ? 'pointer' : 'not-allowed', fontFamily: t.font, flexShrink: 0, opacity: connected ? 1 : 0.55 }}>
+          {testing ? 'Testing…' : 'Test connection'}
+        </button>
+      </div>
+      <div style={{ maxWidth: 640 }}>
+        {profilePathSection}
+        {dbtProfilesSection}
+      </div>
+      <DatabaseConnectionForm
+        t={t}
+        driver={primaryDriver}
+        fields={primaryFields}
+        onDriverChange={changePrimaryDriver}
+        onFieldsChange={setPrimaryFields}
+        onSave={() => void handlePrimarySave()}
+        saving={saving}
+        saveMessage={saveMsg}
+        connectorStatus={connectorStatusByDriver[primaryDriver]}
+        installing={installingDriver === primaryDriver}
+        onInstall={() => void handleInstallConnector(primaryDriver)}
+      />
+    </div>
+  );
+
+  if (isSetup) return databaseEditor;
+
   if (isPage) {
     const activeTab = state.settingsTab;
-    // Prototype (Settings Redesign): left settings nav rail with status dots +
-    // an Advanced group, content column to the right.
-    const showAdvanced = advancedView !== null;
-    const connected = Boolean(info && Object.keys(info.connections ?? {}).length > 0);
+    const aiConfigured = providerReadiness.some((provider) => provider.configured && provider.enabled);
     const navItem = (
       active: boolean,
       label: string,
@@ -1101,68 +1195,34 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
         <style>{CONNECTION_PAGE_STYLES}</style>
         <div style={{ display: 'flex', gap: 0, alignItems: 'stretch', minHeight: 0 }}>
           <nav aria-label="Settings sections" style={{ width: 'clamp(190px, 17vw, 240px)', flexShrink: 0, borderRight: `1px solid ${t.cellBorder}`, padding: '10px 10px 10px 0', display: 'flex', flexDirection: 'column', gap: 2, alignSelf: 'flex-start', position: 'sticky', top: 0 }}>
-            {navItem(!showAdvanced && activeTab === 'database', 'Database', () => { setAdvancedView(null); dispatch({ type: 'SET_SETTINGS_TAB', tab: 'database' }); },
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: connected ? 'var(--status-success)' : 'var(--status-warning)' }} title={connected ? 'Connected' : 'Not connected'} />)}
-            {navItem(!showAdvanced && activeTab === 'ai', 'AI provider', () => { setAdvancedView(null); dispatch({ type: 'SET_SETTINGS_TAB', tab: 'ai' }); },
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--status-success)' }} title="Configured in the AI section" />)}
-            {navItem(!showAdvanced && activeTab === 'memory', 'Agent memory', () => { setAdvancedView(null); dispatch({ type: 'SET_SETTINGS_TAB', tab: 'memory' }); })}
+            {navItem(activeTab === 'overview', 'Overview', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'overview' }))}
+            {navItem(activeTab === 'project', 'Project & dbt', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' }),
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: dbtConfigured ? 'var(--status-success)' : 'var(--status-warning)' }} title={dbtConfigured ? 'Configured' : 'Missing'} />)}
+            {navItem(activeTab === 'database', 'Database', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'database' }),
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: connected ? 'var(--status-success)' : 'var(--status-warning)' }} title={connected ? 'Configured' : 'Missing'} />)}
+            {navItem(activeTab === 'ai', 'AI provider', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'ai' }),
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: aiConfigured ? 'var(--status-success)' : 'var(--status-warning)' }} title={aiConfigured ? 'Configured' : 'Optional · missing'} />)}
+            {navItem(activeTab === 'memory', 'Agent memory', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'memory' }))}
             <div style={{ height: 1, background: t.cellBorder, margin: '10px 10px 10px 0' }} />
-            {navItem(advancedView === 'advanced', 'MCP servers', () => setAdvancedView('advanced'),
-              <span style={{ fontSize: 10, color: t.textMuted }}>Advanced</span>)}
-            {navItem(advancedView === 'advanced', 'Runtime env', () => setAdvancedView('advanced'),
+            {navItem(activeTab === 'advanced', 'Advanced', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'advanced' }),
               <span style={{ fontSize: 10, color: t.textMuted }}>Advanced</span>)}
           </nav>
           <div style={{ flex: 1, minWidth: 0, padding: '0 0 24px 20px' }}>
-            {showAdvanced ? (
+            {activeTab === 'overview' ? (
+              <SettingsOverview
+                dbtConfigured={dbtConfigured}
+                databaseConfigured={connected}
+                databaseTest={testResult}
+                providers={providerReadiness}
+              />
+            ) : activeTab === 'project' ? (
+              <DbtProjectEditor onConfigured={() => setDbtConfigured(true)} />
+            ) : activeTab === 'advanced' ? (
               <ConnectionRuntimeSettings embedded section="advanced" />
             ) : activeTab === 'database' ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                {/* Prototype header + live status card. */}
-                <div>
-                  <div style={{ fontSize: 17, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Database connection</div>
-                  <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5, fontFamily: t.font }}>
-                    Where your dbt models and data live. Credentials stay in <span style={{ fontFamily: t.fontMono, fontSize: 11.5 }}>.dql/</span> and are never sent anywhere.
-                  </div>
-                </div>
-                <div style={{ border: `1px solid ${testResult?.ok ? 'var(--status-success-border)' : 'var(--border-subtle)'}`, borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', alignItems: 'center', gap: 12, maxWidth: 640 }}>
-                  <span style={{ width: 36, height: 36, borderRadius: 9, background: connected ? 'var(--status-success-bg)' : 'var(--status-warning-bg)', color: connected ? 'var(--status-success)' : 'var(--status-warning)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                    <Database size={17} strokeWidth={1.75} />
-                  </span>
-                  <div style={{ flex: 1, minWidth: 0, fontFamily: t.font }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>
-                      {(DRIVER_LABELS[String(info?.connections?.[info?.default ?? '']?.driver ?? '')] ?? info?.connections?.[info?.default ?? '']?.driver ?? 'No connection yet')}
-                      {connected ? ' · connected' : ''}
-                    </div>
-                    <div style={{ fontSize: 11.5, marginTop: 2, color: testing ? t.textMuted : testResult ? (testResult.ok ? 'var(--status-success)' : 'var(--status-error)') : t.textMuted }}>
-                      {testing ? 'Testing…' : testResult ? testResult.message : connected ? 'Ready — run Test connection to verify.' : 'Add a connection below to get started.'}
-                    </div>
-                  </div>
-                  <button type="button" onClick={() => void handleTest()} disabled={testing} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, flexShrink: 0 }}>
-                    {testing ? 'Testing…' : 'Test connection'}
-                  </button>
-                </div>
-                <div style={{ maxWidth: 640 }}>
-                  {profilePathSection}
-                  {dbtProfilesSection}
-                </div>
-                {/* Primary form — Warehouse select swaps fields + shows the
-                    selected driver's catalog install status, then Save. */}
-                <DatabaseConnectionForm
-                  t={t}
-                  driver={primaryDriver}
-                  fields={primaryFields}
-                  onDriverChange={changePrimaryDriver}
-                  onFieldsChange={setPrimaryFields}
-                  onSave={() => void handlePrimarySave()}
-                  saving={saving}
-                  saveMessage={saveMsg}
-                  connectorStatus={connectorStatusByDriver[primaryDriver]}
-                  installing={installingDriver === primaryDriver}
-                  onInstall={() => void handleInstallConnector(primaryDriver)}
-                />
-              </div>
+              databaseEditor
             ) : activeTab === 'ai' ? (
-              <ConnectionRuntimeSettings embedded section="providers" />
+              <ConnectionRuntimeSettings embedded section="providers" onProviderConfigured={(provider) => setProviderReadiness((current) => current.map((entry) => entry.id === provider.id ? provider : { ...entry, active: false }))} />
             ) : (
               <ConnectionRuntimeSettings embedded section="memory" />
             )}
@@ -1183,6 +1243,103 @@ export function ConnectionPanel({ variant = 'panel' }: { variant?: 'panel' | 'pa
       {testConnectionSection}
       {catalogSection}
     </PanelFrame>
+  );
+}
+
+function SettingsOverview({
+  dbtConfigured,
+  databaseConfigured,
+  databaseTest,
+  providers,
+}: {
+  dbtConfigured: boolean;
+  databaseConfigured: boolean;
+  databaseTest: { ok: boolean; message: string } | null;
+  providers: ProviderSettings[];
+}) {
+  const { state, dispatch } = useNotebook();
+  const t = themes[state.themeMode];
+  const activeProvider = providers.find((provider) => provider.active && provider.configured)
+    ?? providers.find((provider) => provider.enabled && provider.configured);
+  const cards: Array<{
+    title: string;
+    detail: string;
+    state: 'missing' | 'configured' | 'passed' | 'failed';
+    tab: 'project' | 'database' | 'ai';
+    icon: React.ReactNode;
+    optional?: boolean;
+  }> = [
+    {
+      title: 'Project & dbt',
+      detail: dbtConfigured ? 'Project configuration and dbt artifacts are present.' : 'Choose a local dbt project or Git repository.',
+      state: dbtConfigured ? 'configured' : 'missing',
+      tab: 'project',
+      icon: <GitBranch size={18} />,
+    },
+    {
+      title: 'Database',
+      detail: databaseTest?.ok
+        ? databaseTest.message
+        : databaseTest
+          ? databaseTest.message
+          : databaseConfigured
+            ? 'Credentials are configured. Run Test to verify reachability.'
+            : 'Import a dbt profile or enter warehouse credentials.',
+      state: databaseTest ? (databaseTest.ok ? 'passed' : 'failed') : databaseConfigured ? 'configured' : 'missing',
+      tab: 'database',
+      icon: <Database size={18} />,
+    },
+    {
+      title: 'AI provider',
+      detail: activeProvider
+        ? `${activeProvider.label}${activeProvider.model ? ` · ${activeProvider.model}` : ''}. Run Test to verify reachability.`
+        : 'Optional. Deterministic and non-AI workflows remain available.',
+      state: activeProvider ? 'configured' : 'missing',
+      tab: 'ai',
+      icon: <Sparkles size={18} />,
+      optional: true,
+    },
+  ];
+  const stateCopy = {
+    missing: 'Missing',
+    configured: 'Configured',
+    passed: 'Test passed',
+    failed: 'Test failed',
+  } as const;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 820 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 750, color: t.textPrimary }}>Settings overview</div>
+          <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 4, lineHeight: 1.5 }}>One place for project, data, AI, memory, and advanced runtime configuration.</div>
+        </div>
+        <button type="button" onClick={() => dispatch({ type: 'OPEN_SETUP' })} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, height: 34, padding: '0 15px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap' }}>
+          <Settings2 size={14} /> Guided Setup
+        </button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 12 }}>
+        {cards.map((card) => {
+          const positive = card.state === 'configured' || card.state === 'passed';
+          const failed = card.state === 'failed';
+          const color = failed ? 'var(--status-error)' : positive ? 'var(--status-success)' : 'var(--status-warning)';
+          const bg = failed ? 'var(--status-error-bg)' : positive ? 'var(--status-success-bg)' : 'var(--status-warning-bg)';
+          return (
+            <button key={card.title} type="button" onClick={() => dispatch({ type: 'SET_SETTINGS_TAB', tab: card.tab })} style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, background: t.cellBg, padding: 16, textAlign: 'left', cursor: 'pointer', fontFamily: t.font, minHeight: 158, display: 'flex', flexDirection: 'column' }}>
+              <span style={{ width: 36, height: 36, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color, background: bg }}>{positive ? <CheckCircle2 size={18} /> : card.icon}</span>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: t.textPrimary, marginTop: 12 }}>{card.title}</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color, marginTop: 4 }}>{stateCopy[card.state]}{card.optional ? ' · optional' : ''}</span>
+              <span style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.45, marginTop: 7 }}>{card.detail}</span>
+            </button>
+          );
+        })}
+      </div>
+      {!activeProvider ? (
+        <div style={{ border: '1px solid var(--status-info-border)', background: 'var(--status-info-bg)', color: t.textSecondary, borderRadius: 10, padding: '11px 13px', fontSize: 11.5, lineHeight: 1.5 }}>
+          Limited-AI mode is active: SQL execution, dbt metadata, lineage, deterministic helpers, and other non-AI paths continue to work. Configure a provider when you want governed Ask and AI-assisted authoring.
+        </div>
+      ) : null}
+    </div>
   );
 }
 

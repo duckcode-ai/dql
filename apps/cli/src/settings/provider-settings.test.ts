@@ -17,6 +17,59 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   delete process.env.ANTHROPIC_REASONING_EFFORT;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.OLLAMA_BASE_URL;
+  delete process.env.OLLAMA_MODEL;
+  delete process.env.DQL_OPENAI_COMPAT_BASE_URL;
+  delete process.env.DQL_OPENAI_COMPAT_MODEL;
+});
+
+describe('provider configured state', () => {
+  it('does not report default Ollama or empty hosted providers as configured', () => {
+    const providers = listProviderSettings(root);
+    expect(providers.find((p) => p.id === 'ollama')).toMatchObject({ enabled: false, configured: false });
+    expect(providers.find((p) => p.id === 'openai')).toMatchObject({ enabled: false, configured: false });
+  });
+
+  it('reports native API-key and local providers from saved or environment configuration', () => {
+    saveProviderSettings(root, { id: 'anthropic', apiKey: 'sk-ant-test', baseUrl: 'https://gateway.example/anthropic' });
+    process.env.OLLAMA_BASE_URL = 'http://127.0.0.1:11434';
+    const providers = listProviderSettings(root);
+    expect(providers.find((p) => p.id === 'anthropic')).toMatchObject({ enabled: true, configured: true, hasApiKey: true });
+    expect(providers.find((p) => p.id === 'ollama')).toMatchObject({ enabled: true, configured: true });
+  });
+
+  it('requires both base URL and model for a custom OpenAI-compatible provider', () => {
+    saveProviderSettings(root, { id: 'custom-openai', enabled: true, baseUrl: 'https://gateway.example/v1' });
+    expect(listProviderSettings(root).find((p) => p.id === 'custom-openai')!.configured).toBe(false);
+    saveProviderSettings(root, { id: 'custom-openai', model: 'enterprise-model' });
+    expect(listProviderSettings(root).find((p) => p.id === 'custom-openai')).toMatchObject({ configured: true, hasApiKey: false });
+  });
+
+  it('preserves a stored secret when a later edit omits the key and never returns it raw', () => {
+    saveProviderSettings(root, { id: 'openai', apiKey: 'sk-secret-value', model: 'gpt-enterprise' });
+    saveProviderSettings(root, { id: 'openai', apiKey: '', baseUrl: 'https://gateway.example/v1' });
+    expect(getEffectiveProviderConfig(root, 'openai').apiKey).toBe('sk-secret-value');
+    const redacted = listProviderSettings(root).find((p) => p.id === 'openai')!;
+    expect(redacted.apiKeyPreview).not.toContain('secret');
+    expect(JSON.stringify(redacted)).not.toContain('sk-secret-value');
+  });
+
+  it('treats native-provider Base URL and model as optional readiness inputs', () => {
+    saveProviderSettings(root, { id: 'openai', apiKey: 'openai-key' });
+    saveProviderSettings(root, { id: 'anthropic', apiKey: 'anthropic-key', baseUrl: 'https://anthropic.enterprise.example/v1' });
+    saveProviderSettings(root, { id: 'gemini', apiKey: 'gemini-key', model: 'gemini-enterprise' });
+    const providers = listProviderSettings(root);
+    expect(providers.find((p) => p.id === 'openai')).toMatchObject({ configured: true, baseUrl: undefined, model: undefined });
+    expect(providers.find((p) => p.id === 'anthropic')).toMatchObject({ configured: true, baseUrl: 'https://anthropic.enterprise.example/v1' });
+    expect(providers.find((p) => p.id === 'gemini')).toMatchObject({ configured: true, model: 'gemini-enterprise' });
+  });
+
+  it('marks an explicitly enabled subscription provider as configured without inventing a key', () => {
+    saveProviderSettings(root, { id: 'claude-code', enabled: true, model: 'claude-sonnet-5' });
+    expect(listProviderSettings(root).find((p) => p.id === 'claude-code')).toMatchObject({ configured: true, hasApiKey: false });
+  });
 });
 
 describe('provider reasoning-effort settings', () => {

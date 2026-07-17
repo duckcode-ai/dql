@@ -46,6 +46,8 @@ export interface RedactedProviderSettings {
   enabled: boolean;
   active: boolean;
   hasApiKey: boolean;
+  /** Required non-secret configuration is present. Reachability still requires an explicit test. */
+  configured: boolean;
   apiKeyPreview?: string;
   baseUrl?: string;
   model?: string;
@@ -127,7 +129,8 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
     const envKey = meta.keyEnv ? process.env[meta.keyEnv] : undefined;
     const hasLocalKey = Boolean(local?.apiKey?.trim());
     const hasEnvKey = Boolean(envKey?.trim());
-    const hasNoAuthEndpoint = id === 'custom-openai' && Boolean(local?.baseUrl?.trim());
+    const resolvedBaseUrl = local?.baseUrl || (meta.baseUrlEnv ? process.env[meta.baseUrlEnv] : undefined);
+    const resolvedModel = local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined);
     // Subscription CLI providers carry no API key — their usability is "installed +
     // logged in", checked at runtime. In settings they're simply on/off (default off).
     if (meta.authMode === 'subscription_cli') {
@@ -138,8 +141,9 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
         enabled,
         active: state.activeProvider === id,
         hasApiKey: false,
+        configured: enabled,
         baseUrl: undefined,
-        model: local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined),
+        model: resolvedModel,
         source: enabled ? 'local' : 'none',
         envVars: [meta.modelEnv].filter(Boolean) as string[],
         authMode: meta.authMode,
@@ -148,15 +152,20 @@ export function listProviderSettings(projectRoot: string): RedactedProviderSetti
         supportsReasoningEffort: false,
       };
     }
-    const resolvedModel = local?.model || (meta.modelEnv ? process.env[meta.modelEnv] : undefined);
+    const configured = id === 'ollama'
+      ? Boolean(resolvedBaseUrl?.trim() || resolvedModel?.trim())
+      : id === 'custom-openai'
+        ? Boolean(resolvedBaseUrl?.trim() && resolvedModel?.trim())
+        : hasLocalKey || hasEnvKey;
     return {
       id,
       label: meta.label,
-      enabled: local?.enabled ?? (hasLocalKey || hasEnvKey || hasNoAuthEndpoint || id === 'ollama'),
+      enabled: local?.enabled ?? configured,
       active: state.activeProvider === id,
-      hasApiKey: hasLocalKey || hasEnvKey || hasNoAuthEndpoint || id === 'ollama',
+      hasApiKey: hasLocalKey || hasEnvKey,
+      configured,
       apiKeyPreview: hasLocalKey ? previewSecret(local!.apiKey!) : hasEnvKey ? `${meta.keyEnv}=set` : undefined,
-      baseUrl: local?.baseUrl || (meta.baseUrlEnv ? process.env[meta.baseUrlEnv] : undefined),
+      baseUrl: resolvedBaseUrl,
       model: resolvedModel,
       source: hasLocalKey || local?.baseUrl || local?.model ? 'local' : hasEnvKey || envHas(meta) ? 'env' : 'none',
       envVars: [meta.keyEnv, meta.modelEnv, meta.baseUrlEnv, meta.reasoningEffortEnv].filter(Boolean) as string[],
@@ -201,7 +210,9 @@ export function saveProviderSettings(projectRoot: string, input: ProviderSetting
   const next: StoredProviderSettings = {
     id: input.id,
     enabled: input.enabled ?? existing?.enabled ?? true,
-    apiKey: input.apiKey === undefined ? existing?.apiKey : input.apiKey.trim() || undefined,
+    // Blank secret fields mean "keep the existing secret" across every UI/API
+    // surface. We never echo a stored key back merely to make edits possible.
+    apiKey: input.apiKey === undefined || input.apiKey.trim() === '' ? existing?.apiKey : input.apiKey.trim(),
     baseUrl: input.baseUrl === undefined ? existing?.baseUrl : input.baseUrl.trim() || undefined,
     model: input.model === undefined ? existing?.model : input.model.trim() || undefined,
     // `undefined` = leave unchanged; `'auto'` = clear the ceiling; a level = set it.

@@ -48,11 +48,15 @@ export function ConnectionRuntimeSettings({
   includeMemory = true,
   embedded = false,
   section,
+  editorMode = 'settings',
+  onProviderConfigured,
 }: {
   includeMemory?: boolean;
   embedded?: boolean;
   /** When set, render only this section (for the tabbed Settings page). */
   section?: 'providers' | 'memory' | 'advanced';
+  editorMode?: 'settings' | 'setup';
+  onProviderConfigured?: (provider: ProviderSettings) => void;
 }) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
@@ -97,8 +101,8 @@ export function ConnectionRuntimeSettings({
     return () => { cancelled = true; };
   }, [loading]);
 
-  const configured = useMemo(() => providers.filter((p) => p.enabled && (p.hasApiKey || p.id === 'ollama' || p.authMode === 'subscription_cli')).length, [providers]);
-  const activeProvider = providers.find((provider) => provider.active);
+  const configured = useMemo(() => providers.filter((p) => p.enabled && p.configured).length, [providers]);
+  const activeProvider = providers.find((provider) => provider.active && provider.configured);
 
   return (
     <div style={{ padding: embedded ? 0 : 24, maxWidth: embedded ? undefined : 1180 }}>
@@ -136,6 +140,8 @@ export function ConnectionRuntimeSettings({
               t={t}
               onSaved={(next) => setProviders(next)}
               onStatus={setStatus}
+              editorMode={editorMode}
+              onProviderConfigured={onProviderConfigured}
             />
           )}
           {!section && (
@@ -745,7 +751,7 @@ const PROVIDER_BRANDS: Array<{ key: string; label: string; modes: Partial<Record
   { key: 'openai', label: 'OpenAI', modes: { subscription: 'codex', api: 'openai' } },
   { key: 'gemini', label: 'Google Gemini', modes: { api: 'gemini' } },
   { key: 'ollama', label: 'Ollama — local', modes: { local: 'ollama' } },
-  { key: 'gateway', label: 'Custom gateway', modes: { api: 'custom-openai' } },
+  { key: 'gateway', label: 'Custom OpenAI-compatible', modes: { api: 'custom-openai' } },
 ];
 const MODE_COPY: Record<ProviderBrandMode, { label: string; hint: string }> = {
   subscription: { label: 'Subscription', hint: 'Sign in — no API key' },
@@ -765,14 +771,18 @@ function ProviderSettingsForm({
   t,
   onSaved,
   onStatus,
+  editorMode,
+  onProviderConfigured,
 }: {
   providers: ProviderSettings[];
   cliStatus: Partial<Record<ProviderSettingsId, ProviderCliStatus>>;
   t: Theme;
   onSaved: (providers: ProviderSettings[]) => void;
   onStatus: (message: string | null) => void;
+  editorMode: 'settings' | 'setup';
+  onProviderConfigured?: (provider: ProviderSettings) => void;
 }) {
-  const activeProvider = providers.find((provider) => provider.active);
+  const activeProvider = providers.find((provider) => provider.active && provider.configured);
   const [brandKey, setBrandKey] = useState<string>(() => brandForProviderId(activeProvider?.id));
   const brand = PROVIDER_BRANDS.find((entry) => entry.key === brandKey) ?? PROVIDER_BRANDS[0];
   const availableModes = (Object.keys(brand.modes) as ProviderBrandMode[]);
@@ -790,6 +800,7 @@ function ProviderSettingsForm({
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortSetting>(provider?.reasoningEffort ?? 'auto');
   const [busy, setBusy] = useState(false);
   const [activeTest, setActiveTest] = useState<{ state: 'idle' | 'testing' | 'done'; ok?: boolean; message?: string; seconds?: string }>({ state: 'idle' });
+  const [draftTest, setDraftTest] = useState<{ state: 'idle' | 'testing' | 'done'; ok?: boolean; message?: string }>({ state: 'idle' });
 
   // Re-seed the form whenever the concrete provider changes.
   useEffect(() => {
@@ -797,6 +808,7 @@ function ProviderSettingsForm({
     setBaseUrl(provider?.baseUrl ?? '');
     setModel(provider?.model ?? '');
     setReasoningEffort(provider?.reasoningEffort ?? 'auto');
+    setDraftTest({ state: 'idle' });
   }, [providerId, provider?.baseUrl, provider?.model, provider?.reasoningEffort]);
 
   const testActive = async () => {
@@ -808,9 +820,42 @@ function ProviderSettingsForm({
     setActiveTest({ state: 'done', ok, message: result.message, seconds: ((Date.now() - started) / 1000).toFixed(1) });
   };
 
+  const validationError = (): string | null => {
+    if (providerId === 'custom-openai' && !baseUrl.trim()) return 'Custom OpenAI-compatible providers require a Base URL.';
+    if (providerId === 'custom-openai' && !model.trim()) return 'Custom OpenAI-compatible providers require a model.';
+    if (effectiveMode === 'api' && providerId !== 'custom-openai' && !apiKey.trim() && !provider?.hasApiKey) {
+      return `Add an API key${provider?.envVars?.[0] ? ` or set ${provider.envVars[0]}` : ''}.`;
+    }
+    if (effectiveMode === 'local' && !baseUrl.trim() && !model.trim() && !provider?.configured) {
+      return 'Set an Ollama endpoint or model before testing.';
+    }
+    return null;
+  };
+
+  const testDraft = async (): Promise<boolean> => {
+    const invalid = validationError();
+    if (invalid) {
+      setDraftTest({ state: 'done', ok: false, message: invalid });
+      return false;
+    }
+    setDraftTest({ state: 'testing' });
+    const result = await api.testProviderSettings(providerId, {
+      apiKey: apiKey || undefined,
+      baseUrl: baseUrl || undefined,
+      model: model || undefined,
+    });
+    setDraftTest({ state: 'done', ok: result.ok, message: result.message });
+    return result.ok;
+  };
+
   const makeActive = async () => {
     setBusy(true);
     try {
+      const testPassed = await testDraft();
+      if (!testPassed) {
+        onStatus('Test failed. Your existing provider configuration was not changed.');
+        return;
+      }
       const result = await api.saveProviderSettings({
         id: providerId,
         enabled: true,
@@ -820,7 +865,9 @@ function ProviderSettingsForm({
         reasoningEffort,
       });
       onSaved(result.providers);
-      onStatus(`${brand.label} is now the active provider.`);
+      const saved = result.providers.find((entry) => entry.id === providerId);
+      if (saved) onProviderConfigured?.(saved);
+      onStatus(`${brand.label} passed its test and is now the active provider.`);
     } catch (error) {
       onStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -834,7 +881,9 @@ function ProviderSettingsForm({
     try {
       const result = await api.saveProviderSettings({ id: providerId, enabled: true, model: chosen });
       onSaved(result.providers);
-      onStatus(`${brand.label} connected and activated.`);
+      const saved = result.providers.find((entry) => entry.id === providerId);
+      if (saved) onProviderConfigured?.(saved);
+      onStatus(`${brand.label} subscription configured and activated. Run Test to verify the next governed request.`);
     } catch (error) {
       onStatus(error instanceof Error ? error.message : String(error));
     }
@@ -849,11 +898,11 @@ function ProviderSettingsForm({
       : 'Keys stay in .dql/ and are never returned raw.';
 
   return (
-    <div style={{ width: 'min(640px, 100%)', display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ width: 'min(680px, 100%)', display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div>
         <div style={{ fontSize: 17, fontWeight: 700, color: t.textPrimary }}>AI provider</div>
         <div style={{ fontSize: 12.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5 }}>
-          One provider powers governed answers, block suggestions, and research. Keys stay in <span style={{ fontFamily: t.fontMono, fontSize: 11.5 }}>.dql/</span> — never returned raw.
+          AI is optional. Without it, deterministic queries, dbt metadata, connections, and governed non-AI paths remain available. Keys stay in <span style={{ fontFamily: t.fontMono, fontSize: 11.5 }}>.dql/</span> and are never returned raw.
         </div>
       </div>
 
@@ -871,7 +920,7 @@ function ProviderSettingsForm({
               {activeTest.state === 'testing' ? 'Testing…'
                 : activeTest.state === 'done'
                   ? (activeTest.ok ? `Test passed · ${activeTest.seconds}s` : (activeTest.message || 'Test failed'))
-                  : (activeProvider.source === 'env' ? 'Configured from environment' : 'Connected and ready')}
+                  : (activeProvider.source === 'env' ? 'Configured from environment — run Test to verify' : 'Configured — run Test to verify reachability')}
             </div>
           </div>
           <button type="button" onClick={() => void testActive()} disabled={activeTest.state === 'testing'} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 30, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, flexShrink: 0 }}>
@@ -882,16 +931,12 @@ function ProviderSettingsForm({
 
       {/* single provider form */}
       <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, background: t.cellBg, padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <span style={fieldLabel}>Provider</span>
             <select value={brand.key} onChange={(event) => { setBrandKey(event.target.value); setMode('subscription'); }} style={input}>
               {PROVIDER_BRANDS.map((entry) => <option key={entry.key} value={entry.key}>{entry.label}</option>)}
             </select>
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <span style={fieldLabel}>Model</span>
-            <input value={model} onChange={(event) => setModel(event.target.value)} placeholder={provider?.model || 'Default model'} style={input} />
           </label>
         </div>
 
@@ -950,23 +995,6 @@ function ProviderSettingsForm({
             {provider?.envVars?.[0] ? (
               <span style={{ fontSize: 10.5, color: t.textMuted, paddingBottom: 9 }}>or set <span style={{ fontFamily: t.fontMono }}>{provider.envVars[0]}</span></span>
             ) : null}
-            {providerId === 'custom-openai' ? (
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
-                <span style={fieldLabel}>Gateway base URL</span>
-                <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={baseUrlPlaceholder(providerId)} style={{ ...input, fontFamily: t.fontMono }} />
-              </label>
-            ) : null}
-            {provider?.supportsReasoningEffort ? (
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
-                <span style={fieldLabel}>Reasoning effort</span>
-                <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffortSetting)} style={input}>
-                  <option value="auto">Auto — pick per task (up to High)</option>
-                  <option value="low">Low — fastest, cheapest</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High — deepest reasoning</option>
-                </select>
-              </label>
-            ) : null}
           </div>
         ) : null}
 
@@ -985,14 +1013,90 @@ function ProviderSettingsForm({
           </div>
         ) : null}
 
+        {editorMode === 'setup' ? (
+          <details style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 10 }}>
+            <summary style={{ fontSize: 11.5, fontWeight: 650, color: t.textSecondary, cursor: 'pointer' }}>Advanced enterprise routing</summary>
+            <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
+              <ProviderAdvancedFields providerId={providerId} provider={provider} mode={effectiveMode} baseUrl={baseUrl} setBaseUrl={setBaseUrl} model={model} setModel={setModel} reasoningEffort={reasoningEffort} setReasoningEffort={setReasoningEffort} t={t} input={input} fieldLabel={fieldLabel} />
+            </div>
+          </details>
+        ) : (
+          <div style={{ display: 'grid', gap: 10 }}>
+            <ProviderAdvancedFields providerId={providerId} provider={provider} mode={effectiveMode} baseUrl={baseUrl} setBaseUrl={setBaseUrl} model={model} setModel={setModel} reasoningEffort={reasoningEffort} setReasoningEffort={setReasoningEffort} t={t} input={input} fieldLabel={fieldLabel} />
+          </div>
+        )}
+
+        {draftTest.state !== 'idle' ? (
+          <div role={draftTest.ok === false ? 'alert' : 'status'} style={{ fontSize: 11.5, lineHeight: 1.5, color: draftTest.state === 'testing' ? t.textMuted : draftTest.ok ? 'var(--status-success)' : 'var(--status-error)' }}>
+            {draftTest.state === 'testing' ? 'Testing these unsaved values through the governed runtime…' : draftTest.message}
+          </div>
+        ) : null}
+
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 4, borderTop: '1px solid var(--border-subtle)' }}>
           <span style={{ fontSize: 10.5, color: t.textMuted, flex: 1 }}>{footnote}</span>
+          <button type="button" onClick={() => void testDraft()} disabled={busy || draftTest.state === 'testing'} style={{ height: 30, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font }}>
+            {draftTest.state === 'testing' ? 'Testing…' : 'Test unsaved values'}
+          </button>
           <button type="button" onClick={() => void makeActive()} disabled={busy} style={{ height: 30, padding: '0 15px', borderRadius: 8, border: 'none', background: t.accent, color: '#fff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 4px rgba(107,93,211,0.25)', opacity: busy ? 0.7 : 1 }}>
-            {busy ? 'Saving…' : 'Make active provider'}
+            {busy ? 'Testing…' : 'Test, save & activate'}
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+function ProviderAdvancedFields({
+  providerId,
+  provider,
+  mode,
+  baseUrl,
+  setBaseUrl,
+  model,
+  setModel,
+  reasoningEffort,
+  setReasoningEffort,
+  t,
+  input,
+  fieldLabel,
+}: {
+  providerId: ProviderSettingsId;
+  provider?: ProviderSettings;
+  mode: ProviderBrandMode;
+  baseUrl: string;
+  setBaseUrl: (value: string) => void;
+  model: string;
+  setModel: (value: string) => void;
+  reasoningEffort: ReasoningEffortSetting;
+  setReasoningEffort: (value: ReasoningEffortSetting) => void;
+  t: Theme;
+  input: React.CSSProperties;
+  fieldLabel: React.CSSProperties;
+}) {
+  return (
+    <>
+      {mode !== 'subscription' && mode !== 'local' ? (
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={fieldLabel}>{providerId === 'custom-openai' ? 'Base URL (required)' : 'Base URL (optional)'}</span>
+          <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={baseUrlPlaceholder(providerId)} style={{ ...input, fontFamily: t.fontMono }} />
+        </label>
+      ) : null}
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <span style={fieldLabel}>{providerId === 'custom-openai' ? 'Model (required)' : 'Model (optional)'}</span>
+        <input value={model} onChange={(event) => setModel(event.target.value)} placeholder={provider?.model || 'Provider default'} style={input} />
+      </label>
+      {provider?.supportsReasoningEffort && mode === 'api' ? (
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={fieldLabel}>Reasoning effort</span>
+          <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffortSetting)} style={input}>
+            <option value="auto">Auto — pick per task (up to High)</option>
+            <option value="low">Low — fastest, cheapest</option>
+            <option value="medium">Medium</option>
+            <option value="high">High — deepest reasoning</option>
+          </select>
+        </label>
+      ) : null}
+    </>
   );
 }
 
@@ -1441,7 +1545,7 @@ function SummaryCard({
   return (
     <div style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, padding: '10px 12px', minWidth: 160, textAlign: 'right', background: t.cellBg }}>
       <div style={{ fontSize: 20, fontWeight: 700 }}>{configured}/{total}</div>
-      <div style={{ fontSize: 12, color: t.textSecondary }}>providers ready</div>
+      <div style={{ fontSize: 12, color: t.textSecondary }}>providers configured</div>
       <div style={{ fontSize: 11, color: activeLabel ? t.accent : t.textMuted, marginTop: 4 }}>
         {activeLabel ? `${activeLabel} active` : 'No active provider'}
       </div>
