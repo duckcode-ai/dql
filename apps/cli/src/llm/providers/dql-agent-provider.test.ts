@@ -140,6 +140,70 @@ describe('governed answer formatting', () => {
 });
 
 describe('conversation context follow-up routing', () => {
+  it('resolves a shortened named member and drops stale block shape for a relative comparison', () => {
+    const question = 'Who are the other customers who paid less tax than Melissa?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_beverage',
+        turns: [
+          {
+            id: 'turn_beverage',
+            question: 'Who are the top beverage customers?',
+            answerSummary: 'Melissa Lopez leads beverage revenue.',
+            sourceCertifiedBlock: 'top_beverage_customers',
+            requestedFilters: ['beverage'],
+            requestedDimensions: ['customer'],
+            requestedMeasures: ['beverage_revenue'],
+            topN: 10,
+            result: {
+              columns: ['customer_name', 'beverage_revenue'],
+              dimensionValues: { customer_name: ['Melissa Lopez', 'Joy Lam'] },
+              measureColumns: ['beverage_revenue'],
+            },
+          },
+        ],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['Melissa Lopez'],
+      dimensions: ['customer'],
+      priorResultValues: { customer_name: ['Melissa Lopez'] },
+      resolvedReferences: ['customer: Melissa Lopez'],
+    });
+    expect(followUp?.sourceBlockName).toBeUndefined();
+    expect(followUp?.sourceQuestion).toBeUndefined();
+    expect(followUp?.priorResultColumns).toBeUndefined();
+    expect(followUp?.priorDqlArtifact).toBeUndefined();
+    expect(followUp?.priorMeasures).toBeUndefined();
+    expect(followUp?.priorLimit).toBeUndefined();
+    expect(followUp?.filters).not.toContain('beverage');
+    expect(followUp?.filters).not.toContain('Joy Lam');
+  });
+
+  it('does not guess a shortened member when multiple prior values share it', () => {
+    const question = 'Show orders for Melissa';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        resultColumns: ['customer_name', 'orders'],
+        resultDimensionValues: { customer_name: ['Melissa Lopez', 'Melissa Moore'] },
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp?.priorResultValues).toEqual({
+      customer_name: ['Melissa Lopez', 'Melissa Moore'],
+    });
+    expect(followUp?.filters).toBeUndefined();
+  });
+
   it('resolves "these categories" to prior result values and dimensions', () => {
     const followUp = __test__.followUpFromConversationContext({
       provider: 'ollama',

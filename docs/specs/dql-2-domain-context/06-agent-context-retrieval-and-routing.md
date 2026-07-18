@@ -71,6 +71,79 @@ assets, MetricFlow, domain context/skills, and dbt/warehouse context as parallel
 candidate classes, then passes a compact ranked context pack to routing
 (`AGT-005`).
 
+Analytical natural language never reaches a general-knowledge decision before
+this retrieval completes. Certified assets, semantic metadata, DQL
+modeling/terms, dbt objects/columns, and safe cached runtime schema are searched
+as parallel evidence lanes from the same snapshot (`CTX-005`, `AGT-009`). Each
+candidate keeps three independent facts:
+
+- relevance: lexical/semantic fit to the question and active context;
+- trust: certified, semantic, governed-SQL, or exploratory evidence tier; and
+- compatibility: whether the object can express the requested measures,
+  dimensions, entity, grain, filters, ranking, parameters, and output.
+
+Trust never compensates for poor meaning relevance. An unrelated certified
+block cannot outrank the correct semantic metric merely because it is
+certified. Trust selects the safest execution path only after the intended
+business concept and compatibility are established (`AGT-010`).
+
+## Evidence retrieval and AI meaning resolution
+
+Retrieval uses exact qualified references, canonical names and approved aliases,
+normalized phrase/token matching, FTS/BM25 over safe business fields, and typed
+graph proximity. Optional vector retrieval may rerank only an already-bounded
+lexical shortlist. Ranking occurs before lane quotas; file order, alphabetical
+order, and arbitrary first-N artifact slices cannot determine visibility.
+
+The initial bounded pool contains at most 25 candidates per lane. Eligibility
+and compatibility filtering occur before graph expansion and payload hydration.
+The final AI evidence package contains at most 8–12 complete candidate cards and
+6,000–12,000 input tokens. A candidate card contains its qualified ID, kind,
+aliases, definition, formula/aggregation when available, domain/semantic model,
+primary entity, dimensions, time grains, parameters/filters, block input/output
+contract, lifecycle, relevant source relations/columns, relationship evidence,
+retrieval reasons, and known compatibility facts. It contains no secret, raw
+sample value, arbitrary source text, or unauthorized metadata.
+
+Except for an explicit qualified reference, a candidate already selected in the
+same conversation, or one unique exact candidate with no competing name/alias or
+materially related definition, a natural-language analytical request uses one
+bounded AI meaning-resolution call. That call compares business meaning; it
+does not search the project, execute SQL, invent identifiers, or decide policy.
+Its structured result contains:
+
+```ts
+interface MeaningResolution {
+  interpretedQuestion: string;
+  questionType: "definition" | "value" | "ranking" | "trend" |
+    "comparison" | "diagnosis" | "research";
+  selectedConceptIds: string[];
+  recommendedExecutionId?: string;
+  queryIntent: {
+    measures: string[];
+    dimensions: string[];
+    filters: Array<{ field: string; value: string }>;
+    timeRange?: string;
+    timeGrain?: string;
+    order?: "asc" | "desc";
+    limit?: number;
+  };
+  rejectedCandidates: Array<{ id: string; reason: string }>;
+  confidence: "high" | "medium" | "low";
+  missingInformation: string[];
+  recommendedRoute: "certified" | "semantic" | "governed_sql" |
+    "exploratory" | "clarify";
+}
+```
+
+Every returned ID must exist in the server-owned evidence package. Unknown IDs,
+changed definitions, or a mismatched snapshot invalidate the resolution. High
+confidence proceeds to deterministic validation. Medium confidence proceeds
+only when compatibility leaves one unique executable candidate. Low confidence
+asks one focused question that explains the competing business meanings. The
+server, not the model, decides authorization, relationship authority, route
+trust, compilation, SQL validation, and execution (`AGT-009`, `AGT-010`).
+
 ## Governed answer cascade
 
 The route order is mandatory (`AGT-001`):
@@ -94,6 +167,15 @@ filter/value, ranking direction, and parameter. A request with a categorical
 filter cannot be answered by an unparameterized block that aggregates across
 that category. Unknown filter/grain capability is context-only for a shaped
 analytical request, not evidence of compatibility (`AGT-006`).
+
+For a meaning-compatible certified block, the runtime executes the block's
+existing query and the AI does not rebuild it. For a meaning-compatible semantic
+metric/saved query, the semantic compiler owns SQL construction. Only when
+neither direct route covers the selected meaning may a bounded SQL-generation
+call receive the selected relations, columns, and authorized relationship proof.
+The execution gateway independently validates and runs the result. Insufficient
+evidence produces a typed modeling gap or focused clarification, never a model
+invitation to invent schema or joins (`AGT-010`).
 
 ## App composition and Business Story
 
@@ -165,6 +247,12 @@ single-domain checks are available. Explicit policy denials, failed contracts,
 restricted access, unsafe fanout, missing attribution, and missing exports do
 not fall through to exploration.
 
+Authentication, authorization, connector, configuration, rate-limit, policy,
+cancellation, timeout, and modeling-gap failures are non-recoverable unless
+their structured error explicitly declares one bounded action such as snapshot
+refresh or SQL identifier repair. They retain their original code and cannot be
+reclassified as research, generic clarification, or provider refusal.
+
 ## Progressive Ask
 
 With no configured domain, Ask may answer from a certified globally compatible
@@ -191,3 +279,27 @@ return `snapshotId`, qualified source IDs, lifecycle, and provenance. Tool
 results from a different snapshot are rejected. MCP exposes the same domain
 workspace, context search, relationship explain, and governed query semantics;
 it cannot expose an unscoped raw SQL bypass as a trusted DQL answer.
+
+Browser Ask, direct CLI, MCP, and Chat call the same governed Ask service. They
+may expose role-appropriate tool subsets, but equivalent requests over the same
+snapshot and policy must produce the same normalized contract, evidence IDs,
+meaning resolution, route, trust label, and stable error (`API-003`). Ordinary
+Ask excludes authoring, certification, proposal, and hint-mutation tools.
+
+## Call and execution budgets
+
+Simple routes are deliberately shallow (`PERF-002`):
+
+| Route | Meaning calls | Planning/generation calls | SQL | Repair | Narration |
+| ----- | ------------- | ------------------------- | --- | ------ | --------- |
+| explicit qualified definition | 0 | 0 | 0 | 0 | 0 |
+| explicit qualified data | 0 | 0 | 1 | 0 | 0 |
+| natural-language certified/semantic | <= 1 | 0 | <= 1 | 0 | 0 |
+| governed/exploratory generated SQL | <= 1 | <= 1 | 1 initial | <= 1 | 0 |
+| explicit research/diagnosis | <= 1 | <= 1 plan | <= 6 | <= 1 total | <= 1 |
+
+Definition and simple-result rendering are deterministic. A successful direct
+certified or semantic route never pays a generic planner, open-ended provider
+tool loop, or answer-synthesis call. Cancellation and inherited deadlines
+propagate through retrieval, meaning resolution, generation, validation,
+database execution, repair, and research.

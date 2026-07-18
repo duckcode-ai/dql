@@ -108,6 +108,62 @@ describe('SemanticLayer', () => {
     expect(layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' })?.sql).toContain('SUM(amount) AS revenue');
   });
 
+  it('AGT-010 emits stable aliases and qualified members across a multi-hop semantic path', () => {
+    const layer = new SemanticLayer();
+    const cube = (
+      name: string,
+      table: string,
+      joins: Array<{ name: string; left: string; right: string; type: 'left'; sql: string }> = [],
+    ) => ({
+      name,
+      label: name,
+      description: '',
+      sql: `SELECT * FROM ${table}`,
+      table,
+      domain: 'commerce',
+      measures: [],
+      dimensions: [],
+      timeDimensions: [],
+      joins,
+      segments: [],
+      preAggregations: [],
+    });
+    layer.addCube(cube('order_item', 'order_items', [
+      { name: 'orders', left: 'order_item', right: 'orders', type: 'left', sql: '${left}.order_id = ${right}.order_id' },
+      { name: 'products', left: 'order_item', right: 'products', type: 'left', sql: '${left}.product_id = ${right}.product_id' },
+    ]));
+    layer.addCube(cube('orders', 'orders', [
+      { name: 'customers', left: 'orders', right: 'customers', type: 'left', sql: '${left}.customer_id = ${right}.customer_id' },
+    ]));
+    layer.addCube(cube('customers', 'customers'));
+    layer.addCube(cube('products', 'products'));
+    layer.addMetric({ name: 'revenue', label: 'Revenue', description: '', domain: 'commerce', sql: 'product_price', type: 'sum', table: 'order_items' });
+    layer.addDimension({ name: 'product_name', label: 'Product', description: '', sql: 'product_name', type: 'string', table: 'products' });
+    layer.addDimension({ name: 'customer_name', label: 'Customer', description: '', sql: 'customer_name', type: 'string', table: 'customers' });
+
+    const result = layer.composeQuery({
+      metrics: ['revenue'],
+      dimensions: ['product_name'],
+      filters: [{ dimension: 'customer_name', operator: 'equals', values: ['Melissa Lopez'] }],
+      orderBy: [{ name: 'revenue', direction: 'desc' }],
+      limit: 10,
+      tableMapping: {
+        order_items: 'dev.order_items',
+        orders: 'dev.orders',
+        customers: 'dev.customers',
+        products: 'dev.products',
+      },
+    });
+
+    expect(result?.sql).toContain('FROM dev.order_items AS order_item');
+    expect(result?.sql).toContain('SUM(order_item.product_price) AS revenue');
+    expect(result?.sql).toContain('LEFT JOIN dev.orders AS orders ON order_item.order_id = orders.order_id');
+    expect(result?.sql).toContain('LEFT JOIN dev.customers AS customers ON orders.customer_id = customers.customer_id');
+    expect(result?.sql).toContain('LEFT JOIN dev.products AS products ON order_item.product_id = products.product_id');
+    expect(result?.sql).toContain("WHERE customers.customer_name = 'Melissa Lopez'");
+    expect(result?.sql).toContain('GROUP BY products.product_name');
+  });
+
   it('pre-aggregates metrics from different fact tables before joining at a conformed grain', () => {
     const layer = new SemanticLayer();
     const cube = (name: string, joins: Array<{ name: string; left: string; right: string; type: 'left'; sql: string }> = []) => ({

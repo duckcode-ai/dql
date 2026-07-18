@@ -66,8 +66,8 @@ For an existing DQL project, install only the CLI:
 
 ```bash
 npm i -D @duckcodeailabs/dql-cli
-npx @duckcodeailabs/dql-cli doctor
-npx @duckcodeailabs/dql-cli notebook
+npm exec -- dql doctor
+npm exec -- dql notebook
 ```
 
 ## Existing dbt repo
@@ -153,9 +153,18 @@ Works on macOS, Linux, and Windows.
 
 ## Verify
 
+For a project-local installation:
+
+```bash
+npm exec -- dql --version
+# dql 1.7.2 or later
+```
+
+For a global installation:
+
 ```bash
 dql --version
-# dql 1.6.30 or later
+# dql 1.7.2 or later
 ```
 
 If you see the version number, jump to the [Quickstart →](01-quickstart.md).
@@ -176,7 +185,7 @@ dql --version        # should print the new version
 
 ```bash
 npm i -D @duckcodeailabs/dql-cli@latest
-npx dql --version
+npm exec -- dql --version
 ```
 
 > **Upgrading from a version older than 1.6.30?** Older releases could fail to

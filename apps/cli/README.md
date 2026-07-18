@@ -60,7 +60,12 @@ npx dql semantic import dbt .
 npm run notebook
 ```
 
-## Core Commands
+## Common Commands
+
+The examples below use the short `dql` form. For a project-local installation,
+run them as `npm exec -- dql ...` or through a repository script. See the
+[complete CLI reference](../../docs/reference/cli.md) for every command,
+subcommand, flag, and exit code.
 
 - `dql init [directory]` — create a starter DQL project
 - `dql new block <name>` — scaffold a new DQL block in the current project

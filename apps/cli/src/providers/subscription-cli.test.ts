@@ -5,7 +5,18 @@ import {
   CodexCliProvider,
   parseClaudeResult,
   parseCodexFinalMessage,
+  resolveSubscriptionCliTimeoutMs,
 } from './subscription-cli.js';
+
+describe('subscription CLI timeout', () => {
+  it('keeps a hard deadline even when the caller also supplies cancellation', () => {
+    expect(resolveSubscriptionCliTimeoutMs({})).toBe(60_000);
+    expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '15000' })).toBe(15_000);
+    expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '1000' })).toBe(5_000);
+    expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: '900000' })).toBe(300_000);
+    expect(resolveSubscriptionCliTimeoutMs({ DQL_SUBSCRIPTION_CLI_TIMEOUT_MS: 'invalid' })).toBe(60_000);
+  });
+});
 
 describe('parseClaudeResult', () => {
   it('extracts .result and is_error from a single JSON object', () => {

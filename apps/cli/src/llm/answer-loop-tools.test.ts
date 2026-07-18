@@ -54,4 +54,26 @@ describe('answer-loop project source search', () => {
       process.env.PATH = originalPath;
     }
   });
+
+  it('never returns project-local provider settings or secret-bearing source lines', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-source-search-secrets-'));
+    roots.push(root);
+    mkdirSync(join(root, '.dql'), { recursive: true });
+    writeFileSync(join(root, '.dql', 'provider-settings.json'), JSON.stringify({ apiKey: 'live-secret-token' }));
+    mkdirSync(join(root, 'models'), { recursive: true });
+    writeFileSync(join(root, 'models', 'safe.yml'), [
+      'description: API usage by customer',
+      'api_key: should-not-leak',
+    ].join('\n'));
+
+    const tool = buildAnswerLoopTools(root).find((candidate) => candidate.name === 'search_project_files');
+    const result = await tool!.run({ query: 'api key' }) as {
+      matches: Array<{ path: string; text: string }>;
+    };
+
+    expect(result.matches.some((match) => match.path.includes('.dql'))).toBe(false);
+    expect(result.matches.some((match) => match.text.includes('live-secret-token'))).toBe(false);
+    expect(result.matches.some((match) => match.text.includes('should-not-leak'))).toBe(false);
+    expect(result.matches.some((match) => match.text.includes('[REDACTED]'))).toBe(true);
+  });
 });

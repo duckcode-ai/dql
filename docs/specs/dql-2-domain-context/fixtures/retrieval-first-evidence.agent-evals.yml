@@ -1,0 +1,287 @@
+# Normative E2E-006 eval design. The W07 executable harness consumes this
+# contract after the retrieval/meaning diagnostics in API-003 are implemented.
+version: 1
+acceptanceIds:
+  - CTX-005
+  - AGT-009
+  - AGT-010
+  - PERF-002
+  - SEC-003
+  - API-003
+  - E2E-006
+
+scale:
+  semanticMetrics: 7000
+  dbtModels: 10000
+  dbtColumns: 300000
+  targetMetricPositions: [24, 60, 200, 500, 6789, 6999]
+
+concepts:
+  - id: semantic:consumption:rollover_balance_amount
+    name: Rollover Balance Amount
+    meaning: Remaining eligible balance carried into the next billing month.
+    aggregation: sum
+    entity: account
+    dimensions: [customer, account, month, region]
+    timeGrains: [month]
+    position: 6789
+
+  - id: semantic:consumption:monthly_rollover_amount
+    name: Monthly Rollover Amount
+    meaning: Amount newly transferred from the current month into the next month.
+    aggregation: sum
+    entity: account
+    dimensions: [customer, account, month]
+    timeGrains: [month]
+    position: 6999
+
+  - id: semantic:consumption:rollover_risk_amount
+    name: Rollover Risk Amount
+    meaning: Forecast balance at risk of expiring before it can roll over.
+    aggregation: sum
+    entity: account
+    dimensions: [customer, account, risk_category, month]
+    timeGrains: [day, month]
+    position: 24
+
+  - id: semantic:consumption:remaining_pool_balance
+    name: Remaining Pool Balance
+    meaning: Current unused pool balance before rollover eligibility is applied.
+    aggregation: sum
+    entity: account
+    dimensions: [customer, account, day]
+    timeGrains: [day]
+    position: 60
+
+  - id: semantic:contracts:rollover_allowance
+    name: Rollover Allowance
+    meaning: Contractual maximum balance that an account is permitted to roll over.
+    aggregation: max
+    entity: contract
+    dimensions: [customer, contract, contract_month]
+    timeGrains: [month]
+    position: 500
+
+  - id: semantic:billing:rollover_balance_amount
+    name: Rollover Balance Amount
+    meaning: Posted general-ledger liability for rollover balances after billing close.
+    aggregation: sum
+    entity: billing_account
+    dimensions: [billing_account, ledger_month]
+    timeGrains: [month]
+    position: 200
+
+  - id: block:consumption:customer_rollover_report
+    name: Customer Rollover Report
+    meaning: Certified monthly report of actual rollover balances by customer.
+    trust: certified
+    inputs: [start_month, end_month]
+    outputs: [customer_id, month, rollover_balance_amount]
+
+  - id: block:consumption:rollover_policy_summary
+    name: Rollover Policy Summary
+    meaning: Certified prose summary of contractual rollover rules, with no balance output.
+    trust: certified
+    inputs: [contract_id]
+    outputs: [contract_id, policy_summary]
+
+defaults:
+  maxCandidateCards: 12
+  maxEvidenceTokens: 12000
+  maxMeaningCalls: 1
+  maxMeaningOutputTokens: 600
+  maxMeaningDurationMs: 15000
+  maxGenerationCalls: 1
+  maxRepairCalls: 1
+  maxSynthesisCalls: 0
+  wrongCertifiedCeiling: 0
+  inventedIdExecutionCeiling: 0
+
+cases:
+  - name: late-position actual balance definition
+    question: What is monthly rollover balance amount?
+    expected:
+      mustRetrieveIds: [semantic:consumption:rollover_balance_amount]
+      selectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      rejectedConceptIds:
+        - semantic:consumption:monthly_rollover_amount
+        - semantic:consumption:rollover_risk_amount
+        - semantic:contracts:rollover_allowance
+      route: semantic
+      trust: governed_semantic
+      generalKnowledge: false
+      maxMeaningCalls: 1
+      maxSqlCalls: 0
+
+  - name: certified actual balance ranking
+    question: Who are the top 10 customers by monthly rollover balance amount?
+    expected:
+      selectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      recommendedExecutionId: block:consumption:customer_rollover_report
+      route: certified
+      trust: certified
+      intent:
+        dimensions: [customer]
+        timeGrain: month
+        order: desc
+        limit: 10
+      maxMeaningCalls: 1
+      maxGenerationCalls: 0
+      maxSqlCalls: 1
+      maxSynthesisCalls: 0
+
+  - name: flow meaning beats balance keyword overlap
+    question: What amount was newly rolled over this month?
+    expected:
+      selectedConceptIds: [semantic:consumption:monthly_rollover_amount]
+      rejectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      route: semantic
+      trust: governed_semantic
+      maxMeaningCalls: 1
+
+  - name: risk meaning beats actual balance
+    question: Which customers have the highest rollover risk this month?
+    expected:
+      selectedConceptIds: [semantic:consumption:rollover_risk_amount]
+      rejectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      route: semantic
+      trust: governed_semantic
+      maxMeaningCalls: 1
+
+  - name: policy question uses policy evidence not a numeric metric
+    question: What is our contractual rollover policy for this account?
+    expected:
+      recommendedExecutionId: block:consumption:rollover_policy_summary
+      rejectedConceptIds:
+        - semantic:consumption:rollover_balance_amount
+        - semantic:consumption:monthly_rollover_amount
+      route: certified
+      trust: certified
+      maxMeaningCalls: 1
+      maxSqlCalls: 1
+
+  - name: irrelevant certification cannot override semantic meaning
+    question: Show actual rollover balance by region for last month.
+    expected:
+      selectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      rejectedExecutionIds: [block:consumption:rollover_policy_summary]
+      route: semantic
+      trust: governed_semantic
+      maxMeaningCalls: 1
+
+  - name: same display name requires domain clarification
+    question: Show rollover balance amount for last month.
+    context: {}
+    expected:
+      competingConceptIds:
+        - semantic:consumption:rollover_balance_amount
+        - semantic:billing:rollover_balance_amount
+      route: clarify
+      confidence: low
+      clarificationMentions: [customer balance, ledger liability]
+      maxMeaningCalls: 1
+      maxSqlCalls: 0
+
+  - name: active domain resolves duplicate display name
+    question: Show rollover balance amount for last month.
+    context:
+      domain: consumption
+    expected:
+      selectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      route: semantic
+      trust: governed_semantic
+      maxMeaningCalls: 1
+
+  - name: explicit qualified metric bypasses resolver
+    question: Show @metric(semantic:consumption:rollover_balance_amount) by customer for last month.
+    expected:
+      selectedConceptIds: [semantic:consumption:rollover_balance_amount]
+      route: semantic
+      trust: governed_semantic
+      maxMeaningCalls: 0
+      maxGenerationCalls: 0
+      maxSqlCalls: 1
+
+  - name: invented resolver identifier fails closed
+    question: Show the actual rollover balance by customer.
+    injectedMeaningResolution:
+      selectedConceptIds: [semantic:consumption:invented_rollover_amount]
+      confidence: high
+      recommendedRoute: semantic
+    expected:
+      route: blocked
+      errorCode: invalid_evidence_reference
+      maxSqlCalls: 0
+      inventedIdExecuted: false
+
+  - name: table and column evidence permits bounded generation
+    question: Show customers with rollover_status equal to eligible.
+    fixtureEvidence:
+      relations: [model.consumption.account_rollover_status]
+      columns: [customer_id, rollover_status, status_month]
+      relationships: [relationship:consumption:rollover_status_to_customer]
+    expected:
+      route: governed_sql
+      trust: governed_sql
+      maxMeaningCalls: 1
+      maxGenerationCalls: 1
+      maxRepairCalls: 1
+      maxSqlCalls: 1
+
+  - name: missing relationship evidence returns modeling gap
+    question: Compare rollover balances to contract renewal outcomes.
+    fixtureEvidence:
+      relations:
+        - model.consumption.account_rollover_balance
+        - model.contracts.renewal_outcomes
+      relationships: []
+    expected:
+      route: blocked
+      errorCode: modeling_gap
+      maxGenerationCalls: 0
+      maxSqlCalls: 0
+
+  - name: provider failure preserves actionable code
+    question: Which customers have the highest rollover risk?
+    injectedFailure: provider_rate_limited
+    expected:
+      route: blocked
+      errorCode: provider_rate_limited
+      recoverability: none
+      researchEscalated: false
+
+  - name: cancellation reaches SQL execution
+    question: Rank every customer by rollover balance for the last 24 months.
+    cancelAt: executing_sql
+    expected:
+      terminalState: cancelled
+      errorCode: cancelled
+      repairCalls: 0
+      researchEscalated: false
+
+  - name: all Ask surfaces agree
+    question: Who are the top 10 customers by monthly rollover balance amount?
+    runOn: [browser, cli, mcp, chat]
+    expected:
+      parityFields:
+        - snapshotId
+        - interpretedQuestion
+        - selectedConceptIds
+        - recommendedExecutionId
+        - route
+        - trust
+        - stableErrorCode
+      parity: true
+
+securityCases:
+  - name: candidate cards and traces are redacted
+    forbiddenTokens:
+      - api_key
+      - provider-settings.json
+      - customer_password
+      - api_token
+      - secret_key
+    expected:
+      forbiddenTokenMatches: 0
+      persistedPlaintextValues: 0
+      unauthorizedCandidateCount: 0

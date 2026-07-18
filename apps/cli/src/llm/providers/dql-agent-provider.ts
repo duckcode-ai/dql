@@ -357,7 +357,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           const selectedContext = selectedContextForMetadata(req, question);
           emit({ kind: 'thinking', text: 'Searching certified blocks, semantic metrics, relevant domains, and skills.' });
           const contextStartedAt = Date.now();
-          const contextPack = await buildLocalContextPack(req.projectRoot, {
+          const contextPack = req.preparedContextPack ?? await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
             followUp,
@@ -438,6 +438,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             analysisDepth: contextBudget.analysisDepth,
             ...(req.semanticDriver ? { semanticDriver: req.semanticDriver } : {}),
             ...(req.semanticTableMapping ? { semanticTableMapping: req.semanticTableMapping } : {}),
+            ...(req.preferredEvidenceIds?.length ? { preferredEvidenceIds: req.preferredEvidenceIds } : {}),
+            ...(req.preferredExecutionId ? { preferredExecutionId: req.preferredExecutionId } : {}),
             executeCertifiedBlock: req.executeCertifiedBlock
               ? async (...args) => { guardSnapshot(); return req.executeCertifiedBlock!(...args); }
               : undefined,
@@ -799,7 +801,10 @@ function followUpFromConversationContext(req: AgentRunRequest, question: string)
   const priorResultRef = priorResultRefFromTurn(activeTurn, activeResult, priorResultColumns);
   const priorDqlArtifact = cleanDqlArtifactReference(activeTurn?.dqlArtifact) ?? cleanDqlArtifactReference(context.dqlArtifact);
   const resolvedReferences = resolveConversationReferences(question, turns, priorResultValues);
-  const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || priorResultValues || priorDqlArtifact);
+  const focusedPriorResultValues = resolvedReferences.valuesByDimension ?? priorResultValues;
+  const hasFocusedReference = Boolean(resolvedReferences.valuesByDimension);
+  const relativeComparison = isEntityRelativeComparisonQuestion(question);
+  const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || focusedPriorResultValues || priorDqlArtifact);
   if (!hasUsefulContext) return undefined;
   const inferredKind = isGenericFollowUp(question)
     ? 'generic'
@@ -816,37 +821,49 @@ function followUpFromConversationContext(req: AgentRunRequest, question: string)
   return {
     kind,
     sourceTurnId: cleanOptionalString(activeTurn?.id) ?? cleanOptionalString(context.sourceAnswerId),
-    sourceBlockName,
-    sourceQuestion: cleanOptionalString(activeTurn?.question) ?? cleanOptionalString(context.sourceQuestion),
-    sourceAnswer: cleanOptionalString(activeTurn?.answerSummary) ?? cleanOptionalString(context.sourceAnswerSummary),
+    // A relative comparison needs the named member from history, not the prior
+    // block's result contract. Carrying a beverage-ranking block into "less tax
+    // than Melissa" biases retrieval toward the same technical artifact and is
+    // exactly how the old loop produced a global tax KPI or all customer rows.
+    sourceBlockName: relativeComparison ? undefined : sourceBlockName,
+    sourceQuestion: relativeComparison
+      ? undefined
+      : cleanOptionalString(activeTurn?.question) ?? cleanOptionalString(context.sourceQuestion),
+    sourceAnswer: relativeComparison
+      ? undefined
+      : cleanOptionalString(activeTurn?.answerSummary) ?? cleanOptionalString(context.sourceAnswerSummary),
     filters: kind === 'drilldown'
       ? mergeStrings(
-          activeTurnStringArray(activeTurn, 'requestedFilters'),
-          context.requestedFilters,
+          hasFocusedReference ? undefined : activeTurnStringArray(activeTurn, 'requestedFilters'),
+          hasFocusedReference ? undefined : context.requestedFilters,
           extractDrilldownFilters(question),
           resolvedReferences.filters,
         )
       : undefined,
     dimensions: kind === 'drilldown'
       ? mergeStrings(
-          activeTurnStringArray(activeTurn, 'requestedDimensions'),
-          context.requestedDimensions,
+          hasFocusedReference ? undefined : activeTurnStringArray(activeTurn, 'requestedDimensions'),
+          hasFocusedReference ? undefined : context.requestedDimensions,
           extractDrilldownDimensions(question),
           resolvedReferences.dimensions,
         )
       : undefined,
-    priorResultColumns,
-    priorResultValues,
-    priorResultRef,
-    priorDqlArtifact,
-    priorLimit: activeTurnNumber(activeTurn, 'topN') ?? (typeof context.priorLimit === 'number' ? context.priorLimit : undefined),
-    priorMeasures: mergeStrings(
-      activeTurnStringArray(activeTurn, 'requestedMeasures'),
-      arrayValue(activeResult?.measureColumns),
-      context.priorMeasures,
-      inferredMeasuresFromAnswerContract(context.answerContract),
-      inferredMeasureColumns(priorResultColumns),
-    ),
+    priorResultColumns: relativeComparison ? undefined : priorResultColumns,
+    priorResultValues: focusedPriorResultValues,
+    priorResultRef: relativeComparison ? undefined : priorResultRef,
+    priorDqlArtifact: relativeComparison ? undefined : priorDqlArtifact,
+    priorLimit: relativeComparison
+      ? undefined
+      : activeTurnNumber(activeTurn, 'topN') ?? (typeof context.priorLimit === 'number' ? context.priorLimit : undefined),
+    priorMeasures: relativeComparison
+      ? undefined
+      : mergeStrings(
+          activeTurnStringArray(activeTurn, 'requestedMeasures'),
+          arrayValue(activeResult?.measureColumns),
+          context.priorMeasures,
+          inferredMeasuresFromAnswerContract(context.answerContract),
+          inferredMeasureColumns(priorResultColumns),
+        ),
     resolvedReferences: resolvedReferences.labels,
     unresolvedReferences: resolvedReferences.unresolved,
   };
@@ -1030,11 +1047,21 @@ function resolveConversationReferences(
   question: string,
   turns: Array<Record<string, unknown>>,
   activeValues: Record<string, string[]> | undefined,
-): { filters?: string[]; dimensions?: string[]; labels?: string[]; unresolved?: string[] } {
-  const dimensions = resolveDeicticDimensions(question, activeValues) ?? [];
+): {
+  filters?: string[];
+  dimensions?: string[];
+  labels?: string[];
+  unresolved?: string[];
+  valuesByDimension?: Record<string, string[]>;
+} {
+  const namedValues = resolveNamedConversationValues(question, turns, activeValues);
+  const dimensions = [
+    ...(resolveDeicticDimensions(question, activeValues) ?? []),
+    ...Object.keys(namedValues ?? {}).map(normalizePriorValueDimension),
+  ];
   let filters = resolveDeicticFilters(question, activeValues) ?? [];
   const labels: string[] = [];
-  if (dimensions.length > 0 && filters.length === 0) {
+  if (!namedValues && dimensions.length > 0 && filters.length === 0) {
     for (const turn of [...turns].reverse()) {
       const values = cleanStringRecordArray(cleanRecord(turn.result)?.dimensionValues);
       if (!values) continue;
@@ -1043,18 +1070,85 @@ function resolveConversationReferences(
     }
   }
   for (const dimension of dimensions) {
-    const values = (activeValues ? valuesForPriorDimension(activeValues, dimension) : []).slice(0, 5);
+    const values = (namedValues
+      ? valuesForPriorDimension(namedValues, dimension)
+      : activeValues
+        ? valuesForPriorDimension(activeValues, dimension)
+        : []).slice(0, 5);
     labels.push(values.length ? `${dimension}: ${values.join(', ')}` : `${dimension}: unresolved`);
   }
+  if (namedValues) filters.push(...Object.values(namedValues).flat());
   const unresolved = referencesNeedValues(question) && filters.length === 0
     ? ['Could not resolve the referenced prior result values from conversation state.']
     : undefined;
   return {
     filters: filters.length > 0 ? Array.from(new Set(filters)).slice(0, 24) : undefined,
-    dimensions: dimensions.length > 0 ? dimensions : undefined,
-    labels: labels.length > 0 ? labels : undefined,
+    dimensions: dimensions.length > 0 ? Array.from(new Set(dimensions)) : undefined,
+    labels: labels.length > 0 ? Array.from(new Set(labels)) : undefined,
     unresolved,
+    valuesByDimension: namedValues,
   };
+}
+
+/**
+ * Resolve explicit mentions against bounded values from recent result sets. Full
+ * phrases win; otherwise a unique member token may resolve a shortened name
+ * ("Melissa" → "Melissa Lopez"). Ambiguous partials are deliberately left for
+ * clarification instead of guessing between two real warehouse members.
+ */
+function resolveNamedConversationValues(
+  question: string,
+  turns: Array<Record<string, unknown>>,
+  activeValues: Record<string, string[]> | undefined,
+): Record<string, string[]> | undefined {
+  const questionText = normalizeConversationValueText(question);
+  const questionTokens = new Set(questionText.split(' ').filter((token) =>
+    token.length >= 3 && !GENERIC_FOLLOW_UP_WORDS.has(token)
+  ));
+  if (!questionText || questionTokens.size === 0) return undefined;
+
+  const candidates = new Map<string, { dimension: string; value: string; exact: boolean }>();
+  const addValues = (values: Record<string, string[]> | undefined) => {
+    for (const [dimension, members] of Object.entries(values ?? {})) {
+      for (const value of members) {
+        const normalized = normalizeConversationValueText(value);
+        if (!normalized) continue;
+        const exact = (` ${questionText} `).includes(` ${normalized} `);
+        const memberTokens = normalized.split(' ').filter((token) =>
+          token.length >= 3 && !GENERIC_FOLLOW_UP_WORDS.has(token)
+        );
+        const partial = memberTokens.some((token) => questionTokens.has(token));
+        if (!exact && !partial) continue;
+        candidates.set(`${dimension}\u0000${normalized}`, { dimension, value, exact });
+      }
+    }
+  };
+  addValues(activeValues);
+  for (const turn of [...turns].reverse()) {
+    addValues(cleanStringRecordArray(cleanRecord(turn.result)?.dimensionValues));
+  }
+
+  const all = [...candidates.values()];
+  const exact = all.filter((candidate) => candidate.exact);
+  const selected = exact.length > 0 ? exact : all;
+  const distinctValues = new Set(selected.map((candidate) => normalizeConversationValueText(candidate.value)));
+  if (distinctValues.size !== 1) return undefined;
+
+  const out: Record<string, string[]> = {};
+  for (const candidate of selected) {
+    out[candidate.dimension] = Array.from(new Set([...(out[candidate.dimension] ?? []), candidate.value])).slice(0, 4);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeConversationValueText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9@._'-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function isEntityRelativeComparisonQuestion(question: string): boolean {
+  return /\b(?:less|lower|fewer|more|higher|greater)\b[^?.!]{0,80}\bthan\b\s+[a-z0-9@._'-]+/i.test(question)
+    || /\b(?:below|under|above|over)\b\s+that\s+of\s+[a-z0-9@._'-]+/i.test(question)
+    || /\b(?:below|under|above|over)\b\s+[A-Z][A-Za-z0-9@._'-]+/.test(question);
 }
 
 function cleanRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1307,7 +1401,7 @@ function isGenericFollowUp(question: string): boolean {
 function isDrilldownFollowUp(question: string): boolean {
   const lower = question.toLowerCase();
   const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower);
-  return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|region|customer|channel|product|category|categories|catagor(?:y|ies)|catogor(?:y|ies))\b/.test(lower)
+  return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|regions?|customers?|channels?|products?|category|categories|catagor(?:y|ies)|catogor(?:y|ies))\b/.test(lower)
     && (deicticDrilldown || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower));
 }
 

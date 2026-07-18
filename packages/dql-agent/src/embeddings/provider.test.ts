@@ -106,6 +106,17 @@ describe('OpenAI embedding provider (R3.3)', () => {
     expect(calls).toBe(1);
   });
 
+  it('returns every vector in order when one batch is larger than the cache', async () => {
+    const counting: EmbeddingProvider = {
+      id: 'counting', dimensions: 1,
+      embed: async (texts) => texts.map((text) => [Number(text.slice(1))]),
+    };
+    const cached = new CachingEmbeddingProvider(counting, 4);
+    const values = Array.from({ length: 12 }, (_, index) => `v${index}`);
+    const vectors = await cached.embed(values);
+    expect(vectors).toEqual(values.map((_, index) => [index]));
+  });
+
   it('resolver returns a real embedder when keyed, hashed fallback otherwise', () => {
     expect(resolveEmbeddingProvider({ openaiApiKey: 'sk-test', fetchImpl }).id).toContain('openai');
     expect(resolveEmbeddingProvider({}).id).toBe('hashed-token-v1');
@@ -164,7 +175,8 @@ describe('local-first embeddings (W3.1)', () => {
   it('embeddingOptionsFromEnv reads Ollama and OpenAI config (Ollama wins)', () => {
     expect(embeddingOptionsFromEnv({ DQL_OLLAMA_EMBED_URL: 'http://x:11434', DQL_OLLAMA_EMBED_MODEL: 'nomic' }))
       .toEqual({ ollamaEndpoint: 'http://x:11434', ollamaModel: 'nomic' });
-    expect(embeddingOptionsFromEnv({ OPENAI_API_KEY: 'sk-x' })).toEqual({ openaiApiKey: 'sk-x' });
+    expect(embeddingOptionsFromEnv({ DQL_OPENAI_API_KEY: 'sk-x' })).toEqual({ openaiApiKey: 'sk-x' });
+    expect(embeddingOptionsFromEnv({ OPENAI_API_KEY: 'ambient-answer-key' })).toEqual({});
     expect(embeddingOptionsFromEnv({})).toEqual({});
   });
 

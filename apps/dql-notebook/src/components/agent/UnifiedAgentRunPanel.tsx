@@ -646,7 +646,7 @@ export function UnifiedAgentRunPanel({
             onSaved={() => setBlockToSave(null)}
           />
         ) : null}
-        <style>{ASK_KEYFRAMES(t)}</style>
+        <style>{ASK_KEYFRAMES}</style>
 
         {/* Chat column */}
         <div style={{ flex: 1, minWidth: 360, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-canvas)' }}>
@@ -786,16 +786,16 @@ export function UnifiedAgentRunPanel({
       <style>{`
         @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
         @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
-        @keyframes dql-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-        @keyframes dql-orb { 0%, 100% { box-shadow: 0 0 0 0 ${t.accent}00; } 50% { box-shadow: 0 0 13px 1px ${t.accent}66; } }
-        @keyframes dql-pip { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.55); opacity: 0.5; } }
-        @keyframes dql-step-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
-        @keyframes dql-glyph { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+        @keyframes dql-agent-thinking-dot { 0%, 65%, 100% { opacity: .28; transform: translateY(0); } 32% { opacity: 1; transform: translateY(-2px); } }
+        @keyframes dql-agent-activity-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+        .dql-agent-thinking-dot { animation: dql-agent-thinking-dot 1.05s ease-in-out infinite; }
+        .dql-agent-activity { animation: dql-agent-activity-in .22s ease-out; }
         .dql-hover { transition: filter .15s ease, transform .12s ease, box-shadow .15s ease, background .15s ease, color .15s ease, border-color .15s ease; }
         .dql-hover:hover { filter: brightness(1.07); }
         .dql-hover:active { transform: translateY(0.5px); }
         .dql-lift:hover { transform: translateY(-1px); }
         details > summary::-webkit-details-marker { display: none; }
+        @media (prefers-reduced-motion: reduce) { .dql-agent-thinking-dot, .dql-agent-activity { animation: none !important; } }
       `}</style>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1074,16 +1074,33 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
   };
 }
 
-function routeActionLabel(route?: AgentRunRoute): string {
+function routeMatchLabel(route?: AgentRunRoute): string {
   switch (route) {
-    case 'conversation': return 'Replying';
-    case 'research': return 'Researching across governed data';
-    case 'certified_answer': return 'Checking certified blocks';
-    case 'generated_answer': return 'Finding the answer';
-    case 'app_build': return 'Assembling the app';
-    case 'sql_cell': return 'Writing the query';
-    case 'dql_block_draft': return 'Drafting the block';
-    default: return 'Working';
+    case 'certified_answer': return 'Found a compatible certified block';
+    case 'semantic_answer': return 'Found a compatible semantic metric';
+    case 'generated_answer': return 'Identified the relevant tables and columns';
+    case 'research': return 'Identified evidence for deeper analysis';
+    case 'app_build': return 'Found governed assets for the app';
+    case 'sql_cell': return 'Identified the query context';
+    case 'dql_block_draft': return 'Identified reusable governed logic';
+    case 'clarify': return 'Identified a missing business detail';
+    default: return 'Identified the best answer path';
+  }
+}
+
+function routeExecutionLabel(route: AgentRunRoute | undefined, events: AgentRunEvent[]): string {
+  if (events.some((event) => event.type === 'repair.attempted')) return 'Refining the query and trying again';
+  if (events.some((event) => event.type === 'escalated')) return 'Expanding the evidence search';
+  switch (route) {
+    case 'certified_answer':
+    case 'semantic_answer': return 'Running the governed query';
+    case 'generated_answer': return 'Building and running a grounded query';
+    case 'research': return 'Researching the strongest evidence';
+    case 'app_build': return 'Assembling the app from governed assets';
+    case 'sql_cell': return 'Building and checking the SQL';
+    case 'dql_block_draft': return 'Drafting the governed logic';
+    case 'clarify': return 'Preparing a focused clarification';
+    default: return 'Preparing the answer';
   }
 }
 
@@ -1093,48 +1110,6 @@ function latestRoute(events: AgentRunEvent[]): AgentRunRoute | undefined {
     if (events[i].route) return events[i].route;
   }
   return undefined;
-}
-
-function currentActionLabel(events: AgentRunEvent[]): string {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    switch (event.type) {
-      case 'repair.attempted': return 'Refining the result';
-      case 'escalated': return 'Switching to a deeper approach';
-      case 'evaluation.recorded': return 'Checking grounding and trust';
-      case 'executor.started':
-      case 'route.decided': return routeActionLabel(event.route);
-      case 'step.started': {
-        const goal = (event.payload as { goal?: string } | undefined)?.goal;
-        return goal ? `Working on: ${goal}` : 'Working';
-      }
-      case 'plan.created': return 'Planning the approach';
-      case 'run.started': return 'Starting';
-      default: break;
-    }
-  }
-  return 'Working';
-}
-
-/**
- * An honest one-liner explaining why a run is deliberately slower, so the wait
- * reads as intent rather than lag. Derived from the route and the user's thinking
- * selection — a research route or High mode trades speed for a cross-checked
- * number. Returns null on the fast paths, where no explanation is needed.
- */
-function slowReasonFor(thinkingMode: AgentThinkingMode | undefined, events: AgentRunEvent[]): string | null {
-  // Repair / escalation are the most common "why is this taking so long" cases —
-  // the first query hit an error and is being regenerated. Say so plainly instead
-  // of leaving the technical "repair attempt N" line to carry the whole story.
-  if (events.some((event) => event.type === 'repair.attempted')) {
-    return 'The first query hit an error — rewriting it and trying again to get the numbers right.';
-  }
-  if (events.some((event) => event.type === 'escalated')) {
-    return 'Switching to a deeper approach for a more reliable answer.';
-  }
-  if (latestRoute(events) === 'research') return 'Deep investigation — slower by design.';
-  if (thinkingMode === 'high') return 'Thorough mode — cross-checking the number takes a little longer.';
-  return null;
 }
 
 export interface LongRunGuidance {
@@ -1149,10 +1124,10 @@ export function longRunGuidanceFor(
   hasRepair = false,
 ): LongRunGuidance | null {
   if (elapsedSeconds < 12) return null;
-  if (elapsedSeconds < 24 && !hasRepair) {
+  if (!route && elapsedSeconds < 24 && !hasRepair) {
     return {
-      title: 'Checking governed context',
-      detail: 'AI is checking certified blocks, semantic metrics, domain modeling, and dbt metadata before it generates SQL.',
+      title: 'Still resolving the governed evidence',
+      detail: 'The bounded request is still selecting its answer path. DQL will stop at the normal deadline instead of silently switching to a longer workflow.',
     };
   }
   if (route === 'research') {
@@ -1162,8 +1137,8 @@ export function longRunGuidanceFor(
     };
   }
   return {
-    title: hasRepair ? 'Repairing and validating generated SQL' : 'Generating and validating SQL',
-    detail: 'No exact reusable answer covered this question. After review, save this result as a block and certify it for faster repeat questions and lower future AI/token usage. Model repeated joins or reusable metrics once.',
+    title: hasRepair ? 'Applying one bounded query repair' : 'Finishing the bounded query path',
+    detail: 'DQL is compiling or running the selected governed path. An ordinary lookup stops at its deadline instead of silently restarting as Research.',
   };
 }
 
@@ -1182,105 +1157,64 @@ export function completedRunGuidanceFor(
   };
 }
 
-const ACTIVITY_STAGES: Array<{ key: 'plan' | 'work' | 'verify'; label: string }> = [
-  { key: 'plan', label: 'Plan' },
-  { key: 'work', label: 'Work' },
-  { key: 'verify', label: 'Verify' },
-];
-
-/** Which high-level stage the agent is in (0 plan → 1 work → 2 verify). */
-function deriveStage(events: AgentRunEvent[]): number {
-  let stage = 0;
-  for (const event of events) {
-    switch (event.type) {
-      case 'route.decided':
-      case 'executor.started':
-      case 'step.started':
-      case 'repair.attempted':
-      case 'escalated':
-        stage = Math.max(stage, 1);
-        break;
-      case 'evaluation.recorded':
-        stage = Math.max(stage, 2);
-        break;
-      default:
-        break;
-    }
-  }
-  return stage;
-}
-
-/** An icon matching what the agent is doing right now. */
-function phaseIconFor(events: AgentRunEvent[]): typeof Sparkles {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    switch (event.type) {
-      case 'evaluation.recorded': return ShieldCheck;
-      case 'repair.attempted':
-      case 'escalated': return Wrench;
-      case 'executor.started':
-      case 'route.decided':
-        switch (event.route) {
-          case 'research': return FileSearch;
-          case 'sql_cell': return Code2;
-          case 'app_build': return LayoutDashboard;
-          case 'dql_block_draft': return Blocks;
-          case 'certified_answer':
-          case 'generated_answer': return Sparkles;
-          default: return Sparkles;
-        }
-      case 'plan.created': return Lightbulb;
-      default: break;
-    }
-  }
-  return Sparkles;
-}
-
-interface AgentActivityCard {
-  title: string;
-  detail: string;
-  Icon: typeof Sparkles;
-}
-
-function compactActivityDetail(message: string): string {
-  const clean = message.replace(/\s+/g, ' ').trim();
-  return clean.length > 118 ? `${clean.slice(0, 115).trimEnd()}…` : clean;
+export interface LiveAgentActivity {
+  id: 'search' | 'match' | 'execute' | 'verify' | 'reconnect';
+  label: string;
+  state: 'complete' | 'active';
 }
 
 /**
- * Compact, evidence-safe activity cards. These are operational observations the
- * runtime has emitted (not hidden reasoning), so people can see concrete work
- * such as checking certified metrics or reading the live schema.
+ * A small, evidence-safe activity trail for the live response. Technical engine
+ * phases such as planning and validation are intentionally translated into what
+ * the user can observe: searching, matching, querying, and checking the result.
  */
-function activityCardsFor(events: AgentRunEvent[]): AgentActivityCard[] {
-  const cardFor = (event: AgentRunEvent): AgentActivityCard | undefined => {
-    const detail = compactActivityDetail(event.message);
-    if (event.type === 'plan.created') return { title: 'Shaping the request', detail, Icon: Lightbulb };
-    if (event.type === 'route.decided') return { title: 'Choosing the safest route', detail, Icon: Route };
-    if (event.type === 'evaluation.recorded') return { title: 'Verifying the answer', detail, Icon: ShieldCheck };
-    if (event.type === 'repair.attempted' || event.type === 'escalated') return { title: 'Improving reliability', detail, Icon: Wrench };
-    if (event.type !== 'executor.started') return undefined;
-    if (/certified|semantic|metric|governed/i.test(detail)) return { title: 'Checking governed definitions', detail, Icon: ShieldCheck };
-    if (/search|definition|domain|skill|project index|source/i.test(detail)) return { title: 'Searching your project', detail, Icon: FileSearch };
-    if (/schema|column|table|relation/i.test(detail)) return { title: 'Inspecting data shape', detail, Icon: ListTree };
-    if (/resolv|answer|result/i.test(detail)) return { title: 'Building the answer', detail, Icon: Sparkles };
-    return { title: 'Working with your data', detail, Icon: Sparkles };
-  };
-  const cards: AgentActivityCard[] = [];
-  const seen = new Set<string>();
-  for (let index = events.length - 1; index >= 0 && cards.length < 3; index -= 1) {
-    const card = cardFor(events[index]);
-    if (!card || seen.has(card.title)) continue;
-    seen.add(card.title);
-    cards.unshift(card);
+export function liveAgentActivityFor(events: AgentRunEvent[], reconnecting = false): LiveAgentActivity[] {
+  if (events.length === 0 && reconnecting) {
+    return [{ id: 'reconnect', label: 'Reconnecting to the running request', state: 'active' }];
   }
-  return cards;
+  const route = latestRoute(events);
+  if (route === 'conversation') return [];
+  const hasRoute = events.some((event) => event.type === 'route.decided');
+  const hasExecution = events.some((event) =>
+    event.type === 'executor.started'
+    || event.type === 'step.started'
+    || event.type === 'repair.attempted'
+    || event.type === 'escalated'
+  );
+  const hasEvaluation = events.some((event) => event.type === 'evaluation.recorded');
+  const activity: LiveAgentActivity[] = [{
+    id: 'search',
+    label: 'Resolving governed evidence and business meaning',
+    state: hasRoute ? 'complete' : 'active',
+  }];
+  if (hasRoute) {
+    activity.push({
+      id: 'match',
+      label: routeMatchLabel(route),
+      state: hasExecution || hasEvaluation ? 'complete' : 'active',
+    });
+  }
+  if (hasExecution || hasEvaluation) {
+    activity.push({
+      id: 'execute',
+      label: routeExecutionLabel(route, events),
+      state: hasEvaluation ? 'complete' : 'active',
+    });
+  }
+  if (hasEvaluation) {
+    activity.push({
+      id: 'verify',
+      label: 'Checking the result against governed evidence',
+      state: 'active',
+    });
+  }
+  return activity;
 }
 
 /**
- * Live agent activity — boxless. A spinning halo + phase icon, a shimmering
- * action headline, a Plan→Work→Verify tracker, and the latest step line.
- * Expresses *what the agent is doing* rather than a generic progress bar.
+ * Live agent activity — a transient, boxless activity trail. It reports the
+ * evidence and execution path without exposing the old planner/validator state
+ * machine, and disappears as soon as the final answer is available.
  */
 function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }: {
   events: AgentRunEvent[];
@@ -1294,17 +1228,6 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }
     const timer = window.setInterval(() => setClock(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
-  const action = events.length ? currentActionLabel(events) : backgroundRun ? 'Continuing your request in the background' : 'Starting';
-  const stage = deriveStage(events);
-  const Icon = phaseIconFor(events);
-  const latest = events.length
-    ? events[events.length - 1].message
-    : backgroundRun ? 'Safe to switch tabs — this run will reconnect as soon as it is ready.' : '';
-  const activityCards = activityCardsFor(events);
-  // Honest "why is this taking a moment" line — set expectations when the run is
-  // deliberately on a slower, more thorough path (a deep investigation, or the
-  // user's High thinking selection cross-checking the number).
-  const slowReason = slowReasonFor(thinkingMode, events);
   const runStartedAt = backgroundRun?.startedAt ?? events.find((event) => event.type === 'run.started')?.at;
   const startedAtMs = runStartedAt ? Date.parse(runStartedAt) : clock;
   const elapsedSeconds = Number.isFinite(startedAtMs) ? Math.max(0, Math.floor((clock - startedAtMs) / 1_000)) : 0;
@@ -1313,112 +1236,55 @@ function RunProgress({ events, t, streamingAnswer, thinkingMode, backgroundRun }
     latestRoute(events),
     events.some((event) => event.type === 'repair.attempted'),
   );
-  // A conversational turn has no Plan/Work/Verify work to show — just a light
-  // "Replying…" line, and the streamed text as it arrives.
-  const isConversation = latestRoute(events) === 'conversation';
-  if (isConversation) {
+  // The activity trail is transient. As soon as answer text starts streaming,
+  // replace it with the answer itself; when the run completes this component is
+  // unmounted, leaving no planning/validation chrome beside the final response.
+  if (streamingAnswer) {
     return (
-      <div style={{ alignSelf: 'stretch', display: 'flex', gap: 12, padding: '4px 2px 8px', animation: 'dql-agent-fadein 0.3s ease-out' }}>
-        <div style={{ position: 'relative', width: 34, height: 34, flex: '0 0 auto' }}>
-          <span style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: `${t.accent}14`, border: `1px solid ${t.accent}33`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', animation: 'dql-orb 1.8s ease-in-out infinite' }}>
-            <Sparkles size={15} />
-          </span>
-        </div>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 6 }}>
-          {streamingAnswer
-            ? <div style={{ fontSize: 13.5, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap' }}>{streamingAnswer}</div>
-            : <span style={{ fontSize: 13.5, fontWeight: 650, color: t.textSecondary }}>Replying…</span>}
-        </div>
+      <div style={{ alignSelf: 'stretch', padding: '4px 2px 8px', fontSize: 13.5, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap', animation: 'dql-agent-fadein 0.22s ease-out' }}>
+        {streamingAnswer}
       </div>
     );
   }
+  const isConversation = latestRoute(events) === 'conversation';
+  if (isConversation) {
+    return (
+      <div role="status" aria-live="polite" style={{ alignSelf: 'stretch', display: 'flex', alignItems: 'center', gap: 9, padding: '5px 2px 9px', color: t.textSecondary, animation: 'dql-agent-fadein 0.22s ease-out' }}>
+        <AgentThinkingDots />
+        <span style={{ fontSize: 13, lineHeight: 1.4 }}>Replying…</span>
+      </div>
+    );
+  }
+  const activity = liveAgentActivityFor(events, Boolean(backgroundRun));
+  const waitHint = elapsedSeconds >= 12
+    ? longRunGuidance?.title
+    : thinkingMode === 'high'
+      ? 'Thorough mode is cross-checking the result.'
+      : null;
   return (
-    <div style={{ alignSelf: 'stretch', display: 'flex', gap: 12, padding: '4px 2px 8px', animation: 'dql-agent-fadein 0.3s ease-out' }}>
-      <div style={{ position: 'relative', width: 34, height: 34, flex: '0 0 auto' }}>
-        <span
-          style={{
-            position: 'absolute', inset: -3, borderRadius: '50%',
-            background: `conic-gradient(from 0deg, ${t.accent}00 0%, ${t.accent}00 55%, ${t.accent} 100%)`,
-            WebkitMask: 'radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px))',
-            mask: 'radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px))',
-            animation: 'dql-agent-run-spin 1s linear infinite',
-          }}
-        />
-        <span
-          style={{
-            position: 'absolute', inset: 0, borderRadius: '50%',
-            background: `${t.accent}14`, border: `1px solid ${t.accent}33`, color: t.accent,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            animation: 'dql-orb 1.8s ease-in-out infinite',
-          }}
-        >
-          <span style={{ display: 'inline-flex', animation: 'dql-glyph 1.8s ease-in-out infinite' }}><Icon size={15} /></span>
-        </span>
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 1 }}>
-        <span
-          key={action}
-          style={{
-            fontSize: 13.5, fontWeight: 750, letterSpacing: '-0.01em',
-            backgroundImage: `linear-gradient(100deg, ${t.textPrimary} 25%, ${t.accent} 50%, ${t.textPrimary} 75%)`,
-            backgroundSize: '220% 100%', WebkitBackgroundClip: 'text', backgroundClip: 'text',
-            color: 'transparent', WebkitTextFillColor: 'transparent',
-            animation: 'dql-shimmer 2.4s linear infinite',
-          }}
-        >
-          {action}
-        </span>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          {ACTIVITY_STAGES.map((s, i) => {
-            const done = i < stage;
-            const active = i === stage;
-            return (
-              <React.Fragment key={s.key}>
-                {i > 0 ? <span style={{ width: 13, height: 1.5, borderRadius: 2, background: done || active ? `${t.accent}66` : t.cellBorder }} /> : null}
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.02em', color: done ? t.accent : active ? t.textPrimary : t.textMuted }}>
-                  {done ? (
-                    <CheckCircle2 size={11} />
-                  ) : (
-                    <span style={{ width: 6, height: 6, borderRadius: 999, background: active ? t.accent : t.cellBorder, animation: active ? 'dql-pip 1s ease-in-out infinite' : 'none' }} />
-                  )}
-                  {s.label}
-                </span>
-              </React.Fragment>
-            );
-          })}
+    <div role="status" aria-live="polite" aria-label="Agent activity" style={{ alignSelf: 'stretch', display: 'grid', gap: 7, padding: '5px 2px 10px', animation: 'dql-agent-fadein 0.22s ease-out' }}>
+      {activity.map((item) => (
+        <div key={item.id} className="dql-agent-activity" style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 18, color: item.state === 'active' ? t.textPrimary : t.textMuted }}>
+          <span aria-hidden="true" style={{ width: 16, height: 16, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto', color: item.state === 'active' ? t.accent : t.textMuted }}>
+            {item.state === 'active' ? <AgentThinkingDots /> : <Check size={13} strokeWidth={2.2} />}
+          </span>
+          <span style={{ fontSize: 12.5, lineHeight: 1.4, fontWeight: item.state === 'active' ? 620 : 450 }}>
+            {item.label}{item.state === 'active' ? '…' : ''}
+          </span>
         </div>
-
-        {activityCards.length > 0 ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6, marginTop: 2 }}>
-            {activityCards.map((card) => (
-              <div key={`${card.title}-${card.detail}`} style={{ minWidth: 0, padding: '7px 8px', border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.cellBg, display: 'grid', gap: 3 }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.accent, fontSize: 10.5, fontWeight: 800 }}><card.Icon size={11} />{card.title}</span>
-                <span style={{ color: t.textMuted, fontSize: 10.5, lineHeight: 1.35 }}>{card.detail}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-
-        {longRunGuidance && !streamingAnswer ? (
-          <div style={{ display: 'grid', gap: 3, marginTop: 2, padding: '8px 9px', border: `1px solid ${t.accent}33`, borderRadius: 7, background: `${t.accent}0a` }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: t.textSecondary, fontSize: 11, fontWeight: 800 }}>
-              <Lightbulb size={11} color={t.accent} /> {longRunGuidance.title}
-            </span>
-            <span style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.45 }}>{longRunGuidance.detail}</span>
-          </div>
-        ) : slowReason && !streamingAnswer ? (
-          <span style={{ fontSize: 11, color: t.textMuted, fontStyle: 'italic', lineHeight: 1.4 }}>{slowReason}</span>
-        ) : null}
-
-        {streamingAnswer ? (
-          <div style={{ fontSize: 13, lineHeight: 1.55, color: t.textPrimary, whiteSpace: 'pre-wrap', marginTop: 2 }}>{streamingAnswer}</div>
-        ) : latest ? (
-          <span key={latest} style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.4, animation: 'dql-step-in 0.3s ease-out' }}>{latest}</span>
-        ) : null}
-      </div>
+      ))}
+      {waitHint ? <span style={{ paddingLeft: 25, fontSize: 10.5, lineHeight: 1.4, color: t.textMuted }}>{waitHint}</span> : null}
     </div>
+  );
+}
+
+function AgentThinkingDots(): JSX.Element {
+  return (
+    <span aria-hidden="true" style={{ width: 16, height: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+      {[0, 1, 2].map((index) => (
+        <span key={index} className="dql-agent-thinking-dot" style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--accent)', animationDelay: `${index * 120}ms` }} />
+      ))}
+    </span>
   );
 }
 
@@ -1672,12 +1538,13 @@ function RunCard({
 
 export type AskInspectorTab = 'dql' | 'sql' | 'lineage' | 'trust';
 
-const ASK_KEYFRAMES = (t: Theme): string => `
+const ASK_KEYFRAMES = `
   @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
   @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
-  @keyframes dql-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-  @keyframes dql-orb { 0%, 100% { box-shadow: 0 0 0 0 ${t.accent}00; } 50% { box-shadow: 0 0 13px 1px ${t.accent}66; } }
-  @keyframes dql-step-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  @keyframes dql-agent-thinking-dot { 0%, 65%, 100% { opacity: .28; transform: translateY(0); } 32% { opacity: 1; transform: translateY(-2px); } }
+  @keyframes dql-agent-activity-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+  .dql-agent-thinking-dot { animation: dql-agent-thinking-dot 1.05s ease-in-out infinite; }
+  .dql-agent-activity { animation: dql-agent-activity-in .22s ease-out; }
   .dql-hover { transition: filter .15s ease, transform .12s ease, box-shadow .15s ease, background .15s ease, color .15s ease, border-color .15s ease; }
   .dql-hover:hover { filter: brightness(1.03); }
   .dql-hover:active { transform: translateY(0.5px); }
@@ -1685,6 +1552,7 @@ const ASK_KEYFRAMES = (t: Theme): string => `
   .dql-ask-ghost:hover { background: var(--bg-0); color: var(--text-primary) !important; }
   .dql-ask-chip:hover { border-color: var(--accent) !important; box-shadow: 0 1px 6px rgba(107,93,211,0.12); }
   details > summary::-webkit-details-marker { display: none; }
+  @media (prefers-reduced-motion: reduce) { .dql-agent-thinking-dot, .dql-agent-activity { animation: none !important; } }
 `;
 
 function askUserBubbleStyle(t: Theme): React.CSSProperties {

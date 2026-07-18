@@ -91,13 +91,14 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
         const raw = await options.complete({
           system: buildPlanSystemPrompt(input.maxSteps, input.audience),
           user: buildPlanUserPrompt(input, catalogContext),
-          signal: options.signal,
+          signal: input.request.signal ?? options.signal,
         });
         const parsed = parsePlan(raw, input.maxSteps, input.audience);
         if (parsed && parsed.steps.length > 0) {
           return parsed;
         }
-      } catch {
+      } catch (error) {
+        rethrowCancellation(error, input.request.signal, options.signal);
         // fall through to deterministic
       }
       return deterministic.plan(input);
@@ -114,16 +115,24 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
         const raw = await options.complete({
           system: buildReplanSystemPrompt(),
           user: buildReplanUserPrompt(input),
-          signal: options.signal,
+          signal: input.request.signal ?? options.signal,
         });
         const parsed = parseReplan(raw, input);
         if (parsed) return parsed;
-      } catch {
+      } catch (error) {
+        rethrowCancellation(error, input.request.signal, options.signal);
         // fall through to deterministic
       }
       return deterministic.replan(input);
     },
   };
+}
+
+function rethrowCancellation(error: unknown, ...signals: Array<AbortSignal | undefined>): void {
+  for (const signal of signals) {
+    if (signal?.aborted) throw signal.reason ?? error;
+  }
+  if (error instanceof Error && error.name === "AbortError") throw error;
 }
 
 function hasAuthoritativeRepairAction(input: AgentRunReplanInput): boolean {

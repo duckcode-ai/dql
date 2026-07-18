@@ -86,6 +86,16 @@ versions before building a candidate snapshot. The active snapshot pointer is
 swapped atomically only after compile/index validation. Cancellation or failure
 leaves the prior active snapshot usable.
 
+A successful dbt Apply immediately starts the shared versioned project-index
+preparation used by governed Ask; users do not run a separate compile, reindex,
+or agent command. Settings and Guided Setup expose the real queued/running/ready/
+failed job state and measured validation, snapshot-compile, and search-index
+durations while allowing unrelated Database and optional-AI setup to continue.
+If Ask starts before preparation completes, it joins the same in-flight promise
+instead of starting a duplicate cold build. The generated snapshot contains
+metadata and governed evidence only; it never copies warehouse rows (`CTX-005`,
+`PERF-001`, `PERF-002`, `UI-007`).
+
 Artifact generation commands, environment requirements, and redacted stderr
 are visible to the user. Secrets are never stored in project source or API job
 records.

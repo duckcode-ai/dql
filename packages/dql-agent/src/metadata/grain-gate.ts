@@ -225,6 +225,7 @@ function blockGrainProfile(block: MetadataObject): BlockGrainProfile {
   const payload = block.payload ?? {};
   const grainStr = typeof payload.grain === 'string' ? payload.grain : '';
   const declaredOutputs = stringArray(payload.declaredOutputs);
+  const declaredDimensions = stringArray(payload.dimensions);
   const entities = stringArray(payload.entities);
 
   const time = extractTimeGrain([grainStr, ...declaredOutputs]);
@@ -236,16 +237,32 @@ function blockGrainProfile(block: MetadataObject): BlockGrainProfile {
     const canonical = canonicalEntityToken(token);
     if (canonical) entityTokens.add(canonical);
   }
-  // Declared business entities are also an entity-grain signal.
-  for (const entity of entities) {
-    for (const token of grainTokens(entity)) {
-      const canonical = canonicalEntityToken(token);
-      if (canonical) entityTokens.add(canonical);
+  // A block's `entities` describe every business object touched by its query;
+  // they are NOT necessarily its output grain. A customer ranking can join
+  // orders and products while still returning one row per customer. Only use
+  // dimensions/outputs as fallbacks when no explicit grain was declared.
+  if (entityTokens.size === 0) {
+    for (const dimension of declaredDimensions) {
+      for (const token of grainTokens(dimension)) {
+        const canonical = canonicalEntityToken(token);
+        if (canonical) entityTokens.add(canonical);
+      }
     }
   }
-  // Output columns named like `<entity>_id` are a strong row-grain signal.
-  for (const output of declaredOutputs) {
-    for (const token of grainTokens(output)) {
+  if (entityTokens.size === 0) {
+    // Output columns named for an entity are a useful legacy row-grain signal.
+    for (const output of declaredOutputs) {
+      for (const token of grainTokens(output)) {
+        const canonical = canonicalEntityToken(token);
+        if (canonical) entityTokens.add(canonical);
+      }
+    }
+  }
+  // Very old blocks sometimes declared only one business entity and no grain,
+  // dimensions, or outputs. Preserve that conservative compatibility fallback;
+  // never infer a grain from a multi-entity join list.
+  if (entityTokens.size === 0 && entities.length === 1) {
+    for (const token of grainTokens(entities[0]!)) {
       const canonical = canonicalEntityToken(token);
       if (canonical) entityTokens.add(canonical);
     }

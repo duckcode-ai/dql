@@ -235,13 +235,14 @@ export function DbtOnboardingFlow({
         expectedFingerprint: preview?.fingerprint,
         buildArtifacts,
       });
-      const refreshed = await api.refreshDbtOnboarding({
+      const appliedJobId = applied.jobId ?? applied.id;
+      const refreshed = appliedJobId ? null : await api.refreshDbtOnboarding({
         expectedFingerprint: applied.fingerprint ?? preview?.fingerprint,
         buildArtifacts,
       });
-      const jobId = refreshed.jobId ?? refreshed.id;
+      const jobId = appliedJobId ?? refreshed?.jobId ?? refreshed?.id;
       if (jobId) {
-        setJob({ id: jobId, status: (refreshed.status as DbtOnboardingJob['status']) ?? 'queued' });
+        setJob({ id: jobId, status: ((applied.status ?? refreshed?.status) as DbtOnboardingJob['status']) ?? 'queued' });
         await pollJob(jobId);
       } else {
         await discoverDomains(useAi);

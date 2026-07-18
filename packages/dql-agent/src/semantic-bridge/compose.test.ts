@@ -11,6 +11,46 @@ function layer(): SemanticLayer {
 }
 
 describe('composeSemanticQueryFromMembers — hollow-answer guard', () => {
+  it('compiles an entity-relative measure comparison at peer grain without an LLM', () => {
+    const l = new SemanticLayer({
+      metrics: [{ name: 'tax_paid', label: 'Tax Paid', description: 'Tax paid by customers.', domain: 'commerce', sql: 'tax_amount', type: 'sum', table: 'orders' }],
+      dimensions: [{ name: 'customer_name', label: 'Customer', description: 'Customer name.', domain: 'commerce', sql: 'customer_name', type: 'string', table: 'orders' }],
+    });
+    const question = 'Who are the other customers who paid less tax than Melissa?';
+
+    const compiled = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      filterValueBindings: (value) => value === 'Melissa'
+        ? [{ column: 'customer_name', canonicalValue: 'Melissa Lopez', match: 'fuzzy', confidence: 0.97 }]
+        : [],
+    });
+    expect(compiled?.metric).toBe('tax_paid');
+    expect(compiled?.dimensions).toEqual(['customer_name']);
+    expect(compiled?.filters).toEqual([{
+      dimension: 'customer_name',
+      operator: 'less_than_reference',
+      values: ['Melissa Lopez'],
+    }]);
+    expect(compiled?.sql).toContain('WITH peer_values AS');
+    expect(compiled?.sql).toContain('SUM(tax_amount) AS tax_paid');
+    expect(compiled?.sql).toContain('WHERE "customer_name" = \'Melissa Lopez\'');
+    expect(compiled?.sql).toContain('peer."tax_paid" < reference.baseline_value');
+    expect(compiled?.sql).toContain('peer."customer_name" <> \'Melissa Lopez\'');
+    expect(compiled?.sql).toContain('ORDER BY peer."tax_paid" DESC');
+    expect(compiled?.sql).toContain('LIMIT 100');
+    expect(composeSemanticQueryFromMembers({
+      semanticLayer: l,
+      question,
+      selection: {
+        metrics: ['tax_paid'],
+        dimensions: ['customer_name'],
+        filters: [{ dimension: 'customer_name', operator: 'equals', values: ['Melissa Lopez'] }],
+      },
+    })).toBeUndefined();
+  });
+
   it('rejects a degenerate compile (empty/blank SQL) so the loop falls through to generation', () => {
     // Reproduces the "Answered from governed semantic metrics … " with an EMPTY SQL
     // preview and no rows: an incompatible metric×dimension combo compiles to blank
@@ -40,6 +80,60 @@ describe('composeSemanticQueryFromMembers — hollow-answer guard', () => {
 });
 
 describe('composeSemanticQueryForQuestion — grain-aware metric disambiguation', () => {
+  it('compiles an across-all metric question without adding an entity GROUP BY', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'lifetime_spend', label: 'Lifetime Spend', description: 'Gross customer lifetime spend.', domain: 'customers', sql: 'lifetime_spend', type: 'sum', table: 'customers' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: 'Customer name.', domain: 'customers', sql: 'customer_name', type: 'string', table: 'customers' },
+      ],
+    });
+    const question = 'What is total lifetime spend across all customers?';
+    const result = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    });
+
+    expect(result?.metric).toBe('lifetime_spend');
+    expect(result?.dimensions).toEqual([]);
+    expect(result?.sql).toContain('SUM(lifetime_spend)');
+    expect(result?.sql).not.toContain('customer_name');
+    expect(result?.sql).not.toContain('GROUP BY');
+  });
+
+  it('AGT-005 binds a complete named value and selects the entity display dimension', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'revenue', label: 'Revenue', description: 'Product revenue.', domain: 'commerce', sql: 'product_price', type: 'sum', table: 'purchases' },
+      ],
+      dimensions: [
+        { name: 'product_description', label: 'Product Description', description: '', domain: 'commerce', sql: 'product_description', type: 'string', table: 'purchases' },
+        { name: 'product_name', label: 'Product', description: 'Product display name.', domain: 'commerce', sql: 'product_name', type: 'string', table: 'purchases' },
+        { name: 'customer_name', label: 'Customer', description: 'Customer display name.', domain: 'commerce', sql: 'customer_name', type: 'string', table: 'purchases' },
+      ],
+    });
+    const question = 'what are the top product Melissa Lopex got it? what is the revenue?';
+    const result = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      filterValueBindings: (value) => value === 'Melissa Lopex'
+        ? [{ column: 'customer_name', canonicalValue: 'Melissa Lopez', match: 'fuzzy', confidence: 0.9231 }]
+        : [],
+    });
+
+    expect(result?.dimensions).toEqual(['product_name']);
+    expect(result?.filters).toEqual([{
+      dimension: 'customer_name',
+      operator: 'equals',
+      values: ['Melissa Lopez'],
+    }]);
+    expect(result?.sql).toContain("customer_name = 'Melissa Lopez'");
+    expect(result?.sql).not.toContain("IN ('melissa', 'lopex')");
+  });
+
   it('AGT-005 prefers a qualifier-specific governed metric over broad lifetime spend', () => {
     const l = new SemanticLayer({
       metrics: [

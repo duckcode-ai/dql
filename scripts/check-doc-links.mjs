@@ -49,4 +49,19 @@ if (problems.length) {
   for (const p of problems) console.error('  ' + p);
   process.exit(1);
 }
+
+const cliSource = readFileSync(join(ROOT, 'apps/cli/src/index.ts'), 'utf-8');
+const cliReference = readFileSync(join(ROOT, 'docs/reference/cli.md'), 'utf-8');
+const dispatchedCommands = [...cliSource.matchAll(/^\s+case "([a-z-]+)":$/gm)]
+  .map((match) => match[1]);
+const undocumentedCommands = dispatchedCommands.filter((command) =>
+  !cliReference.includes(`dql ${command}`));
+
+if (undocumentedCommands.length) {
+  console.error('CLI reference is missing dispatched top-level command(s):');
+  for (const command of undocumentedCommands) console.error(`  dql ${command}`);
+  process.exit(1);
+}
+
 console.log(`Checked ${files.length} markdown files — all relative links resolve.`);
+console.log(`CLI reference covers ${dispatchedCommands.length} dispatched top-level commands.`);

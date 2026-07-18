@@ -19,7 +19,7 @@
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { AgentToolDefinition } from '../providers/types.js';
 import type { KGStore } from '../kg/sqlite-fts.js';
-import type { KGNode } from '../kg/types.js';
+import type { KGNode, KGNodeKind } from '../kg/types.js';
 import {
   composeSemanticQueryFromMembers,
   type SemanticBridgeFilter,
@@ -199,10 +199,31 @@ function scanManifestTool(kg: KGStore): AgentToolDefinition {
     run: async (args) => {
       const record = objectArg(args);
       const terms = tokenizeQuery(typeof record.query === 'string' ? record.query : '');
-      const kinds = stringArray(record.kinds);
-      const scanKinds = kinds.length > 0 ? kinds : ['block', 'metric', 'dimension', 'measure', 'entity', 'semantic_model', 'dbt_model', 'dbt_source', 'term', 'business_view'];
+      const kinds = stringArray(record.kinds).filter(isKgNodeKind);
+      const scanKinds: KGNodeKind[] = kinds.length > 0 ? kinds : ['block', 'metric', 'dimension', 'measure', 'entity', 'semantic_model', 'dbt_model', 'dbt_source', 'term', 'business_view'];
       const max = typeof record.limit === 'number' && record.limit > 0 ? Math.min(record.limit, 50) : 20;
-      const nodes: KGNode[] = scanKinds.flatMap((kind) => kg.getNodesByKind(kind, 500));
+      // Prefer the graph's ranked FTS path. The former first-500-per-kind scan
+      // made a relevant metric/model invisible solely because it sorted late.
+      const indexed = terms.length > 0
+        ? kg.search({ query: typeof record.query === 'string' ? record.query : '', kinds: scanKinds, limit: max })
+        : [];
+      if (indexed.length > 0) {
+        return {
+          total: indexed.length,
+          returned: indexed.length,
+          objects: indexed.map((entry) => ({
+            id: entry.node.nodeId,
+            kind: entry.node.kind,
+            name: entry.node.name,
+            domain: entry.node.domain ?? null,
+            status: entry.node.status ?? null,
+            description: entry.node.description ?? null,
+          })),
+        };
+      }
+      // Index-independent repair remains available, but examines complete
+      // compact node headers rather than an arbitrary alphabetical prefix.
+      const nodes: KGNode[] = scanKinds.flatMap((kind) => kg.getNodesByKind(kind, 100_000));
       const scored = nodes
         .map((node) => {
           const haystack = `${node.name} ${node.description ?? ''} ${node.llmContext ?? ''} ${(node.tags ?? []).join(' ')}`.toLowerCase();
@@ -272,6 +293,17 @@ function objectArg(args: unknown): Record<string, unknown> {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+const KG_NODE_KINDS = new Set<KGNodeKind>([
+  'block', 'term', 'business_view', 'metric', 'dimension', 'measure', 'entity',
+  'model_area', 'semantic_model', 'saved_query', 'domain', 'dbt_model', 'dbt_source',
+  'notebook', 'dashboard', 'app', 'skill', 'relationship', 'contract',
+  'domain_export', 'domain_import', 'conformance', 'policy', 'evaluation',
+]);
+
+function isKgNodeKind(value: string): value is KGNodeKind {
+  return KG_NODE_KINDS.has(value as KGNodeKind);
 }
 
 function parseTimeDimension(value: unknown): { name: string; granularity: string } | undefined {

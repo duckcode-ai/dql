@@ -3,6 +3,7 @@ import { themes } from '../../themes/notebook-theme';
 import type { ThemeMode } from '../../themes/notebook-theme';
 import { TableOutput } from './TableOutput';
 import type { QueryResult, CellChartConfig } from '../../store/types';
+import { formatChartValue, formatDisplayValue } from '../../utils/value-format';
 
 interface ChartOutputProps {
   result: QueryResult;
@@ -14,7 +15,7 @@ export type ChartType =
   | 'bar' | 'line' | 'area' | 'pie' | 'donut'
   | 'scatter' | 'heatmap' | 'funnel' | 'waterfall'
   | 'histogram' | 'gauge' | 'stacked-bar' | 'grouped-bar'
-  | 'kpi' | 'table';
+  | 'sankey' | 'kpi' | 'table';
 
 export const CHART_TYPE_OPTIONS: { value: ChartType; label: string }[] = [
   { value: 'bar', label: 'Bar' },
@@ -28,6 +29,7 @@ export const CHART_TYPE_OPTIONS: { value: ChartType; label: string }[] = [
   { value: 'heatmap', label: 'Heatmap' },
   { value: 'histogram', label: 'Histogram' },
   { value: 'funnel', label: 'Funnel' },
+  { value: 'sankey', label: 'Sankey' },
   { value: 'waterfall', label: 'Waterfall' },
   { value: 'gauge', label: 'Gauge' },
   { value: 'kpi', label: 'KPI' },
@@ -50,7 +52,7 @@ function isStringLike(v: unknown): boolean {
 const VALID_CHART_TYPES = new Set<string>([
   'bar', 'line', 'area', 'pie', 'donut', 'scatter', 'heatmap',
   'funnel', 'waterfall', 'histogram', 'gauge', 'stacked-bar',
-  'grouped-bar', 'kpi', 'table',
+  'grouped-bar', 'sankey', 'kpi', 'table',
 ]);
 
 /**
@@ -142,10 +144,8 @@ function getPalette(name?: string): string[] {
   return COLOR_PALETTES[name ?? 'default'] ?? COLOR_PALETTES.default;
 }
 
-function abbreviate(n: number): string {
-  if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(n) >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+function abbreviate(n: number, column = 'value', format?: CellChartConfig['format']): string {
+  return formatChartValue(column, n, format);
 }
 
 function formatDateLabel(val: string, maxLen = 8): string {
@@ -214,7 +214,7 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
               </text>
               <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={color} opacity={isHovered ? 1 : 0.88} style={{ transition: 'opacity 0.15s' }} />
               <text x={LABEL_W + barW + 6} y={y + BAR_H / 2 + 4} textAnchor="start" fontSize={11} fontFamily={t.fontMono} fill={t.textMuted}>
-                {abbreviate(item.value)}
+                {abbreviate(item.value, valueCol, chartConfig?.format)}
               </text>
             </g>
           );
@@ -282,7 +282,7 @@ function GroupedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
                       style={{ transition: 'opacity 0.15s' }} />
                     {hoveredIdx === key && (
                       <text x={LABEL_W + barW + 4} y={by + BAR_H / 2 + 3} fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>
-                        {abbreviate(val)}
+                        {abbreviate(val, col, chartConfig?.format)}
                       </text>
                     )}
                   </g>
@@ -350,7 +350,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
                       style={{ transition: 'opacity 0.15s' }} />
                     {hoveredIdx === key && w > 30 && (
                       <text x={x + w / 2} y={y + BAR_H / 2 + 4} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill="#fff" fontWeight={600}>
-                        {abbreviate(val)}
+                        {abbreviate(val, col, chartConfig?.format)}
                       </text>
                     )}
                   </g>
@@ -413,7 +413,7 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
         {yTicks.map((tick, i) => (
           <g key={i}>
             <line x1={PAD_L} y1={tick.y} x2={PAD_L + chartW} y2={tick.y} stroke={t.tableBorder} strokeWidth={0.5} />
-            <text x={PAD_L - 6} y={tick.y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(tick.val)}</text>
+            <text x={PAD_L - 6} y={tick.y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(tick.val, yCol, chartConfig?.format)}</text>
           </g>
         ))}
         <path d={areaD} fill={lineColor} opacity={showArea ? 0.3 : 0.15} />
@@ -446,7 +446,7 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
               {formatDateLabel(tooltip.label, 12)}
             </text>
             <text x={tooltip.x + 13} y={tooltip.y + 6} fontSize={11} fontFamily={t.fontMono} fill={t.textPrimary} fontWeight={600}>
-              {abbreviate(tooltip.value)}
+              {abbreviate(tooltip.value, yCol, chartConfig?.format)}
             </text>
           </g>
         )}
@@ -509,7 +509,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           return (
             <g key={i}>
               <line x1={PAD_L} y1={y} x2={PAD_L + chartW} y2={y} stroke={t.tableBorder} strokeWidth={0.5} />
-              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val)}</text>
+              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, yCol, chartConfig?.format)}</text>
             </g>
           );
         })}
@@ -518,7 +518,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           const val = xMin + (xRange * i) / 5;
           const x = toSX(val);
           return (
-            <text key={i} x={x} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val)}</text>
+            <text key={i} x={x} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, xCol)}</text>
           );
         })}
         {/* Axes */}
@@ -541,7 +541,7 @@ function ScatterChart({ result, themeMode, chartConfig }: { result: QueryResult;
           <g>
             <rect x={toSX(data[hoveredIdx].x) + 8} y={toSY(data[hoveredIdx].y) - 24} width={100} height={28} rx={4} fill={t.cellBg} stroke={t.cellBorder} strokeWidth={1} />
             <text x={toSX(data[hoveredIdx].x) + 13} y={toSY(data[hoveredIdx].y) - 8} fontSize={10} fontFamily={t.fontMono} fill={t.textPrimary}>
-              ({abbreviate(data[hoveredIdx].x)}, {abbreviate(data[hoveredIdx].y)})
+              ({abbreviate(data[hoveredIdx].x, xCol)}, {abbreviate(data[hoveredIdx].y, yCol, chartConfig?.format)})
             </text>
           </g>
         )}
@@ -600,7 +600,7 @@ function PieDonutChart({ result, themeMode, chartConfig, isDonut }: { result: Qu
         {isDonut && (
           <>
             <text x={CX} y={CY - 5} textAnchor="middle" fontSize={11} fontFamily={t.fontMono} fill={t.textSecondary}>
-              {hovered ? abbreviate(hovered.value) : abbreviate(total)}
+              {hovered ? abbreviate(hovered.value, valueCol, chartConfig?.format) : abbreviate(total, valueCol, chartConfig?.format)}
             </text>
             <text x={CX} y={CY + 9} textAnchor="middle" fontSize={9} fontFamily={t.font} fill={t.textMuted}>
               {hovered ? `${hovered.pct.toFixed(1)}%` : 'total'}
@@ -681,7 +681,7 @@ function HeatmapChart({ result, themeMode }: { result: QueryResult; themeMode: T
                     {isH && (
                       <text x={LABEL_W + ci * CELL_W + CELL_W / 2} y={y + CELL_H / 2 + 4} textAnchor="middle"
                         fontSize={10} fontFamily={t.fontMono} fill="#fff" fontWeight={600}>
-                        {abbreviate(val)}
+                        {abbreviate(val, col)}
                       </text>
                     )}
                   </g>
@@ -769,7 +769,7 @@ function HistogramChart({ result, themeMode, chartConfig }: { result: QueryResul
           const idx = bins.indexOf(bin);
           return (
             <text key={i} x={PAD_L + idx * barW + barW / 2} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>
-              {abbreviate(bin.low)}
+              {abbreviate(bin.low, numCol, chartConfig?.format)}
             </text>
           );
         })}
@@ -824,8 +824,120 @@ function FunnelChart({ result, themeMode, chartConfig }: { result: QueryResult; 
                 {d.label}
               </text>
               <text x={CENTER} y={y + ROW_H / 2 + 13} textAnchor="middle" fontSize={9} fontFamily={t.fontMono} fill="rgba(255,255,255,0.7)">
-                {abbreviate(d.value)} ({(pct * 100).toFixed(0)}%)
+                {abbreviate(d.value, valueCol, chartConfig?.format)} ({(pct * 100).toFixed(0)}%)
               </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+// ─── Sankey / Flow Chart ─────────────────────────────────────────────────────
+
+function SankeyChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
+  const t = themes[themeMode];
+  const palette = getPalette(chartConfig?.colorPalette);
+  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const sample = result.rows.slice(0, 20);
+  const numericColumns = result.columns.filter((column) => sample.some((row) => isNumericValue(row[column])));
+  const dimensionColumns = result.columns.filter((column) => !numericColumns.includes(column));
+  const sourceCol = chartConfig?.x && dimensionColumns.includes(chartConfig.x)
+    ? chartConfig.x
+    : dimensionColumns.find((column) => /(?:^|_)(?:source|from|origin|upstream|supplier|producer|category)(?:_|$)/i.test(column)) ?? dimensionColumns[0];
+  const targetCol = chartConfig?.color && dimensionColumns.includes(chartConfig.color) && chartConfig.color !== sourceCol
+    ? chartConfig.color
+    : dimensionColumns.find((column) => column !== sourceCol && /(?:^|_)(?:target|to|destination|downstream|consumer|customer|product)(?:_|$)/i.test(column))
+      ?? dimensionColumns.find((column) => column !== sourceCol);
+  const valueCol = chartConfig?.y && numericColumns.includes(chartConfig.y) ? chartConfig.y : numericColumns[0];
+
+  if (!sourceCol || !targetCol || !valueCol) return <TableOutput result={result} themeMode={themeMode} />;
+
+  const aggregated = new Map<string, { source: string; target: string; value: number }>();
+  for (const row of result.rows) {
+    const source = String(row[sourceCol] ?? '').trim();
+    const target = String(row[targetCol] ?? '').trim();
+    const value = Math.abs(Number(row[valueCol] ?? 0));
+    if (!source || !target || !Number.isFinite(value) || value <= 0) continue;
+    const key = `${source}\u0000${target}`;
+    const previous = aggregated.get(key);
+    aggregated.set(key, { source, target, value: (previous?.value ?? 0) + value });
+  }
+  const allLinks = [...aggregated.values()].sort((left, right) => right.value - left.value);
+  if (allLinks.length === 0) return <TableOutput result={result} themeMode={themeMode} />;
+
+  const sourceTotals = new Map<string, number>();
+  const targetTotals = new Map<string, number>();
+  allLinks.forEach((link) => {
+    sourceTotals.set(link.source, (sourceTotals.get(link.source) ?? 0) + link.value);
+    targetTotals.set(link.target, (targetTotals.get(link.target) ?? 0) + link.value);
+  });
+  const sources = [...sourceTotals].sort((left, right) => right[1] - left[1]).slice(0, 12).map(([name]) => name);
+  const targets = [...targetTotals].sort((left, right) => right[1] - left[1]).slice(0, 12).map(([name]) => name);
+  const visibleSources = new Set(sources);
+  const visibleTargets = new Set(targets);
+  const links = allLinks.filter((link) => visibleSources.has(link.source) && visibleTargets.has(link.target)).slice(0, 40);
+  const maxLink = Math.max(...links.map((link) => link.value), 1);
+
+  const WIDTH = 640;
+  const HEIGHT = Math.max(250, Math.max(sources.length, targets.length) * 34 + 40);
+  const SOURCE_X = 132, TARGET_X = WIDTH - 144, NODE_W = 12, PAD_Y = 28;
+  const nodeY = (index: number, count: number) => count <= 1
+    ? HEIGHT / 2
+    : PAD_Y + index * ((HEIGHT - PAD_Y * 2) / (count - 1));
+  const sourceIndex = new Map(sources.map((name, index) => [name, index]));
+  const targetIndex = new Map(targets.map((name, index) => [name, index]));
+
+  return (
+    <div style={{ padding: '8px 0', overflowX: 'auto' }}>
+      <svg
+        role="img"
+        aria-label={`${sourceCol} to ${targetCol} flow by ${valueCol}`}
+        width="100%"
+        height={HEIGHT}
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{ display: 'block', minWidth: 520 }}
+      >
+        <text x={SOURCE_X} y={14} textAnchor="middle" fontSize={10} fontWeight={700} fontFamily={t.font} fill={t.textMuted}>{sourceCol}</text>
+        <text x={TARGET_X} y={14} textAnchor="middle" fontSize={10} fontWeight={700} fontFamily={t.font} fill={t.textMuted}>{targetCol}</text>
+        {links.map((link, index) => {
+          const sy = nodeY(sourceIndex.get(link.source) ?? 0, sources.length);
+          const ty = nodeY(targetIndex.get(link.target) ?? 0, targets.length);
+          const key = `${link.source}\u0000${link.target}`;
+          const active = hoveredKey === key;
+          const path = `M ${SOURCE_X + NODE_W},${sy} C ${SOURCE_X + 150},${sy} ${TARGET_X - 150},${ty} ${TARGET_X},${ty}`;
+          const midX = WIDTH / 2;
+          const midY = (sy + ty) / 2;
+          return (
+            <g key={key} onMouseEnter={() => setHoveredKey(key)} onMouseLeave={() => setHoveredKey(null)}>
+              <path d={path} fill="none" stroke={palette[index % palette.length]} strokeWidth={Math.max(2, (link.value / maxLink) * 18)} opacity={hoveredKey === null || active ? 0.7 : 0.14} strokeLinecap="round" style={{ transition: 'opacity 0.15s', cursor: 'default' }} />
+              {active ? (
+                <g pointerEvents="none">
+                  <rect x={midX - 72} y={midY - 18} width={144} height={36} rx={5} fill={t.cellBg} stroke={t.cellBorder} />
+                  <text x={midX} y={midY - 3} textAnchor="middle" fontSize={9.5} fontFamily={t.font} fill={t.textSecondary}>{link.source} → {link.target}</text>
+                  <text x={midX} y={midY + 11} textAnchor="middle" fontSize={11} fontWeight={700} fontFamily={t.fontMono} fill={t.textPrimary}>{abbreviate(link.value, valueCol, chartConfig?.format)}</text>
+                </g>
+              ) : null}
+            </g>
+          );
+        })}
+        {sources.map((source, index) => {
+          const y = nodeY(index, sources.length);
+          return (
+            <g key={`source-${source}`}>
+              <rect x={SOURCE_X} y={y - 9} width={NODE_W} height={18} rx={3} fill={palette[index % palette.length]} />
+              <text x={SOURCE_X - 7} y={y + 3} textAnchor="end" fontSize={10.5} fontFamily={t.font} fill={t.textSecondary}>{source.length > 18 ? `${source.slice(0, 17)}…` : source}</text>
+            </g>
+          );
+        })}
+        {targets.map((target, index) => {
+          const y = nodeY(index, targets.length);
+          return (
+            <g key={`target-${target}`}>
+              <rect x={TARGET_X} y={y - 9} width={NODE_W} height={18} rx={3} fill={palette[(index + sources.length) % palette.length]} />
+              <text x={TARGET_X + NODE_W + 7} y={y + 3} textAnchor="start" fontSize={10.5} fontFamily={t.font} fill={t.textSecondary}>{target.length > 18 ? `${target.slice(0, 17)}…` : target}</text>
             </g>
           );
         })}
@@ -878,7 +990,7 @@ function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResul
           return (
             <g key={i}>
               <line x1={PAD_L} y1={y} x2={PAD_L + chartW} y2={y} stroke={t.tableBorder} strokeWidth={0.5} />
-              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val)}</text>
+              <text x={PAD_L - 6} y={y + 4} textAnchor="end" fontSize={10} fontFamily={t.fontMono} fill={t.textMuted}>{abbreviate(val, valueCol, chartConfig?.format)}</text>
             </g>
           );
         })}
@@ -902,7 +1014,7 @@ function WaterfallChart({ result, themeMode, chartConfig }: { result: QueryResul
                 fill={isPositive ? t.success : t.error} opacity={isH ? 1 : 0.8} style={{ transition: 'opacity 0.1s' }} />
               {isH && (
                 <text x={x + barW / 2} y={y1 - 4} textAnchor="middle" fontSize={10} fontFamily={t.fontMono} fill={t.textPrimary}>
-                  {bar.value >= 0 ? '+' : ''}{abbreviate(bar.value)}
+                  {bar.value >= 0 ? '+' : ''}{abbreviate(bar.value, valueCol, chartConfig?.format)}
                 </text>
               )}
             </g>
@@ -972,7 +1084,7 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
         )}
         {/* Value text */}
         <text x={CX} y={CY - 4} textAnchor="middle" fontSize={28} fontFamily={t.fontMono} fill={color} fontWeight={700}>
-          {abbreviate(rawVal)}
+          {abbreviate(rawVal, yCol, chartConfig?.format)}
         </text>
         <text x={CX} y={CY + 16} textAnchor="middle" fontSize={11} fontFamily={t.font} fill={t.textMuted}>
           {label}
@@ -987,26 +1099,12 @@ function GaugeChart({ result, themeMode, chartConfig }: { result: QueryResult; t
 // Format a KPI value honoring the tile's `format` option. Large numbers use
 // compact notation ($1.4M, 62K) so the hero figure never overflows a narrow
 // KPI tile.
-function formatKpiValue(raw: unknown, format?: CellChartConfig['format']): string {
+function formatKpiValue(column: string, raw: unknown, values: unknown[], format?: CellChartConfig['format']): string {
   const num = Number(raw);
   if (raw === null || raw === undefined || (typeof raw !== 'number' && isNaN(num))) {
     return raw === null || raw === undefined ? '—' : String(raw);
   }
-  const compact = Math.abs(num) >= 100_000;
-  if (format === 'currency') {
-    return num.toLocaleString(undefined, {
-      style: 'currency', currency: 'USD',
-      notation: compact ? 'compact' : 'standard',
-      maximumFractionDigits: compact ? 1 : 2,
-    });
-  }
-  if (format === 'percent') {
-    return num.toLocaleString(undefined, { style: 'percent', maximumFractionDigits: 1 });
-  }
-  return num.toLocaleString(undefined, {
-    notation: compact ? 'compact' : 'standard',
-    maximumFractionDigits: compact ? 1 : 2,
-  });
+  return formatDisplayValue(column, raw, values, { compact: Math.abs(num) >= 100_000, format });
 }
 
 function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
@@ -1018,7 +1116,7 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y
     : result.columns.find((c) => isNumericValue(row[c])) ?? result.columns[0];
 
-  const displayVal = formatKpiValue(row[yCol], chartConfig?.format);
+  const displayVal = formatKpiValue(yCol, row[yCol], result.rows.map((item) => item[yCol]), chartConfig?.format);
 
   return (
     <div style={{ containerType: 'inline-size', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>
@@ -1205,6 +1303,8 @@ export function renderChart(chartType: ChartType, result: QueryResult, themeMode
       return <HistogramChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'funnel':
       return <FunnelChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
+    case 'sankey':
+      return <SankeyChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'waterfall':
       return <WaterfallChart result={result} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'gauge':

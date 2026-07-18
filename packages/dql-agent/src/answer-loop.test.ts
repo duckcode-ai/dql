@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, parseProposal } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, parseProposal, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
-import type { CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
+import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
 import type { CertifiedBlockFit } from "./metadata/block-fit.js";
 import type { AgentProvider, AgentMessage, AgentToolDefinition, ProviderToolLoopOptions } from "./providers/types.js";
 
@@ -616,6 +616,52 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls.length).toBeGreaterThan(0);
     expect(result.kind === "certified" && result.sourceTier === "business_context").toBe(false);
     expect(result.route?.ref).not.toBe("Jaffle Growth Pulse");
+  });
+
+  it("AGT-001/AGT-009 executes a scalar metric instead of returning a matching business term", async () => {
+    kg.rebuild(
+      [
+        {
+          nodeId: "term:Customer",
+          kind: "term",
+          name: "Customer",
+          status: "certified",
+          description: "A customer represented by one row in the customers mart.",
+          sourceTier: "business_context",
+          certification: "certified",
+        },
+        {
+          nodeId: "metric:customers.lifetime_spend",
+          kind: "metric",
+          name: "customers.lifetime_spend",
+          status: "certified",
+          description: "Gross customer lifetime spend inclusive of taxes.",
+          llmContext: "sql: SUM(lifetime_spend)\ntable: dev.customers",
+          sourceTier: "semantic_layer",
+        },
+      ],
+      [],
+    );
+    const executed: string[] = [];
+    const result = await answer({
+      question: "What is total lifetime spend across all customers?",
+      provider: new StubProvider("should not be called"),
+      kg,
+      executeGeneratedSql: async (sql) => {
+        executed.push(sql);
+        return {
+          columns: ["lifetime_spend"],
+          rows: [{ lifetime_spend: 671425.37 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(result.sourceTier).toBe("semantic_layer");
+    expect(result.result?.rowCount).toBe(1);
+    expect(result.kind === "certified" && result.sourceTier === "business_context").toBe(false);
+    expect(executed[0]).toContain("SUM(lifetime_spend)");
   });
 
   it("prefers an exact certified executable block over a certified term for KPI questions", async () => {
@@ -5056,7 +5102,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 0/2, execution 1/2",
+          label: "Repair budget used: re-ground 0/1, execution 1/1",
         }),
       ]),
     );
@@ -5190,7 +5236,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 0/2, execution 1/2",
+          label: "Repair budget used: re-ground 0/1, execution 1/1",
         }),
       ]),
     );
@@ -5264,7 +5310,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 1/2, execution 0/2",
+          label: "Repair budget used: re-ground 1/1, execution 0/1",
         }),
       ]),
     );
@@ -5336,7 +5382,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 1/2, execution 0/2",
+          label: "Repair budget used: re-ground 1/1, execution 0/1",
         }),
       ]),
     );
@@ -5709,6 +5755,26 @@ function manifestWithUnmodeledProducts(): DQLManifest {
   } as unknown as DQLManifest;
 }
 
+describe("source-to-target flow projection", () => {
+  it("removes unrelated categorical groupings and orders source, target, weight", () => {
+    const question = "Show revenue by product type and product name as a source-to-target flow.";
+    const tightened = tightenSourceTargetFlowProjection(`SELECT
+  products.product_name AS product_name,
+  customers.customer_type AS customer_type,
+  products.product_type AS product_type,
+  SUM(order_item.product_price) AS revenue
+FROM dev.order_items AS order_item
+LEFT JOIN dev.products AS products ON order_item.product_id = products.product_id
+LEFT JOIN dev.customers AS customers ON true
+GROUP BY products.product_name, customers.customer_type, products.product_type`, question, buildAnalysisQuestionPlan(question));
+
+    expect(tightened?.outputs).toEqual(["product_type", "product_name", "revenue"]);
+    expect(tightened?.sql).toContain("products.product_type AS product_type,\n  products.product_name AS product_name");
+    expect(tightened?.sql).not.toContain("customers.customer_type AS customer_type");
+    expect(tightened?.sql).toContain("GROUP BY products.product_type, products.product_name");
+  });
+});
+
 describe("parseProposal", () => {
   it("extracts a structured JSON proposal from a fenced object", () => {
     const raw = [
@@ -5908,6 +5974,48 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.route?.label).toContain("metric");
   });
 
+  it("AGT-010 binds the validated qualified meaning ID instead of re-matching a similar metric name", async () => {
+    kg.rebuild([
+      {
+        nodeId: "metric:consumption.rollover_balance_amount",
+        kind: "metric",
+        name: "consumption.rollover_balance_amount",
+        domain: "consumption",
+        description: "Actual balance carried into the next month.",
+        llmContext: "sql: SUM(rollover_balance_amount)\ntable: dev.monthly_consumption",
+        sourceTier: "semantic_layer",
+        certification: "ai_generated",
+        provenance: "semantic layer",
+      },
+      {
+        nodeId: "metric:consumption.rollover_risk_amount",
+        kind: "metric",
+        name: "consumption.rollover_risk_amount",
+        domain: "consumption",
+        description: "Forecast amount currently at risk of rolling over.",
+        llmContext: "sql: SUM(rollover_risk_amount)\ntable: dev.monthly_consumption",
+        sourceTier: "semantic_layer",
+        certification: "ai_generated",
+        provenance: "semantic layer",
+      },
+    ], []);
+    const provider = new StubProvider("should not be called");
+
+    const result = await answer({
+      question: "what is the monthly rollover amount?",
+      provider,
+      kg,
+      preferredEvidenceIds: ["semantic:metric:consumption.rollover_balance_amount"],
+      preferredExecutionId: "semantic:metric:consumption.rollover_risk_amount",
+    });
+
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.route?.ref).toBe("consumption.rollover_risk_amount");
+    expect(result.sql).toContain("SUM(rollover_risk_amount)");
+    expect(result.sql).not.toContain("SUM(rollover_balance_amount)");
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("does not let a generic catalog-certified block pre-empt a more precise semantic metric", async () => {
     kg.rebuild([
       {
@@ -5968,6 +6076,97 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.route?.tier).toBe("semantic_metric");
     expect(result.sql).toContain("SUM(tax_paid)");
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("does not execute a catalog-certified block that misses the requested product flow shape", async () => {
+    const question = "Show revenue by product type and product name as a source-to-target flow.";
+    kg.rebuild([{
+      nodeId: "block:top_beverage_customers",
+      kind: "block",
+      name: "top_beverage_customers",
+      domain: "commerce",
+      status: "certified",
+      description: "Top customers ranked by beverage revenue. One row per customer.",
+      tags: ["beverage", "customer", "revenue", "ranking"],
+      sourceTier: "certified_artifact",
+      certification: "certified",
+      provenance: "DQL block",
+      grain: "customer",
+      entities: ["Customer"],
+      dimensions: ["customer"],
+      declaredOutputs: ["customer_name", "beverage_revenue", "beverage_orders", "beverage_product_types"],
+    }], []);
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue flow from product type to product name.",
+        sql: "SELECT product_type, product_name, SUM(product_price) AS revenue FROM analytics.order_items GROUP BY product_type, product_name",
+        viz: "sankey",
+        outputs: ["product_type", "product_name", "revenue"],
+      }),
+      "```",
+    ].join("\n"));
+    const contextPack = contextPackForRankedRelations(question, [{
+      relation: "analytics.order_items",
+      name: "order_items",
+      source: "dbt manifest",
+      columns: [
+        { name: "product_type", type: "VARCHAR" },
+        { name: "product_name", type: "VARCHAR" },
+        { name: "product_price", type: "DECIMAL" },
+      ],
+      rank: 1,
+      score: 90,
+      reason: "matches requested product flow",
+    }], {
+      objects: [{ objectKey: "dql:block:top_beverage_customers", objectType: "dql_block", name: "top_beverage_customers" }],
+      sourceBlockSql: [{
+        objectKey: "dql:block:top_beverage_customers",
+        name: "top_beverage_customers",
+        status: "certified",
+        sql: "SELECT customer_name, beverage_revenue, beverage_orders, beverage_product_types FROM customer_beverage ORDER BY beverage_revenue DESC LIMIT 10",
+      }],
+    }) as any;
+    contextPack.questionPlan = buildAnalysisQuestionPlan(question);
+    contextPack.routeDecision = {
+      route: "certified",
+      intent: "exact_certified_lookup",
+      exactObjectKey: "dql:block:top_beverage_customers",
+      reason: "High lexical overlap selected the customer block.",
+      trustLabel: "certified",
+      reviewStatus: "certified",
+      selectedEvidence: [],
+      missingContext: [],
+      followUps: [],
+    };
+    let certifiedExecuted = false;
+
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack,
+      executeCertifiedBlock: async () => {
+        certifiedExecuted = true;
+        return { columns: ["customer_name", "beverage_revenue"], rows: [], rowCount: 0 };
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ["product_type", "product_name", "revenue"],
+        rows: [{ product_type: "Drink", product_name: "Latte", revenue: 100 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(certifiedExecuted).toBe(false);
+    expect(result.sourceCertifiedBlock).not.toBe("top_beverage_customers");
+    expect(result.proposedSql).toContain("product_type");
+    expect(result.proposedSql).toContain("product_name");
+    expect(result.result?.columns).toEqual(["product_type", "product_name", "revenue"]);
+    expect(provider.calls).toHaveLength(1);
+    const generationPrompt = provider.calls[0]!.map((message) => message.content).join("\n");
+    expect(generationPrompt).toContain("analytics.order_items");
+    expect(generationPrompt).not.toContain("beverage_orders");
   });
 
   it("returns an unexecuted exploratory candidate when a dbt-grounded join lacks v3 modeling coverage", async () => {

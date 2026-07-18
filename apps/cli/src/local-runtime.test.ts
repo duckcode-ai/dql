@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyRequestedTopNToExploratorySql,
   buildAgentValueProbeSql,
+  agentRunDeadlineMs,
+  boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
   buildExploratoryJoinProbeSql,
@@ -29,6 +31,7 @@ import {
   getConnectorInstallStatuses,
   ensureConnectorInstalledForStartup,
   loadProjectConfig,
+  isAgentValueProbeColumn,
   normalizeProjectConnection,
   openBlockStudioDocument,
   parseBlockSourceMetadata,
@@ -37,6 +40,7 @@ import {
   dashboardRuntimeVariables,
   resolveDefaultLLMProvider,
   resolveGovernedAnswerRunner,
+  resolveAgentRuntimeValueGrounding,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
   runtimeSnapshotStale,
@@ -149,6 +153,34 @@ describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
     }
     // The prune must never delete the newest row — it's the only one ever read.
     expect(latestRuntimeSchemaSnapshotForProject(dir)?.source).toBe('scan-7');
+  });
+});
+
+describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
+  it('inherits user cancellation and enforces its own short deadline', async () => {
+    const cancelled = new AbortController();
+    cancelled.abort();
+    expect(boundedAgentMeaningSignal(cancelled.signal, 1_000).aborted).toBe(true);
+
+    const deadline = boundedAgentMeaningSignal(undefined, 5);
+    await new Promise<void>((resolve) => deadline.addEventListener('abort', () => resolve(), { once: true }));
+    expect(deadline.aborted).toBe(true);
+  });
+
+  it('keeps ordinary multi-table lookups on the short budget and reserves the longer budget for explicit deep work', () => {
+    expect(agentRunDeadlineMs({
+      question: 'what are the top products Melissa Lopez bought and what is the revenue?',
+      requestedMode: 'ask',
+    })).toBe(45_000);
+    expect(agentRunDeadlineMs({
+      question: 'investigate why revenue declined and identify the drivers',
+      requestedMode: 'research',
+    })).toBe(120_000);
+    expect(agentRunDeadlineMs({
+      question: 'analyze revenue',
+      requestedMode: 'ask',
+      analysisDepth: 'deep',
+    })).toBe(120_000);
   });
 });
 
@@ -735,7 +767,7 @@ describe('dbt-first onboarding runtime API', () => {
     writeFileSync(manifestPath, JSON.stringify({ metadata: { project_name: 'shop' }, nodes: { 'model.shop.orders': { resource_type: 'model', name: 'orders' } }, sources: {}, metrics: {} }));
     let server: Server | undefined;
     try {
-      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, connection: { driver: 'file' }, preferredPort: 0, captureServer: (created) => { server = created; } });
       const base = `http://127.0.0.1:${port}`;
       const previewResponse = await fetch(`${base}/api/onboarding/dbt/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json' }) });
       expect(previewResponse.status).toBe(200);
@@ -753,15 +785,62 @@ describe('dbt-first onboarding runtime API', () => {
       const freshPreview = await (await fetch(`${base}/api/onboarding/dbt/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json' }) })).json() as { fingerprint: string };
       const applyResponse = await fetch(`${base}/api/onboarding/dbt/apply`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json', fingerprint: freshPreview.fingerprint }) });
       expect(applyResponse.status).toBe(200);
+      const applied = await applyResponse.json() as {
+        jobId: string;
+        snapshotId: string;
+        status: string;
+        stage: string;
+        progress: number;
+        phases: Array<{ id: string; status: string; durationMs?: number }>;
+      };
+      expect(applied).toMatchObject({
+        jobId: expect.stringMatching(/^dbt-prepare-/),
+        snapshotId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        status: 'running',
+        stage: 'indexing',
+        progress: 65,
+        phases: [
+          { id: 'artifact_validation', status: 'completed', durationMs: expect.any(Number) },
+          { id: 'snapshot_compile', status: 'completed', durationMs: expect.any(Number) },
+          { id: 'search_index', status: 'running' },
+        ],
+      });
+      let preparation: any = null;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        preparation = await (await fetch(`${base}/api/onboarding/jobs/${applied.jobId}`)).json();
+        if (preparation.status === 'completed' || preparation.status === 'failed') break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(preparation).toMatchObject({
+        status: 'completed',
+        stage: 'ready',
+        progress: 100,
+        snapshotId: applied.snapshotId,
+        result: {
+          snapshotId: applied.snapshotId,
+          objectCount: expect.any(Number),
+          metadataFingerprint: expect.any(String),
+          kgFingerprint: expect.any(String),
+          phaseDurationsMs: {
+            artifactValidation: expect.any(Number),
+            snapshotCompile: expect.any(Number),
+            searchIndex: expect.any(Number),
+            total: expect.any(Number),
+          },
+        },
+      });
+      expect(existsSync(join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite'))).toBe(true);
+      expect(existsSync(join(projectRoot, '.dql', 'cache', 'metadata.sqlite'))).toBe(true);
       const config = JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8')) as any;
       expect(config).toMatchObject({ manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' }, semanticLayer: { provider: 'dbt' } });
       expect(config.connections).toEqual({ warehouse: { driver: 'duckdb', filepath: ':memory:' } });
       expect(config.aiProviders).toEqual({ default: 'ollama', ollama: { model: 'qwen-test' } });
       expect(existsSync(join(projectRoot, 'semantic-layer'))).toBe(false);
-      const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean } };
+      const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean; snapshotState: string }; preparation: { id: string; status: string } };
       expect(status.requestId).toMatch(/^onboarding-status-/);
       expect(status.snapshotId).toMatch(/^[a-f0-9]{64}$/);
-      expect(status.modeling.enabled).toBe(true);
+      expect(status.modeling).toMatchObject({ enabled: true, snapshotState: 'ready' });
+      expect(status.preparation).toMatchObject({ id: applied.jobId, status: 'completed' });
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -2850,11 +2929,41 @@ describe('extractAgentValueSearchTerms', () => {
     expect(extractAgentValueSearchTerms('What is revenue for customer matthew meyer last month?')).toContain('matthew meyer');
     expect(extractAgentValueSearchTerms('What is revenue for customer matthew meyer last month?')).not.toContain('customer matthew meyer last month');
     expect(extractAgentValueSearchTerms('Break that down by segment for Enterprise last week')).toContain('Enterprise');
+    expect(extractAgentValueSearchTerms('what are the top product Melissa Lopex got it? what is the revenue?')).toContain('Melissa Lopex');
+    expect(extractAgentValueSearchTerms('what are the top product Melissa Lopex got it? what is the revenue?')).not.toContain('Melissa Lopex got it');
+    expect(extractAgentValueSearchTerms('Who paid less tax than Melissa?')).toContain('Melissa');
+  });
+});
+
+describe('runtime value grounding policy', () => {
+  it('is disabled unless a project admin opts in with explicit columns (SEC-003)', () => {
+    expect(resolveAgentRuntimeValueGrounding({})).toMatchObject({ mode: 'disabled' });
+    expect(resolveAgentRuntimeValueGrounding({
+      agent: { runtimeValueGrounding: { mode: 'safe_automatic', searchSafeColumns: [] } },
+    })).toMatchObject({ mode: 'disabled' });
+    expect(resolveAgentRuntimeValueGrounding({
+      agent: { runtimeValueGrounding: { mode: 'safe_automatic', searchSafeColumns: ['dev.customers.customer_name'] } },
+    })).toMatchObject({ mode: 'safe_automatic' });
+  });
+
+  it('rejects wildcard scopes instead of treating an unknown column as search-safe (SEC-003)', () => {
+    const policy = resolveAgentRuntimeValueGrounding({
+      agent: { runtimeValueGrounding: { mode: 'safe_automatic', searchSafeColumns: ['dev.customers.*'] } },
+    });
+    expect(policy.mode).toBe('disabled');
+    expect(policy.searchSafeColumns.size).toBe(0);
+  });
+
+  it('hard-denies secrets, email, and free text even before allowlist matching (SEC-003)', () => {
+    for (const name of ['customer_password', 'api_token', 'secretKey', 'customer_email', 'profile_description']) {
+      expect(isAgentValueProbeColumn({ name, type: 'VARCHAR' })).toBe(false);
+    }
+    expect(isAgentValueProbeColumn({ name: 'product_category', type: 'VARCHAR' })).toBe(true);
   });
 });
 
 describe('buildAgentValueProbeSql', () => {
-  it('uses a one-character LIKE escape for DuckDB/file runtime probes', () => {
+  it('uses equality and anchored prefix probes without an unbounded leading wildcard', () => {
     const sql = buildAgentValueProbeSql(
       {
         relation: 'main.revenue',
@@ -2868,8 +2977,11 @@ describe('buildAgentValueProbeSql', () => {
       { driver: 'file', filepath: ':memory:' },
     );
 
-    expect(sql).toContain("LIKE '%enterprise%' ESCAPE '\\'");
+    expect(sql).toContain("= 'enterprise'");
+    expect(sql).toContain("LIKE 'enterprise%' ESCAPE '\\'");
+    expect(sql).not.toContain("LIKE '%enterprise");
     expect(sql).not.toContain("ESCAPE '\\\\'");
+    expect(sql).toContain('LIMIT 25');
   });
 });
 

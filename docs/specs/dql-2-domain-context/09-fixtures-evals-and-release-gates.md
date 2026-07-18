@@ -64,37 +64,96 @@ Required dbt connection scenarios (`E2E-003`):
 
 Required unified configuration scenarios (`E2E-005`):
 
-1. The built `dql notebook` exposes one Govern → Settings destination with
+1. Applying a valid dbt project automatically starts one shared project-index
+   preparation job, exposes truthful progress/timings in Settings and Guided
+   Setup, produces ignored metadata/KG caches, and leaves the first governed Ask
+   with no duplicate cold rebuild.
+2. The built `dql notebook` exposes one Govern → Settings destination with
    Overview, Project & dbt, Database, AI provider, Agent memory, and Advanced;
    Guided Setup launches from Overview and has no separate rail item.
-2. Settings and Guided Setup render the same dbt, profile/database, and provider
+3. Settings and Guided Setup render the same dbt, profile/database, and provider
    capabilities, reload the same project-local values, and report Missing,
    Configured, Test passed, and Test failed without calling untested values ready.
-3. OpenAI and Anthropic enterprise URLs and unsaved keys/models traverse the
+4. OpenAI and Anthropic enterprise URLs and unsaved keys/models traverse the
    governed runtime adapters. Native Gemini enterprise routing, Ollama,
    subscriptions, and custom OpenAI-compatible requirements remain selectable.
-4. Blank provider keys retain saved secrets; APIs never return raw secrets; a
+5. Blank provider keys retain saved secrets; APIs never return raw secrets; a
    failing dbt apply, connection test, or provider test preserves the prior
    working configuration. Relative DuckDB and enterprise Snowflake/Databricks
    profile behavior from `E2E-003` remains unchanged.
-5. AI can be skipped with limited-AI guidance and without blocking deterministic
+6. AI can be skipped with limited-AI guidance and without blocking deterministic
    or non-AI paths. Browser verification has no console errors and the Cloud
    embed theme/token/persistence contract remains unchanged.
-6. A clean published-package smoke proves project-local installation exposes
+7. A clean published-package smoke proves project-local installation exposes
    `npx dql`, global installation exposes bare `dql`, both report the requested
    version, and connector installation resolves npm beside the running Node
    executable even when an interactive-shell PATH is unavailable.
-7. A clean project opens Guided Setup before the product on first launch. After
+8. A clean project opens Guided Setup before the product on first launch. After
    acknowledgement it stays closed for the same CLI version, then reopens once
    when the installed version changes. The project-local acknowledgement keeps
    existing favorites, recent items, dbt/database/provider settings, and secrets
    unchanged.
 
+## Retrieval-first evidence fixture
+
+The deterministic retrieval fixture contains 7,000 semantic metrics, including
+targets at positions 24, 60, 200, 500, 6,789, and 6,999; duplicate display names
+across domains and packages; 10,000 dbt models; and 300,000 described columns.
+Its rollover family deliberately separates:
+
+- actual ending `rollover_balance_amount`;
+- new `monthly_rollover_amount` flow;
+- forecast `rollover_risk_amount`;
+- contractual `rollover_allowance`; and
+- a certified `customer_rollover_report` block whose compatibility varies by
+  entity, time grain, filter, and output contract.
+
+Required retrieval/meaning scenarios (`E2E-006`):
+
+1. `What is monthly rollover balance amount?` retrieves the late-position actual
+   balance definition and never routes to general knowledge.
+2. `Who are the top customers by monthly rollover balance amount?` resolves
+   actual balance, customer, month, descending order, and limit; it rejects risk,
+   allowance, and new-flow metrics with explicit reasons.
+3. `What amount was newly rolled over this month?` selects the flow metric,
+   while `Which customers have the highest rollover risk?` selects the forecast
+   risk metric despite overlapping tokens.
+4. A related but output-incompatible certified block does not defeat the correct
+   semantic metric. A meaning-compatible certified block wins only when its
+   complete contract covers the request.
+5. Identical names with materially different formulas/domains produce one
+   focused clarification unless active domain/notebook/conversation context
+   resolves them unambiguously.
+6. An explicit qualified metric/block reference bypasses AI resolution. A model
+   response containing an ID absent from the server evidence package is rejected
+   before compilation or execution.
+7. If only safe table/column evidence exists, one bounded generation may use the
+   selected objects and typed relationship proof. Missing relationship/schema
+   evidence returns a modeling gap and never invites invented SQL.
+8. Equivalent browser, direct CLI, MCP, and Chat requests over one snapshot have
+   identical interpreted meaning, selected qualified IDs, route, trust label,
+   stable error, and call budget.
+9. Cancellation at retrieval, resolver, generation, SQL, or research stops the
+   inherited run. Authentication, authorization, policy, connector, timeout, and
+   modeling errors retain their original codes and never become research or a
+   generic clarification.
+10. Evidence cards and redacted traces contain no provider/connector secrets,
+    source-repair leakage, unauthorized metadata, or plaintext sampled values.
+
+The canonical case design is tracked in
+[`fixtures/retrieval-first-evidence.agent-evals.yml`](fixtures/retrieval-first-evidence.agent-evals.yml).
+The executable harness must report retrieval recall, meaning-selection accuracy,
+clarification precision/recall, route/trust accuracy, invented-ID rejection,
+surface parity, provider/tool/SQL/repair counts, evidence tokens, latency, and
+source-artifact reads. Release thresholds are 1.0 for the named high-trust cases,
+zero invented-ID executions, zero wrong certified answers, and zero surface
+parity drift.
+
 ## Scale fixture
 
 Generate deterministic artifacts representing 10,000 dbt models, 30 columns
-per model, 100 domains, 1,000 entities, 2,000 relationships, 1,000 skills,
-2,000 blocks/views, and 500 Apps/Notebooks.
+per model, 7,000 semantic metrics, 100 domains, 1,000 entities, 2,000
+relationships, 1,000 skills, 2,000 blocks/views, and 500 Apps/Notebooks.
 
 Budgets on the documented reference developer machine:
 
@@ -103,6 +162,13 @@ Budgets on the documented reference developer machine:
 | cold compile | `< 5s`, `< 1GB` peak RSS |
 | cold index/snapshot | `< 30s`, `< 1.5GB` peak RSS |
 | warm context build | p95 `< 500ms`, zero dbt artifact reads |
+| exact/qualified retrieval | p95 `< 100ms` |
+| evidence package assembly | p95 `< 250ms` after retrieval; `8–12` cards; `<= 12,000` tokens |
+| natural-language meaning resolution | `<= 1` call; `<= 15s`; `<= 600` output tokens |
+| direct certified/semantic dispatch | `< 1s` excluding warehouse; no planner/tool-loop/synthesis |
+| generated lookup | `<= 1` meaning + `<= 1` generation + `<= 1` repair |
+| standard analytical run | `< 45s` excluding separately reported warehouse delay |
+| explicit research run | `< 120s`; `<= 1` planner and `<= 1` narrator |
 | warm Domain Workspace summary | p95 `< 250ms` |
 | inventory first page | `< 500KB` uncompressed response |
 | node detail | p95 `< 100ms`, no full artifact parse |
@@ -119,7 +185,8 @@ not aspirational documentation (`PERF-001`).
 - compiler: deterministic v2/v3 manifests and no dbt fact duplication;
 - integration: snapshot atomicity, APIs, CLI, MCP, migration, source patches;
 - agent evaluations: route selection, ambiguity, fanout, exports, stale proof,
-  corrections, and limited-context Ask;
+  corrections, limited-context Ask, similar-name meaning, trust-versus-relevance,
+  identifier binding, call budgets, and surface parity;
 - browser: real built `dql notebook` against the functional fixture;
 - compatibility: v2 and legacy product/split-model paths;
 - security: non-loopback fail-closed, CORS/auth, path traversal, redaction;

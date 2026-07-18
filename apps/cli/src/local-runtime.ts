@@ -132,10 +132,14 @@ import {
   OpenAIProvider,
   buildBlockBusinessFingerprint,
   buildBlockSqlFingerprints,
+  buildAnalysisQuestionPlan,
   buildLocalContextPack,
+  toAgentRetrievalEvidence,
   defaultConversationPath,
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
+  ensureAgentProjectReady,
+  isAgentProjectIndexReady,
   ensureMetadataCatalogFresh,
   propose,
   proposePlan,
@@ -210,7 +214,6 @@ import {
   bumpReasoningEffort,
   resolveThinkingMode,
   coerceThinkingMode,
-  probeLocalOllamaEmbeddings,
   upsertGeneratedDqlArtifactDraft,
   type AgentRun,
   type AgentRunArtifact,
@@ -226,6 +229,9 @@ import {
   type AgentRunStopReason,
   type AgentRunTrustState,
   type AgentRouteExecutor,
+  type AgentEvidenceCandidate,
+  type AgentRetrievalEvidence,
+  type IntentDecision,
   type AnalysisDepth,
   type CascadeAnswerResult,
   type CascadeAnswerRouteTier,
@@ -355,6 +361,14 @@ export interface ProjectConfig {
       expiryDays?: number;
     };
   };
+  agent?: {
+    runtimeValueGrounding?: {
+      /** Runtime value lookup is opt-in because query literals may be sensitive. */
+      mode?: 'disabled' | 'safe_automatic';
+      /** Fully-qualified `schema.table.column` names approved by a project admin. */
+      searchSafeColumns?: string[];
+    };
+  };
   /** Optional `dql propose` conventions (classifier + bounded selection). */
   propose?: ProposeConfigInput;
 }
@@ -410,6 +424,31 @@ export interface ConnectorInstallStatus {
   builtIn: boolean;
   installPath: string;
   installCommand?: string;
+}
+
+type DbtPreparationStage = 'validating' | 'compiling' | 'indexing' | 'ready';
+type DbtPreparationStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+interface DbtPreparationPhase {
+  id: 'artifact_validation' | 'snapshot_compile' | 'search_index';
+  label: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  durationMs?: number;
+}
+
+interface DbtPreparationJob {
+  id: string;
+  kind: 'dbt_prepare' | 'dbt_refresh';
+  status: DbtPreparationStatus;
+  stage: DbtPreparationStage;
+  progress: number;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  snapshotId: string;
+  phases: DbtPreparationPhase[];
+  result?: Record<string, unknown>;
+  error?: string;
 }
 
 export interface LocalServerOptions {
@@ -533,6 +572,24 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       thinkingMode: coerceThinkingMode(record.thinkingMode),
     },
   };
+}
+
+const AGENT_LOOKUP_DEADLINE_MS = 45_000;
+const AGENT_RESEARCH_DEADLINE_MS = 120_000;
+
+/**
+ * PERF-002: one wall-clock budget follows the request through routing, provider
+ * calls, repair, and execution. Ordinary Ask never inherits Research's budget
+ * merely because it spans two tables; explicit/deep investigation does.
+ */
+export function agentRunDeadlineMs(
+  request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth'>,
+): number {
+  if (request.requestedMode === 'research' || request.analysisDepth === 'deep') {
+    return AGENT_RESEARCH_DEADLINE_MS;
+  }
+  const plan = buildAnalysisQuestionPlan(request.question);
+  return plan.needsResearchWorkspace ? AGENT_RESEARCH_DEADLINE_MS : AGENT_LOOKUP_DEADLINE_MS;
 }
 
 export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
@@ -839,7 +896,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     expiresAt: number;
   }>();
   const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
-  const onboardingJobs = new Map<string, { id: string; kind: string; status: 'completed' | 'failed' | 'cancelled'; createdAt: string; result?: unknown; error?: string }>();
+  const onboardingJobs = new Map<string, DbtPreparationJob>();
   const projectSnapshot = () => {
     const dbtManifestPath = resolveDbtManifestPath(projectRoot, projectConfig) ?? undefined;
     const inputs = collectInputFiles({ projectRoot, dbtManifestPath });
@@ -863,6 +920,104 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       stale: snapshot.stale,
       error: snapshot.error,
     };
+  };
+  const latestDbtPreparationJob = (): DbtPreparationJob | undefined => Array.from(onboardingJobs.values())
+    .reverse()
+    .find((job) => job.kind === 'dbt_prepare' || job.kind === 'dbt_refresh');
+  const startDbtPreparationJob = (input: {
+    kind: DbtPreparationJob['kind'];
+    snapshotId: string;
+    manifest: DQLManifest;
+    validationDurationMs: number;
+    compileDurationMs: number;
+  }): DbtPreparationJob => {
+    const now = new Date().toISOString();
+    const id = apiRequestId(input.kind === 'dbt_refresh' ? 'dbt-refresh' : 'dbt-prepare');
+    const job: DbtPreparationJob = {
+      id,
+      kind: input.kind,
+      status: 'running',
+      stage: 'indexing',
+      progress: 65,
+      message: 'Indexing dbt models, columns, semantic metrics, certified blocks, and governed relationships.',
+      createdAt: now,
+      updatedAt: now,
+      snapshotId: input.snapshotId,
+      phases: [
+        { id: 'artifact_validation', label: 'Validated dbt project and artifacts', status: 'completed', durationMs: input.validationDurationMs },
+        { id: 'snapshot_compile', label: 'Compiled immutable project snapshot', status: 'completed', durationMs: input.compileDurationMs },
+        { id: 'search_index', label: 'Build governed search indexes', status: 'running' },
+      ],
+    };
+    if (onboardingJobs.size >= 24) {
+      for (const [existingId, existing] of onboardingJobs) {
+        if (existing.status === 'running' || existing.status === 'queued') continue;
+        onboardingJobs.delete(existingId);
+        if (onboardingJobs.size < 16) break;
+      }
+    }
+    onboardingJobs.set(id, job);
+
+    // Start after the Apply response can be returned. Governed Ask calls the
+    // same versioned preparation service, so an early first question awaits
+    // this in-flight promise instead of starting a duplicate cold rebuild.
+    setTimeout(() => {
+      void (async () => {
+        const indexStartedAt = Date.now();
+        try {
+          const prepared = await ensureAgentProjectReady(projectRoot, {
+            kgPath: defaultKgPath(projectRoot),
+            manifest: input.manifest,
+          });
+          const current = onboardingJobs.get(id);
+          if (!current || current.status === 'cancelled') return;
+          const indexDurationMs = Date.now() - indexStartedAt;
+          const completedAt = new Date().toISOString();
+          onboardingJobs.set(id, {
+            ...current,
+            status: 'completed',
+            stage: 'ready',
+            progress: 100,
+            message: `Ready. Indexed ${prepared.nodes.toLocaleString()} governed objects for fast search.`,
+            updatedAt: completedAt,
+            phases: current.phases.map((phase) => phase.id === 'search_index'
+              ? { ...phase, status: 'completed', durationMs: indexDurationMs }
+              : phase),
+            result: {
+              snapshotId: input.snapshotId,
+              cacheHit: prepared.cacheHit,
+              sourceVersion: prepared.sourceVersion,
+              objectCount: prepared.nodes,
+              edgeCount: prepared.edges,
+              metadataFingerprint: prepared.metadataFingerprint,
+              kgFingerprint: prepared.kgFingerprint,
+              phaseDurationsMs: {
+                artifactValidation: input.validationDurationMs,
+                snapshotCompile: input.compileDurationMs,
+                searchIndex: indexDurationMs,
+                total: input.validationDurationMs + input.compileDurationMs + indexDurationMs,
+              },
+              completedAt,
+            },
+          });
+        } catch (error) {
+          const current = onboardingJobs.get(id);
+          if (!current || current.status === 'cancelled') return;
+          onboardingJobs.set(id, {
+            ...current,
+            status: 'failed',
+            progress: 65,
+            message: 'The dbt project is connected, but its governed search indexes need attention.',
+            updatedAt: new Date().toISOString(),
+            phases: current.phases.map((phase) => phase.id === 'search_index'
+              ? { ...phase, status: 'failed', durationMs: Date.now() - indexStartedAt }
+              : phase),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })();
+    }, 0);
+    return job;
   };
   const onboardingDbtPaths = (body: Record<string, unknown> = {}) => {
     const repoUrl = typeof body.repoUrl === 'string' && body.repoUrl.trim() ? body.repoUrl.trim() : undefined;
@@ -972,27 +1127,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
     return candidate;
   };
-
-  // Zero-config semantic search: if the user is running Ollama with an embedding model
-  // but hasn't set an embed env var, auto-detect it so retrieval + metric/block matching
-  // get real semantic recall out of the box (match by meaning, not just keywords) — the
-  // biggest lever for "find the right metric/block instead of jumping to raw SQL".
-  // Explicit config always wins; when nothing is found we stay on the deterministic
-  // keyword matcher. Scoped to the app server (not eval/CI) and fully best-effort.
-  if (!process.env.DQL_OLLAMA_EMBED_URL && !process.env.DQL_OPENAI_API_KEY && !process.env.OPENAI_API_KEY) {
-    try {
-      const detected = await probeLocalOllamaEmbeddings();
-      if (detected) {
-        process.env.DQL_OLLAMA_EMBED_URL = detected.endpoint;
-        process.env.DQL_OLLAMA_EMBED_MODEL = detected.model;
-        console.log(`[dql] Semantic search on: local Ollama embeddings (${detected.model}) — matching by meaning, not just keywords.`);
-      } else {
-        console.log('[dql] Semantic search: keyword-only. For higher matching accuracy, install Ollama and run `ollama pull nomic-embed-text` — DQL detects and uses it automatically, fully local & free.');
-      }
-    } catch {
-      // Probe failure never blocks startup — fall back to the keyword matcher.
-    }
-  }
 
   // Auto-ensure the active connection's driver so a configured connection is never
   // left "broken" after a fresh clone, a CLI upgrade, or a Node version change (the
@@ -1357,6 +1491,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     repair?: { attempt: number; repairHint?: string },
     route: AgentRunRoute = 'generated_answer',
     onProgress?: (message: string) => void,
+    routeDecision?: IntentDecision,
   ): Promise<AgentAnswer> {
     const governed = resolveGovernedAnswerRunner(projectRoot);
     const resolvedProvider = governed?.provider ?? null;
@@ -1383,6 +1518,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       workspaceContext: request.workspaceContext,
       instruction: [
         'Route through the governed DQL answer loop.',
+        ...(routeDecision?.meaningResolution?.selectedConceptIds.length
+          ? [`Meaning resolution selected these retrieved qualified IDs: ${routeDecision.meaningResolution.selectedConceptIds.join(', ')}. Treat them as strong evidence, but still validate grain, dimensions, filters, authorization, and runtime compatibility before execution.`]
+          : []),
         'Prefer certified DQL blocks when they exactly cover the question.',
         'Generated DQL artifacts remain review-required; SQL is only the bounded preview/compiled evidence.',
         'If the question needs investigation, return the clearest answer and next review action without certifying generated work.',
@@ -1395,6 +1533,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const controller = request.runId
       ? activeAgentRunControllers.get(request.runId) ?? new AbortController()
       : new AbortController();
+    const runSignal = request.signal
+      ? AbortSignal.any([request.signal, controller.signal])
+      : controller.signal;
     // Best-effort active warehouse dialect so Lane-2 semantic compiles emit
     // dialect-correct SQL (e.g. DATE_TRUNC / identifier quoting). Absent when no
     // connection is configured — the compiler then uses its default dialect.
@@ -1436,6 +1577,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
         projectRoot,
+        preparedContextPack: preparedAgentContextPacks.get(request),
         domainContext,
         projectSnapshot: { snapshotId: runProjectSnapshot.snapshotId, manifest: runProjectSnapshot.manifest },
         assertProjectSnapshot: (snapshotId) => {
@@ -1444,6 +1586,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           projectSnapshots.assertCurrent(snapshotId);
         },
         ...(semanticDriver ? { semanticDriver } : {}),
+        ...(routeDecision?.meaningResolution?.selectedConceptIds.length
+          ? { preferredEvidenceIds: routeDecision.meaningResolution.selectedConceptIds }
+          : {}),
+        ...(routeDecision?.meaningResolution?.recommendedExecutionId
+          ? { preferredExecutionId: routeDecision.meaningResolution.recommendedExecutionId }
+          : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: executeGeneratedSqlForAgent,
         getSchemaContext: getSchemaContextForAgent,
@@ -1457,7 +1605,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           providerError = turn.message;
         }
       },
-      controller.signal,
+      runSignal,
     );
     if (!governedAnswer) {
       throw new Error(providerError ?? 'The AI provider did not return a governed answer.');
@@ -1500,8 +1648,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (rows.length === 0 || columns.length === 0) return;
     const existing = agentRunRecord(result.chartConfig) ?? {};
     // A declared chart on the execution result came from authored DQL and is a
-    // governed display contract. Agent `suggestedViz` remains a soft preference.
-    if (typeof existing.chart === 'string') return;
+    // governed display contract. Preserve its type/bindings, but still enrich a
+    // missing display format from the result semantics; otherwise an authored
+    // KPI for `lifetime_spend` renders as a generic `671.4K` instead of `$671.4K`.
+    // Agent `suggestedViz` remains a soft preference when no chart was authored.
+    const hasAuthoredChart = typeof existing.chart === 'string';
     const recommendation = recommendVisualization(projectRoot, {
       blockRef: governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
       prompt: question,
@@ -1511,17 +1662,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
     if (!recommendation.ok) return;
     const fieldHints = recommendation.display.fieldHints ?? {};
-    const chart = recommendation.display.defaultVisualization.replace(/_/g, '-');
+    const chart = hasAuthoredChart
+      ? String(existing.chart).replace(/_/g, '-')
+      : recommendation.display.defaultVisualization.replace(/_/g, '-');
     const agentChoice = typeof governedAnswer.suggestedViz === 'string'
       ? governedAnswer.suggestedViz.toLowerCase().replace(/_/g, '-')
       : undefined;
     result.chartConfig = {
       ...existing,
       chart,
-      decisionSource: agentChoice === chart ? 'agent' : 'data',
-      rationale: recommendation.display.rationale,
-      ...(typeof fieldHints.x === 'string' ? { x: fieldHints.x } : {}),
-      ...(typeof fieldHints.y === 'string' ? { y: fieldHints.y } : {}),
+      decisionSource: hasAuthoredChart ? 'authored' : agentChoice === chart ? 'agent' : 'data',
+      rationale: hasAuthoredChart
+        ? agentRunString(existing.rationale) ?? 'Authored DQL visualization enriched with result-aware display semantics.'
+        : recommendation.display.rationale,
+      ...(typeof existing.x !== 'string' && typeof fieldHints.x === 'string' ? { x: fieldHints.x } : {}),
+      ...(typeof existing.y !== 'string' && typeof fieldHints.y === 'string' ? { y: fieldHints.y } : {}),
+      ...(typeof existing.color !== 'string' && typeof fieldHints.color === 'string' ? { color: fieldHints.color } : {}),
+      ...(typeof existing.format !== 'string'
+        && (fieldHints.format === 'currency' || fieldHints.format === 'percent' || fieldHints.format === 'number')
+        ? { format: fieldHints.format }
+        : {}),
     };
     governedAnswer.suggestedViz = chart;
     const evidence = governedAnswer.evidence ?? {
@@ -1617,6 +1777,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         { attempt, repairHint },
         route,
         (message) => emit({ type: 'executor.started', message, route }),
+        routeDecision,
       );
       // Surface the approved Hint-Graph corrections that shaped this answer so the
       // UI can show an "applied learnings" chip (memoryContext is already on the answer).
@@ -1797,46 +1958,45 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // more provider calls retrying the same incompatible candidate.
     const isPolicyBlocked = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked';
     // The model tried to compose a governed query and declined despite having usable
-    // context (e.g. it wasn't confident about a multi-table join). That is NOT a
-    // question for the USER to clarify — it's a case to retry harder: escalate to a
-    // deeper research pass (higher reasoning effort + deep analysis) through the
-    // engine's bounded loop, exactly as a grounding gap is retried today.
+    // context (e.g. it wasn't confident about a multi-table join). The answer loop
+    // has already spent its one evidence-aware repair. Keep this terminal and
+    // inspectable; an ordinary Ask must never silently become a second Research run.
     const isModelDeclined = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'model_declined';
-    const groundingRepairHint = isGroundingGap ? groundingGapRepairHint(governedAnswer) : undefined;
-    const declinedRepairHint = isModelDeclined
-      ? 'The first attempt declined to compose a governed query despite available context. Investigate the join path across the requested entities/metrics and compose a review-required query rather than declining.'
-      : undefined;
-    // Only a genuinely AMBIGUOUS question is surfaced as "needs clarification". A
-    // grounding gap or a model decline is retried/escalated by the engine, and a
-    // provider outage is surfaced as blocked so the UI offers a retry.
+    // Only a genuinely AMBIGUOUS question is surfaced as "needs clarification".
+    // Grounding/compiler gaps are terminal review states with their evidence trace;
+    // provider outages are blocked so the UI can offer an explicit retry.
     const needsClarification = governedAnswer.kind === 'no_answer'
       && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
     const runnableSql = governedAnswer.kind === 'no_answer' || (isExploratory && !governedAnswer.result)
       ? undefined
       : sql;
-    // Synthesis is a legacy polish pass. Certified/no-answer paths and lanes
-    // that already produced DQL-first final prose keep the fast path.
+    // Render executed rows deterministically for ordinary lookups. A second LLM
+    // call is reserved for an explicit research route; certified, semantic, and
+    // generated lookup answers must not pay another provider round-trip merely
+    // to restate values the host already has.
     let synthesizedAnswer: string | undefined;
     if (shouldSynthesizeAgentRunAnswer(governedAnswer)) {
       try {
-        const provider = await createBlockStudioAssistProvider(projectRoot);
-        if (provider) {
-          const preview = agentResultToSynthesisPreview(governedAnswer.result);
-          const draft = governedAnswer.answer ?? governedAnswer.text;
-          const result = await synthesizeAnswer(
-            {
-              question: request.question,
-              category: routeDecision?.category,
-              // The primary Ask reply is always business-facing. Analysts keep
-              // the full DQL, SQL, lineage, gates, and grain in the inspector.
-              audience: 'stakeholder',
-              resultPreview: preview,
-              sql: sql,
-              draftText: draft,
-              gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
-            },
-            {
+        const provider = route === 'research'
+          ? await createBlockStudioAssistProvider(projectRoot)
+          : null;
+        const preview = agentResultToSynthesisPreview(governedAnswer.result);
+        const draft = governedAnswer.answer ?? governedAnswer.text;
+        const result = await synthesizeAnswer(
+          {
+            question: request.question,
+            category: routeDecision?.category,
+            // The primary Ask reply is always business-facing. Analysts keep
+            // the full DQL, SQL, lineage, gates, and grain in the inspector.
+            audience: 'stakeholder',
+            resultPreview: preview,
+            sql: sql,
+            draftText: draft,
+            gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
+          },
+          provider
+            ? {
               complete: ({ system, user, signal, onDelta }) =>
                 streamOrGenerate(
                   provider,
@@ -1844,10 +2004,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   { maxTokens: 350, temperature: 0.3, signal },
                   onDelta ?? (() => {}),
                 ),
-            },
-          );
-          if (result.text) synthesizedAnswer = result.text;
-        }
+              }
+            : {},
+        );
+        if (result.text) synthesizedAnswer = result.text;
       } catch {
         // Keep the governed draft on any synthesis failure.
         synthesizedAnswer = undefined;
@@ -1968,7 +2128,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               'Metadata grounding',
               false,
               'warning',
-              'The answer loop found a metadata grounding gap that can be retried with wider context.',
+              'The bounded lookup could not prove the required metadata grounding. No automatic retry or Research escalation was started.',
               {
                 refusalCode: governedAnswer.refusalCode,
                 refusalDetails: governedAnswer.refusalDetails,
@@ -1976,8 +2136,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 route: governedAnswer.route,
               },
             ),
-            suggestedRepair: groundingRepairHint,
-            repairAction: { kind: 'retry' as const, hint: groundingRepairHint },
           },
         ] : []),
         ...(isModelDeclined ? [
@@ -1987,7 +2145,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               'Answer grounding',
               false,
               'blocking',
-              'The model declined to compose a governed query despite available context — escalating to a deeper investigation before accepting a refusal.',
+              'The bounded lookup could not compose a governed query after its in-lane repair. Start Research explicitly to investigate beyond this lookup budget.',
               {
                 refusalCode: governedAnswer.refusalCode,
                 refusalDetails: governedAnswer.refusalDetails,
@@ -1995,8 +2153,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 route: governedAnswer.route,
               },
             ),
-            suggestedRepair: declinedRepairHint,
-            repairAction: { kind: 'escalate' as const, route: 'research' as const, hint: declinedRepairHint },
           },
         ] : []),
         ...(isPolicyBlocked ? [
@@ -2619,7 +2775,117 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     },
   };
-  // Compact, catalog-grounded context the LLM planner decomposes `auto` turns against.
+  // One immutable, question-ranked pack is shared by routing, planning, schema
+  // lookup, and governed execution for the lifetime of a request. This removes
+  // both positional catalog truncation and the previous duplicate retrieval pass.
+  const preparedAgentContextPacks = new WeakMap<AgentRunRequest, LocalContextPack>();
+  const pendingAgentContextPacks = new WeakMap<AgentRunRequest, Promise<LocalContextPack>>();
+
+  const buildAgentRunContextPack = async (request: AgentRunRequest): Promise<LocalContextPack> => {
+    const prepared = preparedAgentContextPacks.get(request);
+    if (prepared) return prepared;
+    const pending = pendingAgentContextPacks.get(request);
+    if (pending) return pending;
+    const snapshot = projectSnapshot();
+    const requestedDomain = agentRunWorkspaceValue(request, 'domain');
+    const task = buildLocalContextPack(projectRoot, {
+      question: request.question,
+      surface: 'notebook',
+      selectedContext: {
+        selectedObject: request.selectedObject,
+        workspaceContext: request.workspaceContext,
+      },
+      strictness: request.analysisDepth === 'deep' ? 'exploratory' : 'balanced',
+      limit: request.analysisDepth === 'deep' ? 120 : 80,
+      domainContext: requestedDomain
+        ? resolveDomainContextEnvelope({
+            manifest: snapshot.manifest,
+            activeDomain: requestedDomain,
+            purpose: agentRunWorkspaceValue(request, 'purpose'),
+            modelAreaId: agentRunWorkspaceValue(request, 'modelAreaId'),
+            source: 'explicit_ui',
+            snapshotId: snapshot.snapshotId,
+          })
+        : undefined,
+    }).then((pack) => {
+      preparedAgentContextPacks.set(request, pack);
+      pendingAgentContextPacks.delete(request);
+      return pack;
+    }).catch((error) => {
+      pendingAgentContextPacks.delete(request);
+      throw error;
+    });
+    pendingAgentContextPacks.set(request, task);
+    return task;
+  };
+
+  const buildAgentRunEvidence = async (request: AgentRunRequest): Promise<AgentRetrievalEvidence> => {
+    const startedAt = Date.now();
+    const pack = await buildAgentRunContextPack(request);
+    const meaningEvidence = pack.retrievalDiagnostics.meaningEvidence;
+    if (!meaningEvidence) {
+      return {
+        snapshotId: pack.id,
+        sourceFingerprint: pack.freshness.fingerprint ?? undefined,
+        candidates: [],
+        diagnostics: { durationMs: Date.now() - startedAt },
+      };
+    }
+    const evidence = toAgentRetrievalEvidence(meaningEvidence, pack.questionPlan, {
+      snapshotId: pack.id,
+      sourceFingerprint: pack.freshness.fingerprint ?? undefined,
+      durationMs: Date.now() - startedAt,
+      truncated: pack.retrievalDiagnostics.topRejected.length > 0,
+    });
+    const certifiedFits = new Map(pack.retrievalDiagnostics.certifiedCandidateFits.map((fit) => [fit.objectKey, fit]));
+    const semanticEvidence = new Set(pack.routeDecision.selectedEvidence
+      .filter((item) => item.role === 'semantic_metric')
+      .map((item) => item.objectKey));
+    return {
+      ...evidence,
+      candidates: evidence.candidates.map((candidate): AgentEvidenceCandidate => {
+        if (candidate.kind === 'certified_block') {
+          const fit = certifiedFits.get(candidate.id);
+          return {
+            ...candidate,
+            compatibility: fit?.action === 'certified_answer'
+              ? 'compatible'
+              : fit?.action === 'rejected_for_fit'
+                ? 'incompatible'
+                : 'partial',
+          };
+        }
+        if ((candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
+          && semanticEvidence.has(candidate.id)
+          && pack.routeDecision.route !== 'clarify'
+          && pack.routeDecision.route !== 'conflict') {
+          const requestedDimensions = pack.questionPlan.requestedShape.dimensions.map((dimension) => dimension.toLowerCase());
+          const availableDimensions = (candidate.dimensions ?? []).map((dimension) => dimension.toLowerCase());
+          const dimensionsFit = requestedDimensions.length === 0 || requestedDimensions.every((requested) =>
+            availableDimensions.some((available) => available === requested || available.endsWith(`.${requested}`))
+          );
+          const requestedTimeGrain = pack.questionPlan.timeTerms[0]?.toLowerCase();
+          const availableTimeGrains = (candidate.timeGrains ?? []).map((grain) => grain.toLowerCase());
+          const timeGrainFits = !requestedTimeGrain
+            || availableTimeGrains.includes(requestedTimeGrain);
+          return { ...candidate, compatibility: dimensionsFit && timeGrainFits ? 'compatible' : 'partial' };
+        }
+        if (candidate.trustTier === 'governed_sql') return { ...candidate, compatibility: 'partial' };
+        return candidate;
+      }),
+    };
+  };
+
+  const buildRankedAgentRunCatalogContext = async (request: AgentRunRequest): Promise<string> => {
+    const evidence = await buildAgentRunEvidence(request);
+    return evidence.candidates.map((candidate) => {
+      const detail = candidate.definition ? `: ${candidate.definition}` : '';
+      return `- ${candidate.id} [${candidate.trustTier}; ${candidate.compatibility}]${detail}`;
+    }).join('\n');
+  };
+
+  // Compact fallback used only for plain conversational replies. Analytical
+  // turns use the structured, question-ranked evidence path above.
   const buildAgentRunCatalogContext = (): string => {
     try {
       const blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
@@ -2657,7 +2923,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         { maxTokens: 700, temperature: 0.1, signal },
       );
     },
-    getCatalogContext: buildAgentRunCatalogContext,
+    getCatalogContext: buildRankedAgentRunCatalogContext,
   });
 
   // Hybrid router: keep the deterministic decision when it is confident (certified
@@ -2667,16 +2933,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const agentRunRouter = createHybridRouter({
     complete: async ({ system, user, signal }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
-      if (!provider) throw new Error('No AI provider configured for routing.');
+      if (!provider) throw new Error('No AI provider configured for meaning resolution.');
       return provider.generate(
         [
           { role: 'system', content: system },
           { role: 'user', content: user },
         ],
-        { maxTokens: 250, temperature: 0, signal },
+        {
+          maxTokens: 600,
+          temperature: 0,
+          // AGT-009/PERF-002: ambiguity gets one bounded resolver call. If the
+          // provider stalls, the router falls back to its evidence-only decision
+          // instead of leaving the UI in "Generating and validating SQL" for a
+          // minute or more.
+          signal: boundedAgentMeaningSignal(signal),
+        },
       );
     },
-    getCatalogContext: () => buildAgentRunCatalogContext(),
+    getEvidence: buildAgentRunEvidence,
+    getCatalogContext: buildRankedAgentRunCatalogContext,
   });
 
   const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
@@ -3028,29 +3303,35 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     };
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question, preparedContextPack).catch(() => []);
+    const valueGrounding = resolveAgentRuntimeValueGrounding(projectConfig);
     if (catalogContext.length > 0) {
-      if (!connection) return catalogContext;
-      // Rescan live when the question shape calls for it OR the stored snapshot is
-      // stale/absent (P6) — otherwise a warehouse schema change between sessions is
-      // silently reasoned over from a cached snapshot that never expires.
-      const runtimeScan = (shouldAugmentAgentRuntimeSchema(question, preparedContextPack?.questionPlan) || runtimeSnapshotStale(projectRoot))
-        ? await scanRuntimeSchema().catch(() => undefined)
-        : undefined;
-      const runtimeContext = runtimeScan?.ranked ?? [];
-      const merged = mergeAgentSchemaContexts(catalogContext, runtimeContext);
-      const enriched = await enrichAgentSchemaContextWithValueMatches(question, merged, executor, connection);
-      recordAgentRuntimeSchemaSnapshot(projectRoot, !runtimeScan?.snapshot.length
-        ? enriched
-        : mergeAgentSchemaSampleValues(runtimeScan.snapshot, enriched), runtimeContext.length > 0
-        ? 'full information_schema runtime scan for composite Ask AI question'
-        : 'catalog enriched runtime schema');
+      if (!connection || valueGrounding.mode !== 'safe_automatic') return catalogContext;
+      // The immutable dbt/DQL snapshot already owns schema discovery. A named
+      // row value must not turn a warm Ask into an information_schema scan over
+      // thousands of enterprise tables; only field-scoped value probes are live.
+      const enriched = await enrichAgentSchemaContextWithValueMatches(
+        question,
+        catalogContext,
+        executor,
+        connection,
+        valueGrounding.searchSafeColumns,
+      );
+      recordAgentRuntimeSchemaSnapshot(projectRoot, catalogContext, 'catalog runtime schema');
       return enriched;
     }
 
     if (!connection) return [];
     try {
       const schemaContext = await scanRuntimeSchema();
-      const enriched = await enrichAgentSchemaContextWithValueMatches(question, schemaContext.ranked, executor, connection);
+      const enriched = valueGrounding.mode === 'safe_automatic'
+        ? await enrichAgentSchemaContextWithValueMatches(
+          question,
+          schemaContext.ranked,
+          executor,
+          connection,
+          valueGrounding.searchSafeColumns,
+        )
+        : schemaContext.ranked;
       recordAgentRuntimeSchemaSnapshot(projectRoot, schemaContext.snapshot, 'full information_schema runtime scan');
       return enriched;
     } catch {
@@ -4301,6 +4582,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           snapshotError = error instanceof Error ? error.message : String(error);
         }
       }
+      const preparation = latestDbtPreparationJob();
+      const preparationForSnapshot = preparation?.snapshotId === snapshotId ? preparation : undefined;
+      const searchIndexesPresent = isAgentProjectIndexReady(projectRoot);
+      const snapshotState = preparationForSnapshot?.status === 'running' || preparationForSnapshot?.status === 'queued'
+        ? 'building'
+        : preparationForSnapshot?.status === 'failed'
+          ? 'failed'
+          : snapshotId && searchIndexesPresent
+            ? 'ready'
+            : snapshotId
+              ? 'stale'
+              : 'missing';
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
         requestId,
@@ -4317,14 +4610,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           subPath: projectConfig.dbt?.subPath,
           projectFound: existsSync(join(dbtProjectDir, 'dbt_project.yml')),
           manifestFound,
+          artifactState: manifestFound ? 'ready' : 'missing',
         },
         modeling: {
           enabled: projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first',
           manifestVersion: projectConfig.manifestVersion ?? 2,
           mode: projectConfig.modeling?.mode,
+          snapshotState,
         },
         domains: { count: registry.values().length, diagnostics: registry.diagnostics },
         snapshot: { id: snapshotId, error: snapshotError },
+        preparation,
+        readiness: {
+          project: {
+            state: snapshotState === 'ready' ? 'ready' : snapshotState === 'building' ? 'preparing' : snapshotState === 'failed' ? 'failed' : dbtConfigured ? 'configured' : 'missing',
+            message: preparationForSnapshot?.message ?? (snapshotState === 'ready'
+              ? 'dbt metadata and governed search indexes are ready.'
+              : snapshotState === 'stale'
+                ? 'dbt metadata is configured; search indexes will be refreshed before governed Ask.'
+                : undefined),
+          },
+        },
         capabilities: {
           warehouse: Boolean(connection),
           ai: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GEMINI_API_KEY || process.env.OLLAMA_BASE_URL),
@@ -4350,6 +4656,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/onboarding/dbt/apply') {
       const requestId = apiRequestId('onboarding-dbt-apply');
       try {
+        const applyStartedAt = Date.now();
         const body = await readJSON(req) as Record<string, unknown>;
         let preview;
         try {
@@ -4382,6 +4689,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SOURCE_CHANGED', message: 'dbt artifacts changed after preview. Review the refreshed preview before applying.', nextActions: ['Refresh the preview and review the new diff.'] })));
           return;
         }
+        const validationDurationMs = Date.now() - applyStartedAt;
         const nextConfig: ProjectConfig = {
           ...projectConfig,
           manifestVersion: 3,
@@ -4406,8 +4714,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         projectSnapshots.invalidate();
         invalidateAgentProjectState(projectRoot);
         let snapshotId: string;
+        let snapshotManifest: DQLManifest;
+        const compileStartedAt = Date.now();
         try {
-          snapshotId = projectSnapshot().snapshotId;
+          const snapshot = projectSnapshot();
+          snapshotId = snapshot.snapshotId;
+          snapshotManifest = snapshot.manifest;
         } catch (error) {
           const rollbackPath = `${configPath}.rollback-${process.pid}`;
           writeFileSync(rollbackPath, previousConfigSource, { encoding: 'utf8', mode: 0o600 });
@@ -4418,8 +4730,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           invalidateAgentProjectState(projectRoot);
           throw Object.assign(new Error(`dbt-first configuration did not compile and was rolled back: ${error instanceof Error ? error.message : String(error)}`), { code: 'SNAPSHOT_BUILD_FAILED' });
         }
+        const preparation = startDbtPreparationJob({
+          kind: 'dbt_prepare',
+          snapshotId,
+          manifest: snapshotManifest,
+          validationDurationMs,
+          compileDurationMs: Date.now() - compileStartedAt,
+        });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ requestId, snapshotId, applied: true, config: { manifestVersion: 3, modeling: nextConfig.modeling, dbt: nextConfig.dbt }, fingerprint: preview.fingerprint }));
+        res.end(serializeJSON({
+          requestId,
+          applied: true,
+          config: { manifestVersion: 3, modeling: nextConfig.modeling, dbt: nextConfig.dbt },
+          fingerprint: preview.fingerprint,
+          jobId: preparation.id,
+          ...preparation,
+        }));
       } catch (error) {
         const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : 'DBT_ARTIFACT_INVALID';
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -4430,7 +4756,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'POST' && path === '/api/onboarding/refresh') {
       const requestId = apiRequestId('onboarding-refresh');
-      const id = `dbt-refresh-${Date.now().toString(36)}`;
+      const refreshStartedAt = Date.now();
       try {
         const body = await readJSON(req) as { expectedFingerprint?: string };
         const currentArtifact = previewDbtOnboarding({});
@@ -4439,19 +4765,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SOURCE_CHANGED', message: 'dbt artifacts changed before refresh. Review the current artifact preview.', nextActions: ['Return to the dbt preview step and review the refreshed fingerprint.'] })));
           return;
         }
+        const validationDurationMs = Date.now() - refreshStartedAt;
+        const compileStartedAt = Date.now();
         projectSnapshots.invalidate();
         const snapshot = projectSnapshot();
         invalidateAgentProjectState(projectRoot);
-        await reindexProject(projectRoot, { manifest: snapshot.manifest, kgPath: defaultKgPath(projectRoot) });
-        const job = { id, kind: 'dbt_refresh', status: 'completed' as const, createdAt: new Date().toISOString(), result: { snapshotId: snapshot.snapshotId, diagnostics: snapshot.manifest.diagnostics ?? [] } };
-        onboardingJobs.set(id, job);
+        const job = startDbtPreparationJob({
+          kind: 'dbt_refresh',
+          snapshotId: snapshot.snapshotId,
+          manifest: snapshot.manifest,
+          validationDurationMs,
+          compileDurationMs: Date.now() - compileStartedAt,
+        });
         res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ requestId, snapshotId: snapshot.snapshotId, jobId: id, ...job }));
+        res.end(serializeJSON({ requestId, jobId: job.id, ...job }));
       } catch (error) {
-        const job = { id, kind: 'dbt_refresh', status: 'failed' as const, createdAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) };
-        onboardingJobs.set(id, job);
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ...apiErrorEnvelope({ requestId, code: 'SNAPSHOT_BUILD_FAILED', message: job.error, nextActions: ['Keep using the previous snapshot while fixing compile diagnostics.'] }), jobId: id, ...job }));
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code: 'SNAPSHOT_BUILD_FAILED', message: error instanceof Error ? error.message : String(error), nextActions: ['Keep using the previous snapshot while fixing compile diagnostics.'] })));
       }
       return;
     }
@@ -4472,9 +4802,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requestId = apiRequestId('onboarding-job-cancel');
       const id = decodeURIComponent(path.slice('/api/onboarding/jobs/'.length));
       const job = onboardingJobs.get(id);
-      if (job) onboardingJobs.set(id, { ...job, status: 'cancelled' });
+      const cancelled = job ? {
+        ...job,
+        status: 'cancelled' as const,
+        message: 'Stopped waiting for dbt preparation. The last valid snapshot remains available.',
+        updatedAt: new Date().toISOString(),
+        phases: job.phases.map((phase) => phase.status === 'running' ? { ...phase, status: 'cancelled' as const } : phase),
+      } : undefined;
+      if (cancelled) onboardingJobs.set(id, cancelled);
       res.writeHead(job ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON(job ? { requestId, ...job, status: 'cancelled' } : apiErrorEnvelope({ requestId, code: 'ONBOARDING_JOB_NOT_FOUND', message: `onboarding job not found: ${id}`, recoverable: false })));
+      res.end(serializeJSON(cancelled ? { requestId, ...cancelled } : apiErrorEnvelope({ requestId, code: 'ONBOARDING_JOB_NOT_FOUND', message: `onboarding job not found: ${id}`, recoverable: false })));
       return;
     }
 
@@ -4967,7 +5304,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         const runId = parsed.request.runId;
-        if (runId) activeAgentRunControllers.set(runId, new AbortController());
+        const runController = new AbortController();
+        parsed.request.signal = AbortSignal.any([
+          runController.signal,
+          AbortSignal.timeout(agentRunDeadlineMs(parsed.request)),
+        ]);
+        if (runId) activeAgentRunControllers.set(runId, runController);
         try {
           if (wantsStream) {
             res.writeHead(200, {
@@ -20639,6 +20981,17 @@ async function buildAgentSchemaContextFromCatalog(
 
 /** How long a stored live-warehouse schema snapshot is trusted before a rescan (P6). */
 const RUNTIME_SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
+// A resolver compares at most 12 compact cards and never performs tool calls;
+// ten seconds is the full allowance, not the start of another planning loop.
+const AGENT_MEANING_TIMEOUT_MS = 10_000;
+
+export function boundedAgentMeaningSignal(
+  signal?: AbortSignal,
+  timeoutMs: number = AGENT_MEANING_TIMEOUT_MS,
+): AbortSignal {
+  const timeout = AbortSignal.timeout(Math.max(1, timeoutMs));
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 
 /**
  * Whether the project's stored live-schema snapshot is missing or older than the
@@ -20673,7 +21026,6 @@ function recordAgentRuntimeSchemaSnapshot(projectRoot: string, schemaContext: Ag
           name: column.name,
           type: column.type,
           description: column.description,
-          sampleValues: column.sampleValues?.slice(0, 8),
         })),
       })),
     });
@@ -21701,28 +22053,36 @@ async function enrichAgentSchemaContextWithValueMatches(
   schemaContext: AgentSchemaTable[],
   executor: QueryExecutor,
   connection: ConnectionConfig,
+  searchSafeColumns: ReadonlySet<string>,
 ): Promise<AgentSchemaTable[]> {
   const searchTerms = extractAgentValueSearchTerms(question);
   if (schemaContext.length === 0 || searchTerms.length === 0) return schemaContext;
 
   const matches = new Map<string, Map<string, string[]>>();
-  for (const candidate of rankAgentValueProbeColumns(schemaContext).slice(0, 12)) {
+  const probes = rankAgentValueProbeColumns(schemaContext, searchSafeColumns).slice(0, 3).map(async (candidate) => {
     try {
-      const result = await executor.executeQuery(
-        buildAgentValueProbeSql(candidate.table, candidate.column.name, searchTerms, connection),
-        [],
-        runtimeVariables({}),
-        connection,
+      const result = await withAgentValueProbeTimeout(
+        executor.executeQuery(
+          buildAgentValueProbeSql(candidate.table, candidate.column.name, searchTerms, connection),
+          [],
+          runtimeVariables({}),
+          connection,
+        ),
+        2_000,
       );
-      const values = uniqueStrings(result.rows.flatMap(valueProbeRowValues)).slice(0, 5);
-      if (values.length === 0) continue;
-      const tableMatches = matches.get(candidate.table.relation) ?? new Map<string, string[]>();
-      tableMatches.set(candidate.column.name, values);
-      matches.set(candidate.table.relation, tableMatches);
+      const values = uniqueStrings(result.rows.flatMap(valueProbeRowValues)).slice(0, 25);
+      return values.length > 0 ? { candidate, values } : undefined;
     } catch {
       // Value probes are advisory. Unsupported casts, privileges, and large-table
       // failures should not block the metadata-backed answer path.
+      return undefined;
     }
+  });
+  for (const match of await Promise.all(probes)) {
+    if (!match) continue;
+    const tableMatches = matches.get(match.candidate.table.relation) ?? new Map<string, string[]>();
+    tableMatches.set(match.candidate.column.name, match.values);
+    matches.set(match.candidate.table.relation, tableMatches);
   }
   if (matches.size === 0) return schemaContext;
 
@@ -21734,11 +22094,25 @@ async function enrichAgentSchemaContextWithValueMatches(
       columns: table.columns.map((column) => {
         const sampleValues = tableMatches.get(column.name);
         return sampleValues?.length
-          ? { ...column, sampleValues: uniqueStrings([...(column.sampleValues ?? []), ...sampleValues]).slice(0, 5) }
+          ? { ...column, sampleValues: uniqueStrings([...(column.sampleValues ?? []), ...sampleValues]).slice(0, 25) }
           : column;
       }),
     };
   });
+}
+
+async function withAgentValueProbeTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('VALUE_LOOKUP_TIMEOUT')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function scoreAgentSchemaTable(table: AgentSchemaTable, tokens: Set<string>): number {
@@ -21817,7 +22191,52 @@ function scoreAgentValueProbeTable(table: AgentSchemaTable): number {
   return Math.min(score, 18);
 }
 
-function rankAgentValueProbeColumns(schemaContext: AgentSchemaTable[]): Array<{
+export interface AgentRuntimeValueGroundingPolicy {
+  mode: 'disabled' | 'safe_automatic';
+  searchSafeColumns: ReadonlySet<string>;
+}
+
+/**
+ * Resolve the project-admin boundary for live value lookup. An absent/malformed
+ * policy is deliberately disabled; a broad table or wildcard cannot make an
+ * unknown column search-safe.
+ */
+export function resolveAgentRuntimeValueGrounding(config: ProjectConfig): AgentRuntimeValueGroundingPolicy {
+  const configured = config.agent?.runtimeValueGrounding;
+  if (configured?.mode !== 'safe_automatic') {
+    return { mode: 'disabled', searchSafeColumns: new Set<string>() };
+  }
+  const searchSafeColumns = new Set(
+    (configured.searchSafeColumns ?? [])
+      .map(normalizeAgentSafeColumnReference)
+      .filter((value) => value.split('.').length >= 2 && !value.includes('*')),
+  );
+  return searchSafeColumns.size > 0
+    ? { mode: 'safe_automatic', searchSafeColumns }
+    : { mode: 'disabled', searchSafeColumns };
+}
+
+function normalizeAgentSafeColumnReference(value: string): string {
+  return value.trim().replace(/[`"\[\]]/g, '').toLowerCase();
+}
+
+function isExplicitlySearchSafeAgentColumn(
+  table: AgentSchemaTable,
+  column: AgentSchemaTable['columns'][number],
+  searchSafeColumns: ReadonlySet<string>,
+): boolean {
+  const qualified = normalizeAgentSafeColumnReference(`${table.relation}.${column.name}`);
+  const relationParts = table.relation.split('.').filter(Boolean);
+  const shortQualified = normalizeAgentSafeColumnReference(
+    `${relationParts.slice(-1)[0] ?? table.relation}.${column.name}`,
+  );
+  return searchSafeColumns.has(qualified) || searchSafeColumns.has(shortQualified);
+}
+
+function rankAgentValueProbeColumns(
+  schemaContext: AgentSchemaTable[],
+  searchSafeColumns: ReadonlySet<string>,
+): Array<{
   table: AgentSchemaTable;
   column: AgentSchemaTable['columns'][number];
   score: number;
@@ -21829,7 +22248,7 @@ function rankAgentValueProbeColumns(schemaContext: AgentSchemaTable[]): Array<{
   }> = [];
   for (const table of schemaContext) {
     for (const column of table.columns) {
-      if (!isAgentValueProbeColumn(column)) continue;
+      if (!isAgentValueProbeColumn(column) || !isExplicitlySearchSafeAgentColumn(table, column, searchSafeColumns)) continue;
       ranked.push({
         table,
         column,
@@ -21848,9 +22267,17 @@ function scoreAgentValueProbeColumn(table: AgentSchemaTable, column: AgentSchema
   return score;
 }
 
-function isAgentValueProbeColumn(column: AgentSchemaTable['columns'][number]): boolean {
+export function isAgentValueProbeColumn(column: AgentSchemaTable['columns'][number]): boolean {
   const name = column.name.toLowerCase();
-  if (/\b(password|secret|token|credential|hash|salt)\b/.test(name)) return false;
+  // Tokenize underscore/camel names before applying the hard deny-list. This is
+  // intentionally independent of an allowlist: secrets and free-text payloads
+  // can never be probed through automatic grounding.
+  const normalizedName = column.name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase();
+  if (/\b(password|secret|token|credential|hash|salt|notes?|comments?|description|message|body|payload|content)\b/.test(normalizedName)) return false;
+  if (/\bemail\b/.test(normalizedName)) return false;
   if (!hasAgentSchemaToken(name, [
     'account',
     'category',
@@ -21892,15 +22319,22 @@ export function buildAgentValueProbeSql(
   const relation = quoteAgentRelation(table.relation, connection);
   const identifier = quoteAgentIdentifier(column, connection);
   const castValue = `LOWER(CAST(${identifier} AS ${agentTextCastType(connection.driver)}))`;
-  const predicates = searchTerms
-    .slice(0, 5)
-    .map((term) => `${castValue} LIKE ${sqlStringLiteral(`%${escapeSqlLike(term.toLowerCase())}%`)} ESCAPE '\\'`)
+  const predicates = uniqueStrings(searchTerms.flatMap((term) => {
+    const normalized = term.toLowerCase().replace(/\s+/g, ' ').trim();
+    const tokens = normalized.split(' ').filter((token) => token.length >= 4);
+    return [
+      `${castValue} = ${sqlStringLiteral(normalized)}`,
+      ...tokens.slice(0, 2).map((token) => `${castValue} LIKE ${sqlStringLiteral(`${escapeSqlLike(token)}%`)} ESCAPE '\\'`),
+    ];
+  }))
+    .slice(0, 8)
+    .map((predicate) => predicate)
     .join(' OR ');
   return [
     `SELECT DISTINCT CAST(${identifier} AS ${agentTextCastType(connection.driver)}) AS value`,
     `FROM ${relation}`,
     `WHERE ${identifier} IS NOT NULL AND (${predicates})`,
-    'LIMIT 5',
+    'LIMIT 25',
   ].join('\n');
 }
 
@@ -21993,6 +22427,9 @@ export function extractAgentValueSearchTerms(question: string): string[] {
   for (const match of question.matchAll(/\b(?:for|named|called|only|where|customer|user|account|product)\s+([A-Za-z0-9@._-]+(?:\s+[A-Za-z0-9@._-]+){0,3})/gi)) {
     terms.push(match[1]);
   }
+  for (const match of question.matchAll(/\b(?:than|versus|vs\.?)\s+([A-Za-z0-9@._-]+(?:\s+[A-Za-z0-9@._-]+){0,3})/gi)) {
+    terms.push(match[1]);
+  }
   return uniqueStrings(
     terms
       .map(cleanAgentValueSearchTerm)
@@ -22006,6 +22443,7 @@ function cleanAgentValueSearchTerm(term: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/^(?:account|customer|member|named|called|product|sku|subscriber|user)\s+/i, '')
+    .replace(/\s+\b(?:got|get|gets|bought|buy|buys|purchased|purchase|purchases|spent|spend|spends|has|have|with)\b.*$/i, '')
     .replace(/\s+\b(?:last|next|this)\b.*$/i, '')
     .replace(/\s+\b(?:last|this)\s+(?:day|week|month|quarter|year)\b.*$/i, '')
     .replace(/\s+\b(?:daily|weekly|monthly|quarterly|yearly)\b.*$/i, '')

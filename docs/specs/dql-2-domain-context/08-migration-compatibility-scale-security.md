@@ -49,6 +49,12 @@ Required mechanisms:
 - bounded context packs and graph traversal; and
 - no request-path dbt artifact reparsing.
 
+The scale index includes 7,000 semantic metrics and 300,000 dbt columns without
+file-order/alphabetical cutoffs. Exact/alias maps and compact graph adjacency may
+remain memory-resident; verbose definitions, columns, FTS, edges, and payloads
+remain in the persisted search store. Ranking precedes bounded lane quotas and
+payload hydration (`CTX-005`, `PERF-002`).
+
 The reference scale fixture and budgets are in
 `09-fixtures-evals-and-release-gates.md`.
 
@@ -65,6 +71,27 @@ Secrets stay in environment/keychain/ignored connector state and are redacted
 from logs, jobs, snapshots, manifests, diffs, and browser responses. Source
 patch endpoints reject path traversal/symlink escape and show the exact target
 and diff before apply.
+
+Repository repair search is host-only and allowlisted to Git-tracked modeling
+source roots/extensions. It excludes `.dql/**`, Git state, dependencies, build
+outputs, logs, profiles, environment files, credentials, provider settings, and
+connector state; output is redacted before model use. It runs only for an
+explicit stale/missing-index diagnostic, not normal Ask retrieval (`SEC-003`).
+
+Runtime-value grounding defaults to `disabled`. A project/admin may enable
+`safe_automatic`, after which at most three short read-only probes may inspect
+only shortlisted, explicitly search-safe categorical columns and user-provided
+literals. PII, secrets, free text, and unknown classifications are denied by
+default; underscore/camel tokenization must reject names such as
+`customer_password`, `api_token`, and `secret_key`. No plaintext sampled value is
+persisted; a derived-index version change removes any legacy plaintext value
+cache (`SEC-003`).
+
+Embeddings are optional reranking over the top 30–50 lexical candidates. They
+require an explicit retrieval provider, one query embedding, persisted corpus
+vectors, a strict timeout, and lexical fallback. Ambient provider environment
+keys or automatic local-model discovery cannot activate network/model retrieval
+on the Ask critical path (`SEC-003`, `PERF-002`).
 
 ## OSS metadata versus enforcement
 

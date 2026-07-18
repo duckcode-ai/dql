@@ -10,29 +10,26 @@ function gateFor(route: AgentRunRoute, result: AgentRouteExecutorResult, attempt
 }
 
 describe("defaultAgentRunGates", () => {
-  it("answer gate flags a preview execution error as a retry", () => {
+  it("answer gate reports a preview execution error without restarting the outer route", () => {
     const evaluations = gateFor("generated_answer", {
       answer: "Here is the result.",
       artifacts: [{ id: "a", kind: "answer", title: "Answer", trustState: "review_required", payload: { executionError: "no such column: foo" } }],
     });
     const exec = evaluations.find((evaluation) => evaluation.id === "execution-error");
     expect(exec?.passed).toBe(false);
-    expect(exec?.repairAction?.kind).toBe("retry");
-    expect(exec?.suggestedRepair).toBeTruthy();
+    expect(exec?.repairAction).toBeUndefined();
+    expect(exec?.suggestedRepair).toBeUndefined();
   });
 
-  it("answer gate escalates an empty answer to research", () => {
+  it("answer gate keeps an empty lookup terminal instead of silently starting research", () => {
     const evaluations = gateFor("generated_answer", { answer: "", artifacts: [] });
     const grounding = evaluations.find((evaluation) => evaluation.id === "grounding");
     expect(grounding?.passed).toBe(false);
-    expect(grounding?.severity).toBe("blocking");
-    expect(grounding?.repairAction).toMatchObject({ kind: "escalate", route: "research" });
+    expect(grounding?.severity).toBe("warning");
+    expect(grounding?.repairAction).toBeUndefined();
   });
 
-  it("answer gate escalates a model_declined refusal that carries prose text to research (P1)", () => {
-    // The refusal has non-empty explanatory prose in `answer`, which the old
-    // `hasAnswer` check treated as a completed answer — dead-ending the run. With the
-    // refusal code surfaced, the gate now treats it as no-answer and escalates.
+  it("answer gate treats model_declined prose as a terminal no-answer without research escalation", () => {
     const evaluations = gateFor("generated_answer", {
       answer: "I could not compose a governed query for this from the available tables and metrics.",
       answerRefusalCode: "model_declined",
@@ -40,12 +37,10 @@ describe("defaultAgentRunGates", () => {
     });
     const grounding = evaluations.find((evaluation) => evaluation.id === "grounding");
     expect(grounding?.passed).toBe(false);
-    expect(grounding?.repairAction).toMatchObject({ kind: "escalate", route: "research" });
+    expect(grounding?.repairAction).toBeUndefined();
   });
 
-  it("answer gate does NOT add a duplicate escalation when the executor already attached one (P1)", () => {
-    // In the real app path the executor attaches `declined-despite-context`; the gate
-    // backstop must not pile a second escalate eval on top of it.
+  it("answer gate does not duplicate a terminal grounding evaluation from the executor", () => {
     const evaluations = gateFor("generated_answer", {
       answer: "I could not compose a governed query.",
       answerRefusalCode: "model_declined",
@@ -54,14 +49,12 @@ describe("defaultAgentRunGates", () => {
         id: "declined-despite-context",
         label: "Answer grounding",
         passed: false,
-        severity: "blocking",
+        severity: "warning",
         message: "Declined despite context.",
-        suggestedRepair: "Investigate the join path and compose a query.",
-        repairAction: { kind: "escalate", route: "research", hint: "Investigate the join path and compose a query." },
       }],
     });
     expect(evaluations.filter((evaluation) => evaluation.id === "grounding")).toHaveLength(0);
-    expect(evaluations.filter((evaluation) => !evaluation.passed && evaluation.repairAction?.kind === "escalate")).toHaveLength(1);
+    expect(evaluations.filter((evaluation) => !evaluation.passed && evaluation.repairAction)).toHaveLength(0);
   });
 
   it("answer gate still ACCEPTS an ambiguous refusal as a genuine clarify (no escalation)", () => {
@@ -250,7 +243,7 @@ describe("defaultAgentRunGates", () => {
     }
   });
 
-  it("auto-escalates a DEEP analytical ask that returned a single scalar to research", () => {
+  it("does not auto-escalate a deep Ask result to research", () => {
     const gate = defaultAgentRunGates.generated_answer!;
     const context: AgentRunGateContext = {
       route: "generated_answer",
@@ -263,8 +256,7 @@ describe("defaultAgentRunGates", () => {
       attempt: 0,
     };
     const completeness = gate(context).find((evaluation) => evaluation.id === "answer-completeness");
-    expect(completeness?.passed).toBe(false);
-    expect(completeness?.repairAction).toMatchObject({ kind: "escalate", route: "research" });
+    expect(completeness).toBeUndefined();
   });
 
   it("does NOT escalate a deep ask that already returned a multi-row breakdown", () => {

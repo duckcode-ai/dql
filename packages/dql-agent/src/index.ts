@@ -23,7 +23,7 @@ import { buildKGFromManifest, buildKGFromSemanticLayer } from "./kg/build.js";
 import { loadSkills } from "./skills/loader.js";
 import type { Skill } from "./skills/loader.js";
 import type { KGEdge, KGNode } from "./kg/types.js";
-import { ensureMetadataCatalogFresh } from "./metadata/catalog.js";
+import { defaultMetadataPath, ensureMetadataCatalogFresh, openMetadataCatalog } from "./metadata/catalog.js";
 import { reindexHints, listHintsFromGit } from "./hints/git-store.js";
 import { findStaleApprovedHints, type StaleHintFinding } from "./hints/staleness.js";
 
@@ -164,10 +164,31 @@ export {
 } from "./agent-run-planner.js";
 export {
   createHybridRouter,
+  parseMeaningResolution,
   type RouterClassification,
   type RouterCompletion,
   type HybridRouterOptions,
 } from "./router.js";
+export {
+  buildMeaningEvidencePackage,
+  findExplicitEvidenceReference,
+  validateMeaningResolution,
+  routeForEvidenceCandidate,
+  questionTypeFromText,
+  defaultQueryIntent,
+  type AgentEvidenceKind,
+  type AgentEvidenceTrustTier,
+  type AgentEvidenceCompatibility,
+  type AgentEvidenceCandidate,
+  type AgentRetrievalEvidence,
+  type MeaningQueryIntent,
+  type MeaningQuestionType,
+  type MeaningExecutionRoute,
+  type MeaningConfidence,
+  type MeaningResolution,
+  type MeaningResolutionInput,
+  type AgentMeaningResolver,
+} from "./meaning-resolution.js";
 export {
   synthesizeAnswer,
   inferFormat,
@@ -417,6 +438,7 @@ export {
   recordRuntimeSchemaSnapshot,
   latestRuntimeSchemaSnapshotForProject,
   recordQueryRun,
+  toAgentRetrievalEvidence,
   upsertMetadataSnapshot,
 } from "./metadata/catalog.js";
 export {
@@ -891,13 +913,38 @@ export async function ensureAgentProjectReady(
     return { ...(await existing.promise), cacheHit: true, sourceVersion };
   }
 
-  const promise = reindexProject(root, opts);
+  const promise = reindexProject(root, opts).then((result) => {
+    const catalog = openMetadataCatalog(root);
+    try {
+      catalog.setState('prepared_source_version', sourceVersion);
+    } finally {
+      catalog.close();
+    }
+    return result;
+  });
   warmProjectIndexes.set(root, { sourceVersion, promise });
   try {
     return { ...(await promise), cacheHit: false, sourceVersion };
   } catch (error) {
     if (warmProjectIndexes.get(root)?.promise === promise) warmProjectIndexes.delete(root);
     throw error;
+  }
+}
+
+/** Cheap, persisted readiness check used by Setup/Settings after a restart. */
+export function isAgentProjectIndexReady(projectRoot: string): boolean {
+  const root = resolve(projectRoot);
+  if (!existsSync(defaultKgPath(root)) || !existsSync(defaultMetadataPath(root))) return false;
+  const expected = agentProjectSourceVersion(root);
+  try {
+    const catalog = openMetadataCatalog(root);
+    try {
+      return catalog.state('prepared_source_version') === expected;
+    } finally {
+      catalog.close();
+    }
+  } catch {
+    return false;
   }
 }
 

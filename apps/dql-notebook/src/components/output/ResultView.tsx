@@ -9,7 +9,7 @@ const TECHNICAL_IDENTIFIER_RE = /(?:^|_)(?:id|uuid|key|code)$/i;
 const BUSINESS_LABEL_RE = /(?:name|title|label|display|description|customer|account|product|region|segment|category|channel)$/i;
 const CHART_TYPES = new Set([
   'bar', 'grouped-bar', 'stacked-bar', 'line', 'area', 'scatter', 'pie', 'donut',
-  'heatmap', 'histogram', 'funnel', 'waterfall', 'gauge', 'kpi', 'table',
+  'heatmap', 'histogram', 'funnel', 'sankey', 'waterfall', 'gauge', 'kpi', 'table',
 ]);
 
 function isChartNumericCell(value: unknown): boolean {
@@ -92,6 +92,11 @@ export function deriveResultChartConfig(result: QueryResult, base?: CellChartCon
       ? preferred
       : automatic.chart;
   const wasOverridden = Boolean(preferred && preferred !== chart && !preserve);
+  const color = base?.color && result.columns.includes(base.color)
+    ? base.color
+    : chart === 'sankey'
+      ? nonNumeric.find((column) => column !== x)
+      : base?.color;
   const reason = wasOverridden
     ? `${automatic.reason}; replaced the agent suggestion because the returned data is not compatible.`
     : preferred && !preserve
@@ -103,6 +108,7 @@ export function deriveResultChartConfig(result: QueryResult, base?: CellChartCon
       chart,
       x,
       y,
+      ...(color ? { color } : {}),
       decisionSource: preserve ? source : preferred && !wasOverridden ? 'agent' : 'data',
       rationale: reason,
     },
@@ -143,6 +149,7 @@ function chartCanRepresent(
   if (chart === 'kpi' || chart === 'gauge') return numeric.length >= 1 && result.rows.length === 1;
   if (chart === 'line' || chart === 'area') return numeric.includes(y) && CHART_X_DATE_RE.test(x);
   if (chart === 'scatter') return numeric.length >= 2;
+  if (chart === 'sankey') return nonNumeric.length >= 2 && numeric.length >= 1;
   if (chart === 'histogram') return numeric.length >= 1;
   if (chart === 'grouped-bar' || chart === 'stacked-bar') return nonNumeric.length >= 1 && numeric.length >= 2;
   if (chart === 'pie' || chart === 'donut') return nonNumeric.length >= 1 && numeric.length >= 1 && result.rows.length >= 2 && result.rows.length <= 8;
@@ -241,6 +248,19 @@ export function ResultView({ result, themeMode, t, chartConfig, embedded = false
                   style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
                 >
                   {numericColumns.map((column) => <option key={column} value={column}>{column}</option>)}
+                </select>
+              </label>
+            ) : null}
+            {effectiveChart.chart === 'sankey' ? (
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: t.textMuted, fontSize: 10.5 }}>
+                Target
+                <select
+                  aria-label="Sankey target field"
+                  value={effectiveChart.color ?? ''}
+                  onChange={(event) => setOverride((prev) => ({ ...(prev ?? {}), color: event.target.value, decisionSource: 'user', rationale: 'Sankey target selected manually.' }))}
+                  style={{ fontFamily: t.font, fontSize: 10.5, color: t.textSecondary, background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 5, padding: '1px 3px', cursor: 'pointer', maxWidth: 120 }}
+                >
+                  {result.columns.filter((column) => !numericColumns.includes(column) && column !== effectiveChart.x).map((column) => <option key={column} value={column}>{column}</option>)}
                 </select>
               </label>
             ) : null}

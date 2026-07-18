@@ -59,6 +59,7 @@ export type DashboardVizConfig = {
     | 'pivot'
     | 'map'
     | 'funnel'
+    | 'sankey'
     | 'kpi'
     | 'text'
     | 'heading';
@@ -589,7 +590,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
 
   const allowedViz = [
     'single_value', 'line', 'bar', 'grouped_bar', 'stacked_bar', 'area', 'pie', 'donut', 'scatter',
-    'heatmap', 'histogram', 'waterfall', 'gauge', 'table', 'pivot', 'map', 'funnel', 'kpi', 'text', 'heading',
+    'heatmap', 'histogram', 'waterfall', 'gauge', 'table', 'pivot', 'map', 'funnel', 'sankey', 'kpi', 'text', 'heading',
   ] as const;
 
   const items: DashboardGridItem[] = [];

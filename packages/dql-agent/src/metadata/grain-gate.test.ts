@@ -92,4 +92,16 @@ describe('grain gate', () => {
     expect(result.allow).toBe(true);
     expect(result.kind).toBe('exact');
   });
+
+  it('does not confuse joined business entities with the certified result grain', () => {
+    const result = gate('Show revenue by product type', block('one row per customer', {
+      entities: ['Order Item', 'Product'],
+      dimensions: ['customer_name'],
+      declaredOutputs: ['customer_name', 'beverage_revenue', 'beverage_product_types'],
+    }));
+
+    expect(result.allow).toBe(false);
+    expect(result.kind).toBe('mismatch');
+    expect(result.reason).toMatch(/customer.*product.*Tier 2/i);
+  });
 });

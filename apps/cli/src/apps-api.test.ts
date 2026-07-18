@@ -903,6 +903,84 @@ describe('Apps command center API helpers', () => {
     expect(result.warnings).toContain('Preferred visualization bar did not fit the returned result shape; using line instead.');
   });
 
+  it('selects Sankey for a source-to-target flow and binds all three fields', () => {
+    const root = createProject();
+    const result = recommendVisualization(root, {
+      prompt: 'Show revenue flow from product category to product as a supply-chain Sankey',
+      resultSchema: { columns: [
+        { name: 'product_category', type: 'string' },
+        { name: 'product_name', type: 'string' },
+        { name: 'product_revenue', type: 'number' },
+      ] },
+      rowSample: [
+        { product_category: 'Beverage', product_name: 'Coffee', product_revenue: 1200.5 },
+        { product_category: 'Beverage', product_name: 'Tea', product_revenue: 900 },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.display.defaultVisualization).toBe('sankey');
+    expect(result.display.component).toBe('EvidenceTable');
+    expect(result.display.fieldHints).toMatchObject({
+      source: 'product_category',
+      target: 'product_name',
+      value: 'product_revenue',
+      x: 'product_category',
+      y: 'product_revenue',
+      color: 'product_name',
+      format: 'currency',
+    });
+  });
+
+  it('binds Sankey fields in the order named by the question and ignores unrelated dimensions', () => {
+    const root = createProject();
+    const result = recommendVisualization(root, {
+      prompt: 'Show revenue by product type and product name as a source-to-target flow.',
+      resultSchema: { columns: [
+        { name: 'product_name', type: 'string' },
+        { name: 'customer_type', type: 'string' },
+        { name: 'product_type', type: 'string' },
+        { name: 'revenue', type: 'number' },
+      ] },
+      rowSample: [{ product_name: 'Coffee', customer_type: 'new', product_type: 'Beverage', revenue: 1200.5 }],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.display.defaultVisualization).toBe('sankey');
+    expect(result.display.fieldHints).toMatchObject({
+      source: 'product_type',
+      target: 'product_name',
+      value: 'revenue',
+      x: 'product_type',
+      color: 'product_name',
+    });
+  });
+
+  it('uses question intent to choose composition, correlation, and multi-measure charts', () => {
+    const root = createProject();
+    const composition = recommendVisualization(root, {
+      prompt: 'Show revenue share by category',
+      resultSchema: { columns: ['category', 'revenue'] },
+      rowSample: [{ category: 'A', revenue: 60 }, { category: 'B', revenue: 40 }],
+    });
+    const correlation = recommendVisualization(root, {
+      prompt: 'Show the relationship between discount and revenue',
+      resultSchema: { columns: ['discount', 'revenue'] },
+      rowSample: [{ discount: 5, revenue: 100 }, { discount: 10, revenue: 80 }],
+    });
+    const comparison = recommendVisualization(root, {
+      prompt: 'Compare customers',
+      resultSchema: { columns: ['customer_name', 'revenue', 'order_count'] },
+      rowSample: [{ customer_name: 'A', revenue: 100, order_count: 2 }],
+    });
+
+    expect(composition.ok && composition.display.defaultVisualization).toBe('donut');
+    expect(correlation.ok && correlation.display.defaultVisualization).toBe('scatter');
+    expect(comparison.ok && comparison.display.defaultVisualization).toBe('grouped_bar');
+  });
+
   it('recommends dashboard tile metadata with filter bindings and source evidence', () => {
     const root = createProject();
     writeBlock(root, 'nba/top-scorers.dql', {

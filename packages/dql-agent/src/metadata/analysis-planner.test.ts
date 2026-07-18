@@ -8,6 +8,99 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('AGT-005 models entity-relative measures as peer comparisons', () => {
+    const plan = buildAnalysisQuestionPlan('Who are the other customers who paid less tax than Melissa?');
+
+    expect(plan.mode).toBe('comparison');
+    expect(plan.routeIntent).toBe('segment_compare');
+    expect(plan.needsGeneratedSql).toBe(true);
+    expect(plan.dimensionTerms).toContain('customer');
+    expect(plan.metricTerms).toContain('tax');
+    expect(plan.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: 'Melissa', source: 'explicit_filter' }),
+    ]));
+    expect(plan.valueMentions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: 'Melissa', syntacticRole: 'filter_value' }),
+    ]));
+    expect(plan.requestedShape).toMatchObject({
+      dimensions: ['customer'],
+      measures: ['tax'],
+      filters: ['Melissa'],
+      rankingDirection: 'bottom',
+    });
+  });
+
+  it('classifies higher-than entity questions as upward comparisons', () => {
+    const plan = buildAnalysisQuestionPlan('Which accounts generated more revenue than Acme?');
+
+    expect(plan.mode).toBe('comparison');
+    expect(plan.requestedShape.rankingDirection).toBe('top');
+    expect(plan.requestedShape.filters).toContain('Acme');
+  });
+
+  it('AGT-005 classifies a new-session named-value product question as ranking, not definition', () => {
+    const plan = buildAnalysisQuestionPlan('what are the top product Melissa Lopex got it? what is the revenue?');
+
+    expect(plan.mode).toBe('ranking');
+    expect(plan.routeIntent).toBe('ad_hoc_ranking');
+    expect(plan.requestedShape).toMatchObject({
+      grain: 'product',
+      dimensions: ['product'],
+      measures: ['revenue'],
+      filters: ['Melissa Lopex'],
+      topN: { n: 10, scope: 'overall' },
+      rankingDirection: 'top',
+    });
+    expect(plan.valueMentions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: 'Melissa Lopex', syntacticRole: 'filter_value' }),
+    ]));
+    expect(plan.requestedShape.filters).not.toEqual(expect.arrayContaining(['melissa', 'lopex']));
+  });
+
+  it('keeps certified contracts eligible for lifetime-spend list paraphrases', () => {
+    for (const question of [
+      'Can you give each customer with lifetime spend info',
+      'List every customer and their lifetime spend',
+      'Show lifetime spend by customer',
+      "What is each customer's lifetime spend?",
+    ]) {
+      const plan = buildAnalysisQuestionPlan(question);
+      expect(plan.mode, question).not.toBe('definition');
+      expect(plan.shouldConsiderCertifiedExact, question).toBe(true);
+      expect(plan.requestedShape.dimensions, question).toContain('customer');
+      expect(plan.requestedShape.measures, question).toContain('spend');
+    }
+  });
+
+  it('treats across-all entity wording as one scalar aggregate, not a breakdown', () => {
+    const plan = buildAnalysisQuestionPlan('What is total lifetime spend across all customers?');
+
+    expect(plan.mode).toBe('exact_lookup');
+    expect(plan.outputShape).toBe('value');
+    expect(plan.requestedShape.dimensions).toEqual([]);
+    expect(plan.requestedShape.grain).toBeUndefined();
+    expect(plan.requestedShape.measures).toEqual(expect.arrayContaining(['spend', 'lifetime_spend']));
+    expect(plan.requestedShape.requiredOutputs).toContain('spend');
+    expect(plan.requestedShape.requiredOutputs).not.toContain('customer');
+    expect(plan.requestedShape.requiredOutputs).not.toContain('total');
+  });
+
+  it('AGT-001 treats a temporally scoped KPI question as a scalar value', () => {
+    const plan = buildAnalysisQuestionPlan('What was revenue last week?');
+
+    expect(plan.mode).toBe('exact_lookup');
+    expect(plan.routeIntent).toBe('exact_certified_lookup');
+    expect(plan.outputShape).toBe('value');
+    expect(plan.requestedShape.dimensions).toEqual([]);
+  });
+
+  it('keeps requested supply detail distinct from a product-only answer shape', () => {
+    const plan = buildAnalysisQuestionPlan('Which supplies are perishable by product?');
+
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['supply', 'product']));
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['supply', 'product']));
+  });
+
   it('AGT-005 preserves measure, grain, qualifier, and ranking for category-scoped spend questions', () => {
     const plan = buildAnalysisQuestionPlan('who are the customers who spent most on beverages?');
 
@@ -36,6 +129,23 @@ describe('analysis planner', () => {
       rankingDirection: 'top',
     });
     expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['customer', 'revenue']));
+    expect(plan.requestedShape.requiredOutputs).not.toEqual(expect.arrayContaining(['product', 'category']));
+  });
+
+  it('treats a category-products phrase as filter context rather than customer-ranking output grain (AGT-009, AGT-010)', () => {
+    const plan = buildAnalysisQuestionPlan('who are the top customers who spent on beverage category products?');
+
+    expect(plan.mode).toBe('ranking');
+    expect(plan.dimensionTerms).toEqual(['customer']);
+    expect(plan.filterTerms).toContain('beverage');
+    expect(plan.requestedShape).toMatchObject({
+      grain: 'customer',
+      dimensions: ['customer'],
+      measures: ['spend'],
+      filters: ['beverage'],
+      topN: { n: 10, scope: 'overall' },
+      rankingDirection: 'top',
+    });
     expect(plan.requestedShape.requiredOutputs).not.toEqual(expect.arrayContaining(['product', 'category']));
   });
 
@@ -72,7 +182,7 @@ describe('analysis planner', () => {
     const plan = buildAnalysisQuestionPlan('Can you give me the average tax info by location by product?');
 
     // A breakdown with named dimensions is analytical (routes to a fast direct answer).
-    expect(plan.mode).toBe('general_analysis');
+    expect(plan.mode).toBe('list_by_dimension');
     expect(plan.routeIntent).toBe('ad_hoc_ranking');
     // Clean grouping dimensions — no "a by b" blob.
     expect(plan.dimensionTerms).toEqual(expect.arrayContaining(['location', 'product']));
@@ -321,6 +431,19 @@ describe('analysis planner', () => {
 
     expect(sorted.relations[0]?.relation).toBe('analytics.market_finance');
     expect(score.reasons.join(' ')).toContain('revenue->net_amount');
+  });
+
+  it('treats semantic identifiers and source-to-target wording as a multi-dimensional flow', () => {
+    const plan = buildAnalysisQuestionPlan(
+      'Render a Sankey: product_type to product_name weighted by total revenue. Return exactly product_type, product_name, and revenue.',
+    );
+
+    expect(plan.outputShape).toBe('chart');
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['product', 'type']));
+    expect(plan.requestedShape.requiredOutputs).toEqual(
+      expect.arrayContaining(['product_type', 'product_name', 'revenue']),
+    );
+    expect(plan.requestedShape.requiredOutputs).not.toEqual(['revenue']);
   });
 });
 

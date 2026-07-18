@@ -55,12 +55,18 @@ import {
   extractSimpleSelectShape,
   selectExpressionOutputName,
 } from './metadata/sql-shape.js';
-import { composeSemanticQueryForQuestion, composeSemanticQueryFromMembers, type SemanticBridgeQueryResult } from './semantic-bridge/compose.js';
+import {
+  composeSemanticQueryForQuestion,
+  composeSemanticQueryFromMembers,
+  type SemanticBridgeQueryResult,
+  type SemanticFilterValueBinding,
+} from './semantic-bridge/compose.js';
 import { runAgenticToolLoop } from './agentic/tool-loop.js';
 import { buildSemanticStageTools } from './agentic/toolset.js';
 import { deriveAgenticTrust, type CompiledSemanticRecord } from './agentic/answer-contract.js';
 import { selectSemanticMembersViaLlm } from './semantic-bridge/member-select.js';
 import { normalizeValueIndexText } from './grounding/value-index.js';
+import { questionTypeFromText } from './meaning-resolution.js';
 import {
   cascadeTraceToEvidenceRouteSteps,
   createCascadeAnswerResult,
@@ -238,17 +244,108 @@ export interface AgentSchemaColumn {
  * it — a generic, project-agnostic replacement for hard-coded value→dimension maps.
  */
 function resolveFilterValueColumns(value: string, schemaContext: AgentSchemaTable[]): string[] {
+  return resolveAgentFilterValueBindings(value, schemaContext).map((binding) => binding.column);
+}
+
+/**
+ * Resolve a user-provided member phrase only against bounded values that were
+ * retrieved for eligible schema fields. This is deliberately separate from
+ * metadata/object search: the provider never chooses the canonical row value.
+ */
+export function resolveAgentFilterValueBindings(
+  value: string,
+  schemaContext: AgentSchemaTable[],
+): SemanticFilterValueBinding[] {
   const needle = normalizeValueIndexText(value);
   if (!needle) return [];
-  const columns: string[] = [];
+  const candidates: Array<SemanticFilterValueBinding & { distance: number }> = [];
   for (const table of schemaContext) {
     for (const column of table.columns) {
-      if (column.sampleValues?.some((sample) => normalizeValueIndexText(sample) === needle)) {
-        columns.push(column.name);
+      for (const sample of column.sampleValues ?? []) {
+        const normalizedSample = normalizeValueIndexText(sample);
+        if (!normalizedSample) continue;
+        if (normalizedSample === needle) {
+          candidates.push({
+            column: column.name,
+            canonicalValue: sample,
+            match: sample === value ? 'exact' : 'normalized',
+            confidence: 1,
+            distance: 0,
+          });
+          continue;
+        }
+        const needleTokens = needle.split(' ').filter(Boolean);
+        const sampleTokens = normalizedSample.split(' ').filter(Boolean);
+        // A stakeholder often refers to a result member by its distinctive first
+        // token ("Melissa") while the warehouse stores the display value as
+        // "Melissa Lopez". Treat a strict token subset as a high-confidence fuzzy
+        // candidate, but let the runner-up ambiguity guard below reject it when
+        // more than one sampled value shares that token.
+        if (needleTokens.length < sampleTokens.length
+          && needleTokens.every((token) => token.length >= 3 && sampleTokens.includes(token))) {
+          candidates.push({
+            column: column.name,
+            canonicalValue: sample,
+            match: 'fuzzy',
+            confidence: 0.97,
+            distance: sampleTokens.length - needleTokens.length,
+          });
+          continue;
+        }
+        if (needleTokens.length !== sampleTokens.length) continue;
+        const distance = damerauLevenshteinDistance(needle, normalizedSample);
+        const similarity = 1 - (distance / Math.max(needle.length, normalizedSample.length, 1));
+        const singleToken = needleTokens.length === 1;
+        const threshold = singleToken ? 0.94 : 0.92;
+        const maxDistance = singleToken ? 1 : 2;
+        const hasExactToken = needleTokens.some((token) => sampleTokens.includes(token));
+        if (similarity < threshold || distance > maxDistance || (!singleToken && !hasExactToken)) continue;
+        candidates.push({
+          column: column.name,
+          canonicalValue: sample,
+          match: 'fuzzy',
+          confidence: Number(similarity.toFixed(4)),
+          distance,
+        });
       }
     }
   }
-  return columns;
+  candidates.sort((a, b) => b.confidence - a.confidence || a.distance - b.distance || a.column.localeCompare(b.column));
+  const best = candidates[0];
+  if (!best) return [];
+  const runnerUp = candidates.find((candidate) => (
+    candidate.column !== best.column
+    || normalizeValueIndexText(candidate.canonicalValue) !== normalizeValueIndexText(best.canonicalValue)
+  ));
+  if (best.match === 'fuzzy' && runnerUp && best.confidence - runnerUp.confidence < 0.08) return [];
+  return candidates
+    .filter((candidate) => candidate.confidence === best.confidence
+      && normalizeValueIndexText(candidate.canonicalValue) === normalizeValueIndexText(best.canonicalValue))
+    .map(({ distance: _distance, ...binding }) => binding);
+}
+
+function damerauLevenshteinDistance(left: string, right: string): number {
+  const rows = left.length + 1;
+  const columns = right.length + 1;
+  const matrix = Array.from({ length: rows }, () => Array<number>(columns).fill(0));
+  for (let row = 0; row < rows; row += 1) matrix[row][0] = row;
+  for (let column = 0; column < columns; column += 1) matrix[0][column] = column;
+  for (let row = 1; row < rows; row += 1) {
+    for (let column = 1; column < columns; column += 1) {
+      const cost = left[row - 1] === right[column - 1] ? 0 : 1;
+      matrix[row][column] = Math.min(
+        matrix[row - 1][column] + 1,
+        matrix[row][column - 1] + 1,
+        matrix[row - 1][column - 1] + cost,
+      );
+      if (row > 1 && column > 1
+        && left[row - 1] === right[column - 2]
+        && left[row - 2] === right[column - 1]) {
+        matrix[row][column] = Math.min(matrix[row][column], matrix[row - 2][column - 2] + cost);
+      }
+    }
+  }
+  return matrix[left.length][right.length];
 }
 
 export interface AgentSchemaTable {
@@ -538,6 +635,10 @@ export interface AnswerLoopInput {
    * rendering for research, diagnostics, or explicitly high-effort runs.
    */
   analysisDepth?: AnalysisDepth;
+  /** Qualified candidate IDs selected by the bounded meaning resolver. */
+  preferredEvidenceIds?: string[];
+  /** Qualified execution ID recommended by meaning resolution. */
+  preferredExecutionId?: string;
   /** Optional shared repair/escalation budget model for this answer-loop run. */
   cascadeBudgetModel?: PartialCascadeBudgetModel;
   /**
@@ -860,7 +961,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     : [];
   const hasExplicitDomainScope = Boolean(input.domain || input.domainContext?.activeDomain);
   const questionDomainScope = hasExplicitDomainScope ? [] : directQuestionDomains;
-  const promptContextPack = questionDomainScope.length > 0
+  const scopedContextPack = questionDomainScope.length > 0
     ? scopeContextPackToQuestionDomains(input.contextPack, questionDomainScope, input.manifest)
     : input.contextPack;
   // Select the RELEVANT skills (not all) for this question; keep pinned project
@@ -908,13 +1009,25 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     kg.search({ query: question, domain, limit: 10 }),
   ).slice(0, 30);
   const schemaContext = schemaContextWithAllowedSqlContext(
-    schemaContextWithinQuestionScope(input.schemaContext ?? [], input.contextPack, promptContextPack),
-    promptContextPack,
+    schemaContextWithinQuestionScope(input.schemaContext ?? [], input.contextPack, scopedContextPack),
+    scopedContextPack,
   );
   const catalogRoute = input.contextPack?.routeDecision;
   const questionPlan = input.contextPack?.questionPlan?.requestedShape
     ? input.contextPack.questionPlan
     : buildAnalysisQuestionPlan(question, input.followUp);
+  // Retrieval may surface a high-trust block because its source tables and
+  // vocabulary overlap the question even when its output contract does not.
+  // Keep such candidates in the audit trail, but do not put their SQL or a stale
+  // "exact certified" route into the generation prompt. The model should decide
+  // from compatible certified evidence, semantic members, and dbt/runtime
+  // columns—not copy a customer-grain worked example into a product-grain ask.
+  const promptContextPack = contextPackForRequestedShape(
+    scopedContextPack,
+    question,
+    questionPlan,
+    kg,
+  );
   const repairBudgetState = createCascadeBudgetState(input.cascadeBudgetModel);
   const fallbackIntent = classifyAgentIntent({
     question,
@@ -935,9 +1048,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const node = kg.getNode(`metric:${metric}`);
     if (node && !semanticMetricNodes.some((candidate) => candidate.nodeId === node.nodeId)) semanticMetricNodes.push(node);
   }
-  let semanticMetricMatch = await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
-    measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
-  }).catch(() => null);
+  const preferredSemanticMetric = resolvePreferredSemanticMetric(
+    [input.preferredExecutionId, ...(input.preferredEvidenceIds ?? [])],
+    semanticMetricNodes,
+    kg,
+  );
+  let semanticMetricMatch = preferredSemanticMetric
+    ? { metric: preferredSemanticMetric, score: 1, basis: 'name' as const }
+    : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
+        measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
+      }).catch(() => null);
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
@@ -955,7 +1075,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const catalogCertifiedHit = shouldTryCertifiedRoute
     ? certifiedHitFromContextPack(input.contextPack, kg)
     : null;
-  const unsafeCatalogCertifiedHit = catalogCertifiedHit?.node.kind === 'block' && semanticMetricMatch
+  // Catalog route scores are retrieval evidence, not permission to execute a
+  // block. Always enforce the output/grain/filter contract—even when no semantic
+  // metric happened to match. Previously this guard only ran when Lane 2 had a
+  // metric, so a high-scoring `top_beverage_customers` catalog hit could answer a
+  // product-type → product-name flow request with customer rows.
+  const unsafeCatalogCertifiedHit = catalogCertifiedHit?.node.kind === 'block'
     && !hasCertifiedNodeFit(question, questionPlan, catalogCertifiedHit.node)
     ? null
     : catalogCertifiedHit;
@@ -1002,7 +1127,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // explicitly names the object in a definition request ("what is Revenue
     // Health?"). A broad lexical match must never turn an analytical question
     // into a no-data Certified answer merely because it starts with "what is".
-    return isBusinessDefinitionQuestion(question)
+    return isPureBusinessDefinitionQuestion(question)
       && objectNameInQuestion(question, artifactHit.node);
   })();
   if (artifactHit && businessContextTerminal) {
@@ -1260,7 +1385,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
   ).filter((node) => questionDomainScope.length === 0 || !node.domain || questionDomainScope.includes(node.domain));
   const kgJoinPathHints = buildKgJoinPathHints(kg, contextNodes, questionPlan);
-  const contextBlocks = contextNodes.filter((n) => n.kind === 'block');
+  const contextBlocks = contextNodes.filter((node) => {
+    if (node.kind !== 'block') return false;
+    if (node.status !== 'certified') return true;
+    const fit = evaluateCertifiedBlockFit({ question, plan: questionPlan, block: node });
+    return fit.kind === 'exact' || fit.kind === 'trim_safe';
+  });
   const contextBusiness = contextNodes.filter((n) => BUSINESS_CONTEXT_KINDS.includes(n.kind));
   const contextOther = contextNodes.filter((n) => n.kind !== 'block' && !BUSINESS_CONTEXT_KINDS.includes(n.kind));
   const promptBudget = promptContextBudgetForQuestion({
@@ -1335,6 +1465,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       questionPlan,
       matchedMetric: semanticMetricMatch.metric,
       filterValueColumns: (value) => resolveFilterValueColumns(value, schemaContext),
+      filterValueBindings: (value) => resolveAgentFilterValueBindings(value, schemaContext),
       ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
       ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
     });
@@ -1696,6 +1827,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       considered,
       providerUsed: provider.name,
     };
+  }
+
+  if (parsed.sql) {
+    const tightenedFlow = tightenSourceTargetFlowProjection(parsed.sql, question, questionPlan);
+    if (tightenedFlow && tightenedFlow.sql !== parsed.sql) {
+      parsed.sql = tightenedFlow.sql;
+      parsed.outputs = tightenedFlow.outputs;
+      // Any edit to compiler-owned SQL is no longer an exact governed compile.
+      // Keep the corrected result review-required instead of overstating trust.
+      governedMetricAnswer = false;
+      // A deep candidate may already have executed the wider proposal. The
+      // narrowed SQL is now authoritative and must be executed/validated anew.
+      deepCandidateResult = undefined;
+      deepCandidateExecutionError = undefined;
+      deepCandidateNotes.push('Removed an unrelated grouping from the source-to-target flow projection.');
+    }
   }
 
   // Shared grounding (spec 15): deterministically qualify any bare relation the
@@ -2355,6 +2502,10 @@ Rules:
    an additional output dimension. An entity ranking filtered to a category
    value must return one row per requested entity, not one row per
    entity-category-member pair.
+   For a Sankey/source-to-target flow, return exactly two categorical columns
+   (the requested source first, then the requested target) plus one numeric
+   weight. Do not add an unrelated grouping such as customer type, segment, or
+   region unless the question explicitly asks for it.
 4. In summary, state your QUERY PLAN first: the grain (one row per WHAT), the
    measures and how they aggregate, the dimensions/filters, and the exact join
    path + join keys between the grounded tables. Then make the SQL match that
@@ -2365,10 +2516,18 @@ Rules:
    or use a grain-preserving value only when the owning entity remains in the
    output. Never SUM the repeated parent value at child grain. If the question
    requires allocating a parent value to children, ask for the allocation rule.
+   For an entity-relative measure comparison such as "customers who paid less
+   tax than Melissa", first aggregate the measure for every peer at the same
+   entity grain, obtain the named reference entity's aggregate in a CTE or
+   scalar subquery, then compare peers with the requested < or > predicate and
+   exclude the reference entity. Do not filter the result down to the reference
+   entity, compare unaggregated fact rows, or return one global aggregate.
 5. Choose a visualization deliberately in the "viz" JSON field: use single_value
    or kpi for one aggregate, line/area only for an ordered time series, bar for a
    categorical comparison, grouped-bar for multiple measures by one category,
-   scatter for two continuous measures, and table when the result is not chartable.
+   donut for a small part-to-whole result, scatter for two continuous measures,
+   histogram for a distribution, funnel for ordered stages, waterfall for signed
+   contributions, sankey for source-to-target flows, and table for detailed rows.
    Do not default to bar. The runtime validates this preference against returned
    rows before displaying it.
 6. NEVER fabricate column names that are not present in the supplied schema,
@@ -2462,6 +2621,87 @@ function scopeContextPackToQuestionDomains(
       selectedJoinPaths,
       schemaShapeCandidates: contextPack.retrievalDiagnostics.schemaShapeCandidates?.filter((candidate) => objectKeys.has(candidate.objectKey)),
       certifiedCandidateFits: contextPack.retrievalDiagnostics.certifiedCandidateFits.filter((candidate) => objectKeys.has(candidate.objectKey)),
+    },
+  };
+}
+
+/**
+ * Build the prompt-facing evidence pack after enforcing the certified output
+ * contract. Incompatible blocks remain in the returned answer's `considered`
+ * evidence for inspection, but their prose/SQL cannot steer generation.
+ */
+function contextPackForRequestedShape(
+  contextPack: LocalContextPack | undefined,
+  question: string,
+  questionPlan: AnalysisQuestionPlan,
+  kg: KGStore,
+): LocalContextPack | undefined {
+  if (!contextPack) return undefined;
+  const incompatibleBlockKeys = new Set<string>();
+  for (const object of contextPack.objects) {
+    if (object.objectType !== 'dql_block') continue;
+    const blockName = object.name || object.objectKey.replace(/^dql:block:/, '');
+    const node = kg.getNode(`block:${blockName}`);
+    if (node?.kind === 'block') {
+      const fit = evaluateCertifiedBlockFit({ question, plan: questionPlan, block: node });
+      if (fit.kind === 'context_only' || fit.kind === 'not_applicable') {
+        incompatibleBlockKeys.add(object.objectKey);
+      }
+    }
+  }
+  if (incompatibleBlockKeys.size === 0) return contextPack;
+
+  // Some embedders/tests provide a lightweight pack without a route decision.
+  // The prompt still benefits from removing mismatched worked-example SQL.
+  const existingRoute = contextPack.routeDecision;
+  if (!existingRoute) {
+    return {
+      ...contextPack,
+      allowedSqlContext: {
+        ...contextPack.allowedSqlContext,
+        sourceBlockSql: contextPack.allowedSqlContext.sourceBlockSql.filter(
+          (source) => !incompatibleBlockKeys.has(source.objectKey),
+        ),
+      },
+    };
+  }
+  const exactWasRemoved = Boolean(
+    existingRoute.exactObjectKey
+    && incompatibleBlockKeys.has(existingRoute.exactObjectKey),
+  );
+  const routeDecision = exactWasRemoved
+    ? (() => {
+        const {
+          exactObjectKey: _exactObjectKey,
+          grainGate: _grainGate,
+          ...route
+        } = existingRoute;
+        return {
+          ...route,
+          route: 'generated_sql' as const,
+          reason: 'No certified block satisfies the requested output shape; use compatible semantic and SQL evidence.',
+          routeReason: 'The retrieved certified candidate has a different grain or output contract and is context-only.',
+          trustLabel: route.trustLabel === 'certified' ? 'mixed' as const : route.trustLabel,
+          reviewStatus: 'draft_ready' as const,
+          certifiedApplicability: route.certifiedApplicability
+            ? { ...route.certifiedApplicability, kind: 'context_only' as const }
+            : undefined,
+          selectedEvidence: route.selectedEvidence,
+        };
+      })()
+    : {
+        ...existingRoute,
+      };
+
+  return {
+    ...contextPack,
+    trustLabel: exactWasRemoved && contextPack.trustLabel === 'certified' ? 'mixed' : contextPack.trustLabel,
+    routeDecision,
+    allowedSqlContext: {
+      ...contextPack.allowedSqlContext,
+      sourceBlockSql: contextPack.allowedSqlContext.sourceBlockSql.filter(
+        (source) => !incompatibleBlockKeys.has(source.objectKey),
+      ),
     },
   };
 }
@@ -3163,6 +3403,83 @@ interface ParsedProposal {
 }
 
 /**
+ * A source-to-target flow has a strict three-field contract. Models sometimes
+ * add a high-overlap but unrelated categorical grouping from retrieved context
+ * (for example customer_type), which splits edge weights and corrupts both the
+ * summary and Sankey. For a simple generated SELECT, narrow the projection and
+ * GROUP BY to the two fields explicitly named in the question plus one
+ * aggregate. This never invents SQL and leaves complex CTE queries untouched.
+ */
+export function tightenSourceTargetFlowProjection(
+  sql: string,
+  question: string,
+  plan: AnalysisQuestionPlan,
+): { sql: string; outputs: string[] } | undefined {
+  if (!/\bsankey|flow|source.?to.?target|from .+ to\b/i.test(question)) return undefined;
+  if (!/^\s*select\b/i.test(sql)) return undefined;
+  const shape = extractSimpleSelectShape(sql);
+  if (!shape || shape.selectExpressions.length < 3) return undefined;
+
+  const entries = shape.selectExpressions.map((expression) => ({
+    expression,
+    output: selectExpressionOutputName(expression),
+  })).filter((entry): entry is { expression: string; output: string } => Boolean(entry.output));
+  const measureTerms = new Set(plan.requestedShape.measures.map(normalizeFlowField));
+  const aggregates = entries.filter((entry) =>
+    /\b(?:sum|count|avg|average|min|max)\s*\(/i.test(entry.expression)
+    || [...measureTerms].some((measure) => flowFieldCovers(entry.output, measure))
+  );
+  const measure = aggregates[0];
+  if (!measure) return undefined;
+
+  const mentionedDimensions = entries
+    .filter((entry) => entry !== measure)
+    .map((entry) => ({ ...entry, position: flowFieldPosition(question, entry.output) }))
+    .filter((entry) => entry.position >= 0)
+    .sort((left, right) => left.position - right.position);
+  const source = mentionedDimensions[0];
+  const target = mentionedDimensions.find((entry) => entry.output !== source?.output);
+  if (!source || !target) return undefined;
+
+  const kept = [source, target, measure];
+  const outputs = kept.map((entry) => entry.output);
+  if (entries.length === kept.length && entries.every((entry, index) => entry.output === outputs[index])) {
+    return { sql, outputs };
+  }
+  const selectMatch = /\bselect\b[\s\S]*?\bfrom\b/i.exec(sql);
+  if (!selectMatch || selectMatch.index !== sql.search(/\bselect\b/i)) return undefined;
+  const replacement = `SELECT\n  ${kept.map((entry) => entry.expression).join(',\n  ')}\nFROM`;
+  let narrowed = `${sql.slice(0, selectMatch.index)}${replacement}${sql.slice(selectMatch.index + selectMatch[0].length)}`;
+  const groupExpressions = [source, target].map((entry) => selectSourceExpression(entry.expression));
+  narrowed = narrowed.replace(
+    /\bgroup\s+by\b[\s\S]*?(?=\bhaving\b|\border\s+by\b|\blimit\b|$)/i,
+    `GROUP BY ${groupExpressions.join(', ')}`,
+  );
+  return { sql: narrowed.trim(), outputs };
+}
+
+function selectSourceExpression(expression: string): string {
+  return expression
+    .replace(/\s+as\s+["`]?\w+["`]?\s*$/i, '')
+    .trim();
+}
+
+function flowFieldPosition(question: string, field: string): number {
+  const normalizedQuestion = normalizeFlowField(question);
+  const normalizedField = normalizeFlowField(field);
+  return normalizedField ? normalizedQuestion.indexOf(normalizedField) : -1;
+}
+
+function flowFieldCovers(field: string, term: string): boolean {
+  const normalizedField = normalizeFlowField(field);
+  return normalizedField === term || normalizedField.split(' ').includes(term);
+}
+
+function normalizeFlowField(value: string): string {
+  return value.toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
  * Public for tests. Prefer the structured W2.7 JSON proposal contract, then
  * fall back to the legacy prose + ```sql block + Viz line format.
  */
@@ -3662,7 +3979,7 @@ function pickCertifiedArtifact(input: {
   }
 
   const executableHit = pickFirstCertifiedHit(input.executableArtifactHits, input.kg, input.excludedArtifactIds, input.question, input.questionPlan);
-  if (isBusinessDefinitionQuestion(input.question)) {
+  if (isPureBusinessDefinitionQuestion(input.question)) {
     if (executableHit && hasExactExecutableArtifactSignal(input.question, executableHit.node)) {
       return executableHit;
     }
@@ -3776,6 +4093,11 @@ function isBusinessDefinitionQuestion(question: string): boolean {
   return /\b(what is|what are|define|definition|meaning of|what does .+ mean)\b/i.test(question);
 }
 
+/** Definition that may terminate with documentation instead of executing data. */
+function isPureBusinessDefinitionQuestion(question: string): boolean {
+  return questionTypeFromText(question) === 'definition';
+}
+
 function isBreakdownOrDrilldownQuestion(question: string): boolean {
   return /\b(break\s*down|breakdown|drill\s*(?:down|into)|slice|segment|split|by\s+[a-z][\w\s-]{1,40})\b/i.test(question);
 }
@@ -3838,7 +4160,7 @@ function hasCertifiedNodeFit(
   options: { allowInferredContract?: boolean } = {},
 ): boolean {
   if (!hasCompatibleRankingDirection(question, node)) return false;
-  const definitionLookup = isBusinessDefinitionQuestion(question) && objectNameInQuestion(question, node);
+  const definitionLookup = isPureBusinessDefinitionQuestion(question) && objectNameInQuestion(question, node);
   const exactExampleMatch = (node.examples ?? []).some((example) =>
     normalizeQuestion(example.question) === normalizeQuestion(question)
   );
@@ -4797,9 +5119,10 @@ function interleaveContextHits(
 
 /**
  * Candidate metric KG nodes for semantic-metric matching (spec 17, part C).
- * Starts with the FTS semantic + considered hits, then folds in EVERY metric
+ * Starts with the FTS semantic + considered hits, then folds in every metric
  * node from the KG so a confident measure-family match is found even when FTS
- * surfaced no metric at all (the "total revenue" miss). Bounded for safety.
+ * surfaced no metric at all. Metric headers are compact; correctness must not
+ * depend on an alphabetical first-200 slice in an enterprise catalog.
  */
 function collectMetricCandidates(
   semanticHits: KGSearchHit[],
@@ -4811,13 +5134,39 @@ function collectMetricCandidates(
     if (hit.node.kind === 'metric') byId.set(hit.node.nodeId, hit.node);
   }
   try {
-    for (const node of kg.getNodesByKind('metric', 200)) {
+    for (const node of kg.getNodesByKind('metric', 100_000)) {
       if (!byId.has(node.nodeId)) byId.set(node.nodeId, node);
     }
   } catch {
     // Best-effort: a KG without a getNodesByKind still matches the FTS hits.
   }
   return Array.from(byId.values());
+}
+
+/**
+ * Bind a validated meaning-resolution ID to the exact KG metric node. This is
+ * deliberately ID-only: labels/aliases are not reinterpreted here, and the
+ * semantic compiler still has to prove the requested dimensions and filters.
+ */
+function resolvePreferredSemanticMetric(
+  ids: Array<string | undefined>,
+  pool: KGNode[],
+  kg: KGStore,
+): KGNode | undefined {
+  const byId = new Map(pool.filter((node) => node.kind === 'metric').map((node) => [node.nodeId, node]));
+  for (const rawId of ids) {
+    const id = rawId?.trim();
+    if (!id) continue;
+    const nodeId = id.startsWith('semantic:metric:')
+      ? id.slice('semantic:'.length)
+      : id.startsWith('metric:')
+        ? id
+        : undefined;
+    if (!nodeId) continue;
+    const node = byId.get(nodeId) ?? kg.getNode(nodeId);
+    if (node?.kind === 'metric') return node;
+  }
+  return undefined;
 }
 
 

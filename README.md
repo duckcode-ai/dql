@@ -146,6 +146,49 @@ npm i -g @duckcodeailabs/dql-cli@latest # global
 npm i -D @duckcodeailabs/dql-cli@latest # project-local (then: npx dql --version)
 ```
 
+### How to run project-local and global commands
+
+Project-local installation is recommended because each repository keeps the
+CLI version it was tested with. npm links that CLI at
+`node_modules/.bin/dql`; it does not add the link to your interactive shell's
+`PATH`.
+
+| Installation | Use | Example |
+| --- | --- | --- |
+| Scaffolded/project-local | A provided npm script | `npm run doctor` |
+| Project-local, any command | `npm exec -- dql <command>` | `npm exec -- dql model list` |
+| Project-local shorthand | `npx dql <command>` | `npx dql --help` |
+| Global | `dql <command>` | `dql doctor` |
+
+This means `npm run doctor` can work while a bare `dql doctor` says
+`command not found`: the former uses the repository's local binary, while the
+latter requires the global installation shown above. Confirm which CLI you are
+using with:
+
+```bash
+npm exec -- dql --version   # project-local
+dql --version               # global, if installed
+```
+
+The starter project includes scripts for the daily workflow. Use
+`npm exec -- dql ...` for every other command:
+
+| Goal | Project-local command |
+| --- | --- |
+| Check installation and configuration | `npm run doctor` |
+| Open the notebook UI | `npm run notebook` |
+| Refresh dbt artifacts and indexes | `npm run sync` |
+| Compile and validate the project | `npm run compile` then `npm run validate` |
+| Inspect lineage | `npm run lineage` |
+| List or validate Domain Packages | `npm exec -- dql model list` / `npm exec -- dql model validate` |
+| Create or import governed content | `npm exec -- dql new ...` / `npm exec -- dql import sql ...` |
+| Format, diff, certify, and verify | `npm exec -- dql fmt ...`, `npm exec -- dql diff ...`, `npm exec -- dql certify ...`, `npm exec -- dql verify` |
+| Ask, evaluate, or connect an agent | `npm exec -- dql agent ...`, `npm exec -- dql eval ...`, `npm exec -- dql connect ...` |
+
+Run `npm exec -- dql --help` for the live command list, or use the
+[complete CLI reference](./docs/reference/cli.md) for commands, subcommands,
+flags, examples, and exit codes.
+
 > **Stuck on `dql: command not found` after installing?** Before **1.6.30** a
 > global install could fail on Node 23/24 (the current LTS is Node 24), and a
 > failed `npm i -g` never links the `dql` binary. Just reinstall `@latest` on any
@@ -256,9 +299,9 @@ uses project metadata for safe generated SQL previews, and saves uncertified
 drafts for review.
 
 ```bash
-dql mcp test
-dql connect claude-code   # writes .mcp.json and CLAUDE.md
-dql connect codex         # writes .codex/config.toml and AGENTS.md
+npm exec -- dql mcp test
+npm exec -- dql connect claude-code   # writes .mcp.json and CLAUDE.md
+npm exec -- dql connect codex         # writes .codex/config.toml and AGENTS.md
 ```
 
 See [Connect an AI agent](./docs/guides/mcp.md) for Claude Desktop, Cursor,

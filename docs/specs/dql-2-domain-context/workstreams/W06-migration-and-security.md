@@ -5,7 +5,7 @@
 Provide safe explicit adoption for existing DQL/DataLex projects and fail-closed
 serving outside loopback.
 
-Acceptance IDs: `CFG-002`, `MIG-001`, `MIG-002`, `SEC-001`.
+Acceptance IDs: `CFG-002`, `MIG-001`, `MIG-002`, `SEC-001`, `SEC-003`.
 Dependencies: verified W01–W03 source/config/snapshot contracts.
 
 ## Required implementation
@@ -20,6 +20,9 @@ Dependencies: verified W01–W03 source/config/snapshot contracts.
   wildcard CORS there while retaining documented loopback local mode.
 - Add path confinement, source fingerprint/CSRF protections as applicable,
   secret redaction, and structured audit events for mutations.
+- Constrain repair search, runtime-value grounding, evidence packaging, traces,
+  and optional embeddings to the allowlist/redaction/persistence rules in spec
+  08; remove legacy plaintext derived-value caches on index-version upgrade.
 
 ## Suggested ownership
 
@@ -33,4 +36,7 @@ tokens.
 Dry-run no writes; apply twice no changes; complete loss report; ambiguous
 mapping refusal; no lifecycle upgrade; v2 fixture compile/run; legacy paths;
 non-loopback no-auth/invalid-origin failure; authenticated allowlist success;
-path traversal/symlink escape rejection; secrets absent from logs/responses.
+path traversal/symlink escape rejection; `.dql`/provider/credential repair-search
+exclusion; secret/PII field-name rejection; no plaintext sampled-value
+persistence; ambient provider keys do not activate embeddings; secrets absent
+from cards, traces, logs, and responses.

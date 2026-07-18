@@ -47,7 +47,6 @@ import {
 } from './analysis-planner.js';
 import { extractSimpleSelectShape, sourceSqlShapeColumns } from './sql-shape.js';
 import {
-  buildRuntimeValueIndex,
   normalizeValueIndexText,
   type RuntimeValueIndexEntry,
 } from '../grounding/value-index.js';
@@ -67,6 +66,20 @@ import { buildFtsMatch, sanitizeFtsQuery } from '../memory/fts-query.js';
 import { envEmbeddingProvider } from '../embeddings/provider.js';
 import { matchExampleParaphrase } from './example-match.js';
 import { loadSkills, selectRelevantSkills, type Skill } from '../skills/loader.js';
+import {
+  buildMeaningEvidencePackage,
+  type MetadataMeaningEvidencePackage,
+} from './meaning-evidence.js';
+
+export { toAgentRetrievalEvidence } from './meaning-evidence.js';
+
+export type {
+  AgentRetrievalEvidenceAdapterOptions,
+  MetadataEvidenceClass,
+  MetadataEvidenceTrust,
+  MetadataMeaningCandidate,
+  MetadataMeaningEvidencePackage,
+} from './meaning-evidence.js';
 
 /** An approved scoped hint folded into a context pack (after certified routing). */
 export interface AppliedContextHint {
@@ -546,6 +559,8 @@ export interface LocalContextPack {
       fit: CertifiedBlockFit;
     }>;
     candidateConflicts: MetadataCandidateConflict[];
+    /** Compact, trust-separated candidate cards for bounded AI meaning resolution. */
+    meaningEvidence?: MetadataMeaningEvidencePackage;
   };
   freshness: {
     catalogPath: string;
@@ -659,6 +674,10 @@ const OBJECT_PRIORITY: Record<string, number> = {
   semantic_dimension: 5,
   semantic_measure: 6,
   semantic_entity: 7,
+  dql_entity: 7,
+  relationship: 7.2,
+  contract: 7.4,
+  model_area: 7.6,
   semantic_model: 8,
   dbt_model: 9,
   dbt_source: 10,
@@ -673,6 +692,8 @@ const OBJECT_PRIORITY: Record<string, number> = {
 };
 
 const COLUMN_OBJECT_TYPES = new Set(['dbt_column', 'warehouse_column', 'runtime_column', 'runtime_value']);
+// v3 removes the legacy persisted plaintext runtime-value cache (SEC-003).
+const METADATA_INDEX_VERSION = 'metadata-index-v3-no-plaintext-values';
 
 export function defaultMetadataPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'cache', 'metadata.sqlite');
@@ -695,7 +716,8 @@ export async function ensureMetadataCatalogFresh(
   const catalog = openMetadataCatalog(projectRoot);
   try {
     const existing = catalog.state('fingerprint');
-    if (!options.force && existing === snapshot.fingerprint) {
+    const compatibleIndex = catalog.state('index_version') === METADATA_INDEX_VERSION;
+    if (!options.force && compatibleIndex && existing === snapshot.fingerprint) {
       return {
         path: defaultMetadataPath(projectRoot),
         refreshed: false,
@@ -708,7 +730,7 @@ export async function ensureMetadataCatalogFresh(
     // W3.4 — incremental reindex when prior state exists (only re-tokenizes changed
     // sources' FTS); `force` does a clean full rebuild. Proven equal to a full
     // rebuild by incremental-reindex.test.ts.
-    if (options.force) {
+    if (options.force || !compatibleIndex) {
       catalog.rebuild(snapshot);
     } else {
       catalog.rebuildIncremental(snapshot);
@@ -813,8 +835,18 @@ export async function buildLocalContextPack(
       ? priorPack.objects.slice(0, 24)
       : [];
 
-    const runtimeSnapshot = request.runtimeSchemaSnapshot ?? catalog.latestRuntimeSchemaSnapshot();
-    const runtimeObjects = runtimeSnapshot ? runtimeSchemaObjects(runtimeSnapshot) : [];
+    const searchQueries = uniqueMetadataSearchQueries([
+      buildFollowUpSearchQuery(request.question, followUp),
+      ...questionPlan.searchQueries,
+    ]);
+    // Runtime database schemas live in a separate persisted FTS lane. Normal Ask
+    // requests hydrate only relevant tables, so thousands of tables and hundreds
+    // of thousands of columns never become a request-path full-catalog scan.
+    // Explicit snapshots remain supported for callers that already hold a small,
+    // question-scoped schema payload.
+    const runtimeObjects = request.runtimeSchemaSnapshot
+      ? runtimeSchemaObjects(request.runtimeSchemaSnapshot)
+      : catalog.searchRuntimeSchemaObjects(searchQueries.join(' '), Math.max(request.limit ?? 80, 20));
     const runtimeValueObjects = runtimeValueMatchObjects(catalog.searchRuntimeValues(
       metadataValueSearchTerms(request.question, questionPlan, followUp),
       32,
@@ -822,12 +854,8 @@ export async function buildLocalContextPack(
     const selectedObjects = selectedContextObjects(request.selectedContext);
     const followUpObjects = followUpContextObjects(followUp);
     const followUpSourceObjects = catalog.getObjectsByKeys(followUpSourceObjectKeys(followUp));
-    const searchQueries = uniqueMetadataSearchQueries([
-      buildFollowUpSearchQuery(request.question, followUp),
-      ...questionPlan.searchQueries,
-    ]);
     const areaObjects = filterMetadataObjectsByDomainContext(
-      catalog.listObjects({ objectTypes: ['model_area'], limit: 500 }),
+      catalog.listAllObjects({ objectTypes: ['model_area'] }),
       request.domainContext,
     );
     const focusedArea = resolveFocusedModelArea(request.domainContext, request.question, areaObjects);
@@ -892,7 +920,7 @@ export async function buildLocalContextPack(
     // area, status, and exclusion gates as the loader. They are not left to FTS
     // chance or re-read from disk after the snapshot has been fingerprinted.
     const selectedSkills = selectContextPackSkills(
-      catalog.listObjects({ objectTypes: ['skill'], limit: 500 }),
+      catalog.listAllObjects({ objectTypes: ['skill'] }),
       request.question,
       effectiveDomainContext,
     );
@@ -935,6 +963,7 @@ export async function buildLocalContextPack(
       limit: request.limit ?? 120,
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
+    const meaningEvidence = buildMeaningEvidencePackage(request.question, questionPlan, reranked.ranked);
     const compileConflicts = catalog.compileConflicts();
     const routeDecision = withMetadataTrustLabelInfo(await planContextPackRoute({
       request,
@@ -1012,6 +1041,7 @@ export async function buildLocalContextPack(
         topRejected: reranked.rejected,
         certifiedCandidateFits,
         candidateConflicts: conflicts,
+        meaningEvidence,
       },
       freshness: {
         catalogPath: defaultMetadataPath(projectRoot),
@@ -1237,6 +1267,31 @@ export class MetadataCatalog {
       );
       CREATE INDEX IF NOT EXISTS idx_runtime_schema_snapshots_captured ON runtime_schema_snapshots(captured_at DESC);
 
+      CREATE TABLE IF NOT EXISTS runtime_schema_objects (
+        object_key    TEXT PRIMARY KEY,
+        object_type   TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        full_name     TEXT,
+        domain        TEXT,
+        owner         TEXT,
+        status        TEXT,
+        description   TEXT,
+        source_path   TEXT,
+        source_system TEXT,
+        payload_json  TEXT NOT NULL DEFAULT '{}',
+        updated_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_runtime_schema_objects_type ON runtime_schema_objects(object_type);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS runtime_schema_fts USING fts5(
+        object_key UNINDEXED,
+        name,
+        full_name,
+        description,
+        payload,
+        tokenize = 'porter unicode61'
+      );
+
       CREATE TABLE IF NOT EXISTS runtime_value_index (
         value_key        TEXT PRIMARY KEY,
         relation         TEXT NOT NULL,
@@ -1294,6 +1349,15 @@ export class MetadataCatalog {
         updated_at            TEXT NOT NULL
       );
     `);
+    // Runtime values may be used transiently inside one governed Ask, but they
+    // must never survive in the rebuildable metadata database. Clear legacy v2
+    // rows on open so an upgrade removes old plaintext without a migration.
+    this.db.prepare('DELETE FROM runtime_value_fts').run();
+    this.db.prepare('DELETE FROM runtime_value_index').run();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO metadata_state (key, value)
+      VALUES ('runtime_value_index_count', '0')
+    `).run();
   }
 
   rebuild(snapshot: MetadataSnapshot): void {
@@ -1366,7 +1430,7 @@ export class MetadataCatalog {
           object.description ?? '',
           object.domain ?? '',
           object.owner ?? '',
-          JSON.stringify(payload),
+          searchableMetadataPayload(payload),
         );
       }
 
@@ -1418,6 +1482,7 @@ export class MetadataCatalog {
       setState.run('diagnostics_json', JSON.stringify(snapshot.diagnostics));
       setState.run('compile_conflicts_json', JSON.stringify(snapshot.compileConflicts ?? []));
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
+      setState.run('index_version', METADATA_INDEX_VERSION);
     });
     txn();
   }
@@ -1501,7 +1566,7 @@ export class MetadataCatalog {
           object.description ?? null, object.sourcePath ?? null, object.sourceSystem ?? null,
           JSON.stringify(payload), object.updatedAt ?? now,
         );
-        insertFts.run(object.objectKey, object.name, object.fullName ?? '', object.description ?? '', object.domain ?? '', object.owner ?? '', JSON.stringify(payload));
+        insertFts.run(object.objectKey, object.name, object.fullName ?? '', object.description ?? '', object.domain ?? '', object.owner ?? '', searchableMetadataPayload(payload));
       }
 
       // Cross-source tables: rebuild fully.
@@ -1535,6 +1600,7 @@ export class MetadataCatalog {
       setState.run('diagnostics_json', JSON.stringify(snapshot.diagnostics));
       setState.run('compile_conflicts_json', JSON.stringify(snapshot.compileConflicts ?? []));
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
+      setState.run('index_version', METADATA_INDEX_VERSION);
     });
     txn();
     return { mode: 'incremental', changedSources: changedSources.size };
@@ -1580,10 +1646,21 @@ export class MetadataCatalog {
     const seen = new Set(andRows.map((row) => row.object_key));
     const orRows = runMatch(match.or).filter((row) => !seen.has(row.object_key));
     const rows = [...andRows, ...orRows].slice(0, limit);
+    const andKeys = new Set(andRows.map((row) => row.object_key));
+    const maxAndMagnitude = strongestBm25Magnitude(andRows);
+    const maxOrMagnitude = strongestBm25Magnitude(orRows);
 
     return rows.map((row) => ({
       ...rowToObject(row),
-      score: row.rank ? 1 / (1 + Math.max(0, row.rank)) : 1,
+      // FTS5 bm25() is negative and more-negative means stronger. The old
+      // max(0, rank) conversion flattened virtually every hit to 1. Preserve
+      // within-tier separation and keep all-terms (AND) evidence ahead of a
+      // partial OR-only match without pretending BM25 is an absolute confidence.
+      score: normalizedBm25Score(
+        row.rank,
+        andKeys.has(row.object_key) ? 'and' : 'or',
+        andKeys.has(row.object_key) ? maxAndMagnitude : maxOrMagnitude,
+      ),
       snippet: row.snip ?? undefined,
     }));
   }
@@ -1610,6 +1687,27 @@ export class MetadataCatalog {
       ORDER BY updated_at DESC, name
       LIMIT ?
     `).all(...params, options.limit ?? 100) as MetadataObjectRow[];
+    return rows.map(rowToObject);
+  }
+
+  /** Complete typed inventory; callers must apply their own bounded ranking. */
+  listAllObjects(options: { objectTypes?: string[]; domain?: string } = {}): MetadataObject[] {
+    const filters: string[] = [];
+    const params: unknown[] = [];
+    if (options.objectTypes && options.objectTypes.length > 0) {
+      filters.push(`object_type IN (${options.objectTypes.map(() => '?').join(', ')})`);
+      params.push(...options.objectTypes);
+    }
+    if (options.domain) {
+      filters.push('domain = ?');
+      params.push(options.domain);
+    }
+    const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+    const rows = this.db.prepare(`
+      SELECT * FROM metadata_objects
+      ${where}
+      ORDER BY object_key
+    `).all(...params) as MetadataObjectRow[];
     return rows.map(rowToObject);
   }
 
@@ -1653,7 +1751,18 @@ export class MetadataCatalog {
 
   getObject(objectKey: string): MetadataObject | null {
     const row = this.db.prepare('SELECT * FROM metadata_objects WHERE object_key = ?').get(objectKey) as MetadataObjectRow | undefined;
-    return row ? rowToObject(row) : null;
+    if (row) return rowToObject(row);
+    const legacy = legacyQualifiedAlias(objectKey);
+    if (!legacy) return null;
+    const matches = this.db.prepare(`
+      SELECT * FROM metadata_objects
+      WHERE object_type = ? AND name = ?
+      ORDER BY object_key
+      LIMIT 2
+    `).all(legacy.objectType, legacy.name) as MetadataObjectRow[];
+    // A legacy local-name lookup is safe only while it resolves uniquely. When
+    // two domains define the same local ID, callers must use the qualified key.
+    return matches.length === 1 ? rowToObject(matches[0]!) : null;
   }
 
   getObjectsByKeys(keys: string[]): MetadataObject[] {
@@ -1669,6 +1778,12 @@ export class MetadataCatalog {
       `).all(...chunk) as MetadataObjectRow[];
       rows.push(...fetched.map(rowToObject));
     }
+    const found = new Set(rows.map((row) => row.objectKey));
+    for (const key of unique) {
+      if (found.has(key)) continue;
+      const resolved = this.getObject(key);
+      if (resolved && !rows.some((row) => row.objectKey === resolved.objectKey)) rows.push(resolved);
+    }
     return rows;
   }
 
@@ -1677,14 +1792,22 @@ export class MetadataCatalog {
     const seenKeys = new Set(frontier);
     const edges = new Map<string, MetadataEdge>();
     for (let hop = 0; hop < hops && frontier.size > 0; hop += 1) {
-      const current = Array.from(frontier).slice(0, 100);
+      const current = Array.from(frontier).sort();
       frontier = new Set();
-      const rows = this.db.prepare(`
-        SELECT * FROM metadata_edges
-        WHERE from_key IN (${current.map(() => '?').join(', ')})
-           OR to_key IN (${current.map(() => '?').join(', ')})
-        LIMIT 500
-      `).all(...current, ...current) as MetadataEdgeRow[];
+      const rows: MetadataEdgeRow[] = [];
+      for (let offset = 0; offset < current.length; offset += 100) {
+        const chunk = current.slice(offset, offset + 100);
+        rows.push(...this.db.prepare(`
+          SELECT * FROM metadata_edges
+          WHERE from_key IN (${chunk.map(() => '?').join(', ')})
+             OR to_key IN (${chunk.map(() => '?').join(', ')})
+          ORDER BY confidence DESC, edge_type, from_key, to_key
+          LIMIT 500
+        `).all(...chunk, ...chunk) as MetadataEdgeRow[]);
+      }
+      rows.sort((left, right) =>
+        right.confidence - left.confidence
+        || `${left.edge_type}|${left.from_key}|${left.to_key}`.localeCompare(`${right.edge_type}|${right.from_key}|${right.to_key}`));
       for (const row of rows) {
         const edge = rowToEdge(row);
         const edgeKey = `${edge.edgeType}\u0000${edge.fromKey}\u0000${edge.toKey}`;
@@ -1754,26 +1877,26 @@ export class MetadataCatalog {
 
   recordRuntimeSchemaSnapshot(snapshot: RuntimeSchemaSnapshot): RuntimeSchemaSnapshot {
     const capturedAt = snapshot.capturedAt ?? new Date().toISOString();
+    const normalizedTables = normalizeRuntimeSchemaTables(snapshot.tables).slice(0, 10_000);
     const cleanSnapshot: RuntimeSchemaSnapshot = {
       source: snapshot.source,
       capturedAt,
-      tables: normalizeRuntimeSchemaTables(snapshot.tables).slice(0, 500),
+      tables: normalizedTables,
     };
     const id = `schema_${Date.parse(capturedAt) || Date.now()}`;
-    const valueEntries = buildRuntimeValueIndex(cleanSnapshot);
     const insertSnapshot = this.db.prepare(`
       INSERT OR REPLACE INTO runtime_schema_snapshots (
         id, source, payload_json, captured_at
       ) VALUES (?, ?, ?, ?)
     `);
-    const insertValue = this.db.prepare(`
-      INSERT OR REPLACE INTO runtime_value_index (
-        value_key, relation, schema_name, table_name, column_name, column_type,
-        value, normalized_value, source, captured_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    const insertSchemaObject = this.db.prepare(`
+      INSERT INTO runtime_schema_objects (
+        object_key, object_type, name, full_name, domain, owner, status,
+        description, source_path, source_system, payload_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const insertValueFts = this.db.prepare(`
-      INSERT INTO runtime_value_fts (value_key, relation, column_name, value, normalized_value)
+    const insertSchemaFts = this.db.prepare(`
+      INSERT INTO runtime_schema_fts (object_key, name, full_name, description, payload)
       VALUES (?, ?, ?, ?, ?)
     `);
     const setState = this.db.prepare(`
@@ -1796,45 +1919,67 @@ export class MetadataCatalog {
       `).run();
       this.db.prepare('DELETE FROM runtime_value_fts').run();
       this.db.prepare('DELETE FROM runtime_value_index').run();
-      for (const entry of valueEntries) {
-        insertValue.run(
-          entry.valueKey,
-          entry.relation,
-          entry.schema ?? null,
-          entry.tableName ?? null,
-          entry.columnName,
-          entry.columnType ?? null,
-          entry.value,
-          entry.normalizedValue,
-          entry.source ?? null,
-          entry.capturedAt,
+      this.db.prepare('DELETE FROM runtime_schema_fts').run();
+      this.db.prepare('DELETE FROM runtime_schema_objects').run();
+      for (const table of normalizedTables) {
+        const object = runtimeSchemaTableObject(table, cleanSnapshot.source, capturedAt);
+        const payload = object.payload ?? {};
+        insertSchemaObject.run(
+          object.objectKey,
+          object.objectType,
+          object.name,
+          object.fullName ?? null,
+          null,
+          null,
+          object.status ?? null,
+          object.description ?? null,
+          null,
+          object.sourceSystem ?? null,
+          JSON.stringify(payload),
+          capturedAt,
         );
-        insertValueFts.run(entry.valueKey, entry.relation, entry.columnName, entry.value, entry.normalizedValue);
+        insertSchemaFts.run(
+          object.objectKey,
+          object.name,
+          object.fullName ?? '',
+          object.description ?? '',
+          searchableMetadataPayload(payload),
+        );
       }
-      setState.run('runtime_value_index_count', String(valueEntries.length));
+      setState.run('runtime_value_index_count', '0');
       setState.run('runtime_value_index_captured_at', capturedAt);
+      setState.run('runtime_schema_table_count', String(normalizedTables.length));
+      setState.run('runtime_schema_index_captured_at', capturedAt);
     });
     txn();
     return cleanSnapshot;
   }
 
   searchRuntimeValues(terms: string[], limit = 40): RuntimeValueMatch[] {
-    const cleanTerms = uniqueStrings(terms.map(normalizeValueIndexText).filter(Boolean)).slice(0, 8);
-    // Filter VALUES may legitimately be stop words (a category named "current");
-    // fall back to raw tokens so value binding still fires rather than dropping to empty.
-    const query = sanitizeFtsQuery(cleanTerms.join(' '), { prefix: true, fallbackToRawTokens: true });
-    if (!query) return [];
-    const rows = this.db.prepare(`
-      SELECT v.*,
-             bm25(runtime_value_fts) AS rank
-      FROM runtime_value_fts
-      JOIN runtime_value_index AS v ON v.value_key = runtime_value_fts.value_key
-      WHERE runtime_value_fts MATCH ?
+    // Deliberately non-persistent. Approved live probes are attached to the
+    // current in-memory schema context by the CLI and discarded after the Ask.
+    void terms;
+    void limit;
+    return [];
+  }
+
+  searchRuntimeSchemaObjects(query: string, limit = 40): MetadataObject[] {
+    const match = buildFtsMatch(query, { prefix: true });
+    if (!match.or) return [];
+    const runMatch = (matchExpr: string): MetadataObjectRow[] => this.db.prepare(`
+      SELECT o.*,
+             bm25(runtime_schema_fts) AS rank,
+             snippet(runtime_schema_fts, -1, '<mark>', '</mark>', '...', 12) AS snip
+      FROM runtime_schema_fts
+      JOIN runtime_schema_objects AS o ON o.object_key = runtime_schema_fts.object_key
+      WHERE runtime_schema_fts MATCH ?
       ORDER BY rank
       LIMIT ?
-    `).all(query, Math.max(1, limit)) as RuntimeValueIndexRow[];
-    return rows.map((row) => rowToRuntimeValueMatch(row, cleanTerms))
-      .sort((a, b) => b.score - a.score || a.relation.localeCompare(b.relation) || a.columnName.localeCompare(b.columnName));
+    `).all(matchExpr, Math.max(1, limit)) as MetadataObjectRow[];
+    const andRows = match.and ? runMatch(match.and) : [];
+    const seen = new Set(andRows.map((row) => row.object_key));
+    const rows = [...andRows, ...runMatch(match.or).filter((row) => !seen.has(row.object_key))].slice(0, limit);
+    return rows.map(rowToObject);
   }
 
   latestRuntimeSchemaSnapshot(): RuntimeSchemaSnapshot | null {
@@ -1945,6 +2090,10 @@ export class MetadataCatalog {
     return row?.value ?? null;
   }
 
+  setState(key: string, value: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO metadata_state (key, value) VALUES (?, ?)').run(key, value);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -1999,6 +2148,42 @@ interface RuntimeValueIndexRow {
   source: string | null;
   captured_at: string;
   rank?: number;
+}
+
+function strongestBm25Magnitude(rows: Array<{ rank?: number }>): number {
+  return rows.reduce((strongest, row) => Math.max(strongest, bm25Magnitude(row.rank)), 0);
+}
+
+function bm25Magnitude(rank: number | undefined): number {
+  return typeof rank === 'number' && Number.isFinite(rank) ? Math.max(0, -rank) : 0;
+}
+
+function normalizedBm25Score(rank: number | undefined, tier: 'and' | 'or', strongest: number): number {
+  const relative = strongest > 0 ? bm25Magnitude(rank) / strongest : 0;
+  const score = tier === 'and'
+    ? 0.55 + relative * 0.45
+    : 0.05 + relative * 0.45;
+  return Number(score.toFixed(6));
+}
+
+function legacyQualifiedAlias(objectKey: string): { objectType: string; name: string } | undefined {
+  const mappings: Array<[string, string]> = [
+    ['semantic:entity:', 'dql_entity'],
+    ['model_area:', 'model_area'],
+    ['relationship:', 'relationship'],
+    ['contract:', 'contract'],
+    ['domain_export:', 'domain_export'],
+    ['domain_import:', 'domain_import'],
+    ['conformance:', 'conformance'],
+    ['policy:', 'policy'],
+    ['evaluation:', 'evaluation'],
+  ];
+  for (const [prefix, objectType] of mappings) {
+    if (!objectKey.startsWith(prefix)) continue;
+    const name = objectKey.slice(prefix.length);
+    return name ? { objectType, name } : undefined;
+  }
+  return undefined;
 }
 
 function loadAgentManifest(projectRoot: string): DQLManifest {
@@ -2056,6 +2241,7 @@ function manifestDiagnosticToMetadataDiagnostic(diagnostic: ManifestDiagnostic):
 }
 
 function objectFromKGNode(node: KGNode): MetadataObject {
+  const qualifiedIdentity = qualifiedIdentityFromKGNode(node);
   const payload: Record<string, unknown> = {
     ...(node.payload ?? {}),
     kgNodeId: node.nodeId,
@@ -2090,13 +2276,21 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     businessRules: node.businessRules ?? [],
     caveats: node.caveats ?? [],
     llmContext: node.llmContext,
+    label: kgContextField(node.llmContext, 'label'),
+    metricType: kgContextField(node.llmContext, 'metric type'),
+    aggregation: kgContextField(node.llmContext, 'aggregation'),
+    table: kgContextField(node.llmContext, 'table'),
+    formula: node.kind === 'metric' ? kgContextField(node.llmContext, 'sql') : undefined,
+    semanticModel: ['metric', 'dimension', 'measure', 'entity'].includes(node.kind) && node.name.includes('.')
+      ? node.name.split('.')[0]
+      : undefined,
     referencedBy: node.referencedBy ?? [],
   };
   return {
     objectKey: objectKeyFromKGNode(node),
     objectType: objectTypeFromKGNode(node),
     name: node.name,
-    fullName: node.name,
+    fullName: qualifiedIdentity ?? node.name,
     domain: node.domain,
     owner: node.owner,
     status: node.status ?? node.certification,
@@ -2107,7 +2301,18 @@ function objectFromKGNode(node: KGNode): MetadataObject {
   };
 }
 
+function kgContextField(context: string | undefined, field: string): string | undefined {
+  if (!context) return undefined;
+  const prefix = `${field.toLowerCase()}:`;
+  const line = context.split(/\r?\n/).find((candidate) => candidate.trim().toLowerCase().startsWith(prefix));
+  return line?.trim().slice(prefix.length).trim() || undefined;
+}
+
 function objectKeyFromKGNode(node: KGNode): string {
+  const qualifiedIdentity = qualifiedIdentityFromKGNode(node);
+  if (qualifiedIdentity && isQualifiedDqlModelingNode(node)) {
+    return `dql:${node.kind}:${qualifiedIdentity}`;
+  }
   switch (node.kind) {
     case 'block': return `dql:block:${node.name}`;
     case 'term': return `dql:term:${node.name}`;
@@ -2131,6 +2336,29 @@ function objectKeyFromKGNode(node: KGNode): string {
   }
 }
 
+function isQualifiedDqlModelingNode(node: KGNode): boolean {
+  return node.sourceTier === 'business_context' && [
+    'model_area',
+    'entity',
+    'relationship',
+    'contract',
+    'domain_export',
+    'domain_import',
+    'conformance',
+    'policy',
+    'evaluation',
+  ].includes(node.kind);
+}
+
+function qualifiedIdentityFromKGNode(node: KGNode): string | undefined {
+  const payload = node.payload ?? {};
+  const explicit = stringValue(payload.qualifiedId);
+  if (explicit) return explicit;
+  if (!isQualifiedDqlModelingNode(node)) return undefined;
+  const prefix = `${node.kind}:`;
+  return node.nodeId.startsWith(prefix) ? node.nodeId.slice(prefix.length) : undefined;
+}
+
 function objectTypeFromKGNode(node: KGNode): string {
   switch (node.kind) {
     case 'block': return 'dql_block';
@@ -2139,7 +2367,7 @@ function objectTypeFromKGNode(node: KGNode): string {
     case 'metric': return 'semantic_metric';
     case 'dimension': return 'semantic_dimension';
     case 'measure': return 'semantic_measure';
-    case 'entity': return 'semantic_entity';
+    case 'entity': return isQualifiedDqlModelingNode(node) ? 'dql_entity' : 'semantic_entity';
     case 'semantic_model': return 'semantic_model';
     case 'saved_query': return 'semantic_saved_query';
     case 'dbt_model': return 'dbt_model';
@@ -3371,9 +3599,16 @@ async function planContextPackRoute(input: {
       (b.fit.confidence === 'high' ? 1 : 0) - (a.fit.confidence === 'high' ? 1 : 0)
       || b.applicabilityScore - a.applicabilityScore
     )[0]?.object;
-  let exact = exactByApplicability
+  const directlyNamedCertified = findExactCertifiedObject(input.request.question, intent, input.objects);
+  const applicabilityCertified = exactByApplicability
     ? input.objects.find((object) => object.objectKey === exactByApplicability.objectKey)
-    : findExactCertifiedObject(input.request.question, intent, input.objects) ?? exactByContract;
+    : undefined;
+  // Selection order is governance-significant (AGT-009/AGT-010): an explicit
+  // block/example reference wins, then a complete answer-shape fit, and only then
+  // the older lexical applicability heuristic. This prevents a broad customer
+  // block containing the word "spend" from displacing an exact beverage-scoped
+  // customer ranking whose measure is named "beverage_revenue".
+  let exact: MetadataObject | undefined = directlyNamedCertified ?? exactByContract ?? applicabilityCertified;
   const contextApplicability = [...applicabilityByKey.values()]
     .filter((item) => item.kind === 'context_only')
     .sort((a, b) => b.score - a.score)[0];
@@ -3406,7 +3641,6 @@ async function planContextPackRoute(input: {
   const directCertifiedBypass = Boolean(exact && (
     exactExampleMatch
     || intent === 'definition_lookup'
-    || intent === 'exact_certified_lookup'
     || objectNameInQuestion(input.request.question, exact)
   ));
   const blockFitObject = exact
@@ -3476,7 +3710,9 @@ async function planContextPackRoute(input: {
   )) {
     return {
       route: 'certified',
-      intent,
+      intent: input.questionPlan.outputShape === 'value' && input.questionPlan.requestedShape.dimensions.length === 0
+        ? 'exact_certified_lookup'
+        : intent,
       reason: `Certified ${exact.objectType.replace(/_/g, ' ')} "${exact.name}" exactly matches the requested artifact, definition, or direct KPI grain.`,
       routeReason: grainGateInfo?.reason,
       grainGate: grainGateInfo,
@@ -5115,23 +5351,7 @@ function runtimeSchemaObjects(snapshot: RuntimeSchemaSnapshot): MetadataObject[]
   const capturedAt = snapshot.capturedAt ?? new Date().toISOString();
   return normalizeRuntimeSchemaTables(snapshot.tables).flatMap((table) => {
     const relation = table.relation;
-    const tableKey = `runtime:table:${relation}`;
-    const tableObject: MetadataObject = {
-      objectKey: tableKey,
-      objectType: 'runtime_table',
-      name: table.name ?? relation.split('.').at(-1) ?? relation,
-      fullName: relation,
-      description: table.description,
-      status: 'runtime_observed',
-      sourceSystem: snapshot.source ?? table.source ?? 'runtime schema snapshot',
-      payload: compactObject({
-        relation,
-        schema: table.schema,
-        columnCompleteness: 'complete',
-        columns: table.columns,
-      }),
-      updatedAt: capturedAt,
-    };
+    const tableObject = runtimeSchemaTableObject(table, snapshot.source, capturedAt);
     const columns = table.columns.map((column) => ({
       objectKey: `runtime:column:${relation}.${column.name}`,
       objectType: 'runtime_column',
@@ -5150,6 +5370,30 @@ function runtimeSchemaObjects(snapshot: RuntimeSchemaSnapshot): MetadataObject[]
     }));
     return [tableObject, ...columns];
   });
+}
+
+function runtimeSchemaTableObject(
+  table: RuntimeSchemaTable,
+  snapshotSource: string | undefined,
+  capturedAt: string,
+): MetadataObject {
+  const relation = table.relation;
+  return {
+    objectKey: `runtime:table:${relation}`,
+    objectType: 'runtime_table',
+    name: table.name ?? relation.split('.').at(-1) ?? relation,
+    fullName: relation,
+    description: table.description,
+    status: 'runtime_observed',
+    sourceSystem: snapshotSource ?? table.source ?? 'runtime schema snapshot',
+    payload: compactObject({
+      relation,
+      schema: table.schema,
+      columnCompleteness: 'complete',
+      columns: table.columns,
+    }),
+    updatedAt: capturedAt,
+  };
 }
 
 function runtimeValueMatchObjects(matches: RuntimeValueMatch[]): MetadataObject[] {
@@ -5472,7 +5716,15 @@ function normalizeRuntimeSchemaTables(tables: RuntimeSchemaTable[]): RuntimeSche
       name: table.name ?? relation.split('.').at(-1) ?? relation,
       description: table.description,
       source: table.source,
-      columns: dedupeRuntimeColumns(table.columns ?? []).slice(0, 160),
+      // Persist structural schema only. Live sample values can contain PII and
+      // are scoped to a single request by the CLI (SEC-003).
+      columns: dedupeRuntimeColumns(table.columns ?? [])
+        .slice(0, 160)
+        .map((column) => ({
+          name: column.name,
+          type: column.type,
+          description: column.description,
+        })),
     };
     if (!current) byRelation.set(key, normalized);
     else byRelation.set(key, {
@@ -5691,6 +5943,50 @@ function compactObject(value: Record<string, unknown>): Record<string, unknown> 
     out[key] = raw;
   }
   return out;
+}
+
+const SEARCHABLE_METADATA_KEYS = new Set([
+  'aliases', 'synonyms', 'tags', 'label', 'metricType', 'aggregation', 'semanticModel',
+  'localId', 'qualifiedId', 'uniqueId',
+  'description', 'businessOutcome', 'decisionUse', 'grain', 'entities',
+  'dimensions', 'allowedFilters', 'declaredOutputs', 'outputContract', 'outputs',
+  'parameters', 'parameterPolicy', 'tableDependencies', 'sourceSystems', 'relation',
+  'table', 'database', 'schema', 'materialized', 'columns', 'intentExamples',
+  'examples', 'primaryTerms', 'businessRules', 'caveats', 'triggers', 'vocabulary',
+]);
+const SEARCHABLE_NESTED_METADATA_KEYS = new Set([
+  'name', 'id', 'label', 'description', 'type', 'role', 'filter', 'binding',
+  'question', 'entity', 'column', 'relation', 'table', 'domain', 'term', 'alias',
+  'synonym', 'localId', 'qualifiedId', 'grain',
+]);
+
+/**
+ * FTS indexes business/schema evidence, not the complete payload. In particular,
+ * raw SQL and provider/runtime fields add large amounts of noise and can contain
+ * literals that should never become general retrieval context.
+ */
+function searchableMetadataPayload(payload: Record<string, unknown>): string {
+  const tokens: string[] = [];
+  const visit = (value: unknown, depth: number): void => {
+    if (tokens.length >= 2_000 || depth > 3 || value === null || value === undefined) return;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      const text = String(value).replace(/\s+/g, ' ').trim();
+      if (text) tokens.push(text.slice(0, 500));
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 500)) visit(item, depth + 1);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (depth === 0 ? !SEARCHABLE_METADATA_KEYS.has(key) : !SEARCHABLE_NESTED_METADATA_KEYS.has(key)) continue;
+      if (/sql|secret|password|token|credential|api.?key/i.test(key)) continue;
+      visit(item, depth + 1);
+    }
+  };
+  visit(payload, 0);
+  return tokens.join(' ');
 }
 
 function rowToObject(row: MetadataObjectRow): MetadataObject {

@@ -172,9 +172,9 @@ metrics:
     // End-to-end: the metric on orders composes by a dimension on locations.
     const composed = layer.composeQuery({ metrics: ['tax_paid'], dimensions: ['location_name'] });
     expect(composed).not.toBeNull();
-    expect(composed!.sql).toContain('LEFT JOIN locations ON orders.location_id = locations.location_id');
-    expect(composed!.sql).toContain('SUM(tax_paid)');
-    expect(composed!.sql).toContain('location_name');
+    expect(composed!.sql).toContain('LEFT JOIN locations AS locations ON orders.location_id = locations.location_id');
+    expect(composed!.sql).toContain('SUM(orders.tax_paid)');
+    expect(composed!.sql).toContain('locations.location_name AS location_name');
   });
 
   it('surfaces regular dbt models when manifest has no MetricFlow semantic nodes', () => {

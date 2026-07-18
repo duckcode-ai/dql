@@ -12,6 +12,7 @@ import {
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
   recordQueryRun,
+  toAgentRetrievalEvidence,
   upsertMetadataSnapshot,
 } from './catalog.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
@@ -153,6 +154,94 @@ describe('local metadata catalog', () => {
     expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toEqual(
       expect.arrayContaining(['NBA_DB.ANALYTICS.fct_player_performance']),
     );
+  });
+
+  it('preserves BM25 separation and emits compact trust-separated meaning evidence', async () => {
+    const generatedAt = '1970-01-01T00:00:00.000Z';
+    const snapshot = {
+      projectRoot,
+      manifest: { generatedAt } as DQLManifest,
+      objects: [
+        {
+          objectKey: 'dql:block:customer_rollover_report', objectType: 'dql_block',
+          name: 'Customer rollover report', fullName: 'consumption.customer_rollover_report',
+          domain: 'consumption', status: 'certified',
+          description: 'Monthly customer report for actual rollover balances.',
+          payload: {
+            grain: 'customer_month', dimensions: ['customer', 'month'],
+            parameters: [{ name: 'month' }], declaredOutputs: ['customer_id', 'rollover_balance_amount'],
+          },
+        },
+        {
+          objectKey: 'semantic:metric:consumption.rollover_balance_amount', objectType: 'semantic_metric',
+          name: 'consumption.rollover_balance_amount', fullName: 'consumption.rollover_balance_amount',
+          domain: 'consumption', status: 'approved',
+          description: 'Remaining eligible balance carried into the next billing month.',
+          payload: { label: 'Rollover Balance Amount', aggregation: 'sum', dimensions: ['customer', 'month'], table: 'fct_consumption' },
+        },
+        {
+          objectKey: 'semantic:metric:consumption.rollover_risk_amount', objectType: 'semantic_metric',
+          name: 'consumption.rollover_risk_amount', fullName: 'consumption.rollover_risk_amount',
+          domain: 'consumption', status: 'approved',
+          description: 'Forecasted balance at risk of expiring before rollover.',
+          payload: { label: 'Rollover Risk Amount', aggregation: 'sum', dimensions: ['customer', 'month'], table: 'fct_consumption' },
+        },
+        {
+          objectKey: 'dbt:model:fct_consumption', objectType: 'dbt_model', name: 'fct_consumption',
+          fullName: 'analytics.fct_consumption', status: 'dbt_catalog',
+          description: 'Customer monthly consumption, rollover balance, and risk facts.',
+          payload: { uniqueId: 'model.analytics.fct_consumption', relation: 'analytics.fct_consumption', columns: [{ name: 'rollover_balance_amount' }] },
+        },
+      ],
+      edges: [], diagnostics: [], compileConflicts: [], fingerprint: 'meaning-evidence-test', generatedAt,
+    };
+    upsertMetadataSnapshot(projectRoot, snapshot);
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      const hits = catalog.searchObjects({ query: 'monthly rollover balance amount', limit: 10 });
+      const exact = hits.find((hit) => hit.objectKey === 'semantic:metric:consumption.rollover_balance_amount');
+      const partial = hits.find((hit) => hit.objectKey === 'semantic:metric:consumption.rollover_risk_amount');
+      expect(exact?.score).toBeGreaterThan(partial?.score ?? 0);
+      expect(new Set(hits.map((hit) => hit.score)).size).toBeGreaterThan(1);
+    } finally {
+      catalog.close();
+    }
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Who are the top customers by monthly rollover balance amount?',
+      preparedMetadataFingerprint: snapshot.fingerprint,
+      limit: 20,
+    });
+    const meaning = pack.retrievalDiagnostics.meaningEvidence;
+    expect(meaning?.candidates.length).toBeLessThanOrEqual(12);
+    expect(meaning?.byEvidenceClass.certified[0]).toMatchObject({
+      objectKey: 'dql:block:customer_rollover_report', trustTier: 'certified',
+    });
+    expect(meaning?.byEvidenceClass.semantic.map((candidate) => candidate.objectKey)).toEqual(
+      expect.arrayContaining([
+        'semantic:metric:consumption.rollover_balance_amount',
+        'semantic:metric:consumption.rollover_risk_amount',
+      ]),
+    );
+    expect(meaning?.byEvidenceClass.sql[0]).toMatchObject({
+      objectKey: 'dbt:model:fct_consumption', trustTier: 'exploratory',
+    });
+    expect(meaning?.ambiguousGroups.some((group) =>
+      group.candidateIds.includes('semantic:metric:consumption.rollover_balance_amount')
+      && group.candidateIds.includes('semantic:metric:consumption.rollover_risk_amount'))).toBe(true);
+    const agentEvidence = toAgentRetrievalEvidence(meaning!, pack.questionPlan, {
+      snapshotId: 'snapshot-meaning', sourceFingerprint: snapshot.fingerprint,
+    });
+    expect(agentEvidence).toMatchObject({
+      snapshotId: 'snapshot-meaning',
+      sourceFingerprint: snapshot.fingerprint,
+      parsedIntent: { dimensions: expect.arrayContaining(['customer']), order: 'desc' },
+    });
+    expect(agentEvidence.candidates.find((candidate) =>
+      candidate.id === 'semantic:metric:consumption.rollover_balance_amount')).toMatchObject({
+      kind: 'semantic_metric', trustTier: 'semantic', compatibility: 'unknown', eligible: true,
+    });
   });
 
   it('hands the whole small catalog to deep research and keeps ranked selection otherwise', async () => {
@@ -303,13 +392,19 @@ Use the finance model area.
     const manifest = {
       manifestVersion: 3,
       dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
-      domains: { nba: { id: 'nba', name: 'NBA', filePath: 'domains/nba/domain.dql' } },
+      domains: {
+        nba: { id: 'nba', name: 'NBA', filePath: 'domains/nba/domain.dql' },
+        growth: { id: 'growth', name: 'Growth', filePath: 'domains/growth/domain.dql' },
+      },
       blocks: {}, businessViews: {}, terms: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {}, sources: {},
       lineage: { nodes: [], edges: [] }, diagnostics: [],
       dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'area-snapshot', nodes: {}, metricFlow: {} },
       modeling: {
         mode: 'dbt-first',
-        packages: { nba: { id: 'nba', filePath: 'domains/nba/domain.dql', exports: [] } },
+        packages: {
+          nba: { id: 'nba', filePath: 'domains/nba/domain.dql', exports: [] },
+          growth: { id: 'growth', filePath: 'domains/growth/domain.dql', exports: [] },
+        },
         areas: {
           'nba::model_area::scoring': {
             id: 'nba::model_area::scoring', localId: 'scoring', qualifiedId: 'nba::model_area::scoring', domain: 'nba', name: 'Player scoring',
@@ -327,12 +422,27 @@ Use the finance model area.
             id: 'nba::entity::performance', localId: 'performance', qualifiedId: 'nba::entity::performance', domain: 'nba',
             areaId: 'nba::model_area::scoring', dbtUniqueId: 'model.nba.performance', keys: [], sourcePath: 'domains/nba/modeling/areas/scoring.dql.yaml', identityFingerprint: 'p',
           },
+          'growth::entity::performance': {
+            id: 'growth::entity::performance', localId: 'performance', qualifiedId: 'growth::entity::performance', domain: 'growth',
+            dbtUniqueId: 'model.growth.performance', keys: [], sourcePath: 'domains/growth/modeling/entities.dql.yaml', identityFingerprint: 'growth-p',
+          },
         },
         relationships: {}, contracts: {}, conformance: {}, rules: {}, interfaces: { exports: {}, imports: {} }, domainLineage: [],
       },
     } as unknown as DQLManifest;
     const snapshot = buildMetadataSnapshot(projectRoot, manifest);
     upsertMetadataSnapshot(projectRoot, snapshot);
+    expect(snapshot.objects.map((object) => object.objectKey)).toEqual(expect.arrayContaining([
+      'dql:entity:nba::entity::performance',
+      'dql:entity:growth::entity::performance',
+    ]));
+    const identityCatalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(identityCatalog.getObject('semantic:entity:performance')).toBeNull();
+      expect(identityCatalog.getObject('dql:entity:nba::entity::performance')).toMatchObject({ domain: 'nba' });
+    } finally {
+      identityCatalog.close();
+    }
 
     const explicit = await buildLocalContextPack(projectRoot, {
       question: 'Who are the points leaders?', preparedMetadataFingerprint: snapshot.fingerprint,
@@ -340,7 +450,7 @@ Use the finance model area.
     });
     expect(explicit.retrievalDiagnostics).toMatchObject({ focusedModelAreaId: 'nba::model_area::scoring', modelAreaSource: 'explicit' });
     expect(explicit.objects.map((object) => object.objectType)).toContain('model_area');
-    expect(explicit.objects.map((object) => object.objectKey)).toContain('semantic:entity:performance');
+    expect(explicit.objects.map((object) => object.objectKey)).toContain('dql:entity:nba::entity::performance');
     expect(explicit.skills.map((skill) => skill.id)).toEqual(['scoring-guide']);
 
     const inferred = await buildLocalContextPack(projectRoot, {
@@ -976,6 +1086,109 @@ Use the finance model area.
     );
 	  });
 
+  it('prefers a complete beverage-scoped certified contract over a broader lexical spend match (AGT-009, AGT-010)', async () => {
+    writeFileSync(
+      join(projectRoot, 'blocks', 'customer_profile.dql'),
+      `block "customer_profile" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Customer lifetime profile. One row per customer."
+  tags = ["customer", "spend"]
+  grain = "one row per customer"
+  outputs = ["customer_name", "lifetime_spend"]
+  dimensions = ["customer_name"]
+  query = """
+    SELECT player_name AS customer_name, SUM(points) AS lifetime_spend
+    FROM fct_player_performance
+    GROUP BY 1
+  """
+}`,
+      'utf-8',
+    );
+    writeFileSync(
+      join(projectRoot, 'blocks', 'top_beverage_customers.dql'),
+      `block "top_beverage_customers" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Top customers ranked by beverage revenue. One row per customer."
+  tags = ["beverage", "customer", "revenue", "ranking"]
+  grain = "one row per customer in the beverage purchase ranking"
+  outputs = ["customer_name", "beverage_revenue"]
+  dimensions = ["customer_name"]
+  query = """
+    SELECT player_name AS customer_name, SUM(points) AS beverage_revenue
+    FROM fct_player_performance
+    WHERE is_beverage = true
+    GROUP BY 1
+    ORDER BY beverage_revenue DESC
+    LIMIT 10
+  """
+}`,
+      'utf-8',
+    );
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Who are the top customers who spent on beverage category products?',
+      limit: 40,
+    });
+
+    expect(pack.routeDecision).toMatchObject({
+      route: 'certified',
+      exactObjectKey: 'dql:block:top_beverage_customers',
+      blockFit: expect.objectContaining({
+        kind: 'exact',
+        unsupportedFilters: [],
+      }),
+    });
+    expect(pack.retrievalDiagnostics.certifiedCandidateFits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'top_beverage_customers', action: 'certified_answer' }),
+        expect.objectContaining({ name: 'customer_profile', action: 'rejected_for_fit' }),
+      ]),
+    );
+
+    for (const question of [
+      'Can you give each customer with lifetime spend info',
+      'List every customer and their lifetime spend',
+      'Show lifetime spend by customer',
+      "What is each customer's lifetime spend?",
+    ]) {
+      const lifetimePack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      expect(lifetimePack.routeDecision, question).toMatchObject({
+        route: 'certified',
+        exactObjectKey: 'dql:block:customer_profile',
+        blockFit: expect.objectContaining({ kind: 'exact' }),
+      });
+    }
+
+    const scalarPack = await buildLocalContextPack(projectRoot, {
+      question: 'What is total lifetime spend across all customers?',
+      limit: 40,
+    });
+    expect(scalarPack.routeDecision).toMatchObject({
+      route: 'generated_sql',
+      blockFit: expect.objectContaining({
+        kind: 'context_only',
+        grainMismatch: expect.stringContaining('one aggregate value'),
+      }),
+      certifiedApplicability: expect.objectContaining({
+        name: 'customer_profile',
+        kind: 'context_only',
+      }),
+    });
+    expect(scalarPack.routeDecision.exactObjectKey).toBeUndefined();
+    expect(scalarPack.retrievalDiagnostics.certifiedCandidateFits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'customer_profile', action: 'context_only' }),
+      ]),
+    );
+  });
+
   it('ingests dbt catalog.json columns as complete physical metadata', async () => {
     addJaffleOrderItemsModel(projectRoot);
     const manifestPath = join(projectRoot, 'target', 'manifest.json');
@@ -1386,19 +1599,19 @@ Use the finance model area.
     );
   });
 
-  it('indexes enterprise-scale dbt models and MetricFlow metrics with bounded retrieval', async () => {
+  it('indexes 4,000 dbt models and 10,000 MetricFlow metrics with bounded retrieval (CTX-005, PERF-001, PERF-002, E2E-006)', async () => {
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
       project: 'nba_ops',
       dbt: { projectDir: '.' },
     }), 'utf-8');
     addNoisyDbtModels(projectRoot, 3998);
-    addLargeSemanticManifest(projectRoot, 3000);
+    addLargeSemanticManifest(projectRoot, 10_000);
 
     const semanticLayer = resolveSemanticLayerWithDiagnostics({
       provider: 'dbt',
       projectPath: '.',
     }, projectRoot).layer;
-    expect(semanticLayer?.listMetrics().length).toBeGreaterThanOrEqual(3000);
+    expect(semanticLayer?.listMetrics().length).toBeGreaterThanOrEqual(10_000);
 
     const refresh = await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
     expect(refresh.objectCount).toBeGreaterThan(10_000);
@@ -1409,28 +1622,28 @@ Use the finance model area.
       expect(catalog.getObject('dbt:model:noisy_3997')).toMatchObject({
         objectType: 'dbt_model',
       });
-      expect(catalog.getObject('semantic:metric:enterprise_metrics.enterprise_metric_2999')).toMatchObject({
+      expect(catalog.getObject('semantic:metric:enterprise_metrics.enterprise_metric_9999')).toMatchObject({
         objectType: 'semantic_metric',
       });
       expect(catalog.sourceFingerprints().length).toBeGreaterThan(10);
-      expect(catalog.domainShards().some((shard) => shard.semanticMetricCount >= 3000)).toBe(true);
+      expect(catalog.domainShards().some((shard) => shard.semanticMetricCount >= 10_000)).toBe(true);
     } finally {
       catalog.close();
     }
 
     const start = Date.now();
     const pack = await buildLocalContextPack(projectRoot, {
-      question: 'Show enterprise metric 2999 by enterprise segment',
+      question: 'Show enterprise metric 9999 by enterprise segment',
       objectTypes: ['semantic_metric', 'semantic_model', 'dbt_model'],
       limit: 80,
     });
     const elapsed = Date.now() - start;
 
     expect(pack.objects.length).toBeLessThanOrEqual(80);
-    expect(pack.objects.map((object) => object.objectKey)).toContain('semantic:metric:enterprise_metrics.enterprise_metric_2999');
+    expect(pack.objects.map((object) => object.objectKey)).toContain('semantic:metric:enterprise_metrics.enterprise_metric_9999');
     expect(pack.retrievalDiagnostics.topRejected.length).toBeGreaterThan(0);
     // Keep the product target strict locally. The full monorepo CI runs this
-    // 4k-model/3k-metric fixture alongside other CPU-heavy suites, so leave
+    // 4k-model/10k-metric fixture alongside other CPU-heavy suites, so leave
     // bounded scheduler headroom without weakening retrieval-size assertions.
     expect(elapsed).toBeLessThan(process.env.CI ? 10_000 : 4_000);
   }, 60_000);
@@ -1579,7 +1792,7 @@ Use the finance model area.
     );
   });
 
-  it('uses runtime schema snapshots as allowed SQL context', async () => {
+  it('uses runtime schema snapshots as allowed SQL context without persisting plaintext samples (SEC-003)', async () => {
     recordRuntimeSchemaSnapshot(projectRoot, {
       source: 'test runtime',
       tables: [{
@@ -1596,16 +1809,8 @@ Use the finance model area.
     const catalog = openMetadataCatalog(projectRoot);
     try {
       const matches = catalog.searchRuntimeValues(['Stephen Curry']);
-      expect(matches).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            relation: 'NBA_DB.RAW.player_box_scores',
-            columnName: 'player_name',
-            value: 'Stephen Curry',
-          }),
-        ]),
-      );
-      expect(catalog.state('runtime_value_index_count')).toBe('1');
+      expect(matches).toEqual([]);
+      expect(catalog.state('runtime_value_index_count')).toBe('0');
     } finally {
       catalog.close();
     }
@@ -1622,15 +1827,65 @@ Use the finance model area.
           role: 'runtime_schema',
           name: 'player_box_scores',
         }),
-        expect.objectContaining({
-          role: 'value_match',
-          name: 'player_name = Stephen Curry',
-        }),
       ]),
     );
+    expect(pack.evidenceRoles.some((role) => role.role === 'value_match')).toBe(false);
     const relation = pack.allowedSqlContext.relations.find((item) => item.relation === 'NBA_DB.RAW.player_box_scores');
-    expect(relation?.columns.find((column) => column.name === 'player_name')?.sampleValues).toContain('Stephen Curry');
+    expect(relation?.columns.find((column) => column.name === 'player_name')?.sampleValues ?? []).toEqual([]);
   });
+
+  it('retrieves a relevant table from a 3,000-table runtime schema without hydrating the full database catalog (CTX-005, PERF-002, E2E-006)', async () => {
+    const prepared = await ensureMetadataCatalogFresh(projectRoot, { force: true });
+    const tables = Array.from({ length: 3_000 }, (_, index) => ({
+      relation: `ENTERPRISE.RAW.operational_table_${index}`,
+      schema: 'RAW',
+      name: `operational_table_${index}`,
+      columns: [
+        { name: 'record_id', type: 'VARCHAR' },
+        { name: 'created_at', type: 'TIMESTAMP' },
+        { name: `attribute_${index}`, type: 'VARCHAR' },
+      ],
+    }));
+    tables[2_999] = {
+      relation: 'ENTERPRISE.COMMERCE.beverage_customer_spend_fact',
+      schema: 'COMMERCE',
+      name: 'beverage_customer_spend_fact',
+      columns: [
+        { name: 'customer_id', type: 'VARCHAR' },
+        { name: 'customer_name', type: 'VARCHAR' },
+        { name: 'product_category', type: 'VARCHAR' },
+        { name: 'beverage_revenue', type: 'DECIMAL' },
+      ],
+    };
+    recordRuntimeSchemaSnapshot(projectRoot, {
+      source: 'enterprise warehouse fixture',
+      tables,
+    });
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.state('runtime_schema_table_count')).toBe('3000');
+      expect(catalog.searchRuntimeSchemaObjects('top customers beverage category spend', 20).map((row) => row.objectKey)).toContain(
+        'runtime:table:ENTERPRISE.COMMERCE.beverage_customer_spend_fact',
+      );
+    } finally {
+      catalog.close();
+    }
+
+    const start = Date.now();
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'Who are the top customers who spent on beverage category products?',
+      preparedMetadataFingerprint: prepared.fingerprint,
+      limit: 40,
+    });
+    const elapsed = Date.now() - start;
+
+    expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).toContain(
+      'ENTERPRISE.COMMERCE.beverage_customer_spend_fact',
+    );
+    expect(pack.objects.filter((object) => object.objectType === 'runtime_table').length).toBeLessThanOrEqual(40);
+    expect(elapsed).toBeLessThan(process.env.CI ? 5_000 : 2_000);
+  }, 30_000);
 
   it('folds an approved, scoped correction hint into a matching Tier-2 context pack (cited)', async () => {
     // No hints yet → backward compatible (empty applied set).

@@ -26,7 +26,7 @@ describe("synthesizeAnswer", () => {
     const input: SynthesizeInput = { question: "what is total revenue?", draftText: "Revenue is $2.8M.", resultPreview: preview([{ revenue: 2800000 }], ["revenue"]) };
     const result = await synthesizeAnswer(input);
     expect(result.source).toBe("deterministic");
-    expect(result.text).toContain("**Revenue:** 2,800,000");
+    expect(result.text).toContain("**Revenue:** $2,800,000.00");
     expect(result.text).not.toContain("$2.8M");
   });
 
@@ -72,9 +72,24 @@ describe("synthesizeAnswer", () => {
       resultPreview: preview([{ region: "West", revenue: 10 }, { region: "East", revenue: 8 }], ["region", "revenue"]),
     });
     expect(result.format).toBe("comparison");
-    expect(result.text).toContain("**West** has the highest revenue at **10**");
-    expect(result.text).toContain("**East:** 8");
+    expect(result.text).toContain("**West** has the highest revenue at **$10.00**");
+    expect(result.text).toContain("**East:** $8.00");
     expect(result.text).not.toContain("| region | revenue |");
+  });
+
+  it("uses the distinguishing target entity instead of a repeated flow source as the narrative label", async () => {
+    const result = await synthesizeAnswer({
+      question: "Show revenue by product type and product name as a source-to-target flow.",
+      resultPreview: preview([
+        { product_type: "beverage", product_name: "Jaffle", revenue: 100275 },
+        { product_type: "beverage", product_name: "Vanilla Ice", revenue: 84474 },
+        { product_type: "beverage", product_name: "Tangaroo", revenue: 83772 },
+      ], ["product_type", "product_name", "revenue"]),
+    });
+
+    expect(result.text).toContain("**Jaffle** has the highest revenue at **$100,275.00**");
+    expect(result.text).toContain("**Vanilla Ice:** $84,474.00");
+    expect(result.text).not.toContain("**beverage** has the highest");
   });
 
   it("turns a one-row profile into business facts instead of a query plan", async () => {
@@ -93,6 +108,7 @@ describe("synthesizeAnswer", () => {
     expect(result.text).toContain("**Matthew Meyer**");
     expect(result.text).toContain("Customer Type");
     expect(result.text).toContain("Lifetime Spend");
+    expect(result.text).toContain("$3,089.80");
     expect(result.text).not.toContain("QUERY PLAN");
     expect(result.text).not.toContain("grain");
   });
@@ -167,7 +183,32 @@ describe("verified statistics — sample-as-population hallucination guard", () 
     // The sample is labeled honestly and the stats are the declared source of truth.
     expect(user).toContain("200 rows total; SAMPLE of first 20 shown");
     expect(user).toContain("VERIFIED STATISTICS (computed over ALL 200 rows");
-    expect(user).toContain("min 66.88, max 3089.8");
+    expect(user).toContain("min $66.88, max $3,089.80, sum $671,425.37");
     expect(system).toContain("NEVER derive aggregates from the sample rows");
+    expect(system).toContain("money uses the shown currency symbol");
+  });
+});
+
+describe("business value semantics", () => {
+  it("formats percentages from either fractional or whole-percent storage", async () => {
+    const fractional = await synthesizeAnswer({
+      question: "what is conversion?",
+      resultPreview: preview([{ conversion_rate_pct: 0.082 }], ["conversion_rate_pct"]),
+    });
+    const whole = await synthesizeAnswer({
+      question: "what is market share?",
+      resultPreview: preview([{ market_share: 8.2 }], ["market_share"]),
+    });
+    expect(fractional.text).toContain("8.2%");
+    expect(whole.text).toContain("8.2%");
+  });
+
+  it("renders counts as integers without currency or decimals", async () => {
+    const result = await synthesizeAnswer({
+      question: "how many orders?",
+      resultPreview: preview([{ order_count: 231 }], ["order_count"]),
+    });
+    expect(result.text).toContain("**Order Count:** 231");
+    expect(result.text).not.toContain("$");
   });
 });

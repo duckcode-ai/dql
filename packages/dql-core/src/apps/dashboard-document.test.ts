@@ -116,6 +116,27 @@ describe('parseDashboardDocument', () => {
     expect(document?.layout.items[0].viz.options?.chart).toBe('scatter');
   });
 
+  it('preserves Sankey source, target, and value bindings', () => {
+    const doc = {
+      ...minimal,
+      layout: {
+        ...minimal.layout,
+        items: [{
+          i: 'supply-flow',
+          x: 0, y: 0, w: 8, h: 4,
+          block: { blockId: 'supply_flow' },
+          viz: { type: 'sankey', options: { chart: 'sankey', x: 'source', color: 'target', y: 'amount' } },
+        }],
+      },
+    };
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+    expect(errors).toEqual([]);
+    expect(document?.layout.items[0].viz).toMatchObject({
+      type: 'sankey',
+      options: { chart: 'sankey', x: 'source', color: 'target', y: 'amount' },
+    });
+  });
+
   it('parses governed display metadata on dashboard tiles', () => {
     const doc = {
       ...minimal,

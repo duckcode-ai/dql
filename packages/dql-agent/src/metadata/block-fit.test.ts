@@ -36,6 +36,70 @@ describe('certified block fit', () => {
     expect(result.reasons.join(' ')).toContain('unsupported requested filters');
   });
 
+  it('accepts a certified customer ranking whose beverage restriction is baked into its contract and SQL (AGT-009, AGT-010)', () => {
+    const block = certifiedBlock('top_beverage_customers', {
+      grain: 'customer',
+      entities: ['Customer'],
+      declaredOutputs: ['customer_name', 'beverage_revenue', 'beverage_orders', 'beverage_product_types'],
+      dimensions: ['customer'],
+      allowedFilters: ['top_n'],
+      tags: ['beverage', 'customer', 'revenue', 'ranking'],
+      description: 'Top customers ranked by beverage revenue. One row per customer.',
+      sql: `select customer_name, sum(product_price) as beverage_revenue
+        from order_items
+        join products on order_items.product_id = products.product_id
+        where products.is_beverage = true
+        group by customer_name
+        order by beverage_revenue desc
+        limit 10`,
+    });
+
+    const result = fit('who are the top customers who spent on beverage category products?', block);
+
+    expect(result.kind).toBe('exact');
+    expect(result.confidence).toBe('high');
+    expect(result.missingDimensions).toEqual([]);
+    expect(result.missingOutputs).toEqual([]);
+    expect(result.unsupportedFilters).toEqual([]);
+  });
+
+  it('rejects a high-overlap customer block for a product flow with different required outputs', () => {
+    const block = certifiedBlock('top_beverage_customers', {
+      grain: 'customer',
+      // These are joined/source entities, not the returned row grain.
+      entities: ['Order Item', 'Product'],
+      declaredOutputs: ['customer_name', 'beverage_revenue', 'beverage_orders', 'beverage_product_types'],
+      dimensions: ['customer'],
+      tags: ['beverage', 'customer', 'revenue', 'ranking'],
+      description: 'Top customers ranked by beverage revenue. One row per customer.',
+      sql: 'select customer_name, beverage_revenue, beverage_orders, beverage_product_types from customer_beverage order by beverage_revenue desc limit 10',
+    });
+
+    const result = fit('Show revenue by product type and product name as a source-to-target flow.', block);
+
+    expect(result.kind).toBe('context_only');
+    expect(result.missingOutputs).toEqual(expect.arrayContaining(['product_type', 'product_name']));
+    expect(result.grainMismatch).toMatch(/customer.*product/i);
+    expect(result.reasons.join(' ')).toContain('missing requested outputs');
+  });
+
+  it('AGT-009/AGT-010 keeps a row-level profile as context for a scalar aggregate', () => {
+    const block = certifiedBlock('customer_profile', {
+      grain: 'one row per customer',
+      entities: ['Customer'],
+      declaredOutputs: ['customer_name', 'lifetime_spend', 'first_ordered_at'],
+      dimensions: ['customer_name'],
+      description: 'Customer lifetime profile. One row per customer.',
+      sql: 'select customer_name, lifetime_spend, first_ordered_at from customers',
+    });
+
+    const result = fit('What is total lifetime spend across all customers?', block);
+
+    expect(result.kind).toBe('context_only');
+    expect(result.grainMismatch).toContain('one aggregate value');
+    expect(result.reasons.join(' ')).toContain('one aggregate value');
+  });
+
   it('rejects a category-level revenue block for a product-level revenue request', () => {
     const block = certifiedBlock('food_vs_drink_revenue', {
       grain: 'category',

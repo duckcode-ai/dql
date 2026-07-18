@@ -55,6 +55,20 @@ describe('validateAnswerResultShape', () => {
     expect(validation.missingOutputs).not.toContain('vendor_name');
   });
 
+  it('accepts a governed revenue output for a plain-English spend request', () => {
+    const validation = validateAnswerResultShape(
+      buildAnalysisQuestionPlan('Who are the top customers who spent on beverage category products?'),
+      {
+        columns: ['customer_name', 'beverage_revenue', 'beverage_orders', 'beverage_product_types'],
+        rows: [{ customer_name: 'Melissa Lopez', beverage_revenue: 1317, beverage_orders: 231, beverage_product_types: 5 }],
+        rowCount: 1,
+      },
+    );
+
+    expect(validation.missingOutputs).not.toContain('spend');
+    expect(validation.warnings).toEqual([]);
+  });
+
   it('warns when a global top-N answer returns too many rows', () => {
     const validation = validateAnswerResultShape(
       buildAnalysisQuestionPlan('Show the top 2 customers by revenue'),

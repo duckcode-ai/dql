@@ -2322,7 +2322,9 @@ function nextTileId(dashboard: { layout: { items: Array<{ i: string }> } }, raw:
 function normalizeVizTypeForDashboard(value: unknown): string {
   const chart = String(value ?? 'table').toLowerCase().replace(/-/g, '_');
   if (chart === 'single_value' || chart === 'kpi' || chart === 'line' || chart === 'bar' || chart === 'area'
-    || chart === 'pie' || chart === 'pivot' || chart === 'map' || chart === 'funnel') {
+    || chart === 'pie' || chart === 'donut' || chart === 'grouped_bar' || chart === 'stacked_bar' || chart === 'scatter'
+    || chart === 'heatmap' || chart === 'histogram' || chart === 'waterfall' || chart === 'pivot' || chart === 'map'
+    || chart === 'funnel' || chart === 'sankey') {
     return chart;
   }
   return 'table';

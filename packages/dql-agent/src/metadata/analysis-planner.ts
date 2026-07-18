@@ -7,6 +7,7 @@ import type {
 export type AnalysisQuestionMode =
   | 'exact_lookup'
   | 'definition'
+  | 'list_by_dimension'
   | 'ranking'
   | 'entity_profile'
   | 'entity_drilldown'
@@ -25,12 +26,27 @@ export interface AnalysisEntityMention {
   typeHint?: string;
 }
 
+/**
+ * A phrase that may be a stored member value rather than a metadata object.
+ * Keep the original phrase intact so later, field-scoped value resolution can
+ * distinguish `Melissa Lopez` (a customer_name value) from `customer` (an
+ * entity) and `revenue` (a metric). AGT-005/AGT-009.
+ */
+export interface AnalysisValueMention {
+  text: string;
+  normalizedText: string;
+  source: AnalysisEntityMention['source'];
+  syntacticRole: 'filter_value' | 'entity_identifier' | 'unknown';
+  typeHint?: string;
+}
+
 export interface AnalysisQuestionPlan {
   question: string;
   normalizedQuestion: string;
   mode: AnalysisQuestionMode;
   routeIntent: MetadataAgentIntent;
   entities: AnalysisEntityMention[];
+  valueMentions: AnalysisValueMention[];
   metricTerms: string[];
   dimensionTerms: string[];
   filterTerms: string[];
@@ -115,7 +131,7 @@ const METRIC_WORDS = [
 const DIMENSION_WORDS = [
   'account', 'category', 'channel', 'cohort', 'customer', 'department', 'entity', 'geo',
   'location', 'market', 'merchant', 'month', 'person', 'player', 'product', 'profile',
-  'region', 'segment', 'sku', 'team', 'type', 'user', 'vendor', 'week', 'year',
+  'region', 'segment', 'sku', 'supply', 'team', 'type', 'user', 'vendor', 'week', 'year',
 ];
 
 /**
@@ -150,21 +166,28 @@ export function buildAnalysisQuestionPlan(
 ): AnalysisQuestionPlan {
   const cleanQuestion = question.replace(/\s+/g, ' ').trim();
   const normalizedQuestion = normalizeSearchText(cleanQuestion);
-  const lower = cleanQuestion.toLowerCase();
+  // Stakeholders occasionally paste semantic/dbt identifiers directly. Treat
+  // underscores as word boundaries for intent extraction while retaining the
+  // original question for exact output identifiers and auditability.
+  const languageQuestion = cleanQuestion.replace(/_/g, ' ');
+  const lower = languageQuestion.toLowerCase();
   const entities = extractEntities(cleanQuestion);
+  const valueMentions = extractValueMentions(entities);
   const metricTerms = uniqueStrings([
-    ...extractMetricTerms(cleanQuestion),
+    ...extractMetricTerms(languageQuestion),
     ...extractFollowUpMetricTerms(followUp, lower),
   ]);
-  const extractedDimensionTerms = extractDimensionTerms(cleanQuestion);
-  const filterTerms = extractFilterTerms(cleanQuestion, entities);
-  const dimensionTerms = removeFilterOnlyDimensionTerms(cleanQuestion, extractedDimensionTerms);
-  const timeTerms = extractTimeTerms(cleanQuestion);
+  const extractedDimensionTerms = extractDimensionTerms(languageQuestion);
+  const filterTerms = extractFilterTerms(languageQuestion, entities);
+  const dimensionTerms = removeFilterOnlyDimensionTerms(languageQuestion, extractedDimensionTerms);
+  const timeTerms = extractTimeTerms(languageQuestion);
   const mode = inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
   const routeIntent = routeIntentForMode(mode);
   const outputShape = outputShapeForMode(mode, lower, dimensionTerms);
-  const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities)
-    && !(mode === 'general_analysis' && definitionPhraseCarriesAnalyticalShape({ lower, metricTerms, dimensionTerms }));
+  // Certified capability matching is contract-first. An explicit analytical
+  // shape ("lifetime spend by customer") is a reason to reject a definition
+  // term, not a reason to skip a fully compatible certified block.
+  const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities);
   const needsGeneratedSql = generatedSqlIsLikely(mode, shouldConsiderCertifiedExact);
   const needsResearchWorkspace = researchWorkspaceIsLikely(mode, lower);
   const requestedShape = buildRequestedAnswerShape(cleanQuestion, {
@@ -203,6 +226,7 @@ export function buildAnalysisQuestionPlan(
     mode,
     routeIntent,
     entities,
+    valueMentions,
     metricTerms,
     dimensionTerms,
     filterTerms,
@@ -237,7 +261,7 @@ export function certifiedApplicabilityForObject(
   const dimensionMatch = scoreTerms(text, plan.dimensionTerms);
   const searchMatch = scoreTerms(text, plan.searchTerms);
   const directionCompatible = rankingDirectionCompatible(plan.question, directionalTextForObject(object));
-  const asksDifferentGrain = plan.needsGeneratedSql || plan.entities.length > 0 || plan.mode === 'entity_profile';
+  const asksDifferentGrain = plan.entities.length > 0 || plan.mode === 'entity_profile';
   const score = Number((
     (explicitName ? 45 : 0) +
     (exactExample ? 55 : 0) +
@@ -625,9 +649,29 @@ function inferQuestionMode(input: {
   followUp?: unknown;
 }): AnalysisQuestionMode {
   const { lower } = input;
+  // A relative measure predicate is not an ordinary entity drilldown. It asks for
+  // a peer set whose aggregate is compared with a named entity's aggregate (for
+  // example, "customers who paid less tax than Melissa"). Classify it before the
+  // conversation drilldown carry so a prior certified block cannot turn the ask
+  // into a simple equality filter or a single global KPI.
+  if (isEntityRelativeMeasureComparison(lower)) return 'comparison';
   if (followUpKind(input.followUp) === 'drilldown') return 'entity_drilldown';
   if (/^\s*(run|execute|open)\b/i.test(lower)) return 'exact_lookup';
   if (/\b(trust|rely|certif|certified|lineage|owner|caveat|gap|governance|can .* trust)\b/i.test(lower)) return 'trust_review';
+  if (/\b(anomal|exception|outlier|spike|dip)\b/i.test(lower)) return 'anomaly';
+  if (/\b(compare|versus|vs\.?|cohort)\b/i.test(lower)) return 'comparison';
+  if (/\b(why|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|what happened)\b/i.test(lower)) return 'diagnose_change';
+  if (/\b(driver|drivers|drove|break\s*down|breakdown|contribute|contribution|top movers?)\b/i.test(lower)) return 'driver_breakdown';
+  if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|maximum|max|rank|ranking|most|leading|leader|leaders)\b/i.test(lower)
+    || hasComparativeMetricRanking(lower)) return 'ranking';
+  if (/\b(profile|overview|360|complete\s+(?:stats|statistics|view)|full\s+(?:stats|statistics|view)|all\s+(?:stats|statistics|metrics)|research|reserach)\b/i.test(lower)) return 'entity_profile';
+  if (/\b(trend|over time|by\s+(?:day|week|month|quarter|year|season)|daily|weekly|monthly|quarterly|yearly)\b/i.test(lower)) return 'trend';
+  // "Across all customers" states the population for one aggregate; it does
+  // not request a customer breakdown. Resolve direct KPI shape before the
+  // generic each/every/all list heuristic.
+  if (isDirectKpiValueQuestion(lower)) return 'exact_lookup';
+  if (input.metricTerms.length > 0 && input.dimensionTerms.length > 0
+    && /\b(each|every|all|list|show|give|provide)\b/i.test(lower)) return 'list_by_dimension';
   // "What is" is not, by itself, a definition request. Questions such as
   // "what is revenue by customer and product?" carry an explicit analytical
   // shape and must reach the data cascade. Keep genuine single-concept meaning
@@ -635,17 +679,8 @@ function inferQuestionMode(input: {
   // explicitly grouped measure requests as analysis (AGT-001).
   if (/\b(define|definition|meaning of|what is|what are|what does .+ mean)\b/i.test(lower)
     && !definitionPhraseCarriesAnalyticalShape(input)) return 'definition';
-  if (/\b(anomal|exception|outlier|spike|dip)\b/i.test(lower)) return 'anomaly';
-  if (/\b(compare|versus|vs\.?|cohort)\b/i.test(lower)) return 'comparison';
-  if (/\b(why|changed?|change|drop|dropped|decline|declined|increase|increased|decrease|decreased|delta|variance|what happened)\b/i.test(lower)) return 'diagnose_change';
-  if (/\b(driver|drivers|drove|break\s*down|breakdown|contribute|contribution|top movers?)\b/i.test(lower)) return 'driver_breakdown';
-  if (/\b(profile|overview|360|complete\s+(?:stats|statistics|view)|full\s+(?:stats|statistics|view)|all\s+(?:stats|statistics|metrics)|research|reserach)\b/i.test(lower)) return 'entity_profile';
   if (input.entities.length > 0 && (input.metricTerms.length > 0 || /\b(show|list|find|give|provide|performance|activity|history|details)\b/i.test(lower))) return 'entity_drilldown';
-  if (/\b(trend|over time|by\s+(?:day|week|month|quarter|year|season)|daily|weekly|monthly|quarterly|yearly)\b/i.test(lower)) return 'trend';
-  if (/\b(top|bottom|best|worst|highest|lowest|least|fewest|minimum|min|maximum|max|rank|ranking|most|leading|leader|leaders)\b/i.test(lower)
-    || hasComparativeMetricRanking(lower)) return 'ranking';
   if (/\b(block|certified|saved|existing|approved|governed)\b/i.test(lower)) return 'exact_lookup';
-  if (isDirectKpiValueQuestion(lower)) return 'exact_lookup';
   if (/\b(show|list|find|which|who|how many|how much|metric|kpi|dashboard|performance|revenue|sales|orders|customers|users)\b/i.test(lower)) return 'general_analysis';
   // A question that carries real analytical structure — named grouping dimensions
   // and/or a measure to aggregate — is a general analysis, not an ambiguous ask.
@@ -664,13 +699,14 @@ function definitionPhraseCarriesAnalyticalShape(input: {
   if (input.metricTerms.length === 0) return false;
   if (input.dimensionTerms.length >= 2) return true;
   return input.dimensionTerms.length > 0
-    && /\b(by|per|for each|group(?:ed)? by|split by|break(?:down| down)|info for|details for)\b/i.test(input.lower);
+    && /\b(top|bottom|highest|lowest|most|least|by|per|each|every|group(?:ed)? by|split by|break(?:down| down)|info for|details for|got|bought|purchased)\b/i.test(input.lower);
 }
 
 function routeIntentForMode(mode: AnalysisQuestionMode): MetadataAgentIntent {
   switch (mode) {
     case 'exact_lookup': return 'exact_certified_lookup';
     case 'definition': return 'definition_lookup';
+    case 'list_by_dimension': return 'ad_hoc_ranking';
     case 'ranking': return 'ad_hoc_ranking';
     case 'entity_profile':
     case 'entity_drilldown': return 'entity_drilldown';
@@ -686,14 +722,16 @@ function routeIntentForMode(mode: AnalysisQuestionMode): MetadataAgentIntent {
 }
 
 function certifiedExactIsPlausible(mode: AnalysisQuestionMode, entities: AnalysisEntityMention[]): boolean {
-  if (mode === 'exact_lookup' || mode === 'definition') return true;
-  if (mode === 'ranking' || mode === 'general_analysis') return entities.length === 0;
-  return false;
+  void entities;
+  return mode !== 'clarify' && mode !== 'trust_review';
 }
 
 function generatedSqlIsLikely(mode: AnalysisQuestionMode, certifiedExact: boolean): boolean {
+  void certifiedExact;
   if (mode === 'clarify' || mode === 'definition' || mode === 'trust_review') return false;
-  return !certifiedExact || ['entity_profile', 'entity_drilldown', 'comparison', 'driver_breakdown', 'diagnose_change', 'anomaly', 'trend'].includes(mode);
+  // This flag controls whether dbt/schema evidence is hydrated as the final
+  // fallback. It must not suppress contract-first certified/semantic matching.
+  return mode !== 'exact_lookup';
 }
 
 function researchWorkspaceIsLikely(mode: AnalysisQuestionMode, lower: string): boolean {
@@ -708,10 +746,10 @@ function outputShapeForMode(
 ): AnalysisQuestionPlan['outputShape'] {
   if (mode === 'entity_profile') return 'profile';
   if (mode === 'definition' || mode === 'trust_review') return 'narrative';
-  if (/\b(chart|graph|visual|plot)\b/i.test(lower) || mode === 'trend') return 'chart';
-  if (dimensionTerms.length >= 2 || /\b(info for|details for|for each|group(?:ed)? by|split by|break(?:down| down))\b/i.test(lower)) return 'table';
+  if (/\b(chart|graph|visual|plot|sankey|flow\s+diagram|source.?to.?target\s+flow)\b/i.test(lower) || mode === 'trend') return 'chart';
+  if (mode === 'list_by_dimension' || dimensionTerms.length >= 2 || /\b(info for|details for|for each|group(?:ed)? by|split by|break(?:down| down))\b/i.test(lower)) return 'table';
   if (/\b(table|list|show all|complete|full)\b/i.test(lower) || mode === 'ranking' || mode === 'entity_drilldown') return 'table';
-  if (/\bwhat is|how many|how much|total|count|kpi|metric\b/i.test(lower)) return 'value';
+  if (/\bwhat (?:is|was|were|are)|how many|how much|total|count|kpi|metric\b/i.test(lower)) return 'value';
   return 'narrative';
 }
 
@@ -729,6 +767,14 @@ function extractEntities(question: string): AnalysisEntityMention[] {
   for (const match of question.matchAll(/\b(?:for|where|only|specific|named|called|profile\s+for|research\s+on|reserach\s+on)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,5})/g)) {
     entities.push({ text: cleanEntityText(match[1]), source: 'explicit_filter' });
   }
+  // A one-token person/account reference after a comparator ("less than
+  // Melissa") is still a data value. The generic named-entity regex below only
+  // accepts two title-cased words, so without this rule the baseline entity is
+  // lost and retrieval repeatedly selects a broad metric or the previous block.
+  for (const match of question.matchAll(/\b(?:than|versus|vs\.?)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,4})/g)) {
+    const text = cleanEntityText(match[1]);
+    if (text) entities.push({ text, source: 'explicit_filter' });
+  }
   for (const match of question.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4})\b/g)) {
     const text = cleanEntityText(match[1]);
     if (text && !/^(SQL|DQL|KPI|ARR|MRR|NBA|AI|LLM)$/.test(text)) {
@@ -736,6 +782,20 @@ function extractEntities(question: string): AnalysisEntityMention[] {
     }
   }
   return uniqueEntities(entities).slice(0, 8);
+}
+
+function extractValueMentions(entities: AnalysisEntityMention[]): AnalysisValueMention[] {
+  return entities.map((entity) => ({
+    text: entity.text,
+    normalizedText: normalizeSearchText(entity.text),
+    source: entity.source,
+    syntacticRole: entity.source === 'id' || entity.source === 'email'
+      ? 'entity_identifier'
+      : entity.source === 'quoted' || entity.source === 'explicit_filter' || entity.source === 'named_entity'
+        ? 'filter_value'
+        : 'unknown',
+    ...(entity.typeHint ? { typeHint: entity.typeHint } : {}),
+  }));
 }
 
 function extractMetricTerms(question: string): string[] {
@@ -804,6 +864,31 @@ function removeFilterOnlyDimensionTerms(question: string, dimensions: string[]):
       if (!explicitlyGrouped && !mentionedOutsideDescriptor) filterOnly.add(dimension);
     }
   }
+  // Natural-language purchase restrictions often put the filtered object after
+  // its qualifier instead of before it: "customers who spent on beverage
+  // category products". In that sentence the answer grain is customer; products
+  // describe what was purchased and must not become an output dimension. Limit
+  // this broader rule to transactional grammar so named subjects such as "What
+  // changed in Player Stats Data Availability?" retain their analytical grain.
+  const hasTransactionalRestriction = /\b(?:spend|spends|spent|spending|buy|buys|bought|buying|purchase|purchases|purchased|purchasing|order|orders|ordered|ordering|sell|sells|sold|selling)\b[^?.!,;]{0,80}\b(?:on|in|within|from|among)\b/i.test(lower);
+  if (hasTransactionalRestriction) {
+    for (const dimension of dimensions) {
+      const word = escapeRegExp(dimension);
+      const restriction = new RegExp(
+        `\\b(?:on|in|within|from|among)\\s+(?:the\\s+)?[^?.!,;]{0,60}\\b${word}s?\\b`,
+        'ig',
+      );
+      for (const match of lower.matchAll(restriction)) {
+        const outsideRestriction = `${lower.slice(0, match.index)} ${lower.slice((match.index ?? 0) + match[0].length)}`;
+        const explicitlyGrouped = new RegExp(
+          `\\b(?:by|per|for each|group(?:ed)? by|split by)\\b[^?.!,;]{0,40}\\b${word}s?\\b`,
+          'i',
+        ).test(lower);
+        const mentionedOutsideRestriction = new RegExp(`\\b${word}s?\\b`, 'i').test(outsideRestriction);
+        if (!explicitlyGrouped && !mentionedOutsideRestriction) filterOnly.add(dimension);
+      }
+    }
+  }
   return dimensions.filter((dimension) => !filterOnly.has(dimension));
 }
 
@@ -830,7 +915,9 @@ function extractFilterTerms(question: string, entities: AnalysisEntityMention[])
     }
   }
   return uniqueStrings([
-    ...entities.flatMap((entity) => tokenize(entity.text)),
+    // Stored member values are phrases, not metadata tokens. Search can still
+    // tokenize them separately, but the executable filter contract must not.
+    ...entities.map((entity) => entity.text),
     ...analyticalValues,
     ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
@@ -978,6 +1065,11 @@ function hasComparativeMetricRanking(lower: string): boolean {
   return /\bmore\s+(?:amount|bookings|cost|count|margin|orders?|points?|profit|quantity|revenue|sales|score|spend|spending|tax|usage|value|volume)\b/.test(lower);
 }
 
+function isEntityRelativeMeasureComparison(value: string): boolean {
+  return /\b(?:less|lower|fewer|more|higher|greater)\b[^?.!]{0,80}\bthan\b\s+[a-z0-9@._'-]+/i.test(value)
+    || /\b(?:below|under|above|over)\b\s+that\s+of\s+[a-z0-9@._'-]+/i.test(value);
+}
+
 function wordNumberFromTopN(lower: string): number | undefined {
   const words: Record<string, number> = {
     one: 1,
@@ -1006,6 +1098,10 @@ function isPlausibleRequiredColumn(term: string): boolean {
 function extractRequiredOutputs(question: string, dimensions: string[], measures: string[]): string[] {
   const lower = question.toLowerCase();
   const outputs = new Set<string>();
+  for (const match of lower.matchAll(/\b([a-z][a-z0-9]*(?:_[a-z0-9]+){1,3})\b/g)) {
+    const identifier = canonicalShapeTerm(match[1]);
+    if (isPlausibleRequiredColumn(identifier)) outputs.add(identifier);
+  }
   for (const dim of dimensions) {
     if (isPlausibleRequiredColumn(dim)) outputs.add(dim);
   }
@@ -1015,7 +1111,8 @@ function extractRequiredOutputs(question: string, dimensions: string[], measures
     // ("average tax info", "tax info by location") is a fuzzy search hint, not a
     // literal column the generated SQL must return — promoting it falsely flags a
     // valid answer as "partial". Single tokens (incl. "count" for KPI blocks) stay.
-    if (measure.split(/[_\s]+/).filter(Boolean).length === 1) outputs.add(measure);
+    const aggregationOperators = new Set(['total', 'sum', 'average', 'avg', 'minimum', 'min', 'maximum', 'max']);
+    if (measure.split(/[_\s]+/).filter(Boolean).length === 1 && !aggregationOperators.has(measure)) outputs.add(measure);
   }
   if (/\bproduct\s+name\b/i.test(lower)) outputs.add('product_name');
   if (/\bcustomer\s+name\b/i.test(lower)) outputs.add('customer_name');
@@ -1202,6 +1299,7 @@ function modeSearchTerms(mode: AnalysisQuestionMode): string[] {
   switch (mode) {
     case 'entity_profile': return ['profile', 'summary', 'details', 'stats', 'statistics', 'history'];
     case 'entity_drilldown': return ['detail', 'filter', 'name', 'id'];
+    case 'list_by_dimension': return ['list', 'detail', 'group'];
     case 'ranking': return ['rank', 'top', 'bottom', 'total'];
     case 'trend': return ['date', 'time', 'month', 'week', 'year', 'trend'];
     case 'comparison': return ['compare', 'segment', 'cohort'];
@@ -1234,7 +1332,7 @@ function relationSearchText(relation: MetadataAllowedSqlContext['relations'][num
 }
 
 function isDirectCertifiedQuestion(plan: AnalysisQuestionPlan): boolean {
-  return plan.mode === 'exact_lookup' || plan.mode === 'definition' || (plan.shouldConsiderCertifiedExact && !plan.needsGeneratedSql);
+  return plan.mode === 'exact_lookup' || plan.mode === 'definition' || plan.shouldConsiderCertifiedExact;
 }
 
 function hasExactExampleQuestion(object: MetadataObject, normalizedQuestion: string): boolean {
@@ -1255,9 +1353,13 @@ function rankingDirectionCompatible(question: string, targetText: string): boole
 
 function rankingDirection(value: string): 'top' | 'bottom' | undefined {
   const lower = value.toLowerCase();
-  const bottom = /\b(bottom|worst|lowest|least|fewest|minimum|min|smallest)\b/.test(lower);
+  const bottom = /\b(bottom|worst|lowest|least|fewest|minimum|min|smallest)\b/.test(lower)
+    || /\b(?:less|lower|fewer)\b[^?.!]{0,80}\bthan\b/.test(lower)
+    || /\b(?:below|under)\b\s+that\s+of\s+[a-z0-9@._'-]+/.test(lower);
   const top = /\b(top|best|highest|most|maximum|max|largest|leading|leaders?)\b/.test(lower)
-    || hasComparativeMetricRanking(lower);
+    || hasComparativeMetricRanking(lower)
+    || /\b(?:more|higher|greater)\b[^?.!]{0,80}\bthan\b/.test(lower)
+    || /\b(?:above|over)\b\s+that\s+of\s+[a-z0-9@._'-]+/.test(lower);
   if (bottom && !top) return 'bottom';
   if (top && !bottom) return 'top';
   return undefined;
@@ -1345,9 +1447,11 @@ function cleanEntityText(value: string): string {
 
 function isDirectKpiValueQuestion(lower: string): boolean {
   const asksForValue = /\b(what\s+(?:is|was|were|are)|how\s+(?:much|many)|show|report|calculate|give\s+me|tell\s+me)\b/.test(lower);
-  const metricLanguage = /\b(revenue|sales|arr|mrr|bookings|orders|customers|users|churn|retention|conversion|rate|count|total|points|goals|kpi|metric)\b/.test(lower);
+  const aggregateCue = /\b(how\s+(?:much|many)|show|report|calculate|give\s+me|tell\s+me|total|sum|count|number of|average|avg|minimum|min|maximum|max|across\s+all|overall)\b/.test(lower);
+  const temporalScope = /\b(?:last|this|previous|prior|current)\s+(?:day|week|month|quarter|year)\b/.test(lower);
+  const metricLanguage = /\b(revenue|sales|spend|spending|cost|profit|margin|value|amount|usage|arr|mrr|bookings|orders|customers|users|churn|retention|conversion|rate|count|total|points|goals|kpi|metric)\b/.test(lower);
   const customGrain = /\b(by|break\s*down|breakdown|drill|compare|versus|vs\.?|segment|cohort|top|bottom|best|worst|highest|lowest|least|fewest|rank|ranking|most|why|changed?|driver|anomal|exception)\b/.test(lower);
-  return asksForValue && metricLanguage && !customGrain;
+  return asksForValue && (aggregateCue || temporalScope) && metricLanguage && !customGrain;
 }
 
 function tokenize(value: string): string[] {

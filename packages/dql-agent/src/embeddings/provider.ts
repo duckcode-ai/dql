@@ -211,17 +211,26 @@ export class CachingEmbeddingProvider implements EmbeddingProvider {
   }
 
   async embed(texts: string[]): Promise<number[][]> {
-    const missing: { text: string; key: string }[] = [];
+    const missingByKey = new Map<string, string>();
     const keys = texts.map((text) => {
       const key = createHash('sha1').update(text).digest('hex');
-      if (!this.cache.has(key)) missing.push({ text, key });
+      if (!this.cache.has(key) && !missingByKey.has(key)) missingByKey.set(key, text);
       return key;
     });
+    const resolvedThisBatch = new Map<string, number[]>();
+    const missing = Array.from(missingByKey, ([key, text]) => ({ key, text }));
     if (missing.length > 0) {
       const vectors = await this.inner.embed(missing.map((entry) => entry.text));
-      missing.forEach((entry, i) => this.put(entry.key, vectors[i] ?? []));
+      missing.forEach((entry, i) => {
+        const vector = vectors[i] ?? [];
+        resolvedThisBatch.set(entry.key, vector);
+        this.put(entry.key, vector);
+      });
     }
-    return keys.map((key) => this.cache.get(key) ?? []);
+    // A single batch may exceed maxEntries. Early vectors can be evicted before
+    // this method returns, so retain the batch-local result instead of returning
+    // empty vectors or introducing order bias.
+    return keys.map((key) => this.cache.get(key) ?? resolvedThisBatch.get(key) ?? []);
   }
 
   private put(key: string, vector: number[]): void {
@@ -357,15 +366,17 @@ export function resolveEmbeddingProvider(options: EmbeddingResolveOptions = {}):
  * Read embedding config from environment (local-first). Lets retrieval/matching
  * light up a real embedder without threading config through every call site.
  * `DQL_OLLAMA_EMBED_URL` / `DQL_OLLAMA_EMBED_MODEL` for Ollama; `DQL_OPENAI_API_KEY`
- * (or `OPENAI_API_KEY`) for an OpenAI-compatible endpoint. Absent ⇒ hashed default.
+ * for an OpenAI-compatible endpoint. A general `OPENAI_API_KEY` is deliberately
+ * ignored: answer-provider credentials are not implicit authorization to export
+ * enterprise catalog text for retrieval. Absent ⇒ hashed default.
  */
 export function embeddingOptionsFromEnv(env: Record<string, string | undefined> = process.env): EmbeddingResolveOptions {
   const options: EmbeddingResolveOptions = {};
   if (env.DQL_OLLAMA_EMBED_URL) {
     options.ollamaEndpoint = env.DQL_OLLAMA_EMBED_URL;
     if (env.DQL_OLLAMA_EMBED_MODEL) options.ollamaModel = env.DQL_OLLAMA_EMBED_MODEL;
-  } else if (env.DQL_OPENAI_API_KEY || env.OPENAI_API_KEY) {
-    options.openaiApiKey = env.DQL_OPENAI_API_KEY ?? env.OPENAI_API_KEY;
+  } else if (env.DQL_OPENAI_API_KEY) {
+    options.openaiApiKey = env.DQL_OPENAI_API_KEY;
     if (env.DQL_OPENAI_EMBED_MODEL) options.model = env.DQL_OPENAI_EMBED_MODEL;
   }
   return options;

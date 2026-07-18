@@ -154,6 +154,8 @@ export interface AgentRunRequest {
    * `analysisDepth` above (e.g. CLI flags) take precedence over this.
    */
   thinkingMode?: ThinkingMode;
+  /** Host-only cancellation signal. JSON request parsers must never hydrate it. */
+  signal?: AbortSignal;
 }
 
 export interface AgentRunEvent {
@@ -394,8 +396,9 @@ const DEFAULT_MAX_STEPS = 4;
  * re-running the same executor (repair can't add what the route can't produce).
  */
 export const AGENT_RUN_ESCALATION_MAP: Partial<Record<AgentRunRoute, AgentRunRoute>> = {
-  certified_answer: "research",
-  generated_answer: "research",
+  // Ordinary answers never silently turn into Research. A certified shape gap
+  // may still explicitly escalate to generated_answer through its gate; after
+  // the one bounded generated repair, the result remains visible for review.
   app_build: "dql_block_draft",
 };
 
@@ -428,6 +431,10 @@ export function answerAnywayRoute(
   decision?: IntentDecision,
 ): AgentRunRoute {
   if (route !== "clarify") return route;
+  // Meaning resolution found real, material ambiguity. This is a hard safety
+  // boundary: generated SQL must not guess which similarly named metric/block
+  // the user intended.
+  if (decision?.requiresClarification === true) return "clarify";
   const explicitMissing = (request.signals?.missingContext?.length ?? 0) > 0;
   const explicitClarifyIntent = request.intent === "clarify" || request.intent === "trust_gap_review";
   // A router suggestion alone is not enough to dead-end an answerable data
@@ -744,11 +751,27 @@ export class AgentRunEngine {
    * deterministic decision. The router owns its own fallback to heuristics.
    */
   private async decideRoute(request: AgentRunRequest): Promise<IntentDecision> {
-    if (requestedModeToAction(request.requestedMode)) return buildIntentDecision(request);
+    const requestedAction = requestedModeToAction(request.requestedMode);
+    // `ask` constrains the eventual analytical action to a direct answer, but it
+    // still needs retrieval-first meaning resolution. Treating it like the SQL,
+    // block, or app authoring modes used to bypass the evidence router entirely
+    // on the primary Ask surface.
+    if (requestedAction && request.requestedMode !== "ask") return buildIntentDecision(request);
     if (this.router) {
       try {
-        return await this.router.decide(request);
-      } catch {
+        const routed = await this.router.decide(request);
+        if (
+          request.requestedMode === "ask"
+          && routed.action !== "converse"
+          && routed.action !== "compose_app"
+          && routed.requiresClarification !== true
+        ) {
+          return { ...routed, action: "answer" };
+        }
+        return routed;
+      } catch (error) {
+        if (request.signal?.aborted) throw request.signal.reason ?? error;
+        if (error instanceof Error && error.name === "AbortError") throw error;
         // Router failed entirely — fall back to deterministic routing.
       }
     }
@@ -792,23 +815,26 @@ export class AgentRunEngine {
     });
 
     const audience = resolveAudience(request);
-    const routeDecision: IntentDecision = clarificationContinuation
-      ? {
-          action: "answer",
-          confidence: 1,
-          reason: "This continues a pending clarification, so I will resolve it against the original analytical question and produce a governed answer instead of asking again.",
-          followsUp: true,
-          source: "heuristic",
-        }
-      : await this.decideRoute(request);
-    const defaultRoute = answerAnywayRoute(
-      constrainRouteForAudience(selectRoute(request, routeDecision), audience),
-      request,
-      audience,
-      routeDecision,
-    );
-
+    // Initialize a deterministic decision so router/provider timeouts can still
+    // be persisted as a complete blocked run with an inspectable trace. The old
+    // pre-try await escaped the engine and left active UI runs looking endless.
+    let routeDecision: IntentDecision = buildIntentDecision(request);
     try {
+      routeDecision = clarificationContinuation
+        ? {
+            action: "answer",
+            confidence: 1,
+            reason: "This continues a pending clarification, so I will resolve it against the original analytical question and produce a governed answer instead of asking again.",
+            followsUp: true,
+            source: "heuristic",
+          }
+        : await this.decideRoute(request);
+      const defaultRoute = answerAnywayRoute(
+        constrainRouteForAudience(selectRoute(request, routeDecision), audience),
+        request,
+        audience,
+        routeDecision,
+      );
       const plan = await this.planner.plan({
         request,
         routeDecision,
@@ -1121,7 +1147,9 @@ export class AgentRunEngine {
       await this.store?.save(run);
       return run;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error && err.name === "TimeoutError"
+        ? "This request reached its bounded execution deadline. No additional retry or Research run was started; refine the question or start Research explicitly for a longer investigation."
+        : err instanceof Error ? err.message : String(err);
       emit({
         type: "run.failed",
         message,
@@ -1382,6 +1410,9 @@ export function createDeterministicAgentRunPlanner(): AgentRunPlanner {
       if (attemptsUsed < maxRepairAttempts) {
         return { decision: "repair", repairHint: hint };
       }
+      if (action?.kind === "retry") {
+        return { decision: "accept" };
+      }
       if (escalationRoute) {
         return { decision: "escalate", route: escalationRoute, goal: hint, repairHint: hint };
       }
@@ -1458,6 +1489,14 @@ function requestedModeToAction(mode: AgentRunRequestedMode | undefined): IntentD
 }
 
 export function selectRoute(request: AgentRunRequest, decision: IntentDecision): AgentRunRoute {
+  // Retrieval + meaning resolution already established a compatible execution
+  // class. Route directly to the shared answer executor instead of paying for a
+  // planner/tool-search pass. The executor still owns authorization and runtime
+  // compatibility validation.
+  if (decision.action === "answer" && decision.meaningResolution && decision.requiresClarification !== true) {
+    if (decision.meaningResolution.recommendedRoute === "certified") return "certified_answer";
+    if (decision.meaningResolution.recommendedRoute === "semantic") return "semantic_answer";
+  }
   return selectCascadeRunRoute(request, decision);
 }
 

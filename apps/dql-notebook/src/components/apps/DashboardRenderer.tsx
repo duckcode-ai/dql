@@ -3447,7 +3447,9 @@ function autoLayoutRank(item: DashboardLayoutItem): number {
 function normalizeViz(chartType?: string): string {
   const value = (chartType ?? 'table').toLowerCase().replace(/-/g, '_');
   if (value === 'single_value' || value === 'kpi' || value === 'gauge' || value === 'line' || value === 'bar' || value === 'area'
-    || value === 'pie' || value === 'pivot' || value === 'map' || value === 'funnel' || value === 'heading' || value === 'text') {
+    || value === 'pie' || value === 'donut' || value === 'grouped_bar' || value === 'stacked_bar' || value === 'scatter'
+    || value === 'heatmap' || value === 'histogram' || value === 'waterfall' || value === 'pivot' || value === 'map'
+    || value === 'funnel' || value === 'sankey' || value === 'heading' || value === 'text') {
     return value;
   }
   return 'table';

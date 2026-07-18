@@ -51,4 +51,80 @@ describe('selectSemanticMembersViaLlm', () => {
     const provider = { name: 'claude', available: async () => true, generate: async () => { throw new Error('no key'); } } as AgentProvider;
     expect(await selectSemanticMembersViaLlm({ provider, semanticLayer: layer(), question: 'q' })).toBeUndefined();
   });
+
+  it('rejects invented semantic member names at the resolver boundary', async () => {
+    const selection = await selectSemanticMembersViaLlm({
+      provider: providerReturning('{"metrics":["invented_revenue"],"dimensions":["invented_region"]}'),
+      semanticLayer: layer(),
+      question: 'revenue by region',
+    });
+    expect(selection).toBeUndefined();
+  });
+
+  it('ranks a relevant metric into the bounded prompt from a 7,000-metric catalog', async () => {
+    const metrics = Array.from({ length: 7_000 }, (_, index) => ({
+      name: `metric_${index}`,
+      label: `Metric ${index}`,
+      description: 'Unrelated operational measure.',
+      domain: 'operations',
+      sql: `metric_${index}`,
+      type: 'sum' as const,
+      table: 'facts',
+    }));
+    metrics[6_789] = {
+      name: 'monthly_rollover_balance_amount',
+      label: 'Monthly Rollover Balance Amount',
+      description: 'Actual eligible balance carried into the next month.',
+      domain: 'operations',
+      sql: 'rollover_balance',
+      type: 'sum',
+      table: 'facts',
+    };
+    const semanticLayer = new SemanticLayer({ metrics, dimensions: [] });
+    const provider = {
+      name: 'claude',
+      available: async () => true,
+      generate: async (messages: AgentMessage[]) => {
+        const prompt = messages.map((message) => message.content).join('\n');
+        expect(prompt).toContain('monthly_rollover_balance_amount');
+        return '{"metrics":["monthly_rollover_balance_amount"]}';
+      },
+    } as AgentProvider;
+
+    const selection = await selectSemanticMembersViaLlm({
+      provider,
+      semanticLayer,
+      question: 'what is the monthly rollover balance amount',
+    });
+    expect(selection?.metrics).toEqual(['monthly_rollover_balance_amount']);
+  });
+
+  it('rejects a real catalog member that was not present in the bounded prompt', async () => {
+    const metrics = Array.from({ length: 80 }, (_, index) => ({
+      name: `metric_${index}`,
+      label: `Metric ${index}`,
+      description: index === 79 ? 'Hidden catalog member.' : 'Visible operational measure.',
+      domain: 'operations',
+      sql: `metric_${index}`,
+      type: 'sum' as const,
+      table: 'facts',
+    }));
+    const semanticLayer = new SemanticLayer({ metrics, dimensions: [] });
+    const provider = {
+      name: 'claude',
+      available: async () => true,
+      generate: async (messages: AgentMessage[]) => {
+        const prompt = messages.map((message) => message.content).join('\n');
+        expect(prompt).not.toContain('- metric_79');
+        return '{"metrics":["metric_79"]}';
+      },
+    } as AgentProvider;
+
+    const selection = await selectSemanticMembersViaLlm({
+      provider,
+      semanticLayer,
+      question: 'unrelated metric',
+    });
+    expect(selection).toBeUndefined();
+  });
 });

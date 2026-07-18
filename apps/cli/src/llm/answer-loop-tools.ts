@@ -334,7 +334,12 @@ async function runRipgrep(
     '--line-number', '--no-heading', '--color', 'never', '--ignore-case', '--max-count', '5',
     '--glob', '*.{dql,sql,yml,yaml,json,md}',
     '--glob', '!.git/**', '--glob', '!node_modules/**', '--glob', '!dist/**', '--glob', '!target/**',
-    '--glob', '!.dql/cache/**',
+    // `.dql` contains provider/connection settings and other runtime-local state.
+    // Source repair must never make those files available to a model, even when
+    // a user question happens to contain a word such as "api" or "token".
+    '--glob', '!.dql/**',
+    '--glob', '!**/.env*', '--glob', '!**/profiles.yml', '--glob', '!**/profiles.yaml',
+    '--glob', '!**/*credential*.json', '--glob', '!**/*secret*.json', '--glob', '!**/*provider-settings*.json',
     pattern, '.',
   ];
   return new Promise((resolveSearch) => {
@@ -365,7 +370,7 @@ async function runRipgrep(
     child.on('close', () => {
       const matches = output.split(/\r?\n/).flatMap((raw) => {
         const match = raw.match(/^(.*?):(\d+):(.*)$/);
-        return match ? [{ path: match[1], line: Number(match[2]), text: match[3].trim().slice(0, 500) }] : [];
+        return match ? [{ path: match[1], line: Number(match[2]), text: redactSourceSearchLine(match[3]) }] : [];
       }).slice(0, limit);
       finish(matches);
     });
@@ -374,6 +379,17 @@ async function runRipgrep(
 
 const SOURCE_FILE_PATTERN = /\.(dql|sql|yml|yaml|json|md)$/i;
 const SOURCE_SEARCH_IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'target', '.dql']);
+const SOURCE_SEARCH_DENIED_FILE = /(?:^|\/)(?:\.env(?:\..*)?|profiles\.ya?ml|[^/]*(?:credential|secret|provider-settings)[^/]*\.(?:json|ya?ml))$/i;
+
+function redactSourceSearchLine(value: string): string {
+  return value
+    .trim()
+    .slice(0, 500)
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|password|secret|private[_-]?key|client[_-]?secret)\s*[=:]\s*)([^\s,}\]]+)/gi,
+      '$1[REDACTED]',
+    );
+}
 
 function runNativeSourceSearch(
   projectRoot: string,
@@ -401,7 +417,8 @@ function runNativeSourceSearch(
         if (!SOURCE_SEARCH_IGNORED_DIRECTORIES.has(entry.name)) directories.push(filePath);
         continue;
       }
-      if (!entry.isFile() || !SOURCE_FILE_PATTERN.test(entry.name)) continue;
+      const relativePath = relative(projectRoot, filePath).replaceAll('\\', '/');
+      if (!entry.isFile() || !SOURCE_FILE_PATTERN.test(entry.name) || SOURCE_SEARCH_DENIED_FILE.test(relativePath)) continue;
       scannedFiles += 1;
       if (scannedFiles > 5_000) break;
       let source: string;
@@ -412,7 +429,7 @@ function runNativeSourceSearch(
       }
       for (const [index, line] of source.split(/\r?\n/).entries()) {
         if (!matcher.test(line)) continue;
-        matches.push({ path: filePath, line: index + 1, text: line.trim().slice(0, 500) });
+        matches.push({ path: filePath, line: index + 1, text: redactSourceSearchLine(line) });
         if (matches.length >= limit) break;
       }
     }

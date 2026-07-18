@@ -16,6 +16,7 @@
  */
 
 import type { MetadataAgentIntent } from './metadata/catalog.js';
+import type { MeaningResolution } from './meaning-resolution.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse';
@@ -82,6 +83,20 @@ export interface IntentDecision {
     | 'unclear';
   /** Where the decision came from: fast heuristics, the LLM router, or its cache. */
   source?: 'heuristic' | 'llm' | 'cache';
+  /**
+   * Retrieval-first meaning decision. Executors may use the selected qualified
+   * IDs as a query specification, but must still validate/authorize execution.
+   */
+  meaningResolution?: MeaningResolution;
+  /** Redacted retrieval trace; deliberately excludes definitions and raw values. */
+  retrievalEvidence?: {
+    snapshotId?: string;
+    sourceFingerprint?: string;
+    candidateCount: number;
+    candidateIds: string[];
+  };
+  /** A hard ambiguity must remain a clarification; answer-anyway must not bypass it. */
+  requiresClarification?: boolean;
 }
 
 /** A confident match means a certified block or governed metric clearly fits. */

@@ -184,7 +184,7 @@ describe("AgentRunEngine", () => {
     )).toBe(true);
   });
 
-  it("escalates a model_declined generated answer to research instead of dead-ending (P1)", async () => {
+  it("keeps a model_declined Ask terminal after its bounded in-lane repair", async () => {
     const events: AgentRunEvent[] = [];
     let generatedCalls = 0;
     const engine = new AgentRunEngine({
@@ -193,9 +193,8 @@ describe("AgentRunEngine", () => {
       planner: fixedRoutePlanner("generated_answer"),
       gates: defaultAgentRunGates,
       executors: {
-        // Mirrors the real local-runtime answerRunExecutor for a model_declined
-        // refusal: non-empty apology prose, the refusal code surfaced, and a blocking
-        // escalate-to-research evaluation. Previously this dead-ended as needs_clarification.
+        // Mirrors the real local-runtime answer executor: the answer loop already
+        // spent its repair, so this is inspectable but not actionable by the engine.
         generated_answer: () => {
           generatedCalls += 1;
           return {
@@ -207,10 +206,8 @@ describe("AgentRunEngine", () => {
               id: "declined-despite-context",
               label: "Answer grounding",
               passed: false,
-              severity: "blocking",
+              severity: "warning",
               message: "Declined despite context.",
-              suggestedRepair: "Investigate the join path and compose a query.",
-              repairAction: { kind: "escalate", route: "research", hint: "Investigate the join path and compose a query." },
             }],
           };
         },
@@ -233,13 +230,10 @@ describe("AgentRunEngine", () => {
     }, (event) => events.push(event));
 
     expect(generatedCalls).toBe(1);
-    expect(run.escalationAttempts).toBe(1);
-    expect(run.steps.map((step) => step.route)).toEqual(["generated_answer", "research"]);
+    expect(run.escalationAttempts).toBe(0);
+    expect(run.steps.map((step) => step.route)).toEqual(["generated_answer"]);
     expect(run.stopReason).not.toBe("needs_clarification");
-    expect(events.some((event) =>
-      event.type === "escalated"
-      && (event.payload as { route?: string })?.route === "research"
-    )).toBe(true);
+    expect(events.some((event) => event.type === "escalated")).toBe(false);
   });
 
   it("opens research as review-required durable work for investigate requests", async () => {
@@ -392,6 +386,38 @@ describe("AgentRunEngine", () => {
       message: "warehouse unavailable",
     });
     expect(run.events.at(-1)?.type).toBe("run.failed");
+  });
+
+  it("persists a bounded timeout even when it occurs during retrieval-first routing", async () => {
+    const store = new InMemoryAgentRunStore();
+    const controller = new AbortController();
+    controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-routing-timeout",
+      now: fixedClock(),
+      store,
+      router: {
+        decide: async () => {
+          throw controller.signal.reason;
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: "top products by revenue",
+      requestedMode: "ask",
+      signal: controller.signal,
+    });
+
+    expect(run).toMatchObject({
+      id: "run-routing-timeout",
+      route: "blocked",
+      status: "blocked",
+      stopReason: "blocked",
+    });
+    expect(run.summary).toContain("bounded execution deadline");
+    expect(run.events.at(-1)?.type).toBe("run.failed");
+    expect(store.get("run-routing-timeout")?.summary).toContain("bounded execution deadline");
   });
 
   it("persists runs to a project-local file store", async () => {
@@ -573,7 +599,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     expect(generatedResearch).toBe(1);
   });
 
-  it("escalates a generated answer with no grounding to research", async () => {
+  it("keeps a generated answer with no grounding terminal", async () => {
     const events: AgentRunEvent[] = [];
     const engine = new AgentRunEngine({
       idGenerator: () => "run-escalate",
@@ -595,20 +621,19 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
       signals: { certifiedScore: 0.1, hasRetrieval: true },
     }, (event) => events.push(event));
 
-    expect(run.route).toBe("research");
-    expect(run.steps).toHaveLength(2);
-    expect(run.steps[0]?.status).toBe("escalated");
-    expect(run.steps[1]?.route).toBe("research");
+    expect(run.route).toBe("generated_answer");
+    expect(run.steps).toHaveLength(1);
+    expect(run.steps[0]?.status).toBe("passed");
     expect(run.repairAttempts).toBe(0);
-    expect(run.escalationAttempts).toBe(1);
+    expect(run.escalationAttempts).toBe(0);
     expect(run.budgetUsage?.usage).toMatchObject({
       laneExecutionAttemptsUsed: 0,
-      engineEscalationsUsed: 1,
+      engineEscalationsUsed: 0,
     });
-    expect(events.map((event) => event.type)).toContain("escalated");
+    expect(events.map((event) => event.type)).not.toContain("escalated");
   });
 
-  it("does not run an escalation after the engine escalation budget is exhausted", async () => {
+  it("does not spend the engine escalation budget for a terminal lookup gap", async () => {
     let researchCalls = 0;
     const events: AgentRunEvent[] = [];
     const engine = new AgentRunEngine({
@@ -633,14 +658,52 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
 
     expect(researchCalls).toBe(0);
     expect(run.route).toBe("generated_answer");
-    expect(run.status).toBe("blocked");
+    expect(run.status).toBe("needs_review");
     expect(run.repairAttempts).toBe(0);
     expect(run.escalationAttempts).toBe(0);
     expect(run.budgetUsage?.limits.engineEscalations).toBe(0);
-    expect(events.some((event) =>
-      event.type === "escalated"
-      && event.message.includes("budget exhausted")
-    )).toBe(true);
+    expect(events.some((event) => event.type === "escalated")).toBe(false);
+  });
+
+  it("does not silently turn an exhausted ordinary shape repair into Research", async () => {
+    let generatedCalls = 0;
+    let researchCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-shape-bounded",
+      now: fixedClock(),
+      maxRepairAttempts: 1,
+      gates: defaultAgentRunGates,
+      executors: {
+        generated_answer: () => {
+          generatedCalls += 1;
+          return {
+            answer: "Customer list without the requested measure.",
+            artifacts: [{
+              id: `generated:${generatedCalls}`,
+              kind: "answer",
+              title: "Generated answer",
+              trustState: "review_required",
+              payload: {
+                answer: "Customer list without the requested measure.",
+                result: { columns: ["customer_name"], rows: [{ customer_name: "A" }], rowCount: 1 },
+              },
+            }],
+          };
+        },
+        research: () => {
+          researchCalls += 1;
+          return { summary: "This must remain explicit." };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: "Who are the top customers by revenue?" });
+
+    expect(generatedCalls).toBe(2);
+    expect(researchCalls).toBe(0);
+    expect(run.steps.map((step) => step.route)).toEqual(["generated_answer"]);
+    expect(run.escalationAttempts).toBe(0);
+    expect(run.status).toBe("needs_review");
   });
 
   it("escalates an app build with no certified coverage to a block draft", async () => {
@@ -1077,6 +1140,47 @@ describe("AgentRunEngine — conversation route", () => {
     const run = await engine.run({ question: "what is total revenue?", signals: { certifiedScore: 0.9 } });
     expect(run.route).toBe("conversation");
     expect(run.answer).toBe("routed reply");
+  });
+
+  it("runs retrieval-first routing for Ask mode before selecting the governed executor", async () => {
+    let routerCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-ask-router",
+      now: fixedClock(),
+      router: {
+        decide: () => {
+          routerCalls += 1;
+          return {
+            action: "answer",
+            confidence: 0.9,
+            reason: "Resolved against a semantic metric.",
+            followsUp: false,
+            meaningResolution: {
+              interpretedQuestion: "Monthly rollover balance by customer",
+              questionType: "ranking",
+              selectedConceptIds: ["semantic:rollover_balance_amount"],
+              recommendedExecutionId: "semantic:rollover_balance_amount",
+              queryIntent: { measures: ["rollover_balance_amount"], dimensions: ["customer"], filters: [] },
+              rejectedCandidates: [],
+              confidence: "high",
+              missingInformation: [],
+              recommendedRoute: "semantic",
+            },
+          };
+        },
+      },
+      executors: {
+        semantic_answer: () => ({
+          answer: "Resolved semantic answer.",
+          answerTier: "semantic_metric",
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "monthly rollover balance", requestedMode: "ask" });
+
+    expect(routerCalls).toBe(1);
+    expect(run.route).toBe("semantic_answer");
   });
 
   it("falls back to deterministic routing when the router throws", async () => {

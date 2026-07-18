@@ -56,8 +56,8 @@ export function SetupOnboarding({
     ]).then(([onboarding, dbt, connectionInfo, providerInfo]) => {
       if (!alive) return;
       if (onboarding?.dbt?.configured || (dbt?.configured && dbt.artifacts.manifest.exists)) {
-        setProjectState('configured');
-        setProjectDetail(onboarding?.dbt?.repoUrl || onboarding?.dbt?.projectDir || dbt?.projectPath || 'dbt project configured');
+        setProjectState(onboarding?.modeling?.snapshotState === 'ready' ? 'passed' : 'configured');
+        setProjectDetail(onboarding?.preparation?.message || onboarding?.dbt?.repoUrl || onboarding?.dbt?.projectDir || dbt?.projectPath || 'dbt project configured');
       }
       if (connectionInfo && hasRealConnection(connectionInfo.connections ?? {})) {
         setDatabaseState('configured');
@@ -103,8 +103,8 @@ export function SetupOnboarding({
     });
   };
   const onProjectConfigured = (project: DbtProjectConfigured) => {
-    setProjectState('configured');
-    setProjectDetail(`${project.name} · ${project.summary}`);
+    setProjectState(project.readiness === 'ready' ? 'passed' : 'configured');
+    setProjectDetail(project.readinessDetail || `${project.name} · ${project.summary}`);
   };
   const onProviderConfigured = (provider: ProviderSettings) => {
     setAiSkipped(false);
@@ -114,7 +114,9 @@ export function SetupOnboarding({
 
   const hint = useMemo(() => {
     if (loading) return 'Loading existing project-local configuration…';
-    if (step === 1) return projectState === 'missing' ? 'Preview before applying; existing dbt settings stay untouched.' : `Configured · ${projectDetail}`;
+    if (step === 1) return projectState === 'missing'
+      ? 'Preview before applying; existing dbt settings stay untouched.'
+      : `${projectState === 'passed' ? 'Ready' : 'Configured'} · ${projectDetail}`;
     if (step === 2) return databaseState === 'passed' ? `Test passed · ${databaseDetail}` : databaseState === 'configured' ? databaseDetail : 'A failed test rolls back to the previous connection.';
     if (step === 3) return aiSkipped ? 'AI skipped · limited-AI mode remains available.' : aiState === 'missing' ? 'Optional · skip for now or configure a provider.' : `${aiState === 'passed' ? 'Test passed' : 'Configured'} · ${providerSummary(aiProvider)}`;
     return 'Setup complete';

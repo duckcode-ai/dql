@@ -67,6 +67,42 @@ describe("createLlmAgentRunPlanner", () => {
     expect(plan.steps[0]?.successCriteria).toEqual(["grounded"]);
   });
 
+  it("propagates the request cancellation signal into planning", async () => {
+    const controller = new AbortController();
+    const complete = vi.fn().mockResolvedValue(JSON.stringify({
+      rationale: "Investigate.",
+      steps: [{ route: "research", goal: "Find drivers" }],
+    }));
+    const planner = createLlmAgentRunPlanner({ complete });
+
+    await planner.plan(planInput({
+      request: {
+        question: "why is revenue down?",
+        requestedMode: "auto",
+        signal: controller.signal,
+      },
+    }));
+
+    expect(complete.mock.calls[0]?.[0].signal).toBe(controller.signal);
+  });
+
+  it("does not replace cancellation with a deterministic fallback plan", async () => {
+    const controller = new AbortController();
+    const complete = vi.fn(async () => {
+      controller.abort(new Error("Stopped by user."));
+      throw controller.signal.reason;
+    });
+    const planner = createLlmAgentRunPlanner({ complete });
+
+    await expect(planner.plan(planInput({
+      request: {
+        question: "why is revenue down?",
+        requestedMode: "auto",
+        signal: controller.signal,
+      },
+    }))).rejects.toThrow("Stopped by user.");
+  });
+
   it("tolerates code fences and prose around the JSON", async () => {
     const complete = vi.fn().mockResolvedValue("Here is the plan:\n```json\n{\"rationale\":\"go\",\"steps\":[{\"route\":\"generated_answer\",\"goal\":\"answer\"}]}\n```\nDone.");
     const planner = createLlmAgentRunPlanner({ complete });

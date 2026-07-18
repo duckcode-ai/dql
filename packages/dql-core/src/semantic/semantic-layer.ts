@@ -624,6 +624,27 @@ export class SemanticLayer {
       return table; // fallback: treat table as cube name
     };
 
+    // A semantic model name and its physical relation frequently differ
+    // (`order_item` -> `dev.order_items`). Multi-table SQL therefore needs one
+    // stable alias vocabulary owned by the compiler; mixing cube names,
+    // physical names, and unqualified columns produces ambiguous or invalid SQL.
+    const useStableAliases = allTables.size > 1;
+    const aliasForCube = (cube: string): string => sanitizeSqlAlias(cube);
+    const aliasForTable = (table: string): string => aliasForCube(cubeByTable(table) ?? table);
+    const qualifierAliases = new Map<string, string>();
+    for (const table of allTables) {
+      const cube = cubeByTable(table) ?? table;
+      const alias = aliasForCube(cube);
+      qualifierAliases.set(table, alias);
+      qualifierAliases.set(cube, alias);
+      const cubeDefinition = this.cubes.get(cube);
+      if (cubeDefinition?.table) qualifierAliases.set(cubeDefinition.table, alias);
+    }
+    const qualifyForTable = (sql: string, table: string): string => {
+      if (!useStableAliases) return sql;
+      return qualifyBareSqlIdentifiers(rewriteSqlQualifiers(sql, qualifierAliases), aliasForTable(table));
+    };
+
     // Build JOIN clauses using join graph
     const primaryCube = cubeByTable(primaryTable);
     const joinsUsed: JoinDefinition[] = [];
@@ -639,6 +660,16 @@ export class SemanticLayer {
         if (!joinsUsed.some((j) => `${j.left}_${j.right}` === joinKey)) {
           joinsUsed.push(join);
           joinedTables.add(join.right);
+          const joinedCube = this.cubes.get(join.right);
+          if (joinedCube?.table) joinedTables.add(joinedCube.table);
+          const leftCube = this.cubes.get(join.left);
+          if (leftCube?.table) joinedTables.add(leftCube.table);
+          const leftAlias = aliasForCube(join.left);
+          const rightAlias = aliasForCube(join.right);
+          qualifierAliases.set(join.left, leftAlias);
+          qualifierAliases.set(join.right, rightAlias);
+          if (leftCube?.table) qualifierAliases.set(leftCube.table, leftAlias);
+          if (joinedCube?.table) qualifierAliases.set(joinedCube.table, rightAlias);
         }
       }
       // No join path to a required table: emitting SELECT `table.col` with no JOIN
@@ -661,8 +692,9 @@ export class SemanticLayer {
     // generated SQL rather than surfacing a governed-but-wrong answer.
     const resolveFilterColumn = (ref: string): string => {
       const dim = this.dimensions.get(ref);
-      if (dim?.sql) return dim.sql;
-      return ref.includes('__') ? ref.split('__').pop() ?? ref : ref;
+      if (dim?.sql) return qualifyForTable(dim.sql, dim.table);
+      const column = ref.includes('__') ? ref.split('__').pop() ?? ref : ref;
+      return qualifyForTable(column, primaryTable);
     };
     const metricFilters = resolvedMetrics.map((m) => computeMetricFilterPredicate(m, resolveFilterColumn));
     // A metric that declares a filter we cannot render fails the whole compose.
@@ -679,15 +711,17 @@ export class SemanticLayer {
 
     // Add dimensions
     for (const d of resolvedDimensions) {
-      const prefix = d.table !== primaryTable ? `${d.table}.` : '';
-      const sql = d.sql.includes('.') ? d.sql : `${prefix}${d.sql}`;
+      const prefix = !useStableAliases && d.table !== primaryTable ? `${d.table}.` : '';
+      const sql = useStableAliases ? qualifyForTable(d.sql, d.table) : d.sql.includes('.') ? d.sql : `${prefix}${d.sql}`;
       selectParts.push(`${sql} AS ${d.name}`);
     }
 
     // Add time dimension with granularity (dialect-aware)
     if (timeDimDef && timeDimension) {
       const grain = timeDimension.granularity;
-      const tdSql = timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
+      const tdSql = useStableAliases
+        ? qualifyForTable(timeDimDef.sql, timeDimDef.table)
+        : timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
       const truncated = dialect.dateTrunc(grain, tdSql);
       selectParts.push(`${truncated} AS ${timeDimDef.name}_${grain}`);
     }
@@ -696,7 +730,7 @@ export class SemanticLayer {
     for (let i = 0; i < resolvedMetrics.length; i++) {
       const m = resolvedMetrics[i];
       const fr = metricFilters[i];
-      let expr = renderMetricExpression(m);
+      let expr = qualifyForTable(renderMetricExpression(m), m.table);
       if (fr.kind === 'ok' && !hoistFilterToWhere) {
         const wrapped = wrapAggregateWithFilter(expr, fr.sql);
         // Unparseable aggregate + a per-metric filter → refuse rather than emit
@@ -708,27 +742,34 @@ export class SemanticLayer {
     }
 
     // Build FROM + JOINs (apply tableMapping for actual DB table names)
-    let fromClause = `FROM ${resolveTable(primaryTable)}`;
+    let fromClause = `FROM ${resolveTable(primaryTable)}${useStableAliases ? ` AS ${aliasForTable(primaryTable)}` : ''}`;
     const joinClauses: string[] = [];
     for (const join of joinsUsed) {
       const rightCube = this.cubes.get(join.right);
       const rightTable = resolveTable(rightCube?.table ?? join.right);
-      const resolvedSql = join.sql
-        .replace('${left}', resolveTable(join.left))
-        .replace('${right}', rightTable);
-      joinClauses.push(`${join.type.toUpperCase()} JOIN ${rightTable} ON ${resolvedSql}`);
+      const leftQualifier = useStableAliases ? aliasForCube(join.left) : resolveTable(this.cubes.get(join.left)?.table ?? join.left);
+      const rightQualifier = useStableAliases ? aliasForCube(join.right) : rightTable;
+      const resolvedSql = rewriteSqlQualifiers(
+        join.sql
+          .replaceAll('${left}', leftQualifier)
+          .replaceAll('${right}', rightQualifier),
+        qualifierAliases,
+      );
+      joinClauses.push(`${join.type.toUpperCase()} JOIN ${rightTable}${useStableAliases ? ` AS ${rightQualifier}` : ''} ON ${resolvedSql}`);
     }
 
     // Build GROUP BY
     const groupByParts: string[] = [];
     for (const d of resolvedDimensions) {
-      const prefix = d.table !== primaryTable ? `${d.table}.` : '';
-      const sql = d.sql.includes('.') ? d.sql : `${prefix}${d.sql}`;
+      const prefix = !useStableAliases && d.table !== primaryTable ? `${d.table}.` : '';
+      const sql = useStableAliases ? qualifyForTable(d.sql, d.table) : d.sql.includes('.') ? d.sql : `${prefix}${d.sql}`;
       groupByParts.push(sql);
     }
     if (timeDimDef && timeDimension) {
       const grain = timeDimension.granularity;
-      const tdSql = timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
+      const tdSql = useStableAliases
+        ? qualifyForTable(timeDimDef.sql, timeDimDef.table)
+        : timeDimDef.sql.includes('.') ? timeDimDef.sql : `${timeDimDef.table}.${timeDimDef.sql}`;
       groupByParts.push(dialect.dateTrunc(grain, tdSql));
     }
 
@@ -738,7 +779,9 @@ export class SemanticLayer {
       if (!f.dimension) continue;
       const dimDef = this.dimensions.get(f.dimension);
       const dimSql = dimDef
-        ? (dimDef.sql.includes('.') || dimDef.table === primaryTable ? dimDef.sql : `${dimDef.table}.${dimDef.sql}`)
+        ? useStableAliases
+          ? qualifyForTable(dimDef.sql, dimDef.table)
+          : (dimDef.sql.includes('.') || dimDef.table === primaryTable ? dimDef.sql : `${dimDef.table}.${dimDef.sql}`)
         : f.dimension;
       const v0 = f.values?.[0] ?? '';
       const v1 = f.values?.[1] ?? '';
@@ -824,7 +867,10 @@ export class SemanticLayer {
     return {
       sql,
       joins: joinClauses,
-      tables: Array.from(allTables),
+      tables: Array.from(new Set([
+        ...allTables,
+        ...joinsUsed.map((join) => this.cubes.get(join.right)?.table ?? join.right),
+      ])),
       strategy: 'direct_join',
       grainKeys: [
         ...resolvedDimensions.map((dimension) => dimension.name),
@@ -1581,6 +1627,80 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
 function sanitizeSqlAlias(value: string): string {
   const normalized = value.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
   return normalized || 'metric';
+}
+
+const SQL_EXPRESSION_KEYWORDS = new Set([
+  'and', 'or', 'not', 'null', 'true', 'false', 'case', 'when', 'then', 'else', 'end',
+  'distinct', 'as', 'in', 'is', 'like', 'between', 'over', 'partition', 'by', 'order',
+  'asc', 'desc', 'rows', 'range', 'current', 'row', 'unbounded', 'preceding', 'following',
+  'interval', 'date', 'timestamp', 'varchar', 'string', 'numeric', 'decimal', 'integer',
+  'float', 'double', 'boolean', 'cast', 'extract', 'from', 'at', 'time', 'zone',
+]);
+
+/** Replace semantic/physical qualifiers with the compiler-owned stable alias. */
+function rewriteSqlQualifiers(sql: string, aliases: Map<string, string>): string {
+  let output = sql;
+  const entries = [...aliases.entries()].sort((a, b) => b[0].length - a[0].length);
+  for (const [qualifier, alias] of entries) {
+    if (!qualifier || qualifier === alias) continue;
+    const escaped = qualifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    output = output.replace(new RegExp(`\\b${escaped}\\s*\\.`, 'g'), `${alias}.`);
+  }
+  return output;
+}
+
+/**
+ * Qualify bare identifiers inside a semantic expression. This scanner keeps
+ * quoted literals, SQL keywords, function names, and existing qualifiers
+ * untouched while qualifying physical member references such as
+ * `SUM(product_price)` and `CASE WHEN is_food_item THEN product_price END`.
+ */
+function qualifyBareSqlIdentifiers(sql: string, alias: string): string {
+  let output = '';
+  let index = 0;
+  let quote: "'" | '"' | '`' | undefined;
+  while (index < sql.length) {
+    const char = sql[index];
+    if (quote) {
+      output += char;
+      if (char === quote) {
+        if (sql[index + 1] === quote) {
+          output += sql[index + 1];
+          index += 2;
+          continue;
+        }
+        quote = undefined;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      output += char;
+      index += 1;
+      continue;
+    }
+    if (!/[A-Za-z_]/.test(char)) {
+      output += char;
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end])) end += 1;
+    const token = sql.slice(index, end);
+    const lower = token.toLowerCase();
+    const previousNonSpace = output.match(/\S(?=\s*$)/)?.[0];
+    const nextNonSpace = sql.slice(end).match(/^\s*(.)/)?.[1];
+    const alreadyQualified = previousNonSpace === '.';
+    const functionName = nextNonSpace === '(';
+    if (alreadyQualified || functionName || lower === alias.toLowerCase() || SQL_EXPRESSION_KEYWORDS.has(lower)) {
+      output += token;
+    } else {
+      output += `${alias}.${token}`;
+    }
+    index = end;
+  }
+  return output;
 }
 
 function indentSql(sql: string): string {

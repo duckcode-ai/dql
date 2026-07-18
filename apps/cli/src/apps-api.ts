@@ -3063,6 +3063,7 @@ function normalizeVizType(chartType?: string): DashboardGridItem['viz']['type'] 
   if (normalized === 'pivot') return 'pivot';
   if (normalized === 'map') return 'map';
   if (normalized === 'funnel') return 'funnel';
+  if (normalized === 'sankey' || normalized === 'flow') return 'sankey';
   if (normalized === 'text') return 'text';
   if (normalized === 'heading') return 'heading';
   return 'table';
@@ -3073,7 +3074,7 @@ function isSupportedVizType(chartType?: string): boolean {
   return [
     'single', 'single_value', 'kpi', 'line', 'bar', 'grouped_bar', 'stacked_bar',
     'area', 'pie', 'donut', 'scatter', 'heatmap', 'histogram', 'waterfall',
-    'gauge', 'pivot', 'map', 'funnel', 'table', 'text', 'heading',
+    'gauge', 'pivot', 'map', 'funnel', 'sankey', 'flow', 'table', 'text', 'heading',
   ].includes(normalized);
 }
 
@@ -3150,9 +3151,19 @@ function recommendVizType(input: {
   const measures = input.columns.filter((column) => isMeasureColumn(column, input.rows));
   const dimensions = input.columns.filter((column) => !isMeasureColumn(column, input.rows));
   if (/\bpivot|matrix|cross.?tab\b/.test(input.prompt)) return 'pivot';
+  if (/\bsankey|flow|flows|movement|journey|path|paths|supply.?chain|source.?to.?target|from .+ to\b/.test(input.prompt)
+    && dimensions.length >= 2 && measures.length >= 1) return 'sankey';
   if (/\btrend|over time|weekly|monthly|daily|quarterly\b/.test(input.prompt) || (hasTime && measures.length > 0)) return 'line';
+  if (/\bcorrelat|relationship between|versus|vs\.?\b/.test(input.prompt) && measures.length >= 2) return 'scatter';
+  if (/\bdistribution|histogram|frequency|spread|bucket|bins?\b/.test(input.prompt) && measures.length >= 1) return 'histogram';
+  if (/\bfunnel|conversion stages?|drop.?off|pipeline stages?\b/.test(input.prompt) && dimensions.length >= 1 && measures.length >= 1) return 'funnel';
+  if (/\bwaterfall|bridge|contribution|change drivers?|variance drivers?\b/.test(input.prompt) && dimensions.length >= 1 && measures.length >= 1) return 'waterfall';
+  if (/\bshare|composition|mix|proportion|percent of (?:the )?total\b/.test(input.prompt)
+    && dimensions.length >= 1 && measures.length >= 1 && input.rows.length >= 2 && input.rows.length <= 8) return 'donut';
   if (/\btop|bottom|rank|ranking|leader|leaderboard|players?|scorers?\b/.test(input.prompt)) return 'bar';
   if (measures.length === 1 && dimensions.length === 0) return 'single_value';
+  if (/\bcomplete|profile|details?|list|records?|rows?\b/.test(input.prompt) && input.columns.length >= 4) return 'table';
+  if (dimensions.length > 0 && measures.length >= 2) return 'grouped_bar';
   if (dimensions.length > 0 && measures.length > 0) return 'bar';
   return normalizeVizType(input.blockChartType);
 }
@@ -3171,6 +3182,7 @@ function visualizationFitsResult(
   if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return rows.length === 1 && measures.length >= 1;
   if (viz === 'line' || viz === 'area') return hasTime && measures.length >= 1;
   if (viz === 'scatter') return measures.length >= 2;
+  if (viz === 'sankey') return dimensions.length >= 2 && measures.length >= 1;
   if (viz === 'grouped_bar' || viz === 'stacked_bar') return dimensions.length >= 1 && measures.length >= 2;
   if (viz === 'pie' || viz === 'donut') return dimensions.length >= 1 && measures.length >= 1 && rows.length >= 2 && rows.length <= 8;
   if (viz === 'heatmap') return columns.length >= 3 && measures.length >= 1;
@@ -3185,7 +3197,7 @@ function isMeasureColumn(column: { name: string; type?: string }, rows: Array<Re
   const type = (column.type ?? '').toLowerCase();
   if (/\b(number|numeric|decimal|double|float|integer|int|bigint|real)\b/.test(type)) return true;
   const name = column.name.toLowerCase();
-  if (/\b(count|sum|avg|average|total|revenue|arr|amount|rate|score|points?|goals?|rank|value)\b/.test(name)) return true;
+  if (/(?:^|_)(?:count|sum|avg|average|total|revenue|sales|spend|arr|mrr|amount|balance|price|cost|profit|quantity|percent|percentage|pct|margin|ratio|share|rate|score|points?|goals?|rank|value)(?:_|$)/.test(name)) return true;
   const sample = rows.map((row) => row[column.name]).find((value) => value !== null && value !== undefined);
   return typeof sample === 'number';
 }
@@ -3196,12 +3208,32 @@ function fieldHintsForColumns(
   prompt: string,
 ): Record<string, string> {
   const hints: Record<string, string> = {};
-  const measure = columns.find((column) => isMeasureColumn(column, rows));
+  const measures = columns.filter((column) => isMeasureColumn(column, rows));
+  const questionTerms = new Set(prompt.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2));
+  const measure = [...measures].sort((left, right) => {
+    const score = (column: { name: string }) => column.name.toLowerCase().split(/[_-]+/).filter((term) => questionTerms.has(term)).length;
+    return score(right) - score(left);
+  })[0];
+  const dimensions = columns.filter((column) => !isMeasureColumn(column, rows));
   const time = columns.find((column) => /\b(date|time|week|month|quarter|year|season|period)\b/i.test(column.name));
   const rank = columns.find((column) => /\b(rank|position)\b/i.test(column.name));
   const label = columns.find((column) =>
     !isMeasureColumn(column, rows) && /\b(name|player|customer|account|team|segment|region|category|label)\b/i.test(column.name),
   ) ?? columns.find((column) => !isMeasureColumn(column, rows));
+  const asksForFlow = /\bsankey|flow|flows|movement|journey|path|paths|supply.?chain|source.?to.?target|from .+ to\b/i.test(prompt);
+  const promptOrderedDimensions = asksForFlow
+    ? dimensions
+        .map((column) => ({ column, position: promptFieldPosition(prompt, column.name) }))
+        .filter((item) => item.position >= 0)
+        .sort((left, right) => left.position - right.position)
+        .map((item) => item.column)
+    : [];
+  const source = promptOrderedDimensions[0]
+    ?? dimensions.find((column) => /(?:^|_)(?:source|from|origin|upstream|supplier|producer|category)(?:_|$)/i.test(column.name))
+    ?? dimensions[0];
+  const target = promptOrderedDimensions.find((column) => column !== source)
+    ?? dimensions.find((column) => column !== source && /(?:^|_)(?:target|to|destination|downstream|consumer|customer|product)(?:_|$)/i.test(column.name))
+    ?? dimensions.find((column) => column !== source);
   if (label) hints.label = label.name;
   if (measure) hints.value = measure.name;
   if (time) hints.time = time.name;
@@ -3213,7 +3245,29 @@ function fieldHintsForColumns(
     hints.x = label.name;
     hints.y = measure.name;
   }
+  if (source && target && measure) {
+    hints.source = source.name;
+    hints.target = target.name;
+    hints.color = target.name;
+    if (asksForFlow) {
+      hints.x = source.name;
+      hints.y = measure.name;
+    }
+  }
+  if (measure) hints.format = displayFormatForColumn(measure.name);
   return hints;
+}
+
+function promptFieldPosition(prompt: string, field: string): number {
+  const normalizedPrompt = prompt.toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const normalizedField = field.toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return normalizedField ? normalizedPrompt.indexOf(normalizedField) : -1;
+}
+
+function displayFormatForColumn(column: string): 'currency' | 'percent' | 'number' {
+  if (/(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)|(?:^|_)margin(?:_|$)/i.test(column)) return 'percent';
+  if (/(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i.test(column)) return 'currency';
+  return 'number';
 }
 
 function componentForViz(
@@ -3247,7 +3301,7 @@ function compatibleVisualizationsForComponent(
   if (component === 'TrendPanel') return ['line', 'area', 'bar', 'table'];
   if (component === 'RankingPanel') return ['bar', 'grouped_bar', 'stacked_bar', 'pie', 'donut', 'table'];
   if (component === 'PivotTable') return ['pivot', 'table', 'bar'];
-  if (component === 'EvidenceTable') return ['table', 'bar', 'scatter', 'heatmap', 'histogram', 'waterfall', 'map', 'funnel'];
+  if (component === 'EvidenceTable') return ['table', 'bar', 'scatter', 'heatmap', 'histogram', 'waterfall', 'map', 'funnel', 'sankey'];
   return ['text', 'heading'];
 }
 

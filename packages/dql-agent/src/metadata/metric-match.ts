@@ -26,7 +26,7 @@
  * still refuse honestly.
  */
 
-import { defaultEmbeddingProvider, envEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
+import { defaultEmbeddingProvider, hybridRank, type EmbeddingProvider } from '../embeddings/provider.js';
 import type { KGNode } from '../kg/types.js';
 import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 
@@ -339,7 +339,10 @@ export async function matchSemanticMetric(
     .slice(0, 96);
   if (rankedCandidates.length === 0) return null;
   const hasLexicalSignal = rankedCandidates.some((entry) => entry.ftsScore > 0);
-  const provider = options.provider ?? envEmbeddingProvider();
+  // Retrieval must not silently send enterprise metric definitions to a remote
+  // provider merely because an ambient API key exists. Hosts may opt into an
+  // explicit provider; the default remains local and deterministic.
+  const provider = options.provider ?? defaultEmbeddingProvider();
   const ranked = await hybridRank(
     question,
     rankedCandidates.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),

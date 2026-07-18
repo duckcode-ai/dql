@@ -31,7 +31,7 @@ Task-oriented walkthroughs.
 
 Look-it-up material.
 
-- [CLI](./reference/cli.md)
+- [CLI command reference](./reference/cli.md) — local/global invocation, all commands, flags, and exit codes
 - [Language](./reference/language.md)
 - [Connectors](./reference/connectors.md)
 - [Semantic layer](./reference/semantic-layer.md)

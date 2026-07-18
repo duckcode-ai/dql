@@ -89,7 +89,21 @@ function columnCoversRequestedOutput(column: string, requiredOutput: string): bo
     const bareNameColumn = columnTokens.length === 1 && hasNameToken;
     return (hasEntityToken && hasNameToken) || column === entity || bareNameColumn;
   }
-  return requiredTokens.every((token) => columnTokens.includes(token));
+  return requiredTokens.every((token) => columnTokens.some((columnToken) => outputTokensEquivalent(token, columnToken)));
+}
+
+// Keep this deliberately small and business-semantic. These are common measure
+// words that users interchange in plain English; matching them prevents a
+// correctly selected certified contract from being rejected merely because its
+// governed output uses `revenue` while the question says `spend`.
+const OUTPUT_TOKEN_EQUIVALENCE: ReadonlyArray<ReadonlySet<string>> = [
+  new Set(['spend', 'spending', 'revenue', 'sales']),
+  new Set(['count', 'number', 'num', 'quantity', 'qty']),
+];
+
+function outputTokensEquivalent(required: string, column: string): boolean {
+  if (required === column) return true;
+  return OUTPUT_TOKEN_EQUIVALENCE.some((group) => group.has(required) && group.has(column));
 }
 
 function canonicalResultColumn(value: string): string {

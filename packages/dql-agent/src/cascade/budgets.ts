@@ -83,8 +83,11 @@ export interface ContextRetrievalBudget {
 
 export const DEFAULT_CASCADE_BUDGET_MODEL: CascadeBudgetModel = {
   lane: {
-    reground: 2,
-    execution: 2,
+    // AGT-009 / PERF-002: the answer loop owns the one useful, evidence-aware
+    // repair. Re-running the entire outer route after that repair multiplied a
+    // simple lookup into several full provider calls.
+    reground: 1,
+    execution: 1,
   },
   engineEscalations: 2,
   mcpTier2Reground: 1,

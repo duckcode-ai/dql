@@ -176,9 +176,11 @@ function routeAwareAnswerShapeEvaluation(
 }
 
 /**
- * Answer routes (certified + generated). Preview execution errors retry the
- * route, empty answers escalate to research, and wrong result shapes are
- * repaired before we accept the answer.
+ * Answer routes (certified + generated). The answer loop performs the one
+ * bounded SQL/context repair while it still has the compiler error and evidence
+ * ledger. The outer engine must not restart an ordinary lookup or silently turn
+ * it into Research; terminal gaps stay visible and the user may explicitly
+ * choose Research if that is the work they want.
  */
 const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluation[] => {
   const { result } = context;
@@ -194,72 +196,37 @@ const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluat
       passed: false,
       severity: "warning",
       message: `The generated SQL failed to execute against the bounded preview: ${executionError}`,
-      suggestedRepair: "Repair the generated SQL using the execution error and re-run the bounded preview.",
-      repairAction: { kind: "retry", hint: executionError },
     });
   }
 
   // A governed refusal (the model declined, or a grounding gap) still carries
   // explanatory PROSE in `answer`/`text` — but that prose is not a real answer.
-  // Treat those refusal codes as "no answer" so the loop retries/escalates instead
-  // of accepting the apology as done. (`ambiguous` is a genuine clarify and
-  // `provider_error` is surfaced as blocked, so both stay terminal here.)
-  const isRetryableRefusal = result.answerRefusalCode === "model_declined"
+  // Treat those refusal codes as terminal no-answer states. They are not an
+  // instruction to spend another provider call on a different orchestration lane.
+  const isTerminalRefusal = result.answerRefusalCode === "model_declined"
     || result.answerRefusalCode === "grounding_gap";
-  const hasAnswer = !isRetryableRefusal && (
+  const hasAnswer = !isTerminalRefusal && (
     nonEmptyString(result.answer)
     ?? nonEmptyString(payload?.answer)
     ?? nonEmptyString(payload?.text)
   );
-  // The answer executor may already have attached an actionable escalate/retry
-  // evaluation for this refusal (local-runtime `answerRunExecutor`). This gate is a
-  // package-level backstop for hosts that don't — so only add it when nothing
-  // actionable is present yet, to avoid a duplicate escalation.
-  const hasActionableFailure = evaluations.some(
-    (evaluation) => !evaluation.passed && Boolean(evaluation.suggestedRepair),
+  const hasGroundingFailure = evaluations.some(
+    (evaluation) => !evaluation.passed
+      && (evaluation.id === "grounding" || evaluation.id === "grounding-gap" || evaluation.id === "declined-despite-context"),
   );
-  if (!hasAnswer && !hasActionableFailure && result.status !== "blocked") {
+  if (!hasAnswer && !hasGroundingFailure && result.status !== "blocked") {
     evaluations = upsert(evaluations, {
       id: "grounding",
       label: "Answer grounding",
       passed: false,
-      severity: "blocking",
-      message: "No governed answer could be produced from the available certified context.",
-      suggestedRepair: "Investigate the question across governed metrics and lineage instead of answering directly.",
-      repairAction: { kind: "escalate", route: "research", hint: "Investigate to ground the answer." },
+      severity: "warning",
+      message: "No governed answer could be produced within the bounded lookup path. Refine the business meaning or explicitly start Research for a deeper investigation.",
     });
   }
   const shape = routeAwareAnswerShapeEvaluation(context, payload);
   if (shape) evaluations = upsert(evaluations, shape);
   return evaluations;
 };
-
-/**
- * Auto-escalation safety net: when the router judged a turn "deep" (an analytical
- * ask) but it still landed on a direct answer that came back as a single scalar,
- * escalate to research instead of relying on the user clicking "Dig deeper".
- * Only fires for genuinely generated (non-certified) answers with a real answer
- * present — a missing answer is already escalated by {@link answerGate}.
- */
-function deepAnswerCompletenessEvaluation(
-  context: AgentRunGateContext,
-): AgentRunEvaluation | undefined {
-  if (context.routeDecision?.depth !== "deep") return undefined;
-  const payload = primaryArtifactPayload(context.result);
-  const hasAnswer = nonEmptyString(context.result.answer) ?? nonEmptyString(payload?.answer) ?? nonEmptyString(payload?.text);
-  if (!hasAnswer) return undefined; // answerGate already escalates an empty answer.
-  const rowCount = resultRowCount(payload);
-  if (rowCount !== undefined && rowCount > 1) return undefined; // a real breakdown — leave it.
-  return {
-    id: "answer-completeness",
-    label: "Depth of answer",
-    passed: false,
-    severity: "warning",
-    message: "This looks like an analytical question, but the answer is a single value — a deeper investigation will explain the drivers.",
-    suggestedRepair: "Investigate the drivers and breakdown across governed metrics and lineage.",
-    repairAction: { kind: "escalate", route: "research", hint: "Investigate the drivers behind this analytical question." },
-  };
-}
 
 /**
  * Generated answers get the liveness checks (execution error / grounding) PLUS a
@@ -273,8 +240,6 @@ const generatedAnswerGate: AgentRunGate = (context: AgentRunGateContext): AgentR
   if (!certified) {
     const semantic = semanticCorrectnessEvaluation(context.request.question, primaryArtifactPayload(context.result));
     if (semantic) evaluations = upsert(evaluations, semantic);
-    const completeness = deepAnswerCompletenessEvaluation(context);
-    if (completeness) evaluations = upsert(evaluations, completeness);
   }
   return evaluations;
 };

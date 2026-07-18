@@ -144,6 +144,19 @@ export interface AgentRunRequest {
   semanticDriver?: string;
   /** Logical->physical table mapping for the semantic compiler, when resolved. */
   semanticTableMapping?: Record<string, string>;
+  /**
+   * Qualified IDs selected by the bounded meaning resolver. They are advisory
+   * for relevance but identifier-bound; the answer loop still runs its own
+   * deterministic contract/compiler/policy checks before execution.
+   */
+  preferredEvidenceIds?: string[];
+  preferredExecutionId?: string;
+  /**
+   * Request-scoped ranked evidence prepared before routing. Hosts pass this to
+   * prevent the provider adapter from rebuilding and re-searching the same
+   * metadata snapshot after the meaning/route decision has already been made.
+   */
+  preparedContextPack?: LocalContextPack;
 }
 
 export interface AgentRunner {

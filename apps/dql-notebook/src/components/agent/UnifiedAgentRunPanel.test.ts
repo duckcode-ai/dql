@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildConversationContext, type ConversationThreadItem } from './agentConversationContext';
+import type { AgentRunEvent } from '../../api/client';
 import type * as UnifiedAgentRunPanelModule from './UnifiedAgentRunPanel';
 
 let resolveArtifactDqlView: typeof UnifiedAgentRunPanelModule.resolveArtifactDqlView;
@@ -13,6 +14,7 @@ let askArtifactMeta: typeof UnifiedAgentRunPanelModule.askArtifactMeta;
 let preferredAskInspectorTab: typeof UnifiedAgentRunPanelModule.preferredAskInspectorTab;
 let inlineAskChartConfig: typeof UnifiedAgentRunPanelModule.inlineAskChartConfig;
 let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryFromItems;
+let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -29,12 +31,66 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     preferredAskInspectorTab = module.preferredAskInspectorTab;
     inlineAskChartConfig = module.inlineAskChartConfig;
     agentRunHistoryFromItems = module.agentRunHistoryFromItems;
+    liveAgentActivityFor = module.liveAgentActivityFor;
+  });
+
+  it('shows a lightweight search → match → query activity trail instead of planning phases', () => {
+    const event = (type: AgentRunEvent['type'], route?: AgentRunEvent['route']): AgentRunEvent => ({
+      id: type,
+      runId: 'run-1',
+      type,
+      at: '2026-07-18T00:00:00.000Z',
+      message: type,
+      route,
+    });
+    const searching = liveAgentActivityFor([event('run.started')]);
+    expect(searching).toEqual([expect.objectContaining({ id: 'search', state: 'active' })]);
+
+    const matched = liveAgentActivityFor([
+      event('run.started'),
+      event('route.decided', 'semantic_answer'),
+    ]);
+    expect(matched.map((item) => item.label)).toEqual([
+      'Resolving governed evidence and business meaning',
+      'Found a compatible semantic metric',
+    ]);
+    expect(matched[1]?.state).toBe('active');
+
+    const querying = liveAgentActivityFor([
+      event('run.started'),
+      event('route.decided', 'semantic_answer'),
+      event('executor.started', 'semantic_answer'),
+    ]);
+    expect(querying.at(-1)).toMatchObject({ id: 'execute', label: 'Running the governed query', state: 'active' });
+    expect(querying.some((item) => /plan|validate/i.test(item.label))).toBe(false);
+  });
+
+  it('finishes the transient activity trail by checking governed evidence', () => {
+    const base = {
+      runId: 'run-1',
+      at: '2026-07-18T00:00:00.000Z',
+      message: 'event',
+      route: 'generated_answer' as const,
+    };
+    const activity = liveAgentActivityFor([
+      { ...base, id: 'start', type: 'run.started' },
+      { ...base, id: 'route', type: 'route.decided' },
+      { ...base, id: 'execute', type: 'executor.started' },
+      { ...base, id: 'verify', type: 'evaluation.recorded' },
+    ]);
+    expect(activity.at(-1)).toMatchObject({
+      id: 'verify',
+      label: 'Checking the result against governed evidence',
+      state: 'active',
+    });
+    expect(activity.slice(0, -1).every((item) => item.state === 'complete')).toBe(true);
   });
 
   it('UI-003 progressively explains long SQL generation and its durable optimization path', () => {
     expect(longRunGuidanceFor(11, 'generated_answer')).toBeNull();
-    expect(longRunGuidanceFor(15, 'generated_answer')).toMatchObject({ title: 'Checking governed context' });
-    expect(longRunGuidanceFor(25, 'generated_answer')?.detail).toContain('lower future AI/token usage');
+    expect(longRunGuidanceFor(15)).toMatchObject({ title: 'Still resolving the governed evidence' });
+    expect(longRunGuidanceFor(15, 'generated_answer')?.title).toContain('Finishing');
+    expect(longRunGuidanceFor(25, 'generated_answer')?.detail).toContain('stops at its deadline');
     expect(longRunGuidanceFor(25, 'research')?.title).toContain('Deep research');
   });
 
@@ -87,6 +143,40 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       rowCount: 2,
     });
     expect(config.chart).toBe('grouped-bar');
+  });
+
+  it('keeps a validated Sankey recommendation and its source/target/value bindings', () => {
+    const { config, chartable } = deriveResultChartConfig(
+      {
+        columns: ['product_category', 'product_name', 'product_revenue'],
+        rows: [
+          { product_category: 'Beverage', product_name: 'Coffee', product_revenue: 1200 },
+          { product_category: 'Beverage', product_name: 'Tea', product_revenue: 900 },
+        ],
+        rowCount: 2,
+      },
+      { chart: 'sankey', x: 'product_category', color: 'product_name', y: 'product_revenue', decisionSource: 'agent' },
+    );
+    expect(chartable).toBe(true);
+    expect(config).toMatchObject({
+      chart: 'sankey',
+      x: 'product_category',
+      color: 'product_name',
+      y: 'product_revenue',
+      decisionSource: 'agent',
+    });
+  });
+
+  it('rejects Sankey when the result has no target dimension', () => {
+    const { config } = deriveResultChartConfig(
+      {
+        columns: ['product_name', 'product_revenue'],
+        rows: [{ product_name: 'Coffee', product_revenue: 1200 }],
+        rowCount: 1,
+      },
+      { chart: 'sankey', decisionSource: 'agent' },
+    );
+    expect(config.chart).toBe('kpi');
   });
 
   it('uses a business label rather than an adjacent technical identifier for the chart axis', () => {

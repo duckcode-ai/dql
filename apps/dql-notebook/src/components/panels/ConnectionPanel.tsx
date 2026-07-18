@@ -3,7 +3,7 @@ import { CheckCircle2, Database, GitBranch, Settings2, Sparkles } from 'lucide-r
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
-import { api, type DbtProfileConnectionCandidate, type ProviderSettings } from '../../api/client';
+import { api, type DbtOnboardingJob, type DbtProfileConnectionCandidate, type ProviderSettings } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
@@ -343,6 +343,7 @@ export function ConnectionPanel({
   const [profileImportError, setProfileImportError] = useState<string | null>(null);
   const [providerReadiness, setProviderReadiness] = useState<ProviderSettings[]>([]);
   const [dbtConfigured, setDbtConfigured] = useState(false);
+  const [dbtPreparation, setDbtPreparation] = useState<DbtOnboardingJob | null>(null);
 
   // Edit form state (inline editor for the "manage all connections" list)
   const [editName, setEditName] = useState('');
@@ -375,10 +376,35 @@ export function ConnectionPanel({
         if (!alive) return;
         setProviderReadiness(providerResult.providers);
         setDbtConfigured(onboarding.dbt?.configured === true || Boolean(dbt?.configured && dbt.artifacts.manifest.exists));
+        setDbtPreparation(onboarding.preparation ?? null);
       })
       .catch(() => undefined);
     return () => { alive = false; };
   }, [isPage]);
+
+  useEffect(() => {
+    if (!isPage || !dbtPreparation || (dbtPreparation.status !== 'queued' && dbtPreparation.status !== 'running')) return;
+    let alive = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const onboarding = await api.getOnboardingStatus();
+        if (!alive) return;
+        setDbtPreparation(onboarding.preparation ?? null);
+        setDbtConfigured(onboarding.dbt?.configured === true);
+        if (onboarding.preparation?.status === 'queued' || onboarding.preparation?.status === 'running') {
+          timer = window.setTimeout(() => void poll(), 700);
+        }
+      } catch {
+        // The project editor retains the actionable error; Overview polling is advisory.
+      }
+    };
+    timer = window.setTimeout(() => void poll(), 500);
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [dbtPreparation?.id, dbtPreparation?.status, isPage]);
 
   // Seed the primary form from the default connection. Keyed on the connection's
   // identity so user typing (which only updates primaryFields) never re-seeds,
@@ -1197,7 +1223,7 @@ export function ConnectionPanel({
           <nav aria-label="Settings sections" style={{ width: 'clamp(190px, 17vw, 240px)', flexShrink: 0, borderRight: `1px solid ${t.cellBorder}`, padding: '10px 10px 10px 0', display: 'flex', flexDirection: 'column', gap: 2, alignSelf: 'flex-start', position: 'sticky', top: 0 }}>
             {navItem(activeTab === 'overview', 'Overview', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'overview' }))}
             {navItem(activeTab === 'project', 'Project & dbt', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' }),
-              <span style={{ width: 7, height: 7, borderRadius: 999, background: dbtConfigured ? 'var(--status-success)' : 'var(--status-warning)' }} title={dbtConfigured ? 'Configured' : 'Missing'} />)}
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: dbtPreparation?.status === 'failed' ? 'var(--status-error)' : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued' ? 'var(--status-info)' : dbtConfigured ? 'var(--status-success)' : 'var(--status-warning)' }} title={dbtPreparation?.status === 'failed' ? 'Needs attention' : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued' ? 'Preparing' : dbtConfigured ? 'Ready' : 'Missing'} />)}
             {navItem(activeTab === 'database', 'Database', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'database' }),
               <span style={{ width: 7, height: 7, borderRadius: 999, background: connected ? 'var(--status-success)' : 'var(--status-warning)' }} title={connected ? 'Configured' : 'Missing'} />)}
             {navItem(activeTab === 'ai', 'AI provider', () => dispatch({ type: 'SET_SETTINGS_TAB', tab: 'ai' }),
@@ -1211,12 +1237,16 @@ export function ConnectionPanel({
             {activeTab === 'overview' ? (
               <SettingsOverview
                 dbtConfigured={dbtConfigured}
+                dbtPreparation={dbtPreparation}
                 databaseConfigured={connected}
                 databaseTest={testResult}
                 providers={providerReadiness}
               />
             ) : activeTab === 'project' ? (
-              <DbtProjectEditor onConfigured={() => setDbtConfigured(true)} />
+              <DbtProjectEditor onConfigured={() => {
+                setDbtConfigured(true);
+                void api.getOnboardingStatus().then((onboarding) => setDbtPreparation(onboarding.preparation ?? null)).catch(() => undefined);
+              }} />
             ) : activeTab === 'advanced' ? (
               <ConnectionRuntimeSettings embedded section="advanced" />
             ) : activeTab === 'database' ? (
@@ -1248,11 +1278,13 @@ export function ConnectionPanel({
 
 function SettingsOverview({
   dbtConfigured,
+  dbtPreparation,
   databaseConfigured,
   databaseTest,
   providers,
 }: {
   dbtConfigured: boolean;
+  dbtPreparation: DbtOnboardingJob | null;
   databaseConfigured: boolean;
   databaseTest: { ok: boolean; message: string } | null;
   providers: ProviderSettings[];
@@ -1264,15 +1296,19 @@ function SettingsOverview({
   const cards: Array<{
     title: string;
     detail: string;
-    state: 'missing' | 'configured' | 'passed' | 'failed';
+    state: 'missing' | 'configured' | 'preparing' | 'passed' | 'failed';
     tab: 'project' | 'database' | 'ai';
     icon: React.ReactNode;
     optional?: boolean;
   }> = [
     {
       title: 'Project & dbt',
-      detail: dbtConfigured ? 'Project configuration and dbt artifacts are present.' : 'Choose a local dbt project or Git repository.',
-      state: dbtConfigured ? 'configured' : 'missing',
+      detail: dbtPreparation?.message ?? (dbtConfigured ? 'Project configuration, dbt artifacts, and governed search indexes are ready.' : 'Choose a local dbt project or Git repository.'),
+      state: dbtPreparation?.status === 'failed' || dbtPreparation?.status === 'cancelled'
+        ? 'failed'
+        : dbtPreparation?.status === 'running' || dbtPreparation?.status === 'queued'
+          ? 'preparing'
+          : dbtConfigured ? 'configured' : 'missing',
       tab: 'project',
       icon: <GitBranch size={18} />,
     },
@@ -1303,6 +1339,7 @@ function SettingsOverview({
   const stateCopy = {
     missing: 'Missing',
     configured: 'Configured',
+    preparing: 'Preparing',
     passed: 'Test passed',
     failed: 'Test failed',
   } as const;
@@ -1321,9 +1358,10 @@ function SettingsOverview({
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 12 }}>
         {cards.map((card) => {
           const positive = card.state === 'configured' || card.state === 'passed';
+          const preparing = card.state === 'preparing';
           const failed = card.state === 'failed';
-          const color = failed ? 'var(--status-error)' : positive ? 'var(--status-success)' : 'var(--status-warning)';
-          const bg = failed ? 'var(--status-error-bg)' : positive ? 'var(--status-success-bg)' : 'var(--status-warning-bg)';
+          const color = failed ? 'var(--status-error)' : preparing ? 'var(--status-info)' : positive ? 'var(--status-success)' : 'var(--status-warning)';
+          const bg = failed ? 'var(--status-error-bg)' : preparing ? 'var(--status-info-bg)' : positive ? 'var(--status-success-bg)' : 'var(--status-warning-bg)';
           return (
             <button key={card.title} type="button" onClick={() => dispatch({ type: 'SET_SETTINGS_TAB', tab: card.tab })} style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, background: t.cellBg, padding: 16, textAlign: 'left', cursor: 'pointer', fontFamily: t.font, minHeight: 158, display: 'flex', flexDirection: 'column' }}>
               <span style={{ width: 36, height: 36, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color, background: bg }}>{positive ? <CheckCircle2 size={18} /> : card.icon}</span>

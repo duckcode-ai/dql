@@ -6,12 +6,15 @@ Prove the complete product behavior and scale budgets on deterministic fixtures;
 repair integration defects without weakening safety contracts.
 
 Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
-`E2E-001`, and `E2E-005`. Dependencies: verified W01–W06.
+`PERF-002`, `E2E-001`, `E2E-005`, and `E2E-006`. Dependencies: verified W01–W06.
 
 ## Required implementation
 
 - Create/complete the Commerce/Growth functional fixture and deterministic
-  10k-model scale generator exactly as spec 09.
+  10k-model/300k-column/7k-metric scale generator exactly as spec 09.
+- Add a deterministic similar-name evidence corpus covering balance versus flow
+  versus risk versus allowance meanings, duplicate names across domains, trust
+  conflicts, late-position candidates, ambiguity, and explicit references.
 - Add cross-package integration, CLI, MCP, migration, agent-eval, browser,
   compatibility, security, and performance suites.
 - Prove end-to-end typed lineage from dbt through proof/asset/product/answer.
@@ -25,6 +28,8 @@ Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
 - Verify first-install and version-upgrade Guided Setup prompts in the built CLI,
   including one-time acknowledgement and preservation of user preferences and
   every project-local connection setting.
+- Compare browser Ask, direct CLI, MCP, and Chat on the same snapshot and assert
+  identical interpretation, selected qualified IDs, route, trust, and error.
 
 ## Suggested ownership
 

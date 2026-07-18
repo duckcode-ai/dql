@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import type { QueryResult } from '../../store/types';
 import { inferColumnKind, type ColumnKind } from '../../utils/column-kind';
+import { formatDisplayValue } from '../../utils/value-format';
 
 interface TableOutputProps {
   result: QueryResult;
@@ -33,21 +34,6 @@ function formatCell(value: unknown): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
-}
-
-// DATE columns arrive as midnight-UTC ISO timestamps; timestamps keep their
-// full ISO form. Display them readably — exports (CSV/JSON) keep raw values.
-const MIDNIGHT_UTC_RE = /^(\d{4}-\d{2}-\d{2})T00:00:00(\.0+)?(Z|\+00:00)$/;
-const ISO_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
-
-function formatCellDisplay(value: unknown): string {
-  if (typeof value === 'string') {
-    const midnight = MIDNIGHT_UTC_RE.exec(value);
-    if (midnight) return midnight[1];
-    const ts = ISO_TIMESTAMP_RE.exec(value);
-    if (ts) return `${ts[1]} ${ts[2]}`;
-  }
-  return formatCell(value);
 }
 
 function compareValues(a: unknown, b: unknown): number {
@@ -160,6 +146,9 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
     for (const col of result.columns) map.set(col, inferColumnKind(col, result.rows));
     return map;
   }, [result.columns, result.rows]);
+  const columnValues = useMemo(() => new Map(
+    result.columns.map((column) => [column, result.rows.map((row) => row[column])]),
+  ), [result.columns, result.rows]);
 
   // Track scroll to drop a soft shadow under the sticky header.
   const [scrolled, setScrolled] = useState(false);
@@ -341,7 +330,7 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
                           transition: 'background 0.1s',
                         }}
                       >
-                        {isNull ? '—' : formatCellDisplay(value)}
+                        {isNull ? '—' : formatDisplayValue(col, value, columnValues.get(col) ?? [])}
                       </td>
                     );
                   })}

@@ -66,7 +66,9 @@ export function evaluateCertifiedBlockFit(input: {
   const grainMismatch = requested.grain && block.grain && canonicalToken(requested.grain) !== block.grain
     && !blockDimensions.has(canonicalToken(requested.grain))
     ? `certified block grain=${block.grain} does not cover requested grain=${canonicalToken(requested.grain)}`
-    : undefined;
+    : scalarRequestCannotUseRowGrainBlock(input.plan, requestedDimensions, block)
+      ? `certified block returns rows at ${block.grain ?? block.dimensions[0]} grain but the question requests one aggregate value`
+      : undefined;
   const topNAction = topNFitAction(requested, block);
 
   if (grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || !measureMatch || topNAction === 'generate') {
@@ -126,12 +128,30 @@ export function evaluateCertifiedBlockFit(input: {
   };
 }
 
+/**
+ * A block can contain the requested measure and still answer at the wrong
+ * cardinality. For example, a customer-profile block exposes lifetime_spend,
+ * but it cannot directly answer "total lifetime spend across all customers"
+ * because it returns one row per customer. Keep it as trusted context and let
+ * the semantic compiler perform the requested aggregate instead. AGT-009/010.
+ */
+function scalarRequestCannotUseRowGrainBlock(
+  plan: AnalysisQuestionPlan,
+  requestedDimensions: string[],
+  block: BlockShape,
+): boolean {
+  if (plan.outputShape !== 'value' || requestedDimensions.length > 0) return false;
+  return block.dimensions.length > 0;
+}
+
 interface BlockShape {
   grain?: string;
   dimensions: string[];
   measures: string[];
   outputs: string[];
   filters: string[];
+  /** Static scope proven by the certified name/tags/WHERE clause. */
+  scopeTokens: Set<string>;
   limit?: number;
   textTokens: Set<string>;
   relevance: number;
@@ -161,8 +181,6 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
   const explicitDimensions = uniqueStrings([
     ...stringArray(payload.dimensions),
     ...stringArray(record.dimensions),
-    ...stringArray(payload.entities),
-    ...stringArray(record.entities),
     ...outputs.filter(isDimensionLike),
     ...tokensFromValue(stringValue(payload.grain) ?? stringValue(record.grain) ?? '').filter(isDimensionLike),
   ].map(canonicalToken).filter(Boolean));
@@ -186,6 +204,13 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     ...parameterNames(payload.parameters),
     ...parameterNames(record.parameters),
   ].map(canonicalToken).filter(Boolean));
+  const scopeText = [
+    stringValue(record.name),
+    Array.isArray(record.tags) ? (record.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
+    Array.isArray(payload.tags) ? (payload.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
+    sql ? extractSqlFilterScope(sql) : '',
+  ].filter(Boolean).join(' ');
+  const scopeTokens = new Set(tokensFromValue(scopeText).map(canonicalToken).filter(Boolean));
   const grain = canonicalToken(stringValue(payload.grain) ?? stringValue(record.grain) ?? explicitDimensions[0] ?? '');
   const relevance = outputs.length + dimensions.length + measures.length;
   return {
@@ -194,6 +219,7 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     measures,
     outputs,
     filters,
+    scopeTokens,
     limit: sql ? parseSqlLimit(sql) : undefined,
     textTokens,
     relevance,
@@ -228,6 +254,13 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
     ...requested.followUpReferences.flatMap((ref) => ref.resolvedValues ?? []),
   ].map(canonicalToken).filter((filter) => Boolean(filter) && !isTemporalFilter(filter)));
   if (requestedFilters.length === 0) return [];
+  // A certified artifact may bake a restriction into its identity and SQL
+  // rather than expose it as a dynamic parameter. For example,
+  // top_beverage_customers has WHERE products.is_beverage and is already exactly
+  // beverage-scoped. This is stronger than a description mention: scopeTokens
+  // are sourced only from the certified name, tags, and WHERE clause.
+  const uncoveredFilters = requestedFilters.filter((filter) => !block.scopeTokens.has(filter));
+  if (uncoveredFilters.length === 0) return [];
   // A filtered question cannot be answered exactly by an unparameterized block.
   // Returning [] here used to erase the user's restriction and let a broad
   // certified ranking (for example all-customer lifetime spend) answer a
@@ -244,10 +277,15 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
         || new RegExp(`\\b${words}\\s*(?:=|:|is|equals)`, 'i').test(question);
     });
     if (explicitlyFilterable) return [];
-    return requestedFilters.filter((filter) => !block.dimensions.includes(filter));
+    return uncoveredFilters.filter((filter) => !block.dimensions.includes(filter));
   }
   const blockFilters = new Set(block.filters);
-  return requestedFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter));
+  return uncoveredFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter));
+}
+
+function extractSqlFilterScope(sql: string): string {
+  const match = /\bwhere\b([\s\S]*?)(?=\bgroup\s+by\b|\border\s+by\b|\bhaving\b|\blimit\b|$)/i.exec(sql);
+  return match?.[1] ?? '';
 }
 
 function isTemporalFilter(filter: string): boolean {
@@ -280,6 +318,16 @@ function outputCoversRequired(outputs: string[], required: string): boolean {
 }
 
 function outputRequirementCovered(required: string, block: BlockShape): boolean {
+  // Compound dimension outputs are contracts, not loose keyword hints.
+  // `beverage_product_types` (a count) must not satisfy `product_type`, and a
+  // block that merely touches products must not satisfy `product_name`.
+  // Requiring the concrete projected output here prevents a high-overlap block
+  // at the wrong grain from being promoted to an exact certified answer.
+  if (isStructuredDimensionOutput(required)) {
+    const directDimension = required.replace(/_(?:name|title)$/, '');
+    return block.outputs.includes(required)
+      || (directDimension !== required && block.outputs.includes(directDimension));
+  }
   if (outputCoversRequired(block.outputs, required)) return true;
   const token = canonicalToken(required);
   if (block.dimensions.includes(token)) return true;
@@ -287,6 +335,11 @@ function outputRequirementCovered(required: string, block: BlockShape): boolean 
     return block.measures.includes(token) || block.textTokens.has(token) || outputHasEntity(new Set(block.outputs), token);
   }
   return false;
+}
+
+function isStructuredDimensionOutput(value: string): boolean {
+  return /_(?:id|key|name|title|type|category|segment|region|country|channel|date|month|quarter|year)$/.test(value)
+    && !isMeasureLike(value);
 }
 
 function outputHasEntity(outputs: Set<string>, entity: string): boolean {

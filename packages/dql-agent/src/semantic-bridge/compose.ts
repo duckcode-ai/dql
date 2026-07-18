@@ -20,6 +20,13 @@ export interface SemanticBridgeOrderBy {
   direction: 'asc' | 'desc';
 }
 
+export interface SemanticFilterValueBinding {
+  column: string;
+  canonicalValue: string;
+  match: 'exact' | 'normalized' | 'fuzzy';
+  confidence: number;
+}
+
 export interface SemanticDqlArtifactInput {
   question: string;
   name?: string;
@@ -61,6 +68,12 @@ export interface ComposeSemanticQueryInput {
    * hard-coding project-specific value→dimension guesses.
    */
   filterValueColumns?: (value: string) => string[];
+  /**
+   * Field-scoped canonical member binding. Unlike metadata token search, this
+   * preserves a stored value phrase and lets the compiler use the canonical
+   * warehouse member (`Melissa Lopez`) while keeping the user's typo out of SQL.
+   */
+  filterValueBindings?: (value: string) => SemanticFilterValueBinding[];
 }
 
 export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput): SemanticBridgeQueryResult | undefined {
@@ -74,7 +87,34 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   const allDimensions = input.semanticLayer.listDimensions();
   const dimensionSelection = selectDimensions(allDimensions, input.questionPlan, timeDimension?.name);
   const dimensions = dimensionSelection.dimensions;
-  const filters = selectFilters(allDimensions, dimensions, input.question, input.questionPlan, timeDimension?.name, input.filterValueColumns);
+  const relativeComparison = entityRelativeComparisonSpec(input, allDimensions, dimensions);
+  if (requiresEntityRelativeMeasureComparison(input.question)) {
+    if (!relativeComparison || timeDimension || dimensions.length !== 1) return undefined;
+    const candidates = [
+      ...metrics,
+      ...alternativePrimaryMetrics(input, new Set(metrics.map((metric) => metric.name))),
+    ];
+    for (const metric of candidates) {
+      const relative = buildEntityRelativeSemanticResult({
+        input,
+        metric,
+        dimension: relativeComparison.dimension,
+        referenceValue: relativeComparison.referenceValue,
+        operator: relativeComparison.operator,
+      });
+      if (relative) return relative;
+    }
+    return undefined;
+  }
+  const filters = selectFilters(
+    allDimensions,
+    dimensions,
+    input.question,
+    input.questionPlan,
+    timeDimension?.name,
+    input.filterValueColumns,
+    input.filterValueBindings,
+  );
   // A semantic metric can legitimately encode a restriction in its governed
   // definition (`drink_revenue`, `enterprise_arr`). In that case requiring a
   // second physical dimension filter is both redundant and sometimes
@@ -159,6 +199,7 @@ export function composeSemanticQueryFromMembers(input: {
   driver?: string;
   tableMapping?: Record<string, string>;
 }): SemanticBridgeQueryResult | undefined {
+  if (requiresEntityRelativeMeasureComparison(input.question)) return undefined;
   const metricByName = new Map(input.semanticLayer.listMetrics().map((metric) => [metric.name.toLowerCase(), metric]));
   const metrics = uniqueStrings(input.selection.metrics ?? [])
     .map((name) => metricByName.get(name.toLowerCase()))
@@ -186,6 +227,124 @@ export function composeSemanticQueryFromMembers(input: {
     driver: input.driver,
     tableMapping: input.tableMapping,
   });
+}
+
+function requiresEntityRelativeMeasureComparison(question: string): boolean {
+  return /\b(?:less|lower|fewer|more|higher|greater)\b[^?.!]{0,80}\bthan\b\s+[a-z0-9@._'-]+/i.test(question)
+    || /\b(?:below|under|above|over)\b\s+that\s+of\s+[a-z0-9@._'-]+/i.test(question);
+}
+
+function entityRelativeComparisonSpec(
+  input: ComposeSemanticQueryInput,
+  allDimensions: DimensionDefinition[],
+  selectedDimensions: string[],
+): { dimension: string; referenceValue: string; operator: '<' | '>' } | undefined {
+  const operator = /\b(?:less|lower|fewer)\b[^?.!]{0,80}\bthan\b/i.test(input.question)
+    || /\b(?:below|under)\b\s+that\s+of\b/i.test(input.question)
+    ? '<' as const
+    : /\b(?:more|higher|greater)\b[^?.!]{0,80}\bthan\b/i.test(input.question)
+      || /\b(?:above|over)\b\s+that\s+of\b/i.test(input.question)
+      ? '>' as const
+      : undefined;
+  if (!operator) return undefined;
+  const mention = input.questionPlan.valueMentions.find((candidate) => candidate.syntacticRole === 'filter_value')
+    ?? input.questionPlan.valueMentions[0];
+  if (!mention?.text.trim()) return undefined;
+
+  const bindings = input.filterValueBindings?.(mention.text) ?? [];
+  const binding = bindings.length === 1 ? bindings[0] : undefined;
+  // A unique bounded member binding can safely canonicalize a shortened name.
+  // Without one, only carry a complete multi-token display name; a bare
+  // "Melissa" could refer to multiple real members and must fall back to AI or
+  // clarification instead of being guessed by the deterministic compiler.
+  const referenceValue = binding?.canonicalValue
+    ?? (mention.text.trim().split(/\s+/).length >= 2 ? mention.text.trim() : undefined);
+  if (!referenceValue) return undefined;
+
+  const boundDimension = binding
+    ? allDimensions.find((dimension) => {
+        const names = [dimension.name, dimension.sql, dimension.sql.split('.').pop() ?? '']
+          .map((value) => value.toLowerCase());
+        return names.includes(binding.column.toLowerCase());
+      })?.name
+    : undefined;
+  const dimension = boundDimension && selectedDimensions.includes(boundDimension)
+    ? boundDimension
+    : selectedDimensions[0];
+  return dimension ? { dimension, referenceValue, operator } : undefined;
+}
+
+function buildEntityRelativeSemanticResult(input: {
+  input: ComposeSemanticQueryInput;
+  metric: MetricDefinition;
+  dimension: string;
+  referenceValue: string;
+  operator: '<' | '>';
+}): SemanticBridgeQueryResult | undefined {
+  const base = buildSemanticBridgeResult({
+    semanticLayer: input.input.semanticLayer,
+    question: input.input.question,
+    metrics: [input.metric],
+    dimensions: [input.dimension],
+    filters: [],
+    driver: input.input.driver,
+    tableMapping: input.input.tableMapping,
+  });
+  if (!base) return undefined;
+
+  const dimension = quoteSqlIdentifier(input.dimension);
+  const metric = quoteSqlIdentifier(input.metric.name);
+  const reference = `'${input.referenceValue.replace(/'/g, "''")}'`;
+  const limit = input.input.questionPlan.requestedShape.topN?.n ?? 100;
+  const sql = [
+    'WITH peer_values AS (',
+    indentSql(base.sql.trim().replace(/;+\s*$/, ''), 2),
+    '),',
+    'reference_value AS (',
+    `  SELECT ${metric} AS baseline_value`,
+    '  FROM peer_values',
+    `  WHERE ${dimension} = ${reference}`,
+    '  LIMIT 1',
+    ')',
+    `SELECT peer.${dimension} AS ${dimension},`,
+    `       peer.${metric} AS ${metric}`,
+    'FROM peer_values AS peer',
+    'CROSS JOIN reference_value AS reference',
+    `WHERE peer.${dimension} <> ${reference}`,
+    `  AND peer.${metric} ${input.operator} reference.baseline_value`,
+    `ORDER BY peer.${metric} DESC`,
+    `LIMIT ${Math.max(1, Math.min(500, Math.floor(limit)))}`,
+  ].join('\n');
+  const relativeFilter: SemanticBridgeFilter = {
+    dimension: input.dimension,
+    operator: input.operator === '<' ? 'less_than_reference' : 'greater_than_reference',
+    values: [input.referenceValue],
+  };
+  const orderBy: SemanticBridgeOrderBy[] = [{ name: input.metric.name, direction: 'desc' }];
+  return {
+    ...base,
+    sql,
+    filters: [relativeFilter],
+    orderBy,
+    limit,
+    dqlArtifact: {
+      ...base.dqlArtifact,
+      compiledSql: sql,
+    },
+    composeResult: {
+      ...base.composeResult,
+      sql,
+    },
+  };
+}
+
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function indentSql(value: string, spaces: number): string {
+  const prefix = ' '.repeat(spaces);
+  return value.split('\n').map((line) => `${prefix}${line}`).join('\n');
 }
 
 function buildSemanticBridgeResult(input: {
@@ -435,10 +594,14 @@ function selectDimensions(
     ...questionPlan.requestedShape.measures,
     ...questionPlan.metricTerms,
   ].map((term) => normalizeSemanticText(term)).filter(Boolean));
-  const terms = uniqueStrings([
-    ...questionPlan.requestedShape.dimensions,
-    ...questionPlan.dimensionTerms,
-  ])
+  const terms = uniqueStrings(
+    questionPlan.outputShape === 'value' && questionPlan.requestedShape.dimensions.length === 0
+      ? []
+      : [
+        ...questionPlan.requestedShape.dimensions,
+        ...questionPlan.dimensionTerms,
+      ],
+  )
     .filter((term) => !isTimeGrainTerm(term))
     .filter((term) => !metricTerms.has(normalizeSemanticText(term)));
   const selected: string[] = [];
@@ -458,7 +621,7 @@ function selectDimensions(
           dimension.description,
           dimension.domain ?? '',
           ...(dimension.tags ?? []),
-        ].join(' '), tokens),
+        ].join(' '), tokens) + semanticDisplayRoleScore(dimension, term),
       }))
       .filter((candidate) => candidate.score > 0)
       .sort((a, b) => b.score - a.score || a.dimension.name.localeCompare(b.dimension.name))[0]?.dimension;
@@ -558,6 +721,7 @@ function selectFilters(
   questionPlan: AnalysisQuestionPlan,
   timeDimensionName: string | undefined,
   filterValueColumns: ((value: string) => string[]) | undefined,
+  filterValueBindings: ((value: string) => SemanticFilterValueBinding[]) | undefined,
 ): SemanticBridgeFilter[] {
   const available = dimensions.filter((dimension) => dimension.name !== timeDimensionName);
   const selected = new Map<string, SemanticBridgeFilter>();
@@ -574,12 +738,18 @@ function selectFilters(
     if (!value || [...selected.values()].some((filter) => filter.values.some((existing) => sameFilterValue(existing, value)))) {
       continue;
     }
-    const dimension = selectFilterDimension(value, available, selectedDimensions, filterValueColumns);
-    if (!dimension) continue;
-    selected.set(dimension.name, {
-      dimension: dimension.name,
+    const resolved = selectFilterDimension(
+      value,
+      available,
+      selectedDimensions,
+      filterValueColumns,
+      filterValueBindings,
+    );
+    if (!resolved) continue;
+    selected.set(resolved.dimension.name, {
+      dimension: resolved.dimension.name,
       operator: 'equals',
-      values: uniqueStrings([...(selected.get(dimension.name)?.values ?? []), value]),
+      values: uniqueStrings([...(selected.get(resolved.dimension.name)?.values ?? []), resolved.canonicalValue]),
     });
   }
 
@@ -623,8 +793,18 @@ function selectFilterDimension(
   dimensions: DimensionDefinition[],
   selectedDimensions: string[],
   filterValueColumns: ((value: string) => string[]) | undefined,
-): DimensionDefinition | undefined {
+  filterValueBindings: ((value: string) => SemanticFilterValueBinding[]) | undefined,
+): { dimension: DimensionDefinition; canonicalValue: string } | undefined {
   const selectedSet = new Set(selectedDimensions);
+
+  const bindings = filterValueBindings?.(value) ?? [];
+  for (const binding of bindings) {
+    const normalizedColumn = normalizeColumnToken(binding.column);
+    const matched = dimensions.find((dimension) =>
+      dimensionColumnTokens(dimension).includes(normalizedColumn),
+    );
+    if (matched) return { dimension: matched, canonicalValue: binding.canonicalValue };
+  }
 
   // Bind the literal to the dimension that actually carries it: ask the value
   // index which physical column(s) sampled this value, then match a dimension
@@ -636,7 +816,7 @@ function selectFilterDimension(
     const matched = dimensions.find((dimension) =>
       dimensionColumnTokens(dimension).some((token) => normalizedColumns.has(token)),
     );
-    if (matched) return matched;
+    if (matched) return { dimension: matched, canonicalValue: value };
   }
 
   // Never bind an unresolved literal to the only selected grouping dimension.
@@ -645,6 +825,27 @@ function selectFilterDimension(
   // (handled by extractInlineFilterCandidates); otherwise it stays unresolved.
   void selectedSet;
   return undefined;
+}
+
+/**
+ * Resolve generic entity words to their display member rather than whichever
+ * equally-token-matched dimension sorts first. `product` should select
+ * `product_name`, not `product_description`; explicit semantic labels still win.
+ */
+function semanticDisplayRoleScore(dimension: DimensionDefinition, rawTerm: string): number {
+  const term = normalizeSemanticText(rawTerm).replace(/\s+/g, '_');
+  if (!term) return 0;
+  const name = normalizeSemanticText(dimension.name).replace(/\s+/g, '_');
+  const label = normalizeSemanticText(dimension.label).replace(/\s+/g, '_');
+  const leaf = normalizeSemanticText(leafName(dimension.name)).replace(/\s+/g, '_');
+  let score = 0;
+  if (name === `${term}_name` || leaf === `${term}_name`) score += 80;
+  if (label === term || label === `${term}_name`) score += 55;
+  if (name === term || leaf === term) score += 40;
+  if (name.endsWith('_name') && (name.includes(term) || term.includes(name.replace(/_name$/, '')))) score += 30;
+  if (/(_description|_detail|_text|_notes?)$/.test(name)) score -= 25;
+  if (/(_id|_key|_uuid|_code)$/.test(name)) score -= 15;
+  return score;
 }
 
 /** Physical column tokens a dimension might reference (leaf of name/expr/sql). */

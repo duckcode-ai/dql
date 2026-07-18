@@ -27,6 +27,7 @@ interface RunResult {
   stdout: string;
   stderr: string;
   spawnError?: Error;
+  timedOut?: boolean;
 }
 
 interface RunOptions {
@@ -41,6 +42,8 @@ interface RunOptions {
 function runProcess(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     let settled = false;
+    let timedOut = false;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: RunResult) => { if (!settled) { settled = true; resolve(result); } };
     let child;
     try {
@@ -56,7 +59,13 @@ function runProcess(command: string, args: string[], options: RunOptions = {}): 
     const stdout: string[] = [];
     const stderr: string[] = [];
     const timer = options.timeoutMs
-      ? setTimeout(() => { try { child.kill('SIGTERM'); } catch { /* noop */ } }, options.timeoutMs)
+      ? setTimeout(() => {
+          timedOut = true;
+          try { child.kill('SIGTERM'); } catch { /* noop */ }
+          forceKillTimer = setTimeout(() => {
+            try { child.kill('SIGKILL'); } catch { /* noop */ }
+          }, 2_000);
+        }, options.timeoutMs)
       : undefined;
     const onAbort = () => { try { child.kill('SIGTERM'); } catch { /* noop */ } };
     options.signal?.addEventListener('abort', onAbort);
@@ -64,13 +73,15 @@ function runProcess(command: string, args: string[], options: RunOptions = {}): 
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk.toString()));
     child.on('error', (error) => {
       if (timer) clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       options.signal?.removeEventListener('abort', onAbort);
-      finish({ code: null, stdout: stdout.join(''), stderr: stderr.join(''), spawnError: error });
+      finish({ code: null, stdout: stdout.join(''), stderr: stderr.join(''), spawnError: error, timedOut });
     });
     child.on('close', (code) => {
       if (timer) clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       options.signal?.removeEventListener('abort', onAbort);
-      finish({ code, stdout: stdout.join(''), stderr: stderr.join('') });
+      finish({ code, stdout: stdout.join(''), stderr: stderr.join(''), timedOut });
     });
     if (options.input !== undefined) {
       child.stdin.end(options.input);
@@ -78,6 +89,14 @@ function runProcess(command: string, args: string[], options: RunOptions = {}): 
       child.stdin.end();
     }
   });
+}
+
+const DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS = 60_000;
+
+export function resolveSubscriptionCliTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.DQL_SUBSCRIPTION_CLI_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS;
+  return Math.max(5_000, Math.min(300_000, Math.floor(configured)));
 }
 
 /** Split messages into a single system string and a flattened conversation prompt. */
@@ -177,9 +196,16 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         input: prompt,
         cwd,
         env: claudeSubscriptionEnv(),
-        timeoutMs: options.signal ? undefined : 120000,
+        // The UI always supplies an AbortSignal. The previous conditional disabled
+        // the timeout in exactly that path, so a stalled CLI left Ask spinning
+        // forever. User cancellation and the independent hard deadline now both
+        // apply.
+        timeoutMs: resolveSubscriptionCliTimeoutMs(),
         signal: options.signal,
       });
+      if (res.timedOut) {
+        throw new Error(`Claude Code did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
+      }
       if (res.spawnError) {
         throw new Error(`Claude Code CLI not found. Install it (https://claude.com/claude-code) and run \`claude /login\`, or switch to an API-key provider. (${res.spawnError.message})`);
       }
@@ -282,9 +308,12 @@ export class CodexCliProvider implements AgentProvider {
       const res = await runProcess(this.command, args, {
         input: fullPrompt,
         cwd,
-        timeoutMs: options.signal ? undefined : 120000,
+        timeoutMs: resolveSubscriptionCliTimeoutMs(),
         signal: options.signal,
       });
+      if (res.timedOut) {
+        throw new Error(`Codex did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
+      }
       if (res.spawnError) {
         throw new Error(`Codex CLI not found. Install it and run \`codex login\` with your ChatGPT plan, or switch to an API-key provider. (${res.spawnError.message})`);
       }

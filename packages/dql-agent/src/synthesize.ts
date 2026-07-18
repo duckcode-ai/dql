@@ -149,6 +149,7 @@ function buildSystemPrompt(format: SynthesisFormat, audience: "analyst" | "stake
     "Do NOT add trust disclaimers (e.g. 'uncertified', 'review required') — the UI shows a trust badge separately.",
     "Do NOT mention query plans, grain, routing, tools, SQL, tables, columns, row counts, missing-output checks, or implementation details. Those appear in a separate inspector.",
     "Do NOT say 'As an AI' or narrate your process. Be direct and concrete.",
+    "Preserve the display semantics in the supplied result: money uses the shown currency symbol and decimals, percentages use %, counts are integers, and dates remain dates. Do not strip or change those units.",
     "Return concise GitHub-flavored Markdown only. Never return HTML.",
   ];
   if (audience === "stakeholder") {
@@ -181,7 +182,7 @@ function previewToText(preview: SynthesizeResultPreview | undefined, limit = 20)
   const header = `| ${cols.join(" | ")} |`;
   const sep = `| ${cols.map(() => "---").join(" | ")} |`;
   const body = preview.rows.slice(0, limit).map((row) =>
-    `| ${cols.map((col) => formatCell(row[col])).join(" | ")} |`,
+    `| ${cols.map((col) => formatBusinessValue(col, row[col])).join(" | ")} |`,
   );
   const more = preview.rows.length > limit ? `\n(${preview.rows.length - limit} more rows not shown)` : "";
   return [header, sep, ...body].join("\n") + more;
@@ -213,15 +214,54 @@ function numericCell(value: unknown): number | undefined {
 function formatBusinessValue(column: string, value: unknown): string {
   const numeric = numericCell(value);
   if (numeric === undefined) return formatCell(value).replace(/_/g, " ");
-  if (/percent|percentage|pct/i.test(column)) return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(numeric)}%`;
+  const isCount = /(?:^|_)(?:count|orders?|customers?|accounts?|users?|products?|items?|units?|quantity|rank|position|days?|months?|years?|distinct)(?:_|$)/i.test(column);
+  const isPercent = /(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)|(?:^|_)margin(?:_|$)/i.test(column);
+  const isCurrency = /(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i.test(column);
+  if (isCount) return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(numeric);
+  if (isPercent) {
+    const normalized = Math.abs(numeric) <= 1 ? numeric : numeric / 100;
+    return new Intl.NumberFormat("en-US", { style: "percent", maximumFractionDigits: 2 }).format(normalized);
+  }
+  if (isCurrency) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(numeric);
+  }
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(numeric);
 }
 
-function labelColumn(preview: SynthesizeResultPreview): string | undefined {
+function labelColumn(preview: SynthesizeResultPreview, question = ""): string | undefined {
   const sample = preview.rows[0] ?? {};
   const candidates = preview.columns.filter((column) => numericCell(sample[column]) === undefined && !isTechnicalColumn(column));
-  return candidates.find((column) => /name|title|label|customer|account|product|region|segment|category|channel|status|type/i.test(column))
-    ?? candidates[0];
+  if (candidates.length <= 1) return candidates[0];
+
+  // A result can contain several categorical fields (for example a Sankey
+  // source and target). Choosing the first one makes a low-cardinality source
+  // such as `product_type = beverage` look like the identity of every row.
+  // Rank the labels using the returned values as well as their business names:
+  // specific entity/name fields beat broad type/status fields, and a field that
+  // actually distinguishes the rows beats one repeated across the result.
+  const questionText = question.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  const ranked = candidates.map((column, index) => {
+    const values = preview.rows
+      .map((row) => row[column])
+      .filter((value) => value !== null && value !== undefined && String(value).trim().length > 0)
+      .map((value) => String(value).toLowerCase());
+    const distinct = new Set(values).size;
+    const distinctRatio = values.length > 0 ? distinct / values.length : 0;
+    const phrase = column.toLowerCase().replace(/[_-]+/g, " ");
+    const nameLike = /(?:^|_)(?:name|title|label)(?:_|$)/i.test(column) ? 18 : 0;
+    const entityLike = /customer|account|product|patient|member|employee|supplier|vendor|region/i.test(column) ? 6 : 0;
+    const broadDimension = /(?:^|_)(?:type|status|category|segment|channel)(?:_|$)/i.test(column) ? -4 : 0;
+    const askedFor = phrase && questionText.includes(phrase) ? 4 : 0;
+    const specificity = Math.min(distinct, 12) + distinctRatio * 8;
+    return { column, score: nameLike + entityLike + broadDimension + askedFor + specificity - index / 100 };
+  });
+  ranked.sort((left, right) => right.score - left.score);
+  return ranked[0]?.column ?? candidates[0];
 }
 
 function measureColumn(input: SynthesizeInput): string | undefined {
@@ -259,7 +299,7 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
   if (!preview) return undefined;
   if (preview.rows.length === 0) return "No matching records were found for this question.";
 
-  const identityColumn = labelColumn(preview);
+  const identityColumn = labelColumn(preview, input.question);
   const measure = measureColumn(input);
   if (preview.rows.length === 1) {
     const row = preview.rows[0];
@@ -340,7 +380,7 @@ function statsToText(stats: SynthesizeColumnStat[] | undefined, rowCount: number
   if (!stats || stats.length === 0) return undefined;
   const lines = stats.slice(0, 16).map((stat) => {
     if (stat.kind === 'numeric') {
-      return `- ${stat.column}: min ${stat.min}, max ${stat.max}, sum ${stat.sum}`;
+      return `- ${stat.column}: min ${formatBusinessValue(stat.column, stat.min)}, max ${formatBusinessValue(stat.column, stat.max)}, sum ${formatBusinessValue(stat.column, stat.sum)}`;
     }
     const values = stat.values
       ? ` (${stat.values.slice(0, 12).map((entry) => `${entry.value}: ${entry.count}`).join(', ')})`

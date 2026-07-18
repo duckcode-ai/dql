@@ -254,6 +254,8 @@ export interface DbtOnboardingStatusResponse {
     state?: 'none' | 'draft' | 'ready';
   };
   capabilities?: OnboardingCapabilities;
+  preparation?: DbtOnboardingJob;
+  snapshot?: { id?: string; error?: string };
   readiness?: Record<string, unknown>;
 }
 
@@ -295,10 +297,24 @@ export interface DbtOnboardingApplyResponse {
   snapshotId?: string;
   jobId?: string;
   id?: string;
+  kind?: string;
   status?: string;
+  stage?: string;
+  progress?: number;
+  message?: string;
+  phases?: DbtOnboardingPhase[];
+  result?: Record<string, unknown>;
+  error?: string;
   applied?: boolean;
   fingerprint?: string;
   config?: Record<string, unknown>;
+}
+
+export interface DbtOnboardingPhase {
+  id: 'artifact_validation' | 'snapshot_compile' | 'search_index';
+  label: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  durationMs?: number;
 }
 
 export interface DbtOnboardingJob {
@@ -308,6 +324,10 @@ export interface DbtOnboardingJob {
   stage?: string;
   progress?: number;
   message?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  snapshotId?: string;
+  phases?: DbtOnboardingPhase[];
   diagnostics?: Array<{ code?: string; message: string; level?: string }>;
   result?: Record<string, unknown>;
   error?: string;
@@ -323,6 +343,7 @@ export interface DbtOnboardingJobResponse {
   stage?: string;
   progress?: number;
   message?: string;
+  phases?: DbtOnboardingPhase[];
   diagnostics?: DbtOnboardingJob['diagnostics'];
   result?: Record<string, unknown>;
   error?: string;
