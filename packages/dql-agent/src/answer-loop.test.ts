@@ -6655,7 +6655,9 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     });
 
     expect(result.kind).toBe("no_answer");
-    expect(result.refusalCode).toBe("grounding_gap");
+    // Slice 1: a DECLARED draft path is now the more precise `modeling_gap`
+    // (still a non-terminal gap code; hosts treat it exactly like grounding_gap).
+    expect(result.refusalCode).toBe("modeling_gap");
     expect(result.exploratoryCandidate).toMatchObject({
       kind: "dbt_grounded_exploration",
       reason: "relationship_not_certified",
@@ -7458,5 +7460,210 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
         reason: "I cannot answer that.",
       },
     });
+  });
+});
+
+describe("declared draft-path exploration (Slice 1)", () => {
+  function jaffleDraftLoopManifest(): DQLManifest {
+    const models: Array<[string, string]> = [
+      ["order", "fct_orders"],
+      ["customer", "dim_customers"],
+      ["order_item", "fct_order_items"],
+      ["product", "dim_products"],
+      ["location", "dim_locations"],
+    ];
+    const draftRel = (id: string, from: string, to: string, key: string) => ({
+      id,
+      localId: id,
+      qualifiedId: `commerce::relationship::${id}`,
+      from,
+      to,
+      keys: [{ from: key, to: key }],
+      cardinality: "many_to_one" as const,
+      fanout: "safe" as const,
+      status: "draft" as const,
+      crossDomain: false,
+      sourcePath: "modeling/model.dql.yaml",
+      fingerprint: id,
+      staleCertification: false,
+      automaticJoinAllowed: false,
+    });
+    return {
+      manifestVersion: 3,
+      dqlVersion: "2.0.0",
+      generatedAt: "2026-07-19T00:00:00.000Z",
+      project: "jaffle",
+      projectRoot: "/fixture",
+      blocks: {},
+      businessViews: {},
+      terms: {},
+      notebooks: {},
+      metrics: {},
+      dimensions: {},
+      sources: {},
+      lineage: { nodes: [], edges: [], domains: [], crossDomainFlows: [], domainTrust: {} },
+      dbtProvenance: {
+        manifestPath: "/fixture/target/manifest.json",
+        manifestFingerprint: "manifest",
+        nodes: Object.fromEntries(models.map(([, name]) => [`model.jaffle.${name}`, {
+          uniqueId: `model.jaffle.${name}`,
+          resourceType: "model" as const,
+          name,
+          relation: `analytics.${name}`,
+          identityFingerprint: name,
+          available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+        }])),
+        metricFlow: {},
+      },
+      modeling: {
+        mode: "dbt-first",
+        packages: {},
+        entities: Object.fromEntries(models.map(([id, name]) => [id, {
+          id: `commerce::entity::${id}`,
+          localId: id,
+          qualifiedId: `commerce::entity::${id}`,
+          dbtUniqueId: `model.jaffle.${name}`,
+          domain: "commerce",
+          grain: `${id}_id`,
+          keys: [`${id}_id`],
+          sourcePath: "modeling/model.dql.yaml",
+          identityFingerprint: id,
+        }])),
+        relationships: {
+          order_item_to_order: draftRel("order_item_to_order", "order_item", "order", "order_id"),
+          order_item_to_product: draftRel("order_item_to_product", "order_item", "product", "product_id"),
+          order_to_customer: draftRel("order_to_customer", "order", "customer", "customer_id"),
+          order_to_location: draftRel("order_to_location", "order", "location", "location_id"),
+        },
+        contracts: {},
+        conformance: {},
+        rules: {},
+        domainLineage: [],
+      },
+    };
+  }
+
+  const fiveTableContext = (question: string) => contextPackForRankedRelations(question, [
+    { relation: "analytics.fct_order_items", name: "fct_order_items", source: "dbt manifest", columns: [
+      { name: "order_id", type: "VARCHAR" }, { name: "product_id", type: "VARCHAR" }, { name: "subtotal", type: "DECIMAL" },
+    ], rank: 1, score: 95, reason: "order items fact" },
+    { relation: "analytics.fct_orders", name: "fct_orders", source: "dbt manifest", columns: [
+      { name: "order_id", type: "VARCHAR" }, { name: "customer_id", type: "VARCHAR" }, { name: "location_id", type: "VARCHAR" },
+    ], rank: 2, score: 90, reason: "orders fact" },
+    { relation: "analytics.dim_products", name: "dim_products", source: "dbt manifest", columns: [
+      { name: "product_id", type: "VARCHAR" }, { name: "product_name", type: "VARCHAR" },
+    ], rank: 3, score: 85, reason: "products" },
+    { relation: "analytics.dim_customers", name: "dim_customers", source: "dbt manifest", columns: [
+      { name: "customer_id", type: "VARCHAR" }, { name: "customer_name", type: "VARCHAR" },
+    ], rank: 4, score: 80, reason: "customers" },
+    { relation: "analytics.dim_locations", name: "dim_locations", source: "dbt manifest", columns: [
+      { name: "location_id", type: "VARCHAR" }, { name: "location_name", type: "VARCHAR" },
+    ], rank: 5, score: 75, reason: "locations" },
+  ], { metricTerms: ["revenue"], dimensionTerms: ["product", "location", "customer"] });
+
+  const fiveTableContextScoped = (question: string) => ({
+    ...fiveTableContext(question),
+    skills: [],
+    edges: [],
+    citations: [],
+  });
+
+  const FIVE_TABLE_SQL = [
+    "SELECT p.product_name, l.location_name, c.customer_name, SUM(oi.subtotal) AS revenue",
+    "FROM analytics.fct_order_items oi",
+    "JOIN analytics.fct_orders o ON oi.order_id = o.order_id",
+    "JOIN analytics.dim_products p ON oi.product_id = p.product_id",
+    "JOIN analytics.dim_customers c ON o.customer_id = c.customer_id",
+    "JOIN analytics.dim_locations l ON o.location_id = l.location_id",
+    "GROUP BY p.product_name, l.location_name, c.customer_name",
+  ].join(" ");
+
+  it("renders the declared draft join path as suggestion-only prompt cards", async () => {
+    kg.rebuild([], []);
+    const question = "Which product made the most revenue in each location and which customers bought it?";
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({ summary: "Product revenue by location with customers.", sql: FIVE_TABLE_SQL, outputs: ["product_name", "location_name", "customer_name", "revenue"], viz: "table" }),
+      "```",
+    ].join("\n"));
+    let executed = false;
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      manifest: jaffleDraftLoopManifest(),
+      contextPack: fiveTableContextScoped(question),
+      executeGeneratedSql: async (sql) => {
+        executed = true;
+        return { columns: ["product_name"], rows: [], rowCount: 0, sql };
+      },
+    });
+
+    const prompt = provider.calls[0]!.map((message) => message.content).join("\n");
+    expect(prompt).toContain("DECLARED (UNCERTIFIED) DRAFT JOIN PATH");
+    expect(prompt).toContain("keys=order_id=order_id");
+    expect(prompt).toContain("status=draft");
+    expect(prompt).toContain("GOVERNED RELATIONSHIP COVERAGE: MISSING");
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("modeling_gap");
+    expect(result.exploratoryCandidate).toMatchObject({
+      kind: "dbt_grounded_exploration",
+      reason: "relationship_not_certified",
+      executionStatus: "not_executed",
+    });
+    expect(result.exploratoryCandidate?.exploratoryPath?.edges.map((edge) => edge.relationshipId).sort()).toEqual([
+      "order_item_to_order", "order_item_to_product", "order_to_customer", "order_to_location",
+    ]);
+    // The chat-facing text is business language; machine detail stays in refusalDetails.
+    expect(result.answer).not.toContain("commerce::entity::");
+    expect(result.refusalDetails?.message).toContain("uncertified edge");
+    expect(executed).toBe(false);
+  });
+
+  it("humanizes a terminal policy refusal and keeps the machine detail in refusalDetails", async () => {
+    kg.rebuild([], []);
+    const manifest = jaffleDraftLoopManifest();
+    manifest.modeling!.relationships.order_to_customer.fanout = "attribution_required";
+    const question = "Join order revenue to customer segments";
+    const provider = new StubProvider("I cannot compose that query.");
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      manifest,
+      contextPack: fiveTableContextScoped(question),
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("policy_blocked");
+    expect(result.answer).not.toContain("commerce::entity::");
+    expect(result.answer).toContain("attribution");
+    expect(result.refusalDetails?.message).toContain("attribution policy");
+    expect(result.validationWarnings?.some((warning) => warning.startsWith("Analytical policy detail:"))).toBe(true);
+  });
+
+  it("rethrows the request deadline from the forced-join retry instead of swallowing it", async () => {
+    kg.rebuild([], []);
+    const deadline = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const controller = new AbortController();
+    class DeclineThenAbortProvider extends StubProvider {
+      constructor() { super("no sql here"); }
+      async generate(messages: AgentMessage[]): Promise<string> {
+        this.calls.push(messages);
+        if (this.calls.length === 1) return "I cannot compose that query.";
+        controller.abort(deadline);
+        throw deadline;
+      }
+    }
+    const question = "Which product made the most revenue in each location and which customers bought it?";
+    await expect(answer({
+      question,
+      provider: new DeclineThenAbortProvider(),
+      kg,
+      manifest: jaffleDraftLoopManifest(),
+      signal: controller.signal,
+      contextPack: fiveTableContextScoped(question),
+    })).rejects.toBe(deadline);
   });
 });

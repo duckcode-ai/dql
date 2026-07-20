@@ -17,6 +17,7 @@ import {
 import { listRemoteMcpSettings } from '../llm/mcp-config.js';
 import { listProviderSettings } from '../settings/provider-settings.js';
 import { describeNpmInvocation, resolveNpmInvocation } from '../npm-runtime.js';
+import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from '../version-status.js';
 
 interface Check {
   name: string;
@@ -95,6 +96,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
 
   checks.push(checkNotebookAssets());
   checks.push(checkOutputContractDrift(projectRoot));
+  checks.push(await checkDqlVersionDrift(projectRoot));
 
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
@@ -862,4 +864,28 @@ function checkAiRuntime(projectRoot: string): Check[] {
         : 'missing; run dql agent reindex before Claude Code/Codex ask flows',
     },
   ];
+}
+
+/**
+ * REL-002: version drift is the #1 source of "the fix didn't work" reports —
+ * the project pin, the global binary, and a long-running server can be three
+ * different versions. Best-effort latest lookup (2s cap); offline stays ok.
+ */
+async function checkDqlVersionDrift(projectRoot: string): Promise<Check> {
+  await fetchLatestPublishedDqlVersion();
+  const status = resolveDqlRuntimeVersionStatus({ projectRoot, runningVersion: readRunningCliVersion() });
+  const identity = [
+    `running=${status.runningVersion} (${status.invocationSource})`,
+    status.projectInstalledVersion ? `project=${status.projectInstalledVersion}` : undefined,
+    status.projectPinnedRange ? `pin=${status.projectPinnedRange}` : undefined,
+    status.latestKnownVersion ? `latest=${status.latestKnownVersion}` : 'latest=unknown (offline or check disabled)',
+  ].filter(Boolean).join(', ');
+  if (status.drift.length === 0) {
+    return { name: 'DQL version drift', ok: true, detail: identity };
+  }
+  return {
+    name: 'DQL version drift',
+    ok: false,
+    detail: `${identity}. ${status.drift.join(' ')}${status.upgradeCommand ? ` Upgrade: ${status.upgradeCommand}` : ''}`,
+  };
 }

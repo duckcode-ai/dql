@@ -3,6 +3,7 @@ import {
   applyRequestedTopNToExploratorySql,
   buildAgentValueProbeSql,
   agentRunDeadlineMs,
+  exploratoryProbeContradiction,
   agentAnswerHasExecutionFailure,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
@@ -4324,5 +4325,60 @@ describe('configured Skills folder API', () => {
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
+  });
+});
+
+describe('agentRunDeadlineMs env overrides (Slice 1)', () => {
+  it('keeps the 45s/120s normative defaults', () => {
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, {})).toBe(45_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue', requestedMode: 'research' }, {})).toBe(120_000);
+  });
+
+  it('honors env overrides with clamping', () => {
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '180000' })).toBe(180_000);
+    expect(agentRunDeadlineMs({ question: 'x', requestedMode: 'research' }, { DQL_AGENT_RESEARCH_DEADLINE_MS: '420000' })).toBe(420_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '1' })).toBe(15_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '99999999' })).toBe(600_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: 'not-a-number' })).toBe(45_000);
+  });
+});
+
+describe('exploratoryProbeContradiction gating (Slice 1)', () => {
+  const join = { leftRelation: 'analytics.fct_orders', leftColumn: 'o.customer_id', rightRelation: 'analytics.dim_customers', rightColumn: 'c.customer_id' };
+  const edge = { relationshipId: 'order_to_customer', fromRelation: 'analytics.fct_orders', toRelation: 'analytics.dim_customers', cardinality: 'many_to_one' };
+  const probeRow = (overrides: Record<string, number>) => [{
+    left_sample_rows: 100,
+    right_sample_rows: 50,
+    joined_rows: 100,
+    unmatched_left_sample_rows: 0,
+    unmatched_right_sample_rows: 0,
+    max_matches_per_left_key: 1,
+    max_matches_per_right_key: 4,
+    max_left_rows_per_key: 4,
+    max_right_rows_per_key: 1,
+    ...overrides,
+  }];
+
+  it('stops execution when the unfiltered key samples have zero overlap', () => {
+    const error = exploratoryProbeContradiction(probeRow({ joined_rows: 0 }), join, edge);
+    expect(error).toContain('no matching rows');
+  });
+
+  it('stops execution when the declared one-side key is duplicated', () => {
+    const error = exploratoryProbeContradiction(probeRow({ max_right_rows_per_key: 3 }), join, edge);
+    expect(error).toContain('duplicates');
+  });
+
+  it('allows a legitimate many-to-one join with duplicates only on the many side', () => {
+    expect(exploratoryProbeContradiction(probeRow({}), join, edge)).toBeUndefined();
+  });
+
+  it('does not gate cardinality without a resolvable edge orientation', () => {
+    const ambiguous = { ...edge, fromRelation: undefined, toRelation: undefined };
+    expect(exploratoryProbeContradiction(probeRow({ max_right_rows_per_key: 9 }), join, ambiguous)).toBeUndefined();
+  });
+
+  it('never treats an empty-but-matching sample pair as a contradiction', () => {
+    expect(exploratoryProbeContradiction(probeRow({ left_sample_rows: 0, joined_rows: 0 }), join, edge)).toBeUndefined();
   });
 });

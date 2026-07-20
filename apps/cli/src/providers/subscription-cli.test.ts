@@ -97,3 +97,25 @@ describe.runIf(process.env.DQL_TEST_LIVE_CLI === '1' && hasCodex)('CodexCliProvi
     expect(status.installed).toBe(true);
   });
 });
+
+describe('pre-spawn cancellation (Slice 1)', () => {
+  it('Claude generate rejects with the exact abort reason without spawning', async () => {
+    const { ClaudeCodeCliProvider } = await import('./subscription-cli.js');
+    const provider = new ClaudeCodeCliProvider({ command: '/definitely/not/a/real/claude' });
+    const deadline = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    const controller = new AbortController();
+    controller.abort(deadline);
+    await expect(provider.generate([{ role: 'user', content: 'hi' }], { signal: controller.signal }))
+      .rejects.toBe(deadline);
+  });
+
+  it('Codex generate rejects with the exact abort reason without spawning', async () => {
+    const { CodexCliProvider } = await import('./subscription-cli.js');
+    const provider = new CodexCliProvider({ command: '/definitely/not/a/real/codex' });
+    const deadline = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    const controller = new AbortController();
+    controller.abort(deadline);
+    await expect(provider.generate([{ role: 'user', content: 'hi' }], { signal: controller.signal }))
+      .rejects.toBe(deadline);
+  });
+});

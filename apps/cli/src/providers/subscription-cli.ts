@@ -91,6 +91,13 @@ function runProcess(command: string, args: string[], options: RunOptions = {}): 
   });
 }
 
+/** Surface a fired AbortSignal as its own reason (deadline TimeoutError, user AbortError). */
+function throwIfAlreadyCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+  }
+}
+
 const DEFAULT_SUBSCRIPTION_CLI_TIMEOUT_MS = 60_000;
 
 export function resolveSubscriptionCliTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -176,6 +183,8 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   }
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
+    // A run whose deadline already fired must not spawn a doomed child process.
+    throwIfAlreadyCancelled(options.signal);
     const { system, prompt } = flattenMessages(messages);
     const model = options.model ?? this.defaultModel;
     const args = [
@@ -203,6 +212,9 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         timeoutMs: resolveSubscriptionCliTimeoutMs(),
         signal: options.signal,
       });
+      // A mid-flight cancellation SIGTERMed the child; surface the exact abort
+      // reason (e.g. the run deadline's TimeoutError), never a parse error.
+      throwIfAlreadyCancelled(options.signal);
       if (res.timedOut) {
         throw new Error(`Claude Code did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
       }
@@ -288,6 +300,8 @@ export class CodexCliProvider implements AgentProvider {
   }
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
+    // A run whose deadline already fired must not spawn a doomed child process.
+    throwIfAlreadyCancelled(options.signal);
     const { system, prompt } = flattenMessages(messages);
     const model = options.model ?? this.defaultModel;
     // Codex exec has no --system-prompt; prepend the system text as a labeled preamble.
@@ -311,6 +325,9 @@ export class CodexCliProvider implements AgentProvider {
         timeoutMs: resolveSubscriptionCliTimeoutMs(),
         signal: options.signal,
       });
+      // A mid-flight cancellation SIGTERMed the child; surface the exact abort
+      // reason (e.g. the run deadline's TimeoutError), never a parse error.
+      throwIfAlreadyCancelled(options.signal);
       if (res.timedOut) {
         throw new Error(`Codex did not respond within ${Math.round(resolveSubscriptionCliTimeoutMs() / 1_000)} seconds. Retry, choose a faster model, or increase DQL_SUBSCRIPTION_CLI_TIMEOUT_MS.`);
       }

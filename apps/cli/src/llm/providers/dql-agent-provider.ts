@@ -30,6 +30,7 @@ import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath } 
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
+import { rethrowIfCancelled } from '../cancellation.js';
 import { blockProposalDqlMetadata } from '../proposal-metadata.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
 import { ClaudeCodeCliProvider, CodexCliProvider } from '../../providers/subscription-cli.js';
@@ -519,6 +520,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         }
         emit({ kind: 'done', stopReason: 'stop' });
       } catch (err) {
+        // A deadline/cancellation is NOT a provider failure. Rethrow it intact so
+        // the engine renders its graceful bounded-deadline message instead of a
+        // raw "<provider> failed: The operation was aborted due to timeout".
+        rethrowIfCancelled(err, signal);
         const message = err instanceof Error ? err.message : String(err);
         const setupHint = shouldShowProviderSetupHint(message) ? ` ${spec.setup}` : '';
         emit({ kind: 'error', message: `${spec.label} failed: ${message}.${setupHint}` });

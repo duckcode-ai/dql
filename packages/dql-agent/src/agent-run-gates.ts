@@ -204,7 +204,8 @@ const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluat
   // Treat those refusal codes as terminal no-answer states. They are not an
   // instruction to spend another provider call on a different orchestration lane.
   const isTerminalRefusal = result.answerRefusalCode === "model_declined"
-    || result.answerRefusalCode === "grounding_gap";
+    || result.answerRefusalCode === "grounding_gap"
+    || result.answerRefusalCode === "modeling_gap";
   const hasAnswer = !isTerminalRefusal && (
     nonEmptyString(result.answer)
     ?? nonEmptyString(payload?.answer)

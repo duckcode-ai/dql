@@ -48,7 +48,14 @@ import { createContextLedger, type ContextLedger } from './grounding/context-led
 import { validateAnswerResultShape } from './answer-shape.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
 import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
-import { planAnalyticalPath, type AnalyticalPathPlan, type AnalyticalPolicyCode } from './metadata/analytical-policy.js';
+import {
+  planAnalyticalPath,
+  humanizeAnalyticalEntityId,
+  analyticalPolicyUserFacingReason,
+  type AnalyticalExploratoryPath,
+  type AnalyticalPathPlan,
+  type AnalyticalPolicyCode,
+} from './metadata/analytical-policy.js';
 import { planCertifiedAdaptation, type CertifiedAdaptation } from './metadata/block-adapt.js';
 import {
   compactSqlSnippet,
@@ -98,7 +105,7 @@ export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'sema
  * from `ambiguous`: an attribution/export/proof policy is a metadata decision,
  * not a request for the analyst to rewrite an otherwise clear question.
  */
-export type AnswerRefusalCode = 'grounding_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
+export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
 export type AnalysisDepth = CascadeAnalysisDepth;
 
 /**
@@ -113,10 +120,18 @@ export interface ExploratorySqlCandidate {
   reason: 'unbound_relation' | 'unplanned_join' | 'relationship_not_certified' | 'unsafe_relationship';
   sql: string;
   message: string;
+  /** Business-language explanation, safe to show a stakeholder verbatim. */
+  userFacingReason?: string;
   /** Bound entity ids, if any, that the v3 guard resolved before it stopped. */
   modeledEntityIds: string[];
   /** Relationships the guard considered; empty means no certified route exists. */
   relationshipIds: string[];
+  /**
+   * Declared (uncertified) join path from the manifest, re-bound to this SQL's
+   * actual joins. Suggestion-only key hints for the host's structural
+   * validation and gating probes — never join authorization.
+   */
+  exploratoryPath?: AnalyticalExploratoryPath;
   /** The SQL was NOT executed by the governed generated-SQL lane. */
   executionStatus: 'not_executed';
 }
@@ -756,6 +771,22 @@ function exploratoryCandidateFromDbtFirstGuard(
   sql: string,
   decision: ReturnType<typeof evaluateDbtFirstGeneratedSql>,
 ): ExploratorySqlCandidate | undefined {
+  // The policy service's disposition is authoritative: a declared draft path
+  // re-bound to this SQL's actual joins enters the bounded lane directly.
+  if (decision.disposition === 'exploratory_candidate') {
+    return {
+      kind: 'dbt_grounded_exploration',
+      reason: 'relationship_not_certified',
+      sql,
+      message: decision.technicalDetail ?? decision.message
+        ?? 'This query follows a declared but uncertified DQL relationship path.',
+      userFacingReason: decision.userFacingReason,
+      modeledEntityIds: decision.entities,
+      relationshipIds: decision.relationshipIds,
+      exploratoryPath: decision.exploratoryPath,
+      executionStatus: 'not_executed',
+    };
+  }
   const reason = decision.code;
   const missingPathWithoutUnsafeProof = reason === 'unsafe_relationship' && decision.relationshipIds.length === 0;
   if (decision.safe || (!missingPathWithoutUnsafeProof
@@ -776,6 +807,7 @@ function exploratoryCandidateFromDbtFirstGuard(
     sql,
     message: decision.message
       ?? 'This query is grounded in dbt metadata but has no certified DQL relationship path yet.',
+    userFacingReason: decision.userFacingReason,
     modeledEntityIds: decision.entities,
     relationshipIds: decision.relationshipIds,
     executionStatus: 'not_executed',
@@ -1818,7 +1850,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         toolCalls: proposalToolCalls,
       });
       parsed = parseProposal(proposed);
-    } catch {
+    } catch (err) {
+      // Deadline/cancellation must surface as itself, never as a policy refusal.
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) throw err;
       // keep the original decline; fall through to the honest no_answer.
     }
   }
@@ -1831,9 +1866,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // consistent, actionable message so the same question yields the same outcome
     // every run and every surface — instead of passing through the model's varying
     // text. A genuinely context-less ask keeps the plain honest message.
+    // The user-facing text is BUSINESS language; the machine policy detail
+    // (qualified ids, codes) lives only in refusalDetails + validationWarnings.
     const declinedDespiteContext = wantsGeneratedData && hasGeneratableContext;
+    const policyDetail = analyticalPlan?.safe === false
+      ? analyticalPlan.technicalDetail ?? analyticalPlan.message ?? 'DQL could not prove a safe analytical relationship path.'
+      : undefined;
     const text = analyticalPlan?.safe === false
-      ? analyticalPlan.message ?? 'DQL could not prove a safe analytical relationship path.'
+      ? analyticalPlan.userFacingReason
+        ?? analyticalPolicyUserFacingReason(analyticalPlan.code ?? 'unsafe_relationship', analyticalPlan.entities)
       : declinedDespiteContext
       ? 'I could not compose a governed query for this from the available tables and metrics. This usually needs a clearer join path or an explicit metric and grouping — name the specific measure and how to break it down, and I can generate a review-required draft.'
       : parsed.text || 'No answer (the model declined to propose SQL).';
@@ -1845,14 +1886,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       confidence: 0.1,
       text,
       refusalCode: analyticalPlan?.safe === false
-        ? refusalCodeForAnalyticalPolicy(analyticalPlan.code)
+        ? analyticalPlan.disposition === 'exploratory_candidate'
+          ? 'modeling_gap'
+          : refusalCodeForAnalyticalPolicy(analyticalPlan.code, analyticalPlanAllowsDbtExploration(analyticalPlan))
         : 'model_declined',
       refusalDetails: {
         code: analyticalPlan?.safe === false
           ? analyticalPlan.code ?? 'unsafe_relationship'
           : 'model_declined',
-        message: text,
+        message: policyDetail ?? text,
       },
+      validationWarnings: policyDetail ? [`Analytical policy detail: ${policyDetail}`] : undefined,
       answer: text,
       citations: [],
       memoryContext: input.memoryContext,
@@ -2068,7 +2112,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               offending: revalidated.offending,
             };
       }
-    } catch {
+    } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) throw err;
       // Re-grounding is best-effort; the bounded self-repair below still runs.
     }
   }
@@ -2126,7 +2172,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           };
         }
       }
-    } catch {
+    } catch (err) {
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) throw err;
       // Repair is best-effort — the refusal below stays the honest fallback.
     }
   }
@@ -2206,8 +2254,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest, input.domainContext?.purpose, input.domainContext)
     : undefined;
   if (dbtFirstJoinSafety && !dbtFirstJoinSafety.safe) {
-    const text = dbtFirstJoinSafety.message
+    // Business-language text for the chat surface; the machine policy message
+    // stays in refusalDetails + validationWarnings for Inspect.
+    const policyDetail = dbtFirstJoinSafety.technicalDetail ?? dbtFirstJoinSafety.message
       ?? 'DQL could not prove this generated join from certified analytical relationships.';
+    const text = dbtFirstJoinSafety.userFacingReason
+      ?? analyticalPolicyUserFacingReason(dbtFirstJoinSafety.code ?? 'unsafe_relationship', dbtFirstJoinSafety.entities);
     const exploratoryCandidate = exploratoryCandidateFromDbtFirstGuard(parsed.sql, dbtFirstJoinSafety);
     const analysisPlan = buildAnalysisPlan({
       question,
@@ -2235,13 +2287,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       proposedSql: parsed.sql,
       sql: parsed.sql,
       ...(exploratoryCandidate ? { exploratoryCandidate } : {}),
-      refusalCode: refusalCodeForAnalyticalPolicy(dbtFirstJoinSafety.code, Boolean(exploratoryCandidate)),
+      refusalCode: dbtFirstJoinSafety.disposition === 'exploratory_candidate'
+        ? 'modeling_gap'
+        : refusalCodeForAnalyticalPolicy(dbtFirstJoinSafety.code, Boolean(exploratoryCandidate)),
       refusalDetails: {
         code: dbtFirstJoinSafety.code ?? 'unsafe_relationship',
-        message: text,
+        message: policyDetail,
       },
       validationWarnings: [
         ...contextValidation.warnings,
+        `Analytical policy detail: ${policyDetail}`,
         `DQL v3 relationship guard: ${dbtFirstJoinSafety.code ?? 'unsafe relationship'}.`,
         ...(exploratoryCandidate
           ? ['A bounded DBT-grounded exploratory route may validate this missing modeled relationship; governed SQL was not executed.']
@@ -2921,10 +2976,21 @@ function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): strin
   if (!plan || plan.entities.length < 2) return undefined;
   if (!plan.safe) {
     if (analyticalPlanAllowsDbtExploration(plan)) {
+      const declaredPath = plan.exploratoryPath?.edges.length
+        ? [
+            'DECLARED (UNCERTIFIED) DRAFT JOIN PATH — suggestion only, NOT authorization:',
+            ...plan.exploratoryPath.edges.map((edge, index) => [
+              `${index + 1}. ${edge.fromEntity} (${edge.fromRelation ?? 'bound dbt model'}) -> ${edge.toEntity} (${edge.toRelation ?? 'bound dbt model'})`,
+              `   relationship=${edge.relationshipId}; keys=${edge.keys.map((key) => `${key.from}=${key.to}`).join(', ')}; cardinality=${edge.cardinality}; fanout=${edge.fanout}; status=${edge.lifecycle}`,
+            ].join('\n')),
+            'Prefer these declared relations and exact key pairs over inferring joins from column names. The result remains analyst-review-required.',
+          ]
+        : [];
       return [
         'DQL GOVERNED RELATIONSHIP COVERAGE: MISSING.',
         plan.message ?? 'No certified analytical relationship path is available.',
         `Policy code: ${plan.code ?? 'unsafe_relationship'}.`,
+        ...declaredPath,
         'This is not authorization for governed SQL. You MAY propose one bounded, read-only DBT-grounded exploratory SELECT/WITH using only the inspected relations and columns supplied below.',
         'Use explicit aliases and equality join keys visible in the inspected schema. Preserve the requested member bindings exactly. Do not introduce an uninspected relation, a cross-domain path, an attribution/allocation rule, or more than four joins.',
         'The host will independently parse, bound, probe, validate, and execute the candidate as analyst-review-required. If the inspected evidence cannot express the request, return no SQL.',
@@ -2951,8 +3017,11 @@ function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): strin
 /**
  * Missing modeling may enter the narrow EXP-001 host-validated lane. Explicit
  * unsafe, cross-domain, attribution, expiry, purpose, and proof failures never do.
+ * The planner's `disposition` is authoritative; the code checks remain only for
+ * plans produced by older manifests/paths that predate the disposition contract.
  */
 function analyticalPlanAllowsDbtExploration(plan: AnalyticalPathPlan): boolean {
+  if (plan.disposition === 'exploratory_candidate') return true;
   if (plan.safe) return false;
   if (plan.code === 'unbound_relation' || plan.code === 'relationship_not_certified') return true;
   return plan.code === 'unsafe_relationship' && plan.relationshipIds.length === 0;

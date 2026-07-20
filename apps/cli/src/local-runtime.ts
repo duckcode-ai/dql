@@ -117,6 +117,8 @@ import {
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
+import { rethrowIfCancelled } from './llm/cancellation.js';
+import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type { AgentConversationContext, AgentRunner as LLMAgentRunner, ProviderId } from './llm/types.js';
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
@@ -590,6 +592,13 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
 const AGENT_LOOKUP_DEADLINE_MS = 45_000;
 const AGENT_RESEARCH_DEADLINE_MS = 120_000;
 
+/** Env-tunable run deadline (e.g. slow subscription-CLI providers), clamped to sane bounds. */
+function resolveAgentDeadlineMs(envKey: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env[envKey]);
+  if (!Number.isFinite(configured) || configured <= 0) return fallback;
+  return Math.max(15_000, Math.min(600_000, Math.floor(configured)));
+}
+
 /**
  * PERF-002: one wall-clock budget follows the request through routing, provider
  * calls, repair, and execution. Ordinary Ask never inherits Research's budget
@@ -597,12 +606,15 @@ const AGENT_RESEARCH_DEADLINE_MS = 120_000;
  */
 export function agentRunDeadlineMs(
   request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth'>,
+  env: NodeJS.ProcessEnv = process.env,
 ): number {
+  const lookupDeadline = resolveAgentDeadlineMs('DQL_AGENT_LOOKUP_DEADLINE_MS', AGENT_LOOKUP_DEADLINE_MS, env);
+  const researchDeadline = resolveAgentDeadlineMs('DQL_AGENT_RESEARCH_DEADLINE_MS', AGENT_RESEARCH_DEADLINE_MS, env);
   if (request.requestedMode === 'research' || request.analysisDepth === 'deep') {
-    return AGENT_RESEARCH_DEADLINE_MS;
+    return researchDeadline;
   }
   const plan = buildAnalysisQuestionPlan(request.question);
-  return plan.needsResearchWorkspace ? AGENT_RESEARCH_DEADLINE_MS : AGENT_LOOKUP_DEADLINE_MS;
+  return plan.needsResearchWorkspace ? researchDeadline : lookupDeadline;
 }
 
 export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
@@ -652,7 +664,12 @@ async function conversationContextFromThread(
   clientContext: Record<string, unknown> | undefined,
   question?: string,
 ): Promise<Record<string, unknown>> {
-  const turns = store.recentTurns(threadId, 8).map((turn) => {
+  // Token-budget backstop: six verbatim turns with per-field caps. Older turns
+  // remain reachable through the rolling summary + semantic recall below —
+  // carrying more raw prose mostly slows every provider call on follow-ups.
+  const clampTurnText = (value: string | undefined): string | undefined =>
+    value && value.length > 1_200 ? `${value.slice(0, 1_200)}…` : value;
+  const turns = store.recentTurns(threadId, 6).map((turn) => {
     const contract = turn.contract ?? {};
     const topN = contract.topN;
     const topNValue = typeof topN === 'number'
@@ -662,8 +679,8 @@ async function conversationContextFromThread(
         : undefined;
     return compactConversationRecord({
       id: turn.id,
-      question: turn.question,
-      answerSummary: turn.answerSummary,
+      question: clampTurnText(turn.question),
+      answerSummary: clampTurnText(turn.answerSummary),
       sourceCertifiedBlock: turn.sourceCertifiedBlock,
       route: turn.route,
       trustLabel: turn.trustLabel,
@@ -890,6 +907,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
   const authToken = opts.authToken ?? process.env.DQL_SERVER_TOKEN;
   const runtimeVersion = readDqlRuntimeVersion();
+  // Warm the latest-version cache in the background (2s cap, 24h cache; offline → unknown).
+  void fetchLatestPublishedDqlVersion();
   const allowedOrigins = new Set((opts.allowedOrigins ?? (process.env.DQL_ALLOWED_ORIGINS ?? '').split(','))
     .map((value) => value.trim().replace(/\/$/, ''))
     .filter(Boolean));
@@ -1626,7 +1645,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       {
         provider: resolvedProvider,
         messages: [
-          ...(request.history ?? []).map((message) => ({ role: message.role, content: message.text })),
+          // No-thread fallback path: bound the raw client history so follow-ups
+          // cannot inflate every provider call (8 turns × 4k chars).
+          ...(request.history ?? []).slice(-8).map((message) => ({
+            role: message.role,
+            content: message.text.length > 4_000 ? `${message.text.slice(0, 4_000)}…` : message.text,
+          })),
           ...(isRepair
             ? [{ role: 'assistant' as const, content: `The prior attempt needs repair without changing the original question or requested output grain: ${repair?.repairHint}` }]
             : []),
@@ -1974,6 +1998,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       attachExecutableDqlArtifactContract(governedAnswer, request.question);
       applySmartVisualization(governedAnswer, request.question);
     } catch (error) {
+      // Deadline/cancellation propagates to the engine, which renders the
+      // graceful "bounded execution deadline" outcome — never a provider error.
+      rethrowIfCancelled(error, request.signal);
       const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
       return {
         summary: message,
@@ -2013,7 +2040,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const isExploratory = Boolean(governedAnswer.exploratoryCandidate);
     const isExecutionFailure = agentAnswerHasExecutionFailure(governedAnswer);
     const isGroundingGap = governedAnswer.kind === 'no_answer'
-      && governedAnswer.refusalCode === 'grounding_gap'
+      && (governedAnswer.refusalCode === 'grounding_gap' || governedAnswer.refusalCode === 'modeling_gap')
       && !isExploratory;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
     // AGT-004: a rejected attribution/export/proof policy is a deliberate
@@ -2402,6 +2429,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             storage.close();
           }
         } catch (error) {
+          rethrowIfCancelled(error, request.signal);
           researchWorkspaceError = formatNotebookResearchStorageError(error);
         }
       }
@@ -3344,7 +3372,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const preflight = repairExploratorySqlBeforeExecution(candidate.sql, schemaContext, question);
     const boundedSql = applyRequestedTopNToExploratorySql(preflight.sql, requestedTopN);
     const repairs = boundedSql === preflight.sql
-      ? preflight.repairs
+      ? [...preflight.repairs]
       : [...preflight.repairs, `Applied the requested overall top-${requestedTopN} bound before exploratory execution.`];
     if (preflight.blockedReason) {
       return {
@@ -3368,10 +3396,50 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
     }
 
+    // Structural binding: when the candidate carries a declared draft join path,
+    // every SQL join must ride one of its edges on the declared key pair. A join
+    // outside the declared path (or on different keys) is not executed — it is a
+    // review-required modeling question, not a runtime guess.
+    const declaredEdges = candidate.exploratoryPath?.edges ?? [];
+    const joinEdges = new Map<number, (typeof declaredEdges)[number]>();
+    if (declaredEdges.length > 0) {
+      for (const [index, join] of analysis.joins.entries()) {
+        const edge = declaredEdges.find((value) =>
+          declaredExploratoryRelationMatches(join.leftRelation!, value.fromRelation) && declaredExploratoryRelationMatches(join.rightRelation!, value.toRelation)
+          || declaredExploratoryRelationMatches(join.leftRelation!, value.toRelation) && declaredExploratoryRelationMatches(join.rightRelation!, value.fromRelation));
+        if (!edge) {
+          return {
+            proofs: [],
+            sql: boundedSql,
+            repairs,
+            error: `The join between ${join.leftRelation} and ${join.rightRelation} is not part of the declared relationship path, so DQL did not execute it. Declare the relationship in the DQL model to enable it.`,
+          };
+        }
+        const keyMatches = edge.keys.some((key) =>
+          exploratoryColumnsMatch(join.leftColumn, key.from) && exploratoryColumnsMatch(join.rightColumn, key.to)
+          || exploratoryColumnsMatch(join.leftColumn, key.to) && exploratoryColumnsMatch(join.rightColumn, key.from));
+        if (!keyMatches) {
+          return {
+            proofs: [],
+            sql: boundedSql,
+            repairs,
+            error: `The join ${join.leftColumn} = ${join.rightColumn} uses different keys than relationship "${edge.relationshipId}" declares (${edge.keys.map((key) => `${key.from}=${key.to}`).join(', ')}). Review the declared keys before executing.`,
+          };
+        }
+        joinEdges.set(index, edge);
+      }
+      const exercised = new Set([...joinEdges.values()].map((edge) => edge.relationshipId));
+      for (const edge of declaredEdges) {
+        if (!exercised.has(edge.relationshipId)) {
+          repairs.push(`Declared relationship "${edge.relationshipId}" was not exercised by this query.`);
+        }
+      }
+    }
+
     const activeConnection = requireActiveConnection();
     const proofs: Array<{ summary: string }> = [];
     try {
-      for (const join of analysis.joins) {
+      for (const [index, join] of analysis.joins.entries()) {
         const proofSql = buildExploratoryJoinProbeSql({
           leftRelation: join.leftRelation!,
           leftColumn: join.leftColumn,
@@ -3381,6 +3449,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const prepared = prepareLocalExecution(proofSql, activeConnection, projectRoot, projectConfig);
         const raw = await executor.executeQuery(prepared.sql, [], runtimeVariables({}), prepared.connection);
         proofs.push({ summary: summarizeExploratoryJoinProbe(raw.rows, join.leftRelation!, join.leftColumn, join.rightRelation!, join.rightColumn) });
+        // Gating (not observational): a structural contradiction between the
+        // UNFILTERED key overlap and the declared relationship stops automatic
+        // execution. A legitimately empty *filtered* business result is still an
+        // answer — these gates only inspect the raw key samples.
+        const contradiction = exploratoryProbeContradiction(raw.rows, join, joinEdges.get(index));
+        if (contradiction) {
+          return { proofs, sql: boundedSql, repairs, error: contradiction };
+        }
       }
       const result = await executeGeneratedSqlForAgent(boundedSql);
       return { result, proofs, sql: boundedSql, repairs };
@@ -4628,8 +4704,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     if (req.method === 'GET' && path === '/api/health') {
+      // REL-002: expose runtime/build identity so a server started before a
+      // rebuild or running a different version than the project pin is visibly
+      // stale. Uses only the cached latest-version lookup — never blocks.
+      const versionStatus = resolveDqlRuntimeVersionStatus({ projectRoot, runningVersion: runtimeVersion });
+      void fetchLatestPublishedDqlVersion();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ status: 'ok', version: runtimeVersion }));
+      res.end(serializeJSON({ status: 'ok', version: runtimeVersion, versionStatus }));
       return;
     }
 
@@ -5442,6 +5523,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             parsed.request.conversationContext,
             parsed.request.question,
           );
+          // The persisted thread is authoritative for prior turns. Raw client
+          // history would duplicate the same conversation into the prompt a
+          // second time — dropping it keeps follow-up prompts bounded.
+          if (parsed.request.history?.length) parsed.request.history = [];
         }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         const runId = parsed.request.runId;
@@ -14956,6 +15041,16 @@ export function buildExploratoryJoinProbeSql(input: {
     SELECT right_key, COUNT(*) AS match_count
     FROM matches
     GROUP BY right_key
+  ),
+  left_key_counts AS (
+    SELECT join_key, COUNT(*) AS key_count
+    FROM left_sample
+    GROUP BY join_key
+  ),
+  right_key_counts AS (
+    SELECT join_key, COUNT(*) AS key_count
+    FROM right_sample
+    GROUP BY join_key
   )
 SELECT
   (SELECT COUNT(*) FROM left_sample) AS left_sample_rows,
@@ -14964,7 +15059,73 @@ SELECT
   (SELECT COUNT(*) FROM left_sample AS l WHERE NOT EXISTS (SELECT 1 FROM right_sample AS r WHERE r.join_key = l.join_key)) AS unmatched_left_sample_rows,
   (SELECT COUNT(*) FROM right_sample AS r WHERE NOT EXISTS (SELECT 1 FROM left_sample AS l WHERE l.join_key = r.join_key)) AS unmatched_right_sample_rows,
   (SELECT COALESCE(MAX(match_count), 0) FROM left_counts) AS max_matches_per_left_key,
-  (SELECT COALESCE(MAX(match_count), 0) FROM right_counts) AS max_matches_per_right_key`;
+  (SELECT COALESCE(MAX(match_count), 0) FROM right_counts) AS max_matches_per_right_key,
+  (SELECT COALESCE(MAX(key_count), 0) FROM left_key_counts) AS max_left_rows_per_key,
+  (SELECT COALESCE(MAX(key_count), 0) FROM right_key_counts) AS max_right_rows_per_key`;
+}
+
+function declaredExploratoryRelationMatches(sqlRelation: string, declaredRelation: string | undefined): boolean {
+  if (!declaredRelation) return false;
+  const normalize = (value: string) => value.replace(/["`\[\]]/g, '').trim();
+  return exploratoryRelationsMatch(normalize(sqlRelation), normalize(declaredRelation));
+}
+
+function exploratoryColumnsMatch(sqlColumn: string, declaredColumn: string): boolean {
+  const normalize = (value: string) => value.replace(/["`\[\]]/g, '').split('.').at(-1)?.trim().toLowerCase() ?? value.toLowerCase();
+  return normalize(sqlColumn) === normalize(declaredColumn);
+}
+
+/**
+ * Gate a join probe against the declared relationship. Returns an error string
+ * when the UNFILTERED key samples structurally contradict the declaration:
+ * - zero key overlap while both sides have rows (wrong/mistyped key), or
+ * - duplicate keys on the declared "one" side of a *_to_one / one_to_* edge.
+ * Sampling caveat: gates only fire on definitive contradictions, never on low
+ * match rates, so a sparse but real relationship still executes.
+ */
+export function exploratoryProbeContradiction(
+  rows: unknown[],
+  join: { leftRelation?: string; leftColumn: string; rightRelation?: string; rightColumn: string },
+  edge?: { relationshipId: string; fromRelation?: string; toRelation?: string; cardinality: string },
+): string | undefined {
+  const row = Array.isArray(rows) && rows[0] && typeof rows[0] === 'object'
+    ? rows[0] as Record<string, unknown>
+    : {};
+  const number = (key: string) => {
+    const value = Number(row[key]);
+    return Number.isFinite(value) ? value : 0;
+  };
+  const leftRows = number('left_sample_rows');
+  const rightRows = number('right_sample_rows');
+  const joined = number('joined_rows');
+  if (leftRows > 0 && rightRows > 0 && joined === 0) {
+    return `The join key ${join.leftColumn} = ${join.rightColumn} produced no matching rows between ${join.leftRelation} and ${join.rightRelation} (unfiltered sample). The declared key pair is likely wrong — review the relationship before executing this analysis.`;
+  }
+  if (!edge) return undefined;
+  // Orient the declared cardinality onto the parsed join: which physical side is
+  // the declared "one" side? Duplicated keys there contradict the declaration.
+  const leftIsFrom = Boolean(join.leftRelation && declaredExploratoryRelationMatches(join.leftRelation, edge.fromRelation));
+  const rightIsFrom = Boolean(join.rightRelation && declaredExploratoryRelationMatches(join.rightRelation, edge.fromRelation));
+  if (leftIsFrom === rightIsFrom) return undefined; // orientation unresolved — do not guess
+  const oneSide = edge.cardinality === 'many_to_one' ? 'to' : edge.cardinality === 'one_to_many' ? 'from' : edge.cardinality === 'one_to_one' ? 'both' : undefined;
+  if (!oneSide) return undefined;
+  // Per-side key duplication measured WITHIN each sample (max rows sharing one
+  // key value). Duplicates inside a sample are definitive — a subset of a table
+  // cannot show duplicates the full table does not have. The pairwise
+  // max_matches_* columns are NOT used here: they inflate whenever the
+  // legitimate "many" side repeats a key value.
+  const leftDuplicated = number('max_left_rows_per_key') > 1;
+  const rightDuplicated = number('max_right_rows_per_key') > 1;
+  const fromSideIsLeft = leftIsFrom;
+  const duplicatedSides: Array<'from' | 'to'> = [
+    ...(leftDuplicated ? [fromSideIsLeft ? 'from' as const : 'to' as const] : []),
+    ...(rightDuplicated ? [fromSideIsLeft ? 'to' as const : 'from' as const] : []),
+  ];
+  const violated = oneSide === 'both' ? duplicatedSides.length > 0 : duplicatedSides.includes(oneSide);
+  if (violated) {
+    return `Relationship "${edge.relationshipId}" declares ${edge.cardinality}, but the sampled join keys show duplicates on the declared unique side. Executing would duplicate rows — validate and correct the relationship first.`;
+  }
+  return undefined;
 }
 
 function summarizeExploratoryJoinProbe(

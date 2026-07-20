@@ -1,7 +1,12 @@
 /** Compatibility wrapper around the unified manifest-v3 analytical policy service. */
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import type { DomainContextEnvelope } from '../domain-context.js';
-import { validateAnalyticalSql, type AnalyticalPolicyCode } from './analytical-policy.js';
+import {
+  validateAnalyticalSql,
+  type AnalyticalExploratoryPath,
+  type AnalyticalPathDisposition,
+  type AnalyticalPolicyCode,
+} from './analytical-policy.js';
 
 export type DbtFirstJoinSafetyCode = AnalyticalPolicyCode;
 
@@ -11,6 +16,13 @@ export interface DbtFirstJoinSafetyDecision {
   message?: string;
   entities: string[];
   relationshipIds: string[];
+  /** Authoritative decision from the analytical policy service. */
+  disposition: AnalyticalPathDisposition;
+  reasonCode?: AnalyticalPolicyCode;
+  userFacingReason?: string;
+  technicalDetail?: string;
+  /** Declared draft join path re-bound to the SQL's actual join set. */
+  exploratoryPath?: AnalyticalExploratoryPath;
 }
 
 /**
@@ -31,5 +43,10 @@ export function evaluateDbtFirstGeneratedSql(
     message: decision.message,
     entities: decision.entities,
     relationshipIds: decision.relationshipIds,
+    disposition: decision.disposition,
+    reasonCode: decision.reasonCode,
+    userFacingReason: decision.userFacingReason,
+    technicalDetail: decision.technicalDetail,
+    exploratoryPath: decision.exploratoryPath,
   };
 }
