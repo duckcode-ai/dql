@@ -3386,13 +3386,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (!analysis.parsed) {
       return { proofs: [], sql: boundedSql, repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
     }
+    const probeableJoins = probeableExploratoryJoins(analysis.joins, analysis.ctes);
+
     // A normal customer → order → order-item → product question needs three
     // joins. Keep the lane bounded, but do not reject this common dbt-star path
-    // solely because the old two-join demo limit was too small.
-    if (analysis.joins.length > 4) {
+    // solely because the old two-join demo limit was too small. CTE-internal
+    // joins are counted physically (they appear in analysis.joins with their
+    // physical endpoints); joins ON a CTE are restructuring, not new paths.
+    if (probeableJoins.length > 4) {
       return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has more than four joins and requires an analyst to review the relationship path.' };
     }
-    if (analysis.joins.some((join) => !join.leftRelation || !join.rightRelation)) {
+    if (probeableJoins.some((join) => !join.leftRelation || !join.rightRelation)) {
       return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
     }
 
@@ -3403,7 +3407,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const declaredEdges = candidate.exploratoryPath?.edges ?? [];
     const joinEdges = new Map<number, (typeof declaredEdges)[number]>();
     if (declaredEdges.length > 0) {
-      for (const [index, join] of analysis.joins.entries()) {
+      for (const [index, join] of probeableJoins.entries()) {
         const edge = declaredEdges.find((value) =>
           declaredExploratoryRelationMatches(join.leftRelation!, value.fromRelation) && declaredExploratoryRelationMatches(join.rightRelation!, value.toRelation)
           || declaredExploratoryRelationMatches(join.leftRelation!, value.toRelation) && declaredExploratoryRelationMatches(join.rightRelation!, value.fromRelation));
@@ -3436,10 +3440,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
     }
 
+    if (probeableJoins.length < analysis.joins.length) {
+      repairs.push(`Skipped join probes for ${analysis.joins.length - probeableJoins.length} join(s) on derived (CTE) relations; the final query execution validates them.`);
+    }
+
     const activeConnection = requireActiveConnection();
     const proofs: Array<{ summary: string }> = [];
     try {
-      for (const [index, join] of analysis.joins.entries()) {
+      for (const [index, join] of probeableJoins.entries()) {
         const proofSql = buildExploratoryJoinProbeSql({
           leftRelation: join.leftRelation!,
           leftColumn: join.leftColumn,
@@ -15062,6 +15070,26 @@ SELECT
   (SELECT COALESCE(MAX(match_count), 0) FROM right_counts) AS max_matches_per_right_key,
   (SELECT COALESCE(MAX(key_count), 0) FROM left_key_counts) AS max_left_rows_per_key,
   (SELECT COALESCE(MAX(key_count), 0) FROM right_key_counts) AS max_right_rows_per_key`;
+}
+
+/**
+ * CTE names are query-internal derived relations, not warehouse tables. A join
+ * whose endpoint is a CTE (e.g. `WITH joy_items AS (…) … JOIN joy_items`) must
+ * be excluded from declared-path enforcement and from join probes — probing
+ * `FROM "joy_items"` throws a DuckDB catalog error for a table that was never
+ * supposed to exist. The physical joins INSIDE the CTE are still present in
+ * the parsed join list and get validated/probed on their own.
+ */
+export function probeableExploratoryJoins<T extends { leftRelation?: string; rightRelation?: string }>(
+  joins: T[],
+  ctes: string[],
+): T[] {
+  const cteNames = new Set(ctes.map((name) => name.split('.').at(-1)?.toLowerCase() ?? name.toLowerCase()));
+  if (cteNames.size === 0) return joins;
+  return joins.filter((join) => ![join.leftRelation, join.rightRelation].some((relation) => {
+    const bare = relation?.replace(/["`\[\]]/g, '').split('.').at(-1)?.toLowerCase();
+    return Boolean(bare && cteNames.has(bare));
+  }));
 }
 
 function declaredExploratoryRelationMatches(sqlRelation: string, declaredRelation: string | undefined): boolean {

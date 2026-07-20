@@ -4,6 +4,7 @@ import {
   buildAgentValueProbeSql,
   agentRunDeadlineMs,
   exploratoryProbeContradiction,
+  probeableExploratoryJoins,
   agentAnswerHasExecutionFailure,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
@@ -4380,5 +4381,29 @@ describe('exploratoryProbeContradiction gating (Slice 1)', () => {
 
   it('never treats an empty-but-matching sample pair as a contradiction', () => {
     expect(exploratoryProbeContradiction(probeRow({ left_sample_rows: 0, joined_rows: 0 }), join, edge)).toBeUndefined();
+  });
+});
+
+describe('probeableExploratoryJoins (Slice 1c — CTE endpoints are not warehouse tables)', () => {
+  const physical = { leftRelation: 'jaffle_shop.dev.order_items', leftColumn: 'oi.order_id', rightRelation: 'jaffle_shop.dev.orders', rightColumn: 'o.order_id' };
+  const cteJoin = { leftRelation: 'joy_items', leftColumn: 'ji.product_id', rightRelation: 'jaffle_shop.dev.products', rightColumn: 'p.product_id' };
+
+  it('drops joins whose endpoint is a CTE and keeps physical joins', () => {
+    const result = probeableExploratoryJoins([physical, cteJoin], ['joy_items']);
+    expect(result).toEqual([physical]);
+  });
+
+  it('matches CTE names case-insensitively and by bare name', () => {
+    const quoted = { ...cteJoin, leftRelation: '"Joy_Items"' };
+    expect(probeableExploratoryJoins([quoted], ['joy_items'])).toEqual([]);
+  });
+
+  it('keeps everything when the query has no CTEs', () => {
+    expect(probeableExploratoryJoins([physical, cteJoin], [])).toEqual([physical, cteJoin]);
+  });
+
+  it('does not drop a physical table that merely shares a suffix token', () => {
+    const lookalike = { ...physical, leftRelation: 'jaffle_shop.dev.items' };
+    expect(probeableExploratoryJoins([lookalike], ['joy_items'])).toEqual([lookalike]);
   });
 });

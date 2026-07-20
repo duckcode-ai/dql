@@ -283,3 +283,47 @@ describe('certified block fit', () => {
     expect(evaluateCertifiedBlockFit({ question, plan, block }).unsupportedFilters).toEqual([]);
   });
 });
+
+describe('member bindings vs Tier-1 termination (Slice 1c)', () => {
+  const rankingBlock = (allowedFilters: string[]) => ({
+    nodeId: 'block:top_beverage_customers',
+    kind: 'block',
+    name: 'top_beverage_customers',
+    status: 'certified',
+    description: 'Top customers ranked by beverage revenue, with beverage order count and product variety. One row per customer.',
+    tags: ['beverage', 'customer', 'revenue', 'ranking'],
+    grain: 'one row per customer in the beverage purchase ranking',
+    declaredOutputs: ['customer_name', 'beverage_revenue', 'beverage_orders', 'beverage_product_types'],
+    dimensions: ['customer_name'],
+    allowedFilters,
+    sql: 'SELECT 1',
+    examples: [],
+  });
+  const joyFollowUp = {
+    kind: 'drilldown',
+    memberBindings: [{ dimension: 'customer', values: ['Joy Lam'], source: 'prior_result', confidence: 'exact' }],
+  };
+
+  it('keeps the broad ranking question exact (no member binding)', () => {
+    const question = 'who are the top customers bought a beverage product?';
+    const fit = evaluateCertifiedBlockFit({ question, plan: buildAnalysisQuestionPlan(question), block: rankingBlock([]) as never });
+    expect(fit.kind).toBe('exact');
+  });
+
+  it('demotes a member-bound follow-up: a dimension column cannot apply the filter verbatim', () => {
+    // Regression for the "Joy Lam" hijack: Tier-1 executed the unfiltered
+    // top-10 ranking as a certified answer for a member-scoped follow-up
+    // because a customer DIMENSION was treated as binding support.
+    const question = 'Joy Lam is a customer data. we are asking from the results so I need his products by revenue in berearage';
+    const fit = evaluateCertifiedBlockFit({ question, plan: buildAnalysisQuestionPlan(question, joyFollowUp), block: rankingBlock([]) as never });
+    expect(fit.kind).toBe('context_only');
+    expect(fit.unsupportedFilters).toContain('Joy Lam');
+  });
+
+  it('keeps a member binding supported when the block exposes a parameterized filter', () => {
+    const question = 'top beverage customers for Joy Lam';
+    const fit = evaluateCertifiedBlockFit({ question, plan: buildAnalysisQuestionPlan(question, joyFollowUp), block: rankingBlock(['customer_name']) as never });
+    expect(fit.kind).toBe('exact');
+    expect(fit.unsupportedFilters).toEqual([]);
+  });
+});

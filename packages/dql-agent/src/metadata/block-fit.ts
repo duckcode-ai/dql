@@ -255,7 +255,15 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
     const dimension = canonicalToken(binding.dimension);
     const dimensionAliases = new Set([dimension, dimension.replace(/_name$/, '')]);
     const staticallyScoped = binding.values.every((value) => block.scopeTokens.has(canonicalToken(value)));
-    const exposesBinding = [...dimensionAliases].some((alias) => block.filters.includes(alias) || block.dimensions.includes(alias));
+    // Only a real parameterized filter contract makes a typed member binding
+    // SUPPORTED for exact Tier-1 termination. A matching DIMENSION column is
+    // not enough: Tier-1 executes the block verbatim, so a "customer" dimension
+    // cannot apply `customer = "Joy Lam"` — claiming support here returned the
+    // full unfiltered ranking as a certified answer for a member-scoped
+    // follow-up. A dimension match demotes to context_only instead, where the
+    // adaptation lane applies the actual restriction (or the generated lane
+    // answers the member-specific shape).
+    const exposesBinding = [...dimensionAliases].some((alias) => block.filters.includes(alias));
     return staticallyScoped || exposesBinding ? [] : binding.values;
   });
   const requestedFilters = uniqueStrings([
