@@ -568,6 +568,8 @@ interface EntityValuePredicate {
   relation?: string;
   column: string;
   value: string;
+  /** True for LIKE/ILIKE-derived predicates (wildcards stripped) — matched by containment, not equality. */
+  fuzzy?: boolean;
 }
 
 function findAmbiguousEntityFilter(
@@ -670,6 +672,21 @@ function extractEntityValuePredicates(sql: string, aliasToRelation: Record<strin
     }
   }
 
+  // Models frequently express a typed member as a pattern filter
+  // (customer_name ILIKE '%Capital One%'). That still APPLIES the binding —
+  // capture it (wildcards stripped) so binding validation doesn't refuse a
+  // semantically correct query. NOT LIKE is deliberately excluded.
+  const likePattern = /(?:(?:LOWER|UPPER)\s*\(\s*)?(?:(["`]?[\w]+["`]?)\s*\.\s*)?(["`]?[\w]+["`]?)\s*\)?\s+(?<!NOT\s)I?LIKE\s+(?:(?:LOWER|UPPER)\s*\(\s*)?('(?:''|[^'])*')\s*\)?/gi;
+  for (const match of sql.matchAll(likePattern)) {
+    const value = unquoteSqlLiteral(match[3] ?? '').replace(/[%_]+/g, ' ').trim();
+    predicates.push({
+      relation: resolvePredicateRelation(match[1], aliasToRelation),
+      column: cleanIdentifier(match[2] ?? ''),
+      value,
+      fuzzy: true,
+    });
+  }
+
   return predicates.filter((predicate) => predicate.column.length > 0 && predicate.value.length > 0);
 }
 
@@ -680,10 +697,20 @@ function findMisboundMemberFilter(
 ): { message: string; relation?: string; column?: string } | undefined {
   if (bindings.length === 0) return undefined;
   const predicates = extractEntityValuePredicates(sql, aliasToRelation);
+  // Equality predicates must match the typed member exactly (normalized);
+  // LIKE-derived predicates count when the stripped pattern and the typed
+  // member contain each other in either direction ('%Capital One%' or a
+  // narrower '%Capital%' both honor the binding "Capital One").
+  const predicateAppliesValue = (predicate: EntityValuePredicate, valueKey: string): boolean => {
+    const predicateKey = normalizeSampleValue(predicate.value);
+    if (!predicateKey || !valueKey) return false;
+    if (predicateKey === valueKey) return true;
+    return Boolean(predicate.fuzzy) && (predicateKey.includes(valueKey) || valueKey.includes(predicateKey));
+  };
   for (const binding of bindings) {
     for (const value of binding.values) {
       const valueKey = normalizeSampleValue(value);
-      const matchingValuePredicates = predicates.filter((predicate) => normalizeSampleValue(predicate.value) === valueKey);
+      const matchingValuePredicates = predicates.filter((predicate) => predicateAppliesValue(predicate, valueKey));
       if (matchingValuePredicates.length === 0) {
         return {
           message: `SQL does not apply required member binding ${binding.dimension} = "${value}". Preserve the typed binding in the generated filter.`,

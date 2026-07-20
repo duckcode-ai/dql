@@ -164,6 +164,49 @@ describe('validateSqlAgainstLocalContext', () => {
     ).ok).toBe(true);
   });
 
+  it('AGT-012 accepts a typed member applied through LIKE and ILIKE pattern filters (Slice 1b)', () => {
+    const context = pack();
+    context.allowedSqlContext.relations.push({
+      relation: 'analytics.customers',
+      name: 'customers',
+      source: 'test',
+      columns: [{ name: 'customer_id' }, { name: 'customer_name' }],
+    });
+
+    for (const sql of [
+      "SELECT customer_name FROM analytics.customers AS c WHERE c.customer_name ILIKE '%Capital One%'",
+      "SELECT customer_name FROM analytics.customers AS c WHERE c.customer_name LIKE 'Capital One%'",
+      "SELECT customer_name FROM analytics.customers AS c WHERE LOWER(c.customer_name) LIKE '%capital one%'",
+      "SELECT customer_name FROM analytics.customers AS c WHERE c.customer_name ILIKE '%Capital%'",
+    ]) {
+      const result = validateSqlAgainstLocalContext(sql, context, {
+        memberBindings: [{ dimension: 'customer', values: ['Capital One'] }],
+      });
+      expect(result.ok, sql).toBe(true);
+    }
+  });
+
+  it('AGT-012 still rejects NOT LIKE and unrelated pattern filters (Slice 1b)', () => {
+    const context = pack();
+    context.allowedSqlContext.relations.push({
+      relation: 'analytics.customers',
+      name: 'customers',
+      source: 'test',
+      columns: [{ name: 'customer_id' }, { name: 'customer_name' }],
+    });
+
+    for (const sql of [
+      "SELECT customer_name FROM analytics.customers AS c WHERE c.customer_name NOT LIKE '%Capital One%'",
+      "SELECT customer_name FROM analytics.customers AS c WHERE c.customer_name ILIKE '%Chase%'",
+    ]) {
+      const result = validateSqlAgainstLocalContext(sql, context, {
+        memberBindings: [{ dimension: 'customer', values: ['Capital One'] }],
+      });
+      expect(result.ok, sql).toBe(false);
+      if (!result.ok) expect(result.code).toBe('misbound_filter');
+    }
+  });
+
   it('AGT-012 validates typed bindings through normalized text predicates', () => {
     const context = pack();
     context.allowedSqlContext.relations.push({

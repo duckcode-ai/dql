@@ -1351,7 +1351,9 @@ describe("answer (block-first loop)", () => {
     });
     expect(result.kind).toBe("no_answer");
     expect(result.result).toBeUndefined();
-    expect(result.text).toContain("read-only SELECT");
+    // Slice 1b: chat text is business language; the validator detail stays in refusalDetails.
+    expect(result.text).toContain("not allowed in this governed preview");
+    expect(result.refusalDetails?.message).toContain("read-only SELECT");
     expect(executed).toBe(false);
     expect(result.evidence?.execution?.status).toBe("not_applicable");
     expect(result.evidence?.route).toEqual(
@@ -4977,9 +4979,8 @@ describe("answer (block-first loop)", () => {
     });
 
     expect(result.kind).toBe("no_answer");
-    expect(result.text).toContain("could not safely prepare");
-    expect(result.text).toContain("review-required DQL artifact");
-    expect(result.text).toContain("SQL preview failed validation");
+    // Slice 1b: humanized chat text; machine validation detail preserved in warnings.
+    expect(result.validationWarnings?.some((warning) => warning.startsWith("SQL context validation detail:"))).toBe(true);
     expect(result.evidence?.validation?.message).toContain("filters \"Enterprise\" on customer");
     expect(executed).toBe(false);
     expect(captured).toBe(false);
@@ -5602,7 +5603,9 @@ describe("answer (block-first loop)", () => {
       code: "unknown_column",
       offending: { column: "fake_column" },
     });
-    expect(result.text).toContain('column "fake_column"');
+    // Slice 1b: humanized chat text; the exact column stays in refusalDetails.
+    expect(result.text).toContain("not in the inspected metadata");
+    expect(result.refusalDetails?.message).toContain('column "fake_column"');
     expect(executed).toBe(false);
     // Initial generation + exactly ONE bounded self-repair attempt (which still
     // fails against this stub) — invalid SQL is never executed either way.
@@ -7665,5 +7668,85 @@ describe("declared draft-path exploration (Slice 1)", () => {
       signal: controller.signal,
       contextPack: fiveTableContextScoped(question),
     })).rejects.toBe(deadline);
+  });
+});
+
+describe("retrieval-miss recovery + humanized context-validation refusals (Slice 1b)", () => {
+  const ordersOnlyContext = (question: string) => ({
+    ...contextPackForRankedRelations(question, [
+      { relation: "analytics.fct_orders", name: "fct_orders", source: "dbt manifest", columns: [
+        { name: "order_id", type: "VARCHAR" }, { name: "customer_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" },
+      ], rank: 1, score: 90, reason: "orders fact" },
+    ], { metricTerms: ["revenue"], dimensionTerms: ["customer"] }),
+    skills: [],
+    edges: [],
+    citations: [],
+  });
+
+  it("accepts SQL over a runtime-known relation the retrieval context missed", async () => {
+    kg.rebuild([], []);
+    const question = "Revenue by product category";
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by category.",
+        sql: "SELECT p.category, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_products p ON o.product_id = p.product_id GROUP BY p.category",
+        outputs: ["category", "revenue"],
+        viz: "bar",
+      }),
+      "```",
+    ].join("\n"));
+    let executed = false;
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: ordersOnlyContext(question),
+      schemaContext: [
+        { relation: "analytics.fct_orders", columns: [{ name: "order_id" }, { name: "customer_id" }, { name: "product_id" }, { name: "amount" }] },
+        { relation: "analytics.dim_products", columns: [{ name: "product_id" }, { name: "category" }] },
+      ],
+      executeGeneratedSql: async (sql) => {
+        executed = true;
+        return { columns: ["category", "revenue"], rows: [{ category: "beverage", revenue: 10 }], rowCount: 1, sql };
+      },
+    });
+
+    // The runtime schema snapshot is merged into the allowed relation lookup,
+    // so a real table the retrieval ranking missed is still queryable.
+    expect(executed).toBe(true);
+    expect(result.kind).toBe("uncertified");
+  });
+
+  it("humanizes an unknown-relation refusal when runtime grounding cannot prove the table", async () => {
+    kg.rebuild([], []);
+    const question = "Revenue by product category";
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Revenue by category.",
+        sql: "SELECT p.category, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.mystery_products p ON o.product_id = p.product_id GROUP BY p.category",
+        outputs: ["category", "revenue"],
+        viz: "bar",
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: ordersOnlyContext(question),
+      schemaContext: [
+        { relation: "analytics.fct_orders", columns: [{ name: "order_id" }, { name: "product_id" }, { name: "amount" }] },
+      ],
+    });
+
+    expect(result.kind).toBe("no_answer");
+    // Chat text is business language — no internal tool guidance, no raw validator prose.
+    expect(result.answer).not.toContain("inspect_metadata_context");
+    expect(result.answer).toContain("not part of the metadata retrieved");
+    // Machine detail preserved for Inspect.
+    expect(result.refusalDetails?.message).toContain("outside the inspected metadata context");
+    expect(result.validationWarnings?.some((warning) => warning.startsWith("SQL context validation detail:"))).toBe(true);
   });
 });

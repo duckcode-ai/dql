@@ -736,6 +736,40 @@ const ARTIFACT_KINDS: KGNodeKind[] = [...EXECUTABLE_ARTIFACT_KINDS, ...BUSINESS_
 const SEMANTIC_KINDS: KGNodeKind[] = ['metric', 'dimension', 'measure', 'entity', 'semantic_model', 'saved_query'];
 const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
 
+/**
+ * Business-language explanation for a failed SQL context validation. The chat
+ * surface shows THIS; the validator's machine message (relation ids, repair
+ * tool guidance) belongs in refusalDetails/validationWarnings only.
+ */
+function renderContextValidationRefusalForUser(
+  code: SqlContextValidationCode | undefined,
+  machineError: string,
+  memberBindings?: Array<{ dimension: string; values: string[] }>,
+): string {
+  switch (code) {
+    case 'unknown_relation':
+      return 'I drafted a query, but it uses a table that was not part of the metadata retrieved for this question, so I did not run it. Ask again (retrieval usually finds it on a follow-up), name the table or metric explicitly, or re-sync the dbt metadata.';
+    case 'unknown_column':
+      return 'I drafted a query, but it references a column that is not in the inspected metadata for those tables, so I did not run it. Name the exact field you mean, or re-sync the dbt metadata if the column is new.';
+    case 'misbound_filter': {
+      const binding = memberBindings?.[0];
+      const target = binding ? `${humanizeAnalyticalEntityId(binding.dimension)} "${binding.values[0] ?? ''}"` : 'the requested value';
+      return `I need to filter this answer to ${target}, but the query I drafted did not apply that filter to a matching column, so I did not run it. Tell me which column identifies ${binding ? humanizeAnalyticalEntityId(binding.dimension) : 'that value'}, or rephrase with the exact field name.`;
+    }
+    case 'ambiguous_filter':
+      return 'The value you asked about matches more than one column in the inspected data, so I did not guess. Tell me which field it belongs to and I will run it.';
+    case 'missing_baseline':
+      return 'This comparison needs a baseline period or value that the drafted query did not include. Say what to compare against (for example, the prior month) and I will run it.';
+    case 'unsafe_sql':
+      return 'The drafted query used a statement type that is not allowed in this governed preview, so I did not run it.';
+    case 'insufficient_context':
+    default:
+      return machineError.trim().length > 0 && !/inspect_metadata_context/i.test(machineError)
+        ? `I could not prepare a governed query yet: ${machineError.replace(/\s*Use inspect_metadata_context[^.]*\.\s*$/i, '').trim()}`
+        : 'I could not prepare a governed query from the retrieved metadata. Name the specific metric or table and how to break it down, and I can generate a review-required draft.';
+  }
+}
+
 function refusalCodeForValidation(code: SqlContextValidationCode | undefined): AnswerRefusalCode {
   if (code === 'unknown_relation' || code === 'unknown_column' || code === 'insufficient_context' || code === 'missing_baseline') {
     return 'grounding_gap';
@@ -2194,7 +2228,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   }
 
   if (!contextValidation.ok) {
-    const text = `I could not safely prepare this review-required DQL artifact from the inspected context. The SQL preview failed validation: ${contextValidation.error}`;
+    // Business-language chat text; the validator's machine message (with
+    // relation ids and tool guidance for the repair prompt) stays in
+    // refusalDetails + validationWarnings for the Inspect surface.
+    const text = renderContextValidationRefusalForUser(contextValidation.code, contextValidation.error, input.followUp?.memberBindings);
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,
@@ -2228,7 +2265,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       trustLabel: input.contextPack?.trustLabel,
       sourceCertifiedBlock: followUpSourceBlock?.name ?? input.followUp?.sourceBlockName,
       contextPackId: input.contextPack?.id,
-      validationWarnings: [...contextValidation.warnings, ...deepCandidateNotes],
+      validationWarnings: [
+        ...contextValidation.warnings,
+        `SQL context validation detail: ${contextValidation.error}`,
+        ...deepCandidateNotes,
+      ],
       selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
       citations: [],
       memoryContext: input.memoryContext,
