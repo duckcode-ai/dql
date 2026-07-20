@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { compileMetricFlowQuery, hasMetricFlowCli, MetricFlowUnavailableError } from './metricflow.js';
+import {
+  compileMetricFlowQuery,
+  hasMetricFlowCli,
+  metricFlowCompileMode,
+  MetricFlowUnavailableError,
+} from './metricflow.js';
 
 describe('MetricFlow compile wrapper', () => {
   let tmpDir: string;
@@ -30,7 +35,7 @@ describe('MetricFlow compile wrapper', () => {
       bin,
       [
         '#!/bin/sh',
-        'if [ "$1" = "--version" ]; then printf "%s\\n" "mf test"; exit 0; fi',
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "mf, version 0.13.0"; exit 0; fi',
         'printf "%s\\n" "$*" > args.txt',
         'printf "%s\\n" "info: compiling"',
         'printf "%s\\n" "SELECT metric_time, revenue FROM compiled_metric_sql"',
@@ -50,9 +55,17 @@ describe('MetricFlow compile wrapper', () => {
     });
 
     expect(result.sql).toBe('SELECT metric_time, revenue FROM compiled_metric_sql');
-    expect(result.command).toContain('--compile');
+    expect(result.command).toContain('--explain');
+    expect(result.command).toContain('--quiet');
+    expect(result.command).not.toContain('--compile');
     expect(result.command).toContain('--metrics');
     expect(hasMetricFlowCli()).toBe(true);
+  });
+
+  it('keeps the legacy compile flag for older user-managed runtimes', () => {
+    expect(metricFlowCompileMode('mf, version 0.13.0')).toBe('explain');
+    expect(metricFlowCompileMode('mf, version 0.12.2')).toBe('legacy-compile');
+    expect(metricFlowCompileMode('mf test')).toBe('legacy-compile');
   });
 
   it('returns a setup error when semantic_manifest.json is missing', () => {

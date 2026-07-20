@@ -9,6 +9,8 @@ interface MetricDetailPanelProps {
   onPreview: () => void;
   onCopySql: () => void;
   onToggleFavorite: () => void;
+  runtimeBlockedReason?: string;
+  onSetupRuntime?: () => void;
   t: Theme;
 }
 
@@ -19,6 +21,8 @@ export function MetricDetailPanel({
   onPreview,
   onCopySql,
   onToggleFavorite,
+  runtimeBlockedReason,
+  onSetupRuntime,
   t,
 }: MetricDetailPanelProps) {
   if (!item) return null;
@@ -69,6 +73,17 @@ export function MetricDetailPanel({
           {item.description}
         </div>
       )}
+
+      {runtimeBlockedReason ? (
+        <div style={{ display: 'grid', gap: 7, border: '1px solid var(--status-warning-border)', borderRadius: 7, background: 'var(--status-warning-bg)', padding: '8px 9px' }}>
+          <div style={{ fontSize: 10.5, lineHeight: 1.45, color: t.textSecondary }}>{runtimeBlockedReason}</div>
+          {onSetupRuntime ? (
+            <button type="button" onClick={onSetupRuntime} style={{ justifySelf: 'start', border: 'none', background: 'transparent', color: t.accent, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', padding: 0 }}>
+              Set up semantic runtime →
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 11, fontFamily: t.fontMono, color: t.textMuted }}>
         <div>domain: {item.domain || 'uncategorized'}</div>
@@ -172,11 +187,11 @@ export function MetricDetailPanel({
           Copy SQL
         </button>
         <button
-          onClick={onInsert}
+          onClick={runtimeBlockedReason && onSetupRuntime ? onSetupRuntime : onInsert}
           disabled={!isInsertable}
           style={{ flex: 1, background: t.accent, border: `1px solid ${t.accent}`, borderRadius: 6, color: '#fff', cursor: 'pointer', fontSize: 11, fontFamily: t.font, padding: '6px 10px' }}
         >
-          {isInsertable ? 'Insert' : 'Inspect'}
+          {runtimeBlockedReason && onSetupRuntime ? 'Set up runtime' : isInsertable ? 'Insert' : 'Inspect'}
         </button>
       </div>
     </div>

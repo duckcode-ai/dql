@@ -115,6 +115,32 @@ export interface SemanticRuntimeSettingsInput {
   dbtCloud?: { host?: string; environmentId?: string; serviceToken?: string };
 }
 
+export type MetricFlowWarehouseAdapter = 'duckdb' | 'snowflake' | 'bigquery' | 'databricks' | 'redshift' | 'postgres' | 'trino';
+
+export interface MetricFlowInstallJob {
+  id: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'failed';
+  stage: 'detecting_python' | 'creating_environment' | 'installing' | 'parsing' | 'testing' | 'ready';
+  progress: number;
+  adapter: MetricFlowWarehouseAdapter;
+  packageSpec: string;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  runtimePath: string;
+  runtimeVersion?: string;
+  logs: string[];
+  error?: string;
+}
+
+export interface MetricFlowInstallerStatus {
+  job: MetricFlowInstallJob | null;
+  recommendedAdapter: MetricFlowWarehouseAdapter | null;
+  supportedAdapters: MetricFlowWarehouseAdapter[];
+  projectConfigured: boolean;
+  semanticManifestFound: boolean;
+}
+
 export interface GitGovernedContextGroup {
   total: number;
   tracked: number;
@@ -3810,6 +3836,17 @@ export const api = {
 
   async getSemanticRuntimeSettings(): Promise<SemanticRuntimeSettingsResponse> {
     return request<SemanticRuntimeSettingsResponse>('/api/semantic-runtime');
+  },
+
+  async getMetricFlowInstallerStatus(): Promise<MetricFlowInstallerStatus> {
+    return request<MetricFlowInstallerStatus>('/api/semantic-runtime/metricflow/installer');
+  },
+
+  async installMetricFlow(adapter?: MetricFlowWarehouseAdapter): Promise<{ ok: boolean; job: MetricFlowInstallJob }> {
+    return request<{ ok: boolean; job: MetricFlowInstallJob }>('/api/semantic-runtime/metricflow/install', {
+      method: 'POST',
+      body: JSON.stringify(adapter ? { adapter } : {}),
+    });
   },
 
   async testDbtCloudSemanticRuntime(payload: SemanticRuntimeSettingsInput): Promise<{ ok: boolean; message?: string; dialect?: string; metricCount?: number; error?: string }> {

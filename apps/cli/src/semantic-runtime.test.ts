@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import { compileSemanticRuntimeQuery, getSemanticRuntimeStatus } from './semantic-runtime.js';
+import { managedMetricFlowBin } from './metricflow.js';
 
 let root: string;
 let priorMfBin: string | undefined;
@@ -62,6 +63,38 @@ describe('shared semantic runtime selector', () => {
       semanticLayer: layer(),
     });
     expect(result).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+  });
+
+  it('activates a managed project-local runtime immediately and forwards the configured profiles directory', async () => {
+    delete process.env.DQL_METRICFLOW_BIN;
+    mkdirSync(join(root, 'target'), { recursive: true });
+    mkdirSync(join(root, '.dql', 'runtimes', 'metricflow', 'bin'), { recursive: true });
+    writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
+    const bin = managedMetricFlowBin(root);
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then printf "%s\\n" "mf, version 0.13.0"; exit 0; fi',
+      'printf "SELECT \'%s\' AS profiles_dir\\n" "$DBT_PROFILES_DIR"',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+
+    const status = await getSemanticRuntimeStatus(root);
+    expect(status.active).toBe('metricflow-cli');
+    expect(status.adapters.find((adapter) => adapter.id === 'metricflow-cli')).toMatchObject({
+      configured: true,
+      ready: true,
+      source: 'local',
+    });
+    expect(status.adapters.find((adapter) => adapter.id === 'metricflow-cli')?.detail).toContain('project-local managed runtime');
+
+    const result = await compileSemanticRuntimeQuery({ metrics: ['revenue_ratio'], dimensions: [] }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.', profilesDir: 'profiles' } },
+      detectedProvider: 'dbt',
+      semanticLayer: layer(),
+    });
+    expect(result).toMatchObject({ engine: 'metricflow-cli' });
+    expect(result?.sql).toContain(join(root, 'profiles'));
   });
 
   it('selects a successfully tested dbt Cloud adapter without exposing its token', async () => {

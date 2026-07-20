@@ -1065,6 +1065,10 @@ export function BlockStudio() {
                     onChange={handleDraftChange}
                     onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
                     onOpenAi={() => openAskAi({ kind: 'edit', initialInput: 'Help resolve the selected semantic metrics and dimensions for this block: ' })}
+                    onSetupRuntime={() => {
+                      dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' });
+                      dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
+                    }}
                     t={t}
                   />
                 ) : (
@@ -2319,6 +2323,7 @@ function SemanticBlockBuilder({
   onChange,
   onMetadataChange,
   onOpenAi,
+  onSetupRuntime,
   t,
 }: {
   source: string;
@@ -2330,6 +2335,7 @@ function SemanticBlockBuilder({
   onChange: (next: string) => void;
   onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
   onOpenAi: () => void;
+  onSetupRuntime: () => void;
   t: Theme;
 }) {
   const parsedValues = parseSemanticVisualFields(source);
@@ -2407,8 +2413,9 @@ function SemanticBlockBuilder({
             t={t}
           />
           {semanticLayer.metrics.some((metric) => metric.execution && metric.execution.status !== 'ready') && (
-            <div style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.4 }}>
-              Complex metrics remain discoverable. Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime in Project &amp; dbt to run them.
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10.5, color: t.textMuted, lineHeight: 1.4 }}>
+              <span style={{ flex: 1 }}>Complex metrics are imported but need a full semantic runtime to execute.</span>
+              <button type="button" onClick={onSetupRuntime} style={{ border: 'none', background: 'transparent', color: t.accent, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>Set up runtime →</button>
             </div>
           )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>

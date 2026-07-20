@@ -2,6 +2,14 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+export type MetricFlowCliSource = 'env' | 'managed' | 'path';
+
+export interface MetricFlowCliResolution {
+  bin: string;
+  source: MetricFlowCliSource;
+  version: string;
+}
+
 export class MetricFlowUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -12,6 +20,7 @@ export class MetricFlowUnavailableError extends Error {
 export interface MetricFlowQueryRequest {
   projectRoot: string;
   dbtProjectPath?: string;
+  profilesDir?: string;
   metrics: string[];
   dimensions: string[];
   timeDimension?: { name: string; granularity: string };
@@ -21,11 +30,62 @@ export interface MetricFlowQueryRequest {
   savedQuery?: string;
 }
 
+export function managedMetricFlowRuntimeRoot(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'runtimes', 'metricflow');
+}
+
+export function managedMetricFlowBin(projectRoot: string): string {
+  return process.platform === 'win32'
+    ? join(managedMetricFlowRuntimeRoot(projectRoot), 'Scripts', 'mf.exe')
+    : join(managedMetricFlowRuntimeRoot(projectRoot), 'bin', 'mf');
+}
+
+/** Resolve the semantic compiler without mutating PATH. A DQL-managed,
+ * project-local runtime is considered before the user's ambient executable so
+ * Settings installations work after completion without restarting the server. */
+export function resolveMetricFlowCli(projectRoot?: string): MetricFlowCliResolution | null {
+  const explicit = process.env.DQL_METRICFLOW_BIN || process.env.METRICFLOW_BIN;
+  const candidates: Array<{ bin: string; source: MetricFlowCliSource }> = explicit
+    ? [{ bin: explicit, source: 'env' }]
+    : [
+        ...(projectRoot ? [{ bin: managedMetricFlowBin(projectRoot), source: 'managed' as const }] : []),
+        { bin: 'mf', source: 'path' },
+      ];
+  for (const candidate of candidates) {
+    if (candidate.source === 'managed' && !existsSync(candidate.bin)) continue;
+    const result = spawnSync(candidate.bin, ['--version'], {
+      encoding: 'utf-8',
+      env: process.env,
+      timeout: 3000,
+    });
+    if (!result.error && result.status === 0) {
+      return {
+        ...candidate,
+        version: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim().split('\n')[0] ?? '',
+      };
+    }
+  }
+  return null;
+}
+
 export interface MetricFlowCompileResult {
   sql: string;
   command: string[];
   stdout: string;
   stderr: string;
+}
+
+export type MetricFlowCompileMode = 'legacy-compile' | 'explain';
+
+/** dbt-metricflow 0.13 removed `mf query --compile`. Its quiet explain mode
+ * emits only the compiled SQL and does not print the result table. Keep the
+ * legacy flag for existing user-managed MetricFlow installations. */
+export function metricFlowCompileMode(version: string): MetricFlowCompileMode {
+  const match = /(?:version\s*)?(\d+)\.(\d+)\.(\d+)/i.exec(version);
+  if (!match) return 'legacy-compile';
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 0 || minor >= 13 ? 'explain' : 'legacy-compile';
 }
 
 export function resolveDbtProjectRoot(projectRoot: string, configuredPath?: string): string {
@@ -37,14 +97,8 @@ export function hasDbtSemanticManifest(projectRoot: string, configuredPath?: str
 }
 
 /** Check whether the configured MetricFlow executable is callable. */
-export function hasMetricFlowCli(): boolean {
-  const bin = process.env.DQL_METRICFLOW_BIN || process.env.METRICFLOW_BIN || 'mf';
-  const result = spawnSync(bin, ['--version'], {
-    encoding: 'utf-8',
-    env: process.env,
-    timeout: 3000,
-  });
-  return !result.error && result.status === 0;
+export function hasMetricFlowCli(projectRoot?: string): boolean {
+  return resolveMetricFlowCli(projectRoot) !== null;
 }
 
 export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricFlowCompileResult {
@@ -55,12 +109,18 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
     );
   }
 
-  const bin = process.env.DQL_METRICFLOW_BIN || process.env.METRICFLOW_BIN || 'mf';
-  const args = buildMetricFlowArgs(request);
+  const resolvedCli = resolveMetricFlowCli(request.projectRoot);
+  const bin = resolvedCli?.bin ?? process.env.DQL_METRICFLOW_BIN ?? process.env.METRICFLOW_BIN ?? 'mf';
+  const args = buildMetricFlowArgs(request, metricFlowCompileMode(resolvedCli?.version ?? ''));
   const result = spawnSync(bin, args, {
     cwd: dbtRoot,
     encoding: 'utf-8',
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(request.profilesDir
+        ? { DBT_PROFILES_DIR: resolve(request.projectRoot, request.profilesDir) }
+        : {}),
+    },
   });
 
   if (result.error) {
@@ -91,8 +151,10 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
   };
 }
 
-function buildMetricFlowArgs(request: MetricFlowQueryRequest): string[] {
-  const args = ['query', '--compile'];
+function buildMetricFlowArgs(request: MetricFlowQueryRequest, mode: MetricFlowCompileMode): string[] {
+  const args = mode === 'explain'
+    ? ['query', '--explain', '--quiet']
+    : ['query', '--compile'];
   if (request.savedQuery) {
     args.push('--saved-query', request.savedQuery);
   } else {
@@ -112,7 +174,11 @@ function buildMetricFlowArgs(request: MetricFlowQueryRequest): string[] {
   }
   for (const order of request.orderBy ?? []) {
     if (!order.name) continue;
-    args.push('--order', `${order.name} ${order.direction ?? 'asc'}`);
+    args.push('--order', mode === 'explain' && order.direction === 'desc'
+      ? `-${order.name}`
+      : mode === 'explain'
+        ? order.name
+        : `${order.name} ${order.direction ?? 'asc'}`);
   }
   if (request.limit && Number.isFinite(request.limit)) {
     args.push('--limit', String(request.limit));

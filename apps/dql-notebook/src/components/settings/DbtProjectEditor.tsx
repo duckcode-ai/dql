@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, GitBranch, LoaderCircle, RefreshCw } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Download, GitBranch, LoaderCircle, RefreshCw } from 'lucide-react';
 import {
   api,
   type DbtOnboardingJob,
   type DbtOnboardingPreviewResponse,
   type DbtOnboardingStatusResponse,
+  type MetricFlowInstallerStatus,
+  type MetricFlowWarehouseAdapter,
   type SemanticRuntimeSettingsResponse,
 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -36,7 +38,7 @@ export function DbtProjectEditor({
   compact?: boolean;
   onConfigured?: (project: DbtProjectConfigured) => void;
 }) {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [status, setStatus] = useState<DbtOnboardingStatusResponse | null>(null);
   const [projectReady, setProjectReady] = useState(false);
@@ -51,6 +53,9 @@ export function DbtProjectEditor({
   const [semanticToken, setSemanticToken] = useState('');
   const [semanticBusy, setSemanticBusy] = useState<'test' | 'apply' | null>(null);
   const [semanticMessage, setSemanticMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [metricFlowInstaller, setMetricFlowInstaller] = useState<MetricFlowInstallerStatus | null>(null);
+  const [metricFlowAdapter, setMetricFlowAdapter] = useState<MetricFlowWarehouseAdapter | ''>('');
+  const [metricFlowStarting, setMetricFlowStarting] = useState(false);
 
   const loadSemanticRuntime = useCallback(async () => {
     const runtime = await api.getSemanticRuntimeSettings();
@@ -59,6 +64,13 @@ export function DbtProjectEditor({
     setSemanticEnvironmentId(runtime.dbtCloud.environmentId ?? '');
     setSemanticToken('');
     return runtime;
+  }, []);
+
+  const loadMetricFlowInstaller = useCallback(async () => {
+    const installer = await api.getMetricFlowInstallerStatus();
+    setMetricFlowInstaller(installer);
+    setMetricFlowAdapter((current) => current || installer.recommendedAdapter || installer.supportedAdapters[0] || '');
+    return installer;
   }, []);
 
   const loadStatus = useCallback(async () => {
@@ -85,11 +97,28 @@ export function DbtProjectEditor({
 
   useEffect(() => {
     let alive = true;
-    void loadSemanticRuntime().catch((error) => {
+    void Promise.all([loadSemanticRuntime(), loadMetricFlowInstaller()]).catch((error) => {
       if (alive) setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
     });
     return () => { alive = false; };
-  }, [loadSemanticRuntime]);
+  }, [loadMetricFlowInstaller, loadSemanticRuntime]);
+
+  useEffect(() => {
+    const job = metricFlowInstaller?.job;
+    if (!job || (job.state !== 'queued' && job.state !== 'running')) return;
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      void loadMetricFlowInstaller().then(async (next) => {
+        if (!alive || next.job?.state !== 'completed') return;
+        await loadSemanticRuntime();
+        const layer = await api.getSemanticLayer();
+        if (alive) dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
+      }).catch((error) => {
+        if (alive) setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
+      });
+    }, 700);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [dispatch, loadMetricFlowInstaller, loadSemanticRuntime, metricFlowInstaller?.job?.id, metricFlowInstaller?.job?.state, metricFlowInstaller?.job?.updatedAt]);
 
   useEffect(() => {
     if (!preparation || (preparation.status !== 'queued' && preparation.status !== 'running')) return;
@@ -155,6 +184,7 @@ export function DbtProjectEditor({
       const nextPreparation = dbtPreparationFromResponse(applied);
       if (nextPreparation) setPreparation(nextPreparation);
       const nextStatus = await loadStatus();
+      await loadMetricFlowInstaller();
       const observedPreparation = nextStatus.preparation ?? nextPreparation;
       const summary = `${preview.counts.models ?? 0} models · ${preview.counts.sources ?? 0} sources · ${preview.counts.metrics ?? 0} metrics`;
       setMessage({
@@ -240,7 +270,33 @@ export function DbtProjectEditor({
     }
   };
 
+  const installMetricFlow = async () => {
+    if (!metricFlowAdapter) {
+      setSemanticMessage({ ok: false, text: 'Choose the warehouse adapter used by this dbt project.' });
+      return;
+    }
+    setMetricFlowStarting(true);
+    setSemanticMessage(null);
+    try {
+      const result = await api.installMetricFlow(metricFlowAdapter);
+      setMetricFlowInstaller((current) => current ? { ...current, job: result.job } : {
+        job: result.job,
+        recommendedAdapter: metricFlowAdapter,
+        supportedAdapters: [metricFlowAdapter],
+        projectConfigured: true,
+        semanticManifestFound: false,
+      });
+    } catch (error) {
+      setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setMetricFlowStarting(false);
+    }
+  };
+
   const configured = projectReady;
+  const metricFlowJob = metricFlowInstaller?.job ?? null;
+  const metricFlowInstalling = metricFlowStarting || metricFlowJob?.state === 'queued' || metricFlowJob?.state === 'running';
+  const metricFlowFailed = metricFlowJob?.state === 'failed';
   const preparing = preparation?.status === 'queued' || preparation?.status === 'running';
   const preparationFailed = preparation?.status === 'failed' || preparation?.status === 'cancelled';
   const projectStatusTitle = preparationFailed
@@ -319,16 +375,72 @@ export function DbtProjectEditor({
 
         <div style={{ display: 'grid', gap: 7 }}>
           {(semanticRuntime?.runtime.adapters ?? []).map((adapter) => (
-            <div key={adapter.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 9, border: '1px solid var(--border-subtle)', borderRadius: 9, padding: '9px 10px' }}>
-              <span style={{ width: 8, height: 8, borderRadius: 999, marginTop: 4, background: adapter.ready ? 'var(--status-success)' : adapter.configured ? 'var(--status-warning)' : 'var(--text-muted)' }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: t.textPrimary }}>{adapter.label}</span>
-                  {semanticRuntime?.runtime.active === adapter.id ? <span style={{ fontSize: 9, fontWeight: 700, color: t.accent }}>ACTIVE</span> : null}
+            <div key={adapter.id} style={{ border: '1px solid var(--border-subtle)', borderRadius: 9, padding: '9px 10px', display: 'grid', gap: adapter.id === 'metricflow-cli' ? 10 : 0 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 9 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 999, marginTop: 4, background: adapter.ready ? 'var(--status-success)' : adapter.configured ? 'var(--status-warning)' : 'var(--text-muted)' }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 700, color: t.textPrimary }}>{adapter.label}</span>
+                    {semanticRuntime?.runtime.active === adapter.id ? <span style={{ fontSize: 9, fontWeight: 700, color: t.accent }}>ACTIVE</span> : null}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: t.textMuted, marginTop: 2, lineHeight: 1.4 }}>{adapter.detail}</div>
                 </div>
-                <div style={{ fontSize: 10.5, color: t.textMuted, marginTop: 2, lineHeight: 1.4 }}>{adapter.detail}</div>
+                <span style={{ fontSize: 9.5, color: adapter.ready ? 'var(--status-success)' : t.textMuted }}>{adapter.ready ? 'Ready' : adapter.configured ? 'Configured' : 'Setup required'}</span>
               </div>
-              <span style={{ fontSize: 9.5, color: adapter.ready ? 'var(--status-success)' : t.textMuted }}>{adapter.ready ? 'Ready' : adapter.configured ? 'Configured' : 'Available'}</span>
+
+              {adapter.id === 'metricflow-cli' && (!adapter.ready || metricFlowJob) ? (
+                <div style={{ marginLeft: 17, paddingTop: 9, borderTop: '1px solid var(--border-subtle)', display: 'grid', gap: 8 }}>
+                  {!adapter.ready ? (
+                    <>
+                      <div style={{ fontSize: 10.5, color: t.textSecondary, lineHeight: 1.45 }}>
+                        Install into an isolated <code style={{ fontFamily: t.fontMono }}>.dql/runtimes/metricflow</code> environment. DQL never uses sudo or changes system Python.
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <select
+                          aria-label="MetricFlow warehouse adapter"
+                          value={metricFlowAdapter}
+                          onChange={(event) => setMetricFlowAdapter(event.target.value as MetricFlowWarehouseAdapter)}
+                          disabled={metricFlowInstalling}
+                          style={{ ...input, width: 160, height: 32, fontFamily: t.font }}
+                        >
+                          {(metricFlowInstaller?.supportedAdapters ?? []).map((candidate) => (
+                            <option key={candidate} value={candidate}>{candidate === 'postgres' ? 'PostgreSQL' : candidate.charAt(0).toUpperCase() + candidate.slice(1)}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => void installMetricFlow()}
+                          disabled={!configured || metricFlowInstalling || !metricFlowAdapter}
+                          style={{ ...secondary, border: 'none', background: t.accent, color: '#fff', opacity: !configured || metricFlowInstalling || !metricFlowAdapter ? 0.55 : 1, cursor: !configured || metricFlowInstalling ? 'not-allowed' : 'pointer' }}
+                        >
+                          {metricFlowInstalling ? <LoaderCircle className="dql-dbt-preparing-icon" size={12} style={{ verticalAlign: -2, marginRight: 6 }} /> : <Download size={12} style={{ verticalAlign: -2, marginRight: 6 }} />}
+                          {metricFlowInstalling ? 'Installing…' : 'Install local MetricFlow'}
+                        </button>
+                      </div>
+                      {!configured ? <div style={{ fontSize: 9.5, color: t.textMuted }}>Connect the dbt project first, then install its matching runtime.</div> : null}
+                    </>
+                  ) : null}
+
+                  {metricFlowJob ? (
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      <div role={metricFlowFailed ? 'alert' : 'status'} style={{ fontSize: 10.5, color: metricFlowFailed ? 'var(--status-error)' : metricFlowJob.state === 'completed' ? 'var(--status-success)' : t.textSecondary, lineHeight: 1.45 }}>
+                        {metricFlowJob.message}
+                      </div>
+                      {(metricFlowJob.state === 'queued' || metricFlowJob.state === 'running') ? (
+                        <div aria-label="MetricFlow installation progress" style={{ height: 3, borderRadius: 999, background: 'var(--border-subtle)', overflow: 'hidden' }}>
+                          <span style={{ display: 'block', height: '100%', width: `${Math.max(4, metricFlowJob.progress)}%`, background: t.accent, transition: 'width 180ms ease' }} />
+                        </div>
+                      ) : null}
+                      {metricFlowJob.error || metricFlowJob.logs.length > 0 ? (
+                        <details>
+                          <summary style={{ cursor: 'pointer', fontSize: 9.5, color: t.textMuted }}>{metricFlowFailed ? 'View error and manual details' : 'View installation details'}</summary>
+                          <pre style={{ margin: '7px 0 0', maxHeight: 130, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: t.fontMono, fontSize: 9, lineHeight: 1.45, color: metricFlowFailed ? 'var(--status-error)' : t.textMuted }}>{[...metricFlowJob.logs.slice(-30), ...(metricFlowJob.error ? [metricFlowJob.error] : [])].join('\n')}</pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

@@ -598,6 +598,11 @@ export function SemanticPanel() {
     dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' });
   };
 
+  const openSemanticRuntimeSettings = () => {
+    dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' });
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
+  };
+
   if (!sl.available && !sl.loading) {
     return (
       <>
@@ -744,6 +749,12 @@ export function SemanticPanel() {
             void api.toggleFavorite(selectedItem.name).then((favorites) => dispatch({ type: 'SET_SEMANTIC_FAVORITES', favorites }));
           }
         }}
+        runtimeBlockedReason={selectedItem?.kind === 'metric'
+          ? metricsByName.get(selectedItem.name)?.execution?.status !== 'ready'
+            ? metricsByName.get(selectedItem.name)?.execution?.reason ?? undefined
+            : undefined
+          : undefined}
+        onSetupRuntime={openSemanticRuntimeSettings}
         t={t}
       />
 
@@ -782,8 +793,9 @@ export function SemanticPanel() {
             </button>
           </div>
           {composeError && (
-            <div role="alert" style={{ fontSize: 10.5, lineHeight: 1.4, color: t.error, background: `${t.error}10`, border: `1px solid ${t.error}30`, borderRadius: 6, padding: '6px 8px' }}>
-              {composeError}
+            <div role="alert" style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 10.5, lineHeight: 1.4, color: t.error, background: `${t.error}10`, border: `1px solid ${t.error}30`, borderRadius: 6, padding: '6px 8px' }}>
+              <span style={{ flex: 1 }}>{composeError}</span>
+              {/semantic runtime|MetricFlow/i.test(composeError) ? <button type="button" onClick={openSemanticRuntimeSettings} style={{ border: 'none', background: 'transparent', color: t.accent, fontSize: 10, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>Set up runtime →</button> : null}
             </div>
           )}
           {composePreview && (

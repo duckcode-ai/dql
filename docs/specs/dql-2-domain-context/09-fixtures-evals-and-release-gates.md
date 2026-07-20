@@ -163,9 +163,13 @@ Required semantic-notebook scenarios (`E2E-008`):
    tokens are redacted and a failed candidate preserves the last tested config.
 7. At least 3,000 warehouse tables are considered for logical-to-physical
    semantic relation mapping; no fixed prefix cutoff may hide a valid model.
-8. Two joined semantic models may both declare `report_date`; compatibility and
+8. Settings and Guided Setup offer the same explicit local MetricFlow install
+   action after dbt connection. The install stays under `.dql/runtimes`, never
+   uses sudo or system Python, reports bounded progress/redacted errors, becomes
+   active without a server restart, and a disabled metric links to that setup.
+9. Two joined semantic models may both declare `report_date`; compatibility and
    composition bind the selected metric's model and emit a qualified column.
-9. Valid warehouse-specific generated SQL (including Snowflake `QUALIFY`) passes
+10. Valid warehouse-specific generated SQL (including Snowflake `QUALIFY`) passes
    every validation gate with the active dialect, while malformed SQL is never
    executed and raw parser traces remain in Inspect rather than chat.
 

@@ -5,7 +5,7 @@ import {
   testDbtCloudSemanticConnection,
   type DbtCloudSemanticTestResult,
 } from './dbt-cloud-semantic.js';
-import { compileMetricFlowQuery, hasMetricFlowCli, MetricFlowUnavailableError } from './metricflow.js';
+import { compileMetricFlowQuery, hasMetricFlowCli, MetricFlowUnavailableError, resolveMetricFlowCli } from './metricflow.js';
 import {
   getEffectiveDbtCloudSemanticSettings,
   getSemanticRuntimeSettings,
@@ -19,13 +19,13 @@ export type SemanticMetricExecutionStatus = 'ready' | 'requires_setup' | 'unsupp
 
 export interface SemanticRuntimeProjectConfig {
   semanticLayer?: { provider?: string; projectPath?: string };
-  dbt?: { projectDir?: string };
+  dbt?: { projectDir?: string; profilesDir?: string };
 }
 
 export interface SemanticRuntimeAdapterStatus {
   id: SemanticRuntimeAdapterId;
   label: string;
-  bundled: true;
+  bundled: boolean;
   configured: boolean;
   tested: boolean;
   ready: boolean;
@@ -87,7 +87,8 @@ export async function getSemanticRuntimeStatus(
 ): Promise<SemanticRuntimeStatus> {
   const redacted = getSemanticRuntimeSettings(projectRoot);
   const cloud = getEffectiveDbtCloudSemanticSettings(projectRoot);
-  const cliReady = hasMetricFlowCli();
+  const metricFlowCli = resolveMetricFlowCli(projectRoot);
+  const cliReady = Boolean(metricFlowCli);
   let cloudTest: DbtCloudSemanticTestResult | undefined;
   if (cloud.configured && cloud.testState === 'passed') {
     cloudTest = {
@@ -119,14 +120,14 @@ export async function getSemanticRuntimeStatus(
     {
       id: 'metricflow-cli',
       label: 'Local MetricFlow',
-      bundled: true,
+      bundled: false,
       configured: cliReady,
       tested: cliReady,
       ready: cliReady,
       source: cliReady ? 'local' : 'none',
       detail: cliReady
-        ? 'Detected a compatible `mf` executable.'
-        : 'Adapter is bundled; install a compatible dbt/MetricFlow Python runtime so `mf` is callable.',
+        ? `Detected ${metricFlowCli?.source === 'managed' ? 'the project-local managed runtime' : 'a compatible `mf` executable'}${metricFlowCli?.version ? ` · ${metricFlowCli.version}` : ''}.`
+        : 'The DQL adapter is bundled; install a project-local MetricFlow Python runtime or use an existing `mf` executable.',
     },
     {
       id: 'dbt-cloud',
@@ -196,7 +197,7 @@ export async function compileSemanticRuntimeQuery(
       }
     }
     if (adapter === 'metricflow-cli') {
-      if (!hasMetricFlowCli()) continue;
+      if (!hasMetricFlowCli(context.projectRoot)) continue;
       try {
         const dbtProjectPath = context.projectConfig.semanticLayer?.provider === 'dbt'
           ? context.projectConfig.semanticLayer.projectPath
@@ -204,6 +205,7 @@ export async function compileSemanticRuntimeQuery(
         const compiled = compileMetricFlowQuery({
           projectRoot: context.projectRoot,
           dbtProjectPath,
+          profilesDir: context.projectConfig.dbt?.profilesDir,
           metrics: request.metrics,
           dimensions: request.dimensions,
           filters: request.filters,

@@ -330,6 +330,11 @@ import {
   hasMetricFlowCli,
 } from "./metricflow.js";
 import {
+  ManagedMetricFlowInstaller,
+  isMetricFlowWarehouseAdapter,
+  metricFlowAdapterForDriver,
+} from './metricflow-installer.js';
+import {
   compileSemanticRuntimeQuery,
   getSemanticRuntimeStatus,
   isSemanticRuntimeError,
@@ -959,6 +964,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   }>();
   const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
   const onboardingJobs = new Map<string, DbtPreparationJob>();
+  const metricFlowInstaller = new ManagedMetricFlowInstaller(projectRoot);
   const projectSnapshot = () => {
     const dbtManifestPath = resolveDbtManifestPath(projectRoot, projectConfig) ?? undefined;
     const inputs = collectInputFiles({ projectRoot, dbtManifestPath });
@@ -10073,6 +10079,44 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === 'GET' && path === '/api/semantic-runtime/metricflow/installer') {
+      try {
+        const profileAdapter = discoverDbtProfileConnections(projectRoot, projectConfig)[0]?.adapter;
+        const recommendedAdapter = metricFlowAdapterForDriver(connection?.driver ?? profileAdapter);
+        const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          job: metricFlowInstaller.latest(),
+          recommendedAdapter,
+          supportedAdapters: ['duckdb', 'snowflake', 'bigquery', 'databricks', 'redshift', 'postgres', 'trino'],
+          projectConfigured: existsSync(join(dbtProjectDir, 'dbt_project.yml')),
+          semanticManifestFound: existsSync(join(dbtProjectDir, 'target', 'semantic_manifest.json')),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    if (req.method === 'POST' && path === '/api/semantic-runtime/metricflow/install') {
+      try {
+        const body = await readJSON(req) as { adapter?: unknown };
+        const profileAdapter = discoverDbtProfileConnections(projectRoot, projectConfig)[0]?.adapter;
+        const inferred = metricFlowAdapterForDriver(connection?.driver ?? profileAdapter);
+        const adapter = body.adapter === undefined ? inferred : body.adapter;
+        if (!isMetricFlowWarehouseAdapter(adapter)) {
+          throw new Error('Choose a supported warehouse adapter before installing MetricFlow.');
+        }
+        const { dbtProjectDir, profilesDir } = onboardingDbtPaths({});
+        const job = metricFlowInstaller.start({ adapter, dbtProjectDir, profilesDir });
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, job }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -20893,6 +20937,7 @@ const LOCAL_RUNTIME_GITIGNORE_RULES = [
   '**/.dql/cache/',
   '**/.dql/imports/',
   '**/.dql/local/',
+  '**/.dql/runtimes/',
   '**/.dql/connectors/',
   '**/.dql/memory/',
   '**/.dql/migration-staging/',

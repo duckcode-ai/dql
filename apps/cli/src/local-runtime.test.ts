@@ -915,6 +915,27 @@ describe('dbt-first onboarding runtime API', () => {
         engine: null,
         reason: expect.stringContaining('requires a full semantic runtime'),
       });
+      const installer = await (await fetch(`${base}/api/semantic-runtime/metricflow/installer`)).json() as {
+        recommendedAdapter: string;
+        supportedAdapters: string[];
+        projectConfigured: boolean;
+        semanticManifestFound: boolean;
+        job: unknown;
+      };
+      expect(installer).toMatchObject({
+        recommendedAdapter: 'duckdb',
+        projectConfigured: true,
+        semanticManifestFound: true,
+        job: null,
+      });
+      expect(installer.supportedAdapters).toContain('snowflake');
+      const invalidInstaller = await fetch(`${base}/api/semantic-runtime/metricflow/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adapter: 'mssql' }),
+      });
+      expect(invalidInstaller.status).toBe(400);
+      await expect(invalidInstaller.json()).resolves.toMatchObject({ ok: false, error: expect.stringContaining('supported warehouse adapter') });
       const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean; snapshotState: string }; preparation: { id: string; status: string } };
       expect(status.requestId).toMatch(/^onboarding-status-/);
       expect(status.snapshotId).toMatch(/^[a-f0-9]{64}$/);

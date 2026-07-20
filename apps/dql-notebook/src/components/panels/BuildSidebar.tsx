@@ -247,6 +247,10 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
   const [preview, setPreview] = useState<{ sql: string; rows: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const metricsByName = new Map(state.semanticLayer.metrics.map((metric) => [metric.name, metric]));
+  const openSemanticRuntimeSettings = () => {
+    dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' });
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
+  };
 
   useEffect(() => {
     let active = true;
@@ -349,9 +353,9 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
             <code style={{ display: 'block', maxHeight: 48, overflow: 'hidden', whiteSpace: 'pre-wrap', fontSize: 9, color: t.textMuted }}>{preview.sql}</code>
           </div>
         )}
-        {error && <div role="alert" style={{ padding: '6px 7px', borderRadius: 6, border: `1px solid ${t.error}40`, background: `${t.error}10`, color: t.error, fontSize: 10, lineHeight: 1.35 }}>{error}</div>}
+        {error && <div role="alert" style={{ display: 'flex', gap: 7, alignItems: 'center', padding: '6px 7px', borderRadius: 6, border: `1px solid ${t.error}40`, background: `${t.error}10`, color: t.error, fontSize: 10, lineHeight: 1.35 }}><span style={{ flex: 1 }}>{error}</span>{/semantic runtime|MetricFlow/i.test(error) ? <button type="button" onClick={openSemanticRuntimeSettings} style={{ border: 'none', background: 'transparent', color: t.accent, fontSize: 9.5, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>Set up →</button> : null}</div>}
         {state.semanticLayer.metrics.some((metric) => metric.execution && metric.execution.status !== 'ready') && (
-          <div style={{ fontSize: 9.5, color: t.textMuted }}>Complex metrics remain discoverable. Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime in Project &amp; dbt to run them.</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 9.5, color: t.textMuted }}><span style={{ flex: 1 }}>Complex metrics are imported but need a full semantic runtime to execute.</span><button type="button" onClick={openSemanticRuntimeSettings} style={{ border: 'none', background: 'transparent', color: t.accent, fontSize: 9.5, fontWeight: 700, cursor: 'pointer', padding: 0, whiteSpace: 'nowrap' }}>Set up runtime →</button></div>
         )}
       </div>
     )}

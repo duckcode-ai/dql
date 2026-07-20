@@ -215,6 +215,12 @@ tables and optional `dbtImport` filters in `dql.config.json`:
 
 - **`manifest.json not found`** — run `dbt build`, `dbt compile`, or `dbt parse` first.
 - **Semantic metrics missing** — confirm `target/semantic_manifest.json` exists and your dbt version emits MetricFlow artifacts.
+- **Metric is visible but disabled** — simple metrics use DQL's native compiler.
+  Derived, ratio, cumulative, conversion, and other MetricFlow-owned metrics
+  need a full semantic runtime. Open **Settings → Project & dbt**, then either
+  select **Install local MetricFlow** or connect and test dbt Cloud Semantic
+  Layer. The managed installer uses `.dql/runtimes/metricflow`, preserves system
+  Python, and refreshes metric readiness when its test finishes.
 - **Lineage is stale** — rerun `dql compile .` and `dql agent reindex`.
 - **Too much dbt metadata** — add `dbtImport` anchors/include/exclude filters
   and rerun `dql compile .`.

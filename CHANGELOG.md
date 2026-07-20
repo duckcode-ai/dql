@@ -6,6 +6,24 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.5 - 2026-07-20
+
+### Managed MetricFlow setup
+
+This patch lets dbt users install and activate a compatible local MetricFlow
+runtime directly from Guided Setup or Settings, with the same actionable path
+available wherever a runtime-owned semantic metric is disabled.
+
+### Added
+
+- **Managed local MetricFlow setup.** Settings and Guided Setup can install a
+  DQL-tested MetricFlow runtime into an isolated project-local environment,
+  show progress and redacted diagnostics, activate it without a server restart,
+  and leave system Python and existing dbt environments untouched.
+- **Actionable disabled metrics.** Notebook, Build, and Block Studio explain
+  why a complex metric is unavailable and navigate directly to the shared
+  semantic-runtime setup instead of relying on a tooltip or terminal command.
+
 ## v1.8.4 - 2026-07-20
 
 ### Enterprise semantic execution and reusable Ask inputs
