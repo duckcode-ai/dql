@@ -1386,7 +1386,12 @@ export function buildMetadataSnapshot(
     manifest,
     objects: Array.from(objects.values()).sort((a, b) => a.objectKey.localeCompare(b.objectKey)),
     edges: Array.from(edges.values()).sort((a, b) => `${a.edgeType}|${a.fromKey}|${a.toKey}`.localeCompare(`${b.edgeType}|${b.fromKey}|${b.toKey}`)),
-    diagnostics,
+    // Diagnostics are stored under a content-hash PRIMARY KEY, so two
+    // byte-identical entries (e.g. the duplicate-object-key warning emitted for
+    // a key that collides three or more times with the same source labels)
+    // would crash the rebuild INSERT with SQLITE_CONSTRAINT_PRIMARYKEY.
+    // Identical diagnostics carry no extra signal — keep exactly one of each.
+    diagnostics: [...new Map(diagnostics.map((diagnostic) => [diagnosticId(diagnostic), diagnostic])).values()],
     compileConflicts,
     skillBodies: [...new Map(skills.map((skill) => {
       const bodyHash = sha256(skill.body);
@@ -1882,7 +1887,7 @@ export class MetadataCatalog {
       ) VALUES (?, ?, ?, ?, ?, ?)
     `);
     const insertDiagnostic = this.db.prepare(`
-      INSERT INTO metadata_diagnostics (
+      INSERT OR IGNORE INTO metadata_diagnostics (
         id, kind, severity, message, object_key, file_path, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
@@ -2045,8 +2050,10 @@ export class MetadataCatalog {
     const insertEdge = this.db.prepare(`
       INSERT OR IGNORE INTO metadata_edges (edge_type, from_key, to_key, confidence, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?)`);
+    // OR IGNORE: the id is a content hash, so a colliding row is byte-identical
+    // — dropping the duplicate is lossless and keeps the rebuild transactional.
     const insertDiagnostic = this.db.prepare(`
-      INSERT INTO metadata_diagnostics (id, kind, severity, message, object_key, file_path, created_at)
+      INSERT OR IGNORE INTO metadata_diagnostics (id, kind, severity, message, object_key, file_path, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const insertSourceFingerprint = this.db.prepare(`
       INSERT OR REPLACE INTO metadata_source_fingerprints (source_path, fingerprint, object_count, updated_at)

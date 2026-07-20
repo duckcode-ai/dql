@@ -76,3 +76,35 @@ describe('incremental reindex equals a full rebuild (W3.4)', () => {
     catalog.close();
   });
 });
+
+describe('duplicate diagnostics do not crash rebuilds (1.8.2 field bug)', () => {
+  // A key that collides three+ times emits byte-identical duplicate-object-key
+  // warnings; the content-hash PRIMARY KEY then failed both rebuild paths with
+  // SQLITE_CONSTRAINT_PRIMARYKEY. Identical rows are lossless to drop.
+  const duplicated = {
+    kind: 'metadata',
+    severity: 'warning' as const,
+    objectKey: 'dbt_model:dbt_core_models.total_ccu',
+    message: 'duplicate metadata object key "dbt_model:dbt_core_models.total_ccu" from models/a.yml and models/a.yml',
+  };
+  const withDuplicates = (fingerprint: string) => ({
+    ...snapshot([obj('o1', 's1.yaml', { v: 1 })], [], fingerprint),
+    diagnostics: [duplicated, { ...duplicated }, { kind: 'metadata', severity: 'error' as const, message: 'other' }],
+  });
+
+  it('full rebuild tolerates identical diagnostic rows', () => {
+    const catalog = new MetadataCatalog(tmpDb('dup-full.sqlite'));
+    expect(() => catalog.rebuild(withDuplicates('fp-dup-1') as never)).not.toThrow();
+  });
+
+  it('incremental rebuild tolerates identical diagnostic rows and stores one copy', () => {
+    const dbPath = tmpDb('dup-inc.sqlite');
+    const catalog = new MetadataCatalog(dbPath);
+    catalog.rebuild(snapshot([obj('o1', 's1.yaml', { v: 1 })], [], 'fp-base') as never);
+    expect(() => catalog.rebuildIncremental(withDuplicates('fp-dup-2') as never)).not.toThrow();
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare('SELECT COUNT(*) AS n FROM metadata_diagnostics').get() as { n: number };
+    db.close();
+    expect(rows.n).toBe(2);
+  });
+});
