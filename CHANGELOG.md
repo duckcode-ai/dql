@@ -6,6 +6,35 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.3 - 2026-07-20
+
+### Durable agent runs and coherent retrieval diagnostics
+
+This patch hardens the local governed-agent runtime, exposes actionable search
+health, and aligns the MCP and Claude Code tool surfaces used for retrieval and
+SQL validation.
+
+### Added
+
+- **SQLite-backed agent run history.** Governed runs are retained in a bounded,
+  WAL-enabled local store, with one-time migration from the legacy JSON file and
+  compact event retention for older runs.
+- **Retrieval health diagnostics.** The local health API and `dql doctor` report
+  value-grounding mode, embedding capability, metadata catalog/context-pack
+  state, run-store size, and immutable snapshot growth without exposing secrets.
+- **Complete governed discovery tools.** MCP and Claude Code expose metadata
+  search, table-schema inspection, and SQL validation through the same agentic
+  registry used by the runtime.
+
+### Fixed
+
+- **Tool recommendations only name callable tools.** Ask responses no longer
+  advertise a phantom clarification tool, and deprecated block generation is
+  explicitly represented as an alias.
+- **Retrieval degradations remain advisory.** Lexical embedding fallback,
+  disabled value grounding, or a cold catalog are visible in `dql doctor`
+  without incorrectly failing an otherwise healthy installation.
+
 ## v1.8.2 - 2026-07-20
 
 ### Grounded follow-ups and semantic notebook execution

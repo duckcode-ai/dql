@@ -25,6 +25,7 @@ interface Check {
   name: string;
   ok: boolean;
   detail: string;
+  advisory?: boolean;
 }
 
 export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest: string[] = []): Promise<void> {
@@ -128,7 +129,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   console.log(`    Project: ${projectRoot}`);
   console.log('');
   for (const check of checks) {
-    console.log(`  ${check.ok ? '✓' : '✗'} ${check.name}`);
+    console.log(`  ${check.advisory ? '!' : check.ok ? '✓' : '✗'} ${check.name}`);
     console.log(`    ${check.detail}`);
   }
   console.log('');
@@ -919,5 +920,10 @@ function checkRetrievalHealth(projectRoot: string, config: ReturnType<typeof loa
   if (health.warnings.length === 0) {
     return { name: 'Agent retrieval health', ok: true, detail: summary };
   }
-  return { name: 'Agent retrieval health', ok: false, detail: `${summary}. ${health.warnings.join(' ')}` };
+  return {
+    name: 'Agent retrieval health',
+    ok: true,
+    advisory: true,
+    detail: `${summary}. ${health.warnings.join(' ')}`,
+  };
 }

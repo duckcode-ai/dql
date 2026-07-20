@@ -23,7 +23,7 @@ afterEach(() => {
 });
 
 describe('runDoctor', () => {
-  it('reports health for a starter-like project', async () => {
+  it('reports retrieval degradations as non-blocking advisories (PERF-002, E2E-005)', async () => {
     const projectDir = makeProject('dql-doctor-');
     mkdirSync(join(projectDir, 'blocks'));
     mkdirSync(join(projectDir, 'semantic-layer'));
@@ -59,6 +59,8 @@ describe('runDoctor', () => {
     const output = spy.mock.calls.flat().join('\n');
     expect(output).toContain('DQL Doctor');
     expect(output).toContain('blocks/');
+    expect(output).toContain('! Agent retrieval health');
+    expect(output).not.toContain('✗ Agent retrieval health');
     expect(output).toContain('npx dql notebook');
     expect(output).not.toContain('add duckdb for file/duckdb local preview support');
   });
