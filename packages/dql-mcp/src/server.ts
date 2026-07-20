@@ -103,6 +103,12 @@ const DQL_MCP_AGENTIC_INSTRUCTIONS =
   'in the metadata catalog/runtime schema, call `expand_context` with the prior ' +
   'contextPackId and relation, then retry `query_via_metadata` once with the new contextPackId ' +
   'and `regroundAttemptsUsed: 1`.\n' +
+  'Discovery: when the inspected context is missing a table or column you ' +
+  'believe exists, DISCOVER it before declining — `search_metadata` finds the ' +
+  'governed relation for a business phrase, `get_table_schema` returns its real ' +
+  'columns and suggestion-only join keys, and `validate_sql` checks a draft ' +
+  'SELECT against the inspected schema and relationship policy. Discovery ' +
+  'output is grounding evidence, never join authorization.\n' +
   'Tier 3 missing context: if metadata does not identify a safe table, metric, ' +
   'dimension, or grain, refuse and ask for what is missing.\n' +
   'Trust labels are one canonical vocabulary: Certified, Reviewed, ' +
@@ -118,10 +124,9 @@ const DQL_MCP_AGENTIC_INSTRUCTIONS =
   'Never present generated SQL or draft output as certified.';
 
 const DQL_MCP_FULL_PROFILE_INSTRUCTIONS =
-  '\nFull expert profile only: `build_dql_block`, `build_dql_app`, ' +
-  '`list_proposals`, `feedback_record`, `record_correction`, `approve_hint`, ' +
-  '`list_hints`, `search_metadata`, `get_table_schema`, `validate_sql`, ' +
-  '`resolve_analytical_path`, `explain_relationship_proof`, ' +
+  '\nFull expert profile only: `build_dql_block` (deprecated alias of ' +
+  '`suggest_block`), `build_dql_app`, `list_proposals`, `feedback_record`, ' +
+  '`record_correction`, `approve_hint`, `list_hints`, ' +
   '`list_metrics`, and `list_dimensions` are available for maintenance, legacy, ' +
   'and governance-admin workflows. Prefer the bounded governed cascade tools for normal analytics questions.\n' +
   'Correction memory: when an analyst corrects a Tier-2 answer, call ' +

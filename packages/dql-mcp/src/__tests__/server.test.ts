@@ -41,7 +41,7 @@ describe('DQL MCP server instructions', () => {
     const registrations = __test__.buildMcpToolRegistrations({} as DQLContext);
 
     expect(registrations.map((tool) => tool.name)).toEqual(dqlToolNamesForSurface('mcp_agentic'));
-    expect(registrations).toHaveLength(17);
+    expect(registrations).toHaveLength(20);
     expect(registrations.map((tool) => tool.name)).toEqual(
       expect.arrayContaining([
         'ask_dql',

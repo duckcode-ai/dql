@@ -69,7 +69,7 @@ export async function askDql(
     routeReason: route.routeReason,
     grainGate: route.grainGate,
     recommendedAction: recommendedAction(route.route),
-    nextTool: nextTool(route.route),
+    ...(nextTool(route.route) ? { nextTool: nextTool(route.route) } : {}),
     exactCertifiedBlock: exact && exact.objectType === 'dql_block' ? summarizeObject(exact) : undefined,
     certifiedCandidates,
     // Conflict route: surface BOTH sides + owners + the disambiguation prompt.
@@ -230,12 +230,16 @@ function recommendedAction(route: string): string {
   return 'Ask for the missing business object, metric, table, filter, or grain before writing SQL.';
 }
 
-function nextTool(route: string): string {
+/**
+ * Advisory next REGISTERED tool for the route. Conflict/missing-context routes
+ * have no tool to call — the agent must ask the USER — so this returns
+ * undefined instead of a phantom tool name a model would try to invoke.
+ */
+function nextTool(route: string): string | undefined {
   if (route === 'certified') return 'query_via_block';
   if (route === 'generated_sql') return 'query_via_metadata';
   if (route === 'research') return 'inspect_metadata_context';
-  if (route === 'conflict') return 'ask_user_clarifying_question';
-  return 'ask_user_clarifying_question';
+  return undefined;
 }
 
 function summarizeAllowedSqlContext(context: MetadataAllowedSqlContext): MetadataAllowedSqlContext {

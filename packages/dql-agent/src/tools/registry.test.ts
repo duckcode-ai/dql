@@ -66,12 +66,18 @@ describe('DQL tool registry', () => {
       'lineage_impact',
       'certify',
       'suggest_block',
+      // Grounding/discovery trio: SYSTEM_PROMPT rule 8 ("DISCOVER before you
+      // decline") and the expand_context repair loop both assume an agent can
+      // FIND a missing relation, not just name one it already knows.
+      'search_metadata',
+      'get_table_schema',
+      'validate_sql',
       'resolve_analytical_path',
       'explain_relationship_proof',
       'inspect_dql_project',
     ]);
-    expect(mcpAgenticTools).toHaveLength(17);
-    expect(mcpAgenticTools.length).toBeLessThanOrEqual(18);
+    expect(mcpAgenticTools).toHaveLength(20);
+    expect(mcpAgenticTools.length).toBeLessThanOrEqual(20);
   });
 
   it('keeps the full MCP surface available for explicit expert sessions', () => {
@@ -191,5 +197,25 @@ describe('DQL tool registry', () => {
       type: 'object',
       required: ['contextPackId', 'relations'],
     });
+  });
+});
+
+describe('surface coherence (P0 tool-surface fixes)', () => {
+  it('Claude Code allowlist covers every tool the agentic MCP server exposes', () => {
+    // The claude-code provider spawns `dql mcp` (agentic profile) and passes
+    // --allowedTools from the claude_code surface. A served-but-not-allowed
+    // tool is invisible to the model — the two sets must stay aligned.
+    const served = new Set(dqlToolNamesForSurface('mcp_agentic'));
+    const allowed = new Set(dqlToolNamesForSurface('claude_code'));
+    for (const name of served) {
+      expect(allowed.has(name), `served tool "${name}" missing from claude_code allowlist`).toBe(true);
+    }
+  });
+
+  it('gives every discovery-instruction surface the grounding trio', () => {
+    for (const surface of ['mcp_agentic', 'claude_code', 'native', 'answer_loop'] as const) {
+      const names = dqlToolNamesForSurface(surface);
+      expect(names, surface).toEqual(expect.arrayContaining(['search_metadata', 'get_table_schema', 'validate_sql']));
+    }
   });
 });

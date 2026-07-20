@@ -109,6 +109,18 @@ export {
   routeReasoningEffort,
 } from "./agent-run-engine.js";
 export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
+export {
+  readMetadataCatalogHealth,
+  readAgentRunStoreHealth,
+  type MetadataCatalogHealth,
+  type AgentRunStoreHealth,
+} from "./metadata/health.js";
+export {
+  SqliteAgentRunStore,
+  defaultAgentRunSqlitePath,
+  resolveAgentRunRetention,
+  type SqliteAgentRunStoreOptions,
+} from "./agent-run-store.js";
 export type {
   AgentRouteExecutionContext,
   AgentRouteExecutor,
@@ -738,6 +750,8 @@ export type {
 export {
   HashedTokenEmbeddingProvider,
   defaultEmbeddingProvider,
+  envEmbeddingProvider,
+  resolveEmbeddingProvider,
   cosineSimilarity,
   hybridRank,
   probeLocalOllamaEmbeddings,

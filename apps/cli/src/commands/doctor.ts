@@ -13,11 +13,13 @@ import {
   loadProjectConfig,
   normalizeProjectConnection,
   resolveProjectSemanticConfig,
+  resolveAgentRuntimeValueGrounding,
 } from '../local-runtime.js';
 import { listRemoteMcpSettings } from '../llm/mcp-config.js';
 import { listProviderSettings } from '../settings/provider-settings.js';
 import { describeNpmInvocation, resolveNpmInvocation } from '../npm-runtime.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from '../version-status.js';
+import { resolveRetrievalHealthStatus } from '../retrieval-health.js';
 
 interface Check {
   name: string;
@@ -97,6 +99,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   checks.push(checkNotebookAssets());
   checks.push(checkOutputContractDrift(projectRoot));
   checks.push(await checkDqlVersionDrift(projectRoot));
+  checks.push(checkRetrievalHealth(projectRoot, config));
 
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
@@ -888,4 +891,33 @@ async function checkDqlVersionDrift(projectRoot: string): Promise<Check> {
     ok: false,
     detail: `${identity}. ${status.drift.join(' ')}${status.upgradeCommand ? ` Upgrade: ${status.upgradeCommand}` : ''}`,
   };
+}
+
+/**
+ * P0: the agent stack fails soft (value grounding silently disabled, hashed
+ * embedding fallback, caches without GC). Surface the degradations in one
+ * glance instead of a debugging session. Warnings, never blocking.
+ */
+function checkRetrievalHealth(projectRoot: string, config: ReturnType<typeof loadProjectConfig>): Check {
+  const valueGrounding = resolveAgentRuntimeValueGrounding(config);
+  const health = resolveRetrievalHealthStatus({
+    projectRoot,
+    valueGroundingMode: valueGrounding.mode,
+    searchSafeColumnCount: valueGrounding.searchSafeColumns.size,
+  });
+  const summary = [
+    `value-grounding=${health.valueGrounding.mode}${health.valueGrounding.mode === 'safe_automatic' ? ` (${health.valueGrounding.searchSafeColumns} safe columns)` : ''}`,
+    `embeddings=${health.embeddings.providerId}${health.embeddings.semantic ? '' : ' (lexical fallback)'}`,
+    health.catalog.exists
+      ? `catalog=${health.catalog.objectCount ?? '?'} objects, packs=${health.catalog.contextPackCount ?? 0} (${formatBytes(health.catalog.contextPackBytes ?? 0)})`
+      : 'catalog=missing',
+    health.runStore.exists
+      ? `runs=${health.runStore.runCount ?? '?'} (${formatBytes(health.runStore.fileBytes ?? 0)})`
+      : 'runs=none',
+    `snapshots=${health.snapshots.count} (${formatBytes(health.snapshots.totalBytes)})`,
+  ].join(', ');
+  if (health.warnings.length === 0) {
+    return { name: 'Agent retrieval health', ok: true, detail: summary };
+  }
+  return { name: 'Agent retrieval health', ok: false, detail: `${summary}. ${health.warnings.join(' ')}` };
 }

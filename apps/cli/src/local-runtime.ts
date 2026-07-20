@@ -119,6 +119,7 @@ import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
+import { resolveRetrievalHealthStatus } from './retrieval-health.js';
 import { createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type { AgentConversationContext, AgentRunner as LLMAgentRunner, ProviderId } from './llm/types.js';
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
@@ -154,7 +155,7 @@ import {
   type JoinPatternCandidate,
   reviewHint,
   AgentRunEngine,
-  FileAgentRunStore,
+  SqliteAgentRunStore,
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
   createHybridRouter,
@@ -170,6 +171,7 @@ import {
   buildProposePreview,
   buildFromPrompt,
   defaultAgentRunStorePath,
+  defaultAgentRunSqlitePath,
   resolveLocalOwner,
   resolveProposeConfig,
   recordQueryRun,
@@ -3087,7 +3089,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     getCatalogContext: buildRankedAgentRunCatalogContext,
   });
 
-  const agentRunStore = new FileAgentRunStore({ path: defaultAgentRunStorePath(projectRoot) });
+  // P0: one row per run with retention + old-run compaction. The legacy JSON
+  // store rewrote the entire file (123 MB observed) twice per answered question;
+  // existing history is imported once and the JSON renamed to *.migrated.
+  const agentRunStore = new SqliteAgentRunStore({
+    path: defaultAgentRunSqlitePath(projectRoot),
+    legacyJsonPath: defaultAgentRunStorePath(projectRoot),
+  });
   // A run may outlive its streaming browser connection, so cancellation is
   // server-owned and keyed by run id rather than relying on fetch abort alone.
   const activeAgentRunControllers = new Map<string, AbortController>();
@@ -4717,8 +4725,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       // stale. Uses only the cached latest-version lookup — never blocks.
       const versionStatus = resolveDqlRuntimeVersionStatus({ projectRoot, runningVersion: runtimeVersion });
       void fetchLatestPublishedDqlVersion();
+      const healthValueGrounding = resolveAgentRuntimeValueGrounding(projectConfig);
+      const retrievalHealth = resolveRetrievalHealthStatus({
+        projectRoot,
+        valueGroundingMode: healthValueGrounding.mode,
+        searchSafeColumnCount: healthValueGrounding.searchSafeColumns.size,
+      });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ status: 'ok', version: runtimeVersion, versionStatus }));
+      res.end(serializeJSON({ status: 'ok', version: runtimeVersion, versionStatus, retrievalHealth }));
       return;
     }
 

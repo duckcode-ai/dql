@@ -1647,7 +1647,10 @@ describe('agent run runtime API', () => {
       expect(listed.runs.some((run) => run.id === created.run.id)).toBe(true);
       expect(listed.runs.some((run) => run.id === ask.run.id)).toBe(true);
       expect(listed.runs.some((run) => run.id === appRun.run.id)).toBe(true);
-      expect(readFileSync(join(projectRoot, '.dql', 'local', 'agent-runs.json'), 'utf-8')).toContain(created.run.id);
+      // P0: runs persist in SQLite now (one row per run, retention on write),
+      // not the rewrite-the-world JSON file.
+      expect(existsSync(join(projectRoot, '.dql', 'local', 'agent-runs.sqlite'))).toBe(true);
+      expect(existsSync(join(projectRoot, '.dql', 'local', 'agent-runs.json'))).toBe(false);
     } finally {
       await new Promise<void>((resolve) => {
         if (!server) {

@@ -475,7 +475,7 @@ const CORE_TOOL_DEFINITIONS = [
         serverUrl: { type: 'string', description: 'Base URL of the local DQL runtime. Default http://127.0.0.1:3474.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic'],
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
   },
   {
     name: 'build_block_from_prompt',
@@ -493,7 +493,7 @@ const CORE_TOOL_DEFINITIONS = [
         serverUrl: { type: 'string', description: 'Base URL of the local DQL runtime. Default http://127.0.0.1:3474.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic'],
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
   },
   {
     name: 'list_metrics',
@@ -577,7 +577,7 @@ const CORE_TOOL_DEFINITIONS = [
         limit: { type: 'number', description: 'Max tables to return. Default 12.' },
       },
     },
-    surfaces: ['mcp', 'native', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
   },
   {
     name: 'get_table_schema',
@@ -591,7 +591,7 @@ const CORE_TOOL_DEFINITIONS = [
         table: { type: 'string', description: 'Model name, alias, or qualified relation.' },
       },
     },
-    surfaces: ['mcp', 'native', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
   },
   {
     name: 'validate_sql',
@@ -606,7 +606,7 @@ const CORE_TOOL_DEFINITIONS = [
         query: { type: 'string', description: 'Optional original request, used to scope grounding.' },
       },
     },
-    surfaces: ['mcp', 'native', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
   },
   {
     name: 'resolve_analytical_path',
@@ -624,7 +624,7 @@ const CORE_TOOL_DEFINITIONS = [
         dimensionEntities: { type: 'array', items: { type: 'string' }, description: 'Entities contributing grouping dimensions.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
   },
   {
     name: 'explain_relationship_proof',
@@ -638,7 +638,7 @@ const CORE_TOOL_DEFINITIONS = [
         relationshipId: { type: 'string', description: 'Manifest-v3 relationship id.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic', 'native', 'answer_loop'],
+    surfaces: ['mcp', 'mcp_agentic', 'native', 'claude_code', 'answer_loop'],
   },
   {
     name: 'inspect_dql_project',
@@ -651,12 +651,12 @@ const CORE_TOOL_DEFINITIONS = [
         refresh: { type: 'boolean', description: 'Refresh metadata and agent index before returning status. Default true.' },
       },
     },
-    surfaces: ['mcp', 'mcp_agentic'],
+    surfaces: ['mcp', 'mcp_agentic', 'claude_code'],
   },
   {
     name: 'build_dql_block',
     description:
-      'High-level draft-block tool. Writes a proposed block to the local draft queue with governance results. Does not certify automatically.',
+      'Deprecated alias of suggest_block (identical behavior, kept for backward compatibility) — prefer suggest_block. Writes a proposed block to the local draft queue with governance results. Does not certify automatically.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
