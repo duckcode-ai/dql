@@ -48,4 +48,19 @@ describe('prepareBlockInvocation', () => {
     );
     expect(invocation.unresolvedParameters).toEqual(['start_date']);
   });
+
+  it('AGT-012 preserves prior-result provenance supplied by the governed planner', () => {
+    const invocation = prepareBlockInvocation({
+      source: SOURCE,
+      parameters: { start_date: '2026-01-01', region_set: ['East'] },
+      parameterSources: { start_date: 'question', region_set: 'prior_result' },
+      question: 'Use this region from the previous result',
+      surface: 'ask_ai',
+    });
+
+    expect(invocation.resolvedParameters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'start_date', value: '2026-01-01', source: 'question' }),
+      expect.objectContaining({ name: 'region_set', value: ['East'], source: 'prior_result' }),
+    ]));
+  });
 });

@@ -38,6 +38,7 @@ jaffle-shop/
 **/.dql/docker-starter/
 **/.dql/oauth-credentials.json
 **/.dql/provider-settings.json
+**/.dql/semantic-runtime-settings.json
 **/.dql/mcp-servers.json
 **/.dql-user-prefs.json
 output/

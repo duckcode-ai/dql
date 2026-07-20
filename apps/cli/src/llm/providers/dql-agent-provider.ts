@@ -467,6 +467,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             analysisDepth: contextBudget.analysisDepth,
             ...(req.semanticDriver ? { semanticDriver: req.semanticDriver } : {}),
             ...(req.semanticTableMapping ? { semanticTableMapping: req.semanticTableMapping } : {}),
+            ...(req.semanticQueryCompiler ? { semanticQueryCompiler: req.semanticQueryCompiler } : {}),
             ...(req.preferredEvidenceIds?.length ? { preferredEvidenceIds: req.preferredEvidenceIds } : {}),
             ...(req.preferredExecutionId ? { preferredExecutionId: req.preferredExecutionId } : {}),
             executeCertifiedBlock: req.executeCertifiedBlock

@@ -1689,6 +1689,8 @@ function InlineAskResultCard({
   if (!result) return null;
   const chartConfig = inlineAskChartConfig(payload, result);
   const inspectorTab = preferredAskInspectorTab(run, artifact);
+  const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
+  const certifiedName = artifact.trustState === 'certified' ? certifiedBlockName(artifact, payload) : undefined;
   return (
     <section
       data-followup="table"
@@ -1707,14 +1709,27 @@ function InlineAskResultCard({
           <ListTree size={12} /> Inspect
         </button>
       </div>
-      <ResultView
-        result={result}
-        themeMode={themeMode}
-        t={t}
-        chartConfig={chartConfig}
-        embedded
-        tabLabels={{ table: 'Results', chart: 'Visualization' }}
-      />
+      {dqlArtifact ? (
+        <ExecutableDqlResult
+          artifact={dqlArtifact}
+          certifiedBlockName={certifiedName}
+          initialResult={result}
+          initialChartConfig={chartConfig}
+          payload={payload}
+          t={t}
+          themeMode={themeMode}
+          embedded
+        />
+      ) : (
+        <ResultView
+          result={result}
+          themeMode={themeMode}
+          t={t}
+          chartConfig={chartConfig}
+          embedded
+          tabLabels={{ table: 'Results', chart: 'Visualization' }}
+        />
+      )}
     </section>
   );
 }
@@ -2532,6 +2547,7 @@ function ExecutableDqlResult({
   payload,
   t,
   themeMode,
+  embedded = false,
 }: {
   artifact: AgentConversationDqlArtifact;
   certifiedBlockName?: string;
@@ -2540,6 +2556,7 @@ function ExecutableDqlResult({
   payload: Record<string, unknown>;
   t: Theme;
   themeMode: ThemeMode;
+  embedded?: boolean;
 }) {
   const [parameters, setParameters] = useState<BlockParameterDefinition[]>(() => artifact.parameters ?? []);
   const [values, setValues] = useState<Record<string, unknown>>(() => ({
@@ -2593,10 +2610,21 @@ function ExecutableDqlResult({
   };
 
   const editable = parameters.some(isRuntimeEditableParameter);
+  const appliedInputs = Object.entries(values).filter(([, value]) => value !== undefined && value !== null && value !== '');
   return (
     <div style={{ display: 'grid', gap: 9 }}>
+      {appliedInputs.length > 0 ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: embedded ? '8px 12px 0' : 0 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 750, color: t.textMuted }}>Applied inputs</span>
+          {appliedInputs.map(([name, value]) => (
+            <span key={name} style={{ fontSize: 10.5, color: t.textSecondary, border: `1px solid ${t.cellBorder}`, background: t.appBg, borderRadius: 999, padding: '2px 7px' }}>
+              {name.replace(/_/g, ' ')} = {formatAppliedParameterValue(value)}
+            </span>
+          ))}
+        </div>
+      ) : null}
       {loading ? <div style={{ fontSize: 10.5, color: t.textMuted }}>Loading reusable inputs…</div> : editable ? (
-        <div style={{ display: 'grid', gap: 8, padding: 9, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.appBg }}>
+        <div style={{ display: 'grid', gap: 8, padding: 9, margin: embedded ? '0 12px' : 0, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.appBg }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 11, fontWeight: 800, color: t.textPrimary }}>Change DQL inputs</div>
@@ -2611,12 +2639,19 @@ function ExecutableDqlResult({
         </div>
       ) : null}
       {error ? <div style={{ fontSize: 10.5, color: t.error }}>{error}</div> : null}
-      <ResultView result={result} themeMode={themeMode} t={t} chartConfig={chartConfig} />
+      <ResultView
+        result={result}
+        themeMode={themeMode}
+        t={t}
+        chartConfig={chartConfig}
+        embedded={embedded}
+        tabLabels={embedded ? { table: 'Results', chart: 'Visualization' } : undefined}
+      />
     </div>
   );
 }
 
-function resolvedParameterValues(payload: Record<string, unknown>): Record<string, unknown> {
+export function resolvedParameterValues(payload: Record<string, unknown>): Record<string, unknown> {
   const result = payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
     ? payload.result as Record<string, unknown>
     : undefined;
@@ -2626,6 +2661,12 @@ function resolvedParameterValues(payload: Record<string, unknown>): Record<strin
     const record = entry as { name?: unknown; value?: unknown };
     return typeof record.name === 'string' ? [[record.name, record.value]] : [];
   }));
+}
+
+function formatAppliedParameterValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(', ');
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return String(value);
 }
 
 function certifiedBlockName(artifact: AgentRunArtifact, payload: Record<string, unknown>): string | undefined {

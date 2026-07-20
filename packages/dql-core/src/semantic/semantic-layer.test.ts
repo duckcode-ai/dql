@@ -482,6 +482,39 @@ describe('SemanticLayer', () => {
     expect(composed?.sql).toContain('SUM(product_price) AS revenue');
     expect(composed?.sql).toContain('FROM analytics.order_items');
     expect(composed?.sql).toContain('GROUP BY category');
+    expect(layer.canComposeMetric('revenue')).toBe(true);
+  });
+
+  it('binds a repeated report_date dimension to the selected metric model instead of the last loaded model', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'usage_daily', label: 'Usage daily', description: '', domain: 'usage',
+      sql: 'SELECT * FROM analytics.usage_daily', table: 'analytics.usage_daily',
+      measures: [{ name: 'total_bcm', label: 'Total BCM', description: '', domain: 'usage', sql: 'SUM(bcm)', type: 'sum', table: 'analytics.usage_daily', cube: 'usage_daily' }],
+      dimensions: [],
+      timeDimensions: [{ name: 'report_date', label: 'Report date', description: '', sql: 'report_date', type: 'date', table: 'analytics.usage_daily', cube: 'usage_daily', isTimeDimension: true, granularities: ['day'] }],
+      joins: [{ name: 'account_snapshot', left: 'usage_daily', right: 'account_snapshot', type: 'left', sql: '${left}.account_id = ${right}.account_id' }],
+      segments: [], preAggregations: [],
+    });
+    layer.addCube({
+      name: 'account_snapshot', label: 'Account snapshot', description: '', domain: 'usage',
+      sql: 'SELECT * FROM analytics.account_snapshot', table: 'analytics.account_snapshot',
+      measures: [],
+      dimensions: [{ name: 'account_tier', label: 'Account tier', description: '', sql: 'account_tier', type: 'string', table: 'analytics.account_snapshot', cube: 'account_snapshot' }],
+      timeDimensions: [{ name: 'report_date', label: 'Report date', description: '', sql: 'report_date', type: 'date', table: 'analytics.account_snapshot', cube: 'account_snapshot', isTimeDimension: true, granularities: ['day'] }],
+      joins: [], segments: [], preAggregations: [],
+    });
+
+    const composed = layer.composeQuery({
+      metrics: ['total_bcm'],
+      dimensions: ['report_date', 'account_tier'],
+    });
+
+    expect(composed?.sql).toContain('usage_daily.report_date AS report_date');
+    expect(composed?.sql).toContain('account_snapshot.account_tier AS account_tier');
+    expect(composed?.sql).not.toContain('account_snapshot.report_date AS report_date');
+    expect(layer.listCompatibleDimensions(['total_bcm']).find((dimension) => dimension.name === 'report_date')?.table)
+      .toBe('analytics.usage_daily');
   });
 
   it('refuses to natively compose a dbt derived metric without a physical table', () => {
@@ -494,6 +527,26 @@ describe('SemanticLayer', () => {
     });
 
     expect(layer.composeQuery({ metrics: ['revenue_ratio'], dimensions: [] })).toBeNull();
+    expect(layer.canComposeMetric('revenue_ratio')).toBe(false);
+  });
+
+  it('checks native capability across an enterprise-size catalog without composing SQL', () => {
+    const metricCount = 7_500;
+    const layer = new SemanticLayer({
+      metrics: Array.from({ length: metricCount }, (_, index) => ({
+        name: `metric_${index}`,
+        label: `Metric ${index}`,
+        description: '',
+        domain: `domain_${index % 20}`,
+        sql: `SUM(value_${index})`,
+        type: 'sum' as const,
+        table: `model_${index % 4_000}`,
+      })),
+      dimensions: [],
+    });
+
+    expect(Array.from({ length: metricCount }, (_, index) =>
+      layer.canComposeMetric(`metric_${index}`)).every(Boolean)).toBe(true);
   });
 });
 

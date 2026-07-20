@@ -253,7 +253,6 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
   const boundValueTokens = new Set(memberBindings.flatMap((binding) => binding.values.map(canonicalToken)));
   const unsupportedBindings = memberBindings.flatMap((binding) => {
     const dimension = canonicalToken(binding.dimension);
-    const dimensionAliases = new Set([dimension, dimension.replace(/_name$/, '')]);
     const staticallyScoped = binding.values.every((value) => block.scopeTokens.has(canonicalToken(value)));
     // Only a real parameterized filter contract makes a typed member binding
     // SUPPORTED for exact Tier-1 termination. A matching DIMENSION column is
@@ -263,7 +262,7 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
     // follow-up. A dimension match demotes to context_only instead, where the
     // adaptation lane applies the actual restriction (or the generated lane
     // answers the member-specific shape).
-    const exposesBinding = [...dimensionAliases].some((alias) => block.filters.includes(alias));
+    const exposesBinding = block.filters.some((filter) => filterContractMatchesDimension(filter, dimension));
     return staticallyScoped || exposesBinding ? [] : binding.values;
   });
   const requestedFilters = uniqueStrings([
@@ -305,6 +304,16 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
     ...unsupportedBindings,
     ...uncoveredFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter)),
   ]);
+}
+
+function filterContractMatchesDimension(filter: string, dimension: string): boolean {
+  const tokens = (value: string) => canonicalToken(value)
+    .split('_')
+    .filter((token) => token && token !== 'name' && token !== 'label' && token !== 'value' && token !== 'set');
+  const left = tokens(filter);
+  const right = tokens(dimension);
+  return left.length > 0 && right.length > 0
+    && (left.every((token) => right.includes(token)) || right.every((token) => left.includes(token)));
 }
 
 function extractSqlFilterScope(sql: string): string {

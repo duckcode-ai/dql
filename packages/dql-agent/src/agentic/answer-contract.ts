@@ -15,6 +15,7 @@ export interface CompiledSemanticRecord {
   metrics: string[];
   dimensions: string[];
   dqlArtifactSource: string;
+  engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
 }
 
 export interface AgenticTrustResult {

@@ -11,6 +11,12 @@ const QUERY_CERTIFIED_BLOCK_SCHEMA = {
   properties: {
     name: { type: 'string', description: 'Certified DQL block name to execute.' },
     limit: { type: 'number', description: 'Maximum rows to return in the tool result. Default 200.' },
+    question: { type: 'string', description: 'Original user question used to resolve typed block parameters.' },
+    parameters: {
+      type: 'object',
+      additionalProperties: true,
+      description: 'Explicit typed values for the certified block parameters.',
+    },
   },
 } as const;
 
@@ -50,7 +56,11 @@ export function buildAnalyticsAgentTools(ctx: DQLContext, req: AgentRunRequest):
         }
         const input = objectArgs(args);
         const name = requiredString(input.name, 'name');
-        const result = await req.executeCertifiedBlock(blockNodeFor(name));
+        const question = typeof input.question === 'string' && input.question.trim() ? input.question.trim() : undefined;
+        const parameters = input.parameters && typeof input.parameters === 'object' && !Array.isArray(input.parameters)
+          ? input.parameters as Record<string, unknown>
+          : undefined;
+        const result = await req.executeCertifiedBlock(blockNodeFor(name), { question, parameters });
         const limit = typeof input.limit === 'number' && Number.isFinite(input.limit)
           ? Math.max(1, Math.min(10000, Math.floor(input.limit)))
           : 200;
@@ -64,6 +74,8 @@ export function buildAnalyticsAgentTools(ctx: DQLContext, req: AgentRunRequest):
           sql: result.sql,
           chartConfig: result.chartConfig,
           blockPath: result.blockPath,
+          parameters: result.parameters,
+          auditId: result.auditId,
         };
       },
     },

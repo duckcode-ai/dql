@@ -23,6 +23,7 @@ import {
 export interface ContextLedgerInput {
   contextPack?: LocalContextPack;
   schemaContext?: RuntimeSchemaTable[];
+  dialect?: string;
 }
 
 export interface ContextLedgerSqlValidationOptions {
@@ -42,10 +43,12 @@ export class ContextLedger {
   readonly contextPack?: LocalContextPack;
   readonly schemaContext: RuntimeSchemaTable[];
   readonly grounding?: SchemaGrounding;
+  readonly dialect?: string;
 
   constructor(input: ContextLedgerInput = {}) {
     this.contextPack = input.contextPack;
     this.schemaContext = input.schemaContext ?? [];
+    this.dialect = input.dialect;
     this.grounding = buildRuntimeGrounding(this.schemaContext);
   }
 
@@ -60,12 +63,13 @@ export class ContextLedger {
   ): SqlContextValidationResult {
     return validateSqlAgainstLocalContext(sql, this.contextPack, {
       ...options,
+      dialect: this.dialect,
       runtimeSchema: this.schemaContext,
     });
   }
 
   validateRuntimeGrounding(sql: string): GroundingValidationResult | undefined {
-    return this.grounding ? validateSqlAgainstGrounding(sql, this.grounding) : undefined;
+    return this.grounding ? validateSqlAgainstGrounding(sql, this.grounding, this.dialect) : undefined;
   }
 
   withExpansion(expansion: GroundingExpansionResult | undefined): ContextLedgerExpansionResult {
@@ -74,6 +78,7 @@ export class ContextLedger {
       ledger: new ContextLedger({
         contextPack: merged.contextPack,
         schemaContext: merged.schemaContext,
+        dialect: this.dialect,
       }),
       notes: merged.notes,
     };

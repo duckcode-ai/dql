@@ -5,6 +5,7 @@ import {
   type DbtOnboardingJob,
   type DbtOnboardingPreviewResponse,
   type DbtOnboardingStatusResponse,
+  type SemanticRuntimeSettingsResponse,
 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
@@ -44,6 +45,21 @@ export function DbtProjectEditor({
   const [preparation, setPreparation] = useState<DbtOnboardingJob | null>(null);
   const [busy, setBusy] = useState<'loading' | 'preview' | 'apply' | 'refresh' | null>('loading');
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [semanticRuntime, setSemanticRuntime] = useState<SemanticRuntimeSettingsResponse | null>(null);
+  const [semanticHost, setSemanticHost] = useState('');
+  const [semanticEnvironmentId, setSemanticEnvironmentId] = useState('');
+  const [semanticToken, setSemanticToken] = useState('');
+  const [semanticBusy, setSemanticBusy] = useState<'test' | 'apply' | null>(null);
+  const [semanticMessage, setSemanticMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const loadSemanticRuntime = useCallback(async () => {
+    const runtime = await api.getSemanticRuntimeSettings();
+    setSemanticRuntime(runtime);
+    setSemanticHost(runtime.dbtCloud.host ?? '');
+    setSemanticEnvironmentId(runtime.dbtCloud.environmentId ?? '');
+    setSemanticToken('');
+    return runtime;
+  }, []);
 
   const loadStatus = useCallback(async () => {
     const [next, dbt] = await Promise.all([
@@ -66,6 +82,14 @@ export function DbtProjectEditor({
       .finally(() => alive && setBusy(null));
     return () => { alive = false; };
   }, [loadStatus]);
+
+  useEffect(() => {
+    let alive = true;
+    void loadSemanticRuntime().catch((error) => {
+      if (alive) setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
+    });
+    return () => { alive = false; };
+  }, [loadSemanticRuntime]);
 
   useEffect(() => {
     if (!preparation || (preparation.status !== 'queued' && preparation.status !== 'running')) return;
@@ -181,6 +205,41 @@ export function DbtProjectEditor({
     }
   };
 
+  const semanticPayload = () => ({
+    preference: 'auto' as const,
+    dbtCloud: {
+      host: semanticHost,
+      environmentId: semanticEnvironmentId,
+      serviceToken: semanticToken,
+    },
+  });
+
+  const testSemanticRuntime = async () => {
+    setSemanticBusy('test');
+    setSemanticMessage(null);
+    try {
+      const result = await api.testDbtCloudSemanticRuntime(semanticPayload());
+      setSemanticMessage({ ok: result.ok, text: result.message || result.error || 'dbt Cloud Semantic Layer test failed.' });
+    } finally {
+      setSemanticBusy(null);
+    }
+  };
+
+  const applySemanticRuntime = async () => {
+    setSemanticBusy('apply');
+    setSemanticMessage(null);
+    try {
+      const result = await api.applyDbtCloudSemanticRuntime(semanticPayload());
+      setSemanticRuntime(result);
+      setSemanticToken('');
+      setSemanticMessage({ ok: true, text: result.dbtCloud.testMessage || 'dbt Cloud Semantic Layer tested and activated.' });
+    } catch (error) {
+      setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSemanticBusy(null);
+    }
+  };
+
   const configured = projectReady;
   const preparing = preparation?.status === 'queued' || preparation?.status === 'running';
   const preparationFailed = preparation?.status === 'failed' || preparation?.status === 'cancelled';
@@ -248,6 +307,55 @@ export function DbtProjectEditor({
           <button type="button" onClick={() => void inspect()} disabled={Boolean(busy)} style={secondary}>{busy === 'preview' ? 'Inspecting…' : 'Preview'}</button>
           {preview ? <button type="button" onClick={() => void apply()} disabled={Boolean(busy)} style={{ ...secondary, border: 'none', background: t.accent, color: '#fff' }}>{busy === 'apply' ? 'Applying…' : 'Apply project'}</button> : null}
         </div>
+      </div>
+
+      <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, background: t.cellBg, padding: 16, display: 'grid', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Semantic execution adapters</div>
+          <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5 }}>
+            Adapter code is included with DQL. Auto uses dbt Cloud when tested, then local MetricFlow, and safely falls back to the native compiler for simple metrics.
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gap: 7 }}>
+          {(semanticRuntime?.runtime.adapters ?? []).map((adapter) => (
+            <div key={adapter.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 9, border: '1px solid var(--border-subtle)', borderRadius: 9, padding: '9px 10px' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, marginTop: 4, background: adapter.ready ? 'var(--status-success)' : adapter.configured ? 'var(--status-warning)' : 'var(--text-muted)' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: t.textPrimary }}>{adapter.label}</span>
+                  {semanticRuntime?.runtime.active === adapter.id ? <span style={{ fontSize: 9, fontWeight: 700, color: t.accent }}>ACTIVE</span> : null}
+                </div>
+                <div style={{ fontSize: 10.5, color: t.textMuted, marginTop: 2, lineHeight: 1.4 }}>{adapter.detail}</div>
+              </div>
+              <span style={{ fontSize: 9.5, color: adapter.ready ? 'var(--status-success)' : t.textMuted }}>{adapter.ready ? 'Ready' : adapter.configured ? 'Configured' : 'Available'}</span>
+            </div>
+          ))}
+        </div>
+
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 11.5, fontWeight: 700, color: t.textSecondary }}>dbt Cloud Semantic Layer</summary>
+          <div style={{ display: 'grid', gap: 9, marginTop: 11 }}>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 650, color: t.textSecondary }}>Host</span>
+              <input value={semanticHost} onChange={(event) => setSemanticHost(event.target.value)} placeholder="semantic-layer.cloud.getdbt.com" style={input} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 650, color: t.textSecondary }}>Environment ID</span>
+              <input value={semanticEnvironmentId} onChange={(event) => setSemanticEnvironmentId(event.target.value)} placeholder="123456" style={input} />
+            </label>
+            <label style={{ display: 'grid', gap: 5 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 650, color: t.textSecondary }}>Service token</span>
+              <input type="password" value={semanticToken} onChange={(event) => setSemanticToken(event.target.value)} placeholder={semanticRuntime?.dbtCloud.serviceTokenPreview || 'Semantic Layer service token'} autoComplete="off" style={input} />
+              <span style={{ fontSize: 9.5, color: t.textMuted }}>Requires Semantic Layer and Metadata permissions. Leave blank to preserve the stored token.</span>
+            </label>
+            {semanticMessage ? <div role={semanticMessage.ok ? 'status' : 'alert'} style={{ fontSize: 11, color: semanticMessage.ok ? 'var(--status-success)' : 'var(--status-error)' }}>{semanticMessage.text}</div> : null}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" onClick={() => void testSemanticRuntime()} disabled={Boolean(semanticBusy)} style={secondary}>{semanticBusy === 'test' ? 'Testing…' : 'Test draft'}</button>
+              <button type="button" onClick={() => void applySemanticRuntime()} disabled={Boolean(semanticBusy)} style={{ ...secondary, border: 'none', background: t.accent, color: '#fff' }}>{semanticBusy === 'apply' ? 'Testing & saving…' : 'Test & save'}</button>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   );

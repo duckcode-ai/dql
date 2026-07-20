@@ -345,6 +345,11 @@ const CORE_TOOL_DEFINITIONS = [
           type: 'string',
           description: 'Original question. Enables a defense-in-depth grain gate before serving the block.',
         },
+        parameters: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'Typed runtime parameter values resolved from the question, prior result, or an explicit user input.',
+        },
         serverUrl: {
           type: 'string',
           description: 'Base URL of the local DQL runtime. Default http://127.0.0.1:3474.',

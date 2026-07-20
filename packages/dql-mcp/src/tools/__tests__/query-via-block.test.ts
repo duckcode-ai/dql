@@ -72,6 +72,38 @@ describe('queryViaBlock — certified-only enforcement (the wedge)', () => {
     });
   });
 
+  it('AGT-012 forwards the original question and typed parameters to the shared runtime', async () => {
+    const ctx = makeCtx({ 'My Block': makeManifestBlock() });
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: { columns: [{ name: 'product_name' }], rows: [{ product_name: 'Flame Impala' }], executionTime: 2 },
+        invocation: {
+          resolvedParameters: [{ name: 'product_name', value: 'Flame Impala', source: 'question' }],
+          auditId: 'audit-1',
+        },
+      }),
+    } as unknown as Response));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const result = await queryViaBlock(ctx, {
+      name: 'My Block',
+      question: 'Show revenue for Flame Impala',
+      parameters: { product_name: 'Flame Impala' },
+    });
+
+    const request = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      question: 'Show revenue for Flame Impala',
+      parameters: { product_name: 'Flame Impala' },
+    });
+    expect(result).toMatchObject({
+      parameters: [{ name: 'product_name', value: 'Flame Impala', source: 'question' }],
+      auditId: 'audit-1',
+    });
+  });
+
   it('bounds returned rows to 200 by default', async () => {
     const ctx = makeCtx({ 'My Block': makeManifestBlock() });
     globalThis.fetch = vi.fn(async () => ({

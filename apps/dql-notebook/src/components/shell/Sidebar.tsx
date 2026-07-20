@@ -35,16 +35,20 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
 
   const panel = state.sidebarPanel;
   const buildPanel = panel === 'files' || panel === 'block_library';
-  const buildFooter = `${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${state.schemaTables.length} table${state.schemaTables.length === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`;
+  const buildFooter = state.semanticLayer.loading
+    ? 'Loading semantic metrics…'
+    : `${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${state.schemaTables.length} table${state.schemaTables.length === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length.toLocaleString()} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`;
 
   // Block Studio loads this context before rendering its footer. Do the same in
   // the Notebook explorer so the shared footer never reports a stale 0 metrics.
   useEffect(() => {
     if (!buildPanel) return undefined;
     let active = true;
+    dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
     void api.getSemanticLayer()
       .then((layer) => { if (active) dispatch({ type: 'SET_SEMANTIC_LAYER', layer }); })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => { if (active) dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false }); });
     return () => { active = false; };
   }, [buildPanel, dispatch]);
 
@@ -139,6 +143,7 @@ export function Sidebar({ onOpenFile }: SidebarProps) {
             onNewBlock={() => dispatch({ type: 'OPEN_NEW_BLOCK_MODAL' })}
             onCollapse={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
             footer={buildFooter}
+            footerStatus={state.semanticLayer.loading ? 'loading' : 'ready'}
           />
         )}
         {panel === 'lineage' && <LineagePanel />}

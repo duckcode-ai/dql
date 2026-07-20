@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
+import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
 import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
@@ -832,6 +832,132 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.execution?.status).toBe("executed");
     expect(result.evidence?.execution?.rowCount).toBe(1);
     expect(result.evidence?.validation?.status).toBe("passed");
+  });
+
+  it("AGT-005/AGT-012 binds a question member to a certified block parameter and preserves the artifact contract", async () => {
+    kg.rebuild([{
+      nodeId: "block:product_revenue_for_product",
+      kind: "block",
+      name: "product_revenue_for_product",
+      domain: "commerce",
+      status: "certified",
+      description: "Revenue for a selected product. One row per product.",
+      tags: ["product", "revenue"],
+      sourceTier: "certified_artifact",
+      certification: "certified",
+      provenance: "DQL block",
+      sourcePath: "blocks/product_revenue_for_product.dql",
+      grain: "product",
+      dimensions: ["product"],
+      declaredOutputs: ["product_name", "revenue"],
+      allowedFilters: ["product_name"],
+      parameters: [{
+        name: "product_name",
+        type: "string",
+        required: true,
+        policy: "dynamic",
+        binding: { kind: "sql_value" },
+      }],
+      parameterPolicy: [{ name: "product_name", policy: "dynamic" }],
+      filterBindings: [{ filter: "product_name", binding: "product_name" }],
+      sql: "SELECT product_name, SUM(revenue) AS revenue FROM product_sales WHERE product_name = ${product_name} GROUP BY product_name",
+    }], []);
+    let receivedInvocation: Parameters<NonNullable<Parameters<typeof answer>[0]["executeCertifiedBlock"]>>[1];
+
+    const result = await answer({
+      question: 'Run product_revenue_for_product for "Flame Impala"',
+      provider: new StubProvider("should not be called"),
+      kg,
+      blockHints: ["product_revenue_for_product"],
+      schemaContext: [{
+        relation: "product_sales",
+        name: "product_sales",
+        columns: [
+          { name: "product_name", type: "VARCHAR", sampleValues: ["Flame Impala"] },
+          { name: "revenue", type: "DECIMAL" },
+        ],
+      }],
+      executeCertifiedBlock: async (_block, invocation) => {
+        receivedInvocation = invocation;
+        return {
+          columns: ["product_name", "revenue"],
+          rows: [{ product_name: "Flame Impala", revenue: 38800 }],
+          rowCount: 1,
+          sql: "SELECT product_name, SUM(revenue) AS revenue FROM product_sales WHERE product_name = 'Flame Impala' GROUP BY product_name",
+          parameters: [{ name: "product_name", value: "Flame Impala", source: "question" }],
+        };
+      },
+    });
+
+    expect(receivedInvocation).toMatchObject({
+      parameters: { product_name: "Flame Impala" },
+      parameterSources: { product_name: "question" },
+    });
+    expect(result.kind).toBe("certified");
+    expect(result.dqlArtifact).toMatchObject({
+      kind: "certified_block",
+      persistence: "saved",
+      trustState: "certified",
+      parameterValues: { product_name: "Flame Impala" },
+      parameters: [expect.objectContaining({ name: "product_name", policy: "dynamic" })],
+    });
+    expect(result.dqlArtifact?.source).toContain("params {");
+    expect(result.dqlArtifact?.source).toContain('product_name: string');
+    expect(result.dqlArtifact?.source).toContain('product_name = "product_name"');
+    expect(() => parse(result.dqlArtifact!.source)).not.toThrow();
+  });
+
+  it("AGT-012 carries a prior-result member into the same certified parameter contract", async () => {
+    kg.rebuild([{
+      nodeId: "block:product_revenue_for_product",
+      kind: "block",
+      name: "product_revenue_for_product",
+      domain: "commerce",
+      status: "certified",
+      description: "Revenue for a selected product. One row per product.",
+      tags: ["product", "revenue"],
+      sourceTier: "certified_artifact",
+      certification: "certified",
+      provenance: "DQL block",
+      grain: "product",
+      dimensions: ["product"],
+      declaredOutputs: ["product_name", "revenue"],
+      parameters: [{ name: "product_name", type: "string", required: true, policy: "dynamic", binding: { kind: "sql_value" } }],
+      filterBindings: [{ filter: "product_name", binding: "product_name" }],
+      sql: "SELECT product_name, SUM(revenue) AS revenue FROM product_sales WHERE product_name = ${product_name} GROUP BY product_name",
+    }], []);
+    let receivedInvocation: Parameters<NonNullable<Parameters<typeof answer>[0]["executeCertifiedBlock"]>>[1];
+
+    const result = await answer({
+      question: "Run product_revenue_for_product for this product",
+      provider: new StubProvider("should not be called"),
+      kg,
+      blockHints: ["product_revenue_for_product"],
+      followUp: {
+        kind: "contextual",
+        memberBindings: [{
+          dimension: "product_name",
+          values: ["Flame Impala"],
+          source: "prior_result",
+          confidence: "exact",
+        }],
+      },
+      executeCertifiedBlock: async (_block, invocation) => {
+        receivedInvocation = invocation;
+        return {
+          columns: ["product_name", "revenue"],
+          rows: [{ product_name: "Flame Impala", revenue: 38800 }],
+          rowCount: 1,
+          parameters: [{ name: "product_name", value: "Flame Impala", source: "prior_result" }],
+        };
+      },
+    });
+
+    expect(result.kind).toBe("certified");
+    expect(receivedInvocation).toMatchObject({
+      parameters: { product_name: "Flame Impala" },
+      parameterSources: { product_name: "prior_result" },
+    });
   });
 
   it("keeps the certified badge but flags a certified block that returns 0 rows", async () => {
@@ -5612,6 +5738,63 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(2);
   });
 
+  it("keeps raw SQL parser diagnostics out of the chat response", async () => {
+    const provider = new StubProvider(
+      '```json\n{"summary":"Draft.","sql":"SELECT ( FROM analytics.fct_orders","viz":"table"}\n```',
+    );
+    const question = "Revenue by segment";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      semanticDriver: 'snowflake',
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: 'analytics.fct_orders',
+        name: 'fct_orders',
+        source: 'runtime schema',
+        columns: [{ name: 'amount', type: 'NUMBER' }],
+        rank: 1,
+        score: 80,
+        reason: 'revenue fact',
+      }], { metricTerms: ['revenue'], dimensionTerms: ['segment'] }),
+    });
+
+    expect(result.kind).toBe('no_answer');
+    expect(result.text).toContain('SQL syntax did not match the connected warehouse');
+    expect(result.text).not.toContain('Expected');
+    expect(result.validationWarnings?.some((warning) => warning.startsWith('SQL context validation detail:'))).toBe(true);
+  });
+
+  it("validates and executes warehouse-specific generated SQL with the active dialect", async () => {
+    const sql = 'SELECT u.account_id, u.report_date FROM analytics.usage_daily AS u QUALIFY ROW_NUMBER() OVER (PARTITION BY u.account_id ORDER BY u.report_date DESC) = 1';
+    const provider = new StubProvider(`\`\`\`json\n${JSON.stringify({ summary: 'Latest usage per account.', sql, viz: 'table' })}\n\`\`\``);
+    const question = 'Show the latest usage report date for each account';
+    let executed = false;
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      semanticDriver: 'snowflake',
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: 'analytics.usage_daily',
+        name: 'usage_daily',
+        source: 'runtime schema',
+        columns: [{ name: 'account_id', type: 'VARCHAR' }, { name: 'report_date', type: 'DATE' }],
+        rank: 1,
+        score: 90,
+        reason: 'account usage snapshot',
+      }], { dimensionTerms: ['account', 'report date'] }),
+      executeGeneratedSql: async (candidate) => {
+        executed = true;
+        return { columns: ['account_id', 'report_date'], rows: [{ account_id: 'A1', report_date: '2026-07-20' }], rowCount: 1, sql: candidate };
+      },
+    });
+
+    expect(executed).toBe(true);
+    expect(result.kind).toBe('uncertified');
+    expect(result.sql).toContain('QUALIFY ROW_NUMBER()');
+  });
+
   it("tags a provider outage with the provider_error refusal code (not a clarify)", async () => {
     class ThrowingProvider extends StubProvider {
       async generate(): Promise<string> {
@@ -7127,6 +7310,49 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.proposedSql).toContain("total_revenue");
     expect(result.kind).not.toBe("no_answer");
     expect(result.evidence?.toolCalls?.some((call) => call.name === "compile_semantic_query")).toBe(true);
+  });
+
+  it("compiles an exact derived metric through the host semantic adapter before AI planning", async () => {
+    kg.rebuild([revenueMetric("revenue_ratio", "Revenue ratio")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: "revenue_ratio",
+        label: "Revenue Ratio",
+        description: "Revenue divided by target revenue.",
+        domain: "finance",
+        sql: "revenue_ratio",
+        type: "custom",
+        table: "",
+        metricType: "ratio",
+      }],
+      dimensions: [],
+    });
+    const provider = new StubProvider([]);
+    const compiler = vi.fn(async () => ({
+      sql: "SELECT 0.82 AS revenue_ratio",
+      engine: "dbt-cloud" as const,
+    }));
+
+    const result = await answer({
+      question: "what is the revenue ratio",
+      provider,
+      kg,
+      semanticLayer,
+      semanticQueryCompiler: compiler,
+      executeGeneratedSql: async (sql) => ({
+        columns: ["revenue_ratio"],
+        rows: [{ revenue_ratio: 0.82 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(compiler).toHaveBeenCalledOnce();
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).not.toBe("no_answer");
+    expect(result.proposedSql).toBe("SELECT 0.82 AS revenue_ratio");
+    expect(result.evidence?.toolCalls?.some((call) =>
+      call.name === "compile_semantic_query" && call.outputSummary?.includes("dbt-cloud"))).toBe(true);
   });
 
   it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {

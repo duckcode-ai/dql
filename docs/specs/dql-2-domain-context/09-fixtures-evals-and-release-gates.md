@@ -147,9 +147,10 @@ Required semantic-notebook scenarios (`E2E-008`):
 1. A modern array-shaped `semantic_manifest.json` resolves object measure
    references, `node_relation`, and compiled `where_filters` without losing the
    dbt relation or predicate.
-2. Safe simple metrics report native readiness when MetricFlow is unavailable;
+2. Safe simple metrics report native readiness when full semantic runtimes are unavailable;
    derived, ratio, cumulative, conversion, median/non-additive metrics remain
-   discoverable but report that MetricFlow setup is required.
+   discoverable but report that dbt Cloud Semantic Layer or local MetricFlow
+   setup is required.
 3. The built notebook searches metrics, selects multiple metrics, exposes only
    common governed dimensions, and reports incompatibility before insertion.
 4. Preview executes through the canonical semantic endpoint and shows compiled
@@ -157,6 +158,16 @@ Required semantic-notebook scenarios (`E2E-008`):
    their stable codes and actionable messages.
 5. Add to notebook creates a semantic DQL cell containing metric/dimension
    identities; it never degrades the selection into anonymous raw SQL.
+6. The same unsaved member selection compiles through a tested regional dbt
+   Cloud endpoint in Preview, Notebook execution, Block Studio, and Ask; service
+   tokens are redacted and a failed candidate preserves the last tested config.
+7. At least 3,000 warehouse tables are considered for logical-to-physical
+   semantic relation mapping; no fixed prefix cutoff may hide a valid model.
+8. Two joined semantic models may both declare `report_date`; compatibility and
+   composition bind the selected metric's model and emit a qualified column.
+9. Valid warehouse-specific generated SQL (including Snowflake `QUALIFY`) passes
+   every validation gate with the active dialect, while malformed SQL is never
+   executed and raw parser traces remain in Inspect rather than chat.
 
 ## Structured clarification and grounding fixture
 
@@ -208,6 +219,23 @@ Required Ask scenarios (`E2E-010`):
    omitted from the SQL projection. One validation correction receives the full
    requested shape, while metadata re-grounding and execution repair retain
    their own bounded attempts.
+
+## Parameterized Ask result fixture
+
+Required cross-surface scenarios (`E2E-011`):
+
+1. A user question containing one uniquely resolved product member executes a
+   compatible certified block through its declared string parameter without an
+   AI SQL-generation call.
+2. A follow-up carries the same canonical member with `prior_result` provenance;
+   the block fit gate, invocation audit, result payload, and DQL artifact retain
+   that value and source.
+3. Browser Ask displays the applied input and the shared editable DQL controls.
+   Apply reruns the saved artifact directly and preserves its certified identity.
+4. Native tools, CLI, and MCP accept the same question/parameter contract and
+   return equivalent resolved values and redacted audit identity.
+5. Ambiguous members, unmapped parameters, structural SQL input, and unresolved
+   required values fail closed before certified execution.
 
 ## Scale fixture
 

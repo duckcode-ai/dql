@@ -77,6 +77,44 @@ const EMPTY_PLAN = {
   },
 };
 
+export interface SemanticRuntimeSettingsResponse {
+  preference: 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud';
+  dbtCloud: {
+    host?: string;
+    environmentId?: string;
+    hasServiceToken: boolean;
+    serviceTokenPreview?: string;
+    source: 'local' | 'env' | 'none';
+    configured: boolean;
+    testState: 'missing' | 'configured' | 'passed' | 'failed';
+    testedAt?: string;
+    testMessage?: string;
+    dialect?: string;
+    metricCount?: number;
+    envVars: string[];
+  };
+  runtime: {
+    preference: 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud';
+    active: 'native' | 'metricflow-cli' | 'dbt-cloud';
+    setup: string | null;
+    adapters: Array<{
+      id: 'native' | 'metricflow-cli' | 'dbt-cloud';
+      label: string;
+      bundled: boolean;
+      configured: boolean;
+      tested: boolean;
+      ready: boolean;
+      source: 'bundled' | 'local' | 'env' | 'none';
+      detail: string;
+    }>;
+  };
+}
+
+export interface SemanticRuntimeSettingsInput {
+  preference?: 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud';
+  dbtCloud?: { host?: string; environmentId?: string; serviceToken?: string };
+}
+
 export interface GitGovernedContextGroup {
   total: number;
   tracked: number;
@@ -1219,7 +1257,7 @@ export interface DashboardRunResponse {
       resolvedParameters: Array<{
         name: string;
         value: unknown;
-        source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+        source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default';
       }>;
       unresolvedParameters: string[];
       auditId: string;
@@ -2821,8 +2859,11 @@ export const api = {
     });
   },
 
-  async getBlockStudioCatalog(): Promise<BlockStudioCatalog> {
-    return request<BlockStudioCatalog>('/api/block-studio/catalog');
+  async getBlockStudioCatalog(options: { includeSemantic?: boolean } = {}): Promise<BlockStudioCatalog> {
+    const params = new URLSearchParams();
+    if (options.includeSemantic === false) params.set('includeSemantic', 'false');
+    const query = params.toString();
+    return request<BlockStudioCatalog>(`/api/block-studio/catalog${query ? `?${query}` : ''}`);
   },
 
   async getBlockStudioDbtStatus(): Promise<BlockStudioDbtStatus> {
@@ -3765,6 +3806,28 @@ export const api = {
     } catch (e: any) {
       return { ok: false, message: e.message ?? 'Connection failed' };
     }
+  },
+
+  async getSemanticRuntimeSettings(): Promise<SemanticRuntimeSettingsResponse> {
+    return request<SemanticRuntimeSettingsResponse>('/api/semantic-runtime');
+  },
+
+  async testDbtCloudSemanticRuntime(payload: SemanticRuntimeSettingsInput): Promise<{ ok: boolean; message?: string; dialect?: string; metricCount?: number; error?: string }> {
+    try {
+      return await request<{ ok: boolean; message?: string; dialect?: string; metricCount?: number; error?: string }>('/api/semantic-runtime/dbt-cloud/test', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    } catch (error: any) {
+      return { ok: false, error: error?.message ?? 'dbt Cloud Semantic Layer test failed.' };
+    }
+  },
+
+  async applyDbtCloudSemanticRuntime(payload: SemanticRuntimeSettingsInput): Promise<SemanticRuntimeSettingsResponse & { ok: boolean }> {
+    return request<SemanticRuntimeSettingsResponse & { ok: boolean }>('/api/semantic-runtime/dbt-cloud/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   },
 
   async getSemanticLayer(): Promise<Omit<SemanticLayerState, 'loading'>> {

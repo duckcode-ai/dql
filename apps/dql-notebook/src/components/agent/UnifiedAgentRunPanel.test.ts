@@ -13,6 +13,7 @@ let trustExplainer: typeof UnifiedAgentRunPanelModule.trustExplainer;
 let askArtifactMeta: typeof UnifiedAgentRunPanelModule.askArtifactMeta;
 let preferredAskInspectorTab: typeof UnifiedAgentRunPanelModule.preferredAskInspectorTab;
 let inlineAskChartConfig: typeof UnifiedAgentRunPanelModule.inlineAskChartConfig;
+let resolvedParameterValues: typeof UnifiedAgentRunPanelModule.resolvedParameterValues;
 let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryFromItems;
 let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor;
 let clarificationSelectionInput: typeof UnifiedAgentRunPanelModule.clarificationSelectionInput;
@@ -32,10 +33,23 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     askArtifactMeta = module.askArtifactMeta;
     preferredAskInspectorTab = module.preferredAskInspectorTab;
     inlineAskChartConfig = module.inlineAskChartConfig;
+    resolvedParameterValues = module.resolvedParameterValues;
     agentRunHistoryFromItems = module.agentRunHistoryFromItems;
     liveAgentActivityFor = module.liveAgentActivityFor;
     clarificationSelectionInput = module.clarificationSelectionInput;
     isAgentRunPinnable = module.isAgentRunPinnable;
+  });
+
+  it('UI-011 restores applied certified-block inputs in the inline Ask result', () => {
+    expect(resolvedParameterValues({
+      result: {
+        rows: [{ product_name: 'Flame Impala', revenue: 38800 }],
+        parameters: [
+          { name: 'product_name', value: 'Flame Impala', source: 'question' },
+          { name: 'top_n', value: 5, source: 'question' },
+        ],
+      },
+    })).toEqual({ product_name: 'Flame Impala', top_n: 5 });
   });
 
   it('UI-010 preserves a governed clarification choice as stable identity input', () => {

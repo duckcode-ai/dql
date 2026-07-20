@@ -369,8 +369,9 @@ export type GroundingValidationResult =
 export function validateSqlAgainstGrounding(
   sql: string,
   grounding: SchemaGrounding,
+  dialect = 'duckdb',
 ): GroundingValidationResult {
-  const analysis = analyzeSqlReferences(sql);
+  const analysis = analyzeSqlReferences(sql, dialect);
   const referencedRelations = analysis.tables;
   const warnings: string[] = [];
 

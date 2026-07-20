@@ -64,9 +64,11 @@ import {
 } from './metadata/sql-shape.js';
 import {
   composeSemanticQueryForQuestion,
+  composeSemanticQueryFromCompiledMembers,
   composeSemanticQueryFromMembers,
   type SemanticBridgeQueryResult,
   type SemanticFilterValueBinding,
+  type SemanticMemberSelection,
 } from './semantic-bridge/compose.js';
 import { runAgenticToolLoop } from './agentic/tool-loop.js';
 import { buildSemanticStageTools } from './agentic/toolset.js';
@@ -108,6 +110,11 @@ export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'sema
 export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
 export type AnalysisDepth = CascadeAnalysisDepth;
 
+export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Promise<{
+  sql: string;
+  engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+}>;
+
 /**
  * A generated query that was grounded in dbt metadata but cannot be executed as
  * governed SQL because its final v3 relationship check found missing modeling
@@ -142,7 +149,7 @@ export interface AgentRefusalDetails {
    * grounding gaps, this preserves the exact validation code so repair loops can
    * re-ground the named identifier instead of parsing prose.
    */
-  code?: AnswerRefusalCode | SqlContextValidationCode | AnalyticalPolicyCode;
+  code?: AnswerRefusalCode | SqlContextValidationCode | AnalyticalPolicyCode | 'semantic_runtime_required';
   message: string;
   offending?: SqlContextValidationOffending;
 }
@@ -337,6 +344,98 @@ export function resolveAgentFilterValueBindings(
     .filter((candidate) => candidate.confidence === best.confidence
       && normalizeValueIndexText(candidate.canonicalValue) === normalizeValueIndexText(best.canonicalValue))
     .map(({ distance: _distance, ...binding }) => binding);
+}
+
+/**
+ * AGT-005/AGT-012 — turn bounded value-index evidence into typed question
+ * state before route compatibility is evaluated. The value index, never an
+ * LLM or a metadata-token match, owns the canonical warehouse member. A value
+ * that matches multiple dimensions is intentionally left unbound so the
+ * certified lane cannot silently run with the wrong parameter.
+ */
+function questionPlanWithResolvedMemberBindings(
+  plan: AnalysisQuestionPlan,
+  schemaContext: AgentSchemaTable[],
+): AnalysisQuestionPlan {
+  const existing = plan.requestedShape.memberBindings ?? [];
+  const existingValues = new Set(existing.flatMap((binding) => binding.values.map(normalizeValueIndexText)));
+  const candidates = Array.from(new Set([
+    ...(plan.valueMentions ?? []).map((mention) => mention.text.trim()),
+    ...(plan.requestedShape.filters ?? []).map((value) => value.trim()),
+  ].filter(Boolean)));
+  const resolved = candidates.flatMap((value) => {
+    if (existingValues.has(normalizeValueIndexText(value))) return [];
+    const bindings = resolveAgentFilterValueBindings(value, schemaContext);
+    const dimensions = Array.from(new Set(bindings.map((binding) => binding.column.trim()).filter(Boolean)));
+    const canonicalValues = Array.from(new Set(bindings.map((binding) => binding.canonicalValue.trim()).filter(Boolean)));
+    if (dimensions.length !== 1 || canonicalValues.length !== 1) return [];
+    const binding = bindings[0]!;
+    return [{
+      dimension: dimensions[0]!,
+      values: [canonicalValues[0]!],
+      source: 'question' as const,
+      confidence: binding.match === 'fuzzy' ? 'unique_partial' as const : 'exact' as const,
+    }];
+  });
+  if (resolved.length === 0) return plan;
+  const byIdentity = new Map<string, NonNullable<AnalysisQuestionPlan['requestedShape']['memberBindings']>[number]>();
+  for (const binding of [...existing, ...resolved]) {
+    const key = `${normalizeValueIndexText(binding.dimension)}\0${binding.values.map(normalizeValueIndexText).join('\0')}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, binding);
+  }
+  return {
+    ...plan,
+    requestedShape: {
+      ...plan.requestedShape,
+      memberBindings: Array.from(byIdentity.values()),
+    },
+  };
+}
+
+type CertifiedInvocationParameterSource = NonNullable<CertifiedBlockInvocationInput['parameterSources']>[string];
+
+/**
+ * Map typed member bindings to a block's declared parameter contract. The
+ * mapping is identifier-based (parameter name, semantic field, or declared
+ * filter binding) and must select exactly one parameter. Structural SQL is
+ * never accepted as a value.
+ */
+function certifiedInvocationInputs(
+  block: KGNode,
+  plan: AnalysisQuestionPlan,
+): Pick<CertifiedBlockInvocationInput, 'parameters' | 'parameterSources'> {
+  const definitions = block.parameters ?? [];
+  if (definitions.length === 0) return {};
+  const parameters: Record<string, unknown> = {};
+  const parameterSources: Record<string, CertifiedInvocationParameterSource> = {};
+  const declaredFilterBindings = new Map((block.filterBindings ?? []).map((entry) => [entry.filter, entry.binding]));
+
+  const topN = plan.requestedShape.topN?.n;
+  if (topN) {
+    const limitCandidates = definitions.filter((definition) => definition.name === 'top_n' || definition.binding?.kind === 'limit');
+    if (limitCandidates.length === 1) {
+      parameters[limitCandidates[0]!.name] = topN;
+      parameterSources[limitCandidates[0]!.name] = 'question';
+    }
+  }
+
+  for (const member of plan.requestedShape.memberBindings ?? []) {
+    const candidates = definitions.filter((definition) => {
+      if (Object.prototype.hasOwnProperty.call(parameters, definition.name)) return false;
+      const target = definition.binding?.kind === 'semantic_filter'
+        ? definition.binding.field
+        : declaredFilterBindings.get(definition.name) ?? definition.name;
+      return outputConceptMatches(target, member.dimension);
+    });
+    if (candidates.length !== 1) continue;
+    const definition = candidates[0]!;
+    const values = Array.from(new Set(member.values.map((value) => value.trim()).filter(Boolean)));
+    if (values.length === 0 || (!definition.type.endsWith('[]') && values.length !== 1)) continue;
+    parameters[definition.name] = definition.type.endsWith('[]') ? values : values[0];
+    parameterSources[definition.name] = member.source === 'prior_result' ? 'prior_result' : 'question';
+  }
+
+  return Object.keys(parameters).length > 0 ? { parameters, parameterSources } : {};
 }
 
 function damerauLevenshteinDistance(left: string, right: string): number {
@@ -601,7 +700,7 @@ export interface AgentResultPayload {
   parameters?: Array<{
     name: string;
     value: unknown;
-    source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+    source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default';
   }>;
   auditId?: string;
 }
@@ -609,6 +708,7 @@ export interface AgentResultPayload {
 export interface CertifiedBlockInvocationInput {
   question?: string;
   parameters?: Record<string, unknown>;
+  parameterSources?: Record<string, 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default'>;
 }
 
 export interface AnswerLoopInput {
@@ -708,6 +808,8 @@ export interface AnswerLoopInput {
   semanticLayer?: SemanticLayer;
   semanticDriver?: string;
   semanticTableMapping?: Record<string, string>;
+  /** Host-owned compiler shared by Notebook, Block Studio, and Ask. */
+  semanticQueryCompiler?: SemanticQueryCompiler;
   /**
    * Optional host-backed catalog/runtime expansion for context-validation misses.
    * The answer loop stays closed-world, but the host can widen the inspected
@@ -763,6 +865,12 @@ function renderContextValidationRefusalForUser(
     case 'unsafe_sql':
       return 'The drafted query used a statement type that is not allowed in this governed preview, so I did not run it.';
     case 'insufficient_context':
+      if (/could not be parsed|parse error|syntax/i.test(machineError)) {
+        return 'I drafted a query, but its SQL syntax did not match the connected warehouse, so I did not run it. The failed draft is available in Inspect; retrying will generate a warehouse-specific query.';
+      }
+      return machineError.trim().length > 0 && !/inspect_metadata_context/i.test(machineError)
+        ? `I could not prepare a governed query yet: ${machineError.replace(/\s*Use inspect_metadata_context[^.]*\.\s*$/i, '').trim()}`
+        : 'I could not prepare a governed query from the retrieved metadata. Name the specific metric or table and how to break it down, and I can generate a review-required draft.';
     default:
       return machineError.trim().length > 0 && !/inspect_metadata_context/i.test(machineError)
         ? `I could not prepare a governed query yet: ${machineError.replace(/\s*Use inspect_metadata_context[^.]*\.\s*$/i, '').trim()}`
@@ -1099,9 +1207,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     scopedContextPack,
   );
   const catalogRoute = input.contextPack?.routeDecision;
-  const questionPlan = input.contextPack?.questionPlan?.requestedShape
+  const baseQuestionPlan = input.contextPack?.questionPlan?.requestedShape
     ? input.contextPack.questionPlan
     : buildAnalysisQuestionPlan(question, input.followUp);
+  const questionPlan = questionPlanWithResolvedMemberBindings(baseQuestionPlan, schemaContext);
   // Retrieval may surface a high-trust block because its source tables and
   // vocabulary overlap the question even when its output contract does not.
   // Keep such candidates in the audit trail, but do not put their SQL or a stale
@@ -1157,7 +1266,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         kg,
       })
     : null;
-  const shouldTryCertifiedRoute = shouldUseCertifiedRoute(catalogRoute, intent);
+  const explicitlyRequestedCertifiedBlock = effectiveBlockHints.some((hint) => {
+    const node = kg.getNode(`block:${hint}`);
+    return Boolean(node
+      && node.status === 'certified'
+      && objectNameInQuestion(question, node)
+      && /\b(run|use|open|show|execute|certified|saved|block)\b/i.test(question));
+  });
+  const shouldTryCertifiedRoute = shouldUseCertifiedRoute(catalogRoute, intent)
+    || explicitlyRequestedCertifiedBlock;
   const catalogCertifiedHit = shouldTryCertifiedRoute
     ? certifiedHitFromContextPack(input.contextPack, kg)
     : null;
@@ -1222,7 +1339,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     let executionError: string | undefined;
     if (artifactHit.node.kind === 'block' && input.executeCertifiedBlock) {
       try {
-        result = await input.executeCertifiedBlock(artifactHit.node, { question });
+        result = await input.executeCertifiedBlock(artifactHit.node, {
+          question,
+          ...certifiedInvocationInputs(artifactHit.node, questionPlan),
+        });
         result = trimResultToRequestedTopN(result, questionPlan);
       } catch (err) {
         executionError = err instanceof Error ? err.message : String(err);
@@ -1558,6 +1678,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let governedMetricAnswer = false;
   const semanticBridgeToolCalls: AgentEvidenceToolCall[] = [];
   let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
+  let semanticRuntimeFailure: string | undefined;
+  let semanticRuntimeCompiledAnswer = false;
   if (input.semanticLayer && semanticMetricMatch) {
     semanticBridgeAnswer = composeSemanticQueryForQuestion({
       semanticLayer: input.semanticLayer,
@@ -1569,6 +1691,44 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
       ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
     });
+    // Exact scalar metrics need no AI member selection. If the native compiler
+    // cannot express a derived/ratio/cumulative metric, hand the identifier to
+    // the host's shared dbt Cloud/MetricFlow adapter immediately.
+    if (!semanticBridgeAnswer
+      && input.semanticQueryCompiler
+      && questionPlan.requestedShape.dimensions.length === 0
+      && questionPlan.dimensionTerms.length === 0
+      && questionPlan.requestedShape.filters.length === 0
+      && questionPlan.timeTerms.length === 0) {
+      const matchedName = input.semanticLayer.listMetrics().find((metric) =>
+        metric.name === semanticMetricMatch!.metric.name
+        || metric.name.endsWith(`.${semanticMetricMatch!.metric.name}`)
+        || semanticMetricMatch!.metric.name.endsWith(`.${metric.name}`))?.name;
+      if (matchedName) {
+        const selection: SemanticMemberSelection = { metrics: [matchedName], dimensions: [] };
+        try {
+          const compiled = await input.semanticQueryCompiler(selection);
+          semanticBridgeAnswer = composeSemanticQueryFromCompiledMembers({
+            semanticLayer: input.semanticLayer,
+            question,
+            selection,
+            sql: compiled.sql,
+          });
+          if (semanticBridgeAnswer) {
+            semanticRuntimeCompiledAnswer = compiled.engine !== 'native';
+            semanticBridgeToolCalls.push({
+              name: 'compile_semantic_query',
+              status: 'checked',
+              inputSummary: `metric: ${matchedName}`,
+              outputSummary: `Compiled through ${compiled.engine}`,
+              order: semanticBridgeToolCalls.length + 1,
+            });
+          }
+        } catch (error) {
+          semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
+        }
+      }
+    }
     // Lane-2 LLM fallback: the deterministic token matcher missed, but a metric
     // matched so the semantic layer IS relevant. Spend ONE call to have the model
     // pick members (the query_semantic_model contract); the compiler still owns the
@@ -1583,13 +1743,36 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         reasoningEffort: input.reasoningEffort,
       });
       if (selection) {
-        const composed = composeSemanticQueryFromMembers({
+        let composed = composeSemanticQueryFromMembers({
           semanticLayer: input.semanticLayer,
           question,
           selection,
           ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
           ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
         });
+        if (!composed && input.semanticQueryCompiler) {
+          try {
+            const compiled = await input.semanticQueryCompiler(selection);
+            composed = composeSemanticQueryFromCompiledMembers({
+              semanticLayer: input.semanticLayer,
+              question,
+              selection,
+              sql: compiled.sql,
+            });
+            if (composed) {
+              semanticRuntimeCompiledAnswer = compiled.engine !== 'native';
+              semanticBridgeToolCalls.push({
+                name: 'compile_semantic_query',
+                status: 'checked',
+                inputSummary: `metrics: ${selection.metrics.join(', ')}${selection.dimensions?.length ? `; by ${selection.dimensions.join(', ')}` : ''}`,
+                outputSummary: `Compiled through ${compiled.engine}`,
+                order: semanticBridgeToolCalls.length + 1,
+              });
+            }
+          } catch (error) {
+            semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
+          }
+        }
         // Coverage guard: if the question asked for a breakdown but the LLM
         // selection produced none, the governed answer would silently DROP the
         // requested grouping (governed-but-wrong). Fall through to Lane-3
@@ -1614,6 +1797,36 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       }
     }
   }
+  if (!semanticBridgeAnswer && semanticRuntimeFailure) {
+    const text = `The governed semantic metric was found, but its semantic runtime could not compile the request: ${semanticRuntimeFailure}`;
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: 'modeling_gap',
+      refusalDetails: { code: 'semantic_runtime_required', message: text },
+      citations: [],
+      memoryContext: input.memoryContext,
+      evidence: buildNoAnswerEvidence({
+        question,
+        reason: text,
+        artifactHits,
+        businessHits,
+        semanticHits,
+        manifestHits,
+        considered,
+        memoryContext: input.memoryContext ?? [],
+        toolCalls: semanticBridgeToolCalls,
+      }),
+      contextPack: input.contextPack,
+      considered,
+      providerUsed: provider.name,
+    };
+  }
   const metricFirst = semanticMetricMatch
     ? buildGovernedMetricFirstSql({
         metric: semanticMetricMatch.metric,
@@ -1631,6 +1844,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let contextLedger: ContextLedger = createContextLedger({
     contextPack: input.contextPack,
     schemaContext,
+    dialect: input.semanticDriver,
   });
   // W2.2 — certified-block adaptation lane. When a certified block is context-only
   // ONLY because the question adds exactly one filter whose value maps to a column
@@ -1674,6 +1888,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       kg,
       driver: input.semanticDriver,
       tableMapping: input.semanticTableMapping,
+      semanticQueryCompiler: input.semanticQueryCompiler,
       onCompiled: (record) => compiledSemanticRecords.push(record),
     }),
   ];
@@ -1783,6 +1998,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       if (trust.tier === 'semantic_metric' && trust.compiled) {
         governedMetricAnswer = true;
         const compiled = trust.compiled;
+        semanticRuntimeCompiledAnswer = compiled.engine === 'metricflow-cli' || compiled.engine === 'dbt-cloud';
         const governedNote = `Answered from governed semantic metric${compiled.metrics.length === 1 ? '' : 's'} ${compiled.metrics.join(', ')}${compiled.dimensions.length > 0 ? ` by ${compiled.dimensions.join(', ')}` : ''} (compiled via the semantic layer). Reusable block certification remains a separate review.`;
         parsed = { ...parsed, text: parsed.text ? `${parsed.text}\n\n${governedNote}` : governedNote };
         proposalToolCalls.push({
@@ -1991,13 +2207,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         offending?: SqlContextValidationOffending;
       };
   let contextValidation: AnswerValidation;
-  const initialValidation = contextLedger.validateSql(parsed.sql, {
-    question,
-    intent,
-    filterValues: input.followUp?.filters,
-    trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
-    memberBindings: input.followUp?.memberBindings,
-  });
+  // dbt Cloud/MetricFlow SQL has already been compiled against the selected
+  // semantic environment. A thin local retrieval pack cannot safely reject it
+  // and replace it with a guessed leaf-measure SQL. Warehouse execution remains
+  // the final binder/runtime check.
+  const initialValidation = semanticRuntimeCompiledAnswer
+    ? { ok: true as const, warnings: ['SQL compiled by the configured semantic runtime.'] }
+    : contextLedger.validateSql(parsed.sql, {
+        question,
+        intent,
+        filterValues: input.followUp?.filters,
+        trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+        memberBindings: input.followUp?.memberBindings,
+      });
   const rankedGrainGap = missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions);
   contextValidation = initialValidation.ok && rankedGrainGap
     ? {
@@ -2292,7 +2514,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   }
 
   const dbtFirstJoinSafety = input.manifest
-    ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest, input.domainContext?.purpose, input.domainContext)
+    ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest, input.domainContext?.purpose, input.domainContext, input.semanticDriver)
     : undefined;
   if (dbtFirstJoinSafety && !dbtFirstJoinSafety.safe) {
     // Business-language text for the chat surface; the machine policy message
@@ -3880,6 +4102,15 @@ function buildCertifiedBlockDqlArtifact(
   result?: AgentResultPayload,
 ): NonNullable<AgentAnswer['dqlArtifact']> | undefined {
   if (block.kind !== 'block') return undefined;
+  const parameters = block.parameters ?? [];
+  const parameterValues = Object.fromEntries((result?.parameters ?? []).map((entry) => [entry.name, entry.value]));
+  const parameterContract = renderCertifiedParameterContract(block);
+  const artifactRuntime = {
+    ...(parameters.length > 0 ? { parameters } : {}),
+    ...(Object.keys(parameterValues).length > 0 ? { parameterValues } : {}),
+    persistence: 'saved' as const,
+    trustState: 'certified' as const,
+  };
   const sql = block.sql?.trim() ?? result?.sql?.trim() ?? block.examples?.find((example) => example.sql?.trim())?.sql?.trim();
   if (!sql) {
     // The block answered but its SQL was not inlined in the index (navigation /
@@ -3894,6 +4125,7 @@ function buildCertifiedBlockDqlArtifact(
       source: `// Certified DQL block "${escapeDqlArtifactString(block.name)}"`
         + `${block.sourcePath ? `\n// source: ${block.sourcePath}` : ''}`
         + `\n// SQL is not inlined in the index — open the source file to view or edit the query.`,
+      ...artifactRuntime,
     };
   }
   const domain = block.domain ?? 'misc';
@@ -3903,7 +4135,7 @@ function buildCertifiedBlockDqlArtifact(
     domain = "${escapeDqlArtifactString(domain)}"
     type = "custom"
     status = "certified"${block.owner ? `\n    owner = "${escapeDqlArtifactString(block.owner)}"` : ''}
-    description = """${escapeDqlArtifactTripleString(description)}"""${sourcePathComment}
+    description = """${escapeDqlArtifactTripleString(description)}"""${sourcePathComment}${parameterContract}
 
     query = """
         ${sql.replace(/"""/g, '\\"\\"\\"').split('\n').join('\n        ')}
@@ -3915,7 +4147,43 @@ function buildCertifiedBlockDqlArtifact(
     name: block.name,
     sourcePath: block.sourcePath,
     source,
+    compiledSql: result?.sql ?? sql,
+    ...artifactRuntime,
   };
+}
+
+function renderCertifiedParameterContract(block: KGNode): string {
+  const parameters = block.parameters ?? [];
+  if (parameters.length === 0) return '';
+  const lines = ['\n\n    params {'];
+  for (const parameter of parameters) {
+    const defaultValue = parameter.default === undefined ? '' : ` = ${renderCertifiedDqlParameterValue(parameter.default)}`;
+    lines.push(`      ${parameter.name}: ${parameter.type}${defaultValue}`);
+  }
+  lines.push('    }', '    parameterPolicy {');
+  for (const parameter of parameters) lines.push(`      ${parameter.name} = "${parameter.policy}"`);
+  lines.push('    }');
+  const explicitBindings = new Map((block.filterBindings ?? []).map((entry) => [entry.filter, entry.binding]));
+  const bindings = parameters.flatMap((parameter) => {
+    const explicit = explicitBindings.get(parameter.name);
+    if (explicit) return [{ name: parameter.name, value: explicit }];
+    if (parameter.binding?.kind === 'semantic_filter') return [{ name: parameter.name, value: parameter.binding.field }];
+    if (parameter.binding?.kind === 'limit') return [{ name: parameter.name, value: 'limit' }];
+    return [];
+  });
+  if (bindings.length > 0) {
+    lines.push('    filterBindings {');
+    for (const binding of bindings) lines.push(`      ${binding.name} = "${escapeDqlArtifactString(binding.value)}"`);
+    lines.push('    }');
+  }
+  return lines.join('\n');
+}
+
+function renderCertifiedDqlParameterValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(renderCertifiedDqlParameterValue).join(', ')}]`;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return `"${escapeDqlArtifactString(String(value ?? ''))}"`;
 }
 
 function buildGeneratedSqlDqlArtifact(input: {

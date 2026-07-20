@@ -70,7 +70,13 @@ const DIALECT_MAP: Record<string, string> = {
   bigquery: 'bigquery',
   snowflake: 'snowflake',
   redshift: 'redshift',
+  databricks: 'hive',
+  spark: 'hive',
+  spark_sql: 'hive',
+  hive: 'hive',
   mssql: 'transactsql',
+  sqlserver: 'transactsql',
+  azure_sql: 'transactsql',
   sqlite: 'sqlite',
 };
 

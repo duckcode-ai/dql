@@ -724,7 +724,7 @@ export interface SemanticMetric {
   source?: Record<string, unknown> | null;
   execution?: {
     status: 'ready' | 'requires_setup' | 'unsupported';
-    engine: 'native' | 'metricflow' | null;
+    engine: 'native' | 'metricflow-cli' | 'dbt-cloud' | null;
     reason: string | null;
   };
 }
@@ -862,9 +862,19 @@ export interface SemanticLayerState {
   available: boolean;
   provider: string | null;
   execution?: {
-    engine: 'native' | 'metricflow';
+    engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
     ready: boolean;
     setup: string | null;
+    adapters?: Array<{
+      id: 'native' | 'metricflow-cli' | 'dbt-cloud';
+      label: string;
+      bundled: boolean;
+      configured: boolean;
+      tested: boolean;
+      ready: boolean;
+      source: 'bundled' | 'local' | 'env' | 'none';
+      detail: string;
+    }>;
   };
   metrics: SemanticMetric[];
   measures: SemanticMeasure[];
@@ -924,7 +934,7 @@ export interface BlockStudioPreview {
   result: QueryResult;
   chartConfig?: CellChartConfig;
   invocation?: {
-    resolvedParameters: Array<{ name: string; value: unknown; source: 'explicit' | 'question' | 'default' }>;
+    resolvedParameters: Array<{ name: string; value: unknown; source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default' }>;
     unresolvedParameters: string[];
     auditId: string;
   };
@@ -1216,6 +1226,12 @@ export interface BlockStudioOpenPayload {
   metadata: BlockStudioMetadata;
   companionPath: string | null;
   validation: BlockStudioValidation;
+  /** Redacted save-time compiler outcome; the block may still be safely saved when this fails. */
+  lineageRefresh?: {
+    status: 'ready' | 'failed';
+    compiledAt?: string;
+    message?: string;
+  };
 }
 
 export type SettingsTab = 'overview' | 'project' | 'database' | 'ai' | 'memory' | 'advanced';

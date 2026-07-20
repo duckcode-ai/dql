@@ -35,8 +35,9 @@ export function evaluateDbtFirstGeneratedSql(
   manifest: DQLManifest,
   purpose?: string,
   domainContext?: DomainContextEnvelope,
+  dialect = 'duckdb',
 ): DbtFirstJoinSafetyDecision {
-  const decision = validateAnalyticalSql(sql, manifest, 'duckdb', purpose, domainContext);
+  const decision = validateAnalyticalSql(sql, manifest, dialect, purpose, domainContext);
   return {
     safe: decision.safe,
     code: decision.code,

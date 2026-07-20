@@ -15,7 +15,7 @@ export interface BlockInvocationRequest {
   source: string;
   parameters?: Record<string, unknown>;
   /** Provenance supplied by a consuming surface such as a dashboard binding. */
-  parameterSources?: Record<string, 'policy' | 'explicit' | 'question' | 'surface' | 'default'>;
+  parameterSources?: Record<string, 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default'>;
   question?: string;
   surface: BlockInvocationSurface;
   contextPackId?: string;
@@ -27,7 +27,7 @@ export interface PreparedBlockInvocation {
   resolvedParameters: Array<{
     name: string;
     value: unknown;
-    source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+    source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default';
   }>;
   unresolvedParameters: string[];
   errors: string[];

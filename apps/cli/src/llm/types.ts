@@ -9,6 +9,7 @@ import type {
   KGNode,
   LocalContextPack,
   ReasoningEffort,
+  SemanticQueryCompiler,
   DomainContextEnvelope,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
@@ -144,6 +145,8 @@ export interface AgentRunRequest {
   semanticDriver?: string;
   /** Logical->physical table mapping for the semantic compiler, when resolved. */
   semanticTableMapping?: Record<string, string>;
+  /** Shared host compiler for native, local MetricFlow, or dbt Cloud semantic execution. */
+  semanticQueryCompiler?: SemanticQueryCompiler;
   /**
    * Qualified IDs selected by the bounded meaning resolver. They are advisory
    * for relevance but identifier-bound; the answer loop still runs its own

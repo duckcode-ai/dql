@@ -79,6 +79,7 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
+export type { SemanticQueryCompiler } from "./answer-loop.js";
 export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
 export type { DomainContextEnvelope, KnowledgeLens, ResolveDomainContextInput } from './domain-context.js';
 export {
@@ -281,6 +282,8 @@ export {
 } from "./agentic/answer-contract.js";
 export {
   composeSemanticQueryForQuestion,
+  composeSemanticQueryFromCompiledMembers,
+  composeSemanticQueryFromMembers,
   renderSemanticDqlArtifact,
   semanticDqlArtifactName,
   type ComposeSemanticQueryInput,
@@ -288,6 +291,7 @@ export {
   type SemanticBridgeOrderBy,
   type SemanticBridgeQueryResult,
   type SemanticDqlArtifactInput,
+  type SemanticMemberSelection,
 } from "./semantic-bridge/compose.js";
 export {
   DQL_TOOL_REGISTRY,

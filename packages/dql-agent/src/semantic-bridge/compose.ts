@@ -200,33 +200,67 @@ export function composeSemanticQueryFromMembers(input: {
   tableMapping?: Record<string, string>;
 }): SemanticBridgeQueryResult | undefined {
   if (requiresEntityRelativeMeasureComparison(input.question)) return undefined;
-  const metricByName = new Map(input.semanticLayer.listMetrics().map((metric) => [metric.name.toLowerCase(), metric]));
-  const metrics = uniqueStrings(input.selection.metrics ?? [])
-    .map((name) => metricByName.get(name.toLowerCase()))
-    .filter((metric): metric is NonNullable<typeof metric> => Boolean(metric));
-  if (metrics.length === 0) return undefined;
-
-  const dimensionNames = new Set(input.semanticLayer.listDimensions().map((dimension) => dimension.name.toLowerCase()));
-  const dimensions = uniqueStrings(input.selection.dimensions ?? [])
-    .map((name) => input.semanticLayer.listDimensions().find((dimension) => dimension.name.toLowerCase() === name.toLowerCase())?.name)
-    .filter((name): name is string => Boolean(name));
-  // A hallucinated dimension is a hard miss — refuse rather than silently drop it.
-  if ((input.selection.dimensions ?? []).some((name) => !dimensionNames.has(name.toLowerCase()))) return undefined;
-  const filters = (input.selection.filters ?? []).filter((filter) => dimensionNames.has(filter.dimension.toLowerCase()));
-  if ((input.selection.filters ?? []).length > 0 && filters.length === 0) return undefined;
+  const resolved = resolveSemanticMemberSelection(input.semanticLayer, input.selection);
+  if (!resolved) return undefined;
 
   return buildSemanticBridgeResult({
     semanticLayer: input.semanticLayer,
     question: input.question,
-    metrics,
-    dimensions,
-    filters,
+    metrics: resolved.metrics,
+    dimensions: resolved.dimensions,
+    filters: resolved.filters,
     timeDimension: input.selection.timeDimension,
     orderBy: input.selection.orderBy,
     limit: input.selection.limit,
     driver: input.driver,
     tableMapping: input.tableMapping,
   });
+}
+
+/** Finalize SQL compiled by an external governed semantic runtime (for example
+ * dbt Cloud or local MetricFlow) into the same identity-preserving result used
+ * by the native compiler. Member validation still happens against the immutable
+ * local semantic snapshot before the external SQL is accepted. */
+export function composeSemanticQueryFromCompiledMembers(input: {
+  semanticLayer: SemanticLayer;
+  question: string;
+  selection: SemanticMemberSelection;
+  sql: string;
+}): SemanticBridgeQueryResult | undefined {
+  if (requiresEntityRelativeMeasureComparison(input.question) || !input.sql.trim()) return undefined;
+  const resolved = resolveSemanticMemberSelection(input.semanticLayer, input.selection);
+  if (!resolved) return undefined;
+  return finalizeSemanticBridgeResult({
+    semanticLayer: input.semanticLayer,
+    question: input.question,
+    metrics: resolved.metrics,
+    dimensions: resolved.dimensions,
+    filters: resolved.filters,
+    timeDimension: input.selection.timeDimension,
+    orderBy: input.selection.orderBy,
+    limit: input.selection.limit,
+  }, { sql: input.sql.trim(), joins: [], tables: [] });
+}
+
+function resolveSemanticMemberSelection(
+  semanticLayer: SemanticLayer,
+  selection: SemanticMemberSelection,
+): { metrics: MetricDefinition[]; dimensions: string[]; filters: SemanticBridgeFilter[] } | undefined {
+  const metricByName = new Map(semanticLayer.listMetrics().map((metric) => [metric.name.toLowerCase(), metric]));
+  const metrics = uniqueStrings(selection.metrics ?? [])
+    .map((name) => metricByName.get(name.toLowerCase()))
+    .filter((metric): metric is NonNullable<typeof metric> => Boolean(metric));
+  if (metrics.length === 0) return undefined;
+
+  const dimensionNames = new Set(semanticLayer.listDimensions().map((dimension) => dimension.name.toLowerCase()));
+  const dimensions = uniqueStrings(selection.dimensions ?? [])
+    .map((name) => semanticLayer.listDimensions().find((dimension) => dimension.name.toLowerCase() === name.toLowerCase())?.name)
+    .filter((name): name is string => Boolean(name));
+  // A hallucinated dimension is a hard miss — refuse rather than silently drop it.
+  if ((selection.dimensions ?? []).some((name) => !dimensionNames.has(name.toLowerCase()))) return undefined;
+  const filters = (selection.filters ?? []).filter((filter) => dimensionNames.has(filter.dimension.toLowerCase()));
+  if ((selection.filters ?? []).length > 0 && filters.length === 0) return undefined;
+  return { metrics, dimensions, filters };
 }
 
 function requiresEntityRelativeMeasureComparison(question: string): boolean {
@@ -381,6 +415,21 @@ function buildSemanticBridgeResult(input: {
   // and no rows — a hollow answer. Reject it so the answer loop falls through to
   // Lane-3 generation, which can express the join and actually execute.
   if (typeof composed.sql !== 'string' || composed.sql.trim().length === 0) return undefined;
+  return finalizeSemanticBridgeResult(input, composed);
+}
+
+function finalizeSemanticBridgeResult(input: {
+  semanticLayer: SemanticLayer;
+  question: string;
+  metrics: MetricDefinition[];
+  dimensions: string[];
+  filters: SemanticBridgeFilter[];
+  timeDimension?: { name: string; granularity: string };
+  orderBy?: SemanticBridgeOrderBy[];
+  limit?: number;
+}, composed: ComposeQueryResult): SemanticBridgeQueryResult {
+  const { metrics, dimensions, filters, timeDimension, orderBy, limit } = input;
+  const primaryMetric = metrics[0]!;
   const artifactName = semanticDqlArtifactName({
     question: input.question,
     metrics: metrics.map((metric) => metric.name),

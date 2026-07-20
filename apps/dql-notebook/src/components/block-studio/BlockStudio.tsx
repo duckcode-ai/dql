@@ -87,16 +87,7 @@ export function BlockStudio() {
   const agentThread = usePersistedAgentThreadId(agentScope);
   const [explorerTab, setExplorerTab] = useState<ExplorerTab>('blocks');
   const [resultTab, setResultTab] = useState<ResultTab>('results');
-  const [query, setQuery] = useState('');
-  const [providerFilter, setProviderFilter] = useState('');
   const [domainFilter, setDomainFilter] = useState(() => readBlockStudioDomain());
-  const [cubeFilter, setCubeFilter] = useState('');
-  const [ownerFilter, setOwnerFilter] = useState('');
-  const [tagFilter, setTagFilter] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [selectedSemanticId, setSelectedSemanticId] = useState<string | null>(null);
-  const [selectedSemanticObject, setSelectedSemanticObject] = useState<SemanticObjectDetail | null>(null);
   const [databaseTree, setDatabaseTree] = useState<DatabaseSchemaNode[]>([]);
   const [expandedDbNodes, setExpandedDbNodes] = useState<Record<string, boolean>>({});
   const [databaseQuery, setDatabaseQuery] = useState('');
@@ -138,8 +129,6 @@ export function BlockStudio() {
   } | null>(null);
   const [lineageGraph, setLineageGraph] = useState<{ nodes: Array<{ id: string; type: string; name: string; domain?: string; layer?: string }>; edges: Array<{ source: string; target: string; type: string }> } | null>(null);
   const [lineagePaths, setLineagePaths] = useState<CompletePathResult | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(400);
   const [leftPaneWidth, setLeftPaneWidth] = useState(340);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(320);
   const [leftPaneCollapsed, setLeftPaneCollapsed] = useState(false);
@@ -184,33 +173,43 @@ export function BlockStudio() {
     blockers?: string[];
     error?: string;
   } | null>(null);
-  const semanticTreeRef = useRef<HTMLDivElement | null>(null);
   const lastActiveBlockPathRef = useRef<string | null>(state.activeBlockPath);
 
   useEffect(() => {
+    let active = true;
     dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: true });
+    dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
     setCatalogError(null);
-    void Promise.allSettled([
-      api.getBlockStudioCatalog(),
-      api.getBlockStudioDbtStatus(),
-      api.getSemanticLayer(),
-    ])
-      .then(([catalogResult, dbtResult, semanticLayerResult]) => {
-        if (catalogResult.status === 'fulfilled') {
-          dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog: catalogResult.value });
-          setDatabaseTree(catalogResult.value.databaseTree);
-        } else {
-          setCatalogError('Failed to load schema. Check your connection and try refreshing.');
-        }
-        dispatch({
-          type: 'SET_BLOCK_STUDIO_DBT_STATUS',
-          status: dbtResult.status === 'fulfilled' ? dbtResult.value : null,
-        });
-        if (semanticLayerResult.status === 'fulfilled') {
-          dispatch({ type: 'SET_SEMANTIC_LAYER', layer: semanticLayerResult.value });
-        }
+    // UI-009 / PERF-001: load independent readiness signals independently. A
+    // large semantic payload must not delay dbt status or make the screen claim
+    // that already-parsed artifacts are missing.
+    void api.getBlockStudioCatalog({ includeSemantic: false })
+      .then((catalog) => {
+        if (!active) return;
+        dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
+        setDatabaseTree(catalog.databaseTree);
       })
-      .finally(() => dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: false }));
+      .catch(() => {
+        if (active) setCatalogError('Failed to load schema. Check your connection and try refreshing.');
+      })
+      .finally(() => {
+        if (active) dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: false });
+      });
+    void api.getBlockStudioDbtStatus()
+      .then((status) => {
+        if (active) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status });
+      })
+      .catch(() => {
+        if (active) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status: null });
+      });
+    void api.getSemanticLayer()
+      .then((layer) => {
+        if (active) dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
+      })
+      .finally(() => {
+        if (active) dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
+      });
+    return () => { active = false; };
   }, [dispatch]);
 
   const refreshImportSessions = useCallback(async () => {
@@ -239,16 +238,6 @@ export function BlockStudio() {
   }, [state.activeBlockPath, dispatch]);
 
   useEffect(() => {
-    if (!selectedSemanticId || selectedSemanticId.startsWith('provider:') || selectedSemanticId.startsWith('domain:') || selectedSemanticId.startsWith('group:')) {
-      setSelectedSemanticObject(null);
-      return;
-    }
-    void api.getSemanticObject(selectedSemanticId)
-      .then(setSelectedSemanticObject)
-      .catch(() => setSelectedSemanticObject(null));
-  }, [selectedSemanticId]);
-
-  useEffect(() => {
     const timer = window.setTimeout(() => {
       if (!state.blockStudioDraft.trim()) return;
       void api.validateBlockStudio(state.blockStudioDraft, state.activeBlockPath)
@@ -258,32 +247,6 @@ export function BlockStudio() {
     return () => window.clearTimeout(timer);
   }, [state.blockStudioDraft, state.activeBlockPath, dispatch]);
 
-  const semanticTree = state.blockStudioCatalog?.semanticTree ?? null;
-  const effectiveSemanticTree = useMemo(
-    () => hasSemanticNodes(semanticTree) ? semanticTree : buildFallbackSemanticTree(state.semanticLayer),
-    [semanticTree, state.semanticLayer],
-  );
-  const providerOptions = useMemo(() => collectFacetValues(effectiveSemanticTree, 'provider'), [effectiveSemanticTree]);
-  const cubeOptions = useMemo(() => collectFacetValues(effectiveSemanticTree, 'cube'), [effectiveSemanticTree]);
-  const ownerOptions = useMemo(() => collectFacetValues(effectiveSemanticTree, 'owner'), [effectiveSemanticTree]);
-
-  const filteredSemanticTree = useMemo(() => {
-    if (!effectiveSemanticTree) return null;
-    return filterSemanticTree(effectiveSemanticTree, {
-      query,
-      provider: providerFilter,
-      domain: domainFilter,
-      cube: cubeFilter,
-      owner: ownerFilter,
-      tag: tagFilter,
-      type: typeFilter,
-    });
-  }, [effectiveSemanticTree, query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
-
-  const flatSemanticRows = useMemo(
-    () => flattenSemanticRows(filteredSemanticTree?.children ?? [], expanded),
-    [filteredSemanticTree, expanded],
-  );
   const filteredDatabaseTree = useMemo(
     () => filterDatabaseTree(databaseTree, databaseQuery),
     [databaseTree, databaseQuery],
@@ -302,33 +265,7 @@ export function BlockStudio() {
     semanticModels: state.semanticLayer.semanticModels.length,
     savedQueries: state.semanticLayer.savedQueries.length,
   };
-  const semanticObjectCount = Math.max(
-    countSemanticObjects(semanticStats),
-    countSemanticLeafNodes(effectiveSemanticTree),
-  );
-  const totalTreeHeight = flatSemanticRows.length * TREE_ROW_HEIGHT;
-  const visibleRows = useMemo(() => {
-    const startIndex = Math.max(0, Math.floor(scrollTop / TREE_ROW_HEIGHT) - TREE_OVERSCAN);
-    const endIndex = Math.min(flatSemanticRows.length, Math.ceil((scrollTop + viewportHeight) / TREE_ROW_HEIGHT) + TREE_OVERSCAN);
-    return {
-      offsetTop: startIndex * TREE_ROW_HEIGHT,
-      rows: flatSemanticRows.slice(startIndex, endIndex),
-    };
-  }, [flatSemanticRows, scrollTop, viewportHeight]);
-
-  useEffect(() => {
-    const element = semanticTreeRef.current;
-    if (!element) return;
-    const updateHeight = () => setViewportHeight(element.clientHeight || 400);
-    updateHeight();
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateHeight);
-      return () => window.removeEventListener('resize', updateHeight);
-    }
-    const observer = new ResizeObserver(() => updateHeight());
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+  const semanticObjectCount = countSemanticObjects(semanticStats);
 
   useEffect(() => {
     const updateCompactLayout = () => setCompactLayout(window.innerWidth < 900);
@@ -366,11 +303,6 @@ export function BlockStudio() {
     setEditorMode(parseBlockFields(state.blockStudioDraft)?.blockType === 'semantic' ? 'visual' : 'source');
   }, [state.activeBlockPath]);
 
-  useEffect(() => {
-    setScrollTop(0);
-    if (semanticTreeRef.current) semanticTreeRef.current.scrollTop = 0;
-  }, [query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
-
   const draftMetadata = useMemo(() => {
     const parsed = parseBlockFields(state.blockStudioDraft);
     if (!state.blockStudioMetadata) return parsed;
@@ -396,28 +328,35 @@ export function BlockStudio() {
     if (state.activeBlockPath) setEditorMode('detail');
   }, [state.activeBlockPath]);
 
-  useEffect(() => {
-    if (!activeBlockName) return;
-    const nodeId = `block:${activeBlockName}`;
+  const loadBlockLineage = useCallback(async (blockName: string) => {
+    const nodeId = `block:${blockName}`;
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
     setLineageLoading(true);
-    void Promise.all([
-      api.fetchLineageNode(nodeId),
-      api.queryLineage({ focus: nodeId }),
-      api.fetchLineagePaths(nodeId),
-    ])
-      .then(([detail, focused, paths]) => {
-        setLineageDetail(detail);
-        setLineageGraph(focused.graph ?? null);
-        setLineagePaths(paths);
-      })
-      .catch(() => {
-        setLineageDetail(null);
-        setLineageGraph(null);
-        setLineagePaths(null);
-      })
-      .finally(() => setLineageLoading(false));
-  }, [activeBlockName, dispatch]);
+    try {
+      const [detail, focused, paths] = await Promise.all([
+        api.fetchLineageNode(nodeId),
+        // Block Studio is a focused authoring view, not the project-wide
+        // lineage explorer. Bound the neighborhood so large projects remain
+        // readable while preserving the block's technical context.
+        api.queryLineage({ focus: nodeId, upstreamDepth: 3, downstreamDepth: 2 }),
+        api.fetchLineagePaths(nodeId, { maxDepth: 6, maxPaths: 6 }),
+      ]);
+      setLineageDetail(detail);
+      setLineageGraph(focused.graph ?? null);
+      setLineagePaths(paths);
+    } catch {
+      setLineageDetail(null);
+      setLineageGraph(null);
+      setLineagePaths(null);
+    } finally {
+      setLineageLoading(false);
+    }
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (!activeBlockName) return;
+    void loadBlockLineage(activeBlockName);
+  }, [activeBlockName, loadBlockLineage]);
 
   const handleDraftChange = (draft: string) => {
     setRunError(null);
@@ -548,6 +487,14 @@ export function BlockStudio() {
           folder: 'blocks',
         },
       });
+    }
+    if (payload.lineageRefresh?.status === 'ready') {
+      // The name normally does not change during save, so the name-based effect
+      // will not rerun. Refresh explicitly against the newly compiled snapshot.
+      await loadBlockLineage(payload.metadata.name);
+    } else if (payload.lineageRefresh?.status === 'failed') {
+      setSaveError(`Block saved, but lineage refresh failed: ${payload.lineageRefresh.message ?? 'compile failed'}`);
+      setTimeout(() => setSaveError(null), 7000);
     }
     return payload;
   };
@@ -835,7 +782,7 @@ export function BlockStudio() {
 
   const refreshDatabaseTree = useCallback(async () => {
     try {
-      const catalog = await api.getBlockStudioCatalog();
+      const catalog = await api.getBlockStudioCatalog({ includeSemantic: false });
       if (catalog?.databaseTree) {
         setDatabaseTree(catalog.databaseTree);
       }
@@ -949,7 +896,10 @@ export function BlockStudio() {
             onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
             onNewBlock={beginNewWorkspace}
             onCollapse={() => setLeftPaneCollapsed(true)}
-            footer={`${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${databaseStats.tables} table${databaseStats.tables === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`}
+            footer={state.semanticLayer.loading
+              ? `Loading ${(state.blockStudioDbtStatus?.counts.metrics ?? 0).toLocaleString()} semantic metrics…`
+              : `${state.semanticLayer.provider ? `${state.semanticLayer.provider} synced` : 'dbt synced'} · ${databaseStats.tables} table${databaseStats.tables === 1 ? '' : 's'} · ${state.semanticLayer.metrics.length.toLocaleString()} metric${state.semanticLayer.metrics.length === 1 ? '' : 's'}`}
+            footerStatus={state.semanticLayer.loading ? 'loading' : 'ready'}
           />
         </div>
       </div>
@@ -1028,7 +978,7 @@ export function BlockStudio() {
                 onClick={() => void handleSave()}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 13px', borderRadius: 999, border: `1px solid ${t.accent}`, background: t.accent, color: '#ffffff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 2px rgba(107,93,211,0.25)', opacity: saving ? 0.7 : 1, whiteSpace: 'nowrap' }}
               >
-                {saving ? 'Saving…' : 'Save draft'}
+                {saving ? 'Saving & refreshing…' : 'Save draft'}
               </button>
             </>
           )}
@@ -1109,6 +1059,7 @@ export function BlockStudio() {
                     source={state.blockStudioDraft}
                     metadata={state.blockStudioMetadata}
                     semanticLayer={state.semanticLayer}
+                    dbtStatus={state.blockStudioDbtStatus}
                     domainOptions={state.semanticLayer.domains}
                     chartConfig={currentChart}
                     onChange={handleDraftChange}
@@ -2362,6 +2313,7 @@ function SemanticBlockBuilder({
   source,
   metadata,
   semanticLayer,
+  dbtStatus,
   domainOptions,
   chartConfig,
   onChange,
@@ -2372,6 +2324,7 @@ function SemanticBlockBuilder({
   source: string;
   metadata: BlockStudioOpenPayload['metadata'] | null;
   semanticLayer: SemanticLayerState;
+  dbtStatus: BlockStudioDbtStatus | null;
   domainOptions: string[];
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
@@ -2455,7 +2408,7 @@ function SemanticBlockBuilder({
           />
           {semanticLayer.metrics.some((metric) => metric.execution && metric.execution.status !== 'ready') && (
             <div style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.4 }}>
-              Metrics that require MetricFlow are visible for discovery but disabled until the semantic execution runtime is configured.
+              Complex metrics remain discoverable. Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime in Project &amp; dbt to run them.
             </div>
           )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
@@ -2475,7 +2428,20 @@ function SemanticBlockBuilder({
             </FieldLabel>
           </div>
           {semanticLayer.metrics.length === 0 && (
-            <div style={{ fontSize: 12, color: '#d29922', lineHeight: 1.45 }}>No semantic metrics are loaded. Run `dbt parse` or import a semantic layer, then refresh Block Studio.</div>
+            semanticLayer.loading ? (
+              <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
+                <Loader2 size={14} className="dql-spin" />
+                Loading {(dbtStatus?.counts.metrics ?? 0).toLocaleString()} semantic metrics from parsed dbt artifacts… Large catalogs continue loading in the background.
+              </div>
+            ) : (dbtStatus?.counts.metrics ?? 0) > 0 || dbtStatus?.artifacts.semanticManifest.exists ? (
+              <div role="alert" style={{ fontSize: 12, color: 'var(--status-warning)', lineHeight: 1.45 }}>
+                dbt artifacts contain {(dbtStatus?.counts.metrics ?? 0).toLocaleString()} metrics, but Block Studio could not load them. Refresh the semantic layer; another dbt parse is not required.
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--status-warning)', lineHeight: 1.45 }}>
+                No semantic metrics were discovered. Run dbt parse or import a semantic layer, then refresh Block Studio.
+              </div>
+            )
           )}
           {values.metrics.length > 1 && compatibleDimensions.length === 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#d29922', fontSize: 11, lineHeight: 1.4 }}>
@@ -4578,7 +4544,7 @@ function BlockLineagePanel({
     return (
       <div style={{ padding: 12, display: 'grid', gap: 12 }}>
         <div style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font }}>
-          No lineage node was found for this block yet. Save the block or compile the project if you expect it to appear in the graph.
+          No lineage node was found for this block yet. Save the block to compile and refresh its focused lineage automatically.
         </div>
         <div>
           <button

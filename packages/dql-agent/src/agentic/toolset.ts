@@ -21,6 +21,7 @@ import type { AgentToolDefinition } from '../providers/types.js';
 import type { KGStore } from '../kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind } from '../kg/types.js';
 import {
+  composeSemanticQueryFromCompiledMembers,
   composeSemanticQueryFromMembers,
   type SemanticBridgeFilter,
   type SemanticBridgeOrderBy,
@@ -32,8 +33,19 @@ export interface SemanticStageToolsInput {
   kg: KGStore;
   driver?: string;
   tableMapping?: Record<string, string>;
+  /** Host-owned dbt Cloud/MetricFlow compiler used when the native compiler cannot compose a member set. */
+  semanticQueryCompiler?: (selection: SemanticMemberSelection) => Promise<{
+    sql: string;
+    engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  }>;
   /** Records the compiled result of the last successful compile_semantic_query call. */
-  onCompiled?: (result: { sql: string; metrics: string[]; dimensions: string[]; dqlArtifactSource: string }) => void;
+  onCompiled?: (result: {
+    sql: string;
+    metrics: string[];
+    dimensions: string[];
+    dqlArtifactSource: string;
+    engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  }) => void;
 }
 
 const TOKEN_RE = /[\p{L}\p{N}_]+/gu;
@@ -147,13 +159,31 @@ function compileSemanticQueryTool(input: SemanticStageToolsInput): AgentToolDefi
         orderBy: parseOrderBy(record.orderBy),
         limit: typeof record.limit === 'number' ? record.limit : undefined,
       };
-      const compiled = composeSemanticQueryFromMembers({
+      let compiled = composeSemanticQueryFromMembers({
         semanticLayer: layer,
         question: typeof record.question === 'string' ? record.question : metrics.join(', '),
         selection,
         driver: input.driver,
         tableMapping: input.tableMapping,
       });
+      let compiledEngine: 'native' | 'metricflow-cli' | 'dbt-cloud' = 'native';
+      if (!compiled && input.semanticQueryCompiler) {
+        try {
+          const external = await input.semanticQueryCompiler(selection);
+          compiledEngine = external.engine;
+          compiled = composeSemanticQueryFromCompiledMembers({
+            semanticLayer: layer,
+            question: typeof record.question === 'string' ? record.question : metrics.join(', '),
+            selection,
+            sql: external.sql,
+          });
+        } catch (error) {
+          return {
+            error: error instanceof Error ? error.message : String(error),
+            runtimeRequired: true,
+          };
+        }
+      }
       if (!compiled) {
         return {
           error:
@@ -165,13 +195,15 @@ function compileSemanticQueryTool(input: SemanticStageToolsInput): AgentToolDefi
         metrics: compiled.metrics,
         dimensions: compiled.dimensions,
         dqlArtifactSource: compiled.dqlArtifact.source,
+        engine: compiledEngine,
       });
       return {
         governed: true,
         sql: compiled.sql,
         metrics: compiled.metrics,
         dimensions: compiled.dimensions,
-        note: 'Governed SQL compiled from the semantic layer. Use this SQL verbatim in your final answer; it is labeled governed.',
+        engine: compiledEngine,
+        note: `Governed SQL compiled from the semantic layer through ${compiledEngine}. Use this SQL verbatim in your final answer; it is labeled governed.`,
       };
     },
   };

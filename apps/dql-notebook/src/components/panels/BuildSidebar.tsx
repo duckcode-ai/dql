@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, KeyRound, Layers, Link2, Plus, Search, Type } from 'lucide-react';
 import { api } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
-import type { NotebookFile, SchemaTable, SemanticTreeNode } from '../../store/types';
+import type { NotebookFile, SchemaTable } from '../../store/types';
 import { DataSourceIcon, describeSchemaObject } from './DataSourceIcon';
 import type { Theme } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
@@ -12,6 +12,7 @@ import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
 import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
+import { buildSemanticTreeFromLayer } from '../../utils/semantic-tree';
 
 export type BuildTab = 'notebooks' | 'semantic' | 'database' | 'blocks';
 
@@ -35,7 +36,7 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, blockDomain = '', onBlockDomainChange, onNewBlock, footer, onCollapse }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, blockDomain = '', onBlockDomainChange, onNewBlock, footer, footerStatus = 'ready', onCollapse }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
@@ -49,6 +50,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, block
   onNewBlock?: () => void;
   /** Optional status footer line (e.g. "dbt synced · 42 models · 5 metrics"). */
   footer?: React.ReactNode;
+  footerStatus?: 'ready' | 'loading' | 'warning';
   /** Renders a collapse chevron at the end of the tab bar. */
   onCollapse?: () => void;
 }) {
@@ -143,7 +145,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, block
 
       {footer ? (
         <div style={{ padding: '9px 12px', borderTop: `1px solid ${t.headerBorder}`, fontSize: 10.5, color: t.textMuted, display: 'flex', alignItems: 'center', gap: 6, fontFamily: t.font }}>
-          <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)', flexShrink: 0 }} />
+          <span style={{ width: 6, height: 6, borderRadius: 999, background: footerStatus === 'ready' ? 'var(--status-success)' : 'var(--status-warning)', flexShrink: 0 }} />
           <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{footer}</span>
         </div>
       ) : null}
@@ -226,8 +228,18 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
 
 function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search: string; onInsert: (text: string) => void; notebookMode: boolean }) {
   const { state, dispatch } = useNotebook();
-  const [tree, setTree] = useState<SemanticTreeNode | null>(null);
-  const [loading, setLoading] = useState(true);
+  const tree = useMemo(() => buildSemanticTreeFromLayer(state.semanticLayer), [
+    state.semanticLayer.provider,
+    state.semanticLayer.metrics,
+    state.semanticLayer.measures,
+    state.semanticLayer.dimensions,
+    state.semanticLayer.timeDimensions,
+    state.semanticLayer.entities,
+    state.semanticLayer.hierarchies,
+    state.semanticLayer.semanticModels,
+    state.semanticLayer.savedQueries,
+  ]);
+  const loading = state.semanticLayer.loading;
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
   const [compatibleDimensions, setCompatibleDimensions] = useState<Set<string> | null>(null);
@@ -235,18 +247,6 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
   const [preview, setPreview] = useState<{ sql: string; rows: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const metricsByName = new Map(state.semanticLayer.metrics.map((metric) => [metric.name, metric]));
-
-  // The sidebar owns the semantic-layer fetch (the old SemanticPanel did this on
-  // mount). Without it, nothing shows in the notebook. Cheap + cached server-side.
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    api.getSemanticTree()
-      .then((next) => { if (active) setTree(next); })
-      .catch(() => { if (active) setTree(null); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -351,7 +351,7 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
         )}
         {error && <div role="alert" style={{ padding: '6px 7px', borderRadius: 6, border: `1px solid ${t.error}40`, background: `${t.error}10`, color: t.error, fontSize: 10, lineHeight: 1.35 }}>{error}</div>}
         {state.semanticLayer.metrics.some((metric) => metric.execution && metric.execution.status !== 'ready') && (
-          <div style={{ fontSize: 9.5, color: t.textMuted }}>Setup-required metrics remain visible but cannot be selected until MetricFlow is configured.</div>
+          <div style={{ fontSize: 9.5, color: t.textMuted }}>Complex metrics remain discoverable. Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime in Project &amp; dbt to run them.</div>
         )}
       </div>
     )}

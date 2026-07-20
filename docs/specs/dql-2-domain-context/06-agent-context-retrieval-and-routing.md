@@ -170,6 +170,14 @@ the proposed query path, the runtime applies that predicate deterministically
 before AI repair. Ambiguous or already-misbound predicates are never rewritten
 automatically (`AGT-012`).
 
+When the compatible terminal asset is a parameterized certified block, the
+planner maps each typed member binding only through that block's declared
+parameter/filter contract. The invocation preserves whether the value came from
+the current question or a prior result, and the returned DQL artifact preserves
+the parameter definitions plus resolved values. The model does not reconstruct
+the block SQL. A value that cannot be mapped to exactly one declared parameter
+cannot silently make the block compatible (`AGT-005`, `AGT-006`, `AGT-012`).
+
 ## Governed answer cascade
 
 The route order is mandatory (`AGT-001`):
@@ -202,6 +210,21 @@ call receive the selected relations, columns, and authorized relationship proof.
 The execution gateway independently validates and runs the result. Insufficient
 evidence produces a typed modeling gap or focused clarification, never a model
 invitation to invent schema or joins (`AGT-010`).
+
+The semantic step uses the same runtime selector as Notebook and Block Studio:
+bundled native composition for supported metrics, then a configured local
+MetricFlow or tested dbt Cloud Semantic Layer adapter. An exact scalar metric is
+compiled without an AI planning call. When several metric or dimension meanings
+are plausible, bounded member selection may choose identifiers, after which the
+adapter—not the model—constructs SQL. A known semantic metric that requires an
+unavailable runtime returns `semantic_runtime_required`; it does not fall through
+to hand-written generated SQL or a guessed backing measure (`AGT-001`, `API-004`).
+Repeated physical member names are not treated as globally interchangeable. A
+dimension such as `report_date` is resolved from the selected metric's owning
+semantic model (or an explicit model-scoped identity), and compiled SQL qualifies
+the corresponding relation alias. Generated SQL validation uses the active
+warehouse dialect before any repair or refusal, so valid Snowflake/Databricks
+syntax is not rejected by a DuckDB/PostgreSQL parser (`AGT-001`, `AGT-012`).
 
 For ranked grouped questions, validation requires every real grouping dimension
 from the answer contract in the projection before execution. Compound measure

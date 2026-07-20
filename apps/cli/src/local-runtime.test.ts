@@ -21,6 +21,8 @@ import {
   generateSemanticCompostingDrafts,
   buildSemanticLayerDiagnostics,
   buildSemanticTableMapping,
+  resolveSemanticTableMapping,
+  compileBlockStudioManifest,
   conversationTurnInputFromRun,
   createBlockArtifacts,
   createDqlArtifactGenerationSessionForProject,
@@ -112,6 +114,30 @@ describe('semantic runtime table mapping', () => {
       order_items: 'analytics.order_items',
       customers: 'analytics.customers',
     });
+  });
+
+  it('does not truncate enterprise catalogs before a late semantic table', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'late_metric', label: 'Late metric', description: '', domain: 'enterprise',
+        sql: 'SUM(value)', type: 'sum', table: 'table_3000',
+      }],
+      dimensions: [],
+    });
+    const rows = Array.from({ length: 3_001 }, (_, index) => ({
+      table_schema: 'analytics',
+      table_name: `table_${index}`,
+    }));
+    const executeQuery = vi.fn(async (_sql: string) => ({ rows }));
+
+    const mapping = await resolveSemanticTableMapping(
+      { executeQuery } as unknown as QueryExecutor,
+      { driver: 'duckdb', filepath: ':memory:' },
+      semanticLayer,
+    );
+
+    expect(mapping).toEqual({ table_3000: 'analytics.table_3000' });
+    expect(String(executeQuery.mock.calls[0]?.[0])).not.toMatch(/LIMIT\s+2000/i);
   });
 });
 
@@ -337,7 +363,7 @@ describe('unified provider draft testing (CFG-004)', () => {
   });
 });
 
-describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-002, AGT-006, EXP-002)', () => {
+describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-006, AGT-012, API-005, UI-011)', () => {
   it('returns the typed contract and reruns only the named certified block with explicit values', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-certified-parameter-api-'));
     tempDirs.push(projectRoot);
@@ -440,7 +466,29 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
           expect.objectContaining({ name: 'top_n', type: 'number' }),
         ]),
       });
-      expect(executeQuery).toHaveBeenCalledTimes(2);
+
+      const questionBoundResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: { kind: 'sql_block', name: 'Generated Runtime Parameter', source: generatedSource, persistence: 'transient', trustState: 'review_required' },
+          question: 'Show the top 4 Tea results',
+          parameters: { category: 'Tea' },
+        }),
+      });
+      const questionBound = await questionBoundResponse.json() as {
+        error?: string;
+        result: { rows: Array<Record<string, unknown>>; parameters: Array<{ name: string; value: unknown; source: string }> };
+        artifact: { parameterValues: Record<string, unknown> };
+      };
+      expect({ status: questionBoundResponse.status, error: questionBound.error }).toEqual({ status: 200, error: undefined });
+      expect(questionBound.result.rows).toEqual([{ selected_category: 'Tea', selected_limit: 4 }]);
+      expect(questionBound.result.parameters).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'category', value: 'Tea', source: 'explicit' }),
+        expect.objectContaining({ name: 'top_n', value: 4, source: 'question' }),
+      ]));
+      expect(questionBound.artifact.parameterValues).toEqual({ category: 'Tea', top_n: 4 });
+      expect(executeQuery).toHaveBeenCalledTimes(3);
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
@@ -865,7 +913,7 @@ describe('dbt-first onboarding runtime API', () => {
       expect(semanticLayer.metrics.find((metric) => metric.name === 'revenue_growth')?.execution).toEqual({
         status: 'requires_setup',
         engine: null,
-        reason: expect.stringContaining('requires MetricFlow execution'),
+        reason: expect.stringContaining('requires a full semantic runtime'),
       });
       const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean; snapshotState: string }; preparation: { id: string; status: string } };
       expect(status.requestId).toMatch(/^onboarding-status-/);
@@ -3089,6 +3137,29 @@ describe('buildAgentValueProbeSql', () => {
 });
 
 describe('semantic block save artifacts', () => {
+  it('atomically recompiles the manifest and lineage after a Block Studio save', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-compile-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    saveBlockStudioArtifacts(projectRoot, {
+      name: 'Revenue Summary',
+      domain: 'finance',
+      description: 'Revenue by account',
+      owner: 'analytics',
+      tags: ['finance'],
+      source: 'block "Revenue Summary" {\n  status = "draft"\n  domain = "finance"\n  type = "custom"\n  query = """\nselect account_id, sum(revenue) as revenue from analytics.orders group by account_id\n  """\n}\n',
+    });
+
+    const manifest = compileBlockStudioManifest(projectRoot);
+    const emitted = JSON.parse(readFileSync(join(projectRoot, 'dql-manifest.json'), 'utf-8'));
+
+    expect(manifest.blocks['Revenue Summary']).toBeDefined();
+    expect(manifest.lineage.nodes.some((node) => node.id === 'block:Revenue Summary')).toBe(true);
+    expect(emitted.blocks['Revenue Summary']).toBeDefined();
+    expect(existsSync(join(projectRoot, 'dql-manifest.json'))).toBe(true);
+  });
+
   it('autosaves generated blocks under draft paths without promoting to canonical blocks', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-draft-artifacts-'));
     tempDirs.push(projectRoot);

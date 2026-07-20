@@ -117,6 +117,27 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('parses generated SQL with the active Snowflake dialect instead of rejecting valid QUALIFY syntax', () => {
+    const context = pack();
+    context.allowedSqlContext.relations = [{
+      relation: 'analytics.usage_daily',
+      name: 'usage_daily',
+      source: 'runtime schema context',
+      columns: [
+        { name: 'account_id' },
+        { name: 'report_date' },
+      ],
+    }];
+    const sql = `
+      SELECT u.account_id, u.report_date
+      FROM analytics.usage_daily AS u
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY u.account_id ORDER BY u.report_date DESC) = 1
+    `;
+
+    expect(validateSqlAgainstLocalContext(sql, context, { dialect: 'snowflake' }).ok).toBe(true);
+    expect(validateSqlAgainstLocalContext(sql, context).ok).toBe(false);
+  });
+
   it('AGT-012 rejects a trusted product member applied to a location column', () => {
     const context = pack();
     context.allowedSqlContext.relations.push(

@@ -40,6 +40,8 @@ export type SqlContextValidationResult =
     };
 
 export interface SqlContextValidationOptions {
+  /** Active warehouse driver/dialect (for example snowflake or databricks). */
+  dialect?: string;
   question?: string;
   intent?: MetadataAgentIntent | string;
   filterValues?: string[];
@@ -72,7 +74,7 @@ export function validateSqlAgainstLocalContext(
   contextPack: LocalContextPack | undefined,
   options: SqlContextValidationOptions = {},
 ): SqlContextValidationResult {
-  const analysis = analyzeSqlReferences(sql);
+  const analysis = analyzeSqlReferences(sql, options.dialect);
   const referencedRelations = analysis.tables;
   const referencedColumns = analysis.columns.map((column) => ({
     relation: column.relation,
@@ -118,7 +120,7 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  const allowed = buildAllowedRelationLookup(contextPack, options.runtimeSchema);
+  const allowed = buildAllowedRelationLookup(contextPack, options.runtimeSchema, options.dialect);
 
   if (!contextPack && allowed.size === 0) return { ok: true, ...base };
   if (contextPack?.routeDecision?.route === 'clarify' && shouldClarifyBeforeGeneration({
@@ -267,6 +269,7 @@ export function validateSqlAgainstLocalContext(
 function buildAllowedRelationLookup(
   contextPack: LocalContextPack | undefined,
   runtimeSchema: RuntimeSchemaTable[] = [],
+  dialect?: string,
 ): Map<string, MetadataAllowedSqlRelation> {
   const allowed = new Map<string, MetadataAllowedSqlRelation>();
   const putAllowed = (entry: MetadataAllowedSqlRelation) => {
@@ -281,7 +284,7 @@ function buildAllowedRelationLookup(
     putAllowed(relation);
   }
   for (const source of contextPack?.allowedSqlContext?.sourceBlockSql ?? []) {
-    const analysis = analyzeSqlReferences(source.sql);
+    const analysis = analyzeSqlReferences(source.sql, dialect);
     for (const relation of analysis.tables) {
       putAllowed({
         relation,

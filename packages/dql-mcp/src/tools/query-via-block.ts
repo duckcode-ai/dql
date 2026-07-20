@@ -99,6 +99,7 @@ export async function queryViaBlock(
           source,
           title: args.name,
         },
+        question: args.question,
         parameters: args.parameters,
       }),
     });
@@ -125,7 +126,7 @@ export async function queryViaBlock(
       resolvedParameters?: Array<{
         name: string;
         value: unknown;
-        source: 'policy' | 'explicit' | 'question' | 'surface' | 'default';
+        source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default';
       }>;
       auditId?: string;
     };

@@ -54,12 +54,50 @@ durations. Generated SQLite/KG files remain rebuildable ignored state.
 ## Semantic execution capability
 
 Semantic discovery responses include a redacted per-metric execution capability:
-`ready` with `native|metricflow`, `requires_setup`, or `unsupported`. The dbt
+`ready` with `native|metricflow-cli|dbt-cloud`, `requires_setup`, or
+`unsupported`. The dbt
 adapter normalizes array/object artifacts, object measure references,
 `node_relation`, and compiled `where_filters` without replacing derived, ratio,
 cumulative, conversion, or non-additive meaning with one input measure. Query
 and preview endpoints return `SEMANTIC_RUNTIME_REQUIRED` or
 `SEMANTIC_FIELDS_INCOMPATIBLE` with identifier-bound details (`API-004`).
+
+DQL packages all three adapter integrations. `native` has no external
+dependency; `metricflow-cli` discovers a compatible local `mf` executable; and
+`dbt-cloud` calls the configured regional Semantic Layer GraphQL endpoint with
+an environment ID and service token. npm install does not install a Python dbt
+runtime, create cloud credentials, or alter global PATH. Settings exposes the
+redacted adapter matrix and test-before-save dbt Cloud editor. Blank secret
+edits preserve a tested token and failed candidates never replace working
+settings (`API-004`, `UI-007`, `E2E-005`).
+
+One runtime selector and member contract serve semantic preview, Notebook cells,
+Block Studio, and Ask. Ask may use AI to select among similarly named members,
+but SQL is always produced by the selected semantic adapter. SQL compiled by
+dbt Cloud or MetricFlow remains authoritative; a smaller local retrieval pack
+must not replace it with a guessed leaf measure. Warehouse execution is still
+the final dialect/binder check (`AGT-001`, `UI-009`, `E2E-008`).
+
+The semantic compiler preserves model ownership for repeated dimension names.
+Compatibility lookup and native composition choose the selected metric model's
+member before traversing declared joins; they never use catalog load order.
+Context, grounding, analytical-policy, and exploratory SQL parsers all receive
+the active connector dialect (`API-004`, `AGT-001`).
+
+## Parameterized certified-block invocation
+
+Ask, Notebook, native agent tools, CLI, and MCP invoke certified blocks through
+one typed values-only contract: original question, explicit parameter values,
+and per-value provenance. The shared runtime owns policy/default resolution,
+validation, SQL compilation, audit identity, and secret-safe results. Every
+surface returns the same resolved parameter records, including `question` and
+`prior_result` provenance; no surface accepts structural SQL as a parameter.
+Blank or unresolved required values fail before execution (`API-005`).
+
+Inline Ask results retain the executable DQL artifact rather than flattening it
+to a table. They show the applied values and reuse the same parameter controls
+as other Notebook DQL results, so changing an input reruns the saved artifact
+directly without another metadata search or AI planning pass (`UI-011`).
 
 ## Domain/modeling APIs
 

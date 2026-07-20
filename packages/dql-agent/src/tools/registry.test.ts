@@ -13,6 +13,14 @@ describe('DQL tool registry', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  it('AGT-012 exposes certified block runtime parameters on every agent tool surface', () => {
+    const tool = getDqlToolDefinition('query_via_block');
+    expect(tool?.inputSchema.properties).toMatchObject({
+      question: expect.any(Object),
+      parameters: expect.objectContaining({ type: 'object', additionalProperties: true }),
+    });
+  });
+
   it('keeps native agent tools inside the bounded action-space budget', () => {
     const nativeTools = dqlToolDefinitionsForSurface('native');
 

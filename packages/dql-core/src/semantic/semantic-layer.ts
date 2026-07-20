@@ -446,6 +446,14 @@ export function parseBlockCompanionDefinition(raw: Record<string, unknown>): Blo
 export class SemanticLayer {
   private metrics: Map<string, MetricDefinition> = new Map();
   private dimensions: Map<string, DimensionDefinition> = new Map();
+  /**
+   * A dbt project may legitimately declare the same dimension name on many
+   * semantic models (for example `report_date`).  The flat map above remains a
+   * backwards-compatible lookup, while this index preserves every model-owned
+   * variant so composition can resolve the dimension relative to the selected
+   * metric instead of whichever model happened to load last.
+   */
+  private dimensionVariants: Map<string, DimensionDefinition[]> = new Map();
   private hierarchies: Map<string, HierarchyDefinition> = new Map();
   private segments: Map<string, SegmentDefinition> = new Map();
   private preAggregations: Map<string, PreAggregationDefinition> = new Map();
@@ -476,15 +484,15 @@ export class SemanticLayer {
   }
 
   addDimension(dimension: DimensionDefinition): void {
-    this.dimensions.set(dimension.name, dimension);
+    this.registerDimension(dimension);
   }
 
   addCube(cube: CubeDefinition): void {
     this.cubes.set(cube.name, cube);
     // Auto-populate flat maps for backward compatibility
     for (const m of cube.measures) this.metrics.set(m.name, { ...m, cube: m.cube ?? cube.name, domain: m.domain || cube.domain, owner: m.owner ?? cube.owner, source: m.source ?? cube.source });
-    for (const d of cube.dimensions) this.dimensions.set(d.name, { ...d, cube: d.cube ?? cube.name, domain: d.domain ?? cube.domain, owner: d.owner ?? cube.owner, source: d.source ?? cube.source });
-    for (const td of cube.timeDimensions) this.dimensions.set(td.name, { ...td, cube: td.cube ?? cube.name, domain: td.domain ?? cube.domain, owner: td.owner ?? cube.owner, source: td.source ?? cube.source });
+    for (const d of cube.dimensions) this.registerDimension({ ...d, cube: d.cube ?? cube.name, domain: d.domain ?? cube.domain, owner: d.owner ?? cube.owner, source: d.source ?? cube.source });
+    for (const td of cube.timeDimensions) this.registerDimension({ ...td, cube: td.cube ?? cube.name, domain: td.domain ?? cube.domain, owner: td.owner ?? cube.owner, source: td.source ?? cube.source });
     for (const segment of cube.segments) this.segments.set(segment.name, { ...segment, cube: segment.cube || cube.name, domain: segment.domain ?? cube.domain, owner: segment.owner ?? cube.owner, source: segment.source ?? cube.source });
     for (const preAggregation of cube.preAggregations) this.preAggregations.set(preAggregation.name, { ...preAggregation, cube: preAggregation.cube || cube.name, domain: preAggregation.domain ?? cube.domain, owner: preAggregation.owner ?? cube.owner, source: preAggregation.source ?? cube.source });
     // Register joins in adjacency list
@@ -501,6 +509,18 @@ export class SemanticLayer {
 
   addMeasure(measure: MeasureDefinition): void {
     this.measures.set(measure.name, measure);
+  }
+
+  private registerDimension(dimension: DimensionDefinition): void {
+    const variants = this.dimensionVariants.get(dimension.name) ?? [];
+    const identity = semanticDimensionIdentity(dimension);
+    const existingIndex = variants.findIndex((candidate) => semanticDimensionIdentity(candidate) === identity);
+    if (existingIndex >= 0) variants[existingIndex] = dimension;
+    else variants.push(dimension);
+    this.dimensionVariants.set(dimension.name, variants);
+    // Preserve the historical direct lookup. Metric-aware compilation does not
+    // use this lossy value; it resolves through `dimensionVariants` below.
+    this.dimensions.set(dimension.name, dimension);
   }
 
   addEntity(entity: EntityDefinition): void {
@@ -581,19 +601,23 @@ export class SemanticLayer {
       .filter(Boolean) as MetricDefinition[];
     if (resolvedMetrics.length !== metrics.length) return null;
 
-    // Resolve dimension definitions
+    // Resolve dimension definitions relative to the selected metric models.
+    // Names such as `report_date` are commonly repeated across enterprise dbt
+    // semantic models; global last-write-wins lookup would bind the wrong table.
     const resolvedDimensions = dimensions
-      .map((d) => this.dimensions.get(d))
+      .map((d) => this.resolveDimensionForMetrics(d, resolvedMetrics))
       .filter(Boolean) as DimensionDefinition[];
+    if (resolvedDimensions.length !== dimensions.length) return null;
 
     // Resolve time dimension
     let timeDimDef: DimensionDefinition | undefined;
     if (timeDimension) {
-      timeDimDef = this.dimensions.get(timeDimension.name);
+      timeDimDef = this.resolveDimensionForMetrics(timeDimension.name, resolvedMetrics);
+      if (!timeDimDef) return null;
     }
 
     const resolvedFilterDimensions = (filters ?? [])
-      .map((filter) => this.dimensions.get(filter.dimension))
+      .map((filter) => this.resolveDimensionForMetrics(filter.dimension, resolvedMetrics))
       .filter(Boolean) as DimensionDefinition[];
 
     // Multiple metrics from different fact tables must never be aggregated after
@@ -691,7 +715,7 @@ export class SemanticLayer {
     // apply it or refuse to compose (null) — the caller then falls through to
     // generated SQL rather than surfacing a governed-but-wrong answer.
     const resolveFilterColumn = (ref: string): string => {
-      const dim = this.dimensions.get(ref);
+      const dim = this.resolveDimensionForMetrics(ref, resolvedMetrics);
       if (dim?.sql) return qualifyForTable(dim.sql, dim.table);
       const column = ref.includes('__') ? ref.split('__').pop() ?? ref : ref;
       return qualifyForTable(column, primaryTable);
@@ -777,7 +801,7 @@ export class SemanticLayer {
     const whereParts: string[] = [];
     for (const f of filters ?? []) {
       if (!f.dimension) continue;
-      const dimDef = this.dimensions.get(f.dimension);
+      const dimDef = this.resolveDimensionForMetrics(f.dimension, resolvedMetrics);
       const dimSql = dimDef
         ? useStableAliases
           ? qualifyForTable(dimDef.sql, dimDef.table)
@@ -880,6 +904,15 @@ export class SemanticLayer {
   }
 
   /**
+   * Cheap capability probe for large semantic catalogs. This intentionally
+   * avoids generating SQL: catalog/readiness surfaces may call it for thousands
+   * of metrics, while full composition is reserved for a selected metric.
+   */
+  canComposeMetric(name: string): boolean {
+    return Boolean(this.resolveComposableMetric(name));
+  }
+
+  /**
    * dbt simple metrics may store physical ownership on their input measure
    * instead of duplicating it on the metric node. Materialize that contract for
    * native composition; derived/ratio/cumulative metrics remain MetricFlow-only.
@@ -922,6 +955,57 @@ export class SemanticLayer {
       sql: measure.expr?.trim() || (type === 'count' ? '*' : measure.name),
       type,
     };
+  }
+
+  /**
+   * Resolve a possibly repeated dimension name from the owning metric model.
+   * Explicit model-scoped references (`model.dimension` or
+   * `model__dimension`) win. For the common unqualified form, the metric's own
+   * table/cube wins, followed by the shortest declared semantic join path.
+   */
+  private resolveDimensionForMetrics(
+    reference: string,
+    metrics: MetricDefinition[],
+  ): DimensionDefinition | undefined {
+    const directVariants = this.dimensionVariants.get(reference) ?? [];
+    const allVariants = directVariants.length > 0
+      ? directVariants
+      : Array.from(this.dimensionVariants.values()).flat().filter((dimension) =>
+          semanticDimensionReferences(dimension).some((candidate) => candidate === reference),
+        );
+    if (allVariants.length === 0) return this.dimensions.get(reference);
+    if (allVariants.length === 1) return allVariants[0];
+
+    const metricTables = new Set(metrics.map((metric) => metric.table).filter(Boolean));
+    const metricCubes = new Set(metrics.map((metric) => metric.cube).filter((cube): cube is string => Boolean(cube)));
+    const primaryCube = metrics[0]?.cube ?? this.cubeNameForTable(metrics[0]?.table ?? '');
+    return [...allVariants]
+      .map((dimension) => {
+        const dimensionCube = dimension.cube ?? this.cubeNameForTable(dimension.table);
+        let score = 0;
+        if (metricTables.has(dimension.table)) score += 1_000;
+        if (dimensionCube && metricCubes.has(dimensionCube)) score += 900;
+        if (primaryCube && dimensionCube) {
+          if (primaryCube === dimensionCube) score += 500;
+          else {
+            const path = this.findJoinPath(primaryCube, dimensionCube);
+            if (path.length > 0) score += Math.max(1, 300 - path.length * 20);
+          }
+        }
+        return { dimension, score };
+      })
+      .sort((left, right) =>
+        right.score - left.score
+        || semanticDimensionIdentity(left.dimension).localeCompare(semanticDimensionIdentity(right.dimension)),
+      )[0]?.dimension;
+  }
+
+  private cubeNameForTable(table: string): string | undefined {
+    if (!table) return undefined;
+    for (const [name, cube] of this.cubes) {
+      if (cube.table === table || name === table) return name;
+    }
+    return undefined;
   }
 
   private composeAggregateIslands(
@@ -1318,8 +1402,15 @@ export class SemanticLayer {
       return common;
     }, new Set(metricTables[0]));
 
-    return Array.from(this.dimensions.values())
-      .filter((dimension) => reachableTables.has(dimension.table))
+    const compatibleVariants = Array.from(this.dimensionVariants.values())
+      .flat()
+      .filter((dimension) => reachableTables.has(dimension.table));
+    const names = Array.from(new Set(compatibleVariants.map((dimension) => dimension.name)));
+    return names
+      .map((name) => this.resolveDimensionForMetrics(name, resolvedMetrics))
+      .filter((dimension): dimension is DimensionDefinition =>
+        Boolean(dimension && reachableTables.has(dimension.table)),
+      )
       .sort((a, b) => a.label.localeCompare(b.label));
   }
 
@@ -1637,6 +1728,26 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
     tags: Array.isArray(raw.tags) ? raw.tags.map(String) : undefined,
     source: cubeSource,
   };
+}
+
+function semanticDimensionIdentity(dimension: DimensionDefinition): string {
+  return [
+    dimension.cube ?? '',
+    dimension.table,
+    dimension.name,
+    dimension.sql,
+    dimension.source?.objectId ?? '',
+  ].join('|').toLowerCase();
+}
+
+function semanticDimensionReferences(dimension: DimensionDefinition): string[] {
+  const references = new Set<string>([dimension.name]);
+  if (dimension.cube) {
+    references.add(`${dimension.cube}.${dimension.name}`);
+    references.add(`${dimension.cube}__${dimension.name}`);
+  }
+  if (dimension.source?.objectId) references.add(dimension.source.objectId);
+  return Array.from(references);
 }
 
 function sanitizeSqlAlias(value: string): string {
