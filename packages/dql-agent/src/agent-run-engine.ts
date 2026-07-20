@@ -484,9 +484,17 @@ export function resolveClarificationContinuation(request: AgentRunRequest): Clar
 function looksLikeNewQuestionAfterClarification(value: string): boolean {
   const words = value.split(/\s+/).filter(Boolean);
   if (words.length > 40) return true;
-  return words.length > 6
-    && /^(?:who|what|why|where|when|how|show|give|list|compare|build|create|which)\b/i.test(value)
-    && /\?\s*$/.test(value);
+  // Natural-language Ask does not require terminal punctuation. Treat a
+  // substantive interrogative/imperative as a new analytical turn before we
+  // consider it a reply to a pending clarification. The old `?` requirement
+  // caused questions such as "who are the customers who used beverage
+  // products" to be appended to the previous clarification and sent to the
+  // provider as one polluted prompt.
+  if (
+    words.length >= 4
+    && /^(?:who|what|why|where|when|how|show|give|list|compare|build|create|which|calculate|find|tell)\b/i.test(value)
+  ) return true;
+  return words.length >= 7 && /\?\s*$/.test(value);
 }
 
 function latestClarificationFromHistory(

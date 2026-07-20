@@ -102,6 +102,8 @@ export interface SynthesizeInput {
   findings?: string[];
   /** Known gaps/caveats to surface honestly. */
   gaps?: string[];
+  /** Compiler-owned ranking direction; prose must not reverse it. */
+  rankingDirection?: 'top' | 'bottom';
 }
 
 /** Injected text completion, optionally streaming token deltas. */
@@ -191,7 +193,7 @@ function previewToText(preview: SynthesizeResultPreview | undefined, limit = 20)
 function formatCell(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "number") return String(value);
-  return String(value).replace(/\|/g, "\\|");
+  return String(value).trim().replace(/\|/g, "\\|");
 }
 
 function humanizeColumn(column: string): string {
@@ -264,6 +266,31 @@ function labelColumn(preview: SynthesizeResultPreview, question = ""): string | 
   return ranked[0]?.column ?? candidates[0];
 }
 
+function businessRowLabel(
+  preview: SynthesizeResultPreview,
+  row: Record<string, unknown>,
+  identityColumn: string | undefined,
+): string {
+  if (!identityColumn) return "The leading result";
+  // Multi-grain rows need enough identity to distinguish repeated labels. For
+  // example, product_name repeats for every customer in a customer-product
+  // drilldown; rendering only the product produced three identical bullets.
+  const identityColumns = [
+    identityColumn,
+    ...preview.columns.filter((column) =>
+      column !== identityColumn
+      && /(?:^|_)(?:name|title|label)(?:_|$)/i.test(column)
+      && !isTechnicalColumn(column)
+      && row[column] !== null
+      && row[column] !== undefined
+      && String(row[column]).trim().length > 0),
+  ].slice(0, 2);
+  return identityColumns
+    .map((column) => formatBusinessValue(column, row[column]))
+    .filter(Boolean)
+    .join(" — ");
+}
+
 function measureColumn(input: SynthesizeInput): string | undefined {
   const preview = input.resultPreview;
   if (!preview?.rows.length) return undefined;
@@ -317,17 +344,21 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
   }
 
   if (measure) {
+    const rankingDirection = input.rankingDirection ?? rankingDirectionFromQuestion(input.question);
     const ranked = preview.rows
       .map((row) => ({ row, value: numericCell(row[measure]) }))
       .filter((entry): entry is { row: Record<string, unknown>; value: number } => entry.value !== undefined)
-      .sort((left, right) => right.value - left.value);
+      .sort((left, right) => rankingDirection === 'bottom'
+        ? left.value - right.value
+        : right.value - left.value);
     const top = ranked[0];
     if (top) {
-      const topLabel = identityColumn ? formatBusinessValue(identityColumn, top.row[identityColumn]) : "The leading result";
+      const topLabel = businessRowLabel(preview, top.row, identityColumn);
       const scope = preview.rowCount > preview.rows.length ? "Among the displayed results, " : "";
-      const headline = `${scope}**${topLabel}** has the highest ${humanizeColumn(measure).toLowerCase()} at **${formatBusinessValue(measure, top.value)}**.`;
+      const directionLabel = rankingDirection === 'bottom' ? 'lowest' : 'highest';
+      const headline = `${scope}**${topLabel}** has the ${directionLabel} ${humanizeColumn(measure).toLowerCase()} at **${formatBusinessValue(measure, top.value)}**.`;
       const next = ranked.slice(1, 3).map((entry) => {
-        const label = identityColumn ? formatBusinessValue(identityColumn, entry.row[identityColumn]) : "Another result";
+        const label = identityColumn ? businessRowLabel(preview, entry.row, identityColumn) : "Another result";
         return `- **${label}:** ${formatBusinessValue(measure, entry.value)}`;
       });
       const causationCaveat = format === "research"
@@ -340,6 +371,12 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
   const first = preview.rows[0];
   const fields = preview.columns.filter((column) => !isTechnicalColumn(column)).slice(0, 4);
   return fields.map((column) => `**${humanizeColumn(column)}:** ${formatBusinessValue(column, first[column])}`).join(" · ");
+}
+
+function rankingDirectionFromQuestion(question: string): 'top' | 'bottom' {
+  return /\b(bottom|least|fewest|lowest|minimum|min|smallest|worst)\b/i.test(question)
+    ? 'bottom'
+    : 'top';
 }
 
 /** Keep model output safe for the Markdown renderer while accepting common HTML-ish completions. */
@@ -404,6 +441,7 @@ function buildUserPrompt(input: SynthesizeInput): string {
   }
   if (input.findings?.length) lines.push(`Findings:\n${input.findings.map((f) => `- ${f}`).join("\n")}`);
   if (input.gaps?.length) lines.push(`Known gaps/caveats:\n${input.gaps.map((g) => `- ${g}`).join("\n")}`);
+  if (input.rankingDirection) lines.push(`Ranking direction: ${input.rankingDirection === 'bottom' ? 'lowest / ascending' : 'highest / descending'}.`);
   if (input.sql && input.audience !== "stakeholder") lines.push(`SQL used:\n${input.sql}`);
   lines.push("Write the answer now.");
   return lines.join("\n\n");

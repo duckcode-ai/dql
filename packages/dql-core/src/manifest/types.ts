@@ -70,6 +70,14 @@ export interface DQLManifest {
   modeling?: ManifestDbtFirstModeling;
 
   /**
+   * Additive manifest-v3 policy graph. This is the canonical qualified graph
+   * from which legacy lineage, Domain 360, and the agent search snapshot are
+   * projected. It contains compact DQL-owned policy and source fingerprints,
+   * never secrets, sampled values, or a copied dbt column catalog.
+   */
+  knowledgeGraph?: ManifestKnowledgeGraph;
+
+  /**
    * Non-fatal problems encountered during the build — files that failed to
    * parse, references that could not be resolved, etc. Empty array on a
    * clean build. `dql compile` prints these as warnings; `dql doctor`
@@ -115,6 +123,156 @@ export interface ManifestDiagnostic {
    * route without re-parsing the message.
    */
   drift?: ManifestDriftDetail;
+}
+
+// ---- Canonical domain knowledge graph (manifest v3, CTX-006) ----
+
+export type ManifestKnowledgeObjectKind =
+  | 'domain'
+  | 'model_area'
+  | 'term'
+  | 'skill'
+  | 'entity'
+  | 'relationship'
+  | 'contract'
+  | 'domain_export'
+  | 'domain_import'
+  | 'conformance'
+  | 'policy'
+  | 'evaluation'
+  | 'block'
+  | 'business_view'
+  | 'metric'
+  | 'dimension'
+  | 'dbt_model'
+  | 'dbt_source'
+  | 'source_table'
+  | 'semantic_model'
+  | 'saved_query'
+  | 'notebook'
+  | 'dashboard'
+  | 'app';
+
+export type ManifestKnowledgeEdgeKind =
+  | 'contains'
+  | 'parent_domain'
+  | 'defines'
+  | 'implements'
+  | 'binds_to'
+  | 'depends_on'
+  | 'transforms'
+  | 'reads_from'
+  | 'proves_join'
+  | 'governed_by'
+  | 'exports'
+  | 'imports'
+  | 'conforms_to'
+  | 'guided_by'
+  | 'evaluated_by'
+  | 'consumed_by';
+
+export type ManifestKnowledgeRouteState = 'observed' | 'authorized' | 'blocked' | 'stale';
+
+export interface ManifestKnowledgeSource {
+  system: 'dql' | 'dbt' | 'semantic';
+  path?: string;
+  nativeId?: string;
+  fingerprint: string;
+}
+
+export interface ManifestKnowledgeObject {
+  id: string;
+  kind: ManifestKnowledgeObjectKind;
+  localId: string;
+  domainId?: string;
+  modelAreaIds?: string[];
+  aliases?: string[];
+  status?: string;
+  owner?: string;
+  source: ManifestKnowledgeSource;
+  payload?: Record<string, unknown>;
+}
+
+export interface ManifestKnowledgeObjectRef {
+  id: string;
+  kind: ManifestKnowledgeObjectKind;
+  localId: string;
+  domainId?: string;
+  modelAreaIds?: string[];
+  status?: string;
+  owner?: string;
+  source: ManifestKnowledgeSource;
+}
+
+export interface ManifestKnowledgeEdge {
+  id: string;
+  kind: ManifestKnowledgeEdgeKind;
+  from: string;
+  to: string;
+  state?: ManifestKnowledgeRouteState;
+  domainPair?: { provider: string; consumer: string };
+  evidenceRefs?: string[];
+  reasonCodes?: string[];
+  fingerprint: string;
+}
+
+export interface ManifestDomainCapsule {
+  id: string;
+  domainId: string;
+  modelAreaId?: string;
+  name: string;
+  description?: string;
+  intentExamples: string[];
+  exclusions: string[];
+  termRefs: string[];
+  skillRefs: string[];
+  entityRefs: string[];
+  metricRefs: string[];
+  blockRefs: string[];
+  routeRefs: string[];
+  caveats: string[];
+  requiredFilters: string[];
+  fingerprint: string;
+}
+
+export interface ManifestCrossDomainRoute {
+  id: string;
+  providerDomainId: string;
+  consumerDomainId: string;
+  purpose: string;
+  relationshipId: string;
+  exportId?: string;
+  importId?: string;
+  contractId?: string;
+  state: ManifestKnowledgeRouteState;
+  reasonCodes: string[];
+  path: string[];
+  fingerprint: string;
+}
+
+export interface ManifestKnowledgeShard {
+  id: string;
+  domainId?: string;
+  fingerprint: string;
+  objectCount: number;
+  edgeCount: number;
+}
+
+export interface ManifestKnowledgeGraph {
+  schemaVersion: 1 | 2;
+  /** v1 embeds detail; v2 keeps detail in the content-addressed local index. */
+  storageMode?: 'inline' | 'indexed';
+  sourceFingerprint: string;
+  objects?: Record<string, ManifestKnowledgeObject>;
+  /** Compact v2 identities; verbose payloads and aliases remain indexed. */
+  objectRefs?: ManifestKnowledgeObjectRef[];
+  edges?: ManifestKnowledgeEdge[];
+  counts?: { objects: number; edges: number; skills: number; routes: number };
+  shards?: ManifestKnowledgeShard[];
+  index?: { schemaVersion: number; fingerprint: string };
+  domainCapsules: Record<string, ManifestDomainCapsule>;
+  crossDomainRoutes: ManifestCrossDomainRoute[];
+  diagnostics: ManifestDiagnostic[];
 }
 
 /**

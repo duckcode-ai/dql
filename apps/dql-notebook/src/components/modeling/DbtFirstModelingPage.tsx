@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, XCircle } from 'lucide-react';
+import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, Network, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Sparkles, XCircle } from 'lucide-react';
 import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelArea, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type ContextBootstrapSession, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { SkillsPage } from '../skills/SkillsPage';
+import { Knowledge360 } from '../domains/GovernedContextPage';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
+import { rankModelingOptions, type ModelingSearchOption } from './modeling-search';
 
 type Theme = (typeof themes)['dark'];
 type Tab = DomainStudioSection;
@@ -52,7 +54,7 @@ export function DbtFirstModelingPage() {
   const [focusRequest, setFocusRequest] = useState<{ id: string; token: number } | null>(null);
   const [layoutMode, setLayoutMode] = useState<DiagramLayoutMode>(savedDiagramPreferences.layoutMode ?? 'auto');
   const [diagramDensity, setDiagramDensity] = useState<DiagramDensity>(savedDiagramPreferences.density ?? 'normal');
-  const [visibleLimit, setVisibleLimit] = useState(savedDiagramPreferences.visibleLimit ?? 0);
+  const [visibleLimit, setVisibleLimit] = useState(savedDiagramPreferences.visibleLimit ?? 50);
   const [dimUnrelated, setDimUnrelated] = useState(savedDiagramPreferences.dimUnrelated ?? true);
   const [showEdgeLabels, setShowEdgeLabels] = useState(savedDiagramPreferences.showEdgeLabels ?? true);
   const [showLegend, setShowLegend] = useState(false);
@@ -388,6 +390,7 @@ export function DbtFirstModelingPage() {
             )}
             {tab === 'terms' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['terms']} title="Domain terms" detail="Business vocabulary owned by this domain and available to governed retrieval." t={t} />}
             {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} modelAreaFilter={selectedAreaId} />}
+            {tab === 'knowledge' && <div style={{ height: '100%', overflow: 'auto', padding: '18px 20px' }}><Knowledge360 t={t} domains={Object.values(data.modeling.packages).map((pkg) => ({ id: pkg.id, name: pkg.id }))} initialDomainId={selectedDomain} /></div>}
             {tab === 'blocks' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['blocks']} title="Certified blocks" detail="Reusable analytical building blocks governed by this domain." t={t} />}
             {tab === 'views' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['views']} title="Business views" detail="Domain-owned business views that compose governed models and blocks." t={t} />}
             {tab === 'ai' && <ModelingAiPanel domain={selectedDomain} selectedId={selectedId} data={data} t={t} onOpenSkills={() => selectSection('skills')} onDraftRelationship={() => setEditor({ kind: 'relationship', draft: selectedEntity && selectedId ? { from: selectedId, to: '' } : undefined })} />}
@@ -490,6 +493,7 @@ function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data
   });
   const counts: Partial<Record<Tab, number>> = {
     diagram: entities.length,
+    knowledge: relationships.length,
     skills: assets.skills?.length ?? 0,
     blocks: assets.blocks?.length ?? 0,
   };
@@ -513,7 +517,7 @@ function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data
 }
 
 function domainSectionIcon(section: Tab, size: number, t: Theme, active = false) {
-  const Icon = section === 'blocks' ? Blocks : section === 'diagram' ? GitBranch : section === 'skills' ? GraduationCap : Boxes;
+  const Icon = section === 'blocks' ? Blocks : section === 'diagram' ? GitBranch : section === 'knowledge' ? Network : section === 'skills' ? GraduationCap : Boxes;
   return <Icon size={size} color={active ? t.accent : t.textMuted} />;
 }
 
@@ -611,6 +615,8 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [validation, setValidation] = useState(existing?.validation);
+  const [selectedDbtDetail, setSelectedDbtDetail] = useState<DbtNodeAuthoringDetail | null>(null);
+  const [relationshipDetails, setRelationshipDetails] = useState<Record<string, DbtNodeAuthoringDetail | undefined>>({});
   const [showAdvancedRelationship, setShowAdvancedRelationship] = useState(Boolean(existing && (existing.roles || existing.aggregation || existing.importRefs?.length || existing.attributionBlock || existing.evidenceExpiresAt)));
   useEffect(() => {
     if (editor.kind !== 'relationship' || existing || id || !from || !to) return;
@@ -621,6 +627,35 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
     const name = data.dbtProvenance.nodes[dbtModel]?.name;
     if (name) setId(name.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase());
   }, [editor.kind, id, dbtModel, data.dbtProvenance.nodes]);
+  useEffect(() => {
+    if (editor.kind !== 'entity' || !dbtModel) {
+      setSelectedDbtDetail(null);
+      return;
+    }
+    let cancelled = false;
+    void api.getDbtModelingNode(dbtModel).then((detail) => {
+      if (cancelled) return;
+      setSelectedDbtDetail(detail);
+      if (!businessName) setBusinessName(detail.name.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()));
+      if (!grain && detail.dqlMeta?.grain) setGrain(detail.dqlMeta.grain);
+      if (!keys && detail.dqlMeta?.keys.length) setKeys(detail.dqlMeta.keys.join(', '));
+    }).catch(() => { if (!cancelled) setSelectedDbtDetail(null); });
+    return () => { cancelled = true; };
+  }, [dbtModel, editor.kind]);
+  useEffect(() => {
+    if (editor.kind !== 'relationship') return;
+    const requested = [from, to]
+      .map((recordKey) => data.modeling.entities[recordKey]?.dbtUniqueId)
+      .filter((value): value is string => Boolean(value));
+    const missing = requested.filter((uniqueId) => !relationshipDetails[uniqueId]);
+    if (!missing.length) return;
+    let cancelled = false;
+    void api.getDbtModelingNodes(missing).then(({ details }) => {
+      if (cancelled) return;
+      setRelationshipDetails((current) => ({ ...current, ...Object.fromEntries(details.map((detail) => [detail.uniqueId, detail])) }));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [editor.kind, from, to]);
 
   const buildChange = (): ModelingAuthoringChange => {
     if (editor.kind === 'domain')
@@ -803,6 +838,53 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
       setBusy(false);
     }
   };
+  const entityOptions: ModelingSearchOption[] = Object.entries(data.modeling.entities).map(([recordKey, entity]) => {
+    const dbtNode = data.dbtProvenance.nodes[entity.dbtUniqueId];
+    return {
+      value: recordKey,
+      label: entity.businessName || entity.localId || entity.id,
+      description: `${entity.domain} · ${dbtNode?.relation ?? dbtNode?.name ?? entity.dbtUniqueId}`,
+      keywords: [entity.qualifiedId, entity.businessContext ?? '', entity.analyticalRole ?? ''],
+    };
+  });
+  const fromDetail = relationshipDetails[data.modeling.entities[from]?.dbtUniqueId ?? ''];
+  const toDetail = relationshipDetails[data.modeling.entities[to]?.dbtUniqueId ?? ''];
+  const fromColumnOptions: ModelingSearchOption[] = (fromDetail?.columns ?? []).map((column) => ({
+    value: column.name,
+    label: column.name,
+    description: [column.type, column.description].filter(Boolean).join(' · ') || 'dbt column',
+  }));
+  const toColumnOptions: ModelingSearchOption[] = (toDetail?.columns ?? []).map((column) => ({
+    value: column.name,
+    label: column.name,
+    description: [column.type, column.description].filter(Boolean).join(' · ') || 'dbt column',
+  }));
+  const exactColumnMatches = fromColumnOptions
+    .map((option) => option.value)
+    .filter((column) => toColumnOptions.some((option) => option.value.toLowerCase() === column.toLowerCase()))
+    .slice(0, 5);
+  const editableKeyPairs = keyPairs
+    ? keyPairs.split(',').map((pair) => {
+        const [left = '', right = ''] = pair.split('=').map((item) => item.trim());
+        return { from: left, to: right };
+      })
+    : [{ from: '', to: '' }];
+  const updateKeyPair = (index: number, side: 'from' | 'to', value: string) => {
+    const next = editableKeyPairs.map((pair, pairIndex) => pairIndex === index ? { ...pair, [side]: value } : pair);
+    setKeyPairs(next.map((pair) => `${pair.from}=${pair.to}`).join(', '));
+    setValidation(undefined);
+  };
+  const removeKeyPair = (index: number) => {
+    const next = editableKeyPairs.filter((_, pairIndex) => pairIndex !== index);
+    setKeyPairs(next.map((pair) => `${pair.from}=${pair.to}`).join(', '));
+    setValidation(undefined);
+  };
+  const addKeyPair = () => setKeyPairs([...editableKeyPairs.filter((pair) => pair.from || pair.to), { from: '', to: '' }].map((pair) => `${pair.from}=${pair.to}`).join(', '));
+  const editorReady = editor.kind === 'entity'
+    ? Boolean(domain && id && dbtModel)
+    : editor.kind === 'relationship'
+      ? Boolean(domain && id && from && to && editableKeyPairs.some((pair) => pair.from && pair.to) && editableKeyPairs.every((pair) => pair.from && pair.to))
+      : true;
   const title = editor.kind === 'domain' ? 'Create Domain Package' : editor.kind === 'area' ? (existingArea ? 'Edit model area' : 'Create model area') : editor.kind === 'entity' ? (existingEntity ? 'Edit business entity' : 'Add dbt model') : editor.kind === 'contract' ? 'Create analytical contract' : editor.kind === 'export' ? 'Publish domain export' : editor.kind === 'import' ? 'Request domain import' : existing ? 'Edit relationship' : 'Create relationship';
   return (
     <Modal title={title} t={t} onClose={onClose}>
@@ -830,11 +912,13 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           )}
           {editor.kind === 'entity' && (
             <>
-              <Message text="Start with the business meaning. dbt remains the physical source of truth for columns, descriptions, and tests." t={t} />
+              <WorkflowSteps current={dbtModel ? 2 : 1} labels={['Find dbt model', 'Add business meaning', 'Review source change']} t={t} />
+              <Message text="Search by model name, relation, or source path. Results stay bounded even when the dbt project has thousands of models." t={t} />
               <Field label="Model area"><Select value={areaId} onChange={setAreaId} values={Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => area.localId)} labels={Object.fromEntries(Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => [area.localId, area.name]))} t={t} /></Field>
               <Field label="dbt model">
-                <Select value={dbtModel} onChange={setDbtModel} values={Object.keys(data.dbtProvenance.nodes)} labels={Object.fromEntries(Object.values(data.dbtProvenance.nodes).map((node) => [node.uniqueId, `${node.name} · ${node.relation ?? node.uniqueId}`]))} t={t} />
+                <DbtModelPicker value={dbtModel} onChange={setDbtModel} selectedNode={data.dbtProvenance.nodes[dbtModel]} domain={domain} t={t} />
               </Field>
+              {selectedDbtDetail && <SelectionSummary title={selectedDbtDetail.name} detail={`${selectedDbtDetail.relation ?? selectedDbtDetail.uniqueId} · ${selectedDbtDetail.columns.length} columns${selectedDbtDetail.dqlMeta?.grain ? ` · grain: ${selectedDbtDetail.dqlMeta.grain}` : ''}`} t={t} />}
               <Field label="Business name"><Input value={businessName} onChange={setBusinessName} t={t} placeholder="Customer order" /></Field>
               <Field label="Business context"><Input value={businessContext} onChange={setBusinessContext} t={t} placeholder="One order used to understand repeat purchasing and revenue." /></Field>
               <div style={twoColumns}>
@@ -857,18 +941,31 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           )}
           {editor.kind === 'relationship' && (
             <>
-              <Message text="Choose the two analytical entities and their join keys. DQL keeps the relationship in draft until warehouse validation passes." t={t} />
+              <WorkflowSteps current={!from || !to ? 1 : editableKeyPairs.some((pair) => pair.from && pair.to) ? 3 : 2} labels={['Choose models', 'Match join keys', 'Review policy']} t={t} />
+              <Message text="Search business names or dbt relations, then match columns from only those two models. DQL keeps the relationship in draft until warehouse validation passes." t={t} />
               <Field label="Model area"><Select value={areaId} onChange={setAreaId} values={Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => area.localId)} labels={Object.fromEntries(Object.values(data.modeling.areas).filter((area) => area.domain === domain).map((area) => [area.localId, area.name]))} t={t} /></Field>
               <div style={twoColumns}>
                 <Field label="From entity">
-                  <Select value={from} onChange={setFrom} values={Object.keys(data.modeling.entities)} t={t} />
+                  <SearchPicker ariaLabel="From entity" value={from} onChange={(value) => { setFrom(value); setValidation(undefined); }} options={entityOptions} placeholder="Search source model…" t={t} />
                 </Field>
                 <Field label="To entity">
-                  <Select value={to} onChange={setTo} values={Object.keys(data.modeling.entities)} t={t} />
+                  <SearchPicker ariaLabel="To entity" value={to} onChange={(value) => { setTo(value); setValidation(undefined); }} options={entityOptions.filter((option) => option.value !== from)} placeholder="Search target model…" t={t} />
                 </Field>
               </div>
-              <Field label="Join key pairs">
-                <Input value={keyPairs} onChange={setKeyPairs} t={t} placeholder="customer_id=customer_id, tenant_id=tenant_id" />
+              {from && to && <SelectionSummary title={`${data.modeling.entities[from]?.businessName || data.modeling.entities[from]?.localId} → ${data.modeling.entities[to]?.businessName || data.modeling.entities[to]?.localId}`} detail={`${fromDetail?.columns.length ?? 0} source columns · ${toDetail?.columns.length ?? 0} target columns`} t={t} />}
+              <Field label="Join keys">
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {exactColumnMatches.length > 0 && !editableKeyPairs.some((pair) => pair.from && pair.to) && <button type="button" onClick={() => setKeyPairs(`${exactColumnMatches[0]}=${exactColumnMatches[0]}`)} style={{ ...linkButton(t), justifySelf: 'start' }}><Sparkles size={13} /> Use exact match: {exactColumnMatches[0]}</button>}
+                  {editableKeyPairs.map((pair, index) => (
+                    <div key={`${index}:${pair.from}:${pair.to}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 24px minmax(0, 1fr) 30px', gap: 7, alignItems: 'center' }}>
+                      <SearchPicker ariaLabel={`Source join column ${index + 1}`} value={pair.from} onChange={(value) => updateKeyPair(index, 'from', value)} options={fromColumnOptions} placeholder={from ? 'Source column…' : 'Choose source first'} disabled={!from || !fromDetail} t={t} />
+                      <span aria-hidden="true" style={{ color: t.textMuted, textAlign: 'center' }}>→</span>
+                      <SearchPicker ariaLabel={`Target join column ${index + 1}`} value={pair.to} onChange={(value) => updateKeyPair(index, 'to', value)} options={toColumnOptions} placeholder={to ? 'Target column…' : 'Choose target first'} disabled={!to || !toDetail} t={t} />
+                      <button type="button" aria-label="Remove join key" title="Remove join key" onClick={() => removeKeyPair(index)} style={iconButtonStyle(t)}><XCircle size={14} /></button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={addKeyPair} style={{ ...linkButton(t), justifySelf: 'start' }}><Plus size={13} /> Add key pair</button>
+                </div>
               </Field>
               {id && <div style={{ color: t.textMuted, fontSize: 9.5 }}>Relationship id: <code>{id}</code></div>}
               <div style={twoColumns}>
@@ -995,11 +1092,11 @@ function ModelingEditor({ editor, data, selectedDomain, selectedArea, t, onClose
           {message && <Message text={message} t={t} />}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             {editor.kind === 'relationship' && (
-              <Button t={t} onClick={() => void validate()} disabled={busy}>
+              <Button t={t} onClick={() => void validate()} disabled={busy || !editorReady}>
                 <ShieldCheck size={14} /> Validate in warehouse
               </Button>
             )}
-            <Button primary t={t} onClick={() => void previewChange()} disabled={busy}>
+            <Button primary t={t} onClick={() => void previewChange()} disabled={busy || !editorReady}>
               Preview source change
             </Button>
           </div>
@@ -1056,6 +1153,7 @@ function DomainOverview({ data, domain, t, onOpen }: { data: DbtFirstModelingRes
               {[
                 { id: 'blocks' as const, title: 'Blocks', count: assets.blocks?.length ?? 0, detail: 'Reusable analytics.', icon: <Blocks size={16} /> },
                 { id: 'diagram' as const, title: 'Modeling', count: entities.length, detail: 'Models and relationships.', icon: <GitBranch size={16} /> },
+                { id: 'knowledge' as const, title: 'Knowledge 360', count: Object.values(data.modeling.relationships).filter((relationship) => data.modeling.entities[relationship.from]?.domain === domain || data.modeling.entities[relationship.to]?.domain === domain).length, detail: 'Governed routes and evidence.', icon: <Network size={16} /> },
                 { id: 'skills' as const, title: 'Skills', count: assets.skills?.length ?? 0, detail: 'Agent instructions.', icon: <GraduationCap size={16} /> },
               ].map((item) => (
                 <button key={item.id} type="button" onClick={() => onOpen(item.id)} style={domainActionCard(t)}>
@@ -1156,12 +1254,14 @@ function LayerToolbar({ modelingView, columnMode, search, layoutMode, density, v
         <button type="button" onClick={() => onModelingView('business')} style={{ border: 'none', borderRadius: 5, padding: '4px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap', background: modelingView === 'business' ? 'var(--accent-dim)' : 'transparent', color: modelingView === 'business' ? t.accent : t.textMuted }}>Business modeling</button>
         <button type="button" onClick={() => onModelingView('data')} style={{ border: 'none', borderRadius: 5, padding: '4px 11px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap', background: modelingView === 'data' ? 'var(--accent-dim)' : 'transparent', color: modelingView === 'data' ? t.accent : t.textMuted }}>Data modeling</button>
       </div>
-      <IconButton t={t} title="Bind model" onClick={onBindModel}><Plus size={14} /></IconButton><IconButton t={t} title="Create relationship" onClick={onRelationship}><Link2 size={14} /></IconButton><IconButton t={t} title="Create model area" onClick={onNewArea}><Boxes size={14} /></IconButton>
+      <button type="button" onClick={onBindModel} style={toolbarAction(t, true)}><Plus size={13} /> Add model</button>
+      <button type="button" onClick={onRelationship} style={toolbarAction(t)}><Link2 size={13} /> Connect</button>
+      <button type="button" onClick={onNewArea} style={toolbarAction(t)}><Boxes size={13} /> New area</button>
       {modelingView === 'data' && <label style={{ display: 'flex', alignItems: 'center', gap: 5, color: t.textMuted, fontSize: 10 }}><Columns3 size={13} /><select aria-label="Visible columns" value={columnMode} onChange={(event) => onColumnMode(event.target.value as ColumnDisplayMode)} style={{ ...inputStyle(t), width: 104, padding: '5px 6px' }}><option value="keys">Keys only</option><option value="relevant">Relevant</option><option value="all">All columns</option></select></label>}
       <DiagramSearch search={search} onSearch={onSearch} items={searchItems} onPick={onPickModel} t={t} />
       <select aria-label="Diagram layout" value={layoutMode} onChange={(event) => { onLayoutMode(event.target.value as DiagramLayoutMode); onReset(); }} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value="auto">Auto</option><option value="grid">Grid</option><option value="star">Star</option></select>
       <select aria-label="Diagram density" value={density} onChange={(event) => onDensity(event.target.value as DiagramDensity)} style={{ ...inputStyle(t), width: 92, padding: '5px 6px' }}><option value="compact">Compact</option><option value="normal">Normal</option><option value="wide">Wide</option></select>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9 }}>Show <input aria-label="Visible model limit" type="number" min={0} max={totalEntities} value={visibleLimit || totalEntities} onChange={(event) => onVisibleLimit(Math.max(0, Number(event.target.value) >= totalEntities ? 0 : Number(event.target.value)))} style={{ ...inputStyle(t), width: 52, padding: '5px' }} /></label>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 4, color: t.textMuted, fontSize: 9.5 }}>Canvas <select aria-label="Visible model limit" value={visibleLimit || 50} onChange={(event) => onVisibleLimit(Number(event.target.value))} style={{ ...inputStyle(t), width: 94, padding: '5px 6px' }}><option value={25}>25 models</option><option value={50}>50 models</option><option value={100}>100 models</option><option value={200}>200 max</option></select></label>
       <button aria-label="Dim unrelated models" title="Dim unrelated models" onClick={() => onDimUnrelated(!dimUnrelated)} style={{ ...iconButtonStyle(t), color: dimUnrelated ? t.accent : t.textMuted }}><EyeOff size={14} /></button>
       <button aria-label="Toggle relationship labels" title="Toggle relationship labels" onClick={() => onEdgeLabels(!showEdgeLabels)} style={{ ...iconButtonStyle(t), color: showEdgeLabels ? t.accent : t.textMuted }}><Link2 size={14} /></button>
       <button aria-label="Relationship legend" title="Relationship legend" onClick={() => onLegend(!showLegend)} style={{ ...iconButtonStyle(t), color: showLegend ? t.accent : t.textMuted }}><Boxes size={14} /></button>
@@ -2111,6 +2211,101 @@ function Modal({ title, t, onClose, children }: { title: string; t: Theme; onClo
     </div>
   );
 }
+function WorkflowSteps({ current, labels, t }: { current: number; labels: string[]; t: Theme }) {
+  return (
+    <div aria-label={`Step ${current} of ${labels.length}`} style={{ display: 'grid', gridTemplateColumns: `repeat(${labels.length}, minmax(0, 1fr))`, gap: 6 }}>
+      {labels.map((label, index) => {
+        const step = index + 1;
+        const active = step === current;
+        const complete = step < current;
+        return <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, color: active ? t.textPrimary : t.textMuted, fontSize: 10, fontWeight: active ? 700 : 550 }}><span style={{ display: 'grid', placeItems: 'center', width: 20, height: 20, flex: '0 0 auto', borderRadius: 999, border: `1px solid ${active || complete ? t.accent : t.headerBorder}`, background: complete ? t.accent : active ? 'var(--accent-dim)' : t.appBg, color: complete ? '#fff' : active ? t.accent : t.textMuted }}>{complete ? '✓' : step}</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span></div>;
+      })}
+    </div>
+  );
+}
+
+function SelectionSummary({ title, detail, t }: { title: string; detail: string; t: Theme }) {
+  return <div style={{ display: 'grid', gap: 3, padding: '9px 11px', border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg }}><strong style={{ fontSize: 11 }}>{title}</strong><span style={{ color: t.textMuted, fontSize: 9.5, overflowWrap: 'anywhere' }}>{detail}</span></div>;
+}
+
+function SearchPicker({ ariaLabel, value, onChange, options, placeholder, disabled = false, t }: { ariaLabel?: string; value: string; onChange: (value: string) => void; options: ModelingSearchOption[]; placeholder: string; disabled?: boolean; t: Theme }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const selected = options.find((option) => option.value === value);
+  const results = rankModelingOptions(options, query, 50);
+  return (
+    <div style={{ position: 'relative', minWidth: 0 }}>
+      <div style={{ position: 'relative' }}>
+        <Search size={13} aria-hidden="true" style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: t.textMuted, pointerEvents: 'none' }} />
+        <input
+          role="combobox"
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          aria-controls={open ? 'modeling-search-results' : undefined}
+          disabled={disabled}
+          value={open ? query : (selected?.label ?? value)}
+          placeholder={placeholder}
+          onFocus={() => { setOpen(true); setQuery(''); }}
+          onBlur={() => { setOpen(false); setQuery(''); }}
+          onChange={(event) => { setOpen(true); setQuery(event.target.value); }}
+          onKeyDown={(event) => { if (event.key === 'Escape') { setOpen(false); setQuery(''); } }}
+          style={{ ...inputStyle(t), paddingLeft: 29, paddingRight: value ? 29 : 8, opacity: disabled ? 0.6 : 1 }}
+        />
+        {value && !disabled && <button type="button" aria-label="Clear selection" onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(''); setQuery(''); setOpen(true); }} style={{ ...iconButtonStyle(t), position: 'absolute', right: 3, top: '50%', transform: 'translateY(-50%)', width: 24, height: 24, border: 'none' }}><XCircle size={13} /></button>}
+      </div>
+      {open && !disabled && (
+        <div id="modeling-search-results" role="listbox" style={{ position: 'absolute', zIndex: 90, top: 'calc(100% + 4px)', left: 0, right: 0, maxHeight: 230, overflowY: 'auto', border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }}>
+          {results.length ? results.map((option) => <button key={option.value} type="button" role="option" aria-selected={option.value === value} onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(option.value); setOpen(false); setQuery(''); }} style={{ display: 'grid', width: '100%', gap: 2, padding: '8px 9px', border: 'none', borderRadius: 5, textAlign: 'left', background: option.value === value ? 'var(--accent-dim)' : 'transparent', color: t.textPrimary, cursor: 'pointer' }}><strong style={{ fontSize: 10.5 }}>{option.label}</strong>{option.description && <span style={{ color: t.textMuted, fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.description}</span>}</button>) : <div style={{ padding: 12, color: t.textMuted, fontSize: 10 }}>No matching results.</div>}
+          {options.length > 50 && <div style={{ padding: '6px 9px 4px', borderTop: `1px solid ${t.headerBorder}`, color: t.textMuted, fontSize: 9 }}>Showing the best 50 of {options.length.toLocaleString()}. Refine your search for a specific result.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DbtModelPicker({ value, onChange, selectedNode, t }: { value: string; onChange: (value: string) => void; selectedNode?: { name: string; relation?: string; sourcePath?: string }; domain: string; t: Theme }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [options, setOptions] = useState<ModelingSearchOption[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      void api.getDbtModelInventory({ q: query, limit: 50 }).then((result) => {
+        if (cancelled) return;
+        setTotal(result.total);
+        setOptions(result.items.map((raw) => {
+          const item = raw as { uniqueId?: string; name?: string; relation?: string; sourcePath?: string; binding?: { domain?: string; businessName?: string } };
+          return {
+            value: item.uniqueId ?? '',
+            label: item.name ?? item.uniqueId ?? 'Unnamed model',
+            description: `${item.relation ?? item.sourcePath ?? item.uniqueId}${item.binding ? ` · already bound to ${item.binding.domain ?? 'a domain'}` : ' · unbound'}`,
+            keywords: [item.sourcePath ?? '', item.binding?.businessName ?? ''],
+          };
+        }).filter((option) => option.value));
+      }).catch(() => { if (!cancelled) setOptions([]); }).finally(() => { if (!cancelled) setLoading(false); });
+    }, 140);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query]);
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ position: 'relative' }}>
+        <Search size={13} aria-hidden="true" style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: t.textMuted, pointerEvents: 'none' }} />
+        <input role="combobox" aria-label="Search dbt models" aria-expanded={open} value={open ? query : (selectedNode?.name ?? value)} placeholder="Search model, relation, or path…" onFocus={() => { setOpen(true); setQuery(''); }} onBlur={() => { setOpen(false); setQuery(''); }} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }} style={{ ...inputStyle(t), paddingLeft: 29, paddingRight: value ? 29 : 8 }} />
+        {value && <button type="button" aria-label="Clear dbt model" onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(''); setOpen(true); }} style={{ ...iconButtonStyle(t), position: 'absolute', right: 3, top: '50%', transform: 'translateY(-50%)', width: 24, height: 24, border: 'none' }}><XCircle size={13} /></button>}
+      </div>
+      {open && <div role="listbox" style={{ position: 'absolute', zIndex: 90, top: 'calc(100% + 4px)', left: 0, right: 0, maxHeight: 260, overflowY: 'auto', border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.cellBg, boxShadow: '0 12px 32px #0004', padding: 4 }}>
+        {loading && <div style={{ padding: 10, color: t.textMuted, fontSize: 10 }}>Searching project inventory…</div>}
+        {!loading && options.map((option) => <button key={option.value} type="button" role="option" aria-selected={option.value === value} onMouseDown={(event) => event.preventDefault()} onClick={() => { onChange(option.value); setOpen(false); setQuery(''); }} style={{ display: 'grid', width: '100%', gap: 2, padding: '8px 9px', border: 'none', borderRadius: 5, textAlign: 'left', background: option.value === value ? 'var(--accent-dim)' : 'transparent', color: t.textPrimary, cursor: 'pointer' }}><strong style={{ fontSize: 10.5 }}>{option.label}</strong><span style={{ color: t.textMuted, fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.description}</span></button>)}
+        {!loading && !options.length && <div style={{ padding: 10, color: t.textMuted, fontSize: 10 }}>No dbt models match this search.</div>}
+        {!loading && total > options.length && <div style={{ padding: '6px 9px 4px', borderTop: `1px solid ${t.headerBorder}`, color: t.textMuted, fontSize: 9 }}>Showing 50 of {total.toLocaleString()}. Keep typing to narrow the inventory.</div>}
+      </div>}
+    </div>
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label style={{ display: 'grid', gap: 6, fontSize: 11, fontWeight: 650 }}>
@@ -2364,6 +2559,21 @@ const twoColumns: React.CSSProperties = {
   gridTemplateColumns: '1fr 1fr',
   gap: 12,
 };
+const toolbarAction = (t: Theme, primary = false): React.CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 5,
+  flex: '0 0 auto',
+  border: `1px solid ${primary ? t.accent : t.headerBorder}`,
+  borderRadius: 6,
+  background: primary ? 'var(--accent-dim)' : t.appBg,
+  color: primary ? t.accent : t.textSecondary,
+  padding: '5px 8px',
+  fontSize: 10.5,
+  fontWeight: 650,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+});
 const tableStyle: React.CSSProperties = {
   width: '100%',
   borderCollapse: 'collapse',

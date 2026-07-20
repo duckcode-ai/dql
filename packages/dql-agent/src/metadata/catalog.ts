@@ -8,12 +8,16 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from 'node:zlib';
 import type Database from 'better-sqlite3';
 import {
   buildManifest,
+  buildManifestKnowledgeGraph,
+  loadDomainPackageRegistry,
+  loadManifestKnowledgeSkills,
   loadProjectConfig,
   parseContractRef,
   resolveDataLexManifestPath,
@@ -24,6 +28,11 @@ import {
   type DQLManifest,
   type ManifestConflictDetail,
   type ManifestDiagnostic,
+  type ManifestDomainCapsule,
+  type ManifestCrossDomainRoute,
+  type ManifestKnowledgeObject,
+  type ManifestKnowledgeEdge,
+  type ManifestKnowledgeObjectKind,
   type SemanticLayer,
   type ColumnLineageEntry,
   type ColumnSource,
@@ -34,7 +43,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
-import type { DomainContextEnvelope } from '../domain-context.js';
+import type { DomainContextEnvelope, KnowledgeLens } from '../domain-context.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import {
   buildAnalysisQuestionPlan,
@@ -148,6 +157,8 @@ export interface MetadataSnapshot {
    * `conflict` route needs; persisted as a JSON state blob.
    */
   compileConflicts: ManifestConflictDetail[];
+  /** Optional for callers constructing legacy/in-memory snapshots directly. */
+  skillBodies?: Array<{ bodyHash: string; body: string }>;
   fingerprint: string;
   generatedAt: string;
 }
@@ -179,6 +190,7 @@ export interface EnsureMetadataCatalogOptions {
 
 export interface EnsureMetadataCatalogResult {
   path: string;
+  snapshotPath?: string;
   refreshed: boolean;
   objectCount: number;
   edgeCount: number;
@@ -465,6 +477,8 @@ export interface LocalContextPack {
    * exact skill provenance without re-reading mutable files mid-run.
    */
   skills: LocalContextSkill[];
+  /** Exact domain capsule and skills used for this immutable context pack. */
+  knowledgeLens: KnowledgeLens;
   edges: MetadataEdge[];
   queryRuns: QueryRunSummary[];
   citations: Array<{
@@ -693,14 +707,153 @@ const OBJECT_PRIORITY: Record<string, number> = {
 
 const COLUMN_OBJECT_TYPES = new Set(['dbt_column', 'warehouse_column', 'runtime_column', 'runtime_value']);
 // v3 removes the legacy persisted plaintext runtime-value cache (SEC-003).
-const METADATA_INDEX_VERSION = 'metadata-index-v3-no-plaintext-values';
+const METADATA_INDEX_VERSION = 'metadata-index-v4-content-addressed-skills';
 
 export function defaultMetadataPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'cache', 'metadata.sqlite');
 }
 
+export function metadataSnapshotPath(projectRoot: string, fingerprint: string): string {
+  return join(projectRoot, '.dql', 'cache', 'snapshots', `${fingerprint}.sqlite`);
+}
+
+export function activeMetadataSnapshotPath(projectRoot: string): string | null {
+  const pointerPath = join(projectRoot, '.dql', 'cache', 'active-snapshot.json');
+  if (!existsSync(pointerPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(pointerPath, 'utf8')) as { snapshotPath?: unknown };
+    const path = typeof parsed.snapshotPath === 'string' ? parsed.snapshotPath : '';
+    return path && existsSync(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the prepared catalog identity without rebuilding the metadata snapshot. */
+export function currentMetadataFingerprint(projectRoot: string): string | undefined {
+  if (!existsSync(defaultMetadataPath(projectRoot))) return undefined;
+  const catalog = openMetadataCatalog(projectRoot);
+  try {
+    return catalog.state('fingerprint') ?? undefined;
+  } finally {
+    catalog.close();
+  }
+}
+
+function activateMetadataSnapshot(projectRoot: string, fingerprint: string, catalog: MetadataCatalog): string {
+  const snapshotPath = metadataSnapshotPath(projectRoot, fingerprint);
+  catalog.exportSnapshot(snapshotPath);
+  const cacheDir = join(projectRoot, '.dql', 'cache');
+  const pointerPath = join(cacheDir, 'active-snapshot.json');
+  const candidate = `${pointerPath}.candidate`;
+  mkdirSync(cacheDir, { recursive: true });
+  writeFileSync(candidate, JSON.stringify({
+    snapshotId: fingerprint,
+    indexSchemaVersion: METADATA_INDEX_VERSION,
+    snapshotPath,
+  }, null, 2), 'utf8');
+  renameSync(candidate, pointerPath);
+  // Do not delete older immutable files here: a request that acquired the old
+  // pointer may still hold it open. Cache cleanup is an explicit maintenance
+  // concern until the snapshot service owns reference-counted leases.
+  return snapshotPath;
+}
+
 export function openMetadataCatalog(projectRoot: string, dbPath = defaultMetadataPath(projectRoot)): MetadataCatalog {
   return new MetadataCatalog(dbPath);
+}
+
+export function openActiveKnowledgeSnapshot(projectRoot: string): MetadataCatalog {
+  const path = activeMetadataSnapshotPath(projectRoot) ?? defaultMetadataPath(projectRoot);
+  return new MetadataCatalog(path, { readOnly: path !== defaultMetadataPath(projectRoot) });
+}
+
+export interface IndexedDomainKnowledge {
+  schemaVersion: 2;
+  snapshotId: string;
+  sourceFingerprint: string;
+  domainId: string;
+  capsule?: ManifestDomainCapsule;
+  counts: { objects: number; edges: number; routes: number; routeStates: Record<string, number> };
+  objects: ManifestKnowledgeObject[];
+  edges: ManifestKnowledgeEdge[];
+  routes: ManifestCrossDomainRoute[];
+  truncated: boolean;
+}
+
+export function readIndexedDomainKnowledge(projectRoot: string, domainId: string): IndexedDomainKnowledge | null {
+  const catalog = openActiveKnowledgeSnapshot(projectRoot);
+  try {
+    const snapshotId = catalog.state('fingerprint') ?? 'metadata-unavailable';
+    const capsuleObject = catalog.listAllObjects({ objectTypes: ['domain_capsule'], domain: domainId })
+      .find((item) => !stringValue(item.payload?.modelAreaId));
+    const capsule = capsuleObject?.payload as ManifestDomainCapsule | undefined;
+    if (!capsule) return null;
+    const rows = catalog.listAllObjects({ domain: domainId })
+      .filter((item) => item.objectType !== 'domain_capsule' && item.objectType !== 'cross_domain_route');
+    const selectedRows = rows.slice(0, 750);
+    const byKey = new Map(selectedRows.map((row) => [row.objectKey, metadataObjectToKnowledge(row)]));
+    const edgeRows = catalog.edgesForKeys(selectedRows.map((row) => row.objectKey), 1).slice(0, 1_500);
+    for (const edge of edgeRows) {
+      if (!byKey.has(edge.fromKey)) {
+        const item = catalog.getObject(edge.fromKey);
+        if (item) byKey.set(edge.fromKey, metadataObjectToKnowledge(item));
+      }
+      if (!byKey.has(edge.toKey)) {
+        const item = catalog.getObject(edge.toKey);
+        if (item) byKey.set(edge.toKey, metadataObjectToKnowledge(item));
+      }
+    }
+    const routes = catalog.listAllObjects({ objectTypes: ['cross_domain_route'] })
+      .flatMap((item) => metadataRoute(item) ? [metadataRoute(item)!] : [])
+      .filter((route) => route.providerDomainId === domainId || route.consumerDomainId === domainId);
+    const routeStates = routes.reduce<Record<string, number>>((counts, route) => {
+      counts[route.state] = (counts[route.state] ?? 0) + 1;
+      return counts;
+    }, {});
+    return {
+      schemaVersion: 2,
+      snapshotId,
+      sourceFingerprint: stringValue(capsuleObject?.payload?.sourceFingerprint) ?? snapshotId,
+      domainId,
+      capsule,
+      counts: { objects: rows.length, edges: edgeRows.length, routes: routes.length, routeStates },
+      objects: selectedRows.map(metadataObjectToKnowledge),
+      edges: edgeRows.map((edge) => metadataEdgeToKnowledge(edge, byKey)),
+      routes,
+      truncated: rows.length > selectedRows.length || edgeRows.length >= 1_500,
+    };
+  } finally {
+    catalog.close();
+  }
+}
+
+export function readIndexedKnowledge360(projectRoot: string, identity: string) {
+  const catalog = openActiveKnowledgeSnapshot(projectRoot);
+  try {
+    const focusRow = catalog.findObjectByIdentity(identity);
+    if (!focusRow) return null;
+    const edgeRows = catalog.edgesForKeys([focusRow.objectKey], 2).slice(0, 500);
+    const keys = [...new Set([focusRow.objectKey, ...edgeRows.flatMap((edge) => [edge.fromKey, edge.toKey])])].slice(0, 160);
+    const rows = catalog.getObjectsByKeys(keys);
+    const byKey = new Map(rows.map((row) => [row.objectKey, metadataObjectToKnowledge(row)]));
+    const objects = rows.map(metadataObjectToKnowledge);
+    const domains = new Set(objects.flatMap((item) => item.domainId ? [item.domainId] : []));
+    const routes = catalog.listAllObjects({ objectTypes: ['cross_domain_route'] })
+      .flatMap((item) => metadataRoute(item) ? [metadataRoute(item)!] : [])
+      .filter((route) => domains.has(route.providerDomainId) && domains.has(route.consumerDomainId));
+    return {
+      snapshotId: catalog.state('fingerprint') ?? 'metadata-unavailable',
+      sourceFingerprint: catalog.state('fingerprint') ?? 'metadata-unavailable',
+      focus: metadataObjectToKnowledge(focusRow),
+      objects,
+      edges: edgeRows.filter((edge) => byKey.has(edge.fromKey) && byKey.has(edge.toKey)).map((edge) => metadataEdgeToKnowledge(edge, byKey)),
+      routes,
+      truncated: keys.length >= 160 || edgeRows.length >= 500,
+    };
+  } finally {
+    catalog.close();
+  }
 }
 
 export async function ensureMetadataCatalogFresh(
@@ -718,8 +871,10 @@ export async function ensureMetadataCatalogFresh(
     const existing = catalog.state('fingerprint');
     const compatibleIndex = catalog.state('index_version') === METADATA_INDEX_VERSION;
     if (!options.force && compatibleIndex && existing === snapshot.fingerprint) {
+      const snapshotPath = activateMetadataSnapshot(projectRoot, snapshot.fingerprint, catalog);
       return {
         path: defaultMetadataPath(projectRoot),
+        snapshotPath,
         refreshed: false,
         objectCount: catalog.objectCount(),
         edgeCount: catalog.edgeCount(),
@@ -735,8 +890,10 @@ export async function ensureMetadataCatalogFresh(
     } else {
       catalog.rebuildIncremental(snapshot);
     }
+    const snapshotPath = activateMetadataSnapshot(projectRoot, snapshot.fingerprint, catalog);
     return {
       path: defaultMetadataPath(projectRoot),
+      snapshotPath,
       refreshed: true,
       objectCount: snapshot.objects.length,
       edgeCount: snapshot.edges.length,
@@ -752,8 +909,10 @@ export function upsertMetadataSnapshot(projectRoot: string, snapshot: MetadataSn
   const catalog = openMetadataCatalog(projectRoot);
   try {
     catalog.rebuild(snapshot);
+    const snapshotPath = activateMetadataSnapshot(projectRoot, snapshot.fingerprint, catalog);
     return {
       path: defaultMetadataPath(projectRoot),
+      snapshotPath,
       refreshed: true,
       objectCount: snapshot.objects.length,
       edgeCount: snapshot.edges.length,
@@ -779,7 +938,12 @@ export async function buildLocalContextPack(
     }
   }
   if (!prepared) await ensureMetadataCatalogFresh(projectRoot);
-  const catalog = openMetadataCatalog(projectRoot);
+  // Static governed knowledge is read from the immutable content-addressed
+  // snapshot selected at request start. Mutable run history, runtime schema,
+  // and context packs stay in the working catalog and never alter that view.
+  const snapshotPath = activeMetadataSnapshotPath(projectRoot) ?? defaultMetadataPath(projectRoot);
+  const catalog = openActiveKnowledgeSnapshot(projectRoot);
+  const runtimeCatalog = openMetadataCatalog(projectRoot);
   try {
     const mode = request.mode ?? 'question';
     const followUp = normalizeFollowUpContext(request.followUp);
@@ -796,7 +960,7 @@ export async function buildLocalContextPack(
       && request.priorContextPackId
       && request.conversationTopicRelation
       && request.conversationTopicRelation !== 'shift'
-      ? catalog.getContextPack(request.priorContextPackId)
+      ? runtimeCatalog.getContextPack(request.priorContextPackId)
       : null;
     const priorPackFresh = Boolean(priorPack && priorPack.freshness.fingerprint === catalog.state('fingerprint'));
     if (
@@ -817,13 +981,13 @@ export async function buildLocalContextPack(
           strategy: 'reused_pack_refinement',
         },
         freshness: {
-          catalogPath: defaultMetadataPath(projectRoot),
+          catalogPath: snapshotPath,
           builtAt: catalog.state('built_at'),
           fingerprint: catalog.state('fingerprint'),
         },
       };
       delete (reusedPayload as Partial<LocalContextPack>).id;
-      const reusedId = catalog.insertContextPack(reusedPayload);
+      const reusedId = runtimeCatalog.insertContextPack(reusedPayload);
       return { ...reusedPayload, id: reusedId };
     }
     const priorSeedObjects = priorPack && priorPackFresh
@@ -846,8 +1010,8 @@ export async function buildLocalContextPack(
     // question-scoped schema payload.
     const runtimeObjects = request.runtimeSchemaSnapshot
       ? runtimeSchemaObjects(request.runtimeSchemaSnapshot)
-      : catalog.searchRuntimeSchemaObjects(searchQueries.join(' '), Math.max(request.limit ?? 80, 20));
-    const runtimeValueObjects = runtimeValueMatchObjects(catalog.searchRuntimeValues(
+      : runtimeCatalog.searchRuntimeSchemaObjects(searchQueries.join(' '), Math.max(request.limit ?? 80, 20));
+    const runtimeValueObjects = runtimeValueMatchObjects(runtimeCatalog.searchRuntimeValues(
       metadataValueSearchTerms(request.question, questionPlan, followUp),
       32,
     ));
@@ -920,21 +1084,32 @@ export async function buildLocalContextPack(
     // area, status, and exclusion gates as the loader. They are not left to FTS
     // chance or re-read from disk after the snapshot has been fingerprinted.
     const selectedSkills = selectContextPackSkills(
+      catalog,
       catalog.listAllObjects({ objectTypes: ['skill'] }),
       request.question,
       effectiveDomainContext,
     );
     const selectedSkillObjects = selectedSkills.map((item) => item.object);
+    const routeCandidates = effectiveDomainContext?.activeDomain
+      ? catalog.crossDomainRouteObjects(effectiveDomainContext.activeDomain, 100)
+      : [];
+    const routeObjects = rankMetadataObjects({
+      rows: retrievalObjects(routeCandidates),
+      question: `${request.question} ${effectiveDomainContext?.purpose ?? ''}`,
+      questionPlan,
+      modelAreaId: focusedArea?.id,
+      limit: 8,
+    }).selected;
     const objects = fullCatalogObjects
-      ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects, ...selectedSkillObjects])
-      : mergeObjects([...rankedObjects, ...sqlParentObjects, ...selectedSkillObjects]);
+      ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects, ...selectedSkillObjects, ...routeObjects])
+      : mergeObjects([...rankedObjects, ...sqlParentObjects, ...selectedSkillObjects, ...routeObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
     const allowedObjectKeys = new Set(objectKeys);
     const contextEdges = mergeMetadataEdges([
       ...edgeWalk,
       ...catalog.edgesForKeys(objectKeys, 2),
     ]).filter((edge) => allowedObjectKeys.has(edge.fromKey) && allowedObjectKeys.has(edge.toKey));
-    const queryRuns = catalog.queryRunsForObjectKeys(objectKeys, 20);
+    const queryRuns = runtimeCatalog.queryRunsForObjectKeys(objectKeys, 20);
     const diagnostics = catalog.diagnostics();
     const warnings = buildWarnings(diagnostics, objects);
     const trustLabel = deriveTrust(objects);
@@ -992,6 +1167,8 @@ export async function buildLocalContextPack(
       limit: 6,
     }).catch(() => ({ applied: [], conflicts: [] }));
 
+    const knowledgeLens = buildKnowledgeLens(catalog, effectiveDomainContext, selectedSkills);
+
     const payload: LocalContextPack = {
       id: '',
       question: request.question,
@@ -1003,6 +1180,7 @@ export async function buildLocalContextPack(
       trustLabelInfo: metadataTrustLabelInfo(trustLabel),
       objects,
       skills: selectedSkills.map((item) => item.skill),
+      knowledgeLens,
       edges: contextEdges,
       queryRuns,
       citations,
@@ -1044,18 +1222,49 @@ export async function buildLocalContextPack(
         meaningEvidence,
       },
       freshness: {
-        catalogPath: defaultMetadataPath(projectRoot),
+        catalogPath: snapshotPath,
         builtAt: catalog.state('built_at'),
         fingerprint: catalog.state('fingerprint'),
       },
     };
     const packPayload = { ...payload };
     delete (packPayload as Partial<LocalContextPack>).id;
-    const id = catalog.insertContextPack(packPayload);
+    const id = runtimeCatalog.insertContextPack(packPayload);
     return { ...payload, id };
   } finally {
     catalog.close();
+    runtimeCatalog.close();
   }
+}
+
+function buildKnowledgeLens(
+  catalog: MetadataCatalog,
+  context: DomainContextEnvelope | undefined,
+  selectedSkills: Array<{ object: MetadataObject; skill: LocalContextSkill }>,
+): KnowledgeLens {
+  const activeDomainId = context?.activeDomain ?? undefined;
+  const capsule = activeDomainId
+    ? catalog.listAllObjects({ objectTypes: ['domain_capsule'] })
+      .find((object) => object.domain === activeDomainId && !stringValue(object.payload?.modelAreaId))
+    : undefined;
+  const skillRefs = selectedSkills
+    .map(({ skill }) => skill.qualifiedId ?? skill.id)
+    .sort();
+  const skillFingerprints = Object.fromEntries(selectedSkills.flatMap(({ object, skill }) => {
+    const fingerprint = stringValue(object.payload?.sourceFingerprint);
+    return fingerprint ? [[skill.qualifiedId ?? skill.id, fingerprint]] : [];
+  }));
+  return {
+    mode: context?.source === 'explicit_api' || context?.source === 'explicit_ui' ? 'pinned' : 'auto',
+    activeDomainId,
+    modelAreaId: context?.modelAreaId,
+    purpose: context?.purpose,
+    skillRefs,
+    snapshotId: context?.snapshotId ?? catalog.state('fingerprint') ?? 'metadata-unavailable',
+    capsuleFingerprint: stringValue(capsule?.payload?.fingerprint)
+      ?? stringValue(capsule?.payload?.sourceFingerprint),
+    skillFingerprints: Object.keys(skillFingerprints).length > 0 ? skillFingerprints : undefined,
+  };
 }
 
 export async function planAgentAnswer(
@@ -1134,6 +1343,7 @@ export function buildMetadataSnapshot(
   }
 
   addManifestBlockDetails(manifest, objects);
+  addManifestKnowledgeGraph(materializeIndexedKnowledgeGraph(projectRoot, manifest), objects, edges);
   addSkillObjects(skills, objects, edges);
   addDbtDagObjects(manifest, objects, edges, diagnostics);
   addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
@@ -1171,6 +1381,10 @@ export function buildMetadataSnapshot(
     edges: Array.from(edges.values()).sort((a, b) => `${a.edgeType}|${a.fromKey}|${a.toKey}`.localeCompare(`${b.edgeType}|${b.fromKey}|${b.toKey}`)),
     diagnostics,
     compileConflicts,
+    skillBodies: [...new Map(skills.map((skill) => {
+      const bodyHash = sha256(skill.body);
+      return [bodyHash, { bodyHash, body: skill.body }] as const;
+    })).values()].sort((a, b) => a.bodyHash.localeCompare(b.bodyHash)),
     generatedAt: new Date().toISOString(),
     fingerprint: '',
   };
@@ -1178,13 +1392,289 @@ export function buildMetadataSnapshot(
   return snapshot;
 }
 
+/**
+ * Manifest graph v2 intentionally omits verbose objects and edges. Snapshot
+ * construction rematerializes that compiler graph once, then persists the
+ * detail in immutable SQLite. Normal Ask/API reads never repeat this work.
+ */
+function materializeIndexedKnowledgeGraph(projectRoot: string, manifest: DQLManifest): DQLManifest {
+  const compact = manifest.knowledgeGraph;
+  if (!compact || compact.storageMode !== 'indexed') return manifest;
+  const { knowledgeGraph: _compactGraph, ...baseManifest } = manifest;
+  const registry = loadDomainPackageRegistry(projectRoot);
+  const skillCatalog = loadManifestKnowledgeSkills(projectRoot, registry);
+  const inline = buildManifestKnowledgeGraph({ manifest: baseManifest, skills: skillCatalog.skills });
+  const objects = { ...(inline.objects ?? {}) };
+  for (const ref of compact.objectRefs ?? []) {
+    objects[ref.id] ??= { ...ref };
+  }
+  return {
+    ...manifest,
+    knowledgeGraph: {
+      ...inline,
+      sourceFingerprint: compact.sourceFingerprint,
+      objects,
+      domainCapsules: compact.domainCapsules,
+      crossDomainRoutes: compact.crossDomainRoutes,
+      diagnostics: compact.diagnostics,
+    },
+  };
+}
+
+/**
+ * CTX-006: project search is a projection of the compiler-owned qualified
+ * policy graph. Legacy KG records are enriched in place so existing route keys
+ * remain compatible while identity, capsules, and governed route state come
+ * from one source.
+ */
+function addManifestKnowledgeGraph(
+  manifest: DQLManifest,
+  objects: Map<string, MetadataObject>,
+  edges: Map<string, MetadataEdge>,
+): void {
+  const graph = manifest.knowledgeGraph;
+  if (!graph) return;
+  const keyByGraphId = new Map<string, string>();
+  const graphObjects = Object.values(graph.objects ?? {});
+  const indexedObjects = graphObjects.length > 0 ? graphObjects : (graph.objectRefs ?? []);
+  for (const item of indexedObjects) {
+    const itemPayload = ('payload' in item ? item.payload : undefined) as Record<string, unknown> | undefined;
+    const itemAliases = ('aliases' in item ? item.aliases : undefined) as string[] | undefined;
+    const displayName = knowledgeDisplayName(item.kind, item.localId, itemPayload);
+    const objectKey = knowledgeMetadataKey(item.kind, displayName, item.id, item.source.system);
+    keyByGraphId.set(item.id, objectKey);
+    const description = stringValue(itemPayload?.description)
+      ?? stringValue(itemPayload?.businessContext)
+      ?? itemAliases?.find((alias) => alias !== item.localId);
+    const compiled: MetadataObject = {
+      objectKey,
+      objectType: knowledgeMetadataType(item.kind),
+      name: displayName,
+      fullName: item.id,
+      domain: item.domainId,
+      owner: item.owner,
+      status: item.status,
+      description,
+      sourcePath: item.source.path,
+      sourceSystem: `DQL canonical knowledge graph (${item.source.system})`,
+      payload: compactObject({
+        ...(itemPayload ?? {}),
+        qualifiedId: item.id,
+        aliases: itemAliases ?? [],
+        modelAreaIds: item.modelAreaIds ?? [],
+        sourceFingerprint: item.source.fingerprint,
+        sourceNativeId: item.source.nativeId,
+        knowledgeGraphSchemaVersion: graph.schemaVersion,
+      }),
+    };
+    const existing = objects.get(objectKey);
+    objects.set(objectKey, existing ? mergeObject(existing, compiled) : compiled);
+  }
+
+  for (const capsule of Object.values(graph.domainCapsules)) {
+    const objectKey = `dql:domain_capsule:${capsule.id}`;
+    objects.set(objectKey, {
+      objectKey,
+      objectType: 'domain_capsule',
+      name: capsule.name,
+      fullName: capsule.id,
+      domain: capsule.domainId,
+      description: capsule.description,
+      sourceSystem: 'DQL compiled Domain Knowledge Capsule',
+      payload: compactObject({ ...capsule, sourceFingerprint: graph.sourceFingerprint }),
+    });
+    addMetadataEdge(edges, 'contains', keyByGraphId.get(`domain::${capsule.domainId}`) ?? `domain:${capsule.domainId}`, objectKey, { source: 'knowledge_graph' });
+    for (const skill of capsule.skillRefs) addMetadataEdge(edges, 'guided_by', objectKey, `skill:${skill}`, { source: 'knowledge_graph' });
+  }
+
+  for (const route of graph.crossDomainRoutes) {
+    const objectKey = `dql:cross_domain_route:${route.id}`;
+    objects.set(objectKey, {
+      objectKey,
+      objectType: 'cross_domain_route',
+      name: `${route.providerDomainId} → ${route.consumerDomainId}`,
+      fullName: route.id,
+      domain: route.consumerDomainId,
+      status: route.state,
+      description: route.purpose ? `Approved purpose: ${route.purpose}` : 'Observed cross-domain dependency',
+      sourceSystem: 'DQL compiled cross-domain policy',
+      payload: compactObject(route as unknown as Record<string, unknown>),
+    });
+    addMetadataEdge(edges, 'cross_domain_route', keyByGraphId.get(`domain::${route.providerDomainId}`) ?? `domain:${route.providerDomainId}`, objectKey, { state: route.state, reasonCodes: route.reasonCodes });
+    addMetadataEdge(edges, 'cross_domain_route', objectKey, keyByGraphId.get(`domain::${route.consumerDomainId}`) ?? `domain:${route.consumerDomainId}`, { state: route.state, reasonCodes: route.reasonCodes });
+  }
+
+  for (const edge of graph.edges ?? []) {
+    const fromKey = keyByGraphId.get(edge.from) ?? edge.from;
+    const toKey = keyByGraphId.get(edge.to) ?? edge.to;
+    addMetadataEdge(edges, edge.kind, fromKey, toKey, {
+      state: edge.state,
+      domainPair: edge.domainPair,
+      evidenceRefs: edge.evidenceRefs ?? [],
+      reasonCodes: edge.reasonCodes ?? [],
+      fingerprint: edge.fingerprint,
+      source: 'knowledge_graph',
+    });
+  }
+}
+
+function addMetadataEdge(
+  edges: Map<string, MetadataEdge>,
+  edgeType: string,
+  fromKey: string,
+  toKey: string,
+  payload: Record<string, unknown>,
+): void {
+  const key = `${edgeType}\u0000${fromKey}\u0000${toKey}`;
+  if (!edges.has(key)) edges.set(key, { edgeType, fromKey, toKey, confidence: 1, payload: compactObject(payload) });
+}
+
+function knowledgeMetadataKey(kind: string, localId: string, qualifiedId: string, sourceSystem: string): string {
+  switch (kind) {
+    case 'block': return `dql:block:${localId}`;
+    case 'term': return `dql:term:${localId}`;
+    case 'business_view': return `dql:business_view:${localId}`;
+    case 'metric': return `semantic:metric:${localId}`;
+    case 'dimension': return `semantic:dimension:${localId}`;
+    case 'entity': return `dql:entity:${qualifiedId}`;
+    case 'model_area': return `dql:model_area:${qualifiedId}`;
+    case 'relationship': return `dql:relationship:${qualifiedId}`;
+    case 'contract': return `dql:contract:${qualifiedId}`;
+    case 'domain_export': return `dql:domain_export:${qualifiedId}`;
+    case 'domain_import': return `dql:domain_import:${qualifiedId}`;
+    case 'conformance': return `dql:conformance:${qualifiedId}`;
+    case 'policy': return `dql:policy:${qualifiedId}`;
+    case 'evaluation': return `dql:evaluation:${qualifiedId}`;
+    case 'skill': return `skill:${qualifiedId}`;
+    case 'domain': return `domain:${localId}`;
+    case 'dbt_model': return `dbt:model:${localId}`;
+    case 'dbt_source': return `dbt:source:${localId}`;
+    case 'source_table': return `warehouse:table:${localId}`;
+    case 'notebook': return `notebook:${localId}`;
+    case 'dashboard': return `dashboard:${localId}`;
+    case 'app': return `app:${localId}`;
+    default: return `${sourceSystem}:${kind}:${qualifiedId}`;
+  }
+}
+
+function knowledgeDisplayName(kind: string, localId: string, payload: Record<string, unknown> | undefined): string {
+  if (kind === 'domain' || kind === 'app') return stringValue(payload?.name) ?? localId;
+  if (kind === 'dashboard' || kind === 'notebook') return stringValue(payload?.title) ?? localId;
+  return localId;
+}
+
+function knowledgeMetadataType(kind: string): string {
+  switch (kind) {
+    case 'block': return 'dql_block';
+    case 'term': return 'dql_term';
+    case 'metric': return 'semantic_metric';
+    case 'dimension': return 'semantic_dimension';
+    case 'entity': return 'dql_entity';
+    case 'model_area': return 'model_area';
+    case 'dbt_model': return 'dbt_model';
+    case 'dbt_source': return 'dbt_source';
+    case 'source_table': return 'warehouse_table';
+    default: return kind;
+  }
+}
+
+function metadataKnowledgeKind(objectType: string): ManifestKnowledgeObjectKind {
+  switch (objectType) {
+    case 'dql_block': return 'block';
+    case 'dql_term': return 'term';
+    case 'business_view': return 'business_view';
+    case 'semantic_metric': return 'metric';
+    case 'semantic_dimension': return 'dimension';
+    case 'semantic_model': return 'semantic_model';
+    case 'dql_entity': return 'entity';
+    case 'model_area': return 'model_area';
+    case 'dbt_model': return 'dbt_model';
+    case 'dbt_source': return 'dbt_source';
+    case 'warehouse_table': return 'source_table';
+    case 'domain_capsule': return 'domain';
+    default: return objectType as ManifestKnowledgeObjectKind;
+  }
+}
+
+function metadataObjectToKnowledge(item: MetadataObject): ManifestKnowledgeObject {
+  const payload = item.payload ?? {};
+  const id = stringValue(payload.qualifiedId) ?? item.fullName ?? item.objectKey;
+  const system = item.sourceSystem?.toLowerCase().includes('dbt')
+    ? 'dbt'
+    : item.sourceSystem?.toLowerCase().includes('semantic')
+      ? 'semantic'
+      : 'dql';
+  return {
+    id,
+    kind: metadataKnowledgeKind(item.objectType),
+    localId: item.name,
+    domainId: item.domain,
+    modelAreaIds: metadataStringArray(payload.modelAreaIds),
+    aliases: metadataStringArray(payload.aliases),
+    status: item.status,
+    owner: item.owner,
+    source: {
+      system,
+      path: item.sourcePath,
+      nativeId: stringValue(payload.sourceNativeId),
+      fingerprint: stringValue(payload.sourceFingerprint) ?? sha256(stableStringify({ id, sourcePath: item.sourcePath, payload })),
+    },
+    payload,
+  };
+}
+
+function metadataEdgeToKnowledge(edge: MetadataEdge, byKey: Map<string, ManifestKnowledgeObject>): ManifestKnowledgeEdge {
+  const payload = edge.payload ?? {};
+  const from = byKey.get(edge.fromKey)?.id ?? edge.fromKey;
+  const to = byKey.get(edge.toKey)?.id ?? edge.toKey;
+  const fingerprint = stringValue(payload.fingerprint) ?? sha256(stableStringify({ kind: edge.edgeType, from, to, payload }));
+  return {
+    id: `edge::${fingerprint.slice(0, 20)}`,
+    kind: edge.edgeType as ManifestKnowledgeEdge['kind'],
+    from,
+    to,
+    state: payload.state as ManifestKnowledgeEdge['state'],
+    domainPair: payload.domainPair as ManifestKnowledgeEdge['domainPair'],
+    evidenceRefs: metadataStringArray(payload.evidenceRefs),
+    reasonCodes: metadataStringArray(payload.reasonCodes),
+    fingerprint,
+  };
+}
+
+function metadataRoute(item: MetadataObject): ManifestCrossDomainRoute | null {
+  const payload = item.payload ?? {};
+  const providerDomainId = stringValue(payload.providerDomainId);
+  const consumerDomainId = stringValue(payload.consumerDomainId);
+  const relationshipId = stringValue(payload.relationshipId);
+  const state = stringValue(payload.state);
+  if (!providerDomainId || !consumerDomainId || !relationshipId || !state || !['observed', 'authorized', 'blocked', 'stale'].includes(state)) return null;
+  return {
+    id: stringValue(payload.id) ?? item.fullName ?? item.objectKey,
+    providerDomainId,
+    consumerDomainId,
+    purpose: stringValue(payload.purpose) ?? '',
+    relationshipId,
+    exportId: stringValue(payload.exportId),
+    importId: stringValue(payload.importId),
+    contractId: stringValue(payload.contractId),
+    state: state as ManifestCrossDomainRoute['state'],
+    reasonCodes: metadataStringArray(payload.reasonCodes),
+    path: metadataStringArray(payload.path),
+    fingerprint: stringValue(payload.fingerprint) ?? sha256(stableStringify(payload)),
+  };
+}
+
 export class MetadataCatalog {
   private readonly db: Database.Database;
 
-  constructor(private readonly dbPath: string) {
-    mkdirSync(dirname(dbPath), { recursive: true });
+  constructor(private readonly dbPath: string, options: { readOnly?: boolean } = {}) {
+    if (!options.readOnly) mkdirSync(dirname(dbPath), { recursive: true });
     const Database = loadDatabase();
-    this.db = new Database(dbPath);
+    this.db = new Database(dbPath, options.readOnly ? { readonly: true, fileMustExist: true } : undefined);
+    if (options.readOnly) {
+      this.db.pragma('query_only = ON');
+      return;
+    }
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.initSchema();
@@ -1348,6 +1838,13 @@ export class MetadataCatalog {
         dbt_object_count      INTEGER NOT NULL,
         updated_at            TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS skill_bodies (
+        body_hash       TEXT PRIMARY KEY,
+        encoding        TEXT NOT NULL,
+        compressed_body TEXT NOT NULL,
+        original_length INTEGER NOT NULL
+      );
     `);
     // Runtime values may be used transiently inside one governed Ask, but they
     // must never survive in the rebuildable metadata database. Clear legacy v2
@@ -1396,6 +1893,10 @@ export class MetadataCatalog {
         semantic_metric_count, dbt_object_count, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+    const insertSkillBody = this.db.prepare(`
+      INSERT OR REPLACE INTO skill_bodies (body_hash, encoding, compressed_body, original_length)
+      VALUES (?, 'br', ?, ?)
+    `);
     const sourceFingerprints = buildSourceFingerprints(snapshot.objects, now);
     const domainShards = buildDomainShards(snapshot.objects, now);
 
@@ -1406,6 +1907,7 @@ export class MetadataCatalog {
       this.db.prepare('DELETE FROM metadata_diagnostics').run();
       this.db.prepare('DELETE FROM metadata_source_fingerprints').run();
       this.db.prepare('DELETE FROM metadata_domain_shards').run();
+      this.db.prepare('DELETE FROM skill_bodies').run();
 
       for (const object of snapshot.objects) {
         const payload = object.payload ?? {};
@@ -1469,6 +1971,13 @@ export class MetadataCatalog {
           item.semanticMetricCount,
           item.dbtObjectCount,
           item.updatedAt,
+        );
+      }
+      for (const item of snapshot.skillBodies ?? []) {
+        insertSkillBody.run(
+          item.bodyHash,
+          brotliCompressSync(item.body, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } }).toString('base64'),
+          Buffer.byteLength(item.body, 'utf8'),
         );
       }
 
@@ -1541,6 +2050,9 @@ export class MetadataCatalog {
         semantic_metric_count, dbt_object_count, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)`);
     const setState = this.db.prepare('INSERT OR REPLACE INTO metadata_state (key, value) VALUES (?, ?)');
+    const insertSkillBody = this.db.prepare(`
+      INSERT OR REPLACE INTO skill_bodies (body_hash, encoding, compressed_body, original_length)
+      VALUES (?, 'br', ?, ?)`);
     const deleteFtsForSource = this.db.prepare('DELETE FROM metadata_fts WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?)');
     const deleteObjectsForSource = this.db.prepare('DELETE FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?');
 
@@ -1581,6 +2093,14 @@ export class MetadataCatalog {
       this.db.prepare('DELETE FROM metadata_domain_shards').run();
       for (const shard of domainShards) {
         insertDomainShard.run(shard.domain, shard.objectCount, shard.blockCount, shard.certifiedBlockCount, shard.semanticMetricCount, shard.dbtObjectCount, shard.updatedAt);
+      }
+      this.db.prepare('DELETE FROM skill_bodies').run();
+      for (const item of snapshot.skillBodies ?? []) {
+        insertSkillBody.run(
+          item.bodyHash,
+          brotliCompressSync(item.body, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } }).toString('base64'),
+          Buffer.byteLength(item.body, 'utf8'),
+        );
       }
 
       for (const source of removedSources) {
@@ -1711,6 +2231,17 @@ export class MetadataCatalog {
     return rows.map(rowToObject);
   }
 
+  crossDomainRouteObjects(domainId: string, limit = 100): MetadataObject[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM metadata_objects
+      WHERE object_type = 'cross_domain_route'
+        AND (domain = ? OR json_extract(payload_json, '$.providerDomainId') = ?)
+      ORDER BY status, name, object_key
+      LIMIT ?
+    `).all(domainId, domainId, Math.max(1, Math.min(limit, 500))) as MetadataObjectRow[];
+    return rows.map(rowToObject);
+  }
+
   scanObjects(options: {
     objectTypes?: string[];
     domain?: string;
@@ -1785,6 +2316,16 @@ export class MetadataCatalog {
       if (resolved && !rows.some((row) => row.objectKey === resolved.objectKey)) rows.push(resolved);
     }
     return rows;
+  }
+
+  findObjectByIdentity(identity: string): MetadataObject | null {
+    const rows = this.db.prepare(`
+      SELECT * FROM metadata_objects
+      WHERE object_key = ? OR full_name = ?
+      ORDER BY CASE WHEN object_key = ? THEN 0 ELSE 1 END, object_key
+      LIMIT 2
+    `).all(identity, identity, identity) as MetadataObjectRow[];
+    return rows.length === 1 ? rowToObject(rows[0]!) : rows[0] ? rowToObject(rows[0]) : null;
   }
 
   edgesForKeys(keys: string[], hops = 1): MetadataEdge[] {
@@ -2083,6 +2624,45 @@ export class MetadataCatalog {
       dbtObjectCount: row.dbt_object_count,
       updatedAt: row.updated_at,
     }));
+  }
+
+  skillBody(bodyHash: string): string | null {
+    const row = this.db.prepare(`
+      SELECT encoding, compressed_body
+      FROM skill_bodies
+      WHERE body_hash = ?
+    `).get(bodyHash) as { encoding: string; compressed_body: string } | undefined;
+    if (!row) return null;
+    if (row.encoding !== 'br') return row.compressed_body;
+    const compressed = Uint8Array.from(Buffer.from(row.compressed_body, 'base64'));
+    return brotliDecompressSync(compressed).toString('utf8');
+  }
+
+  exportSnapshot(destination: string): void {
+    mkdirSync(dirname(destination), { recursive: true });
+    if (existsSync(destination)) return;
+    const candidate = `${destination}.candidate`;
+    rmSync(candidate, { force: true });
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
+    this.db.prepare('VACUUM INTO ?').run(candidate);
+    const Database = loadDatabase();
+    const sealed = new Database(candidate);
+    try {
+      sealed.exec(`
+        DELETE FROM context_packs;
+        DELETE FROM query_runs;
+        DELETE FROM runtime_schema_snapshots;
+        DELETE FROM runtime_schema_fts;
+        DELETE FROM runtime_schema_objects;
+        DELETE FROM runtime_value_fts;
+        DELETE FROM runtime_value_index;
+        VACUUM;
+      `);
+      sealed.pragma('journal_mode = DELETE');
+    } finally {
+      sealed.close();
+    }
+    renameSync(candidate, destination);
   }
 
   state(key: string): string | null {
@@ -2402,6 +2982,15 @@ function addSkillObjects(
 ): void {
   for (const skill of skills) {
     const identity = skill.qualifiedId ?? skill.id;
+    const bodyHash = sha256(skill.body);
+    const sourceFingerprint = sha256(stableStringify({
+      identity,
+      domain: skill.domain,
+      domains: skill.domains ?? [],
+      modelAreaRefs: skill.modelAreaRefs ?? [],
+      status: skill.status ?? 'active',
+      bodyHash,
+    }));
     const objectKey = `skill:${identity}`;
     const domains = uniqueNonBlank([skill.domain, ...(skill.domains ?? [])]);
     const object: MetadataObject = {
@@ -2434,12 +3023,13 @@ function addSkillObjects(
         examples: skill.examples ?? [],
         sourceRefs: skill.sourceRefs ?? [],
         vocabulary: skill.vocabulary,
-        body: skill.body,
+        bodyHash,
+        sourceFingerprint,
         isStarter: skill.isStarter,
         provenance: 'DQL domain skill',
       }),
     };
-    objects.set(objectKey, object);
+    objects.set(objectKey, mergeObject(objects.get(objectKey), object));
     for (const domain of domains) {
       const edge: MetadataEdge = {
         edgeType: 'contains',
@@ -5638,7 +6228,7 @@ const METADATA_VALUE_STOP_TERMS = new Set([
   'user',
 ]);
 
-function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpContext | null): string {
+export function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpContext | null): string {
   if (!followUp) return question;
   // Contextual carry is advisory: enrich retrieval softly (prior question, columns,
   // measures) but never with concrete dimension VALUES or the block name — those pull
@@ -5659,14 +6249,19 @@ function buildFollowUpSearchQuery(question: string, followUp: MetadataFollowUpCo
     question,
     followUp.sourceBlockName ?? '',
     followUp.sourceQuestion ?? '',
-    ...(followUp.filters ?? []),
     ...(followUp.dimensions ?? []),
     ...(followUp.priorResultColumns ?? []),
     followUp.priorResultRef?.question ?? '',
     ...(followUp.priorResultRef?.columns ?? []),
-    followUp.priorResultRef?.sourceSql ? followUp.priorResultRef.sourceSql.slice(0, 600) : '',
-    ...dqlArtifactSearchTerms(followUp.priorDqlArtifact, { includeSource: true }),
-    ...Object.entries(followUp.priorResultValues ?? {}).flatMap(([key, values]) => [key, ...values]),
+    ...(followUp.priorMeasures ?? []),
+    // Retrieval searches object meaning, not executable payloads or warehouse
+    // members. The source block is loaded directly by key and the typed follow-up
+    // object retains SQL + values for execution. Injecting 600-1500 characters of
+    // SQL and every prior row value into FTS made an eight-customer drilldown spend
+    // ~11 seconds tokenizing metadata before the provider even started.
+    ...(followUp.priorDqlArtifact?.metrics ?? []),
+    ...(followUp.priorDqlArtifact?.dimensions ?? []),
+    ...(followUp.priorDqlArtifact?.filters ?? []).map((filter) => filter.dimension),
   ].filter(Boolean).join(' ');
 }
 
@@ -6276,6 +6871,7 @@ function filterMetadataObjectsByDomainContext(rows: MetadataObject[], context?: 
 }
 
 function selectContextPackSkills(
+  catalog: MetadataCatalog,
   objects: MetadataObject[],
   question: string,
   context?: DomainContextEnvelope,
@@ -6294,10 +6890,14 @@ function selectContextPackSkills(
   const selected = selectRelevantSkills(parsed, question, {
     domains,
     modelAreaIds: context?.modelAreaId ? [context.modelAreaId] : [],
+    pinnedIds: context?.skillRefs ? ['sql-conventions', ...context.skillRefs] : undefined,
   });
   return selected.flatMap((skill) => {
     const object = byIdentity.get(skill.qualifiedId ?? skill.id);
-    return object ? [{ object, skill: localContextSkillFromParsed(skill, object) }] : [];
+    if (!object) return [];
+    const bodyHash = stringPayload(object.payload?.bodyHash);
+    const hydrated = bodyHash ? { ...skill, body: catalog.skillBody(bodyHash) ?? '' } : skill;
+    return [{ object, skill: localContextSkillFromParsed(hydrated, object) }];
   });
 }
 
@@ -6333,7 +6933,7 @@ function skillFromMetadataObject(object: MetadataObject): Skill | null {
     examples: stringArrayPayload(payload.examples),
     sourceRefs: stringArrayPayload(payload.sourceRefs),
     vocabulary: stringRecordPayload(payload.vocabulary),
-    body: stringPayload(payload.body) ?? '',
+    body: '',
     sourcePath: object.sourcePath ?? '',
     isStarter: payload.isStarter === true,
   };

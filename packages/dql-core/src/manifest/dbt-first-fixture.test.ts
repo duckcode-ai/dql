@@ -11,6 +11,7 @@ const fixtureRoot = resolve(
 describe('dbt-first commerce end-to-end fixture', () => {
   it('compiles dbt provenance, sparse relationship safety, business view, stakeholder app, and analytical lineage', () => {
     const manifest = buildManifest({ projectRoot: fixtureRoot, dbtManifestPath: join(fixtureRoot, 'target/manifest.json') });
+    const repeated = buildManifest({ projectRoot: fixtureRoot, dbtManifestPath: join(fixtureRoot, 'target/manifest.json') });
 
     expect(manifest.manifestVersion).toBe(3);
     expect(manifest.dbtImport).toBeUndefined();
@@ -37,9 +38,40 @@ describe('dbt-first commerce end-to-end fixture', () => {
     expect(manifest.lineage.nodes.some((node) => node.id === 'dql_entity:growth::entity::acquisition')).toBe(true);
     expect(manifest.lineage.edges.some((edge) => edge.type === 'governed_relationship')).toBe(true);
 
+    const knowledge = manifest.knowledgeGraph;
+    expect(knowledge?.sourceFingerprint).toBe(repeated.knowledgeGraph?.sourceFingerprint);
+    expect(knowledge).toMatchObject({
+      schemaVersion: 2,
+      storageMode: 'indexed',
+      counts: { skills: 1, routes: 2 },
+      index: { schemaVersion: 4 },
+    });
+    expect(knowledge?.objects).toBeUndefined();
+    expect(knowledge?.edges).toBeUndefined();
+    expect(knowledge?.domainCapsules['growth::capsule']).toMatchObject({
+      domainId: 'growth',
+      skillRefs: ['growth::skill::acquisition_analysis'],
+    });
+    expect(knowledge?.crossDomainRoutes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        providerDomainId: 'commerce',
+        consumerDomainId: 'growth',
+        relationshipId: 'growth::relationship::acquisition_to_customer',
+        state: 'authorized',
+        reasonCodes: [],
+      }),
+      expect.objectContaining({
+        relationshipId: 'growth::relationship::touch_to_order_attribution',
+        state: 'blocked',
+        reasonCodes: expect.arrayContaining(['RELATIONSHIP_NOT_CERTIFIED', 'VALIDATION_NOT_PASSED']),
+      }),
+    ]));
+
     const serialized = JSON.stringify(manifest);
+    expect(serialized).not.toContain('Acquisition analysis guidance');
     expect(serialized).not.toContain('One row per completed order.');
     expect(serialized).not.toContain('SUM(order_total)');
     expect(serialized).not.toContain('dbt-owned order identifier');
+    expect(serialized).not.toContain('Use the certified commerce-to-growth route.');
   });
 });

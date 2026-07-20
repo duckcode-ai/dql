@@ -12,9 +12,23 @@ export interface DomainContextEnvelope {
   purpose?: string;
   /** Optional focused Model Area. It narrows ranking within activeDomain and is never an authorization boundary. */
   modelAreaId?: string;
+  /** Optional product/user lens; eligibility checks still apply. */
+  skillRefs?: string[];
   source: 'explicit_ui' | 'explicit_api' | 'inferred';
   confidence: 'high' | 'medium' | 'low';
   snapshotId: string;
+}
+
+/** Immutable domain capsule and skill selection recorded for an Ask turn. */
+export interface KnowledgeLens {
+  mode: 'auto' | 'pinned';
+  activeDomainId?: string;
+  modelAreaId?: string;
+  purpose?: string;
+  skillRefs: string[];
+  snapshotId: string;
+  capsuleFingerprint?: string;
+  skillFingerprints?: Record<string, string>;
 }
 
 export interface ResolveDomainContextInput {
@@ -22,6 +36,7 @@ export interface ResolveDomainContextInput {
   activeDomain?: string | null;
   purpose?: string;
   modelAreaId?: string;
+  skillRefs?: string[];
   source?: DomainContextEnvelope['source'];
   confidence?: DomainContextEnvelope['confidence'];
   snapshotId?: string;
@@ -43,6 +58,7 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
   }
   const purpose = input.purpose?.trim() || undefined;
   const requestedModelAreaId = input.modelAreaId?.trim() || undefined;
+  const requestedSkillRefs = [...new Set((input.skillRefs ?? []).map((value) => value.trim()).filter(Boolean))];
   let modelAreaId: string | undefined;
   if (requestedModelAreaId) {
     const areas = Object.values(input.manifest.modeling?.areas ?? {});
@@ -56,6 +72,13 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
     }
     if (activeDomain && area.domain !== activeDomain) throw new Error(`Model area "${requestedModelAreaId}" does not belong to domain "${activeDomain}"`);
     modelAreaId = area.qualifiedId;
+  }
+  if (input.manifest.knowledgeGraph && requestedSkillRefs.length > 0) {
+    const graph = input.manifest.knowledgeGraph;
+    const skills = [...Object.values(graph.objects ?? {}), ...(graph.objectRefs ?? [])].filter((item) => item.kind === 'skill');
+    const compiledRefs = new Set(Object.values(graph.domainCapsules).flatMap((capsule) => capsule.skillRefs));
+    const unknown = requestedSkillRefs.filter((ref) => !compiledRefs.has(ref) && !skills.some((skill) => skill.id === ref || skill.localId === ref));
+    if (unknown.length > 0) throw new Error(`Unknown knowledge skill: ${unknown.join(', ')}`);
   }
   const imports = Object.values(input.manifest.modeling?.interfaces?.imports ?? {});
   const exports = input.manifest.modeling?.interfaces?.exports ?? {};
@@ -82,6 +105,7 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
     allowedImports,
     purpose,
     modelAreaId,
+    skillRefs: requestedSkillRefs.length > 0 ? requestedSkillRefs : undefined,
     source: input.source ?? (activeDomain ? 'explicit_api' : 'inferred'),
     confidence: input.confidence ?? (activeDomain ? 'high' : 'low'),
     snapshotId: input.snapshotId ?? input.manifest.dbtProvenance?.manifestFingerprint ?? 'manifest-v2',

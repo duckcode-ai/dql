@@ -100,6 +100,27 @@ describe('manifest v3 dbt-first modeling', () => {
     expect(manifest.modeling?.relationships['growth::relationship::acquisition_to_customer'].to).toBe('commerce::entity::customer');
   });
 
+  it('preserves same-named blocks from separate domain packages in the canonical graph', () => {
+    writeYaml(projectRoot, 'domains/commerce/blocks/executive_summary.dql', `block "Executive Summary" {
+  status = "certified"
+  query = """SELECT 1 AS commerce_value"""
+}
+`);
+    writeYaml(projectRoot, 'domains/growth/blocks/executive_summary.dql', `block "Executive Summary" {
+  status = "certified"
+  query = """SELECT 1 AS growth_value"""
+}
+`);
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+    expect(manifest.knowledgeGraph).toMatchObject({ schemaVersion: 2, storageMode: 'indexed' });
+    expect(manifest.knowledgeGraph?.counts?.objects).toBeGreaterThan(2);
+    expect(manifest.knowledgeGraph?.objects).toBeUndefined();
+    expect(manifest.knowledgeGraph?.domainCapsules['commerce::capsule'].blockRefs).toContain('commerce::block::Executive Summary');
+    expect(manifest.knowledgeGraph?.domainCapsules['growth::capsule'].blockRefs).toContain('growth::block::Executive Summary');
+  });
+
   it('compiles focused model areas into the one domain graph with read-only references', () => {
     writeYaml(projectRoot, 'domains/commerce/modeling/areas/customer_lifecycle.dql.yaml', `domain: commerce
 area:

@@ -21,13 +21,16 @@ an acceptance-matrix update.
 | PRD-004 | App Builder composes governed dashboards requirement-first: compatible certified blocks first, governed semantic queries only for uncovered requirements, and visible gaps otherwise. |
 | REL-001 | dbt lineage and matching column names are never automatic join proof. |
 | REL-002 | Only certified, fresh, exported, fanout-safe relationships authorize generated joins. |
+| REL-003 | Cross-domain knowledge compiles as explicit `observed`, `authorized`, `blocked`, or `stale` routes; only the full provider export → contract → consumer import → validated relationship chain can authorize use, and dbt transformation lineage remains observation only. |
 | CONTRACT-001 | Cross-domain use requires both certified relationship proof and matching provider export/consumer import. |
 | SKILL-001 | Domain skills are governed domain context; global skills are reusable workflow capability. |
 | SKILL-002 | Skill exclusions are negative constraints and never positive retrieval tokens. |
+| SKILL-003 | The compiler emits compact Domain Knowledge Capsules and skill descriptors/hashes without skill bodies or executable scripts; Ask selects a bounded eligible skill set from the immutable snapshot, records a `KnowledgeLens`, and supports optional product/user pinning without making the pin an authorization boundary. |
 | CTX-001 | One server-resolved `DomainContextEnvelope` scopes every governed answer. |
 | CTX-002 | One immutable `snapshotId` is used from retrieval through final validation. |
 | CTX-004 | Model Area identity is domain-qualified; explicit or inferred Area focus narrows modeling and Skill retrieval inside its owning domain. |
 | CTX-005 | Every Ask surface acquires one qualified immutable project-search snapshot containing DQL v3/modeling, certified assets, semantic metadata, dbt metadata, safe runtime schema, and approved hints; warm retrieval does not reparse source artifacts. |
+| CTX-006 | Manifest v3 owns one deterministic qualified knowledge graph for domains, Areas, terms, skills, certified assets, semantic/dbt provenance, governed interfaces, relationships, and products; legacy lineage, search, Domain 360, and agent context are compatibility projections of this graph. |
 | AGT-001 | Route order is certified block, MetricFlow, governed generation, clarify/refuse. |
 | AGT-002 | AI discovery produces evidence-cited drafts only and never auto-certifies. |
 | AGT-003 | Ask is available before domain setup only in limited-context, review-required mode. |
@@ -44,6 +47,7 @@ an acceptance-matrix update.
 | UI-005 | App Copilot uses the canonical App run context and cannot mutate an App without an explicit previewed user action. |
 | UI-006 | Domain Studio presents the nested Domain Package hierarchy and focused Areas with shareable deep links; Ask visibly preserves and can clear the selected Area context. |
 | UI-007 | One Settings hub under Govern owns Overview, Project & dbt, Database, AI provider, Agent memory, and Advanced. Guided Setup launches from Settings and automatically once per project on first install and each installed CLI version change; it embeds the same project, database, and provider editors, AI is optional, saved settings remain untouched without successful test/apply, and Setup has no separate rail destination. Successful dbt Apply automatically prepares the shared governed search snapshot and exposes truthful background progress without requiring another command. |
+| UI-008 | Governed Context exposes compiler-backed Domain Knowledge 360 with qualified objects, provenance, capsules, skills, and route state; business-360/API/CLI/MCP views must resolve the same snapshot and bounded neighborhood rather than independently rebuilding lineage. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
@@ -57,6 +61,7 @@ an acceptance-matrix update.
 | E2E-004 | Release proves duplicate local Area IDs across domains, explicit and inferred Area focus, Area-scoped Skills, hierarchy/deep-link round trips, and bounded context reduction in the built CLI. |
 | E2E-005 | Release proves built-CLI parity across Settings and Guided Setup, automatic shared dbt snapshot/index preparation with no duplicate first-Ask rebuild, one-time first-install/version-upgrade setup prompts, all provider modes and enterprise URLs, dbt/profile/database preservation and rollback, optional-AI behavior, accurate readiness states, project-local/global npm command availability, PATH-independent internal npm resolution, and unchanged Cloud embed contracts. |
 | E2E-006 | Release proves retrieval-first meaning resolution and route parity at enterprise scale: 7,000 similar/late-position metrics, 10,000 dbt models, 300,000 columns, trust-versus-relevance conflicts, bounded call budgets, accurate ambiguity, and identical built-CLI browser/CLI/MCP/Chat outcomes. |
+| E2E-007 | Release proves deterministic manifest graph compilation, cross-domain route states, compact skill capsules, exact per-turn KnowledgeLens persistence, and Domain 360/Ask parity in the built CLI while preserving v2 compatibility and the Cloud embed contract. |
 
 ## OSS and Cloud boundary
 

@@ -117,7 +117,7 @@ import {
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
 import { getRunner as getLLMRunner } from './llm/index.js';
-import { createDqlAgentProviderRunner } from './llm/providers/dql-agent-provider.js';
+import { createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type { AgentConversationContext, AgentRunner as LLMAgentRunner, ProviderId } from './llm/types.js';
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
 import {
@@ -140,7 +140,10 @@ import {
   ensureDefaultMemoryFiles,
   ensureAgentProjectReady,
   isAgentProjectIndexReady,
+  currentMetadataFingerprint,
   ensureMetadataCatalogFresh,
+  readIndexedDomainKnowledge,
+  readIndexedKnowledge360,
   propose,
   proposePlan,
   recordCorrectionTrace,
@@ -727,6 +730,7 @@ function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
     sourceCertifiedBlock: agentRunString(payload?.sourceCertifiedBlock)
       ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
     contextPackId: agentRunString(payload?.contextPackId) ?? agentRunString(contextPack?.id),
+    knowledgeLens: agentRunRecord(contextPack?.knowledgeLens) as ConversationTurnInput['knowledgeLens'],
     sql: agentRunString(payload?.proposedSql) ?? agentRunString(payload?.sql),
     dqlArtifact: agentRunRecord(payload?.dqlArtifact) as ConversationTurnInput['dqlArtifact'],
     cascade: agentRunRecord(payload?.cascade) as CascadeAnswerResult | undefined,
@@ -1270,6 +1274,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const nested = agentRunRecord(workspace.context);
     return agentRunString(workspace[key]) ?? (nested ? agentRunString(nested[key]) : undefined);
   };
+  const agentRunWorkspaceValues = (request: AgentRunRequest, key: string): string[] | undefined => {
+    const workspace = request.workspaceContext ?? {};
+    const nested = agentRunRecord(workspace.context);
+    const raw = workspace[key] ?? nested?.[key];
+    if (!Array.isArray(raw)) return undefined;
+    const values = raw.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).map((item) => item.trim());
+    return values.length > 0 ? [...new Set(values)] : undefined;
+  };
 
   const agentRunNotebookPath = (request: AgentRunRequest, runId: string): string => (
     agentRunWorkspaceValue(request, 'notebookPath')
@@ -1555,6 +1567,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           activeDomain: requestedDomain,
           purpose: requestedPurpose,
           modelAreaId: requestedModelAreaId,
+          skillRefs: agentRunWorkspaceValues(request, 'skillRefs'),
           source: 'explicit_ui',
           snapshotId: runProjectSnapshot.snapshotId,
         })
@@ -1994,6 +2007,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             sql: sql,
             draftText: draft,
             gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
+            rankingDirection: governedAnswer.contextPack?.questionPlan.requestedShape.rankingDirection,
           },
           provider
             ? {
@@ -2788,8 +2802,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (pending) return pending;
     const snapshot = projectSnapshot();
     const requestedDomain = agentRunWorkspaceValue(request, 'domain');
+    // CTX-003: resolve result entities/values before evidence retrieval. The
+    // router, planner, and answer loop must rank the same typed follow-up; doing
+    // this only inside the provider adapter allowed stale catalog matches to win
+    // before "they" / "this amount" became customer-scoped context.
+    const followUp = resolveAgentFollowUpContext(request.conversationContext, request.question);
+    const serverSnapshot = agentRunRecord(request.conversationContext?.serverSnapshot);
+    const topicRelation = agentRunString(serverSnapshot?.topicRelation);
+    // The readiness marker is source-versioned. When it matches, pass the
+    // already-built metadata identity into retrieval so buildLocalContextPack
+    // opens the immutable snapshot directly instead of rebuilding all metadata
+    // merely to rediscover the same fingerprint on every follow-up.
+    const preparedMetadataFingerprint = isAgentProjectIndexReady(projectRoot)
+      ? currentMetadataFingerprint(projectRoot)
+      : undefined;
     const task = buildLocalContextPack(projectRoot, {
       question: request.question,
+      followUp,
+      priorContextPackId: agentRunString(request.conversationContext?.contextPackId),
+      conversationTopicRelation: topicRelation === 'continuation'
+        || topicRelation === 'refinement'
+        || topicRelation === 'return'
+        || topicRelation === 'shift'
+        ? topicRelation
+        : undefined,
+      preparedMetadataFingerprint,
       surface: 'notebook',
       selectedContext: {
         selectedObject: request.selectedObject,
@@ -2803,6 +2840,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             activeDomain: requestedDomain,
             purpose: agentRunWorkspaceValue(request, 'purpose'),
             modelAreaId: agentRunWorkspaceValue(request, 'modelAreaId'),
+            skillRefs: agentRunWorkspaceValues(request, 'skillRefs'),
             source: 'explicit_ui',
             snapshotId: snapshot.snapshotId,
           })
@@ -4948,12 +4986,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const requestId = apiRequestId('domain-workspace');
       const suffix = decodeURIComponent(path.slice('/api/domain-workspaces/'.length));
       const relatedSuffix = '/related-products';
-      const domainId = suffix.endsWith(relatedSuffix) ? suffix.slice(0, -relatedSuffix.length) : suffix;
+      const knowledgeSuffix = '/knowledge';
+      const domainId = suffix.endsWith(relatedSuffix)
+        ? suffix.slice(0, -relatedSuffix.length)
+        : suffix.endsWith(knowledgeSuffix)
+          ? suffix.slice(0, -knowledgeSuffix.length)
+          : suffix;
       const snapshot = projectSnapshot();
       const manifest = snapshot.manifest;
       if (!manifest.modeling?.packages[domainId]) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DOMAIN_NOT_FOUND', message: `domain workspace not found: ${domainId}`, recoverable: false })));
+        return;
+      }
+      if (suffix.endsWith(knowledgeSuffix)) {
+        await ensureMetadataCatalogFresh(projectRoot, { manifest, semanticLayer });
+        const knowledge = readIndexedDomainKnowledge(projectRoot, domainId)
+          ?? canonicalDomainKnowledge(manifest, domainId, snapshot.snapshotId);
+        if (!knowledge) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({ requestId, snapshotId: snapshot.snapshotId, code: 'DOMAIN_KNOWLEDGE_NOT_FOUND', message: `domain knowledge capsule not found: ${domainId}`, recoverable: false })));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, ...knowledge }));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -5076,12 +5132,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
       const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
       const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      const queryTokens = query.split(/[^a-z0-9]+/).filter(Boolean);
       const domain = (url.searchParams.get('domain') ?? '').trim();
       const boundByDbtId = new Map(Object.values(manifest.modeling?.entities ?? {}).map((entity) => [entity.dbtUniqueId, entity]));
       const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {})
-        .filter((node) => !query || `${node.name} ${node.relation ?? ''} ${node.sourcePath ?? ''}`.toLowerCase().includes(query))
+        .filter((node) => {
+          if (!queryTokens.length) return true;
+          const haystack = `${node.name} ${node.uniqueId} ${node.relation ?? ''} ${node.sourcePath ?? ''}`.toLowerCase();
+          return queryTokens.every((token) => haystack.includes(token));
+        })
         .filter((node) => !domain || boundByDbtId.get(node.uniqueId)?.domain === domain)
-        .sort((a, b) => a.uniqueId.localeCompare(b.uniqueId));
+        .sort((a, b) => {
+          if (!query) return a.uniqueId.localeCompare(b.uniqueId);
+          const score = (node: typeof a) => {
+            const name = node.name.toLowerCase();
+            const uniqueId = node.uniqueId.toLowerCase();
+            let value = name === query || uniqueId === query ? 1_000 : 0;
+            if (name.startsWith(query)) value += 500;
+            if (uniqueId.startsWith(query)) value += 300;
+            if (name.includes(query)) value += 200;
+            value += queryTokens.reduce((total, token) => total + (name.startsWith(token) ? 80 : name.includes(token) ? 40 : 10), 0);
+            return value;
+          };
+          return score(b) - score(a) || a.uniqueId.localeCompare(b.uniqueId);
+        });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
         requestId,
@@ -11156,13 +11230,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const graph = buildProjectLineageGraph(projectRoot, semanticLayer);
         const result: Business360ResultV2 | null = queryBusiness360(graph, rawNodeId);
-        if (!result) {
+        const snapshot = projectSnapshot();
+        await ensureMetadataCatalogFresh(projectRoot, { manifest: snapshot.manifest, semanticLayer });
+        const knowledge = readIndexedKnowledge360(projectRoot, rawNodeId)
+          ?? canonicalKnowledge360(snapshot.manifest, rawNodeId, snapshot.snapshotId);
+        if (!result && !knowledge) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `Lineage node "${rawNodeId}" not found` }));
           return;
         }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(result));
+        res.end(serializeJSON(result ? { ...result, knowledge } : { version: 3, knowledge }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -19176,17 +19254,127 @@ function buildNotebookTemplate(title: string, template: string): string {
 }
 
 /** Build a lineage graph from the project's blocks and semantic layer. */
-// Simple lineage graph cache: rebuilds at most every 5 seconds
-let _lineageCache: { graph: InstanceType<typeof LineageGraph>; builtAt: number } | null = null;
-const LINEAGE_CACHE_TTL_MS = 5000;
+// Cache per project + source fingerprint. A process can serve different roots,
+// and a time-only singleton previously returned the wrong graph after a change.
+const _lineageCache = new Map<string, {
+  signature: string;
+  graph: InstanceType<typeof LineageGraph>;
+}>();
 
 function buildProjectLineageGraph(projectRoot: string, semanticLayer: SemanticLayer | null | undefined) {
-  if (_lineageCache && Date.now() - _lineageCache.builtAt < LINEAGE_CACHE_TTL_MS) {
-    return _lineageCache.graph;
-  }
+  const signature = lineageSourceSignature(projectRoot);
+  const cached = _lineageCache.get(projectRoot);
+  if (cached?.signature === signature) return cached.graph;
   const graph = buildProjectLineageGraphUncached(projectRoot, semanticLayer);
-  _lineageCache = { graph, builtAt: Date.now() };
+  _lineageCache.set(projectRoot, { signature, graph });
   return graph;
+}
+
+function lineageSourceSignature(projectRoot: string): string {
+  const hash = createHash('sha256');
+  const dbtManifestPath = resolveDbtManifestPath(projectRoot, {}) ?? undefined;
+  const inputs = new Set(collectInputFiles({ projectRoot, dbtManifestPath }));
+  const emittedManifest = join(projectRoot, 'dql-manifest.json');
+  if (existsSync(emittedManifest)) inputs.add(emittedManifest);
+  for (const input of [...inputs].sort()) {
+    try {
+      const stats = statSync(input);
+      hash.update(`${input}\0${stats.size}\0${stats.mtimeMs}\n`);
+    } catch {
+      hash.update(`${input}\0missing\n`);
+    }
+  }
+  return hash.digest('hex');
+}
+
+/** UI-008: bounded compiler-owned Domain Knowledge Capsule response. */
+function canonicalDomainKnowledge(manifest: DQLManifest, domainId: string, snapshotId: string) {
+  const graph = manifest.knowledgeGraph;
+  if (!graph) return null;
+  const capsule = graph.domainCapsules[domainId]
+    ?? Object.values(graph.domainCapsules).find((item) => item.domainId === domainId && !item.modelAreaId)
+    ?? Object.values(graph.domainCapsules).find((item) => item.id === domainId || item.name === domainId);
+  const canonicalDomainId = capsule?.domainId
+    ?? Object.values(graph.objects ?? {}).find((item) => item.kind === 'domain' && (item.id === domainId || item.localId === domainId || item.aliases?.includes(domainId)))?.localId;
+  if (!canonicalDomainId) return null;
+  const objects = Object.values(graph.objects ?? {})
+    .filter((item) => item.domainId === canonicalDomainId || item.id === `domain::${canonicalDomainId}`)
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const objectIds = new Set(objects.map((item) => item.id));
+  const edges = (graph.edges ?? [])
+    .filter((edge) => objectIds.has(edge.from) || objectIds.has(edge.to))
+    .slice(0, 1_500);
+  const routes = graph.crossDomainRoutes.filter((route) =>
+    route.providerDomainId === canonicalDomainId || route.consumerDomainId === canonicalDomainId);
+  const routeSummary = routes.reduce<Record<string, number>>((counts, route) => {
+    counts[route.state] = (counts[route.state] ?? 0) + 1;
+    return counts;
+  }, {});
+  return {
+    schemaVersion: graph.schemaVersion,
+    snapshotId,
+    sourceFingerprint: graph.sourceFingerprint,
+    domainId: canonicalDomainId,
+    capsule: capsule ?? graph.domainCapsules[canonicalDomainId],
+    counts: {
+      objects: objects.length,
+      edges: edges.length,
+      routes: routes.length,
+      routeStates: routeSummary,
+    },
+    objects: objects.slice(0, 750),
+    edges,
+    routes,
+    truncated: objects.length > 750 || edges.length >= 1_500,
+  };
+}
+
+/** REL-003: qualified-object neighborhood with route policy and provenance. */
+function canonicalKnowledge360(manifest: DQLManifest, rawId: string, snapshotId: string) {
+  const graph = manifest.knowledgeGraph;
+  if (!graph) return null;
+  const graphObjects = graph.objects ?? {};
+  const graphEdges = graph.edges ?? [];
+  const exact = graphObjects[rawId];
+  const matches = exact ? [exact] : Object.values(graphObjects).filter((item) =>
+    item.localId === rawId || item.aliases?.includes(rawId) || item.id.endsWith(`::${rawId}`));
+  if (matches.length !== 1) {
+    return matches.length > 1 ? {
+      snapshotId,
+      sourceFingerprint: graph.sourceFingerprint,
+      ambiguous: true,
+      candidates: matches.slice(0, 20).map((item) => ({ id: item.id, kind: item.kind, domainId: item.domainId })),
+    } : null;
+  }
+  const focus = matches[0];
+  const ids = new Set([focus.id]);
+  let frontier = new Set([focus.id]);
+  for (let depth = 0; depth < 2 && frontier.size > 0 && ids.size < 160; depth += 1) {
+    const next = new Set<string>();
+    for (const edge of graphEdges) {
+      if (frontier.has(edge.from) && !ids.has(edge.to)) next.add(edge.to);
+      if (frontier.has(edge.to) && !ids.has(edge.from)) next.add(edge.from);
+    }
+    for (const id of next) {
+      if (ids.size >= 160) break;
+      ids.add(id);
+    }
+    frontier = next;
+  }
+  const objects = [...ids].flatMap((id) => graphObjects[id] ? [graphObjects[id]!] : []);
+  const edges = graphEdges.filter((edge) => ids.has(edge.from) && ids.has(edge.to)).slice(0, 500);
+  const domains = new Set(objects.flatMap((item) => item.domainId ? [item.domainId] : []));
+  const routes = graph.crossDomainRoutes.filter((route) =>
+    domains.has(route.providerDomainId) && domains.has(route.consumerDomainId));
+  return {
+    snapshotId,
+    sourceFingerprint: graph.sourceFingerprint,
+    focus,
+    objects,
+    edges,
+    routes,
+    truncated: ids.size >= 160 || edges.length >= 500,
+  };
 }
 
 function buildProjectLineageGraphUncached(projectRoot: string, semanticLayer: SemanticLayer | null | undefined) {

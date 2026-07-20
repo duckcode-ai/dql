@@ -1036,6 +1036,37 @@ describe('domain Related Products backlinks', () => {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
   });
+
+  it('serves the compiler-owned capsule and qualified Business 360 neighborhood', async () => {
+    const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const response = await fetch(`${base}/api/domain-workspaces/growth/knowledge`);
+      expect(response.status).toBe(200);
+      const knowledge = await response.json() as {
+        snapshotId: string;
+        sourceFingerprint: string;
+        capsule: { skillRefs: string[] };
+        counts: { routeStates: Record<string, number> };
+        routes: Array<{ state: string; relationshipId: string }>;
+      };
+      expect(knowledge.snapshotId).toMatch(/^[a-f0-9]{64}$/);
+      expect(knowledge.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(knowledge.capsule.skillRefs).toContain('growth::skill::acquisition_analysis');
+      expect(knowledge.counts.routeStates).toMatchObject({ authorized: 1, blocked: 1 });
+
+      const relationshipId = 'growth::relationship::acquisition_to_customer';
+      const business360Response = await fetch(`${base}/api/lineage/business-360/${encodeURIComponent(relationshipId)}`);
+      expect(business360Response.status).toBe(200);
+      const business360 = await business360Response.json() as { knowledge: { focus: { id: string }; routes: Array<{ state: string }> } };
+      expect(business360.knowledge.focus.id).toBe(relationshipId);
+      expect(business360.knowledge.routes.some((route) => route.state === 'authorized')).toBe(true);
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
 });
 
 describe('exploratory result contracts', () => {

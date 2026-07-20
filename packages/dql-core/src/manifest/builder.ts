@@ -62,6 +62,9 @@ import { blockParameterDefinitions } from '../blocks/parameters.js';
 import { loadDbtFirstModeling, siblingDbtArtifact } from './dbt-first-modeling.js';
 import { domainFolderSlug } from './domain-writer.js';
 import { loadDomainPackageRegistry } from './domain-package-registry.js';
+import type { DomainPackageRegistryResult } from './domain-package-registry.js';
+import { buildManifestKnowledgeGraph, compactManifestKnowledgeGraph } from './knowledge-graph.js';
+import { loadManifestKnowledgeSkills, manifestKnowledgeSkillInputFiles } from './knowledge-skills.js';
 
 // ---- Public API ----
 
@@ -173,6 +176,8 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
 
   if (config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first') {
     for (const f of scanFilesRecursive(join(projectRoot, 'domains'), ['.yaml', '.yml'])) files.add(f);
+    const registry = loadDomainPackageRegistry(projectRoot);
+    for (const f of manifestKnowledgeSkillInputFiles(projectRoot, registry)) files.add(f);
   }
 
   // Apps & dashboards. Manifests live at apps/<id>/dql.app.json; dashboards
@@ -225,7 +230,9 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
 
   // Scan blocks
   const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const blocks = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
+  const blockScan = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
+  const blocks = blockScan.blocks;
+  const knowledgeBlocks = blockScan.all;
 
   // Scan business composition views
   const businessViewDirs = ['blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
@@ -235,6 +242,11 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const termDirs = ['terms', 'blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   const terms = scanTerms(projectRoot, termDirs, diagnostics);
 
+  if (packageRegistry) {
+    applyDomainPackageOwnership(projectRoot, packageRegistry, blocks, businessViews, terms, diagnostics);
+    applyDomainPackageOwnershipToValues(projectRoot, packageRegistry, knowledgeBlocks, 'Block', diagnostics);
+  }
+
   // Scan notebooks
   const notebookDirs = ['notebooks', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   const notebooks = scanNotebooks(projectRoot, notebookDirs, diagnostics, datalexRegistry);
@@ -243,6 +255,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const notebookBlocks = extractNotebookBlocks(notebooks);
   for (const [name, block] of Object.entries(notebookBlocks)) {
     if (!blocks[name]) blocks[name] = block;
+    knowledgeBlocks.push(block);
   }
   const notebookTerms = extractNotebookTerms(notebooks);
   for (const [name, term] of Object.entries(notebookTerms)) {
@@ -337,7 +350,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   );
   if (dbtFirstModeling) appendDbtFirstModelingLineage(lineage, dbtFirstModeling.modeling);
 
-  return {
+  const baseManifest: Omit<DQLManifest, 'knowledgeGraph'> = {
     manifestVersion: dbtFirstV3 ? 3 : 2,
     dqlVersion,
     // v3 is a reproducible policy artifact. Runtime build time lives in the
@@ -361,6 +374,72 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     modeling: dbtFirstModeling?.modeling,
     diagnostics,
   };
+  if (!dbtFirstV3) return baseManifest;
+
+  const skillCatalog = loadManifestKnowledgeSkills(projectRoot, packageRegistry);
+  diagnostics.push(...skillCatalog.diagnostics);
+  const inlineKnowledgeGraph = buildManifestKnowledgeGraph({ manifest: baseManifest, skills: skillCatalog.skills, blocks: knowledgeBlocks });
+  diagnostics.push(...inlineKnowledgeGraph.diagnostics);
+  const knowledgeGraph = compactManifestKnowledgeGraph(inlineKnowledgeGraph);
+  return { ...baseManifest, knowledgeGraph, diagnostics };
+}
+
+/**
+ * A file inside a Domain Package inherits that package's stable id. Explicit
+ * display-name aliases are canonicalized; a conflicting declaration is an
+ * error instead of silently splitting ownership between manifest projections.
+ */
+function applyDomainPackageOwnership(
+  projectRoot: string,
+  registry: DomainPackageRegistryResult,
+  blocks: Record<string, ManifestBlock>,
+  businessViews: Record<string, ManifestBusinessView>,
+  terms: Record<string, ManifestTerm>,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  const assign = (kind: string, value: { filePath: string; domain?: string }) => {
+    const sourcePath = value.filePath.split('#')[0];
+    const pkg = registry.packageForPath(join(projectRoot, sourcePath));
+    if (!pkg) return;
+    const explicit = value.domain?.trim();
+    if (!explicit || explicit === pkg.id || explicit === pkg.name) {
+      value.domain = pkg.id;
+      return;
+    }
+    diagnostics.push({
+      kind: 'resolve',
+      filePath: value.filePath,
+      severity: 'error',
+      message: `${kind} domain "${explicit}" conflicts with owning Domain Package "${pkg.id}".`,
+    });
+  };
+  for (const block of Object.values(blocks)) assign('Block', block);
+  for (const view of Object.values(businessViews)) assign('Business view', view);
+  for (const term of Object.values(terms)) assign('Term', term);
+}
+
+function applyDomainPackageOwnershipToValues(
+  projectRoot: string,
+  registry: DomainPackageRegistryResult,
+  values: Array<{ filePath: string; domain?: string }>,
+  kind: string,
+  diagnostics: ManifestDiagnostic[],
+): void {
+  for (const value of values) {
+    const sourcePath = value.filePath.split('#')[0];
+    const pkg = registry.packageForPath(join(projectRoot, sourcePath));
+    if (!pkg) continue;
+    const explicit = value.domain?.trim();
+    if (!explicit || explicit === pkg.id || explicit === pkg.name) {
+      value.domain = pkg.id;
+      continue;
+    }
+    // The legacy selected map already reports the same conflict. Only report
+    // catalog-only duplicates that did not survive that compatibility view.
+    if (!Object.values(values).some((candidate) => candidate !== value && candidate.filePath === value.filePath)) {
+      diagnostics.push({ kind: 'resolve', filePath: value.filePath, severity: 'error', message: `${kind} domain "${explicit}" conflicts with owning Domain Package "${pkg.id}".` });
+    }
+  }
 }
 
 // ---- Project Config ----
@@ -683,14 +762,18 @@ function scanBlocks(
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
   datalexRegistry?: DataLexContractRegistry,
-): Record<string, ManifestBlock> {
+): { blocks: Record<string, ManifestBlock>; all: ManifestBlock[] } {
   const blocks: Record<string, ManifestBlock> = {};
+  const all: ManifestBlock[] = [];
+  const seenFiles = new Set<string>();
 
   for (const dir of dirs) {
     const dirPath = join(projectRoot, dir);
     const files = scanFilesRecursive(dirPath, ['.dql']);
 
     for (const filePath of files) {
+      if (seenFiles.has(filePath)) continue;
+      seenFiles.add(filePath);
       const relPath = relative(projectRoot, filePath);
       try {
         const source = readFileSync(filePath, 'utf-8');
@@ -703,6 +786,7 @@ function scanBlocks(
           if (block.kind !== 'BlockDecl') continue;
 
           const nextBlock = blockDeclToManifestBlock(block, relPath);
+          all.push(nextBlock);
           if (blocks[block.name]) {
             diagnostics?.push({
               kind: 'resolve',
@@ -729,7 +813,7 @@ function scanBlocks(
     }
   }
 
-  return blocks;
+  return { blocks, all };
 }
 
 function shouldReplaceDuplicateBlock(existing: ManifestBlock, next: ManifestBlock): boolean {

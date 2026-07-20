@@ -43,6 +43,10 @@ describe('ConversationStore', () => {
       trustLabel: 'certified',
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       contextPackId: 'ctx_abc',
+      knowledgeLens: {
+        mode: 'pinned', activeDomainId: 'commerce', skillRefs: ['commerce::skill::revenue'],
+        snapshotId: 'snapshot-1', capsuleFingerprint: 'capsule-1',
+      },
       cascade: {
         terminalLane: 'semantic',
         routeTier: 'semantic_metric',
@@ -81,6 +85,10 @@ describe('ConversationStore', () => {
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });
     expect(stored.sourceCertifiedBlock).toBe('food_vs_drink_revenue');
     expect(stored.contextPackId).toBe('ctx_abc');
+    expect(stored.knowledgeLens).toEqual({
+      mode: 'pinned', activeDomainId: 'commerce', skillRefs: ['commerce::skill::revenue'],
+      snapshotId: 'snapshot-1', capsuleFingerprint: 'capsule-1',
+    });
     expect(stored.cascade).toMatchObject({
       terminalLane: 'semantic',
       routeTier: 'semantic_metric',

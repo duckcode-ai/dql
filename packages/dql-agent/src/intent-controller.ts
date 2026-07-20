@@ -203,7 +203,10 @@ export function looksLikeFollowUp(question: string, hasHistory: boolean): boolea
   const trimmed = question.trim();
   // Short + deictic, or starts with a continuation word.
   if (FOLLOW_UP_RE.test(trimmed)) return true;
-  return trimmed.split(/\s+/).length <= 4 && /\b(it|that|this|those|these|them)\b/i.test(trimmed);
+  // Analytical references are often full sentences ("what product did they
+  // buy for this amount?"). Do not limit pronoun resolution to four words.
+  return /\b(it|its|they|their|them|that|this|those|these|same|previous|prior)\b/i.test(trimmed)
+    && trimmed.split(/\s+/).length <= 24;
 }
 
 /**

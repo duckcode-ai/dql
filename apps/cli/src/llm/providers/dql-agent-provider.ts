@@ -13,7 +13,6 @@ import {
   buildLocalContextPack,
   contextRetrievalBudgetForQuestion,
   ensureAgentProjectReady,
-  loadSkills,
   type AgentAnswer,
   type AgentDqlArtifactReference,
   type CertifiedFitConfirmation,
@@ -24,6 +23,7 @@ import {
   type AgentResultPayload,
   type ConversationSnapshot,
   type LocalContextPack,
+  type Skill,
 } from '@duckcodeailabs/dql-agent';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
@@ -346,7 +346,6 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             scopeId: req.upstream?.cellId,
             limit: 6,
           });
-          const skills = loadSkills(req.projectRoot).skills;
           const semanticLayer = loadAgentSemanticLayer(req.projectRoot);
           const questionPlan = buildAnalysisQuestionPlan(question, followUp);
           const contextBudget = contextRetrievalBudgetForQuestion({
@@ -373,6 +372,34 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             preparedMetadataFingerprint: projectState.metadataFingerprint,
           })
             .catch(() => undefined);
+          // CTX-002/SKILL-003: the immutable context pack is the single skill
+          // selection for this turn. Never re-read mutable skill files after
+          // the project snapshot has been acquired.
+          const skills: Skill[] = (contextPack?.skills ?? []).map((skill) => ({
+            id: skill.id,
+            localId: skill.id,
+            qualifiedId: skill.qualifiedId,
+            scope: 'project',
+            domain: skill.domain,
+            domains: skill.domains,
+            modelAreaRefs: skill.modelAreaRefs,
+            kind: skill.kind,
+            status: skill.status,
+            owner: skill.owner,
+            triggers: skill.triggers,
+            exclusions: skill.exclusions,
+            description: skill.description,
+            preferredMetrics: skill.preferredMetrics,
+            preferredBlocks: skill.preferredBlocks,
+            preferredDimensions: skill.preferredDimensions,
+            requiredFilters: skill.requiredFilters,
+            clarifyWhen: skill.clarifyWhen,
+            examples: [],
+            sourceRefs: skill.sourceRefs,
+            vocabulary: skill.vocabulary,
+            body: skill.guidance,
+            sourcePath: skill.sourcePath ?? '',
+          }));
           const contextDurationMs = Date.now() - contextStartedAt;
           const answerLoopTools = buildAnswerLoopTools(req.projectRoot);
           const sourceSearchTool = answerLoopTools.find((tool) => tool.name === 'search_project_files');
@@ -783,8 +810,11 @@ function applyTopicShiftGuard(
   };
 }
 
-function followUpFromConversationContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
-  const context = req.conversationContext;
+export function resolveAgentFollowUpContext(
+  rawContext: Record<string, unknown> | undefined,
+  question: string,
+): AgentFollowUpContext | undefined {
+  const context = rawContext as AgentRunRequest['conversationContext'];
   if (!context) return undefined;
   const turns = conversationTurnsFromContext(context);
   const activeTurn = activeConversationTurn(context, turns, question);
@@ -867,6 +897,10 @@ function followUpFromConversationContext(req: AgentRunRequest, question: string)
     resolvedReferences: resolvedReferences.labels,
     unresolvedReferences: resolvedReferences.unresolved,
   };
+}
+
+function followUpFromConversationContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
+  return resolveAgentFollowUpContext(req.conversationContext as Record<string, unknown> | undefined, question);
 }
 
 function conversationTurnsFromContext(context: AgentRunRequest['conversationContext']): Array<Record<string, unknown>> {
@@ -1194,7 +1228,7 @@ function activeTurnNumber(turn: Record<string, unknown> | undefined, key: string
 }
 
 function referencesNeedValues(question: string): boolean {
-  return /\b(?:this|that|these|those|same|above|previous|prior)\b/i.test(question);
+  return /\b(?:it|its|they|their|them|this|that|these|those|same|above|previous|prior)\b/i.test(question);
 }
 
 function extractCertifiedBlockName(content: string): string | undefined {
@@ -1286,7 +1320,15 @@ function resolveDeicticDimensions(question: string, priorValues: Record<string, 
     if (dim === 'product' && /\bthe\s+product\s+cat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower)) continue;
     if (valuesForPriorDimension(priorValues, dim).length) dims.push(dim);
   }
-  if (dims.length === 0 && /\b(?:these|those|that|them|same|above|previous|prior)\b/.test(lower)) {
+  // Subject/object pronouns usually refer to people/accounts when paired with
+  // purchasing verbs. Resolve that entity before broad object retrieval so a
+  // prior customer row does not become a fresh catalog search for "they".
+  if (
+    dims.length === 0
+    && /\b(?:they|their|them)\b[^.?!]{0,48}\b(?:buy|bought|purchase|purchased|order|ordered|spend|spent|use|used)\b/.test(lower)
+    && valuesForPriorDimension(priorValues, 'customer').length > 0
+  ) dims.push('customer');
+  if (dims.length === 0 && /\b(?:it|its|they|their|them|this|these|those|that|same|above|previous|prior)\b/.test(lower)) {
     const single = singlePriorValueDimension(priorValues);
     if (single) dims.push(single);
   }
@@ -1400,7 +1442,8 @@ function isGenericFollowUp(question: string): boolean {
 
 function isDrilldownFollowUp(question: string): boolean {
   const lower = question.toLowerCase();
-  const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower);
+  const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:amount|value|orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower)
+    || /\b(?:they|their|them)\b/.test(lower);
   return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|regions?|customers?|channels?|products?|category|categories|catagor(?:y|ies)|catogor(?:y|ies))\b/.test(lower)
     && (deicticDrilldown || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower));
 }

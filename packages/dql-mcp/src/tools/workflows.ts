@@ -57,6 +57,7 @@ export async function askDql(
   return {
     question: args.question,
     contextPackId: planned.contextPackId,
+    knowledgeLens: planned.contextPack.knowledgeLens,
     route: route.route,
     intent: route.intent,
     /** Legacy field retained for backward compatibility. */
@@ -175,6 +176,7 @@ export async function inspectDqlProject(
   const blocks = Object.values(manifest.blocks ?? {});
   const dashboards = Object.values(manifest.dashboards ?? {});
   const apps = Object.values(manifest.apps ?? {});
+  const knowledgeGraph = manifest.knowledgeGraph;
   return {
     projectRoot: ctx.projectRoot,
     blocks: {
@@ -188,6 +190,23 @@ export async function inspectDqlProject(
       metrics: ctx.semanticLayer.listMetrics().length,
       dimensions: ctx.semanticLayer.listDimensions().length,
     },
+    knowledge: knowledgeGraph ? {
+      schemaVersion: knowledgeGraph.schemaVersion,
+      sourceFingerprint: knowledgeGraph.sourceFingerprint,
+      objects: knowledgeGraph.counts?.objects ?? Object.keys(knowledgeGraph.objects ?? {}).length,
+      edges: knowledgeGraph.counts?.edges ?? knowledgeGraph.edges?.length ?? 0,
+      domainCapsules: Object.values(knowledgeGraph.domainCapsules).map((capsule) => ({
+        id: capsule.id,
+        domainId: capsule.domainId,
+        modelAreaId: capsule.modelAreaId,
+        fingerprint: capsule.fingerprint,
+        skills: capsule.skillRefs.length,
+      })),
+      routeStates: knowledgeGraph.crossDomainRoutes.reduce<Record<string, number>>((counts, route) => {
+        counts[route.state] = (counts[route.state] ?? 0) + 1;
+        return counts;
+      }, {}),
+    } : undefined,
     index,
     catalog,
     recommendedNextStep: 'Use ask_dql before writing SQL, then query_via_block or query_via_metadata based on the returned route.',

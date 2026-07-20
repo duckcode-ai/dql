@@ -874,6 +874,58 @@ describe("answer (block-first loop)", () => {
     expect(result.executionError).toContain("connection refused");
   });
 
+  it("EXP-003 bypasses a binder-failed certified block and executes a review-required fallback", async () => {
+    kg.rebuild([{
+      nodeId: 'block:lowest_customer_revenue',
+      kind: 'block',
+      name: 'lowest_customer_revenue',
+      domain: 'commerce',
+      status: 'certified',
+      description: 'Customers ranked by their lowest revenue. One row per customer.',
+      llmContext: 'Use for customers with the least revenue.',
+      tags: ['customer', 'revenue', 'lowest'],
+      sourceTier: 'certified_artifact',
+      certification: 'certified',
+      provenance: 'DQL block',
+    }], []);
+    const provider = new StubProvider(
+      '```json\n{"summary":"Revenue fallback.","sql":"SELECT customer_name, SUM(revenue) AS revenue FROM orders GROUP BY customer_name ORDER BY revenue ASC LIMIT 10","viz":"bar","outputs":["customer_name","revenue"]}\n```',
+    );
+    let certifiedExecutions = 0;
+    const result = await answer({
+      question: "Run certified block lowest_customer_revenue",
+      provider,
+      kg,
+      blockHints: ['lowest_customer_revenue'],
+      schemaContext: [{
+        name: 'orders',
+        relation: 'orders',
+        source: 'runtime schema',
+        columns: [
+          { name: 'customer_name', type: 'VARCHAR' },
+          { name: 'revenue', type: 'DOUBLE' },
+        ],
+      }],
+      executeCertifiedBlock: async () => {
+        certifiedExecutions += 1;
+        throw new Error('DuckDB query failed: Binder Error: Ambiguous reference to column name "customer_name"');
+      },
+      executeGeneratedSql: async (sql) => ({
+        columns: ['customer_name', 'revenue'],
+        rows: [{ customer_name: 'Adele Ace', revenue: 4 }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(certifiedExecutions).toBe(1);
+    expect(result.kind).toBe('uncertified');
+    expect(result.result?.rows).toEqual([{ customer_name: 'Adele Ace', revenue: 4 }]);
+    expect(result.validationWarnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('failed execution'),
+    ]));
+  });
+
   it("returns Uncertified when no certified block matches and SQL is proposed", async () => {
     const llmReply =
       "Median order value by region — joins fct_orders with dim_customers.\n\n" +

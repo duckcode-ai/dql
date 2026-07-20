@@ -34,6 +34,20 @@ describe('reduceWorkingState — topic relation matrix', () => {
     expect(state.topicKey).toContain('revenue');
   });
 
+  it('carries the exact latest knowledge lens without merging skill snapshots', () => {
+    const first = reduceWorkingState(emptyWorkingState(), turn({
+      question: 'revenue',
+      contract: { measures: ['revenue'] },
+      knowledgeLens: { mode: 'auto', skillRefs: ['finance::skill::revenue'], snapshotId: 'snapshot-1' },
+    })).state;
+    const second = reduceWorkingState(first, turn({
+      question: 'signups',
+      contract: { measures: ['signups'] },
+      knowledgeLens: { mode: 'pinned', skillRefs: ['growth::skill::acquisition'], snapshotId: 'snapshot-2' },
+    })).state;
+    expect(second.knowledgeLens).toEqual({ mode: 'pinned', skillRefs: ['growth::skill::acquisition'], snapshotId: 'snapshot-2' });
+  });
+
   it('same-topic turn is a continuation and accumulates', () => {
     const { state, topicRelation } = reduceWorkingState(revenueState(), turn({
       question: 'revenue by product too',

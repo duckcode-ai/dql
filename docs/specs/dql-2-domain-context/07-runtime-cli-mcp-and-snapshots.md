@@ -11,11 +11,14 @@ artifacts per request (`PERF-001`).
 
 The Ask-facing handle is a `ProjectSearchSnapshotHandle` containing `snapshotId`,
 source fingerprint, policy hash, target identity, optional connection identity,
-and creation time. The canonical persisted search store contains qualified DQL
-v3/modeling objects, certified assets, semantic metrics/members, dbt unique IDs,
-complete column records, safe runtime-schema records, approved hints, aliases,
-typed edges, payloads, FTS, and source diagnostics (`CTX-005`). Leaf names are
-ambiguity-aware aliases; they never replace qualified identity.
+and creation time. The immutable content-addressed search store contains
+qualified DQL v3/modeling objects, certified assets, semantic metrics/members,
+dbt unique IDs, complete column records, skill descriptors/bodies, aliases,
+typed edges, payloads, FTS, and source diagnostics (`CTX-005`). A separate
+working catalog contains safe runtime-schema records, approved hints, query
+runs, and context-pack history. One request binds both through the immutable
+snapshot ID; mutable observations cannot alter its governed evidence. Leaf
+names are ambiguity-aware aliases; they never replace qualified identity.
 
 Compact exact/alias maps, metric headers, and graph adjacency are memory-resident.
 Verbose payloads, hundreds of thousands of columns, FTS, and graph records stay
@@ -24,10 +27,17 @@ last valid persisted snapshot before rebuilding; cheap fingerprint validation
 runs without parsing every artifact. A warm Ask performs zero raw dbt, semantic,
 or DQL source reads.
 
-Build occurs in a candidate directory under ignored `.dql/` state. Validation
-must complete before an atomic active-pointer swap. Snapshot IDs are stable
+Build occurs in ignored `.dql/` state. Validated immutable SQLite files are
+written to `.dql/cache/snapshots/<fingerprint>.sqlite`; activation atomically
+renames `.dql/cache/active-snapshot.json`. Snapshot IDs are stable
 content-derived fingerprints. Old snapshots remain available for active
-requests until reference counts reach zero, then are garbage-collected.
+requests until they are no longer retained, then are garbage-collected.
+
+Manifest knowledge graph schema v2 is the compact control plane: counts,
+domain-shard fingerprints, qualified object references, Domain Knowledge
+Capsules, cross-domain route states, and the index fingerprint. Verbose object
+payloads, graph edges, aliases, and compressed skill guidance live only in the
+immutable SQLite snapshot and are hydrated in bounded ranked neighborhoods.
 
 Warm status checks compare cheap file metadata/fingerprints before rebuilding;
 they do not build a full metadata snapshot merely to decide whether it is warm.

@@ -8,7 +8,7 @@ tools, MCP, and final SQL safety through one snapshot-scoped context path.
 Acceptance IDs: `REL-001`, `REL-002`, `CONTRACT-001`, `SKILL-001`, `SKILL-002`,
 `CTX-001`, `CTX-002`, `CTX-004`, `AGT-001`, `AGT-002`, `AGT-003`.
 Also owns `CTX-005`, `AGT-009`, `AGT-010`, `API-003`, `PERF-002`, and
-`SEC-003` for the Ask path.
+`SEC-003`, `CTX-006`, `REL-003`, and `SKILL-003` for the Ask path.
 Dependencies: verified W01/W02; W03 discovery contracts available.
 
 ## Required implementation
@@ -29,6 +29,9 @@ Dependencies: verified W01/W02; W03 discovery contracts available.
   stale dependencies, unsafe fanout, or missing purpose/export/contract.
 - Carry envelope/snapshot/structured reason/provenance through every tool and
   MCP route; keep hints approved-only and unable to override gates.
+- Select structured skills from that immutable snapshot, hydrate only bounded
+  prompt guidance, and persist the exact capsule/skill hashes in a per-turn
+  `KnowledgeLens`. Domain affinity alone must not select an unrelated skill.
 
 ## Suggested ownership
 

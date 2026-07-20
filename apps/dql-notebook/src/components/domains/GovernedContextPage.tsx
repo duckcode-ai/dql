@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Boxes, CheckCircle2, CircleAlert, GraduationCap, Loader2, Sparkles } from 'lucide-react';
-import { api } from '../../api/client';
+import { Boxes, CheckCircle2, CircleAlert, GraduationCap, Loader2, Network, ShieldCheck, Sparkles } from 'lucide-react';
+import { api, type DomainKnowledgeResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { Domain, Skill } from '../../store/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { DomainsPage } from './DomainsPage';
 import { SkillsPage } from '../skills/SkillsPage';
 
-type ContextTab = 'overview' | 'domains' | 'skills';
+type ContextTab = 'overview' | 'domains' | 'skills' | 'knowledge';
 
 /** One home for the business context that guides the governed agent. */
 export function GovernedContextPage({ initialTab = 'overview' }: { initialTab?: ContextTab }): JSX.Element {
@@ -52,6 +52,7 @@ export function GovernedContextPage({ initialTab = 'overview' }: { initialTab?: 
     { id: 'overview', label: 'Overview' },
     { id: 'domains', label: 'Domains', count: domains.length },
     { id: 'skills', label: 'Skills', count: skills.length },
+    { id: 'knowledge', label: 'Knowledge 360' },
   ];
   return (
     <div style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg }}>
@@ -71,9 +72,83 @@ export function GovernedContextPage({ initialTab = 'overview' }: { initialTab?: 
         {tab === 'overview' ? <ContextOverview t={t} loading={loading} domains={domains} skills={skills} status={status} onBuild={startAiDraft} onTab={setTab} /> : null}
         {tab === 'domains' ? <DomainsPage embedded /> : null}
         {tab === 'skills' ? <SkillsPage embedded /> : null}
+        {tab === 'knowledge' ? <Knowledge360 t={t} domains={domains} /> : null}
       </div>
     </div>
   );
+}
+
+export function Knowledge360({ t, domains, initialDomainId }: {
+  t: Theme;
+  domains: Array<Pick<Domain, 'id' | 'name'>>;
+  initialDomainId?: string | null;
+}): JSX.Element {
+  const [domainId, setDomainId] = useState(initialDomainId ?? domains[0]?.id ?? '');
+  const [knowledge, setKnowledge] = useState<DomainKnowledgeResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!domainId && domains[0]?.id) setDomainId(domains[0].id);
+  }, [domainId, domains]);
+  useEffect(() => {
+    if (initialDomainId && domains.some((domain) => domain.id === initialDomainId)) setDomainId(initialDomainId);
+  }, [domains, initialDomainId]);
+  useEffect(() => {
+    if (!domainId) { setKnowledge(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void api.getDomainKnowledge(domainId)
+      .then((result) => { if (!cancelled) setKnowledge(result); })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setKnowledge(null);
+          setError(reason instanceof Error ? reason.message : 'Could not load the compiled knowledge capsule.');
+        }
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [domainId]);
+
+  const kindCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const object of knowledge?.objects ?? []) counts[object.kind] = (counts[object.kind] ?? 0) + 1;
+    return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  }, [knowledge]);
+
+  return <div style={{ display: 'grid', gap: 14 }}>
+    <section style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, background: t.cellBg, padding: 15 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div><div style={{ display: 'flex', gap: 7, alignItems: 'center', color: t.textPrimary, fontWeight: 700, fontSize: 13 }}><Network size={16} color={t.accent} /> Compiled Domain 360</div><div style={{ marginTop: 4, color: t.textMuted, fontSize: 12 }}>The same qualified graph, route policy, and skill snapshot used by Ask.</div></div>
+        <select aria-label="Domain knowledge capsule" value={domainId} onChange={(event) => setDomainId(event.target.value)} style={{ minWidth: 210, border: `1px solid ${t.inputBorder}`, borderRadius: 7, background: t.inputBg, color: t.textPrimary, padding: '7px 9px', fontFamily: t.font }}>
+          <option value="">Select a domain</option>
+          {[...domains].sort((a, b) => a.name.localeCompare(b.name)).map((domain) => <option key={domain.id} value={domain.id}>{domain.name}</option>)}
+        </select>
+      </div>
+    </section>
+    {loading ? <div style={{ color: t.textMuted, display: 'flex', gap: 8, alignItems: 'center', padding: 24 }}><Loader2 size={15} /> Loading compiled knowledge…</div> : null}
+    {error ? <div style={{ border: `1px solid ${t.error}`, background: t.cellBg, color: t.error, borderRadius: 8, padding: 12, fontSize: 12.5 }}>{error}</div> : null}
+    {knowledge ? <>
+      <section style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 9 }}>
+        <StatCard t={t} label="Objects" value={knowledge.counts.objects} detail="qualified knowledge" icon={<Boxes size={16} />} />
+        <StatCard t={t} label="Relations" value={knowledge.counts.edges} detail="provenance + policy" icon={<Network size={16} />} />
+        <StatCard t={t} label="Authorized" value={knowledge.counts.routeStates.authorized ?? 0} detail="safe cross-domain routes" icon={<ShieldCheck size={16} />} />
+        <StatCard t={t} label="Blocked / stale" value={(knowledge.counts.routeStates.blocked ?? 0) + (knowledge.counts.routeStates.stale ?? 0)} detail="never auto-joined" icon={<CircleAlert size={16} />} />
+      </section>
+      <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 1fr)', gap: 12 }}>
+        <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 9, background: t.cellBg, padding: 14 }}>
+          <strong style={{ color: t.textPrimary, fontSize: 13 }}>Knowledge capsule</strong>
+          <p style={{ color: t.textSecondary, fontSize: 12.5, lineHeight: 1.5, margin: '7px 0 11px' }}>{knowledge.capsule?.description || 'Compiled domain boundary and governed references.'}</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{kindCounts.map(([kind, count]) => <span key={kind} style={{ border: `1px solid ${t.cellBorder}`, background: t.pillBg, color: t.textSecondary, borderRadius: 999, padding: '3px 7px', fontSize: 11 }}>{kind.replace(/_/g, ' ')} · {count}</span>)}</div>
+          <div style={{ marginTop: 11, color: t.textMuted, fontSize: 11 }}>Snapshot {knowledge.snapshotId.slice(0, 12)} · graph {knowledge.sourceFingerprint.slice(0, 12)}{knowledge.truncated ? ' · bounded response' : ''}</div>
+        </div>
+        <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 9, background: t.cellBg, padding: 14 }}>
+          <strong style={{ color: t.textPrimary, fontSize: 13 }}>Cross-domain routes</strong>
+          <div style={{ display: 'grid', gap: 7, marginTop: 9 }}>{knowledge.routes.length ? knowledge.routes.map((route) => <div key={route.id} style={{ borderTop: `1px solid ${t.headerBorder}`, paddingTop: 7 }}><div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, color: t.textSecondary, fontSize: 12 }}><span>{route.providerDomainId} → {route.consumerDomainId}</span><span style={{ color: route.state === 'authorized' ? t.success : route.state === 'observed' ? t.textMuted : t.warning, fontWeight: 700 }}>{route.state}</span></div><div style={{ marginTop: 3, color: t.textMuted, fontSize: 11 }}>{route.purpose || route.reasonCodes.join(', ') || 'governed route'}</div></div>) : <div style={{ color: t.textMuted, fontSize: 12, marginTop: 8 }}>No cross-domain routes declared.</div>}</div>
+        </div>
+      </section>
+    </> : null}
+  </div>;
 }
 
 function ContextOverview({ t, loading, domains, skills, status, onBuild, onTab }: {

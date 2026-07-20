@@ -6,7 +6,7 @@ Prove the complete product behavior and scale budgets on deterministic fixtures;
 repair integration defects without weakening safety contracts.
 
 Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
-`PERF-002`, `E2E-001`, `E2E-005`, and `E2E-006`. Dependencies: verified W01–W06.
+`PERF-002`, `E2E-001`, `E2E-005`, `E2E-006`, and `E2E-007`. Dependencies: verified W01–W06.
 
 ## Required implementation
 

@@ -362,4 +362,17 @@ describe('selectRelevantSkills (spec 16)', () => {
 
     expect(selectRelevantSkills([pinned], 'write a python notebook')).toEqual([]);
   });
+
+  it('accepts a qualified pinned skill id but still enforces domain eligibility', () => {
+    const pinned: Skill = {
+      id: 'acquisition', qualifiedId: 'growth::skill::acquisition', scope: 'project', domain: 'growth',
+      preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Acquisition guidance.', sourcePath: '',
+    };
+    expect(selectRelevantSkills([pinned], 'unrelated question', {
+      domains: ['growth'], pinnedIds: ['growth::skill::acquisition'],
+    })).toEqual([pinned]);
+    expect(selectRelevantSkills([pinned], 'acquisition', {
+      domains: ['commerce'], pinnedIds: ['growth::skill::acquisition'],
+    })).toEqual([]);
+  });
 });

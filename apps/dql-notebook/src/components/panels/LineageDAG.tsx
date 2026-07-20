@@ -28,8 +28,7 @@ import {
   LAYER_ORDER,
   LINEAGE_NODE_TYPE_ORDER,
   TECHNICAL_LINEAGE_NODE_TYPES,
-  BUSINESS_LINEAGE_NODE_TYPES,
-  CONSUMPTION_LINEAGE_NODE_TYPES,
+  DOMAIN_LINEAGE_NODE_TYPES,
   getNodeLayer,
   type LineageNode,
   type LineageEdge,
@@ -41,10 +40,24 @@ type Direction = 'LR' | 'TB';
 
 
 const LINEAGE_PRESETS = [
-  { key: 'all', label: 'All', types: LINEAGE_NODE_TYPE_ORDER },
-  { key: 'technical', label: 'Technical', types: TECHNICAL_LINEAGE_NODE_TYPES },
-  { key: 'business', label: 'Business', types: BUSINESS_LINEAGE_NODE_TYPES },
-  { key: 'consumption', label: 'Consumption', types: CONSUMPTION_LINEAGE_NODE_TYPES },
+  {
+    key: 'technical',
+    label: 'Technical',
+    title: 'Physical sources and dbt transformations',
+    types: TECHNICAL_LINEAGE_NODE_TYPES,
+  },
+  {
+    key: 'domain',
+    label: 'Domain',
+    title: 'Business terms, governed domains, semantic metrics, and certified blocks',
+    types: DOMAIN_LINEAGE_NODE_TYPES,
+  },
+  {
+    key: 'end-to-end',
+    label: 'End-to-end',
+    title: 'Complete path from physical sources through governed meaning to consumption',
+    types: LINEAGE_NODE_TYPE_ORDER,
+  },
 ] as const;
 
 // The canvas always scopes to ONE of these — a block, app, or notebook the user
@@ -529,12 +542,14 @@ export function LineageDAG() {
               TB
             </button>
           </div>
-          {/* Prototype segmented presets. */}
-          <div role="group" aria-label="Lineage presets" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, marginRight: 4 }}>
+          {/* Stable user-facing views over the same compiler-owned graph. */}
+          <div role="group" aria-label="Lineage view" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, padding: 2, border: `1px solid ${t.headerBorder}`, borderRadius: 7, background: t.appBg, marginRight: 4 }}>
             {LINEAGE_PRESETS.map((preset) => (
               <button
                 key={preset.key}
                 onClick={() => applyPreset(preset.types)}
+                title={preset.title}
+                aria-pressed={activePreset === preset.key}
                 style={{
                   padding: '4px 11px',
                   fontSize: 11.5,
@@ -641,7 +656,7 @@ export function LineageDAG() {
 
       {/* Prototype status bar. */}
       <div style={{ height: 28, flexShrink: 0, borderTop: '1px solid var(--border-subtle)', background: 'var(--color-bg-card)', display: 'flex', alignItems: 'center', gap: 14, padding: '0 14px', fontSize: 10.5, color: 'var(--color-text-tertiary)' }}>
-        <span>Lineage of {focalName} · {filteredGraph.nodes.length} nodes · {filteredGraph.edges.length} edges{scopeLoading ? ' · loading…' : ''}</span>
+        <span>{activePreset === 'custom' ? 'Custom' : LINEAGE_PRESETS.find((preset) => preset.key === activePreset)?.label} lineage of {focalName} · {filteredGraph.nodes.length} nodes · {filteredGraph.edges.length} edges{scopeLoading ? ' · loading…' : ''}</span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
           <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-success)' }} />
           Compiled from the dbt manifest

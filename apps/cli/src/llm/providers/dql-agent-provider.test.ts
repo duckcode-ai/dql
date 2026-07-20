@@ -253,6 +253,30 @@ describe('conversation context follow-up routing', () => {
     });
   });
 
+  it('resolves "they" to customers before catalog search in a value follow-up', () => {
+    const question = 'what product they bought for this amount?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        sourceQuestion: 'Who are the customers with the least revenue by product?',
+        resultColumns: ['customer_name', 'product_name', 'revenue'],
+        resultDimensionValues: {
+          customer_name: ['Adele Ace'],
+          product_name: ['Vanilla Ice'],
+        },
+        priorMeasures: ['revenue'],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp?.kind).toBe('drilldown');
+    expect(followUp?.filters).toEqual(expect.arrayContaining(['Adele Ace']));
+    expect(followUp?.dimensions).toEqual(expect.arrayContaining(['customer', 'product']));
+    expect(followUp?.resolvedReferences).toEqual(expect.arrayContaining(['customer: Adele Ace']));
+    expect(followUp?.priorMeasures).toEqual(['revenue']);
+  });
+
   it('resolves singular "this product" to the top prior product value', () => {
     const followUp = __test__.followUpFromConversationContext({
       provider: 'ollama',

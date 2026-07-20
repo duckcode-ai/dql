@@ -7,7 +7,7 @@ membership resolver, and deterministic qualified identities used by every later
 workstream.
 
 Acceptance IDs: `CFG-001`, `CFG-002`, `ID-001`, `DOM-001`, `DOM-002`,
-`DOM-003`, `PRD-003`, `CTX-004`.
+`DOM-003`, `PRD-003`, `CTX-004`, `CTX-006`, `REL-003`, `SKILL-003`.
 
 ## Required implementation
 
@@ -21,6 +21,11 @@ Acceptance IDs: `CFG-001`, `CFG-002`, `ID-001`, `DOM-001`, `DOM-002`,
 - Make v3/dbt-first the new dbt-init default while leaving existing config
   loading/defaults unchanged.
 - Preserve sparse-overlay/no-dbt-copy manifest invariants and v2 discriminants.
+- Compile one deterministic qualified knowledge graph plus compact Domain
+  Knowledge Capsules. Preserve same-named objects from separate packages and
+  keep full skill bodies/executable scripts outside the manifest.
+- Represent cross-domain routes with explicit policy state and the complete
+  export/contract/import/relationship evidence chain.
 
 ## Suggested ownership
 

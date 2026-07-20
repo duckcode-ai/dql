@@ -942,6 +942,23 @@ describe("AgentRunEngine audience", () => {
 });
 
 describe("clarification continuations", () => {
+  it("treats a substantive new question without punctuation as a fresh turn", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "who are the customers userd the beverage products",
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [{
+            question: "what product they bought for this amount?",
+            answerSummary: "Which product meaning do you want?",
+            route: "clarify",
+          }],
+        },
+      },
+    });
+
+    expect(continuation).toBeUndefined();
+  });
+
   it("recovers the original question and actual clarifying question from persisted turns", () => {
     const continuation = resolveClarificationContinuation({
       question: "yes",

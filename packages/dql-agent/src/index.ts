@@ -80,7 +80,7 @@ export type {
 } from "./skills/defaults.js";
 export { answer, parseProposal } from "./answer-loop.js";
 export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
-export type { DomainContextEnvelope, ResolveDomainContextInput } from './domain-context.js';
+export type { DomainContextEnvelope, KnowledgeLens, ResolveDomainContextInput } from './domain-context.js';
 export {
   stampTrustLabel,
   trustLabelIdForAnswer,
@@ -431,9 +431,15 @@ export {
   buildLocalContextPack,
   buildMetadataSnapshot,
   defaultMetadataPath,
+  metadataSnapshotPath,
+  activeMetadataSnapshotPath,
+  currentMetadataFingerprint,
   ensureMetadataCatalogFresh,
   metadataObjectToAllowedSqlRelation,
   openMetadataCatalog,
+  openActiveKnowledgeSnapshot,
+  readIndexedDomainKnowledge,
+  readIndexedKnowledge360,
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
   latestRuntimeSchemaSnapshotForProject,

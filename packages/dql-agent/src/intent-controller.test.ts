@@ -143,5 +143,6 @@ describe('follow-up + compose-app detection', () => {
     expect(looksLikeFollowUp('break that down by region', true)).toBe(true);
     expect(looksLikeFollowUp('why?', false)).toBe(false);
     expect(looksLikeFollowUp('what is total revenue', true)).toBe(false);
+    expect(looksLikeFollowUp('what product they bought for this amount?', true)).toBe(true);
   });
 });

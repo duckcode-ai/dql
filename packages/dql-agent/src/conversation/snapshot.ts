@@ -7,6 +7,7 @@
 import type { ConversationStore, ConversationTurn } from './session-store.js';
 import type { AgentDqlArtifactReference } from '../answer-loop.js';
 import type { CascadeAnswerResult } from '../cascade/cascade.js';
+import type { KnowledgeLens } from '../domain-context.js';
 import {
   parseWorkingState,
   reduceWorkingState,
@@ -26,6 +27,7 @@ export interface ConversationSnapshotTurn {
   route?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
+  knowledgeLens?: KnowledgeLens;
   resultColumns?: string[];
   resultRowCount?: number;
   resultDimensionValues?: Record<string, string[]>;
@@ -172,6 +174,7 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
     route: turn.route,
     sourceCertifiedBlock: turn.sourceCertifiedBlock,
     contextPackId: turn.contextPackId,
+    knowledgeLens: turn.knowledgeLens,
     resultColumns: turn.result?.columns,
     resultRowCount: turn.result?.rowCount,
     resultDimensionValues: turn.result?.dimensionValues,

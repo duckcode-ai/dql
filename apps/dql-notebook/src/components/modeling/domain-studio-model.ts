@@ -3,6 +3,7 @@ import type { ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeail
 export type DomainStudioSection =
   | 'overview'
   | 'diagram'
+  | 'knowledge'
   | 'terms'
   | 'skills'
   | 'blocks'
@@ -30,6 +31,7 @@ export const DOMAIN_STUDIO_NAVIGATION: DomainStudioNavigationGroup[] = [
   {
     items: [
       { id: 'diagram', label: 'Model' },
+      { id: 'knowledge', label: 'Knowledge 360' },
       { id: 'skills', label: 'Skills' },
     ],
   },

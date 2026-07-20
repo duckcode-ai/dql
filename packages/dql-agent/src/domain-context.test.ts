@@ -75,4 +75,31 @@ describe('resolveDomainContextEnvelope', () => {
     expect(() => resolveDomainContextEnvelope({ manifest, activeDomain: 'commerce', modelAreaId: 'growth::model_area::acquisition' })).toThrow('does not belong');
     expect(() => resolveDomainContextEnvelope({ manifest, modelAreaId: 'acquisition' })).toThrow('Ambiguous model area');
   });
+
+  it('validates and preserves an optional pinned skill lens', () => {
+    const withKnowledge = {
+      ...manifest,
+      knowledgeGraph: {
+        schemaVersion: 1,
+        sourceFingerprint: 'graph-1',
+        objects: {
+          'growth::skill::acquisition': {
+            id: 'growth::skill::acquisition', kind: 'skill', localId: 'acquisition', domainId: 'growth',
+            source: { system: 'dql', fingerprint: 'skill-1' },
+          },
+        },
+        edges: [], domainCapsules: {}, crossDomainRoutes: [], diagnostics: [],
+      },
+    } as unknown as DQLManifest;
+    expect(resolveDomainContextEnvelope({
+      manifest: withKnowledge,
+      activeDomain: 'growth',
+      skillRefs: ['growth::skill::acquisition'],
+    }).skillRefs).toEqual(['growth::skill::acquisition']);
+    expect(() => resolveDomainContextEnvelope({
+      manifest: withKnowledge,
+      activeDomain: 'growth',
+      skillRefs: ['missing'],
+    })).toThrow('Unknown knowledge skill');
+  });
 });

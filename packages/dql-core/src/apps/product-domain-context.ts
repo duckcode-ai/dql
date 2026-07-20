@@ -10,6 +10,8 @@ export interface ProductDomainContext {
   usesDomains: string[];
   purpose?: string;
   requiredExports: string[];
+  /** Optional qualified knowledge-skill references saved with this product. */
+  skillRefs?: string[];
   classification?: string;
 }
 
@@ -19,6 +21,7 @@ export function normalizeProductDomainContext(input: {
   usesDomains?: unknown;
   purpose?: unknown;
   requiredExports?: unknown;
+  skillRefs?: unknown;
   classification?: unknown;
 }, legacyOwnerDomain?: string): ProductDomainContext {
   const ownerDomain = cleanOptionalString(input.ownerDomain) ?? cleanOptionalString(legacyOwnerDomain);
@@ -27,6 +30,7 @@ export function normalizeProductDomainContext(input: {
     usesDomains: cleanStringArray(input.usesDomains, ownerDomain ? [ownerDomain] : []),
     ...(cleanOptionalString(input.purpose) ? { purpose: cleanOptionalString(input.purpose) } : {}),
     requiredExports: cleanStringArray(input.requiredExports, []),
+    ...(input.skillRefs !== undefined ? { skillRefs: cleanStringArray(input.skillRefs, []) } : {}),
     ...(cleanOptionalString(input.classification) ? { classification: cleanOptionalString(input.classification) } : {}),
   };
 }

@@ -173,10 +173,11 @@ export function buildAnalysisQuestionPlan(
   const lower = languageQuestion.toLowerCase();
   const entities = extractEntities(cleanQuestion);
   const valueMentions = extractValueMentions(entities);
-  const metricTerms = uniqueStrings([
-    ...extractMetricTerms(languageQuestion),
-    ...extractFollowUpMetricTerms(followUp, lower),
-  ]);
+  const metricTerms = resolveQuestionMetricTerms(
+    lower,
+    extractMetricTerms(languageQuestion),
+    extractFollowUpMetricTerms(followUp, lower),
+  );
   const extractedDimensionTerms = extractDimensionTerms(languageQuestion);
   const filterTerms = extractFilterTerms(languageQuestion, entities);
   const dimensionTerms = removeFilterOnlyDimensionTerms(languageQuestion, extractedDimensionTerms);
@@ -924,7 +925,7 @@ function extractFilterTerms(question: string, entities: AnalysisEntityMention[])
 }
 
 function cleanAnalyticalFilterValue(value: string | undefined): string {
-  return (value ?? '')
+  const cleaned = (value ?? '')
     .toLowerCase()
     .replace(/\b(?:highest|lowest|most|least|top|bottom|best|worst|the)\b/g, ' ')
     .replace(/^.*\b(?:on|in|within)\s+/, '')
@@ -932,6 +933,11 @@ function cleanAnalyticalFilterValue(value: string | undefined): string {
     .trim()
     .replace(/ies$/, 'y')
     .replace(/s$/, '');
+  // Deictic phrases are resolved from the typed prior-result context; they are
+  // not warehouse member values. Treating "for this amount" as a literal
+  // filter polluted value search and produced invalid SQL predicates.
+  if (/^(?:for\s+)?(?:this|that|same|previous|prior)\s+(?:amount|value|result|row)$/.test(cleaned)) return '';
+  return cleaned;
 }
 
 function expandSearchTerm(raw: string): string[] {
@@ -948,7 +954,10 @@ function expandSearchTerm(raw: string): string[] {
 
 function extractTimeTerms(question: string): string[] {
   const terms: string[] = [];
-  for (const match of question.matchAll(/\b(?:today|yesterday|ytd|mtd|qtd|wtd|last\s+\w+|this\s+\w+|next\s+\w+|previous\s+\w+|prior\s+\w+|\d{4})\b/gi)) {
+  // Relative determiners are temporal only when followed by a temporal noun.
+  // A broad `this \w+` match classified deictic result references such as
+  // "this amount" as a time grain and polluted both retrieval and SQL planning.
+  for (const match of question.matchAll(/\b(?:today|yesterday|ytd|mtd|qtd|wtd|(?:last|this|next|previous|prior)\s+(?:(?:fiscal|calendar)\s+)?(?:hours?|days?|weeks?|months?|quarters?|years?|seasons?|periods?)|\d{4})\b/gi)) {
     terms.push(match[0].toLowerCase());
   }
   for (const word of ['date', 'day', 'week', 'month', 'quarter', 'year', 'season', 'period']) {
@@ -973,6 +982,23 @@ function extractFollowUpMetricTerms(followUp: unknown, lowerQuestion?: string): 
       METRIC_WORDS.some((word) => new RegExp(`\\b${word}\\b`, 'i').test(column.replace(/_/g, ' ')))
     ),
   ]).slice(0, 8);
+}
+
+function resolveQuestionMetricTerms(
+  lowerQuestion: string,
+  directTerms: string[],
+  followUpTerms: string[],
+): string[] {
+  if (!/\b(?:this|that|same|previous|prior)\s+(?:amount|value)\b/.test(lowerQuestion) || followUpTerms.length === 0) {
+    return uniqueStrings([...directTerms, ...followUpTerms]);
+  }
+  const monetary = followUpTerms.filter((term) =>
+    /(?:amount|revenue|sales?|spend|value|price|cost|profit|margin|bookings?|arr|mrr)/i.test(term));
+  const resolved = monetary.length > 0 ? monetary : [followUpTerms[0]!];
+  return uniqueStrings([
+    ...directTerms.filter((term) => term !== 'amount' && term !== 'value'),
+    ...resolved,
+  ]);
 }
 
 function cleanStringArray(value: unknown): string[] {
@@ -1130,12 +1156,12 @@ function extractFollowUpReferences(question: string, followUp?: unknown): Reques
   const lower = question.toLowerCase();
   const record = followUpRecord(followUp);
   const hasFollowUp = Boolean(record);
-  for (const match of lower.matchAll(/\b(these|those|that|same|prior|previous)\s+([a-z][a-z0-9_ -]{1,30})\b/g)) {
+  for (const match of lower.matchAll(/\b(this|these|those|that|same|prior|previous)\s+([a-z][a-z0-9_ -]{1,30})\b/g)) {
     const phrase = match[0];
     const noun = canonicalShapeTerm(match[2]);
     let kind: RequestedAnswerShape['followUpReferences'][number]['kind'] = 'ambiguous';
     if (/period|date|day|week|month|quarter|year|time/.test(noun)) kind = 'prior_timeframe';
-    else if (hasFollowUp && /\b(category|product|customer|account|user|region|segment|channel)\b/.test(noun)) kind = 'prior_dimension_values';
+    else if (hasFollowUp && /\b(category|product|customer|account|user|region|segment|channel|row|result)\b/.test(noun)) kind = 'prior_dimension_values';
     else if (hasFollowUp) kind = 'prior_entities';
     refs.push({
       phrase,
@@ -1143,8 +1169,16 @@ function extractFollowUpReferences(question: string, followUp?: unknown): Reques
       ...resolvedFollowUpValues(record, noun, kind),
     });
   }
+  if (record && /\b(they|their|them)\b/.test(lower)) {
+    const dimension = pronounFollowUpDimension(lower, record);
+    refs.push({
+      phrase: lower.match(/\b(they|their|them)\b/)?.[0] ?? 'they',
+      kind: dimension ? 'prior_dimension_values' : 'prior_entities',
+      ...resolvedFollowUpValues(record, dimension, dimension ? 'prior_dimension_values' : 'prior_entities'),
+    });
+  }
   if (refs.length === 0 && record) {
-    const bare = lower.match(/\b(these|those|that|them|same)\b/);
+    const bare = lower.match(/\b(this|these|those|that|it|them|same)\b/);
     const dimension = bare ? singleFollowUpDimension(record) : undefined;
     if (bare && dimension) {
       refs.push({
@@ -1155,6 +1189,18 @@ function extractFollowUpReferences(question: string, followUp?: unknown): Reques
     }
   }
   return refs.slice(0, 8);
+}
+
+function pronounFollowUpDimension(question: string, record: Record<string, unknown>): string | undefined {
+  const values = cleanStringRecord(record.priorResultValues);
+  const available = new Set(Object.keys(values).map(contextDimensionTerm));
+  if (available.has('customer') && /\b(they|their|them)\b[^.?!]{0,40}\b(buy|bought|purchase|purchased|order|ordered|spend|spent|use|used)\b/.test(question)) {
+    return 'customer';
+  }
+  if (available.has('product') && /\b(they|their|them)\b[^.?!]{0,40}\b(sell|sold|cost|priced)\b/.test(question)) {
+    return 'product';
+  }
+  return singleFollowUpDimension(record);
 }
 
 function followUpDimensionsForRequestedShape(

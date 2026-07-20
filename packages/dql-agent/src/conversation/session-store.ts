@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3';
 import { sanitizeFtsQuery } from '../memory/fts-query.js';
 import type { AgentDqlArtifactReference } from '../answer-loop.js';
 import type { CascadeAnswerResult } from '../cascade/cascade.js';
+import type { KnowledgeLens } from '../domain-context.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -67,6 +68,8 @@ export interface ConversationTurnInput {
   certification?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
+  /** Immutable domain capsule and skill selection used for this turn. */
+  knowledgeLens?: KnowledgeLens;
   sql?: string;
   dqlArtifact?: AgentDqlArtifactReference;
   cascade?: CascadeAnswerResult;
@@ -133,6 +136,7 @@ export class ConversationStore {
         certification          TEXT,
         source_certified_block TEXT,
         context_pack_id        TEXT,
+        knowledge_lens_json    TEXT NOT NULL DEFAULT '{}',
         sql                    TEXT,
         dql_artifact_json      TEXT NOT NULL DEFAULT '{}',
         cascade_json           TEXT NOT NULL DEFAULT '{}',
@@ -156,6 +160,7 @@ export class ConversationStore {
     `);
     this.ensureColumn('conversation_turns', 'dql_artifact_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_turns', 'cascade_json', "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn('conversation_turns', 'knowledge_lens_json', "TEXT NOT NULL DEFAULT '{}'");
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -236,8 +241,9 @@ export class ConversationStore {
         INSERT INTO conversation_turns (
           id, thread_id, seq, question, answer_summary, answer_text, route,
           trust_label, certification, source_certified_block, context_pack_id,
-          sql, dql_artifact_json, cascade_json, result_json, contract_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          knowledge_lens_json, sql, dql_artifact_json, cascade_json, result_json,
+          contract_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         turn.id,
         threadId,
@@ -250,6 +256,7 @@ export class ConversationStore {
         turn.certification ?? null,
         turn.sourceCertifiedBlock ?? null,
         turn.contextPackId ?? null,
+        JSON.stringify(turn.knowledgeLens ?? {}),
         turn.sql ?? null,
         JSON.stringify(turn.dqlArtifact ?? {}),
         JSON.stringify(turn.cascade ?? {}),
@@ -466,6 +473,7 @@ type TurnRow = {
   certification: string | null;
   source_certified_block: string | null;
   context_pack_id: string | null;
+  knowledge_lens_json: string;
   sql: string | null;
   dql_artifact_json: string;
   cascade_json: string;
@@ -494,6 +502,7 @@ function rowToTurn(row: TurnRow): ConversationTurn {
   const dqlArtifact = safeJSON(row.dql_artifact_json, {} as AgentDqlArtifactReference);
   const cascade = safeJSON(row.cascade_json, {} as CascadeAnswerResult);
   const contract = safeJSON(row.contract_json, {} as Record<string, unknown>);
+  const knowledgeLens = safeJSON(row.knowledge_lens_json, {} as KnowledgeLens);
   return {
     id: row.id,
     threadId: row.thread_id,
@@ -506,6 +515,7 @@ function rowToTurn(row: TurnRow): ConversationTurn {
     certification: row.certification ?? undefined,
     sourceCertifiedBlock: row.source_certified_block ?? undefined,
     contextPackId: row.context_pack_id ?? undefined,
+    knowledgeLens: Object.keys(knowledgeLens).length > 0 ? knowledgeLens : undefined,
     sql: row.sql ?? undefined,
     dqlArtifact: Object.keys(dqlArtifact).length > 0 ? capDqlArtifact(dqlArtifact) : undefined,
     cascade: Object.keys(cascade).length > 0 ? cascade : undefined,

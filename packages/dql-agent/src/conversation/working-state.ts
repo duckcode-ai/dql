@@ -9,6 +9,7 @@
  */
 
 import type { ConversationTurn } from './session-store.js';
+import type { KnowledgeLens } from '../domain-context.js';
 
 export type TopicRelation = 'continuation' | 'refinement' | 'shift' | 'return';
 
@@ -36,6 +37,8 @@ export interface ConversationWorkingState {
   topicKey?: string;
   /** Small ring of prior topics so a "return" can restore filters/block. */
   priorTopics?: ConversationTopicFrame[];
+  /** Most recent immutable capsule/skill lens; replaced, never accumulated. */
+  knowledgeLens?: KnowledgeLens;
 }
 
 const MAX_TERMS = 12;
@@ -73,6 +76,7 @@ export function parseWorkingState(raw: Record<string, unknown> | undefined): Con
     priorTopics: Array.isArray(raw.priorTopics)
       ? raw.priorTopics.map(parseTopicFrame).filter((frame): frame is ConversationTopicFrame => Boolean(frame)).slice(0, MAX_PRIOR_TOPICS)
       : undefined,
+    knowledgeLens: parseKnowledgeLens(raw.knowledgeLens),
   };
 }
 
@@ -109,6 +113,7 @@ export function reduceWorkingState(
         lastResultDimensionValues: turn.result?.dimensionValues,
         topicKey: newKey || undefined,
         priorTopics,
+        knowledgeLens: turn.knowledgeLens ?? prev.knowledgeLens,
       },
     };
   }
@@ -135,6 +140,7 @@ export function reduceWorkingState(
         lastResultDimensionValues: turn.result?.dimensionValues ?? prev.lastResultDimensionValues,
         topicKey: returned?.topicKey ?? newKey ?? prev.topicKey,
         priorTopics: [...currentFrame, ...remaining].slice(0, MAX_PRIOR_TOPICS),
+        knowledgeLens: turn.knowledgeLens ?? prev.knowledgeLens,
       },
     };
   }
@@ -157,6 +163,7 @@ export function reduceWorkingState(
         ? mergeTopicKeys(prev.topicKey, newKey)
         : prev.topicKey ?? newKey ?? undefined,
       priorTopics: prev.priorTopics,
+      knowledgeLens: turn.knowledgeLens ?? prev.knowledgeLens,
     },
   };
 }
@@ -298,4 +305,25 @@ function stringRecord(value: unknown): Record<string, string[]> | undefined {
     if (values.length > 0) out[key] = values;
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function parseKnowledgeLens(value: unknown): KnowledgeLens | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const snapshotId = optionalString(record.snapshotId);
+  if (!snapshotId) return undefined;
+  const skillFingerprints = record.skillFingerprints && typeof record.skillFingerprints === 'object' && !Array.isArray(record.skillFingerprints)
+    ? Object.fromEntries(Object.entries(record.skillFingerprints as Record<string, unknown>)
+      .filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : undefined;
+  return {
+    mode: record.mode === 'pinned' ? 'pinned' : 'auto',
+    activeDomainId: optionalString(record.activeDomainId),
+    modelAreaId: optionalString(record.modelAreaId),
+    purpose: optionalString(record.purpose),
+    skillRefs: stringArray(record.skillRefs),
+    snapshotId,
+    capsuleFingerprint: optionalString(record.capsuleFingerprint),
+    skillFingerprints: skillFingerprints && Object.keys(skillFingerprints).length > 0 ? skillFingerprints : undefined,
+  };
 }

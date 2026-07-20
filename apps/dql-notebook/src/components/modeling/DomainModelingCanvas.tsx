@@ -302,10 +302,18 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
     const detail = detailsByDbtId[entity.dbtUniqueId];
     return [recordKey, entity.id, entity.qualifiedId, entity.domain, detail?.relation, ...(detail?.columns.map((column) => column.name) ?? [])].some((value) => String(value ?? '').toLowerCase().includes(normalizedSearch));
   });
-  if (visibleLimit > 0 && entities.length > visibleLimit) {
+  // Enterprise manifests can contain thousands of entities. The canvas is a
+  // focused workspace, not a catalog renderer: keep the graph bounded and use
+  // search/areas to choose which neighborhood is drawn.
+  const effectiveVisibleLimit = Math.min(200, visibleLimit > 0 ? visibleLimit : 50);
+  if (entities.length > effectiveVisibleLimit) {
     const degree = new Map<string, number>();
     for (const relationship of visibleRelationships) { degree.set(relationship.from, (degree.get(relationship.from) ?? 0) + 1); degree.set(relationship.to, (degree.get(relationship.to) ?? 0) + 1); }
-    entities = [...entities].sort((a, b) => (degree.get(b.recordKey) ?? 0) - (degree.get(a.recordKey) ?? 0) || a.recordKey.localeCompare(b.recordKey)).slice(0, visibleLimit);
+    entities = [...entities].sort((a, b) => {
+      if (a.recordKey === selectedId) return -1;
+      if (b.recordKey === selectedId) return 1;
+      return (degree.get(b.recordKey) ?? 0) - (degree.get(a.recordKey) ?? 0) || a.recordKey.localeCompare(b.recordKey);
+    }).slice(0, effectiveVisibleLimit);
   }
   const domains = [...new Set(entities.map(({ entity }) => entity.domain))].sort();
   const nodes: Node<EntityNodeData>[] = [];

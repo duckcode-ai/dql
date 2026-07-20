@@ -244,6 +244,34 @@ describe('analysis planner', () => {
     });
   });
 
+  it('CTX-003 resolves customer pronouns and amount references from the prior result', () => {
+    const plan = buildAnalysisQuestionPlan('what product they bought for this amount?', {
+      kind: 'drilldown',
+      dimensions: ['customer', 'product'],
+      priorResultValues: {
+        customer_name: ['Adele Ace'],
+        product_name: ['Vanilla Ice'],
+      },
+      priorMeasures: ['revenue'],
+    });
+
+    expect(plan.requestedShape.followUpReferences).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phrase: 'they',
+        kind: 'prior_dimension_values',
+        resolvedValues: ['Adele Ace'],
+      }),
+      expect.objectContaining({ phrase: expect.stringContaining('this amount'), kind: 'prior_entities' }),
+    ]));
+    expect(plan.requestedShape.filters).toContain('Adele Ace');
+    expect(plan.filterTerms).not.toContain('for this amount');
+    expect(plan.metricTerms).toContain('revenue');
+    expect(plan.metricTerms).not.toContain('amount');
+    expect(plan.requestedShape.requiredOutputs).not.toContain('amount');
+    expect(plan.timeTerms).not.toContain('this amount');
+    expect(plan.requestedShape.grain).not.toBe('this amount');
+  });
+
   it('classifies entity profile research without hard-coding the entity domain', () => {
     const plan = buildAnalysisQuestionPlan('Can you research on Kevin Durant profile and provide me the complete stats');
 

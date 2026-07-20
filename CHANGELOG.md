@@ -6,6 +6,47 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.0 - 2026-07-19
+
+### Enterprise domain context and faster governed AI orchestration
+
+This release connects DQL manifests, dbt metadata, domain knowledge, governed
+skills, and cross-domain lineage into one bounded retrieval path for accurate,
+lower-latency answers at enterprise catalog scale.
+
+### Added
+
+- **Compiled knowledge graph and domain-skill references.** Manifests now carry
+  compact, stable references across domains, products, models, metrics, blocks,
+  relationships, and skills without embedding full skill documents.
+- **Cross-domain technical and business lineage.** Domain views and lineage APIs
+  expose connected dbt models, semantic metrics, governed blocks, and downstream
+  products as one end-to-end graph.
+- **Enterprise-scale modeling search.** The dbt-first modeler adds indexed model,
+  relationship, and column search designed for thousands of models instead of
+  relying on long select lists.
+- **Bounded knowledge-context retrieval.** The agent loads only the ranked domain
+  context and governed skill excerpts relevant to a question, with deterministic
+  budgets and scale coverage for large manifests.
+
+### Fixed
+
+- **Follow-up questions use conversational data context.** Entity names, pronouns,
+  result references, and phrases such as “this amount” are resolved before object
+  retrieval instead of being mistaken for schema objects.
+- **Governed evidence stays ahead of generated SQL.** Certified blocks and semantic
+  metrics are selected when they satisfy the requested grain; generated SQL is the
+  fallback, not the default route.
+- **Failed governed SQL can recover safely.** Binder failures and ambiguous-column
+  errors fall through to a grounded repair path instead of trapping the answer loop.
+- **Less planning and retrieval noise.** Duplicate meaning calls, stale clarification
+  state, prior result-value pollution, and unnecessary time/filter assumptions are
+  removed from the orchestration path.
+- **Business-readable results.** Ranking direction, compound labels, numeric and
+  currency formatting, and answer synthesis now stay aligned with executed rows.
+
+---
+
 ## v1.7.0 - 2026-07-16
 
 ### Governed agentic analytics: AI-drafts/human-certify onboarding, enforced trust, and data freshness

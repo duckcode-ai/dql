@@ -77,6 +77,20 @@ describe("synthesizeAnswer", () => {
     expect(result.text).not.toContain("| region | revenue |");
   });
 
+  it("grounds lowest-ranking prose in the requested direction", async () => {
+    const result = await synthesizeAnswer({
+      question: "Which customers have the least revenue?",
+      rankingDirection: 'bottom',
+      resultPreview: preview([
+        { customer_name: "Adele Ace", revenue: 4 },
+        { customer_name: "Melissa Lopez", revenue: 9 },
+      ], ["customer_name", "revenue"]),
+    });
+
+    expect(result.text).toContain("**Adele Ace** has the lowest revenue at **$4.00**");
+    expect(result.text).not.toContain("highest revenue");
+  });
+
   it("uses the distinguishing target entity instead of a repeated flow source as the narrative label", async () => {
     const result = await synthesizeAnswer({
       question: "Show revenue by product type and product name as a source-to-target flow.",
@@ -90,6 +104,19 @@ describe("synthesizeAnswer", () => {
     expect(result.text).toContain("**Jaffle** has the highest revenue at **$100,275.00**");
     expect(result.text).toContain("**Vanilla Ice:** $84,474.00");
     expect(result.text).not.toContain("**beverage** has the highest");
+  });
+
+  it("uses a compound identity for customer-product drilldown rows", async () => {
+    const result = await synthesizeAnswer({
+      question: "what product did they buy for this amount?",
+      resultPreview: preview([
+        { customer_name: "Melissa Lopez", product_name: "pourover ", beverage_revenue: 329 },
+        { customer_name: "Joy Lam", product_name: "pourover ", beverage_revenue: 308 },
+      ], ["customer_name", "product_name", "beverage_revenue"]),
+    });
+
+    expect(result.text).toContain("**Melissa Lopez — pourover** has the highest beverage revenue at **$329.00**");
+    expect(result.text).toContain("**Joy Lam — pourover:** $308.00");
   });
 
   it("turns a one-row profile into business facts instead of a query plan", async () => {

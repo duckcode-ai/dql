@@ -166,16 +166,21 @@ export const TECHNICAL_LINEAGE_NODE_TYPES = [
   'source_table',
   'dbt_source',
   'dbt_model',
+] as const;
+
+/** Governed business meaning, including the semantic and certified answer layer. */
+export const DOMAIN_LINEAGE_NODE_TYPES = [
+  'term',
+  'domain',
+  'business_view',
   'metric',
   'dimension',
   'block',
 ] as const;
 
+/** @deprecated Prefer DOMAIN_LINEAGE_NODE_TYPES for the user-facing lineage mode. */
 export const BUSINESS_LINEAGE_NODE_TYPES = [
-  'term',
-  'block',
-  'business_view',
-  'domain',
+  ...DOMAIN_LINEAGE_NODE_TYPES,
 ] as const;
 
 export const CONSUMPTION_LINEAGE_NODE_TYPES = [

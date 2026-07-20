@@ -563,8 +563,8 @@ export function expandQuestionWithSkillVocabulary(question: string, skills: Skil
   for (const skill of activeSkills(skills, userId)) {
     for (const [term, target] of Object.entries(skill.vocabulary)) {
       if (!term || !normalized.includes(term.toLowerCase())) continue;
-      const metric = target.trim().match(/^metric:(.+)$/i)?.[1]?.trim();
-      if (metric) additions.add(metric);
+      const governedRef = target.trim().match(/^(?:metric|term|entity|block|dimension):(.+)$/i)?.[1]?.trim();
+      if (governedRef) additions.add(governedRef);
     }
   }
   return additions.size > 0 ? `${question} ${Array.from(additions).join(' ')}` : question;
@@ -612,26 +612,6 @@ function modelAreaKey(value: string): string {
   return qualified.at(-1) ?? trimmed;
 }
 
-/** Searchable positive text for a skill. Exclusions are policy, not keywords. */
-function skillSearchText(skill: Skill): string {
-  return [
-    skill.id,
-    skill.domain ?? '',
-    ...(skill.domains ?? []),
-    ...(skill.modelAreaRefs ?? []),
-    skill.description ?? '',
-    ...(skill.triggers ?? []),
-    ...skill.preferredMetrics,
-    ...skill.preferredBlocks,
-    ...(skill.preferredDimensions ?? []),
-    ...Object.keys(skill.vocabulary),
-    ...Object.values(skill.vocabulary),
-    skill.body,
-  ]
-    .filter(Boolean)
-    .join(' ');
-}
-
 function matchesSkillExclusion(skill: Skill, question: string): boolean {
   const normalizedQuestion = skillTokens(question).join(' ');
   if (!normalizedQuestion) return false;
@@ -671,7 +651,10 @@ export function selectRelevantSkills(
     // An explicit domain scope is an eligibility boundary, not merely a score
     // boost. Global skills remain eligible; caller-provided domains already
     // include permitted ancestors and certified imports.
-    if (domains.size > 0 && skillDomains.length > 0 && !skillDomains.some((domain) => domains.has(domain))) continue;
+    // Cross-domain guidance is eligible only when *every* participating domain
+    // is present in the server-authorized envelope. Partial overlap must never
+    // leak policy from another domain.
+    if (domains.size > 0 && skillDomains.length > 0 && !skillDomains.every((domain) => domains.has(domain))) continue;
     const skillAreas = (skill.modelAreaRefs ?? []).map(modelAreaKey).filter(Boolean);
     // Area refs further focus a skill within its already-authorized domain.
     // An area never broadens domain eligibility or grants cross-domain access.
@@ -679,20 +662,36 @@ export function selectRelevantSkills(
     // Exclusions are a negative eligibility boundary. They are evaluated before
     // pinning so a conventions skill cannot silently apply outside its scope.
     if (matchesSkillExclusion(skill, question)) continue;
-    if (pinnedIds.has(skill.id.toLowerCase())) {
+    if (pinnedIds.has(skill.id.toLowerCase()) || (skill.qualifiedId && pinnedIds.has(skill.qualifiedId.toLowerCase()))) {
       pinned.push(skill);
       continue;
     }
-    const textTokens = skillTokens(skillSearchText(skill));
-    let hits = 0;
-    for (const token of textTokens) {
-      if (queryTokens.has(token)) hits += 1;
-    }
+    const overlap = (values: string[]) => {
+      const tokens = new Set(values.flatMap(skillTokens));
+      let hits = 0;
+      for (const token of tokens) if (queryTokens.has(token)) hits += 1;
+      return hits;
+    };
+    const triggerHits = overlap(skill.triggers ?? []);
+    const vocabularyHits = overlap([...Object.keys(skill.vocabulary), ...Object.values(skill.vocabulary)]);
+    const governedRefHits = overlap([
+      ...skill.preferredMetrics,
+      ...skill.preferredBlocks,
+      ...(skill.preferredDimensions ?? []),
+      ...(skill.sourceRefs ?? []),
+    ]);
+    const descriptorHits = overlap([skill.id, skill.description ?? '', ...(skill.examples ?? [])]);
+    // Body prose is recall-only. Count unique tokens and cap its contribution
+    // so repeated words in a long cheat sheet cannot outrank exact structured
+    // triggers, vocabulary, or governed references.
+    const bodyHits = Math.min(2, overlap([skill.body]));
+    const topicalScore = triggerHits * 12 + vocabularyHits * 10 + governedRefHits * 8 + descriptorHits * 4 + bodyHits;
     const domainMatch = skillDomains.some((domain) => domains.has(domain));
     const areaMatch = skillAreas.some((id) => modelAreaIds.has(id));
-    // Domain is a strong routing signal, but still requires either an inferred
-    // domain match or topical text. It never makes a skill a hard policy override.
-    rest.push({ skill, score: hits + (domainMatch ? 4 : 0) + (areaMatch ? 3 : 0) });
+    // Scope only breaks ties among topically relevant guidance. A domain bonus
+    // by itself must not select an arbitrary skill in a large microdomain.
+    if (topicalScore === 0) continue;
+    rest.push({ skill, score: topicalScore + (domainMatch ? 4 : 0) + (areaMatch ? 3 : 0) });
   }
 
   // Keep only skills with at least one topical hit; ordered by score desc, then

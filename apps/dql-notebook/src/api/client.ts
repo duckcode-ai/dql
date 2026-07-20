@@ -13,6 +13,10 @@ import type {
   DbtSourcePatchPreview,
   RelationshipAuthoringInput,
   ManifestRelationshipValidationEvidence,
+  ManifestDomainCapsule,
+  ManifestKnowledgeEdge,
+  ManifestKnowledgeObject,
+  ManifestCrossDomainRoute,
 } from '@duckcodeailabs/dql-core';
 import type { AgentAnswerCascade, AgentConversationContext, AgentConversationDqlArtifact } from '../llm/types';
 import type {
@@ -191,6 +195,24 @@ export interface RelatedDomainProducts {
   apps: Array<{ id: string; name: string; filePath: string; ownerDomain?: string; usesDomains: string[]; purpose?: string; requiredExports: string[]; classification?: string; lifecycle?: string }>;
   notebooks: Array<{ id: string; title: string; filePath: string; ownerDomain?: string; usesDomains: string[]; purpose?: string; requiredExports: string[]; classification?: string }>;
   snapshotId: string;
+}
+
+export interface DomainKnowledgeResponse {
+  schemaVersion: number;
+  snapshotId: string;
+  sourceFingerprint: string;
+  domainId: string;
+  capsule?: ManifestDomainCapsule;
+  counts: {
+    objects: number;
+    edges: number;
+    routes: number;
+    routeStates: Record<string, number>;
+  };
+  objects: ManifestKnowledgeObject[];
+  edges: ManifestKnowledgeEdge[];
+  routes: ManifestCrossDomainRoute[];
+  truncated: boolean;
 }
 
 // ── dbt-first onboarding API contracts ──────────────────────────────────
@@ -2339,6 +2361,10 @@ export const api = {
 
   async getRelatedDomainProducts(domain: string): Promise<RelatedDomainProducts> {
     return request(`/api/domain-workspaces/${encodeURIComponent(domain)}/related-products`);
+  },
+
+  async getDomainKnowledge(domain: string): Promise<DomainKnowledgeResponse> {
+    return request(`/api/domain-workspaces/${encodeURIComponent(domain)}/knowledge`);
   },
 
   async previewModelingChange(change: ModelingAuthoringChange, expectedSnapshotId: string): Promise<ModelingChangePreview> {

@@ -1096,6 +1096,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         }) : null;
   let artifactHit = drilldownCertifiedHit ?? unsafeCatalogCertifiedHit
     ?? (catalogCertifiedHit ? null : fallbackCertifiedHit);
+  let certifiedExecutionFallback: { node: KGNode; error: string } | undefined;
   // Certified remains first when it actually covers the question. If the
   // retrieved block does not fit but a governed semantic metric does, never
   // let the broad catalog match pre-empt Lane 2.
@@ -1231,46 +1232,59 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       suggestedViz: result?.chartConfig ? chartNameFromConfig(result.chartConfig) : undefined,
     });
     const dqlArtifact = buildCertifiedBlockDqlArtifact(artifactHit.node, result);
-    return {
-      kind: certifiedShapePassed ? 'certified' : 'uncertified',
-      sourceTier,
-      certification: certifiedShapePassed ? 'certified' : 'analyst_review_required',
-      reviewStatus: certifiedShapePassed ? 'certified' : 'analyst_review_required',
-      confidence: certifiedShapePassed ? 0.95 : 0.45,
-      text,
-      answer: text,
-      block: artifactHit.node.kind === 'block' ? artifactHit.node : undefined,
-      result,
-      executionError,
-      sql: result?.sql,
-      dqlArtifact,
-      trustLabel: certifiedShapePassed ? input.contextPack?.trustLabel ?? 'certified' : 'mixed',
-      sourceCertifiedBlock: artifactHit.node.kind === 'block' ? artifactHit.node.name : undefined,
-      contextPackId: input.contextPack?.id,
-      validationWarnings: resultShapeWarnings,
-      selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
-      citations,
-      memoryContext: input.memoryContext,
-      analysisPlan,
-      evidence: buildCertifiedEvidence({
-        question,
-        artifact: artifactHit.node,
-        businessHits,
-        semanticHits,
-        manifestHits,
-        considered,
+    const recoverableCertifiedFailure = artifactHit.node.kind === 'block'
+      && executionError !== undefined
+      && isRetryableCertifiedExecutionError(executionError);
+    if (recoverableCertifiedFailure) {
+      // A certified artifact is trusted evidence, not an obligation to return a
+      // failed query. Preserve the failure for the trace, remove executable
+      // trust for this turn, and continue through semantic/generated lanes.
+      // Any fallback result remains review-required; repaired SQL never inherits
+      // the source block's certification.
+      certifiedExecutionFallback = { node: artifactHit.node, error: executionError! };
+      artifactHit = null;
+    } else {
+      return {
+        kind: certifiedShapePassed ? 'certified' : 'uncertified',
+        sourceTier,
+        certification: certifiedShapePassed ? 'certified' : 'analyst_review_required',
+        reviewStatus: certifiedShapePassed ? 'certified' : 'analyst_review_required',
+        confidence: certifiedShapePassed ? 0.95 : 0.45,
+        text,
+        answer: text,
+        block: artifactHit.node.kind === 'block' ? artifactHit.node : undefined,
         result,
         executionError,
-        resultShapeWarnings,
-        executorWasAvailable: Boolean(input.executeCertifiedBlock),
+        sql: result?.sql,
+        dqlArtifact,
+        trustLabel: certifiedShapePassed ? input.contextPack?.trustLabel ?? 'certified' : 'mixed',
+        sourceCertifiedBlock: artifactHit.node.kind === 'block' ? artifactHit.node.name : undefined,
+        contextPackId: input.contextPack?.id,
+        validationWarnings: resultShapeWarnings,
+        selectedEvidence: input.contextPack?.evidenceRoles?.slice(0, 12),
         citations,
-        memoryContext: input.memoryContext ?? [],
+        memoryContext: input.memoryContext,
         analysisPlan,
-      }),
-      contextPack: input.contextPack,
-      considered,
-      providerUsed: provider.name,
-    };
+        evidence: buildCertifiedEvidence({
+          question,
+          artifact: artifactHit.node,
+          businessHits,
+          semanticHits,
+          manifestHits,
+          considered,
+          result,
+          executionError,
+          resultShapeWarnings,
+          executorWasAvailable: Boolean(input.executeCertifiedBlock),
+          citations,
+          memoryContext: input.memoryContext ?? [],
+          analysisPlan,
+        }),
+        contextPack: input.contextPack,
+        considered,
+        providerUsed: provider.name,
+      };
+    }
   }
 
   // Spec 17, part C — SEMANTIC-METRIC MATCHING. Must run BEFORE the clarify
@@ -2282,6 +2296,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     suggestedViz: parsed.viz ?? 'table',
     assumptions: [
       'The SQL preview is uncertified until an analyst reviews and promotes the DQL artifact.',
+      ...(certifiedExecutionFallback
+        ? [`Certified block ${certifiedExecutionFallback.node.name} failed execution and was bypassed: ${certifiedExecutionFallback.error}`]
+        : []),
       ...(repairNarrative ? [`Auto-corrected the query after an execution error: ${repairNarrative}`] : []),
       ...contextValidation.warnings,
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
@@ -2316,6 +2333,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : undefined;
     const validationWarnings = [
       ...(input.contextPack?.warnings ?? []),
+      ...(certifiedExecutionFallback
+        ? [`Certified block ${certifiedExecutionFallback.node.name} failed execution; this fallback result is review-required.`]
+        : []),
       ...contextValidation.warnings,
       ...deepCandidateNotes,
       ...(resultShape?.warnings ?? []),
@@ -4928,6 +4948,19 @@ function summarizeEvidencePayload(value: unknown, maxLength = 700): string | und
 
 function isRetryableGeneratedSqlError(error: string): boolean {
   return !/\b(read-only|readonly|select or with|unsafe|delete|insert|update|drop|alter|create|attach|copy|pragma)\b/i.test(error);
+}
+
+/**
+ * Only SQL-shape/binding failures may leave the certified lane. Connectivity,
+ * authorization, cancellation, and timeout failures would affect every query
+ * route and must remain terminal rather than triggering wasteful provider work.
+ */
+function isRetryableCertifiedExecutionError(error: string): boolean {
+  return /\b(?:binder|parser|catalog)\s+error\b/i.test(error)
+    || /\bambiguous\s+reference\b/i.test(error)
+    || /\breferenced\s+column\b.*\bnot\s+found\b/i.test(error)
+    || /\bcolumn\b.*\b(?:not\s+found|does\s+not\s+exist|not\s+recognized|unknown)\b/i.test(error)
+    || /\btable\b.*\b(?:not\s+found|does\s+not\s+exist|unknown)\b/i.test(error);
 }
 
 function repairGeneratedSqlLocally(sql: string, error: string, schemaContext: AgentSchemaTable[]): string | undefined {

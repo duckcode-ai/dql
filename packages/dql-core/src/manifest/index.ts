@@ -81,6 +81,18 @@ export {
   type ProjectSnapshot,
 } from './project-snapshot.js';
 export {
+  buildManifestKnowledgeGraph,
+  compactManifestKnowledgeGraph,
+  KNOWLEDGE_INDEX_SCHEMA_VERSION,
+  type BuildManifestKnowledgeGraphInput,
+} from './knowledge-graph.js';
+export {
+  loadManifestKnowledgeSkills,
+  manifestKnowledgeSkillInputFiles,
+  type ManifestKnowledgeSkillDescriptor,
+  type ManifestKnowledgeSkillLoadResult,
+} from './knowledge-skills.js';
+export {
   loadDbtRunState,
   applyBlockDataState,
   worseDataState,
@@ -123,6 +135,17 @@ export type {
   ManifestConformanceDeclaration,
   ManifestModelRule,
   ManifestDomainRelationshipLineage,
+  ManifestKnowledgeGraph,
+  ManifestKnowledgeObject,
+  ManifestKnowledgeObjectRef,
+  ManifestKnowledgeShard,
+  ManifestKnowledgeObjectKind,
+  ManifestKnowledgeEdge,
+  ManifestKnowledgeEdgeKind,
+  ManifestKnowledgeRouteState,
+  ManifestKnowledgeSource,
+  ManifestDomainCapsule,
+  ManifestCrossDomainRoute,
   ManifestDiagnostic,
   ManifestConflictDetail,
   ManifestConflictSide,

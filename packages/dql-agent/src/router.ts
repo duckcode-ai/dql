@@ -561,6 +561,33 @@ function dominantCompatibleGovernedCandidate(
   return hasExecutableCompetitor ? undefined : best;
 }
 
+function shouldDeferCompositionalFollowUpToExecutor(
+  base: IntentDecision,
+  candidates: AgentEvidenceCandidate[],
+): boolean {
+  if (!base.followsUp) return false;
+  const executableKinds = new Set<AgentEvidenceCandidate['kind']>([
+    'certified_block',
+    'semantic_metric',
+    'semantic_member',
+    'dql_modeling',
+    'dbt_model',
+    'dbt_source',
+    'sql_table',
+    'sql_column',
+  ]);
+  const relevant = candidates.filter((candidate) =>
+    candidate.compatibility !== 'incompatible' && executableKinds.has(candidate.kind));
+  if (relevant.length === 0) return false;
+  // If a complete governed executor exists, similar names still deserve the tiny
+  // meaning resolver. When every candidate is only partial, however, the turn is
+  // necessarily a composition. A separate resolver cannot authorize execution;
+  // it only duplicates the SQL agent's evidence decision and adds a full provider
+  // round trip. Let the single bounded executor select and compose from the same
+  // ranked cards plus the typed prior-result carrier.
+  return !relevant.some((candidate) => candidate.compatibility === 'compatible');
+}
+
 function rethrowCancellation(error: unknown, ...signals: Array<AbortSignal | undefined>): void {
   for (const signal of signals) {
     if (signal?.aborted) throw signal.reason ?? error;
@@ -658,6 +685,10 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               directResolution(request, evidence, dominant),
               "heuristic",
             );
+          }
+
+          if (shouldDeferCompositionalFollowUpToExecutor(base, candidates)) {
+            return routeWithoutMeaningModel(request, base, evidence, candidates);
           }
 
           const key = cacheKey(request, evidence);

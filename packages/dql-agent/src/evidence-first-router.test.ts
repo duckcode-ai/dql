@@ -178,6 +178,40 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(resolveMeaning).toHaveBeenCalledTimes(1);
   });
 
+  it("AGT-010 avoids a duplicate meaning call for typed compositional follow-ups", async () => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => evidence([
+        candidate({
+          id: 'dql:block:top_beverage_customers',
+          kind: 'certified_block',
+          trustTier: 'certified',
+          compatibility: 'partial',
+        }),
+        candidate({
+          id: 'semantic:order_item:product',
+          kind: 'semantic_member',
+          compatibility: 'partial',
+        }),
+      ]),
+    });
+
+    const decision = await router.decide({
+      question: 'what product they bought for this amount?',
+      history: [
+        { role: 'user', text: 'top beverage customers' },
+        { role: 'assistant', text: 'Melissa Lopez leads beverage revenue.' },
+      ],
+      conversationContext: { priorResultValues: { customer_name: ['Melissa Lopez'] } },
+    });
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.action).toBe('answer');
+    expect(decision.followsUp).toBe(true);
+    expect(decision.retrievalEvidence?.candidateIds).toHaveLength(2);
+  });
+
   it("rejects invented resolver IDs and preserves a hard clarification", async () => {
     const candidates = [candidate(), candidate({
       id: "semantic:billing:monthly_rollover_amount",

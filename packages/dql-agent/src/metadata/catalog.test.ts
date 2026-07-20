@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   buildLocalContextPack,
   buildMetadataSnapshot,
+  buildFollowUpSearchQuery,
   defaultMetadataPath,
   ensureMetadataCatalogFresh,
   MetadataCatalog,
@@ -31,6 +32,31 @@ describe('local metadata catalog', () => {
 
   afterEach(() => {
     rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  it('CTX-003 keeps SQL bodies and prior row values out of metadata FTS queries', () => {
+    const query = buildFollowUpSearchQuery('what product did they buy?', {
+      kind: 'drilldown',
+      sourceBlockName: 'top_beverage_customers',
+      sourceQuestion: 'top beverage customers',
+      filters: ['Melissa Lopez', 'Joy Lam'],
+      dimensions: ['customer', 'product'],
+      priorResultColumns: ['customer_name', 'beverage_revenue'],
+      priorMeasures: ['beverage_revenue'],
+      priorResultValues: { customer_name: ['Melissa Lopez', 'Joy Lam'] },
+      priorResultRef: {
+        id: 'turn-1',
+        question: 'top beverage customers',
+        columns: ['customer_name', 'beverage_revenue'],
+        sourceSql: 'SELECT customers.customer_name, SUM(items.price) FROM secret_relation',
+      },
+    });
+
+    expect(query).toContain('top_beverage_customers');
+    expect(query).toContain('beverage_revenue');
+    expect(query).not.toContain('Melissa Lopez');
+    expect(query).not.toContain('secret_relation');
+    expect(query).not.toContain('SELECT');
   });
 
   it('builds a SQLite catalog with DQL, dbt, FTS, diagnostics, and query-run evidence', async () => {
@@ -326,9 +352,12 @@ This must not leak into the NBA domain.
           modelAreaRefs: ['scoring'],
           preferredMetrics: ['total_points'],
           vocabulary: { scorer: 'metric:total_points' },
-          body: expect.stringContaining('ranking grain'),
+          bodyHash: expect.any(String),
         }),
       });
+      const object = catalog.getObject('skill:nba::skill::nba-ranking');
+      expect(object?.payload).not.toHaveProperty('body');
+      expect(catalog.skillBody(String(object?.payload?.bodyHash))).toContain('ranking grain');
     } finally {
       catalog.close();
     }
