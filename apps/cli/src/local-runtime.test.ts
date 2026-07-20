@@ -765,6 +765,14 @@ describe('dbt-first onboarding runtime API', () => {
     writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: shop\nversion: 1\n');
     const manifestPath = join(projectRoot, 'target', 'manifest.json');
     writeFileSync(manifestPath, JSON.stringify({ metadata: { project_name: 'shop' }, nodes: { 'model.shop.orders': { resource_type: 'model', name: 'orders' } }, sources: {}, metrics: {} }));
+    writeFileSync(join(projectRoot, 'target', 'semantic_manifest.json'), JSON.stringify({
+      semantic_models: [{
+        name: 'orders',
+        model: "ref('orders')",
+        measures: [{ name: 'order_revenue', agg: 'sum', expr: 'revenue' }],
+      }],
+      metrics: [{ name: 'total_order_revenue', type: 'simple', type_params: { measure: 'order_revenue' } }],
+    }));
     let server: Server | undefined;
     try {
       const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, connection: { driver: 'file' }, preferredPort: 0, captureServer: (created) => { server = created; } });
@@ -836,6 +844,12 @@ describe('dbt-first onboarding runtime API', () => {
       expect(config.connections).toEqual({ warehouse: { driver: 'duckdb', filepath: ':memory:' } });
       expect(config.aiProviders).toEqual({ default: 'ollama', ollama: { model: 'qwen-test' } });
       expect(existsSync(join(projectRoot, 'semantic-layer'))).toBe(false);
+      const semanticLayer = await (await fetch(`${base}/api/semantic-layer`)).json() as {
+        provider: string;
+        metrics: Array<{ name: string }>;
+      };
+      expect(semanticLayer.provider).toBe('dbt');
+      expect(semanticLayer.metrics.map((metric) => metric.name)).toContain('total_order_revenue');
       const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean; snapshotState: string }; preparation: { id: string; status: string } };
       expect(status.requestId).toMatch(/^onboarding-status-/);
       expect(status.snapshotId).toMatch(/^[a-f0-9]{64}$/);

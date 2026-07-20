@@ -202,6 +202,7 @@ import {
   type BuildFromPromptResult,
   reindexProject,
   invalidateAgentProjectState,
+  recordAgentRuntimeVersion,
   resolveDomainContextEnvelope,
   defaultKgPath,
   planAppFromPrompt,
@@ -382,20 +383,28 @@ export function resolveProjectSemanticConfig(
 ): SemanticLayerProviderConfig | undefined {
   const configured = projectConfig.semanticLayer;
   const dbtProjectDir = projectConfig.dbt?.projectDir;
+  const dbtManifestPath = projectConfig.dbt?.manifestPath;
+  if (configured?.provider === 'dbt') {
+    return {
+      ...configured,
+      projectPath: configured.projectPath ?? dbtProjectDir,
+      manifestPath: configured.manifestPath ?? dbtManifestPath,
+    };
+  }
   if (
     dbtProjectDir
     && (!configured || configured.provider === 'dql')
-    && hasDbtSemanticArtifacts(projectRoot, dbtProjectDir)
+    && hasDbtSemanticArtifacts(projectRoot, dbtProjectDir, dbtManifestPath)
   ) {
-    return { provider: 'dbt', projectPath: dbtProjectDir };
+    return { provider: 'dbt', projectPath: dbtProjectDir, manifestPath: dbtManifestPath };
   }
   return configured;
 }
 
-function hasDbtSemanticArtifacts(projectRoot: string, dbtProjectDir: string): boolean {
+function hasDbtSemanticArtifacts(projectRoot: string, dbtProjectDir: string, configuredManifestPath?: string): boolean {
   const dbtRoot = resolve(projectRoot, dbtProjectDir);
-  if (existsSync(join(dbtRoot, 'target', 'semantic_manifest.json'))) return true;
-  const manifestPath = join(dbtRoot, 'target', 'manifest.json');
+  const manifestPath = resolve(dbtRoot, configuredManifestPath ?? 'target/manifest.json');
+  if (existsSync(join(dirname(manifestPath), 'semantic_manifest.json'))) return true;
   if (!existsSync(manifestPath)) return false;
   try {
     const parsed = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
@@ -881,6 +890,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const gitRoot = await resolveGitRoot(projectRoot);
   if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
   let projectConfig = loadProjectConfig(projectRoot);
+  recordAgentRuntimeVersion(projectRoot, runtimeVersion);
   const configuredConnection = rawConnection
     ? normalizeProjectConnection(rawConnection, projectRoot)
     : projectConfig.defaultConnection
@@ -934,6 +944,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     manifest: DQLManifest;
     validationDurationMs: number;
     compileDurationMs: number;
+    forceRebuild?: boolean;
   }): DbtPreparationJob => {
     const now = new Date().toISOString();
     const id = apiRequestId(input.kind === 'dbt_refresh' ? 'dbt-refresh' : 'dbt-prepare');
@@ -972,6 +983,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const prepared = await ensureAgentProjectReady(projectRoot, {
             kgPath: defaultKgPath(projectRoot),
             manifest: input.manifest,
+            forceKgIndex: input.forceRebuild,
+            forceMetadataCatalog: input.forceRebuild,
           });
           const current = onboardingJobs.get(id);
           if (!current || current.status === 'cancelled') return;
@@ -1144,18 +1157,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const semanticLayerDir = join(projectRoot, 'semantic-layer');
   let semanticImportManifest = loadSemanticImportManifest(projectRoot);
   const userPrefsPath = join(projectRoot, '.dql-user-prefs.json');
-  const semanticConfig = resolveProjectSemanticConfig(projectConfig, projectRoot);
+  let semanticConfig = resolveProjectSemanticConfig(projectConfig, projectRoot);
   let semanticLastSyncTime: string | null = null;
-  {
+  const reloadSemanticLayer = async (): Promise<SemanticLayerResult> => {
+    semanticConfig = resolveProjectSemanticConfig(projectConfig, projectRoot);
     const semanticConnection = connection;
     const executeQuery = semanticConfig?.provider === 'snowflake' && semanticConnection
       ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, semanticConnection); return { rows: r.rows }; }
       : undefined;
     const result = await resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery);
-    semanticLayer = result.layer;
     semanticLayerErrors = result.errors;
     semanticDetectedProvider = result.detectedProvider;
-    semanticLastSyncTime = result.layer ? new Date().toISOString() : null;
+    if (result.layer) {
+      semanticLayer = result.layer;
+      semanticLastSyncTime = new Date().toISOString();
+    } else if (result.errors.length === 0) {
+      semanticLayer = undefined;
+      semanticLastSyncTime = null;
+    }
     semanticImportManifest = loadSemanticImportManifest(projectRoot);
     // Legacy fallback if provider system returned nothing and no errors
     if (!semanticLayer && semanticLayerErrors.length === 0 && existsSync(semanticLayerDir)) {
@@ -1164,8 +1183,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         semanticLastSyncTime = new Date().toISOString();
       } catch { /* continue without */ }
     }
-  }
+    return result;
+  };
+  await reloadSemanticLayer();
   await refreshLocalMetadataCatalog(projectRoot);
+  const startupDbtManifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
+  if (startupDbtManifestPath && !isAgentProjectIndexReady(projectRoot)) {
+    try {
+      const startupSnapshot = projectSnapshot();
+      startDbtPreparationJob({
+        kind: 'dbt_prepare',
+        snapshotId: startupSnapshot.snapshotId,
+        manifest: startupSnapshot.manifest,
+        validationDurationMs: 0,
+        compileDurationMs: 0,
+        forceRebuild: true,
+      });
+    } catch {
+      // Startup remains available with the last valid cache; Setup exposes the
+      // compile error and the next explicit refresh retries preparation.
+    }
+  }
 
   const recordDatasetMetadataSnapshot = (
     datasets: DatasetSource[] = datasetWorkspace.list(),
@@ -4134,19 +4172,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           // Hot-reload semantic layer on change and notify frontend
           if (dir === 'semantic-layer') {
-            const semanticConnection = connection;
-            const executeQuery = semanticConfig?.provider === 'snowflake' && semanticConnection
-              ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, semanticConnection); return { rows: r.rows }; }
-              : undefined;
-            resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery).then((refreshed) => {
-              if (refreshed.layer) {
-                semanticLayer = refreshed.layer;
-                semanticLayerErrors = refreshed.errors;
-                semanticLastSyncTime = new Date().toISOString();
-                semanticImportManifest = loadSemanticImportManifest(projectRoot);
-              } else if (refreshed.errors.length > 0) {
-                semanticLayerErrors = refreshed.errors;
-              }
+            reloadSemanticLayer().then(() => {
               // Notify all connected notebook clients to re-fetch the semantic layer
               const reloadPayload = JSON.stringify({ type: 'semantic-reload' });
               for (const client of sseClients) {
@@ -4157,7 +4183,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         });
       } catch { /* dir not watchable */ }
     }
-    const configuredDbtManifest = resolveDbtManifestPath(projectRoot);
+    const configuredDbtManifest = resolveDbtManifestPath(projectRoot, projectConfig);
     if (configuredDbtManifest && existsSync(dirname(configuredDbtManifest))) {
       try {
         watch(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
@@ -4171,6 +4197,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           for (const client of sseClients) {
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
           }
+          void reloadSemanticLayer().then(() => {
+            const reloadPayload = JSON.stringify({ type: 'semantic-reload' });
+            for (const client of sseClients) {
+              try { client.write(`event: change\ndata: ${reloadPayload}\n\n`); } catch { sseClients.delete(client); }
+            }
+          }).catch(() => { /* artifact reload errors are exposed in diagnostics */ });
         });
       } catch { /* dbt artifact directory not watchable */ }
     }
@@ -4755,6 +4787,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         let snapshotManifest: DQLManifest;
         const compileStartedAt = Date.now();
         try {
+          const semanticReload = await reloadSemanticLayer();
+          if (semanticReload.errors.length > 0) {
+            throw new Error(`dbt semantic artifacts could not be loaded: ${semanticReload.errors.join('; ')}`);
+          }
           const snapshot = projectSnapshot();
           snapshotId = snapshot.snapshotId;
           snapshotManifest = snapshot.manifest;
@@ -4766,6 +4802,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           connection = previousConnection;
           projectSnapshots.invalidate();
           invalidateAgentProjectState(projectRoot);
+          await reloadSemanticLayer();
           throw Object.assign(new Error(`dbt-first configuration did not compile and was rolled back: ${error instanceof Error ? error.message : String(error)}`), { code: 'SNAPSHOT_BUILD_FAILED' });
         }
         const preparation = startDbtPreparationJob({
@@ -4806,6 +4843,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const validationDurationMs = Date.now() - refreshStartedAt;
         const compileStartedAt = Date.now();
         projectSnapshots.invalidate();
+        await reloadSemanticLayer();
         const snapshot = projectSnapshot();
         invalidateAgentProjectState(projectRoot);
         const job = startDbtPreparationJob({
@@ -9135,16 +9173,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'POST' && path === '/api/semantic-layer/reload') {
       try {
-        const semanticConnection = connection;
-        const executeQuery = semanticConfig?.provider === 'snowflake' && semanticConnection
-          ? async (sql: string) => { const r = await executor.executeQuery(sql, [], {}, semanticConnection); return { rows: r.rows }; }
-          : undefined;
-        const refreshed = await resolveSemanticLayerAsync(semanticConfig, projectRoot, executeQuery);
-        semanticLayer = refreshed.layer;
-        semanticLayerErrors = refreshed.errors;
-        semanticDetectedProvider = refreshed.detectedProvider;
-        semanticLastSyncTime = refreshed.layer ? new Date().toISOString() : null;
-        semanticImportManifest = loadSemanticImportManifest(projectRoot);
+        await reloadSemanticLayer();
         const diagnostics = buildSemanticLayerDiagnostics(projectRoot, projectConfig, {
           semanticLayer,
           semanticErrors: semanticLayerErrors,
@@ -9154,7 +9183,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          ok: Boolean(refreshed.layer),
+          ok: Boolean(semanticLayer),
           ...diagnostics,
         }));
       } catch (error) {

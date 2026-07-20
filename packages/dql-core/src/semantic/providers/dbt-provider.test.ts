@@ -331,6 +331,95 @@ metrics:
     expect(layer.getSavedQuery('revenue_by_region')?.granularity).toBe('month');
   });
 
+  it('imports array-shaped MetricFlow semantic manifests', () => {
+    const targetDir = join(tmpDir, 'target');
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify({
+      semantic_models: [{
+        name: 'customers',
+        model: "ref('customers')",
+        measures: [{ name: 'lifetime_spend', agg: 'sum', expr: 'lifetime_spend' }],
+        dimensions: [{ name: 'customer_name', type: 'categorical' }],
+      }],
+      metrics: [{
+        name: 'customer_lifetime_spend',
+        type: 'simple',
+        type_params: { measure: 'lifetime_spend' },
+      }],
+      saved_queries: [{
+        name: 'top_customers',
+        query_params: { metrics: ['customer_lifetime_spend'], group_by: ['customer_name'] },
+      }],
+    }), 'utf-8');
+
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+
+    expect(layer.listSemanticModels().map((model) => model.name)).toContain('customers');
+    expect(layer.listMetrics().map((metric) => metric.name)).toContain('customer_lifetime_spend');
+    expect(layer.listSavedQueries().map((query) => query.name)).toContain('top_customers');
+  });
+
+  it('honors absolute dbt roots, configured manifest paths, and dbt model-paths', () => {
+    const externalDbtRoot = join(tmpDir, 'external-dbt-project');
+    mkdirSync(join(externalDbtRoot, 'compiled'), { recursive: true });
+    writeFileSync(join(externalDbtRoot, 'dbt_project.yml'), [
+      'name: enterprise_project',
+      'target-path: compiled',
+      'model-paths: [warehouse_models]',
+    ].join('\n'), 'utf-8');
+    writeFileSync(join(externalDbtRoot, 'compiled', 'manifest.json'), JSON.stringify({
+      semantic_models: [{
+        name: 'subscriptions',
+        model: "ref('subscriptions')",
+        measures: [{ name: 'mrr_amount', agg: 'sum', expr: 'mrr' }],
+      }],
+      metrics: [{
+        name: 'monthly_recurring_revenue',
+        type: 'simple',
+        type_params: { measure: 'mrr_amount' },
+      }],
+    }), 'utf-8');
+
+    const fromTargetPath = new DbtProvider().load({ provider: 'dbt', projectPath: externalDbtRoot }, tmpDir);
+    expect(fromTargetPath.listMetrics().map((metric) => metric.name)).toContain('monthly_recurring_revenue');
+
+    rmSync(join(externalDbtRoot, 'compiled'), { recursive: true, force: true });
+    writeSemanticYaml(
+      'external-dbt-project/warehouse_models/semantic.yml',
+      `
+semantic_models:
+  - name: accounts
+    model: "ref('accounts')"
+    measures:
+      - name: account_count
+        agg: count
+metrics:
+  - name: active_accounts
+    type: simple
+    type_params:
+      measure: account_count
+`,
+    );
+    const fromModelPaths = new DbtProvider().load({ provider: 'dbt', projectPath: externalDbtRoot }, tmpDir);
+    expect(fromModelPaths.listMetrics().map((metric) => metric.name)).toContain('active_accounts');
+
+    mkdirSync(join(externalDbtRoot, 'artifacts'), { recursive: true });
+    writeFileSync(join(externalDbtRoot, 'artifacts', 'enterprise-manifest.json'), JSON.stringify({
+      semantic_models: [{
+        name: 'usage',
+        model: "ref('usage')",
+        measures: [{ name: 'usage_total', agg: 'sum' }],
+      }],
+      metrics: [{ name: 'total_usage', type: 'simple', type_params: { measure: 'usage_total' } }],
+    }), 'utf-8');
+    const configuredArtifact = new DbtProvider().load({
+      provider: 'dbt',
+      projectPath: externalDbtRoot,
+      manifestPath: 'artifacts/enterprise-manifest.json',
+    }, tmpDir);
+    expect(configuredArtifact.listMetrics().map((metric) => metric.name)).toContain('total_usage');
+  });
+
   it('falls back to YAML walker when manifest.json is missing', () => {
     writeSemanticYaml(
       'models/_semantic.yml',
@@ -378,6 +467,78 @@ metrics:
     const provider = new DbtProvider();
     const layer = provider.load({ provider: 'dbt' }, tmpDir);
     expect(layer.listMetrics().map((m) => m.name)).toContain('yaml_fallback');
+  });
+
+  it('loads semantic YAML even when manifest.json contains only regular dbt models', () => {
+    writeManifest({
+      nodes: {
+        'model.demo.products': {
+          unique_id: 'model.demo.products',
+          resource_type: 'model',
+          package_name: 'demo',
+          name: 'products',
+          columns: { product_name: { name: 'product_name', data_type: 'varchar' } },
+        },
+      },
+      semantic_models: {},
+      metrics: {},
+    });
+    writeSemanticYaml(
+      'models/_semantic.yml',
+      `
+semantic_models:
+  - name: customers
+    model: "ref('customers')"
+    measures:
+      - name: lifetime_spend
+        agg: sum
+metrics:
+  - name: customer_lifetime_spend
+    type: simple
+    type_params:
+      measure: lifetime_spend
+`,
+    );
+
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+
+    expect(layer.listMetrics().map((metric) => metric.name)).toContain('customer_lifetime_spend');
+    expect(layer.listSemanticModels().map((model) => model.name)).toEqual(
+      expect.arrayContaining(['products', 'customers']),
+    );
+  });
+
+  it('supplements model-only compiled semantic artifacts with source YAML metrics', () => {
+    writeManifest({
+      semantic_models: {
+        'semantic_model.demo.customers': {
+          name: 'customers',
+          model: "ref('customers')",
+          measures: [{ name: 'lifetime_spend', agg: 'sum' }],
+        },
+      },
+      metrics: {},
+    });
+    writeSemanticYaml(
+      'models/_semantic.yml',
+      `
+semantic_models:
+  - name: customers
+    model: "ref('customers')"
+    measures:
+      - name: lifetime_spend
+        agg: sum
+metrics:
+  - name: customer_lifetime_spend
+    type: simple
+    type_params:
+      measure: lifetime_spend
+`,
+    );
+
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+
+    expect(layer.listMetrics().map((metric) => metric.name)).toContain('customer_lifetime_spend');
   });
 
   it('falls back to YAML when manifest.json is malformed', () => {

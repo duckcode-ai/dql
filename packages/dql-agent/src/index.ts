@@ -9,7 +9,7 @@
  */
 
 import { join, resolve } from "node:path";
-import { existsSync, readFileSync, readdirSync, statSync, type Dirent } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { createHash } from "node:crypto";
 import type { DQLManifest } from "@duckcodeailabs/dql-core";
 import {
@@ -795,6 +795,31 @@ export function defaultKgPath(projectRoot: string): string {
   return join(projectRoot, ".dql", "cache", "agent-kg.sqlite");
 }
 
+const AGENT_INDEX_SCHEMA_VERSION = '2';
+const AGENT_RUNTIME_MARKER = join('.dql', 'cache', 'agent-runtime-version');
+
+/**
+ * Record the installed CLI version that owns the local indexes. The marker is
+ * rewritten only when the version changes, so ordinary restarts remain warm
+ * while an npm upgrade makes every readiness path see the same stale state.
+ */
+export function recordAgentRuntimeVersion(projectRoot: string, runtimeVersion: string): boolean {
+  const root = resolve(projectRoot);
+  const normalized = runtimeVersion.trim() || 'unknown';
+  const path = join(root, AGENT_RUNTIME_MARKER);
+  try {
+    if (existsSync(path) && readFileSync(path, 'utf-8').trim() === normalized) return false;
+  } catch {
+    // Replace an unreadable marker atomically below.
+  }
+  mkdirSync(join(root, '.dql', 'cache'), { recursive: true });
+  const tempPath = `${path}.tmp-${process.pid}`;
+  writeFileSync(tempPath, `${normalized}\n`, { encoding: 'utf-8', mode: 0o600 });
+  renameSync(tempPath, path);
+  invalidateAgentProjectState(root);
+  return true;
+}
+
 export interface ReindexOptions {
   manifest?: DQLManifest;
   /** Path to the KG sqlite file. Defaults to `.dql/cache/agent-kg.sqlite`. */
@@ -841,7 +866,7 @@ const warmProjectIndexes = new Map<string, WarmProjectIndexEntry>();
  */
 export function agentProjectSourceVersion(projectRoot: string): string {
   const root = resolve(projectRoot);
-  const tokens: string[] = [];
+  const tokens: string[] = [`agent-index-schema:${AGENT_INDEX_SCHEMA_VERSION}`];
   const addPath = (path: string): void => {
     try {
       const stat = statSync(path);
@@ -859,6 +884,7 @@ export function agentProjectSourceVersion(projectRoot: string): string {
     'semantic_manifest.json',
     join('target', 'manifest.json'),
     join('target', 'semantic_manifest.json'),
+    AGENT_RUNTIME_MARKER,
   ]) addPath(join(root, relative));
 
   try {

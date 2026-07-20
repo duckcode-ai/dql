@@ -5,7 +5,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import * as yaml from 'js-yaml';
 import {
   SemanticLayer,
@@ -138,31 +138,47 @@ export class DbtProvider implements SemanticLayerProvider {
 
   load(config: SemanticLayerProviderConfig, projectRoot: string): SemanticLayer {
     const dbtRoot = config.projectPath
-      ? join(projectRoot, config.projectPath)
-      : projectRoot;
+      ? resolve(projectRoot, config.projectPath)
+      : resolve(projectRoot);
+    const dbtProjectSettings = readDbtProjectSettings(dbtRoot);
+    const manifestPath = resolve(
+      dbtRoot,
+      config.manifestPath ?? join(dbtProjectSettings.targetPath, 'manifest.json'),
+    );
+    const semanticManifestPath = resolve(
+      dbtRoot,
+      config.semanticManifestPath ?? join(dirname(manifestPath), 'semantic_manifest.json'),
+    );
 
     // Prefer target/semantic_manifest.json when available: it is the
     // MetricFlow/dbt Semantic Layer compatibility artifact and includes saved
     // queries plus resolved semantic metadata. Fall back to manifest.json and
     // then source YAML for projects that have not parsed semantic artifacts yet.
-    const semanticManifestPath = join(dbtRoot, 'target', 'semantic_manifest.json');
+    let artifactLayer: SemanticLayer | null = null;
     if (existsSync(semanticManifestPath)) {
-      const layer = loadFromManifestJson(semanticManifestPath, 'semantic_manifest');
-      if (layer) return layer;
+      artifactLayer = loadFromManifestJson(semanticManifestPath, 'semantic_manifest');
+      if (artifactLayer && artifactHasTopLevelMetrics(semanticManifestPath)) return artifactLayer;
     }
 
-    const manifestPath = join(dbtRoot, 'target', 'manifest.json');
+    let manifestInventory: SemanticLayer | null = null;
     if (existsSync(manifestPath)) {
       const layer = loadFromManifestJson(manifestPath, 'manifest');
-      if (layer) return layer;
+      if (layer && artifactHasTopLevelMetrics(manifestPath)) return layer;
+      artifactLayer ??= layer;
+      manifestInventory = loadDbtModelInventoryFromManifestPath(manifestPath);
     }
 
-    const layer = new SemanticLayer();
-    const modelsDir = join(dbtRoot, 'models');
-    if (!existsSync(modelsDir)) return layer;
-
-    // Collect all YAML files recursively
-    const yamlFiles = collectYamlFiles(modelsDir);
+    // A dbt-core manifest can contain the technical model inventory while its
+    // MetricFlow nodes are absent. Keep that inventory, but still scan the
+    // configured model paths so semantic YAML is not hidden by an early return.
+    const layer = artifactLayer ?? manifestInventory ?? new SemanticLayer();
+    const modelPaths = config.modelPaths?.length
+      ? config.modelPaths
+      : dbtProjectSettings.modelPaths;
+    const yamlFiles = Array.from(new Set(
+      modelPaths.flatMap((modelPath) => collectYamlFiles(resolve(dbtRoot, modelPath))),
+    ));
+    if (yamlFiles.length === 0) return layer;
 
     // First pass: collect all semantic models so we can resolve measure references
     const allModels: DbtSemanticModel[] = [];
@@ -247,12 +263,8 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
     return null;
   }
 
-  const semanticModelsRaw = asRecord(manifest.semantic_models);
-  const metricsRaw = asRecord(manifest.metrics);
-  const savedQueriesRaw = asRecord(manifest.saved_queries ?? manifest.savedQueries);
-
   const models: DbtSemanticModel[] = [];
-  for (const node of Object.values(semanticModelsRaw)) {
+  for (const node of artifactCollection(manifest.semantic_models)) {
     if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
     const raw = node as DbtManifestSemanticModel;
     models.push({
@@ -268,7 +280,7 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
   }
 
   const dbtMetrics: DbtMetric[] = [];
-  for (const node of Object.values(metricsRaw)) {
+  for (const node of artifactCollection(manifest.metrics)) {
     if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
     const raw = node as DbtManifestMetric;
     dbtMetrics.push({
@@ -282,15 +294,15 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
   }
 
   const savedQueries: DbtSavedQuery[] = [];
-  for (const node of Object.values(savedQueriesRaw)) {
+  for (const node of artifactCollection(manifest.saved_queries ?? manifest.savedQueries)) {
     if (!node || typeof node !== 'object' || Array.isArray(node) || !('name' in node)) continue;
     const raw = node as DbtSavedQuery;
     savedQueries.push({ ...raw, name: raw.name });
   }
 
   if (models.length === 0 && dbtMetrics.length === 0 && savedQueries.length === 0) {
-    if (artifactKind === 'manifest') return loadDbtModelInventoryFromManifest(manifest);
-    // No semantic content — let the caller try the YAML fallback.
+    // No semantic content — let the caller try source YAML. For manifest.json,
+    // its technical model inventory is merged into that YAML layer by load().
     return null;
   }
 
@@ -358,6 +370,53 @@ interface DbtManifestModelNode {
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return value as Record<string, unknown>;
+}
+
+function artifactCollection(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  return Object.values(asRecord(value));
+}
+
+function readDbtProjectSettings(dbtRoot: string): { targetPath: string; modelPaths: string[] } {
+  const defaults = { targetPath: 'target', modelPaths: ['models'] };
+  const path = join(dbtRoot, 'dbt_project.yml');
+  if (!existsSync(path)) return defaults;
+  try {
+    const parsed = yaml.load(readFileSync(path, 'utf-8')) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return defaults;
+    const targetPath = typeof parsed['target-path'] === 'string' && parsed['target-path'].trim()
+      ? parsed['target-path'].trim()
+      : defaults.targetPath;
+    const rawModelPaths = parsed['model-paths'];
+    const modelPaths = Array.isArray(rawModelPaths)
+      ? rawModelPaths.filter((value): value is string => typeof value === 'string' && Boolean(value.trim())).map((value) => value.trim())
+      : defaults.modelPaths;
+    return { targetPath, modelPaths: modelPaths.length ? modelPaths : defaults.modelPaths };
+  } catch {
+    return defaults;
+  }
+}
+
+function loadDbtModelInventoryFromManifestPath(manifestPath: string): SemanticLayer | null {
+  try {
+    return loadDbtModelInventoryFromManifest(
+      JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function artifactHasTopLevelMetrics(manifestPath: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+    return artifactCollection(manifest.metrics).some((metric) => {
+      if (!metric || typeof metric !== 'object' || Array.isArray(metric)) return false;
+      return 'name' in metric;
+    });
+  } catch {
+    return false;
+  }
 }
 
 function loadDbtModelInventoryFromManifest(manifest: Record<string, unknown>): SemanticLayer | null {

@@ -7,6 +7,7 @@ import {
   ensureAgentProjectReady,
   invalidateAgentProjectState,
   isAgentProjectIndexReady,
+  recordAgentRuntimeVersion,
 } from './index.js';
 
 describe('warm agent project state', () => {
@@ -72,5 +73,35 @@ describe('warm agent project state', () => {
     expect(firstAsk.sourceVersion).toBe(postConnect.sourceVersion);
     expect(firstAsk.metadataFingerprint).toBe(postConnect.metadataFingerprint);
     expect(firstAsk.kgFingerprint).toBe(postConnect.kgFingerprint);
+  });
+
+  it('invalidates persisted indexes once when the installed CLI version changes (CFG-003, E2E-005)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-agent-upgrade-'));
+    roots.push(root);
+    writeFileSync(join(root, 'dql-manifest.json'), JSON.stringify({
+      manifestVersion: 1,
+      dqlVersion: 'test',
+      generatedAt: new Date(0).toISOString(),
+      project: 'upgrade-state-test',
+      projectRoot: root,
+      blocks: {}, terms: {}, businessViews: {}, dashboards: {}, apps: {}, notebooks: {},
+      metrics: {}, dimensions: {}, sources: {},
+      lineage: { nodes: [], edges: [], domains: [], crossDomainFlows: [], domainTrust: {} },
+    }));
+
+    expect(recordAgentRuntimeVersion(root, '1.8.0')).toBe(true);
+    const firstVersion = agentProjectSourceVersion(root);
+    await ensureAgentProjectReady(root);
+    expect(isAgentProjectIndexReady(root)).toBe(true);
+
+    expect(recordAgentRuntimeVersion(root, '1.8.0')).toBe(false);
+    expect(agentProjectSourceVersion(root)).toBe(firstVersion);
+    expect(isAgentProjectIndexReady(root)).toBe(true);
+
+    expect(recordAgentRuntimeVersion(root, '1.9.0')).toBe(true);
+    expect(agentProjectSourceVersion(root)).not.toBe(firstVersion);
+    expect(isAgentProjectIndexReady(root)).toBe(false);
+    await ensureAgentProjectReady(root);
+    expect(isAgentProjectIndexReady(root)).toBe(true);
   });
 });

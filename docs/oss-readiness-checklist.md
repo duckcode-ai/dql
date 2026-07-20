@@ -161,7 +161,7 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-The OSS release candidate gates pass locally for `1.8.0`. Re-run the published
+The OSS release candidate gates pass locally for `1.8.1`. Re-run the published
 package smoke checks after publishing so `latest` is validated against the same
 version as the repo.
 

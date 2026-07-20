@@ -6,6 +6,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.1 - 2026-07-19
+
+### Reliable dbt semantic discovery and upgrade preparation
+
+This patch repairs projects where database objects were visible but dbt semantic
+metrics were missing, and keeps the governed agent snapshot current after CLI
+upgrades without adding work to normal warm restarts.
+
+### Fixed
+
+- **dbt semantic metrics load across enterprise project layouts.** MetricFlow
+  artifacts may use array or object collections, dbt projects may use absolute
+  roots, custom manifests, `target-path`, and `model-paths`, and source semantic
+  YAML remains discoverable when compiled artifacts contain only technical models.
+- **Setup and Settings see semantic changes immediately.** dbt Apply, Refresh,
+  artifact changes, and manual reload now share one live semantic configuration;
+  a failed reload preserves the last valid semantic layer.
+- **CLI upgrades silently refresh governed search state.** A project-local runtime
+  marker invalidates stale snapshots and indexes once per installed CLI version,
+  rebuilds them in the background, and keeps ordinary restarts on the warm cache.
+
 ## v1.8.0 - 2026-07-19
 
 ### Enterprise domain context and faster governed AI orchestration

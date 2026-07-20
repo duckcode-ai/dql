@@ -4,6 +4,12 @@ export interface SemanticLayerProviderConfig {
   provider: 'dql' | 'dbt' | 'cubejs' | 'lookml' | 'snowflake';
   /** Path to the external project (for dbt, cubejs, lookml). */
   projectPath?: string;
+  /** dbt manifest path, relative to projectPath unless absolute. */
+  manifestPath?: string;
+  /** dbt semantic manifest path, relative to projectPath unless absolute. */
+  semanticManifestPath?: string;
+  /** dbt source-model roots, relative to projectPath unless absolute. */
+  modelPaths?: string[];
   /** Path to DQL's native semantic-layer/ directory. */
   path?: string;
   /** Source type for the semantic layer definitions. Defaults to 'local'. */
