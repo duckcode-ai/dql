@@ -140,6 +140,39 @@ Required retrieval/meaning scenarios (`E2E-006`):
 10. Evidence cards and redacted traces contain no provider/connector secrets,
     source-repair leakage, unauthorized metadata, or plaintext sampled values.
 
+## Notebook semantic composition fixture
+
+Required semantic-notebook scenarios (`E2E-008`):
+
+1. A modern array-shaped `semantic_manifest.json` resolves object measure
+   references, `node_relation`, and compiled `where_filters` without losing the
+   dbt relation or predicate.
+2. Safe simple metrics report native readiness when MetricFlow is unavailable;
+   derived, ratio, cumulative, conversion, median/non-additive metrics remain
+   discoverable but report that MetricFlow setup is required.
+3. The built notebook searches metrics, selects multiple metrics, exposes only
+   common governed dimensions, and reports incompatibility before insertion.
+4. Preview executes through the canonical semantic endpoint and shows compiled
+   SQL plus bounded row count. Provider/runtime and compatibility failures keep
+   their stable codes and actionable messages.
+5. Add to notebook creates a semantic DQL cell containing metric/dimension
+   identities; it never degrades the selection into anonymous raw SQL.
+
+## Structured clarification and grounding fixture
+
+Required Ask scenarios (`E2E-009`):
+
+1. Two similarly named semantic metrics produce governed choice cards containing
+   stable IDs, labels, definitions, and kinds; raw IDs are not required user text.
+2. Selecting a choice sends its ID, restores the original analytical question,
+   bypasses a second meaning-model call, and keeps clean artifact naming.
+3. The selected semantic object's backing table and available dbt/runtime columns
+   enter the inspected SQL context before preview validation and execution.
+4. Unknown/stale IDs, out-of-context relations, compiler failures, and SQL guard
+   failures do not leave an Add-to-app action or successful-check presentation.
+5. A request deadline terminates once with a timeout state; it is not relabeled as
+   a provider outage and does not start Research automatically.
+
 The canonical case design is tracked in
 [`fixtures/retrieval-first-evidence.agent-evals.yml`](fixtures/retrieval-first-evidence.agent-evals.yml).
 The executable harness must report retrieval recall, meaning-selection accuracy,
@@ -148,6 +181,33 @@ surface parity, provider/tool/SQL/repair counts, evidence tokens, latency, and
 source-artifact reads. Release thresholds are 1.0 for the named high-trust cases,
 zero invented-ID executions, zero wrong certified answers, and zero surface
 parity drift.
+
+## Typed member-binding continuation fixture
+
+Required Ask scenarios (`E2E-010`):
+
+1. A prior product-by-region result contains multiple real product and region
+   members, including a product outside the UI's displayed row sample; the next
+   question explicitly names that product in ordinary English.
+2. Conversation resolution emits one exact typed product binding before
+   retrieval. The analytical plan, fit gate, prompt, SQL guard, and execution
+   preserve the same canonical value and source-turn ID (`AGT-012`).
+3. A broad certified customer profile is rejected because it exposes neither a
+   product dimension nor a product filter, even when its customer terms rank
+   highly. A product/customer block may terminate only when its contract proves
+   the bound product can be applied.
+4. When no direct certified or semantic route covers the customer/product join,
+   the generated lane receives the selected relations, relationship evidence,
+   and binding in one bounded call. Returned rows all satisfy the product filter;
+   provider/repair counts remain within the request budget.
+   If that generated SQL omits the filter but the canonical product member maps
+   to exactly one inspected product column on the query path, the runtime injects
+   the predicate without another provider call. Ambiguous or wrong-column
+   bindings still fail closed.
+5. A top-product-by-region answer cannot execute when either product or region is
+   omitted from the SQL projection. One validation correction receives the full
+   requested shape, while metadata re-grounding and execution repair retain
+   their own bounded attempts.
 
 ## Scale fixture
 

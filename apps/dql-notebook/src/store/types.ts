@@ -722,6 +722,11 @@ export interface SemanticMetric {
   typeParams?: Record<string, unknown> | null;
   filter?: unknown;
   source?: Record<string, unknown> | null;
+  execution?: {
+    status: 'ready' | 'requires_setup' | 'unsupported';
+    engine: 'native' | 'metricflow' | null;
+    reason: string | null;
+  };
 }
 
 export interface SemanticMeasure {
@@ -856,6 +861,11 @@ export interface SemanticObjectDetail {
 export interface SemanticLayerState {
   available: boolean;
   provider: string | null;
+  execution?: {
+    engine: 'native' | 'metricflow';
+    ready: boolean;
+    setup: string | null;
+  };
   metrics: SemanticMetric[];
   measures: SemanticMeasure[];
   dimensions: SemanticDimension[];

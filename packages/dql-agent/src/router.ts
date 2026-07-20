@@ -415,7 +415,7 @@ function cacheKey(
       ?? evidence.snapshotId
       ?? evidence.candidates.map((candidate) => `${candidate.id}:${candidate.relevanceScore}:${candidate.compatibility}`).join("|")
     : catalogContext ?? "";
-  return `${q} ${last} ${evidenceVersion}`;
+  return `${q}\u0000${last}\u0000${evidenceVersion}`;
 }
 
 function retrievalTrace(
@@ -453,10 +453,27 @@ function routeDecisionForResolution(
     meaningResolution: resolution,
     retrievalEvidence: retrievalTrace(evidence, candidates),
     requiresClarification: needsClarification,
+    ...(needsClarification ? { clarificationOptions: buildClarificationOptions(candidates) } : {}),
     ...(needsClarification
       ? { clarifyingQuestion: resolution.clarifyingQuestion ?? buildEvidenceClarification(candidates, resolution.missingInformation) }
       : {}),
   };
+}
+
+function buildClarificationOptions(candidates: AgentEvidenceCandidate[]): NonNullable<IntentDecision["clarificationOptions"]> {
+  const governed = candidates.filter((candidate) =>
+    candidate.compatibility !== "incompatible"
+    && (candidate.kind === "certified_block" || candidate.kind === "semantic_metric" || candidate.kind === "semantic_member")
+  );
+  const pool = governed.length > 1
+    ? governed
+    : candidates.filter((candidate) => candidate.compatibility !== "incompatible");
+  return pool.slice(0, 3).map((candidate) => ({
+    id: candidate.id,
+    label: candidate.name,
+    ...(candidate.definition?.trim() ? { description: candidate.definition.trim() } : {}),
+    kind: candidate.kind,
+  }));
 }
 
 function buildEvidenceClarification(candidates: AgentEvidenceCandidate[], missing: string[] = []): string {
@@ -650,9 +667,19 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
       }
 
       if (evidence) {
-        const candidates = buildMeaningEvidencePackage(evidence, options.maxMeaningCandidates ?? 12);
+        let candidates = buildMeaningEvidencePackage(evidence, options.maxMeaningCandidates ?? 12);
+        // A structured clarification selection is authoritative identity input,
+        // not a new fuzzy-search phrase. Keep it in the bounded package even if
+        // per-tier limits would otherwise trim it from a large catalog.
+        const selectedEvidence = request.selectedEvidenceId
+          ? evidence.candidates.find((candidate) => candidate.id === request.selectedEvidenceId && candidate.eligible !== false)
+          : undefined;
+        if (selectedEvidence && !candidates.some((candidate) => candidate.id === selectedEvidence.id)) {
+          candidates = [selectedEvidence, ...candidates.filter((candidate) => candidate.id !== selectedEvidence.id)]
+            .slice(0, options.maxMeaningCandidates ?? 12);
+        }
         if (candidates.length > 0) {
-          const explicit = findExplicitEvidenceReference(request.question, candidates);
+          const explicit = selectedEvidence ?? findExplicitEvidenceReference(request.question, candidates);
           if (explicit && explicit.compatibility !== "incompatible") {
             return routeDecisionForResolution(
               base,

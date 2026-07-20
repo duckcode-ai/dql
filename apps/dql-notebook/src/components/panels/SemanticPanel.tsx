@@ -4,6 +4,7 @@ import { api } from '../../api/client';
 import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type {
+  QueryResult,
   SemanticLayerDiagnostics,
   SemanticObjectDetail,
   SemanticTreeNode,
@@ -14,6 +15,7 @@ import { MetricDetailPanel } from './MetricDetailPanel';
 import { SemanticSearchBar } from './SemanticSearchBar';
 import { SemanticTreeNode as TreeRow } from './SemanticTreeNode';
 import { SetupWizard } from '../modals/SetupWizard';
+import { buildNotebookSemanticBlock } from './semantic-notebook-source';
 
 function PanelSectionHeader({ label, count, t }: { label: string; count?: number; t: Theme }) {
   return (
@@ -303,6 +305,9 @@ export function SemanticPanel() {
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
   const [composing, setComposing] = useState(false);
+  const [composeError, setComposeError] = useState<string | null>(null);
+  const [composePreview, setComposePreview] = useState<{ sql: string; result: QueryResult } | null>(null);
+  const [compatibleDimensionNames, setCompatibleDimensionNames] = useState<Set<string> | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const [diagnostics, setDiagnostics] = useState<SemanticLayerDiagnostics | null>(null);
@@ -378,6 +383,20 @@ export function SemanticPanel() {
   }, [flatRows, scrollTop, viewportHeight]);
 
   useEffect(() => {
+    let cancelled = false;
+    setComposePreview(null);
+    setComposeError(null);
+    if (selectedMetrics.size === 0) {
+      setCompatibleDimensionNames(null);
+      return;
+    }
+    void api.getCompatibleDimensions(Array.from(selectedMetrics)).then((dimensions) => {
+      if (!cancelled) setCompatibleDimensionNames(new Set(dimensions.map((dimension) => dimension.name)));
+    });
+    return () => { cancelled = true; };
+  }, [Array.from(selectedMetrics).sort().join('|')]);
+
+  useEffect(() => {
     const element = treeContainerRef.current;
     if (!element) return;
     const updateHeight = () => setViewportHeight(element.clientHeight || 400);
@@ -399,7 +418,17 @@ export function SemanticPanel() {
   }, [query, providerFilter, domainFilter, cubeFilter, ownerFilter, tagFilter, typeFilter]);
 
   const insertMetricOrDimension = async (item: SemanticObjectDetail) => {
-    const reference = item.kind === 'metric' ? `@metric(${item.name})` : `@dim(${item.name})`;
+    if (item.kind === 'metric') {
+      const metric = metricsByName.get(item.name);
+      if (metric?.execution && metric.execution.status !== 'ready') {
+        setComposeError(metric.execution.reason || 'This metric is not executable with the current semantic runtime.');
+        return;
+      }
+      dispatch({ type: 'ADD_CELL', cell: makeCell('dql', buildNotebookSemanticBlock([item.name], [])) });
+      dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.name });
+      return;
+    }
+    const reference = `@dim(${item.name})`;
     if (!insertSemanticReference(reference)) {
       dispatch({ type: 'ADD_CELL', cell: makeCell('sql', reference) });
     }
@@ -410,6 +439,13 @@ export function SemanticPanel() {
     const refKind = node.kind === 'metric' || node.kind === 'dimension' ? node.kind : null;
     const refName = node.id.split(':').slice(1).join(':');
     const isChecked = refKind === 'metric' ? selectedMetrics.has(refName) : refKind === 'dimension' ? selectedDimensions.has(refName) : false;
+    const metricCapability = refKind === 'metric' ? metricsByName.get(refName)?.execution : undefined;
+    const metricBlocked = Boolean(metricCapability && metricCapability.status !== 'ready');
+    const dimensionBlocked = Boolean(
+      selectMode && refKind === 'dimension' && selectedMetrics.size > 0
+      && compatibleDimensionNames && !compatibleDimensionNames.has(refName),
+    );
+    const selectionBlocked = metricBlocked || dimensionBlocked;
 
     return (
       <div key={node.id} style={{ display: 'flex', alignItems: 'center' }}>
@@ -417,7 +453,8 @@ export function SemanticPanel() {
           <input
             type="checkbox"
             checked={isChecked}
-            onChange={() => toggleSelection(refKind, refName)}
+            disabled={selectionBlocked}
+            onChange={() => !selectionBlocked && toggleSelection(refKind, refName)}
             style={{ marginLeft: depth * 12 + 6, marginRight: -depth * 12 - 2, accentColor: t.accent, cursor: 'pointer' }}
           />
         )}
@@ -426,20 +463,30 @@ export function SemanticPanel() {
         depth={selectMode && refKind ? 0 : depth}
         badge={node.kind === 'metric' || node.kind === 'dimension' || node.kind === 'segment' || node.kind === 'pre_aggregation' ? node.kind : undefined}
         selected={selectedId === node.id}
-        onClick={() => { if (selectMode && refKind) { toggleSelection(refKind, refName); } else { setSelectedId(node.id); } }}
+        onClick={() => { if (selectMode && refKind && !selectionBlocked) { toggleSelection(refKind, refName); } else { setSelectedId(node.id); } }}
         onDoubleClick={() => {
           if (node.kind === 'metric' || node.kind === 'dimension') {
             const object = node.kind === 'metric'
               ? metricsByName.get(node.id.slice('metric:'.length))
               : dimensionsByName.get(node.id.slice('dimension:'.length));
             if (object) {
-              const ref = node.kind === 'metric' ? `@metric(${object.name})` : `@dim(${object.name})`;
-              if (!insertSemanticReference(ref)) {
-                dispatch({ type: 'ADD_CELL', cell: makeCell('sql', ref) });
+              if (node.kind === 'metric') {
+                const metric = metricsByName.get(object.name);
+                if (!metric?.execution || metric.execution.status === 'ready') {
+                  dispatch({ type: 'ADD_CELL', cell: makeCell('dql', buildNotebookSemanticBlock([object.name], [])) });
+                  dispatch({ type: 'ADD_SEMANTIC_RECENT', name: object.name });
+                } else {
+                  setComposeError(metric.execution.reason || 'This metric is not executable with the current semantic runtime.');
+                }
+              } else {
+                const ref = `@dim(${object.name})`;
+                if (!insertSemanticReference(ref)) dispatch({ type: 'ADD_CELL', cell: makeCell('sql', ref) });
               }
             }
           }
         }}
+        title={metricBlocked ? metricCapability?.reason ?? undefined : dimensionBlocked ? 'Not compatible with the selected metrics.' : undefined}
+        muted={selectionBlocked}
         onFavoriteToggle={refKind
           ? () => void api.toggleFavorite(refName).then((favorites) => dispatch({ type: 'SET_SEMANTIC_FAVORITES', favorites }))
           : undefined}
@@ -505,19 +552,36 @@ export function SemanticPanel() {
   const handleCompose = async () => {
     if (selectedMetrics.size === 0) return;
     setComposing(true);
+    setComposeError(null);
     try {
-      const result = await api.composeQuery(
-        Array.from(selectedMetrics),
-        Array.from(selectedDimensions),
-      );
-      if ('error' in result) return;
-      dispatch({ type: 'ADD_CELL', cell: makeCell('sql', result.sql) });
-      setSelectMode(false);
-      setSelectedMetrics(new Set());
-      setSelectedDimensions(new Set());
+      const result = await api.previewSemanticBuilder({
+        metrics: Array.from(selectedMetrics),
+        dimensions: Array.from(selectedDimensions),
+        limit: 50,
+      });
+      if ('error' in result) {
+        setComposeError(result.error);
+        setComposePreview(null);
+        return;
+      }
+      setComposePreview({ sql: result.sql, result: result.result });
     } finally {
       setComposing(false);
     }
+  };
+
+  const handleInsertSemanticQuery = () => {
+    if (selectedMetrics.size === 0) return;
+    dispatch({
+      type: 'ADD_CELL',
+      cell: makeCell('dql', buildNotebookSemanticBlock(Array.from(selectedMetrics), Array.from(selectedDimensions))),
+    });
+    for (const metric of selectedMetrics) dispatch({ type: 'ADD_SEMANTIC_RECENT', name: metric });
+    setSelectMode(false);
+    setSelectedMetrics(new Set());
+    setSelectedDimensions(new Set());
+    setComposePreview(null);
+    setComposeError(null);
   };
 
   const handleOpenStudio = () => {
@@ -687,24 +751,50 @@ export function SemanticPanel() {
       {selectMode && (selectedMetrics.size > 0 || selectedDimensions.size > 0) && (
         <div style={{
           padding: '8px 12px', borderTop: `1px solid ${t.headerBorder}`,
-          background: t.cellBg, display: 'flex', alignItems: 'center', gap: 8,
+          background: t.cellBg, display: 'grid', gap: 8,
         }}>
-          <span style={{ flex: 1, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            {selectedMetrics.size} metric{selectedMetrics.size !== 1 ? 's' : ''}
-            {selectedDimensions.size > 0 ? `, ${selectedDimensions.size} dim${selectedDimensions.size !== 1 ? 's' : ''}` : ''}
-          </span>
-          <button
-            onClick={() => void handleCompose()}
-            disabled={composing || selectedMetrics.size === 0}
-            style={{
-              background: t.accent, border: 'none', borderRadius: 6, color: '#fff',
-              cursor: composing ? 'not-allowed' : 'pointer', fontSize: 11, fontWeight: 600,
-              fontFamily: t.font, padding: '6px 14px',
-              opacity: composing || selectedMetrics.size === 0 ? 0.5 : 1,
-            }}
-          >
-            {composing ? 'Composing...' : 'Compose Query'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ flex: 1, fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              {selectedMetrics.size} metric{selectedMetrics.size !== 1 ? 's' : ''}
+              {selectedDimensions.size > 0 ? ` · ${selectedDimensions.size} dimension${selectedDimensions.size !== 1 ? 's' : ''}` : ''}
+            </span>
+            <button
+              onClick={() => void handleCompose()}
+              disabled={composing || selectedMetrics.size === 0}
+              style={{
+                background: t.btnBg, border: `1px solid ${t.btnBorder}`, borderRadius: 6, color: t.textSecondary,
+                cursor: composing ? 'not-allowed' : 'pointer', fontSize: 11, fontWeight: 600,
+                fontFamily: t.font, padding: '6px 10px', opacity: composing || selectedMetrics.size === 0 ? 0.5 : 1,
+              }}
+            >
+              {composing ? 'Running preview…' : 'Preview & run'}
+            </button>
+            <button
+              onClick={handleInsertSemanticQuery}
+              disabled={selectedMetrics.size === 0}
+              style={{
+                background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: 'pointer',
+                fontSize: 11, fontWeight: 600, fontFamily: t.font, padding: '6px 10px',
+                opacity: selectedMetrics.size === 0 ? 0.5 : 1,
+              }}
+            >
+              Add semantic cell
+            </button>
+          </div>
+          {composeError && (
+            <div role="alert" style={{ fontSize: 10.5, lineHeight: 1.4, color: t.error, background: `${t.error}10`, border: `1px solid ${t.error}30`, borderRadius: 6, padding: '6px 8px' }}>
+              {composeError}
+            </div>
+          )}
+          {composePreview && (
+            <div style={{ display: 'grid', gap: 5, fontSize: 10.5, color: t.textMuted }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span>Preview succeeded · {composePreview.result.rowCount ?? composePreview.result.rows.length} row{(composePreview.result.rowCount ?? composePreview.result.rows.length) === 1 ? '' : 's'}</span>
+                <button type="button" onClick={() => void navigator.clipboard.writeText(composePreview.sql)} style={{ border: 'none', background: 'transparent', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 10.5 }}>Copy SQL</button>
+              </div>
+              <pre style={{ margin: 0, maxHeight: 76, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: t.fontMono, fontSize: 9.5, color: t.textSecondary, background: t.editorBg, border: `1px solid ${t.cellBorder}`, borderRadius: 6, padding: '6px 8px' }}>{composePreview.sql}</pre>
+            </div>
+          )}
         </div>
       )}
     </PanelFrame>

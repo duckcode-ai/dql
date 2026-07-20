@@ -244,6 +244,38 @@ describe('analysis planner', () => {
     });
   });
 
+  it('AGT-012 preserves explicit prior-result members as typed query constraints', () => {
+    const plan = buildAnalysisQuestionPlan('who are the customer from flame impala', {
+      kind: 'drilldown',
+      filters: ['flame impala'],
+      dimensions: ['customer', 'product'],
+      priorResultValues: { product_name: ['flame impala'] },
+      memberBindings: [{
+        dimension: 'product',
+        values: ['flame impala'],
+        source: 'prior_result',
+        confidence: 'exact',
+        sourceTurnId: 'turn_products',
+      }],
+    });
+
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['customer', 'product']));
+    expect(plan.requestedShape.filters).toContain('flame impala');
+    expect(plan.requestedShape.memberBindings).toEqual([{
+      dimension: 'product',
+      values: ['flame impala'],
+      source: 'prior_result',
+      confidence: 'exact',
+      sourceTurnId: 'turn_products',
+    }]);
+    expect(plan.requestedShape.followUpReferences).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'prior_dimension_values',
+        resolvedValues: ['flame impala'],
+      }),
+    ]));
+  });
+
   it('CTX-003 resolves customer pronouns and amount references from the prior result', () => {
     const plan = buildAnalysisQuestionPlan('what product they bought for this amount?', {
       kind: 'drilldown',

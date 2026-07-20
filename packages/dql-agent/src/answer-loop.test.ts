@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, parseProposal, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -4985,6 +4985,53 @@ describe("answer (block-first loop)", () => {
     expect(captured).toBe(false);
   });
 
+  it("AGT-012 deterministically applies a uniquely resolved member binding before AI repair", async () => {
+    const provider = new StubProvider(
+      "```sql\nSELECT c.customer_name FROM dev.customers c JOIN dev.orders o ON c.customer_id = o.customer_id JOIN dev.order_items oi ON o.order_id = oi.order_id JOIN dev.products p ON oi.product_id = p.product_id GROUP BY c.customer_name\n```",
+    );
+    let executedSql = "";
+    const result = await answer({
+      question: "Who are the customers from Flame Impala?",
+      provider,
+      kg,
+      followUp: {
+        kind: "drilldown",
+        memberBindings: [{
+          dimension: "product",
+          values: ["Flame Impala"],
+          source: "prior_result",
+          confidence: "exact",
+        }],
+      },
+      schemaContext: [
+        { relation: "dev.customers", name: "customers", columns: [{ name: "customer_id" }, { name: "customer_name" }] },
+        { relation: "dev.orders", name: "orders", columns: [{ name: "order_id" }, { name: "customer_id" }] },
+        { relation: "dev.order_items", name: "order_items", columns: [{ name: "order_id" }, { name: "product_id" }] },
+        { relation: "dev.products", name: "products", columns: [
+          { name: "product_id" },
+          { name: "product_name" },
+        ] },
+      ],
+      executeGeneratedSql: async (sql) => {
+        executedSql = sql;
+        return {
+          columns: ["customer_name"],
+          rows: [{ customer_name: "Melissa Lopez" }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(provider.calls).toHaveLength(1);
+    expect(executedSql).toContain("p.product_name = 'Flame Impala'");
+    expect(executedSql.indexOf("p.product_name = 'Flame Impala'")).toBeLessThan(executedSql.toLowerCase().indexOf("group by"));
+    expect(result.result?.rows).toEqual([{ customer_name: "Melissa Lopez" }]);
+    expect(result.validationWarnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Applied the resolved product member binding deterministically"),
+    ]));
+  });
+
   it("plans a clear entity follow-up drilldown from inspected values and source block SQL", async () => {
     const provider = new StubProvider([
       "```json",
@@ -5154,7 +5201,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 0/1, execution 1/1",
+          label: "Repair budget used: re-ground 0/1, validation 0/1, execution 1/1",
         }),
       ]),
     );
@@ -5288,7 +5335,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 0/1, execution 1/1",
+          label: "Repair budget used: re-ground 0/1, validation 0/1, execution 1/1",
         }),
       ]),
     );
@@ -5340,6 +5387,7 @@ describe("answer (block-first loop)", () => {
         mode: "diagnose_change",
         routeIntent: "diagnose_change",
       }),
+      expandGroundingContext: async () => ({ relations: [], notes: [] }),
       executeGeneratedSql: async (sql) => {
         executed = true;
         return {
@@ -5362,9 +5410,67 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 1/1, execution 0/1",
+          label: "Repair budget used: re-ground 1/1, validation 1/1, execution 0/1",
         }),
       ]),
+    );
+  });
+
+  it("repairs a ranked query that omits its ranked entity before execution", async () => {
+    const provider = new StubProvider([
+      "```sql\nSELECT region, SUM(revenue) AS revenue FROM analytics.sales GROUP BY region LIMIT 10\n```",
+      "```sql\nSELECT product_name, region, SUM(revenue) AS revenue FROM analytics.sales GROUP BY product_name, region ORDER BY revenue DESC LIMIT 10\n```",
+    ]);
+    let executedSql = "";
+    const question = "What are the top 10 products by revenue by region?";
+    expect(missingRankedGrainOutput(
+      buildAnalysisQuestionPlan(question),
+      "SELECT region, SUM(revenue) AS revenue FROM analytics.sales GROUP BY region LIMIT 10",
+    )).toBe("product");
+    expect(missingRankedGrainOutput(
+      buildAnalysisQuestionPlan(question),
+      "SELECT product_name, SUM(revenue) AS revenue FROM analytics.sales GROUP BY product_name LIMIT 10",
+    )).toBe("region");
+    expect(missingRankedGrainOutput(
+      buildAnalysisQuestionPlan(question),
+      "SELECT product_name, location_name, SUM(revenue) AS revenue FROM analytics.sales GROUP BY product_name, location_name LIMIT 10",
+      ["product_name", "location_name"],
+    )).toBeUndefined();
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "analytics.sales",
+        name: "sales",
+        columns: [
+          { name: "product_name", type: "VARCHAR" },
+          { name: "region", type: "VARCHAR" },
+          { name: "revenue", type: "DECIMAL" },
+        ],
+      }],
+      executeGeneratedSql: async (sql) => {
+        executedSql = sql;
+        return {
+          columns: ["product_name", "region", "revenue"],
+          rows: [{ product_name: "Flame Impala", region: "Philadelphia", revenue: 100 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(executedSql).toContain("product_name");
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.messages.some((message) =>
+      message.content.includes('"requiredGroupingAliases"')
+      && message.content.includes('"product"')
+      && message.content.includes('"region"')
+      && message.content.includes("alias it to the requested business name"),
+    )).toBe(true);
+    expect(result.result?.columns).toEqual(["product_name", "region", "revenue"]);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Repaired after context-validation failure")]),
     );
   });
 
@@ -5434,7 +5540,7 @@ describe("answer (block-first loop)", () => {
       expect.arrayContaining([
         expect.objectContaining({
           tool: "cascade_budget",
-          label: "Repair budget used: re-ground 1/1, execution 0/1",
+          label: "Repair budget used: re-ground 1/1, validation 0/1, execution 0/1",
         }),
       ]),
     );
@@ -5538,6 +5644,39 @@ describe("answer (block-first loop)", () => {
     expect(result.kind).toBe("no_answer");
     expect(result.refusalCode).toBe("provider_error");
     expect(result.refusalDetails).toMatchObject({ code: "provider_error" });
+  });
+
+  it("PERF-002 preserves request deadline attribution instead of relabeling it as a provider outage", async () => {
+    class AbortedProvider extends StubProvider {
+      async generate(): Promise<string> {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+    }
+    const controller = new AbortController();
+    const deadline = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    controller.abort(deadline);
+    const question = "Revenue by segment ranked";
+
+    await expect(answer({
+      question,
+      provider: new AbortedProvider("unused"),
+      kg,
+      signal: controller.signal,
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: "analytics.fct_orders",
+        name: "fct_orders",
+        source: "dbt manifest",
+        columns: [{ name: "segment", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }],
+        rank: 1,
+        score: 80,
+        reason: "selected revenue fact table",
+      }], {
+        metricTerms: ["revenue"],
+        dimensionTerms: ["segment"],
+        mode: "ad_hoc_ranking",
+        routeIntent: "ad_hoc_ranking",
+      }),
+    })).rejects.toBe(deadline);
   });
 
   it("asks for clarification when no metadata can ground an analytical question", async () => {
@@ -6290,6 +6429,82 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(executed).toBe(false);
   });
 
+  it("AGT-012/EXP-001 generates one bounded exploratory join when governed path coverage is missing", async () => {
+    kg.rebuild([], []);
+    const base = manifestWithUnmodeledProducts();
+    const manifest = {
+      ...base,
+      dbtProvenance: {
+        ...base.dbtProvenance!,
+        nodes: {
+          ...base.dbtProvenance!.nodes,
+          "model.commerce.dim_customers": {
+            uniqueId: "model.commerce.dim_customers", resourceType: "model", name: "dim_customers",
+            relation: "analytics.dim_customers", identityFingerprint: "dim_customers",
+            available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+          "model.commerce.dim_products": {
+            uniqueId: "model.commerce.dim_products", resourceType: "model", name: "dim_products",
+            relation: "analytics.dim_products", identityFingerprint: "dim_products",
+            available: { description: true, columns: true, tests: true, catalogTypes: true, dqlMeta: true },
+          },
+        },
+      },
+      modeling: {
+        ...base.modeling!,
+        entities: {
+          ...base.modeling!.entities,
+          customer: {
+            id: "commerce::entity::customer", localId: "customer", qualifiedId: "commerce::entity::customer",
+            dbtUniqueId: "model.commerce.dim_customers", domain: "commerce", grain: "customer_id",
+            keys: ["customer_id"], sourcePath: "entities.dql.yaml", identityFingerprint: "customer",
+          },
+          product: {
+            id: "commerce::entity::product", localId: "product", qualifiedId: "commerce::entity::product",
+            dbtUniqueId: "model.commerce.dim_products", domain: "commerce", grain: "product_id",
+            keys: ["product_id"], sourcePath: "entities.dql.yaml", identityFingerprint: "product",
+          },
+        },
+        relationships: {},
+      },
+    } as unknown as DQLManifest;
+    const question = "Who are the customers for product Flame Impala?";
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Customers for Flame Impala.",
+        sql: "SELECT c.customer_name, p.product_name FROM analytics.fct_orders o JOIN analytics.dim_customers c ON o.customer_id = c.customer_id JOIN analytics.dim_products p ON o.product_id = p.product_id WHERE p.product_name = 'Flame Impala' LIMIT 10",
+        outputs: ["customer_name", "product_name"],
+        viz: "table",
+      }),
+      "```",
+    ].join("\n"));
+    const contextPack = contextPackForRankedRelations(question, [
+      { relation: "analytics.fct_orders", name: "fct_orders", source: "dbt manifest", columns: [
+        { name: "customer_id", type: "VARCHAR" }, { name: "product_id", type: "VARCHAR" },
+      ], rank: 1, score: 95, reason: "order bridge" },
+      { relation: "analytics.dim_customers", name: "dim_customers", source: "dbt manifest", columns: [
+        { name: "customer_id", type: "VARCHAR" }, { name: "customer_name", type: "VARCHAR" },
+      ], rank: 2, score: 90, reason: "customer output" },
+      { relation: "analytics.dim_products", name: "dim_products", source: "dbt manifest", columns: [
+        { name: "product_id", type: "VARCHAR" }, { name: "product_name", type: "VARCHAR", sampleValues: ["Flame Impala"] },
+      ], rank: 3, score: 90, reason: "bound product" },
+    ], { dimensionTerms: ["customer", "product"], filterTerms: ["Flame Impala"] });
+    contextPack.skills = [];
+    contextPack.edges = [];
+    contextPack.citations = [];
+
+    const result = await answer({ question, provider, kg, manifest, contextPack });
+
+    expect(provider.calls).toHaveLength(1);
+    const prompt = provider.calls[0]!.map((message) => message.content).join("\n");
+    expect(prompt).toContain("DQL GOVERNED RELATIONSHIP COVERAGE: MISSING");
+    expect(prompt).toContain("bounded, read-only DBT-grounded exploratory");
+    expect(prompt).not.toContain("Do not invent a join from dbt lineage");
+    expect(result.exploratoryCandidate).toMatchObject({ kind: "dbt_grounded_exploration" });
+    expect(result.proposedSql).toContain("p.product_name = 'Flame Impala'");
+  });
+
   it("repairs ambiguous shared columns before handing SQL to the exploratory executor", async () => {
     kg.rebuild([], []);
     const provider = new StubProvider([
@@ -6420,7 +6635,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     } as unknown as DQLManifest;
     const provider = new StubProvider([
       "```sql",
-      "SELECT o.customer_id, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_products p ON o.product_id = p.product_id GROUP BY o.customer_id",
+      "SELECT o.customer_id, p.product_id AS product, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_products p ON o.product_id = p.product_id GROUP BY o.customer_id, p.product_id",
       "```",
     ].join("\n"));
 

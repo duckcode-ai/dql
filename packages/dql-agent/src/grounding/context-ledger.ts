@@ -30,6 +30,7 @@ export interface ContextLedgerSqlValidationOptions {
   intent?: MetadataAgentIntent | string;
   filterValues?: string[];
   trustedFilterValues?: string[];
+  memberBindings?: Array<{ dimension: string; values: string[] }>;
 }
 
 export interface ContextLedgerExpansionResult {

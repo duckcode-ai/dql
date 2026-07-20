@@ -368,6 +368,76 @@ describe('Ask AI jaffle-shop regression', () => {
     }
   });
 
+  it('E2E-010 preserves a named product binding, rejects the broad profile, and generates once', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const provider = new SequencedProvider([[
+        '```json',
+        JSON.stringify({
+          summary: 'Customers who purchased Flame Impala, ranked by product revenue.',
+          sql: [
+            'SELECT c.customer_name, f.product_name, SUM(f.product_price) AS revenue',
+            'FROM order_items AS f',
+            'JOIN fct_orders AS o ON f.order_id = o.order_id',
+            'JOIN dim_customers AS c ON o.customer_id = c.customer_id',
+            "WHERE LOWER(f.product_name) = LOWER('flame impala')",
+            'GROUP BY c.customer_name, f.product_name',
+            'ORDER BY revenue DESC',
+            'LIMIT 10',
+          ].join('\n'),
+          viz: 'bar',
+          outputs: ['customer_name', 'product_name', 'revenue'],
+        }),
+        '```',
+      ].join('\n')]);
+      const question = 'who are the customer from flame impala';
+      const followUp = {
+        kind: 'drilldown' as const,
+        filters: ['flame impala'],
+        dimensions: ['customer', 'product'],
+        priorResultColumns: ['product_name', 'region', 'revenue'],
+        priorResultValues: { product_name: ['flame impala'] },
+        priorMeasures: ['revenue'],
+        memberBindings: [{
+          dimension: 'product',
+          values: ['flame impala'],
+          source: 'prior_result' as const,
+          confidence: 'exact' as const,
+          sourceTurnId: 'turn_products',
+        }],
+        resolvedReferences: ['product: flame impala'],
+      };
+      const contextPack = await buildLocalContextPack(projectRoot, { question, followUp, limit: 40 });
+      const result = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        followUp,
+        executeCertifiedBlock,
+        executeGeneratedSql,
+      });
+
+      expect(result.sourceCertifiedBlock).not.toBe('top_customers');
+      expect(result.proposedSql).toMatch(/product_name\)\s*=\s*LOWER\('flame impala'\)/i);
+      expect(result.result?.columns).toEqual(['customer_name', 'product_name', 'revenue']);
+      expect(result.result?.rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ customer_name: 'Alice Johnson', product_name: 'Flame Impala' }),
+      ]));
+      expect(provider.calls).toHaveLength(1);
+      expect(contextPack.questionPlan.requestedShape.memberBindings).toEqual(followUp.memberBindings);
+      expect(contextPack.retrievalDiagnostics.certifiedCandidateFits).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          name: 'top_customers',
+          action: expect.stringMatching(/context_only|rejected_for_fit/),
+          fit: expect.objectContaining({ unsupportedFilters: expect.arrayContaining(['flame impala']) }),
+        }),
+      ]));
+    } finally {
+      kg.close();
+    }
+  });
+
   it('answers product, supply, and order detail questions and expands follow-ups without grounding dead-ends', async () => {
     const kg = new KGStore(defaultKgPath(projectRoot));
     try {
@@ -748,16 +818,16 @@ function seedJaffleDatabase(db: Database.Database): void {
       (1007, 6, 5.50, 0, 1, 0.00, 5.50, 5.50);
 
     INSERT INTO order_items VALUES
-      (1, 1001, 'JF001', 'Classic Jaffle', 'jaffle', 12.00, '2024-01-05'),
+      (1, 1001, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-01-05'),
       (2, 1001, 'DR001', 'Cold Brew', 'beverage', 4.50, '2024-01-05'),
       (3, 1002, 'JF002', 'Veggie Jaffle', 'jaffle', 11.00, '2024-01-07'),
       (4, 1002, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-01-07'),
-      (5, 1003, 'JF001', 'Classic Jaffle', 'jaffle', 12.00, '2024-02-02'),
+      (5, 1003, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-02-02'),
       (6, 1004, 'JF003', 'Breakfast Jaffle', 'jaffle', 13.50, '2024-02-19'),
       (7, 1004, 'DR001', 'Cold Brew', 'beverage', 4.50, '2024-02-19'),
-      (8, 1005, 'JF001', 'Classic Jaffle', 'jaffle', 12.00, '2024-03-03'),
+      (8, 1005, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-03-03'),
       (9, 1005, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-03-03'),
-      (10, 1006, 'JF001', 'Classic Jaffle', 'jaffle', 12.00, '2024-03-15'),
+      (10, 1006, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-03-15'),
       (11, 1007, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-04-08');
 
     INSERT INTO supplies VALUES

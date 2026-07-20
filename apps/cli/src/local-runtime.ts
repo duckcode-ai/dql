@@ -569,6 +569,7 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
   return {
     request: {
       question,
+      selectedEvidenceId: agentRunString(record.selectedEvidenceId),
       requestedMode,
       audience,
       intent: agentRunString(record.intent) as AgentRunRequest['intent'],
@@ -620,6 +621,13 @@ export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer,
   const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
   if (governedAnswer.dqlArtifact && finalText) return false;
   return true;
+}
+
+export function agentAnswerHasExecutionFailure(
+  governedAnswer: Pick<AgentAnswer, 'executionError'>,
+): boolean {
+  return typeof governedAnswer.executionError === 'string'
+    && governedAnswer.executionError.trim().length > 0;
 }
 
 function businessNarrativeGaps(warnings: string[] | undefined): string[] | undefined {
@@ -713,17 +721,21 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
   }
 }
 
-function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
+export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
   const artifact = run.artifacts.find((candidate) => candidate.kind === 'answer')
     ?? run.artifacts.find((candidate) => candidate.kind === 'research_run')
     ?? run.artifacts[0];
   const payload = agentRunRecord(artifact?.payload);
   const result = agentRunRecord(payload?.result);
   const columns = conversationResultColumns(result?.columns);
-  const rows = Array.isArray(result?.rows)
+  // The visual preview stays tiny, but member resolution needs a wider bounded
+  // value window. Deriving dimensions from only the eight preview rows caused a
+  // valid row 9/10 member to disappear before the next turn (AGT-012/E2E-010).
+  const memberRows = Array.isArray(result?.rows)
     ? result.rows.filter((row): row is Record<string, unknown> =>
-        Boolean(row && typeof row === 'object' && !Array.isArray(row))).slice(0, 8)
+        Boolean(row && typeof row === 'object' && !Array.isArray(row))).slice(0, 24)
     : [];
+  const rows = memberRows.slice(0, 8);
   const rowsSample = rows.map((row) => columns.map((column) => row[column]));
   const contextPack = agentRunRecord(payload?.contextPack);
   const questionPlan = agentRunRecord(contextPack?.questionPlan);
@@ -747,7 +759,7 @@ function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
       ? {
           columns,
           rowsSample,
-          dimensionValues: conversationDimensionValues(columns, rows),
+          dimensionValues: conversationDimensionValues(columns, memberRows),
           measureColumns,
           rowCount: typeof rowCountRaw === 'number' ? rowCountRaw : rows.length || undefined,
         }
@@ -1999,6 +2011,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       || governedAnswer.dqlArtifact?.kind === 'certified_block'
     ));
     const isExploratory = Boolean(governedAnswer.exploratoryCandidate);
+    const isExecutionFailure = agentAnswerHasExecutionFailure(governedAnswer);
     const isGroundingGap = governedAnswer.kind === 'no_answer'
       && governedAnswer.refusalCode === 'grounding_gap'
       && !isExploratory;
@@ -2019,7 +2032,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const needsClarification = governedAnswer.kind === 'no_answer'
       && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
-    const runnableSql = governedAnswer.kind === 'no_answer' || (isExploratory && !governedAnswer.result)
+    const runnableSql = governedAnswer.kind === 'no_answer' || isExecutionFailure || (isExploratory && !governedAnswer.result)
       ? undefined
       : sql;
     // Render executed rows deterministically for ordinary lookups. A second LLM
@@ -2065,14 +2078,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         synthesizedAnswer = undefined;
       }
     }
-    const status: AgentRunStatus = isProviderError
+    const status: AgentRunStatus = isProviderError || isExecutionFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
         : isCertified || isSemantic
           ? 'completed'
           : 'needs_review';
-    const trustState: AgentRunTrustState = isProviderError
+    const trustState: AgentRunTrustState = isProviderError || isExecutionFailure
       ? 'blocked'
       : needsClarification
         ? 'not_applicable'
@@ -2081,7 +2094,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : isSemantic
               ? 'governed'
               : 'review_required';
-    const stopReason: AgentRunStopReason = isProviderError
+    const stopReason: AgentRunStopReason = isProviderError || isExecutionFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
@@ -2092,6 +2105,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               : 'human_review_required';
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
+      : isExecutionFailure
+        ? [{ id: 'retry-after-connection', label: 'Retry after fixing the database connection', route: 'generated_answer' }]
+      : isGroundingGap
+        ? [{ id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' }]
       : [
           { id: 'create-block', label: governedAnswer.dqlArtifact ? 'Review DQL draft' : 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
           { id: 'research-gap', label: 'Research deeper', route: 'research' },
@@ -2106,16 +2123,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       resolvedRoute,
       answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
-      summary: governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
+      summary: isExecutionFailure
+        ? 'The governed query could not be executed.'
+        : governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
       trustState,
       stopReason,
-      artifacts: governedAnswer.kind === 'no_answer'
+      artifacts: isExecutionFailure
+        ? []
+        : governedAnswer.kind === 'no_answer'
         // A refusal still keeps the DQL draft the answer loop produced (when any),
         // so the "Review DQL draft" next-action isn't a dead link and the user can
         // see the SQL that was about to run. Provider outages carry no draft.
-        ? (governedAnswer.dqlArtifact && !isProviderError
+        ? (governedAnswer.dqlArtifact && !isProviderError && !isGroundingGap && !isModelDeclined && !isPolicyBlocked
             ? [agentRunArtifact(
                 'dql_block_draft',
                 'DQL draft (review required)',
@@ -2173,6 +2194,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               : 'The answer is generated or semantic-layer backed and remains review-required.',
           governedAnswer.route,
         ),
+        ...(isExecutionFailure ? [agentRunEvaluation(
+          'query-execution',
+          'Query execution',
+          false,
+          'blocking',
+          `The governed query failed before it produced a result: ${governedAnswer.executionError}`,
+        )] : []),
         ...(isGroundingGap ? [
           {
             ...agentRunEvaluation(
@@ -2856,6 +2884,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : undefined;
     const task = buildLocalContextPack(projectRoot, {
       question: request.question,
+      focusObjectKey: request.selectedEvidenceId,
       followUp,
       priorContextPackId: agentRunString(request.conversationContext?.contextPackId),
       conversationTopicRelation: topicRelation === 'continuation'
@@ -2932,9 +2961,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           };
         }
         if ((candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
-          && semanticEvidence.has(candidate.id)
-          && pack.routeDecision.route !== 'clarify'
-          && pack.routeDecision.route !== 'conflict') {
+          && (semanticEvidence.has(candidate.id) || request.selectedEvidenceId === candidate.id)
+          && (request.selectedEvidenceId === candidate.id
+            || (pack.routeDecision.route !== 'clarify' && pack.routeDecision.route !== 'conflict'))) {
           const requestedDimensions = pack.questionPlan.requestedShape.dimensions.map((dimension) => dimension.toLowerCase());
           const availableDimensions = (candidate.dimensions ?? []).map((dimension) => dimension.toLowerCase());
           const dimensionsFit = requestedDimensions.length === 0 || requestedDimensions.every((requested) =>
@@ -9834,6 +9863,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }));
         return;
       }
+      const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
+      const dbtManifestReady = provider === 'dbt'
+        ? hasDbtSemanticManifest(projectRoot, semanticConfig?.projectPath)
+        : false;
+      const metricFlowReady = provider === 'dbt' ? hasMetricFlowCli() : false;
+      const dbtExecutionReady = dbtManifestReady && metricFlowReady;
       const metrics = semanticLayer.listMetrics().map((m) => ({
         name: m.name,
         label: m.label,
@@ -9848,6 +9883,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         typeParams: m.typeParams ?? null,
         filter: m.filter ?? null,
         source: m.source ?? null,
+        execution: semanticMetricExecutionCapability(
+          m.name,
+          semanticLayer!,
+          provider,
+          metricFlowReady,
+          connection?.driver,
+        ),
       }));
       const measures = semanticLayer.listMeasures().map((m) => ({
         name: m.name,
@@ -9945,12 +9987,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         owner: q.owner ?? null,
         source: q.source ?? null,
       }));
-      const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
-      const dbtManifestReady = provider === 'dbt'
-        ? hasDbtSemanticManifest(projectRoot, semanticConfig?.projectPath)
-        : false;
-      const metricFlowReady = provider === 'dbt' ? hasMetricFlowCli() : false;
-      const dbtExecutionReady = dbtManifestReady && metricFlowReady;
       const dbtExecutionSetup = dbtExecutionReady
         ? null
         : !dbtManifestReady && !metricFlowReady
@@ -10941,8 +10977,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tableMapping,
         });
         if (!composed) {
+          const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
+          const metricFlowReady = provider === 'dbt' && hasMetricFlowCli();
+          const blocked = metrics.map((metricName) => ({
+            metric: metricName,
+            ...semanticMetricExecutionCapability(metricName, semanticLayer!, provider, metricFlowReady, driver),
+          })).filter((capability) => capability.status !== 'ready');
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: `Could not compose query for metrics: [${metrics.join(', ')}]` }));
+          res.end(serializeJSON({
+            error: blocked.length > 0
+              ? blocked.map((capability) => `${capability.metric}: ${capability.reason}`).join(' ')
+              : 'The selected dimensions do not share a governed join path with every selected metric.',
+            code: blocked.length > 0 ? 'SEMANTIC_RUNTIME_REQUIRED' : 'SEMANTIC_FIELDS_INCOMPATIBLE',
+            details: { metrics, dimensions, blocked },
+          }));
           return;
         }
         // Execute the composed SQL against the resolved connection
@@ -11035,8 +11083,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tableMapping,
         });
         if (!composed) {
+          const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
+          const metricFlowReady = provider === 'dbt' && hasMetricFlowCli();
+          const blocked = metrics.map((metricName) => ({
+            metric: metricName,
+            ...semanticMetricExecutionCapability(metricName, semanticLayer!, provider, metricFlowReady, driver),
+          })).filter((capability) => capability.status !== 'ready');
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Could not compose semantic block preview SQL.' }));
+          res.end(serializeJSON({
+            error: blocked.length > 0
+              ? blocked.map((capability) => `${capability.metric}: ${capability.reason}`).join(' ')
+              : 'The selected dimensions do not share a governed join path with every selected metric.',
+            code: blocked.length > 0 ? 'SEMANTIC_RUNTIME_REQUIRED' : 'SEMANTIC_FIELDS_INCOMPATIBLE',
+            details: { metrics, dimensions, blocked },
+          }));
           return;
         }
         const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
@@ -15649,6 +15709,40 @@ interface RuntimeSemanticQueryRequest {
   engine?: 'native' | 'metricflow';
 }
 
+interface SemanticMetricExecutionCapability {
+  status: 'ready' | 'requires_setup' | 'unsupported';
+  engine: 'native' | 'metricflow' | null;
+  reason: string | null;
+}
+
+function semanticMetricExecutionCapability(
+  metricName: string,
+  semanticLayer: SemanticLayer,
+  provider: string,
+  metricFlowReady: boolean,
+  driver?: ConnectionConfig['driver'],
+): SemanticMetricExecutionCapability {
+  if (provider === 'dbt' && metricFlowReady) {
+    return { status: 'ready', engine: 'metricflow', reason: null };
+  }
+  const native = semanticLayer.composeQuery({ metrics: [metricName], dimensions: [], driver });
+  if (native) return { status: 'ready', engine: 'native', reason: null };
+  const metric = semanticLayer.getMetric(metricName);
+  if (provider === 'dbt') {
+    const kind = metric?.metricType || metric?.aggregation || metric?.type || 'metric';
+    return {
+      status: 'requires_setup',
+      engine: null,
+      reason: `${kind} metric requires MetricFlow execution. Install/configure the MetricFlow CLI, then refresh the semantic layer.`,
+    };
+  }
+  return {
+    status: 'unsupported',
+    engine: null,
+    reason: 'The metric does not have enough composable measure and relation metadata.',
+  };
+}
+
 function parseBlockStudioArrayField(source: string, key: string): string[] {
   const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
   if (!match) return [];
@@ -15923,10 +16017,28 @@ function composeSemanticBlockSql(
     return { sql: null, diagnostics, semanticRefs };
   }
   if (!composed) {
+    const provider = options?.projectConfig && isDbtSemanticRuntime(
+      options.projectConfig,
+      options.detectedProvider,
+      semanticLayer,
+    ) ? 'dbt' : (options?.detectedProvider ?? 'dql');
+    const metricFlowReady = provider === 'dbt' && hasMetricFlowCli();
+    const reasons = metrics.map((metricName) => {
+      const capability = semanticMetricExecutionCapability(
+        metricName,
+        semanticLayer,
+        provider,
+        metricFlowReady,
+        options?.driver,
+      );
+      return capability.status === 'ready' ? null : `${metricName}: ${capability.reason}`;
+    }).filter((reason): reason is string => Boolean(reason));
     diagnostics.push({
       severity: 'error',
       code: 'semantic_compose_failed',
-      message: `Could not compose SQL for semantic block metrics: [${metrics.join(', ')}].`,
+      message: reasons.length > 0
+        ? `Could not compose SQL for semantic block metrics. ${reasons.join(' ')}`
+        : `Could not compose SQL for semantic block metrics: [${metrics.join(', ')}]. Check that the selected dimensions share a governed join path.`,
     });
     return { sql: null, diagnostics, semanticRefs };
   }

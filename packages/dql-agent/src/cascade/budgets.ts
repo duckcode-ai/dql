@@ -1,13 +1,14 @@
 import type { AnalysisQuestionPlan } from '../metadata/analysis-planner.js';
 import type { ReasoningEffort } from '../providers/reasoning-effort.js';
 
-export type CascadeLaneRepairKind = 'reground' | 'execution';
+export type CascadeLaneRepairKind = 'reground' | 'validation' | 'execution';
 export type CascadeAnalysisDepth = 'quick' | 'deep';
 export type ProposalToolBudgetClass = 'lookup' | 'multi_entity' | 'deep_research';
 export type ContextRetrievalStrictness = 'balanced' | 'exploratory';
 
 export interface CascadeLaneBudgetLimits {
   reground: number;
+  validation: number;
   execution: number;
 }
 
@@ -23,6 +24,7 @@ export interface CascadeBudgetModel {
 
 export interface CascadeBudgetUsage {
   laneRegroundAttemptsUsed: number;
+  laneValidationAttemptsUsed: number;
   laneExecutionAttemptsUsed: number;
   engineEscalationsUsed: number;
 }
@@ -87,6 +89,7 @@ export const DEFAULT_CASCADE_BUDGET_MODEL: CascadeBudgetModel = {
     // repair. Re-running the entire outer route after that repair multiplied a
     // simple lookup into several full provider calls.
     reground: 1,
+    validation: 1,
     execution: 1,
   },
   engineEscalations: 2,
@@ -138,6 +141,7 @@ export function createCascadeBudgetState(
     limits: mergeCascadeBudgetModel(overrides),
     usage: {
       laneRegroundAttemptsUsed: 0,
+      laneValidationAttemptsUsed: 0,
       laneExecutionAttemptsUsed: 0,
       engineEscalationsUsed: 0,
     },
@@ -154,6 +158,7 @@ export function mergeCascadeBudgetModel(overrides: PartialCascadeBudgetModel = {
   return {
     lane: {
       reground: normalizeBudgetLimit(overrides.lane?.reground, DEFAULT_CASCADE_BUDGET_MODEL.lane.reground),
+      validation: normalizeBudgetLimit(overrides.lane?.validation, DEFAULT_CASCADE_BUDGET_MODEL.lane.validation),
       execution: normalizeBudgetLimit(overrides.lane?.execution, DEFAULT_CASCADE_BUDGET_MODEL.lane.execution),
     },
     engineEscalations: normalizeBudgetLimit(overrides.engineEscalations, DEFAULT_CASCADE_BUDGET_MODEL.engineEscalations),
@@ -168,6 +173,8 @@ export function canUseLaneRepair(state: CascadeBudgetState, kind: CascadeLaneRep
 export function recordLaneRepair(state: CascadeBudgetState, kind: CascadeLaneRepairKind): CascadeBudgetUsage {
   if (kind === 'reground') {
     state.usage.laneRegroundAttemptsUsed += 1;
+  } else if (kind === 'validation') {
+    state.usage.laneValidationAttemptsUsed += 1;
   } else {
     state.usage.laneExecutionAttemptsUsed += 1;
   }
@@ -186,6 +193,7 @@ export function recordEngineEscalation(state: CascadeBudgetState): CascadeBudget
 export function cascadeBudgetUsage(state: CascadeBudgetState): CascadeBudgetUsage {
   return {
     laneRegroundAttemptsUsed: state.usage.laneRegroundAttemptsUsed,
+    laneValidationAttemptsUsed: state.usage.laneValidationAttemptsUsed,
     laneExecutionAttemptsUsed: state.usage.laneExecutionAttemptsUsed,
     engineEscalationsUsed: state.usage.engineEscalationsUsed,
   };
@@ -344,6 +352,8 @@ export function proposalToolBudgetForQuestion(
 function laneRepairAttemptsUsed(state: CascadeBudgetState, kind: CascadeLaneRepairKind): number {
   return kind === 'reground'
     ? state.usage.laneRegroundAttemptsUsed
+    : kind === 'validation'
+      ? state.usage.laneValidationAttemptsUsed
     : state.usage.laneExecutionAttemptsUsed;
 }
 

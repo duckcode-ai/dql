@@ -97,6 +97,13 @@ export interface IntentDecision {
   };
   /** A hard ambiguity must remain a clarification; answer-anyway must not bypass it. */
   requiresClarification?: boolean;
+  /** Stable, identifier-bound choices rendered by clients for a hard ambiguity. */
+  clarificationOptions?: Array<{
+    id: string;
+    label: string;
+    description?: string;
+    kind?: string;
+  }>;
 }
 
 /** A confident match means a certified block or governed metric clearly fits. */

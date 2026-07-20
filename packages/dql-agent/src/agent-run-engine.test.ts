@@ -1049,6 +1049,99 @@ describe("clarification continuations", () => {
     expect(run.answer).toContain("five beverage product types");
     expect(run.events[0]?.payload).toMatchObject({ question: "yes", clarificationResolved: true });
   });
+
+  it("AGT-011 routes a structured meaning choice against the original question and selected evidence", async () => {
+    const selectedEvidenceId = "semantic:metric:dbt_core_models.total_ccu_count";
+    let routedQuestion = "";
+    let routedEvidenceId: string | undefined;
+    let executedQuestion = "";
+    let executedEvidenceId: string | undefined;
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-structured-clarification",
+      now: fixedClock(),
+      router: {
+        decide: (request) => {
+          routedQuestion = request.question;
+          routedEvidenceId = request.selectedEvidenceId;
+          return {
+            action: "answer",
+            confidence: 1,
+            reason: "The user selected an exact governed metric.",
+            source: "heuristic",
+            category: "data_lookup",
+            meaningResolution: {
+              interpretedQuestion: request.question,
+              questionType: "lookup",
+              selectedConceptIds: [selectedEvidenceId],
+              recommendedExecutionId: selectedEvidenceId,
+              queryIntent: { measures: [selectedEvidenceId], dimensions: [], filters: [] },
+              rejectedCandidates: [],
+              confidence: "high",
+              missingInformation: [],
+              recommendedRoute: "semantic",
+            },
+          };
+        },
+      },
+      executors: {
+        semantic_answer: ({ request }) => {
+          executedQuestion = request.question;
+          executedEvidenceId = request.selectedEvidenceId;
+          return { answer: "Total CCU count is 42." };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: "Total CCU Count",
+      selectedEvidenceId,
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [{
+            question: "What is the total CCU count?",
+            answerSummary: "Which total CCU count meaning do you want?",
+            route: "clarify",
+          }],
+        },
+      },
+    });
+
+    expect(routedQuestion).toBe("What is the total CCU count?");
+    expect(executedQuestion).toBe("What is the total CCU count?");
+    expect(routedEvidenceId).toBe(selectedEvidenceId);
+    expect(executedEvidenceId).toBe(selectedEvidenceId);
+    expect(run.question).toBe("Total CCU Count");
+    expect(run.route).toBe("semantic_answer");
+    expect(run.answer).toBe("Total CCU count is 42.");
+  });
+
+  it("AGT-011 returns identifier-bound options with a hard clarification", async () => {
+    const clarificationOptions = [{
+      id: "semantic:metric:orders.total_revenue",
+      label: "Total Revenue",
+      description: "Recognized order revenue.",
+      kind: "semantic_metric",
+    }];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-structured-options",
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: "clarify",
+          confidence: 0.7,
+          reason: "Two governed meanings are materially different.",
+          requiresClarification: true,
+          clarifyingQuestion: "Which revenue meaning do you want?",
+          clarificationOptions,
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "What is revenue?" });
+
+    expect(run.status).toBe("needs_clarification");
+    expect(run.clarificationOptions).toEqual(clarificationOptions);
+  });
 });
 
 describe("selectRoute", () => {

@@ -268,6 +268,13 @@ export interface MetadataFollowUpContext {
   priorDqlArtifact?: MetadataDqlArtifactReference;
   priorLimit?: number;
   priorMeasures?: string[];
+  memberBindings?: Array<{
+    dimension: string;
+    values: string[];
+    source: 'prior_result' | 'question' | 'clarification';
+    confidence: 'exact' | 'unique_partial' | 'deictic';
+    sourceTurnId?: string;
+  }>;
 }
 
 export type MetadataDqlArtifactReference = DqlArtifactReference;
@@ -5343,6 +5350,24 @@ export function buildAllowedSqlContext(objects: MetadataObject[], edges: Metadat
     }
     const relation = metadataObjectToAllowedSqlRelation(object);
     if (relation) addRelation(relation);
+    // Semantic metrics and members carry their governed physical binding in
+    // payload.table. Once one of those objects is selected, that relation must
+    // be part of the inspected SQL context; otherwise preview validation can
+    // reject the exact table the semantic layer instructed the agent to use.
+    // Keep completeness partial until a dbt/runtime object contributes columns.
+    if (['semantic_metric', 'semantic_member', 'semantic_measure', 'semantic_dimension', 'semantic_entity', 'semantic_model'].includes(object.objectType)) {
+      const semanticTable = metadataPayloadString(object, 'table');
+      if (semanticTable) {
+        addRelation({
+          relation: semanticTable,
+          name: semanticTable.split('.').at(-1) ?? semanticTable,
+          objectKey: object.objectKey,
+          source: 'semantic layer backing relation',
+          columnCompleteness: 'partial',
+          columns: [],
+        });
+      }
+    }
     if (object.objectType === 'dql_block' && !isCertifiedMetadataObject(object)) {
       continue;
     }
@@ -6060,7 +6085,32 @@ function normalizeFollowUpContext(value: unknown): MetadataFollowUpContext | nul
     priorDqlArtifact: normalizePriorDqlArtifact(record.priorDqlArtifact),
     priorLimit: typeof record.priorLimit === 'number' ? record.priorLimit : undefined,
     priorMeasures: metadataStringArray(record.priorMeasures),
+    memberBindings: normalizeMemberBindings(record.memberBindings),
   };
+}
+
+function normalizeMemberBindings(value: unknown): MetadataFollowUpContext['memberBindings'] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const bindings = value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const dimension = stringValue(record.dimension);
+    const values = metadataStringArray(record.values) ?? [];
+    const source: NonNullable<MetadataFollowUpContext['memberBindings']>[number]['source'] =
+      record.source === 'question' || record.source === 'clarification' ? record.source : 'prior_result';
+    const confidence: NonNullable<MetadataFollowUpContext['memberBindings']>[number]['confidence'] = record.confidence === 'unique_partial' || record.confidence === 'deictic'
+      ? record.confidence
+      : 'exact';
+    if (!dimension || values.length === 0) return [];
+    return [{
+      dimension,
+      values: values.slice(0, 24),
+      source,
+      confidence,
+      sourceTurnId: stringValue(record.sourceTurnId),
+    }];
+  });
+  return bindings.length > 0 ? bindings.slice(0, 12) : undefined;
 }
 
 function normalizePriorResultRef(value: unknown): MetadataFollowUpContext['priorResultRef'] | undefined {
@@ -6144,6 +6194,7 @@ function followUpContextObjects(followUp: MetadataFollowUpContext | null): Metad
     followUp.priorResultRef?.sourceSql ? followUp.priorResultRef.sourceSql.slice(0, 600) : '',
     ...dqlArtifactSearchTerms(followUp.priorDqlArtifact, { includeSource: true }),
     ...Object.entries(followUp.priorResultValues ?? {}).flatMap(([key, values]) => [key, ...values]),
+    ...(followUp.memberBindings ?? []).flatMap((binding) => [binding.dimension, ...binding.values]),
   ].join(' ');
   return [{
     objectKey: `selected:followup:${sha256(stableStringify(followUp)).slice(0, 16)}`,
@@ -6169,6 +6220,7 @@ function followUpContextObjects(followUp: MetadataFollowUpContext | null): Metad
       priorDqlArtifact: followUp.priorDqlArtifact,
       priorLimit: followUp.priorLimit,
       priorMeasures: followUp.priorMeasures,
+      memberBindings: followUp.memberBindings,
     }),
   }];
 }
@@ -6183,6 +6235,7 @@ function metadataValueSearchTerms(
     ...questionPlan.filterTerms,
     ...(followUp?.filters ?? []),
     ...Object.values(followUp?.priorResultValues ?? {}).flat(),
+    ...(followUp?.memberBindings ?? []).flatMap((binding) => binding.values),
   ];
   for (const match of question.matchAll(/["']([^"']{2,120})["']/g)) terms.push(match[1]);
   for (const match of question.matchAll(/\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g)) terms.push(match[0]);

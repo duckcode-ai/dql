@@ -237,6 +237,7 @@ export type {
   AgentEvidenceRouteStep,
   AgentEvidenceToolCall,
   AgentFollowUpContext,
+  AgentMemberBinding,
   AgentJoinPath,
   AgentIntent,
   AgentPriorResultReference,

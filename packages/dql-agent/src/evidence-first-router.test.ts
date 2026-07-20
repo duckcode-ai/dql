@@ -249,7 +249,53 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     const ask = request("monthly rollover amount");
     const decision = await router.decide(ask);
     expect(decision.clarifyingQuestion).toBe("Do you mean ending balance or newly rolled-over amount?");
+    expect(decision.clarificationOptions).toEqual([
+      expect.objectContaining({
+        id: "semantic:consumption:rollover_balance_amount",
+        label: "Rollover Balance Amount",
+      }),
+      expect.objectContaining({
+        id: "semantic:billing:monthly_rollover_amount",
+        label: "Monthly Rollover Amount",
+      }),
+    ]);
     expect(selectRoute(ask, decision)).toBe("clarify");
+  });
+
+  it("AGT-011 resolves a structured clarification by stable evidence ID without another AI planning call", async () => {
+    const selected = candidate({
+      id: "semantic:consumption:total_ccu_count",
+      name: "Total CCU Count",
+      relevanceScore: 0.7,
+    });
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      maxMeaningCandidates: 2,
+      resolveMeaning,
+      getEvidence: async () => evidence([
+        candidate(),
+        candidate({
+          id: "semantic:billing:monthly_rollover_amount",
+          name: "Monthly Rollover Amount",
+          relevanceScore: 0.9,
+        }),
+        selected,
+      ]),
+    });
+
+    const decision = await router.decide({
+      question: "Total CCU Count",
+      selectedEvidenceId: selected.id,
+    });
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.action).toBe("answer");
+    expect(decision.meaningResolution).toMatchObject({
+      recommendedExecutionId: selected.id,
+      selectedConceptIds: [selected.id],
+      confidence: "high",
+    });
+    expect(selectRoute({ question: "Total CCU Count", selectedEvidenceId: selected.id }, decision)).toBe("semantic_answer");
   });
 
   it("uses the recommended compatible certified executor only after meaning resolution", async () => {

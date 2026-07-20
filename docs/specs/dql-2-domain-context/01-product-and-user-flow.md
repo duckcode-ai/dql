@@ -20,6 +20,23 @@
 8. **Refresh safely.** `dql sync dbt` rebuilds the snapshot, reports drift, and
    marks affected proof stale without mutating source certification.
 
+## Notebook semantic composition
+
+The global Notebook semantic panel searches imported metrics and dimensions at
+enterprise scale. Metrics declare whether they run through MetricFlow, the safe
+native composer, or require runtime setup. After one or more executable metrics
+are selected, the panel exposes only governed-compatible dimensions. Users can
+run a bounded preview, inspect or copy the compiled SQL, and insert the
+selection as a semantic DQL cell. The inserted cell retains metric and dimension
+identities so later sync, lineage, validation, and execution do not degrade into
+anonymous raw SQL (`API-004`, `UI-009`).
+
+Ask ambiguity is shown as compact governed meaning choices. A choice continues
+the original question with its stable evidence ID; users are not expected to copy
+technical identifiers or answer a second free-form prompt. Failed grounding or
+deadline states remain diagnostic only and do not show passed/reusable-answer
+actions (`AGT-011`, `UI-010`).
+
 ## First-run states
 
 | State | UI behavior | Ask behavior |

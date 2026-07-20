@@ -122,6 +122,14 @@ export interface AgentRunNextAction {
   artifactKind?: AgentRunArtifactKind;
 }
 
+export interface AgentRunClarificationOption {
+  /** Stable retrieved evidence ID; display text must never be used as identity. */
+  id: string;
+  label: string;
+  description?: string;
+  kind?: string;
+}
+
 export interface AgentRunSelectedObject {
   kind: "notebook" | "cell" | "block" | "app" | "dashboard" | "research" | "workspace";
   id?: string;
@@ -131,6 +139,8 @@ export interface AgentRunSelectedObject {
 
 export interface AgentRunRequest {
   question: string;
+  /** Exact candidate selected from a prior structured clarification. */
+  selectedEvidenceId?: string;
   requestedMode?: AgentRunRequestedMode;
   /** Defaults to "analyst" (Notebook). Stakeholder surfaces pass "stakeholder". */
   audience?: AgentRunAudience;
@@ -244,6 +254,7 @@ export interface AgentRun {
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
   nextActions: AgentRunNextAction[];
+  clarificationOptions?: AgentRunClarificationOption[];
   /** Same-lane repair reruns. Escalations are tracked separately. */
   repairAttempts: number;
   /** Engine-level route escalations, separate from same-lane repairs. */
@@ -794,7 +805,15 @@ export class AgentRunEngine {
     const submittedQuestion = request.question;
     const clarificationContinuation = resolveClarificationContinuation(request);
     if (clarificationContinuation) {
-      request = { ...request, question: clarificationContinuation.resolvedQuestion };
+      request = {
+        ...request,
+        // A structured choice is already an exact meaning binding. Retrieve and
+        // execute against the original analytical question so artifact names,
+        // planning, and SQL shape are not polluted by clarification prose.
+        question: request.selectedEvidenceId
+          ? clarificationContinuation.sourceQuestion
+          : clarificationContinuation.resolvedQuestion,
+      };
     }
     const runId = request.runId ?? this.idGenerator();
     const startedAt = this.timestamp();
@@ -828,7 +847,7 @@ export class AgentRunEngine {
     // pre-try await escaped the engine and left active UI runs looking endless.
     let routeDecision: IntentDecision = buildIntentDecision(request);
     try {
-      routeDecision = clarificationContinuation
+      routeDecision = clarificationContinuation && !request.selectedEvidenceId
         ? {
             action: "answer",
             confidence: 1,
@@ -1287,6 +1306,9 @@ export class AgentRunEngine {
         resolveAudience(input.request),
         finalOutcome.status,
       ),
+      ...(finalOutcome.status === "needs_clarification" && input.routeDecision.clarificationOptions?.length
+        ? { clarificationOptions: input.routeDecision.clarificationOptions }
+        : {}),
       repairAttempts: finalResult.repairAttempts ?? repairAttempts,
       escalationAttempts,
       budgetUsage: input.budgetUsage,

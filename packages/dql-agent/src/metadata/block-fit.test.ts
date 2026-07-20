@@ -229,4 +229,57 @@ describe('certified block fit', () => {
     expect(result.kind).toBe('context_only');
     expect(result.missingDimensions).toContain('category');
   });
+
+  it('AGT-012 rejects a broad customer profile that cannot honor a named product binding', () => {
+    const block = certifiedBlock('customer_profile', {
+      grain: 'customer',
+      declaredOutputs: ['customer_name', 'customer_type', 'lifetime_spend'],
+      dimensions: ['customer'],
+      sql: 'select customer_name, customer_type, lifetime_spend from customers order by lifetime_spend desc',
+    });
+    const question = 'who are the customer from flame impala';
+    const plan = buildAnalysisQuestionPlan(question, {
+      kind: 'drilldown',
+      filters: ['flame impala'],
+      dimensions: ['customer', 'product'],
+      priorResultValues: { product_name: ['flame impala'] },
+      memberBindings: [{
+        dimension: 'product',
+        values: ['flame impala'],
+        source: 'prior_result',
+        confidence: 'exact',
+      }],
+    });
+
+    const result = evaluateCertifiedBlockFit({ question, plan, block });
+
+    expect(result.kind).toBe('context_only');
+    expect(result.missingDimensions).toContain('product');
+    expect(result.unsupportedFilters).toContain('flame impala');
+  });
+
+  it('AGT-012 permits a certified product/customer result that exposes the bound dimension', () => {
+    const block = certifiedBlock('product_customers', {
+      grain: 'customer_product',
+      declaredOutputs: ['customer_name', 'product_name', 'revenue'],
+      dimensions: ['customer', 'product'],
+      allowedFilters: ['product'],
+      sql: 'select customer_name, product_name, revenue from product_customers',
+    });
+    const question = 'who are the customer from flame impala';
+    const plan = buildAnalysisQuestionPlan(question, {
+      kind: 'drilldown',
+      filters: ['flame impala'],
+      dimensions: ['customer', 'product'],
+      priorResultValues: { product_name: ['flame impala'] },
+      memberBindings: [{
+        dimension: 'product',
+        values: ['flame impala'],
+        source: 'prior_result',
+        confidence: 'exact',
+      }],
+    });
+
+    expect(evaluateCertifiedBlockFit({ question, plan, block }).unsupportedFilters).toEqual([]);
+  });
 });

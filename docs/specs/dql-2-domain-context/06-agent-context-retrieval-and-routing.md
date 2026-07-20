@@ -144,6 +144,32 @@ asks one focused question that explains the competing business meanings. The
 server, not the model, decides authorization, relationship authority, route
 trust, compilation, SQL validation, and execution (`AGT-009`, `AGT-010`).
 
+Clarification is a structured continuation, not another natural-language search.
+Each rendered choice contains a stable candidate ID, business label, definition,
+and kind. Selecting it restores the original analytical question, binds the exact
+candidate, and rebuilds the immutable context pack with that candidate as focus.
+For semantic evidence this must include its governed `table` binding plus matched
+dbt/runtime columns before SQL preview validation. Display labels and generated
+clarification prose are never used as evidence identity (`AGT-011`).
+
+Data members use the same identity-preserving rule. A value resolved from the
+question, a prior result, or a clarification becomes a typed member binding:
+dimension, canonical value(s), source, match confidence, and optional source-turn
+ID. That binding is immutable request state, not another metadata search token.
+Every terminal route must prove that it exposes the bound dimension/filter or is
+statically scoped to the canonical value. An asset that matches the surrounding
+business words but cannot honor the binding is context-only. Generated SQL
+receives the binding and already-selected join evidence directly; it must not run
+a second discovery/planning loop to rediscover the member. The bounded member
+memory is derived independently from the UI row preview, so a named value does
+not disappear merely because it was outside the displayed sample. Metadata
+re-grounding, SQL-contract correction, and execution repair have distinct
+one-attempt budgets; using one cannot silently consume another. When one
+canonical member resolves to exactly one inspected dimension column already on
+the proposed query path, the runtime applies that predicate deterministically
+before AI repair. Ambiguous or already-misbound predicates are never rewritten
+automatically (`AGT-012`).
+
 ## Governed answer cascade
 
 The route order is mandatory (`AGT-001`):
@@ -163,7 +189,7 @@ or freshness checks.
 
 A certified asset terminates the cascade only when its declared or safely
 inferred contract covers every requested measure, output, dimension, grain,
-filter/value, ranking direction, and parameter. A request with a categorical
+filter/value/member binding, ranking direction, and parameter. A request with a categorical
 filter cannot be answered by an unparameterized block that aggregates across
 that category. Unknown filter/grain capability is context-only for a shaped
 analytical request, not evidence of compatibility (`AGT-006`).
@@ -176,6 +202,18 @@ call receive the selected relations, columns, and authorized relationship proof.
 The execution gateway independently validates and runs the result. Insufficient
 evidence produces a typed modeling gap or focused clarification, never a model
 invitation to invent schema or joins (`AGT-010`).
+
+For ranked grouped questions, validation requires every real grouping dimension
+from the answer contract in the projection before execution. Compound measure
+phrases such as "product revenue" remain measures, not invented dimensions. A
+bounded correction receives the exact answer contract and must preserve already
+correct dimensions and measures.
+
+A failed grounding, compiler, policy, provider, or deadline outcome is terminal
+for that run. It may expose redacted diagnostics and a targeted research/modeling
+action, but it cannot retain an invalid reusable draft, passed-answer badge, or
+automatic deeper retry. Provider failures and request deadlines retain distinct
+codes and presentation (`AGT-011`, `PERF-002`).
 
 ## App composition and Business Story
 

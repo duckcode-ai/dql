@@ -51,6 +51,16 @@ warm index or waits on the existing build; it never launches a second rebuild.
 The onboarding status/job APIs report redacted phase state, object counts, and
 durations. Generated SQLite/KG files remain rebuildable ignored state.
 
+## Semantic execution capability
+
+Semantic discovery responses include a redacted per-metric execution capability:
+`ready` with `native|metricflow`, `requires_setup`, or `unsupported`. The dbt
+adapter normalizes array/object artifacts, object measure references,
+`node_relation`, and compiled `where_filters` without replacing derived, ratio,
+cumulative, conversion, or non-additive meaning with one input measure. Query
+and preview endpoints return `SEMANTIC_RUNTIME_REQUIRED` or
+`SEMANTIC_FIELDS_INCOMPATIBLE` with identifier-bound details (`API-004`).
+
 ## Domain/modeling APIs
 
 | Method | Path | Contract |
@@ -114,6 +124,11 @@ return prompts, secrets, raw runtime values, unauthorized metadata, or SQL
 literals that can contain sensitive input. Progress text is emitted from actual
 backend phases; elapsed-time UI guesses cannot claim retrieval work that did not
 run.
+
+Structured clarification submissions add `selectedEvidenceId` to the same agent
+run request. The runtime treats it as identity input, rebuilds context with that
+object as focus, and keeps the original analytical question for planning and
+artifact naming. Unknown or stale IDs cannot authorize a relation (`AGT-011`).
 
 UI, direct CLI, MCP, and Chat acquire the same immutable handle and invoke the
 same retrieval/meaning/route service. Transport-specific adapters may format the

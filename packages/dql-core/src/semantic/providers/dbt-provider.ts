@@ -45,6 +45,12 @@ interface DbtSemanticModel {
   label?: string;
   description?: string;
   model?: string;
+  node_relation?: {
+    alias?: string;
+    schema_name?: string;
+    database?: string;
+    relation_name?: string;
+  };
   defaults?: { agg_time_dimension?: string };
   entities?: Array<{
     name: string;
@@ -565,6 +571,17 @@ function deriveDbtManifestNodeDomain(node: DbtManifestModelNode): string {
 }
 
 function resolveTableName(model: DbtSemanticModel): string {
+  // Modern MetricFlow semantic_manifest.json artifacts resolve `model` into a
+  // concrete node_relation. Preserve that resolved relation instead of falling
+  // back to the semantic-model name (`order_item` is not `dev.order_items`).
+  if (model.node_relation?.relation_name?.trim()) {
+    return model.node_relation.relation_name.trim();
+  }
+  if (model.node_relation?.alias?.trim()) {
+    return model.node_relation.schema_name?.trim()
+      ? `${model.node_relation.schema_name.trim()}.${model.node_relation.alias.trim()}`
+      : model.node_relation.alias.trim();
+  }
   if (model.model) {
     // dbt model refs look like "ref('stg_orders')" - extract the model name
     const match = model.model.match(/ref\(['"](.+?)['"]\)/);
@@ -860,22 +877,28 @@ function convertDbtMetric(
   dbtMetric: DbtMetric,
   measureLookup: Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>,
 ): MetricDefinition | null {
-  const measureName = firstString(dbtMetric.type_params?.measure, dbtMetric.type_params?.measure_name);
-  const measureInfo = measureName ? measureLookup.get(measureName) : undefined;
-  const metricRefs = collectMetricRefs(dbtMetric);
-  const fallbackMeasure = metricRefs.map((ref) => measureLookup.get(ref)).find(Boolean);
-  const resolvedMeasure = measureInfo ?? fallbackMeasure;
+  const isSimple = dbtMetric.type.toLowerCase() === 'simple';
+  const measureName = firstSemanticRefName(
+    dbtMetric.type_params?.measure,
+    dbtMetric.type_params?.measure_name,
+    dbtMetric.type_params?.input_measures,
+  );
+  // Only a simple metric can be represented by one input measure. Selecting a
+  // numerator/input from a derived, ratio, conversion, or cumulative metric
+  // changes its meaning and previously produced plausible but incorrect SQL.
+  const resolvedMeasure = isSimple && measureName ? measureLookup.get(measureName) : undefined;
+  const nativeMetricType = resolvedMeasure ? AGG_TYPE_MAP[resolvedMeasure.agg] : undefined;
 
   return {
     name: dbtMetric.name,
     label: dbtMetric.label ?? dbtMetric.name,
     description: dbtMetric.description ?? '',
     domain: deriveDbtMetricDomain(dbtMetric, resolvedMeasure?.modelName),
-    sql: resolvedMeasure
+    sql: resolvedMeasure && nativeMetricType
       ? buildAggSql(resolvedMeasure.agg, resolvedMeasure.sql)
       : String(dbtMetric.type_params?.expr ?? dbtMetric.name),
-    type: resolvedMeasure ? (AGG_TYPE_MAP[resolvedMeasure.agg] ?? 'custom') : 'custom',
-    table: resolvedMeasure?.table ?? '',
+    type: nativeMetricType ?? 'custom',
+    table: nativeMetricType ? resolvedMeasure?.table ?? '' : '',
     cube: resolvedMeasure?.modelName,
     aggregation: dbtMetric.type,
     metricType: dbtMetric.type,
@@ -884,6 +907,23 @@ function convertDbtMetric(
     aggTimeDimension: resolvedMeasure?.measure.agg_time_dimension,
     source: dbtSource('metric', dbtMetric.unique_id ?? dbtMetric.name, dbtMetric.name, dbtMetric as unknown as Record<string, unknown>),
   };
+}
+
+function firstSemanticRefName(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (Array.isArray(value)) {
+      const nested = firstSemanticRefName(...value);
+      if (nested) return nested;
+      continue;
+    }
+    if (value && typeof value === 'object') {
+      const raw = value as Record<string, unknown>;
+      const nested = firstSemanticRefName(raw.name, raw.measure, raw.measure_name);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }
 
 function deriveDbtDomain(model: DbtSemanticModel): string {

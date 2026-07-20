@@ -2450,8 +2450,14 @@ function SemanticBlockBuilder({
             selected={values.metrics}
             resolveLabel={(name) => metricByName.get(name)?.label || name}
             onToggle={toggleMetric}
+            compatible={(name) => metricByName.get(name)?.execution?.status !== 'requires_setup' && metricByName.get(name)?.execution?.status !== 'unsupported'}
             t={t}
           />
+          {semanticLayer.metrics.some((metric) => metric.execution && metric.execution.status !== 'ready') && (
+            <div style={{ fontSize: 10.5, color: t.textMuted, lineHeight: 1.4 }}>
+              Metrics that require MetricFlow are visible for discovery but disabled until the semantic execution runtime is configured.
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
             <FieldLabel label="Time dimension" t={t}>
               <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={compactInput}>

@@ -13,6 +13,7 @@ export type SqlContextValidationCode =
   | 'unknown_column'
   | 'missing_baseline'
   | 'ambiguous_filter'
+  | 'misbound_filter'
   | 'unsafe_sql'
   | 'insufficient_context';
 
@@ -43,6 +44,10 @@ export interface SqlContextValidationOptions {
   intent?: MetadataAgentIntent | string;
   filterValues?: string[];
   trustedFilterValues?: string[];
+  memberBindings?: Array<{
+    dimension: string;
+    values: string[];
+  }>;
   /**
    * Runtime schema shown to the model in the prompt. When supplied, validation
    * uses the union of the metadata context pack and this runtime context so the
@@ -235,6 +240,19 @@ export function validateSqlAgainstLocalContext(
       warnings,
       referencedRelations,
       referencedColumns,
+    };
+  }
+
+  const misboundMemberFilter = findMisboundMemberFilter(sql, analysis.aliasToRelation, options.memberBindings ?? []);
+  if (misboundMemberFilter) {
+    return {
+      ok: false,
+      code: 'misbound_filter',
+      error: misboundMemberFilter.message,
+      warnings,
+      referencedRelations,
+      referencedColumns,
+      offending: { relation: misboundMemberFilter.relation, column: misboundMemberFilter.column },
     };
   }
 
@@ -622,6 +640,18 @@ function sampleValueColumnMatches(contextPack: LocalContextPack): Map<string, Sa
 
 function extractEntityValuePredicates(sql: string, aliasToRelation: Record<string, string>): EntityValuePredicate[] {
   const predicates: EntityValuePredicate[] = [];
+  // Models commonly normalize text comparisons with LOWER/UPPER. Capture the
+  // wrapped column as the predicate owner so member-binding validation applies
+  // identically to normalized and direct equality filters.
+  const normalizedEqualityPattern = /(?:LOWER|UPPER)\s*\(\s*(?:(["]?[\w]+["]?)\s*\.\s*)?(["]?[\w]+["]?)\s*\)\s*=\s*(?:LOWER|UPPER)\s*\(\s*('(?:''|[^'])*'|"(?:\\"|[^"])*")\s*\)/gi;
+  for (const match of sql.matchAll(normalizedEqualityPattern)) {
+    predicates.push({
+      relation: resolvePredicateRelation(match[1], aliasToRelation),
+      column: cleanIdentifier(match[2] ?? ''),
+      value: unquoteSqlLiteral(match[3] ?? ''),
+    });
+  }
+
   const equalityPattern = /(?:(["`]?[\w]+["`]?)\s*\.\s*)?(["`]?[\w]+["`]?)\s*=\s*('(?:''|[^'])*'|"(?:\\"|[^"])*")/gi;
   for (const match of sql.matchAll(equalityPattern)) {
     predicates.push({
@@ -641,6 +671,55 @@ function extractEntityValuePredicates(sql: string, aliasToRelation: Record<strin
   }
 
   return predicates.filter((predicate) => predicate.column.length > 0 && predicate.value.length > 0);
+}
+
+function findMisboundMemberFilter(
+  sql: string,
+  aliasToRelation: Record<string, string>,
+  bindings: Array<{ dimension: string; values: string[] }>,
+): { message: string; relation?: string; column?: string } | undefined {
+  if (bindings.length === 0) return undefined;
+  const predicates = extractEntityValuePredicates(sql, aliasToRelation);
+  for (const binding of bindings) {
+    for (const value of binding.values) {
+      const valueKey = normalizeSampleValue(value);
+      const matchingValuePredicates = predicates.filter((predicate) => normalizeSampleValue(predicate.value) === valueKey);
+      if (matchingValuePredicates.length === 0) {
+        return {
+          message: `SQL does not apply required member binding ${binding.dimension} = "${value}". Preserve the typed binding in the generated filter.`,
+        };
+      }
+      const correctlyBound = matchingValuePredicates.find((predicate) => columnMatchesBindingDimension(predicate.column, binding.dimension));
+      if (!correctlyBound) {
+        const actual = matchingValuePredicates
+          .map((predicate) => `${predicate.relation ? `${predicate.relation}.` : ''}${predicate.column}`)
+          .sort()
+          .join(', ');
+        const first = matchingValuePredicates[0];
+        return {
+          message: `SQL applies required member "${value}" to ${actual}, but the resolved binding dimension is ${binding.dimension}. Filter a ${binding.dimension} column instead.`,
+          relation: first?.relation,
+          column: first?.column,
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function columnMatchesBindingDimension(column: string, dimension: string): boolean {
+  const columnTokens = normalizedConceptTokens(column);
+  const dimensionTokens = normalizedConceptTokens(dimension);
+  if (dimensionTokens.length === 0) return false;
+  return dimensionTokens.every((token) => columnTokens.includes(token));
+}
+
+function normalizedConceptTokens(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token && token !== 'name' && token !== 'value' && token !== 'label');
 }
 
 function predicateMatchesSampleColumn(predicate: EntityValuePredicate, matches: SampleValueColumnMatch[]): boolean {

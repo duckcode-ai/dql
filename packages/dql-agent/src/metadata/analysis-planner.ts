@@ -68,6 +68,14 @@ export interface RequestedAnswerShape {
   measures: string[];
   requiredOutputs: string[];
   filters: string[];
+  /** Typed warehouse members that every terminal route must honor. AGT-012. */
+  memberBindings?: Array<{
+    dimension: string;
+    values: string[];
+    source: 'prior_result' | 'question' | 'clarification';
+    confidence: 'exact' | 'unique_partial' | 'deictic';
+    sourceTurnId?: string;
+  }>;
   topN?: {
     n: number;
     scope: 'overall' | 'per_group';
@@ -1021,9 +1029,11 @@ function buildRequestedAnswerShape(
   },
 ): RequestedAnswerShape {
   const topN = parseTopN(question);
+  const memberBindings = extractMemberBindings(input.followUp);
   const followUpReferences = extractFollowUpReferences(question, input.followUp);
   const rawDimensions = uniqueStrings([
     ...input.dimensionTerms.map(canonicalShapeTerm),
+    ...memberBindings.map((binding) => contextDimensionTerm(binding.dimension)),
     ...followUpDimensionsForRequestedShape(input.followUp, followUpReferences),
   ].filter(Boolean));
   const dimensions = scalarValueQuestionUsesEntitiesAsMeasures(input.mode, input.lower, rawDimensions)
@@ -1033,6 +1043,7 @@ function buildRequestedAnswerShape(
   const requiredOutputs = extractRequiredOutputs(question, dimensions, measures);
   const filters = uniqueStrings([
     ...input.filterTerms,
+    ...memberBindings.flatMap((binding) => binding.values),
     ...followUpFiltersForRequestedShape(input.followUp, followUpReferences),
   ]);
   const ambiguities = /\bimpact(?:ed|s|ing)?\b/i.test(question)
@@ -1048,6 +1059,7 @@ function buildRequestedAnswerShape(
     measures,
     requiredOutputs,
     filters,
+    memberBindings,
     ...(topN ? { topN } : {}),
     rankingDirection: rankingDirection(question),
     followUpReferences,
@@ -1155,6 +1167,13 @@ function extractFollowUpReferences(question: string, followUp?: unknown): Reques
   const refs: RequestedAnswerShape['followUpReferences'] = [];
   const lower = question.toLowerCase();
   const record = followUpRecord(followUp);
+  for (const binding of extractMemberBindings(followUp)) {
+    refs.push({
+      phrase: binding.values.join(', '),
+      kind: 'prior_dimension_values',
+      resolvedValues: binding.values,
+    });
+  }
   const hasFollowUp = Boolean(record);
   for (const match of lower.matchAll(/\b(this|these|those|that|same|prior|previous)\s+([a-z][a-z0-9_ -]{1,30})\b/g)) {
     const phrase = match[0];
@@ -1191,6 +1210,33 @@ function extractFollowUpReferences(question: string, followUp?: unknown): Reques
   return refs.slice(0, 8);
 }
 
+function extractMemberBindings(followUp: unknown): NonNullable<RequestedAnswerShape['memberBindings']> {
+  const record = followUpRecord(followUp);
+  if (!record || !Array.isArray(record.memberBindings)) return [];
+  return record.memberBindings.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+    const binding = item as Record<string, unknown>;
+    const dimension = typeof binding.dimension === 'string' ? binding.dimension.trim() : '';
+    const values = cleanStringArray(binding.values);
+    if (!dimension || values.length === 0) return [];
+    const source: NonNullable<RequestedAnswerShape['memberBindings']>[number]['source'] =
+      binding.source === 'question' || binding.source === 'clarification' ? binding.source : 'prior_result';
+    const confidence: NonNullable<RequestedAnswerShape['memberBindings']>[number]['confidence'] =
+      binding.confidence === 'unique_partial' || binding.confidence === 'deictic'
+        ? binding.confidence
+        : 'exact';
+    return [{
+      dimension,
+      values: uniqueStrings(values).slice(0, 24),
+      source,
+      confidence,
+      ...(typeof binding.sourceTurnId === 'string' && binding.sourceTurnId.trim()
+        ? { sourceTurnId: binding.sourceTurnId.trim() }
+        : {}),
+    }];
+  }).slice(0, 12);
+}
+
 function pronounFollowUpDimension(question: string, record: Record<string, unknown>): string | undefined {
   const values = cleanStringRecord(record.priorResultValues);
   const available = new Set(Object.keys(values).map(contextDimensionTerm));
@@ -1208,7 +1254,10 @@ function followUpDimensionsForRequestedShape(
   refs: RequestedAnswerShape['followUpReferences'],
 ): string[] {
   const record = followUpRecord(followUp);
-  if (!record || refs.every((ref) => ref.kind !== 'prior_dimension_values')) return [];
+  if (!record) return [];
+  const boundDimensions = extractMemberBindings(followUp).map((binding) => contextDimensionTerm(binding.dimension));
+  if (boundDimensions.length > 0) return uniqueStrings(boundDimensions);
+  if (refs.every((ref) => ref.kind !== 'prior_dimension_values')) return [];
   const explicit = cleanStringArray(record.dimensions).map(contextDimensionTerm).filter(Boolean);
   if (explicit.length > 0) return uniqueStrings(explicit);
   const single = singleFollowUpDimension(record);
@@ -1220,7 +1269,10 @@ function followUpFiltersForRequestedShape(
   refs: RequestedAnswerShape['followUpReferences'],
 ): string[] {
   const record = followUpRecord(followUp);
-  if (!record || refs.every((ref) => ref.kind !== 'prior_dimension_values')) return [];
+  if (!record) return [];
+  const boundValues = extractMemberBindings(followUp).flatMap((binding) => binding.values);
+  if (boundValues.length > 0) return uniqueStrings(boundValues);
+  if (refs.every((ref) => ref.kind !== 'prior_dimension_values')) return [];
   return uniqueStrings([
     ...cleanStringArray(record.filters),
     ...refs.flatMap((ref) => ref.resolvedValues ?? []),

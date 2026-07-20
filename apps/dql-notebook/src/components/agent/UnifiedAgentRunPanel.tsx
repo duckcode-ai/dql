@@ -35,6 +35,7 @@ import {
   type AgentRun,
   type AgentRunArtifact,
   type AgentRunAudience,
+  type AgentRunClarificationOption,
   type AgentRunEvent,
   type AgentRunRequestedMode,
   type AgentRunRoute,
@@ -395,7 +396,11 @@ export function UnifiedAgentRunPanel({
     return () => document.removeEventListener('visibilitychange', reconnectWhenVisible);
   }, [recoverPendingRun, threadIdProp]);
 
-  const submit = async (textOverride?: string, modeOverride?: AgentRunRequestedMode) => {
+  const submit = async (
+    textOverride?: string,
+    modeOverride?: AgentRunRequestedMode,
+    selectedEvidenceId?: string,
+  ) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
     const activeMode = modeOverride ?? pendingModeRef.current ?? initialMode;
@@ -440,6 +445,7 @@ export function UnifiedAgentRunPanel({
       }
       const runInput = {
         question: text,
+        ...(selectedEvidenceId ? { selectedEvidenceId } : {}),
         requestedMode: activeMode,
         audience,
         selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
@@ -689,6 +695,10 @@ export function UnifiedAgentRunPanel({
                   onInsertDql={onInsertDql}
                   onOpenBlock={onOpenBlock}
                   onOpenResearch={onOpenResearch}
+                  onSelectClarification={(option) => {
+                    const selection = clarificationSelectionInput(option);
+                    void submit(selection.question, undefined, selection.selectedEvidenceId);
+                  }}
                   onNextAction={(action) => handleNextAction(item.run, action)}
                 />
               ))}
@@ -830,6 +840,10 @@ export function UnifiedAgentRunPanel({
             insertDqlActionLabel={insertDqlActionLabel}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
+            onSelectClarification={(option) => {
+              const selection = clarificationSelectionInput(option);
+              void submit(selection.question, undefined, selection.selectedEvidenceId);
+            }}
             onNextAction={(action) => handleNextAction(item.run, action)}
           />
         ) : (
@@ -844,6 +858,10 @@ export function UnifiedAgentRunPanel({
             onInsertDql={onInsertDql}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
+            onSelectClarification={(option) => {
+              const selection = clarificationSelectionInput(option);
+              void submit(selection.question, undefined, selection.selectedEvidenceId);
+            }}
             onNextAction={(action) => handleNextAction(item.run, action)}
           />
         ))}
@@ -1325,6 +1343,7 @@ function RunCard({
   onInsertDql,
   onOpenBlock,
   onOpenResearch,
+  onSelectClarification,
   onNextAction,
 }: {
   run: AgentRun;
@@ -1336,6 +1355,7 @@ function RunCard({
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onSelectClarification?: (option: AgentRunClarificationOption) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
   const { dispatch } = useNotebook();
@@ -1379,12 +1399,8 @@ function RunCard({
   const isLlmPlan = run.plan?.source === 'llm';
   const evidence = evidenceFromRun(run);
   const trustNote = trustExplainer(run);
-  const hasMixedSourcePlan = run.artifacts.some((artifact) =>
-    Boolean(extractMixedSourceNotebookPlan(payloadOf(artifact))),
-  );
   // A result worth saving: a real answer or research artifact (not blocked/clarify).
-  const pinnable = !hasMixedSourcePlan && run.status !== 'blocked' && run.status !== 'needs_clarification'
-    && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
+  const pinnable = isAgentRunPinnable(run);
   // Offer a one-click deepening on quick answers (unless the agent already routed deep).
   const isAnswer = run.route === 'certified_answer' || run.route === 'generated_answer';
   const hasResearchAction = run.nextActions.some((a) => a.route === 'research');
@@ -1426,6 +1442,8 @@ function RunCard({
         <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
       {run.answer ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
+
+      <ClarificationChoiceList run={run} t={t} onSelect={onSelectClarification} />
 
       {evidence.length > 0 ? (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1714,6 +1732,7 @@ function AskRunCard({
   insertDqlActionLabel,
   onOpenBlock,
   onOpenResearch,
+  onSelectClarification,
   onNextAction,
 }: {
   run: AgentRun;
@@ -1728,6 +1747,7 @@ function AskRunCard({
   insertDqlActionLabel?: string;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onSelectClarification?: (option: AgentRunClarificationOption) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
   const { dispatch } = useNotebook();
@@ -1771,9 +1791,7 @@ function AskRunCard({
   const primaryArtifact = inlineResultArtifacts[0] ?? chipArtifacts[0] ?? run.artifacts[0];
 
   // Reuse RunCard's action gating so the quiet row offers the same real actions.
-  const hasMixedSourcePlan = run.artifacts.some((a) => Boolean(extractMixedSourceNotebookPlan(payloadOf(a))));
-  const pinnable = !hasMixedSourcePlan && run.status !== 'blocked' && run.status !== 'needs_clarification'
-    && (Boolean(run.answer) || run.artifacts.some((a) => a.kind === 'answer' || a.kind === 'research_run'));
+  const pinnable = isAgentRunPinnable(run);
   const isAnswer = run.route === 'certified_answer' || run.route === 'semantic_answer' || run.route === 'generated_answer';
   const hasResearchAction = run.nextActions.some((a) => a.route === 'research');
   const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
@@ -1812,6 +1830,8 @@ function AskRunCard({
       ) : run.summary ? (
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
+
+      <ClarificationChoiceList run={run} t={t} onSelect={onSelectClarification} />
 
       {/* Executed results live in the transcript; the inspector owns DQL/SQL/lineage/trust. */}
       {inlineResultArtifacts.map((artifact) => (
@@ -1903,6 +1923,52 @@ function AskRunCard({
       ) : null}
     </div>
   );
+}
+
+function ClarificationChoiceList({
+  run,
+  t,
+  onSelect,
+}: {
+  run: AgentRun;
+  t: Theme;
+  onSelect?: (option: AgentRunClarificationOption) => void;
+}) {
+  if (run.status !== 'needs_clarification' || !run.clarificationOptions?.length || !onSelect) return null;
+  return (
+    <div aria-label="Choose a governed meaning" style={{ display: 'grid', gap: 7, maxWidth: 620 }}>
+      {run.clarificationOptions.map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          className="dql-hover dql-lift"
+          onClick={() => onSelect(option)}
+          title={`Use governed evidence ${option.id}`}
+          style={{ display: 'grid', gap: 3, width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textPrimary, cursor: 'pointer', textAlign: 'left', fontFamily: t.font }}
+        >
+          <span style={{ fontSize: 12.5, fontWeight: 700 }}>{option.label}</span>
+          {option.description ? <span style={{ fontSize: 11, lineHeight: 1.4, color: t.textMuted }}>{option.description}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function clarificationSelectionInput(option: AgentRunClarificationOption): {
+  question: string;
+  selectedEvidenceId: string;
+} {
+  return { question: option.label, selectedEvidenceId: option.id };
+}
+
+export function isAgentRunPinnable(run: AgentRun): boolean {
+  const hasMixedSourcePlan = run.artifacts.some((artifact) =>
+    Boolean(extractMixedSourceNotebookPlan(payloadOf(artifact))),
+  );
+  return !hasMixedSourcePlan
+    && run.status !== 'blocked'
+    && run.status !== 'needs_clarification'
+    && run.artifacts.some((artifact) => artifact.kind === 'answer' || artifact.kind === 'research_run');
 }
 
 function AskInspector({

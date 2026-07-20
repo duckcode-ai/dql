@@ -1456,6 +1456,21 @@ function resolveFilterJinja(raw: string, resolveColumn: (ref: string) => string)
 
 /** Render a single object-shaped metric filter (`{ field, operator, value(s) }`). */
 function renderObjectFilter(raw: Record<string, unknown>, resolveColumn: (ref: string) => string): string | null {
+  // semantic_manifest.json represents compiled MetricFlow filters as
+  // `{ where_filters: [{ where_sql_template: "..." }] }`. Normalize that
+  // provider shape here so native fallback preserves the governed predicate.
+  if (Array.isArray(raw.where_filters)) {
+    const predicates: string[] = [];
+    for (const item of raw.where_filters) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const template = (item as Record<string, unknown>).where_sql_template;
+      if (typeof template !== 'string' || !template.trim()) return null;
+      const rendered = resolveFilterJinja(template.trim(), resolveColumn);
+      if (rendered === null) return null;
+      if (rendered) predicates.push(`(${rendered})`);
+    }
+    return predicates.length > 0 ? predicates.join(' AND ') : '';
+  }
   const field = raw.field ?? raw.dimension ?? raw.column ?? raw.name;
   if (field == null || String(field).trim() === '') {
     if (typeof raw.sql === 'string' && raw.sql.trim()) return resolveFilterJinja(raw.sql.trim(), resolveColumn);

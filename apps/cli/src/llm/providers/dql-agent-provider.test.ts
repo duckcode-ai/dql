@@ -140,6 +140,78 @@ describe('governed answer formatting', () => {
 });
 
 describe('conversation context follow-up routing', () => {
+  it('AGT-012 binds an explicitly named prior product as a typed drilldown member', () => {
+    const question = 'who are the customer from flame impala';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_products',
+        turns: [{
+          id: 'turn_products',
+          question: 'what are the top most product revenue by region?',
+          result: {
+            columns: ['product_name', 'region', 'revenue'],
+            dimensionValues: {
+              product_name: ['flame impala', 'vanilla ice'],
+              region: ['Philadelphia'],
+            },
+            measureColumns: ['revenue'],
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['flame impala'],
+      dimensions: expect.arrayContaining(['customer', 'product']),
+      priorResultValues: { product_name: ['flame impala'] },
+      memberBindings: [{
+        dimension: 'product',
+        values: ['flame impala'],
+        source: 'prior_result',
+        confidence: 'exact',
+        sourceTurnId: 'turn_products',
+      }],
+      resolvedReferences: ['product: flame impala'],
+    });
+  });
+
+  it('AGT-012 does not resolve a member from a generic question word inside an unrelated value', () => {
+    const question = 'who are the customer from flame impala';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_products',
+        turns: [{
+          id: 'turn_products',
+          question: 'what are the top most product revenue by region?',
+          result: {
+            columns: ['product_name', 'region', 'revenue'],
+            dimensionValues: {
+              product_name: ['nutellaphone who dis?', 'vanilla ice'],
+              region: ['Philadelphia'],
+            },
+            measureColumns: ['revenue'],
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp?.memberBindings).toBeUndefined();
+    expect(followUp?.filters ?? []).not.toContain('nutellaphone who dis?');
+    expect(followUp?.priorResultValues).toEqual({
+      product_name: ['nutellaphone who dis?', 'vanilla ice'],
+      region: ['Philadelphia'],
+    });
+  });
+
   it('resolves a shortened named member and drops stale block shape for a relative comparison', () => {
     const question = 'Who are the other customers who paid less tax than Melissa?';
     const followUp = __test__.followUpFromConversationContext({

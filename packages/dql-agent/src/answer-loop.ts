@@ -110,7 +110,7 @@ export type AnalysisDepth = CascadeAnalysisDepth;
 export interface ExploratorySqlCandidate {
   kind: 'dbt_grounded_exploration';
   /** Only absence-of-modeling outcomes are eligible — never an unsafe policy. */
-  reason: 'unbound_relation' | 'unplanned_join' | 'relationship_not_certified';
+  reason: 'unbound_relation' | 'unplanned_join' | 'relationship_not_certified' | 'unsafe_relationship';
   sql: string;
   message: string;
   /** Bound entity ids, if any, that the v3 guard resolved before it stopped. */
@@ -405,6 +405,20 @@ export interface AgentPriorResultReference {
 
 export type AgentDqlArtifactReference = DqlArtifactReference;
 
+/**
+ * A warehouse member resolved before retrieval.  This is deliberately distinct
+ * from a text search term: every downstream lane must preserve the dimension,
+ * value, provenance, and match confidence instead of re-interpreting prose.
+ * AGT-012.
+ */
+export interface AgentMemberBinding {
+  dimension: string;
+  values: string[];
+  source: 'prior_result' | 'question' | 'clarification';
+  confidence: 'exact' | 'unique_partial' | 'deictic';
+  sourceTurnId?: string;
+}
+
 export interface AgentFollowUpContext {
   /**
    * 'generic'/'drilldown' — regex-classified follow-ups with routing force.
@@ -424,6 +438,7 @@ export interface AgentFollowUpContext {
   priorDqlArtifact?: AgentDqlArtifactReference;
   priorLimit?: number;
   priorMeasures?: string[];
+  memberBindings?: AgentMemberBinding[];
   resolvedReferences?: string[];
   unresolvedReferences?: string[];
 }
@@ -711,6 +726,7 @@ function refusalCodeForValidation(code: SqlContextValidationCode | undefined): A
     return 'grounding_gap';
   }
   if (code === 'ambiguous_filter') return 'ambiguous';
+  if (code === 'misbound_filter') return 'grounding_gap';
   return 'model_declined';
 }
 
@@ -731,7 +747,7 @@ function refusalCodeForAnalyticalPolicy(
 }
 
 /**
- * The governed guard is intentionally strict. Only the two outcomes that mean
+ * The governed guard is intentionally strict. Only outcomes that mean
  * "this repository has not modeled this join yet" may be handed to a host's
  * exploratory lane. All other decisions are explicit governance/safety
  * denials and must remain terminal in this loop.
@@ -741,7 +757,11 @@ function exploratoryCandidateFromDbtFirstGuard(
   decision: ReturnType<typeof evaluateDbtFirstGeneratedSql>,
 ): ExploratorySqlCandidate | undefined {
   const reason = decision.code;
-  if (decision.safe || (reason !== 'unbound_relation' && reason !== 'unplanned_join' && reason !== 'relationship_not_certified')) {
+  const missingPathWithoutUnsafeProof = reason === 'unsafe_relationship' && decision.relationshipIds.length === 0;
+  if (decision.safe || (!missingPathWithoutUnsafeProof
+    && reason !== 'unbound_relation'
+    && reason !== 'unplanned_join'
+    && reason !== 'relationship_not_certified')) {
     return undefined;
   }
   // `unplanned_join` can also mean the model ignored an existing certified
@@ -1510,9 +1530,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         // generation, which can express the breakdown.
         const wantedBreakdown = questionPlan.requestedShape.dimensions.length > 0
           || questionPlan.dimensionTerms.length > 0;
+        const requiredGroupingCount = requestedGroupingDimensions(questionPlan).length;
         const dropsBreakdown = Boolean(composed)
           && wantedBreakdown
-          && composed!.dimensions.length === 0
+          && composed!.dimensions.length < Math.max(1, requiredGroupingCount)
           && !composed!.timeDimension;
         if (composed && !dropsBreakdown) {
           semanticBridgeAnswer = composed;
@@ -1641,6 +1662,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         toolCalls: proposalToolCalls,
       });
     } catch (err) {
+      // A request-level cancellation/deadline is orchestration state, not an
+      // upstream-provider outage. Preserve the AbortSignal reason so the run
+      // engine can report a bounded deadline (or explicit user cancellation)
+      // instead of the misleading generic "Provider error" label.
+      if (input.signal?.aborted) throw input.signal.reason ?? err;
+      if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) throw err;
       const text = `Provider error: ${(err as Error).message}`;
       return {
         kind: 'no_answer',
@@ -1714,6 +1741,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       intent,
       initial: { raw: proposed, parsed },
       contextLedger,
+      followUp: input.followUp,
       executeGeneratedSql: input.executeGeneratedSql,
       signal: input.signal,
       reasoningEffort: input.reasoningEffort,
@@ -1775,7 +1803,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     || (input.contextPack?.allowedSqlContext?.relations.length ?? 0) > 0
     || (input.contextPack?.allowedSqlContext?.sourceBlockSql.length ?? 0) > 0
     || contextBlocks.length > 0;
-  if (!parsed.sql && !governedMetricAnswer && wantsGeneratedData && hasGeneratableContext && analyticalPlan?.safe !== false) {
+  if (!parsed.sql && !governedMetricAnswer && wantsGeneratedData && hasGeneratableContext
+    && (analyticalPlan?.safe !== false || analyticalPlanAllowsDbtExploration(analyticalPlan))) {
     try {
       proposed = await generateProposalWithOptionalTools({
         provider,
@@ -1889,8 +1918,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     intent,
     filterValues: input.followUp?.filters,
     trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+    memberBindings: input.followUp?.memberBindings,
   });
-  contextValidation = initialValidation.ok
+  const rankedGrainGap = missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions);
+  contextValidation = initialValidation.ok && rankedGrainGap
+    ? {
+        ok: false,
+        code: 'insufficient_context',
+        error: 'Generated SQL omits the ranked grouping dimension ' + rankedGrainGap + '. Include every requested ranking dimension in SELECT and GROUP BY before execution.',
+        warnings: initialValidation.warnings,
+      }
+    : initialValidation.ok
     ? { ok: true, warnings: initialValidation.warnings }
     : {
         ok: false,
@@ -1899,6 +1937,47 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         warnings: initialValidation.warnings,
         offending: initialValidation.offending,
       };
+  // A canonical member value that resolves to exactly one inspected column is
+  // compiler-owned request state, not creative SQL. If the proposal omitted
+  // that predicate entirely, inject it deterministically before spending the
+  // bounded AI validation repair. Misbound or ambiguous predicates are never
+  // rewritten here; they continue through the guarded correction/refusal path.
+  if (!contextValidation.ok
+    && contextValidation.code === 'misbound_filter'
+    && !contextValidation.offending?.relation
+    && !contextValidation.offending?.column
+    && input.followUp?.memberBindings?.length) {
+    const injected = injectUniqueResolvedMemberBindings(parsed.sql, input.followUp.memberBindings, schemaContext);
+    if (injected) {
+      parsed.sql = injected.sql;
+      const rebound = contextLedger.validateSql(parsed.sql, {
+        question,
+        intent,
+        filterValues: input.followUp?.filters,
+        trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+        memberBindings: input.followUp.memberBindings,
+      });
+      const reboundGrainGap = rebound.ok
+        ? missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions)
+        : undefined;
+      contextValidation = rebound.ok && !reboundGrainGap
+        ? { ok: true, warnings: [...rebound.warnings, ...injected.notes] }
+        : rebound.ok
+        ? {
+            ok: false,
+            code: 'insufficient_context',
+            error: 'Generated SQL omits the ranked grouping dimension ' + reboundGrainGap + '. Include every requested ranking dimension in SELECT and GROUP BY before execution.',
+            warnings: [...rebound.warnings, ...injected.notes],
+          }
+        : {
+            ok: false,
+            code: rebound.code,
+            error: rebound.error,
+            warnings: [...rebound.warnings, ...injected.notes],
+            offending: rebound.offending,
+          };
+    }
+  }
   // Semantic compilation owns metric meaning, but a later dimensional join can
   // still make a compiled bare expression ambiguous at the warehouse binder.
   // Revoke governed trust for an invalid composition so the bounded repair lane
@@ -1914,9 +1993,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   //      stands instead of guessing a measure.
   //   2) Otherwise fall back to a CLEAN governed-metric definition (direct or exact
   //      leaf-measure; no fuzzy family guess that could answer the wrong measure).
-  if (!contextValidation.ok && semanticMetricRoute && semanticMetricMatch) {
+  if (!contextValidation.ok && semanticMetricRoute && semanticMetricMatch && !rankedGrainGap) {
     const grounded = contextLedger.validateRuntimeGrounding(parsed.sql);
-    if (grounded?.ok) {
+    // Runtime grounding proves that relations and columns exist; it cannot prove
+    // that a resolved business member was bound to the right dimension. Never
+    // let this recovery lane bypass AGT-012's typed member invariant.
+    if (grounded?.ok && !(input.followUp?.memberBindings?.length)) {
       contextValidation = { ok: true, warnings: grounded.warnings };
     } else if (scalarGovernedMetricRecoveryAllowed) {
       const recovered = resolveGovernedMetricSql(semanticMetricMatch.metric, semanticMetricNodes, input.semanticLayer);
@@ -1955,8 +2037,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           intent,
           filterValues: input.followUp?.filters,
           trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+          memberBindings: input.followUp?.memberBindings,
         });
-        contextValidation = revalidated.ok
+        const regroundedGrainGap = revalidated.ok
+          ? missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions)
+          : undefined;
+        contextValidation = revalidated.ok && regroundedGrainGap
+          ? {
+              ok: false,
+              code: 'insufficient_context',
+              error: 'Generated SQL omits the ranked grouping dimension ' + regroundedGrainGap + '. Include every requested ranking dimension in SELECT and GROUP BY before execution.',
+              warnings: revalidated.warnings,
+            }
+          : revalidated.ok
           ? {
               ok: true,
               warnings: [
@@ -1987,14 +2080,18 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // provider get the same single chance; any provider failure keeps the honest
   // refusal below. This mirrors the engine-level repair loop, applied to the
   // context-validation gate that previously refused on first failure.
-  if (!contextValidation.ok && !governedMetricAnswer && canUseLaneRepair(repairBudgetState, 'reground')) {
-    recordLaneRepair(repairBudgetState, 'reground');
+  if (!contextValidation.ok && !governedMetricAnswer && canUseLaneRepair(repairBudgetState, 'validation')) {
+    recordLaneRepair(repairBudgetState, 'validation');
     try {
       const failedSql = parsed.sql ?? '';
       const repairPrompt = [
         `Your SQL was rejected before execution: ${contextValidation.error}`,
         formatOffendingValidationToken(contextValidation.offending),
         formatValidationWarningsForPrompt(contextValidation.warnings),
+        renderRequestedShapeForRepair(questionPlan),
+        'For every required grouping alias, select the best matching inspected business column, project it with that exact alias, and include the same expression in GROUP BY.',
+        'When the warehouse uses a different physical name (for example a location field for a requested region), keep the inspected physical column and alias it to the requested business name. Do not silently drop the grouping.',
+        'Preserve every requested dimension and measure that was already correct; change only what the validation error requires.',
         'Correct it using ONLY the relations and columns from the inspected context above.',
         'If a needed column lives on a different relation, JOIN that relation using the suggested join paths.',
         'If the requested column does not exist anywhere in the inspected context, return the closest answerable SQL and say what is missing.',
@@ -2012,8 +2109,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           intent,
           filterValues: input.followUp?.filters,
           trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+          memberBindings: input.followUp?.memberBindings,
         });
-        if (revalidated.ok) {
+        const repairedGrainGap = revalidated.ok
+          ? missingRankedGrainOutput(questionPlan, reparsed.sql, semanticBridgeAnswer?.dimensions)
+          : undefined;
+        if (revalidated.ok && !repairedGrainGap) {
           const repairedSql: string = reparsed.sql;
           parsed.sql = repairedSql;
           parsed.text = reparsed.text || parsed.text;
@@ -2214,6 +2315,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             intent,
             filterValues: input.followUp?.filters,
             trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+            memberBindings: input.followUp?.memberBindings,
           });
           if (localRepairValidation.ok) {
             repairAttempts = 1;
@@ -2255,6 +2357,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               intent,
               filterValues: input.followUp?.filters,
               trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+              memberBindings: input.followUp?.memberBindings,
             });
             if (repairedValidation.ok) {
               repairAttempts += 1;
@@ -2817,6 +2920,16 @@ function entityIdentifierTokensForMatching(entity: { localId?: string; id: strin
 function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): string | undefined {
   if (!plan || plan.entities.length < 2) return undefined;
   if (!plan.safe) {
+    if (analyticalPlanAllowsDbtExploration(plan)) {
+      return [
+        'DQL GOVERNED RELATIONSHIP COVERAGE: MISSING.',
+        plan.message ?? 'No certified analytical relationship path is available.',
+        `Policy code: ${plan.code ?? 'unsafe_relationship'}.`,
+        'This is not authorization for governed SQL. You MAY propose one bounded, read-only DBT-grounded exploratory SELECT/WITH using only the inspected relations and columns supplied below.',
+        'Use explicit aliases and equality join keys visible in the inspected schema. Preserve the requested member bindings exactly. Do not introduce an uninspected relation, a cross-domain path, an attribution/allocation rule, or more than four joins.',
+        'The host will independently parse, bound, probe, validate, and execute the candidate as analyst-review-required. If the inspected evidence cannot express the request, return no SQL.',
+      ].join('\n');
+    }
     return [
       'DQL ANALYTICAL POLICY DECISION: BLOCKED.',
       plan.message ?? 'No certified analytical relationship path is available.',
@@ -2833,6 +2946,16 @@ function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): strin
     ].filter(Boolean).join('\n')),
     'Use only these relationships and exact key pairs. dbt DAG lineage and same-named columns are not join authorization. Any different join must be refused.',
   ].join('\n');
+}
+
+/**
+ * Missing modeling may enter the narrow EXP-001 host-validated lane. Explicit
+ * unsafe, cross-domain, attribution, expiry, purpose, and proof failures never do.
+ */
+function analyticalPlanAllowsDbtExploration(plan: AnalyticalPathPlan): boolean {
+  if (plan.safe) return false;
+  if (plan.code === 'unbound_relation' || plan.code === 'relationship_not_certified') return true;
+  return plan.code === 'unsafe_relationship' && plan.relationshipIds.length === 0;
 }
 
 // Metric-anchored generation (Tier 2.5): a governed metric matched the question but
@@ -3334,6 +3457,12 @@ function renderFollowUpContext(followUp: AgentFollowUpContext): string {
     followUp.dimensions?.length ? `requested dimensions: ${followUp.dimensions.join(', ')}` : '',
     followUp.priorResultColumns?.length ? `prior result columns: ${followUp.priorResultColumns.join(', ')}` : '',
     followUp.priorResultValues ? `prior result values: ${formatPriorResultValues(followUp.priorResultValues)}` : '',
+    followUp.memberBindings?.length
+      ? `required member bindings: ${followUp.memberBindings.map((binding) => `${binding.dimension} = ${binding.values.join(' | ')} (${binding.confidence})`).join('; ')}`
+      : '',
+    followUp.memberBindings?.length
+      ? 'binding enforcement: apply every required member value only to a column representing its named dimension. Never substitute another dimension; if the named dimension is unavailable, report that gap.'
+      : '',
     followUp.priorResultRef ? renderPriorResultReference(followUp.priorResultRef) : '',
     followUp.priorDqlArtifact ? renderPriorDqlArtifactReference(followUp.priorDqlArtifact) : '',
     followUp.priorLimit ? `prior result limit: ${followUp.priorLimit}` : '',
@@ -3746,12 +3875,243 @@ function generatedResultShapeIsPartial(
   return resultShape.missingOutputs.length >= 2;
 }
 
+/**
+ * A ranked query without its ranked entity is a different answer, even when the
+ * aggregate executes. Catch this before execution so the bounded validation
+ * correction can restore the requested grain instead of presenting a region-only
+ * total for a top-product question.
+ */
+export function missingRankedGrainOutput(
+  questionPlan: AnalysisQuestionPlan,
+  sql: string,
+  governedSemanticDimensions: string[] = [],
+): string | undefined {
+  const grain = questionPlan.requestedShape.grain;
+  if (!grain || questionPlan.requestedShape.topN?.scope !== 'per_group') return undefined;
+  const shape = extractSimpleSelectShape(sql);
+  if (!shape) return undefined;
+  const columns = shape.selectExpressions
+    .map(selectExpressionOutputName)
+    .filter((column): column is string => Boolean(column));
+  const requiredGroupingDimensions = rankedGroupingDimensions(questionPlan);
+  const literalGap = requiredGroupingDimensions.find((dimension) =>
+    !columns.some((output) => outputConceptMatches(output, dimension))
+  );
+  if (!literalGap) return undefined;
+  // A bounded Lane-2 meaning selection may map a user's business word to a
+  // differently named governed dimension (for example "region" to
+  // `location_name`). Trust that mapping only when the semantic compiler
+  // projected every selected governed dimension and the selection covers the
+  // complete grouping cardinality. Arbitrary generated aliases never receive
+  // this exception.
+  const projectedGovernedDimensions = governedSemanticDimensions.filter((dimension) =>
+    columns.some((output) => outputConceptMatches(output, dimension))
+  );
+  if (projectedGovernedDimensions.length >= requiredGroupingDimensions.length) return undefined;
+  return literalGap;
+}
+
+function requestedGroupingDimensions(questionPlan: AnalysisQuestionPlan): string[] {
+  const grain = questionPlan.requestedShape.grain;
+  const dimensions = [
+    ...(grain ? [grain] : []),
+    ...questionPlan.requestedShape.dimensions,
+  ].filter((dimension) => {
+    const isGrain = Boolean(grain) && conceptsEquivalent(dimension, grain!);
+    if (isGrain && !isCompoundMeasurePhrase(dimension, questionPlan.requestedShape.measures)) return true;
+    return !isMeasurePhrase(dimension, questionPlan.requestedShape.measures);
+  });
+  const seen = new Set<string>();
+  return dimensions.filter((dimension) => {
+    const key = normalizedConceptTokens(dimension).join('_');
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function rankedGroupingDimensions(questionPlan: AnalysisQuestionPlan): string[] {
+  const grain = questionPlan.requestedShape.grain;
+  if (!grain || questionPlan.requestedShape.topN?.scope !== 'per_group') return [];
+  return requestedGroupingDimensions(questionPlan);
+}
+
+function renderRequestedShapeForRepair(questionPlan: AnalysisQuestionPlan): string {
+  return 'Required answer contract: ' + JSON.stringify({
+    grain: questionPlan.requestedShape.grain,
+    dimensions: questionPlan.requestedShape.dimensions,
+    measures: questionPlan.requestedShape.measures,
+    requiredOutputs: questionPlan.requestedShape.requiredOutputs,
+    requiredGroupingAliases: rankedGroupingDimensions(questionPlan),
+    topN: questionPlan.requestedShape.topN,
+  });
+}
+
+function outputConceptMatches(output: string, concept: string): boolean {
+  const outputTokens = normalizedConceptTokens(output);
+  const conceptTokens = normalizedConceptTokens(concept);
+  return conceptTokens.length > 0 && conceptTokens.every((token) => outputTokens.includes(token));
+}
+
+function isCompoundMeasurePhrase(concept: string, measures: string[]): boolean {
+  const conceptTokens = normalizedConceptTokens(concept);
+  return measures.some((measure) => {
+    const measureTokens = normalizedConceptTokens(measure);
+    return measureTokens.length > 0
+      && conceptTokens.length > measureTokens.length
+      && measureTokens.every((token) => conceptTokens.includes(token));
+  });
+}
+
+function isMeasurePhrase(concept: string, measures: string[]): boolean {
+  const conceptTokens = normalizedConceptTokens(concept);
+  return measures.some((measure) => {
+    const measureTokens = normalizedConceptTokens(measure);
+    return measureTokens.length > 0
+      && conceptTokens.length >= measureTokens.length
+      && measureTokens.every((token) => conceptTokens.includes(token));
+  });
+}
+
+function conceptsEquivalent(left: string, right: string): boolean {
+  const leftTokens = normalizedConceptTokens(left);
+  const rightTokens = normalizedConceptTokens(right);
+  return leftTokens.length === rightTokens.length
+    && leftTokens.every((token, index) => token === rightTokens[index]);
+}
+
+function normalizedConceptTokens(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token && token !== 'name' && token !== 'label')
+    .map((token) => token.endsWith('s') && token.length > 3 ? token.slice(0, -1) : token);
+}
+
 function trustedFollowUpFilterValues(followUp: AgentFollowUpContext | undefined): string[] | undefined {
   const filters = new Set((followUp?.filters ?? []).map((value) => value.trim()).filter(Boolean));
-  if (!filters.size || !followUp?.priorResultValues) return undefined;
-  const priorValues = Object.values(followUp.priorResultValues).flat().map((value) => value.trim()).filter(Boolean);
-  const trusted = priorValues.filter((value) => filters.has(value));
+  const boundValues = (followUp?.memberBindings ?? [])
+    .flatMap((binding) => binding.values)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const priorValues = Object.values(followUp?.priorResultValues ?? {}).flat().map((value) => value.trim()).filter(Boolean);
+  const trustedCandidates = uniqueDrilldownStrings([...boundValues, ...priorValues]);
+  if (!trustedCandidates.length) return undefined;
+  // Typed bindings were resolved by the deterministic member resolver and are
+  // trusted even if a legacy caller omitted the mirrored flat `filters` array.
+  const trusted = trustedCandidates.filter((value) => boundValues.includes(value) || filters.has(value));
   return trusted.length > 0 ? uniqueDrilldownStrings(trusted) : undefined;
+}
+
+function injectUniqueResolvedMemberBindings(
+  sql: string,
+  bindings: AgentMemberBinding[],
+  schemaContext: AgentSchemaTable[],
+): { sql: string; notes: string[] } | undefined {
+  if (!/^\s*select\b/i.test(sql) || /;\s*\S/.test(sql)) return undefined;
+  const relationAliases = sqlRelationAliases(sql);
+  const predicates: string[] = [];
+  const notes: string[] = [];
+
+  for (const binding of bindings) {
+    const values = Array.from(new Set(binding.values.map((value) => value.trim()).filter(Boolean)));
+    if (values.length === 0) continue;
+    // Do not add a second interpretation when the proposal already contains a
+    // canonical bound value. The validator will determine whether it is on the
+    // correct dimension and reject a misbinding.
+    if (values.some((value) => sql.toLowerCase().includes(sqlStringLiteral(value).toLowerCase()))) continue;
+    const candidates = schemaContext.flatMap((table) => table.columns.flatMap((column) => {
+      if (!outputConceptMatches(column.name, binding.dimension)) return [];
+      if (values.some((value) => /[\p{L}]/u.test(value)) && isJoinKeyColumn(column.name)) return [];
+      const samples = new Set((column.sampleValues ?? []).map(normalizeValueIndexText));
+      // The typed binding is already canonical request state. Samples may
+      // strengthen the match when this turn has them, but snapshot scoping must
+      // not erase a prior governed value. A conflicting non-empty sample set is
+      // rejected; an absent sample set may proceed only through the unique
+      // dimension-column + existing-query-path proof below.
+      if (samples.size > 0 && !values.every((value) => samples.has(normalizeValueIndexText(value)))) return [];
+      const alias = findSqlAliasForRelation(table.relation, relationAliases);
+      if (!alias || !safeSqlIdentifier(alias) || !safeSqlIdentifier(column.name)) return [];
+      return [{ alias, column: column.name }];
+    }));
+    const uniqueCandidates = Array.from(new Map(candidates.map((candidate) => [
+      `${candidate.alias.toLowerCase()}.${candidate.column.toLowerCase()}`,
+      candidate,
+    ])).values());
+    if (uniqueCandidates.length !== 1) return undefined;
+    const candidate = uniqueCandidates[0]!;
+    const qualifiedColumn = `${candidate.alias}.${candidate.column}`;
+    const predicate = values.length === 1
+      ? `${qualifiedColumn} = ${sqlStringLiteral(values[0]!)}`
+      : `${qualifiedColumn} IN (${values.map(sqlStringLiteral).join(', ')})`;
+    predicates.push(predicate);
+    notes.push(`Applied the resolved ${binding.dimension} member binding deterministically on ${qualifiedColumn}.`);
+  }
+  if (predicates.length === 0) return undefined;
+  const clauseIndex = firstTopLevelSqlClauseIndex(sql, ['group by', 'having', 'qualify', 'order by', 'limit']);
+  const head = clauseIndex >= 0 ? sql.slice(0, clauseIndex).trimEnd() : sql.trimEnd();
+  const tail = clauseIndex >= 0 ? ` ${sql.slice(clauseIndex).trimStart()}` : '';
+  const joiner = /\bwhere\b/i.test(head) ? ' AND ' : ' WHERE ';
+  return { sql: `${head}${joiner}${predicates.join(' AND ')}${tail}`, notes };
+}
+
+function sqlRelationAliases(sql: string): Array<{ relation: string; alias: string }> {
+  const matches: Array<{ relation: string; alias: string }> = [];
+  const pattern = /\b(?:from|join)\s+((?:["`]?\w+["`]?\s*\.\s*)*["`]?\w+["`]?)\s*(?:as\s+)?([A-Za-z_][\w$]*)?/gi;
+  for (const match of sql.matchAll(pattern)) {
+    const relation = (match[1] ?? '').replace(/["`\s]/g, '');
+    if (!relation) continue;
+    const implicitAlias = relation.split('.').pop() ?? relation;
+    const candidateAlias = match[2] && !SQL_CLAUSE_WORDS.has(match[2].toLowerCase()) ? match[2] : implicitAlias;
+    matches.push({ relation, alias: candidateAlias });
+  }
+  return matches;
+}
+
+const SQL_CLAUSE_WORDS = new Set(['where', 'join', 'left', 'right', 'inner', 'outer', 'full', 'cross', 'group', 'having', 'qualify', 'order', 'limit', 'on']);
+
+function findSqlAliasForRelation(
+  relation: string,
+  aliases: Array<{ relation: string; alias: string }>,
+): string | undefined {
+  const normalized = relation.replace(/["`\s]/g, '').toLowerCase();
+  const short = normalized.split('.').pop();
+  return aliases.find((candidate) => {
+    const candidateNormalized = candidate.relation.toLowerCase();
+    return candidateNormalized === normalized || candidateNormalized.split('.').pop() === short;
+  })?.alias;
+}
+
+function firstTopLevelSqlClauseIndex(sql: string, clauses: string[]): number {
+  let depth = 0;
+  let quote: string | undefined;
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index]!;
+    if (quote) {
+      if (char === quote) {
+        if (quote === "'" && sql[index + 1] === "'") index += 1;
+        else quote = undefined;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue; }
+    if (char === '(') { depth += 1; continue; }
+    if (char === ')') { depth = Math.max(0, depth - 1); continue; }
+    if (depth !== 0) continue;
+    const rest = sql.slice(index).toLowerCase();
+    if (clauses.some((clause) => rest.startsWith(clause) && (!rest[clause.length] || /\s/.test(rest[clause.length]!)))) return index;
+  }
+  return -1;
+}
+
+function safeSqlIdentifier(value: string): boolean {
+  return /^[A-Za-z_][\w$]*$/.test(value);
+}
+
+function sqlStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function buildCandidateJoinPaths(schemaContext: AgentSchemaTable[]): AgentJoinPath[] {
@@ -4701,6 +5061,7 @@ async function selectDeepGeneratedProposalCandidate(input: {
   intent: AgentIntent;
   initial: { raw: string; parsed: ParsedProposal };
   contextLedger: ContextLedger;
+  followUp?: AgentFollowUpContext;
   executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
@@ -4783,6 +5144,7 @@ async function scoreDeepGeneratedProposalCandidate(
     questionPlan: AnalysisQuestionPlan;
     intent: AgentIntent;
     contextLedger: ContextLedger;
+    followUp?: AgentFollowUpContext;
     executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
   },
   candidate: { raw: string; parsed: ParsedProposal; index: number },
@@ -4799,6 +5161,9 @@ async function scoreDeepGeneratedProposalCandidate(
     const validation = input.contextLedger.validateSql(parsed.sql, {
       question: input.question,
       intent: input.intent,
+      filterValues: input.followUp?.filters,
+      trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
+      memberBindings: input.followUp?.memberBindings,
     });
     validationOk = validation.ok;
     if (validation.ok) {
@@ -5585,12 +5950,12 @@ function providerToolEvidenceRouteSteps(toolCalls: AgentEvidenceToolCall[] | und
 function cascadeBudgetEvidenceRouteSteps(trace: CascadeBudgetTrace | undefined): AgentEvidenceRouteStep[] {
   if (!trace) return [];
   const { usage, limits } = trace;
-  const used = usage.laneRegroundAttemptsUsed + usage.laneExecutionAttemptsUsed + usage.engineEscalationsUsed;
+  const used = usage.laneRegroundAttemptsUsed + usage.laneValidationAttemptsUsed + usage.laneExecutionAttemptsUsed + usage.engineEscalationsUsed;
   if (used === 0) return [];
   return [{
     tool: 'cascade_budget',
     status: 'checked',
-    label: `Repair budget used: re-ground ${usage.laneRegroundAttemptsUsed}/${limits.lane.reground}, execution ${usage.laneExecutionAttemptsUsed}/${limits.lane.execution}`,
+    label: `Repair budget used: re-ground ${usage.laneRegroundAttemptsUsed}/${limits.lane.reground}, validation ${usage.laneValidationAttemptsUsed}/${limits.lane.validation}, execution ${usage.laneExecutionAttemptsUsed}/${limits.lane.execution}`,
     detail: `engine escalations ${usage.engineEscalationsUsed}/${limits.engineEscalations}`,
   }];
 }

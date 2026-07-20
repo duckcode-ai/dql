@@ -11,6 +11,7 @@ import type { BlockEntry } from '../blocks/block-types';
 import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
 import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
+import { buildNotebookSemanticBlock } from './semantic-notebook-source';
 
 export type BuildTab = 'notebooks' | 'semantic' | 'database' | 'blocks';
 
@@ -135,7 +136,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, block
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
-        {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} />}
+        {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} />}
       </div>
@@ -223,10 +224,17 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
   );
 }
 
-function SemanticList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {
-  const { state } = useNotebook();
+function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search: string; onInsert: (text: string) => void; notebookMode: boolean }) {
+  const { state, dispatch } = useNotebook();
   const [tree, setTree] = useState<SemanticTreeNode | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
+  const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
+  const [compatibleDimensions, setCompatibleDimensions] = useState<Set<string> | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<{ sql: string; rows: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const metricsByName = new Map(state.semanticLayer.metrics.map((metric) => [metric.name, metric]));
 
   // The sidebar owns the semantic-layer fetch (the old SemanticPanel did this on
   // mount). Without it, nothing shows in the notebook. Cheap + cached server-side.
@@ -240,9 +248,124 @@ function SemanticList({ t, search, onInsert }: { t: Theme; search: string; onIns
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    setPreview(null);
+    setError(null);
+    if (selectedMetrics.size === 0) {
+      setCompatibleDimensions(null);
+      setSelectedDimensions(new Set());
+      return;
+    }
+    setCompatibleDimensions(null);
+    void api.getCompatibleDimensions(Array.from(selectedMetrics)).then((dimensions) => {
+      if (!active) return;
+      const names = new Set(dimensions.map((dimension) => dimension.name));
+      setCompatibleDimensions(names);
+      setSelectedDimensions((current) => new Set(Array.from(current).filter((name) => names.has(name))));
+    });
+    return () => { active = false; };
+  }, [Array.from(selectedMetrics).sort().join('|')]);
+
+  const toggleSelection = (kind: 'metric' | 'dimension', name: string) => {
+    const update = kind === 'metric' ? setSelectedMetrics : setSelectedDimensions;
+    update((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
+  const canSelect = (kind: 'metric' | 'dimension', name: string): { allowed: boolean; reason?: string } => {
+    if (kind === 'metric') {
+      const capability = metricsByName.get(name)?.execution;
+      return capability && capability.status !== 'ready'
+        ? { allowed: false, reason: capability.reason || 'This metric requires semantic runtime setup.' }
+        : { allowed: true };
+    }
+    if (selectedMetrics.size === 0) return { allowed: false, reason: 'Select a metric first.' };
+    if (!compatibleDimensions) return { allowed: false, reason: 'Checking compatibility…' };
+    return compatibleDimensions.has(name)
+      ? { allowed: true }
+      : { allowed: false, reason: 'This dimension has no governed join path to every selected metric.' };
+  };
+
+  const selectedKeys = new Set([
+    ...Array.from(selectedMetrics).map((name) => `metric:${name}`),
+    ...Array.from(selectedDimensions).map((name) => `dimension:${name}`),
+  ]);
+
+  const runPreview = async () => {
+    if (selectedMetrics.size === 0) return;
+    setPreviewing(true);
+    setError(null);
+    try {
+      const result = await api.previewSemanticBuilder({
+        metrics: Array.from(selectedMetrics),
+        dimensions: Array.from(selectedDimensions),
+        limit: 50,
+      });
+      if ('error' in result) {
+        setPreview(null);
+        setError(result.error);
+        return;
+      }
+      setPreview({ sql: result.sql, rows: result.result.rowCount ?? result.result.rows.length });
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const addSemanticCell = () => {
+    if (selectedMetrics.size === 0) return;
+    dispatch({ type: 'ADD_CELL', cell: makeCell('dql', buildNotebookSemanticBlock(Array.from(selectedMetrics), Array.from(selectedDimensions))) });
+    setSelectedMetrics(new Set());
+    setSelectedDimensions(new Set());
+    setPreview(null);
+    setError(null);
+  };
+
   if (loading && !tree) return <EmptyNote text="Loading semantic layer…" t={t} />;
   if (!tree || (tree.children?.length ?? 0) === 0) return <EmptyNote text="No semantic layer imported yet." t={t} />;
-  return <SemanticTreeView tree={tree} themeMode={state.themeMode} search={search} onInsert={onInsert} />;
+  return <div>
+    {notebookMode && (
+      <div style={{ display: 'grid', gap: 7, padding: 8, borderBottom: `1px solid ${t.headerBorder}`, background: 'var(--bg-1)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ flex: 1, fontSize: 10.5, color: t.textMuted }}>
+            {selectedMetrics.size > 0
+              ? `${selectedMetrics.size} metric${selectedMetrics.size === 1 ? '' : 's'} · ${selectedDimensions.size} dimension${selectedDimensions.size === 1 ? '' : 's'}`
+              : 'Select metrics, then compatible dimensions'}
+          </span>
+          <button type="button" onClick={() => void runPreview()} disabled={previewing || selectedMetrics.size === 0} style={{ border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.textSecondary, borderRadius: 5, padding: '4px 7px', fontSize: 10, cursor: selectedMetrics.size ? 'pointer' : 'not-allowed', opacity: selectedMetrics.size ? 1 : .5 }}>
+            {previewing ? 'Running…' : 'Preview & run'}
+          </button>
+          <button type="button" onClick={addSemanticCell} disabled={selectedMetrics.size === 0} style={{ border: 'none', background: t.accent, color: '#fff', borderRadius: 5, padding: '5px 7px', fontSize: 10, fontWeight: 700, cursor: selectedMetrics.size ? 'pointer' : 'not-allowed', opacity: selectedMetrics.size ? 1 : .5 }}>
+            Add cell
+          </button>
+        </div>
+        {preview && (
+          <div style={{ display: 'grid', gap: 4, padding: '6px 7px', borderRadius: 6, border: '1px solid var(--status-success)', background: 'var(--status-success-bg)', color: t.textSecondary, fontSize: 10 }}>
+            <span>Preview succeeded · {preview.rows} row{preview.rows === 1 ? '' : 's'}</span>
+            <code style={{ display: 'block', maxHeight: 48, overflow: 'hidden', whiteSpace: 'pre-wrap', fontSize: 9, color: t.textMuted }}>{preview.sql}</code>
+          </div>
+        )}
+        {error && <div role="alert" style={{ padding: '6px 7px', borderRadius: 6, border: `1px solid ${t.error}40`, background: `${t.error}10`, color: t.error, fontSize: 10, lineHeight: 1.35 }}>{error}</div>}
+        {state.semanticLayer.metrics.some((metric) => metric.execution && metric.execution.status !== 'ready') && (
+          <div style={{ fontSize: 9.5, color: t.textMuted }}>Setup-required metrics remain visible but cannot be selected until MetricFlow is configured.</div>
+        )}
+      </div>
+    )}
+    <SemanticTreeView
+      tree={tree}
+      themeMode={state.themeMode}
+      search={search}
+      onInsert={onInsert}
+      selectionMode={notebookMode}
+      selected={selectedKeys}
+      onToggleSelection={toggleSelection}
+      canSelect={canSelect}
+    />
+  </div>;
 }
 
 function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {

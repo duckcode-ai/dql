@@ -6,6 +6,42 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.2 - 2026-07-20
+
+### Grounded follow-ups and semantic notebook execution
+
+This patch strengthens governed AI follow-ups so entity values remain bound to
+the user request, improves multi-concept ranking safety, and makes imported dbt
+semantic metrics easier to compose and execute from the notebook.
+
+### Added
+
+- **Typed member bindings across the answer loop.** Named customers, products,
+  regions, and other result values are preserved as immutable request evidence
+  through planning, block selection, SQL generation, repair, and validation.
+- **Notebook semantic composer.** Users can search imported metrics and
+  dimensions, inspect execution readiness, and insert a valid semantic query
+  source without manually composing internal syntax.
+- **Bounded repair accounting.** Regrounding, validation, and execution retries
+  now have separate budgets and visible progress instead of sharing one opaque
+  retry counter.
+
+### Fixed
+
+- **Generated SQL cannot silently drop or move member filters.** Validation
+  rejects missing bindings and filters attached to the wrong dimension, while
+  deterministic injection safely restores unique predicates on an existing
+  governed query path.
+- **Ranked questions preserve every requested grouping.** Product-by-region and
+  similar questions must return both concepts, including governed semantic
+  aliases such as a location dimension used for a requested region.
+- **Certified blocks are selected by actual fit.** Broad customer or product
+  blocks no longer win solely because their names overlap a follow-up question;
+  grain, outputs, filters, and typed member coverage participate in routing.
+- **dbt semantic execution status stays honest.** Imported MetricFlow and native
+  semantic definitions expose whether they can run locally and retain their
+  source metadata across refreshes.
+
 ## v1.8.1 - 2026-07-19
 
 ### Reliable dbt semantic discovery and upgrade preparation

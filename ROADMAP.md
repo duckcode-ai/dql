@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.8.1)
+## Current State (v1.8.2)
 
 DQL OSS is ready for local-first use cases:
 

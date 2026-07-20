@@ -74,3 +74,58 @@ describe('buildAllowedSqlContext question-relevant column selection (W3.3)', () 
     expect(names.slice(0, 3)).toEqual(['col_0', 'col_1', 'col_2']);
   });
 });
+
+describe('buildAllowedSqlContext selected semantic bindings (AGT-011)', () => {
+  it('allows the governed backing table declared by a selected semantic metric', () => {
+    const metric: MetadataObject = {
+      objectKey: 'semantic:metric:dbt_core_models.total_ccu_count',
+      objectType: 'semantic_metric',
+      name: 'dbt_core_models.total_ccu_count',
+      fullName: 'dbt_core_models.total_ccu_count',
+      status: 'certified',
+      sourceSystem: 'dbt semantic metric',
+      payload: {
+        table: 'analytics.sm_ccu_consumption_by_usage_source_daily_f',
+        formula: 'total_ccu_count',
+      },
+    };
+
+    const ctx = buildAllowedSqlContext([metric], []);
+
+    expect(ctx.relations).toContainEqual(expect.objectContaining({
+      relation: 'analytics.sm_ccu_consumption_by_usage_source_daily_f',
+      objectKey: metric.objectKey,
+      source: 'semantic layer backing relation',
+      columnCompleteness: 'partial',
+    }));
+  });
+
+  it('merges dbt columns into the semantic backing relation when both are inspected', () => {
+    const metric: MetadataObject = {
+      objectKey: 'semantic:metric:orders.total_revenue',
+      objectType: 'semantic_metric',
+      name: 'orders.total_revenue',
+      payload: { table: 'analytics.fct_orders' },
+    };
+    const model: MetadataObject = {
+      objectKey: 'dbt:model:fct_orders',
+      objectType: 'dbt_model',
+      name: 'fct_orders',
+      fullName: 'analytics.fct_orders',
+      sourceSystem: 'dbt manifest',
+      payload: {
+        relation: 'analytics.fct_orders',
+        columnCompleteness: 'complete',
+        columns: [{ name: 'customer_id' }, { name: 'total_revenue', type: 'decimal' }],
+      },
+    };
+
+    const relation = buildAllowedSqlContext([metric, model], []).relations[0];
+
+    expect(relation).toMatchObject({
+      relation: 'analytics.fct_orders',
+      columnCompleteness: 'complete',
+    });
+    expect(relation?.columns.map((column) => column.name)).toEqual(['customer_id', 'total_revenue']);
+  });
+});

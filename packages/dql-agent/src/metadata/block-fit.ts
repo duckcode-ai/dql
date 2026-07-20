@@ -249,18 +249,28 @@ function inferredTextDimensions(text: string): string[] {
 }
 
 function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: BlockShape, question: string): string[] {
+  const memberBindings = requested.memberBindings ?? [];
+  const boundValueTokens = new Set(memberBindings.flatMap((binding) => binding.values.map(canonicalToken)));
+  const unsupportedBindings = memberBindings.flatMap((binding) => {
+    const dimension = canonicalToken(binding.dimension);
+    const dimensionAliases = new Set([dimension, dimension.replace(/_name$/, '')]);
+    const staticallyScoped = binding.values.every((value) => block.scopeTokens.has(canonicalToken(value)));
+    const exposesBinding = [...dimensionAliases].some((alias) => block.filters.includes(alias) || block.dimensions.includes(alias));
+    return staticallyScoped || exposesBinding ? [] : binding.values;
+  });
   const requestedFilters = uniqueStrings([
-    ...requested.filters,
+    ...requested.filters.filter((filter) => !boundValueTokens.has(canonicalToken(filter))),
     ...requested.followUpReferences.flatMap((ref) => ref.resolvedValues ?? []),
   ].map(canonicalToken).filter((filter) => Boolean(filter) && !isTemporalFilter(filter)));
-  if (requestedFilters.length === 0) return [];
+  const unboundRequestedFilters = requestedFilters.filter((filter) => !boundValueTokens.has(filter));
+  if (unboundRequestedFilters.length === 0) return uniqueStrings(unsupportedBindings);
   // A certified artifact may bake a restriction into its identity and SQL
   // rather than expose it as a dynamic parameter. For example,
   // top_beverage_customers has WHERE products.is_beverage and is already exactly
   // beverage-scoped. This is stronger than a description mention: scopeTokens
   // are sourced only from the certified name, tags, and WHERE clause.
-  const uncoveredFilters = requestedFilters.filter((filter) => !block.scopeTokens.has(filter));
-  if (uncoveredFilters.length === 0) return [];
+  const uncoveredFilters = unboundRequestedFilters.filter((filter) => !block.scopeTokens.has(filter));
+  if (uncoveredFilters.length === 0) return uniqueStrings(unsupportedBindings);
   // A filtered question cannot be answered exactly by an unparameterized block.
   // Returning [] here used to erase the user's restriction and let a broad
   // certified ranking (for example all-customer lifetime spend) answer a
@@ -276,11 +286,17 @@ function unsupportedRequestedFilters(requested: RequestedAnswerShape, block: Blo
       return new RegExp(`\\b(?:by|per)\\s+${words}\\b`, 'i').test(question)
         || new RegExp(`\\b${words}\\s*(?:=|:|is|equals)`, 'i').test(question);
     });
-    if (explicitlyFilterable) return [];
-    return uncoveredFilters.filter((filter) => !block.dimensions.includes(filter));
+    if (explicitlyFilterable) return uniqueStrings(unsupportedBindings);
+    return uniqueStrings([
+      ...unsupportedBindings,
+      ...uncoveredFilters.filter((filter) => !block.dimensions.includes(filter)),
+    ]);
   }
   const blockFilters = new Set(block.filters);
-  return uncoveredFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter));
+  return uniqueStrings([
+    ...unsupportedBindings,
+    ...uncoveredFilters.filter((filter) => !blockFilters.has(filter) && !block.dimensions.includes(filter)),
+  ]);
 }
 
 function extractSqlFilterScope(sql: string): string {

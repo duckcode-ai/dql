@@ -30,8 +30,25 @@ describe('cascade budgets', () => {
     expect(canUseEngineEscalation(state)).toBe(false);
     expect(cascadeBudgetTrace(state).usage).toEqual({
       laneRegroundAttemptsUsed: 0,
+      laneValidationAttemptsUsed: 0,
       laneExecutionAttemptsUsed: 1,
       engineEscalationsUsed: 1,
+    });
+  });
+
+  it('keeps metadata expansion and SQL validation correction on separate bounded lanes', () => {
+    const state = createCascadeBudgetState();
+
+    recordLaneRepair(state, 'reground');
+    expect(canUseLaneRepair(state, 'reground')).toBe(false);
+    expect(canUseLaneRepair(state, 'validation')).toBe(true);
+
+    recordLaneRepair(state, 'validation');
+    expect(canUseLaneRepair(state, 'validation')).toBe(false);
+    expect(cascadeBudgetTrace(state).usage).toMatchObject({
+      laneRegroundAttemptsUsed: 1,
+      laneValidationAttemptsUsed: 1,
+      laneExecutionAttemptsUsed: 0,
     });
   });
 

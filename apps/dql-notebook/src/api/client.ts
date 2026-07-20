@@ -816,6 +816,13 @@ export interface AgentRunNextAction {
   artifactKind?: AgentRunArtifactKind;
 }
 
+export interface AgentRunClarificationOption {
+  id: string;
+  label: string;
+  description?: string;
+  kind?: string;
+}
+
 export interface AgentRunEvent {
   id: string;
   runId: string;
@@ -862,6 +869,7 @@ export interface AgentRun {
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
   nextActions: AgentRunNextAction[];
+  clarificationOptions?: AgentRunClarificationOption[];
   repairAttempts: number;
 }
 
@@ -892,6 +900,7 @@ export type AgentThinkingMode = 'auto' | 'low' | 'medium' | 'high';
 
 export interface CreateAgentRunInput {
   question: string;
+  selectedEvidenceId?: string;
   requestedMode?: AgentRunRequestedMode;
   mode?: AgentRunRequestedMode;
   audience?: AgentRunAudience;

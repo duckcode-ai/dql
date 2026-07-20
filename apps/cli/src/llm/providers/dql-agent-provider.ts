@@ -18,6 +18,7 @@ import {
   type CertifiedFitConfirmation,
   type CertifiedFitConfirmationRequest,
   type AgentFollowUpContext,
+  type AgentMemberBinding,
   type AgentPriorResultReference,
   type AgentProvider,
   type AgentResultPayload,
@@ -836,7 +837,9 @@ export function resolveAgentFollowUpContext(
   const relativeComparison = isEntityRelativeComparisonQuestion(question);
   const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || focusedPriorResultValues || priorDqlArtifact);
   if (!hasUsefulContext) return undefined;
-  const inferredKind = isGenericFollowUp(question)
+  const inferredKind = resolvedReferences.memberBindings?.length
+    ? 'drilldown'
+    : isGenericFollowUp(question)
     ? 'generic'
     : isDrilldownFollowUp(question)
       ? 'drilldown'
@@ -894,6 +897,10 @@ export function resolveAgentFollowUpContext(
           inferredMeasuresFromAnswerContract(context.answerContract),
           inferredMeasureColumns(priorResultColumns),
         ),
+    memberBindings: resolvedReferences.memberBindings?.map((binding) => ({
+      ...binding,
+      sourceTurnId: cleanOptionalString(activeTurn?.id) ?? cleanOptionalString(context.sourceAnswerId),
+    })),
     resolvedReferences: resolvedReferences.labels,
     unresolvedReferences: resolvedReferences.unresolved,
   };
@@ -1087,6 +1094,7 @@ function resolveConversationReferences(
   labels?: string[];
   unresolved?: string[];
   valuesByDimension?: Record<string, string[]>;
+  memberBindings?: AgentMemberBinding[];
 } {
   const namedValues = resolveNamedConversationValues(question, turns, activeValues);
   const dimensions = [
@@ -1112,6 +1120,24 @@ function resolveConversationReferences(
     labels.push(values.length ? `${dimension}: ${values.join(', ')}` : `${dimension}: unresolved`);
   }
   if (namedValues) filters.push(...Object.values(namedValues).flat());
+  const questionText = normalizeConversationValueText(question);
+  const memberBindings: AgentMemberBinding[] = namedValues
+    ? Object.entries(namedValues).map(([dimension, values]) => ({
+        dimension: normalizePriorValueDimension(dimension),
+        values,
+        source: 'prior_result',
+        confidence: values.every((value) => (` ${questionText} `).includes(` ${normalizeConversationValueText(value)} `))
+          ? 'exact'
+          : 'unique_partial',
+      }))
+    : dimensions.length === 1 && filters.length > 0
+      ? [{
+          dimension: dimensions[0]!,
+          values: Array.from(new Set(filters)).slice(0, 24),
+          source: 'prior_result',
+          confidence: 'deictic',
+        }]
+      : [];
   const unresolved = referencesNeedValues(question) && filters.length === 0
     ? ['Could not resolve the referenced prior result values from conversation state.']
     : undefined;
@@ -1121,6 +1147,7 @@ function resolveConversationReferences(
     labels: labels.length > 0 ? Array.from(new Set(labels)) : undefined,
     unresolved,
     valuesByDimension: namedValues,
+    memberBindings: memberBindings.length > 0 ? memberBindings : undefined,
   };
 }
 
@@ -1423,10 +1450,11 @@ export const __test__ = {
 };
 
 const GENERIC_FOLLOW_UP_WORDS = new Set([
-  'a', 'about', 'again', 'all', 'also', 'and', 'as', 'be', 'block', 'can', 'could', 'data', 'do',
+  'a', 'about', 'again', 'all', 'also', 'and', 'are', 'as', 'be', 'block', 'can', 'could', 'data', 'did', 'do', 'does',
   'execute', 'for', 'from', 'get', 'give', 'import', 'it', 'its', 'let', 'lets', 'me', 'metrics',
   'more', 'now', 'of', 'output', 'please', 'result', 'results', 'run', 'show', 'solution', 'summary',
-  'that', 'the', 'them', 'this', 'to', 'use', 'with', 'you',
+  'that', 'the', 'them', 'this', 'to', 'use', 'was', 'were', 'what', 'when', 'where', 'which', 'who',
+  'why', 'with', 'you',
 ]);
 
 function isGenericFollowUp(question: string): boolean {

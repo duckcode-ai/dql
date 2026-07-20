@@ -337,15 +337,39 @@ metrics:
     writeFileSync(join(targetDir, 'semantic_manifest.json'), JSON.stringify({
       semantic_models: [{
         name: 'customers',
-        model: "ref('customers')",
-        measures: [{ name: 'lifetime_spend', agg: 'sum', expr: 'lifetime_spend' }],
-        dimensions: [{ name: 'customer_name', type: 'categorical' }],
+        node_relation: {
+          alias: 'customers',
+          schema_name: 'analytics',
+          database: 'warehouse',
+          relation_name: '"warehouse"."analytics"."customers"',
+        },
+        measures: [
+          { name: 'lifetime_spend', agg: 'sum', expr: 'lifetime_spend' },
+          { name: 'median_lifetime_spend', agg: 'median', expr: 'lifetime_spend' },
+        ],
+        dimensions: [
+          { name: 'customer_name', type: 'categorical' },
+          { name: 'customer_tier', type: 'categorical' },
+        ],
       }],
-      metrics: [{
-        name: 'customer_lifetime_spend',
-        type: 'simple',
-        type_params: { measure: 'lifetime_spend' },
-      }],
+      metrics: [
+        {
+          name: 'customer_lifetime_spend',
+          type: 'simple',
+          type_params: { measure: { name: 'lifetime_spend' }, input_measures: [{ name: 'lifetime_spend' }] },
+          filter: { where_filters: [{ where_sql_template: "{{ Dimension('customer__customer_tier') }} = 'enterprise'" }] },
+        },
+        {
+          name: 'average_customer_spend',
+          type: 'derived',
+          type_params: { expr: 'customer_lifetime_spend / customer_count', metrics: [{ name: 'customer_lifetime_spend' }] },
+        },
+        {
+          name: 'median_customer_spend',
+          type: 'simple',
+          type_params: { measure: { name: 'median_lifetime_spend' } },
+        },
+      ],
       saved_queries: [{
         name: 'top_customers',
         query_params: { metrics: ['customer_lifetime_spend'], group_by: ['customer_name'] },
@@ -357,6 +381,12 @@ metrics:
     expect(layer.listSemanticModels().map((model) => model.name)).toContain('customers');
     expect(layer.listMetrics().map((metric) => metric.name)).toContain('customer_lifetime_spend');
     expect(layer.listSavedQueries().map((query) => query.name)).toContain('top_customers');
+    expect(layer.getMetric('customer_lifetime_spend')?.table).toBe('"warehouse"."analytics"."customers"');
+    const composed = layer.composeQuery({ metrics: ['customer_lifetime_spend'], dimensions: ['customer_name'] });
+    expect(composed?.sql).toContain('FROM "warehouse"."analytics"."customers"');
+    expect(composed?.sql).toContain("customer_tier = 'enterprise'");
+    expect(layer.composeQuery({ metrics: ['average_customer_spend'], dimensions: [] })).toBeNull();
+    expect(layer.composeQuery({ metrics: ['median_customer_spend'], dimensions: [] })).toBeNull();
   });
 
   it('honors absolute dbt roots, configured manifest paths, and dbt model-paths', () => {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Bookmark, Box, Boxes, ChevronDown, ChevronRight, Clock, Filter, Folder,
   Gauge, GitBranch, Layers, Sigma, Tag,
@@ -97,11 +97,19 @@ export function SemanticTreeView({
   themeMode,
   search = '',
   onInsert,
+  selectionMode = false,
+  selected = new Set<string>(),
+  onToggleSelection,
+  canSelect = () => ({ allowed: true }),
 }: {
   tree: SemanticTreeNode;
   themeMode: ThemeMode;
   search?: string;
   onInsert: (ref: string) => void;
+  selectionMode?: boolean;
+  selected?: Set<string>;
+  onToggleSelection?: (kind: 'metric' | 'dimension', name: string) => void;
+  canSelect?: (kind: 'metric' | 'dimension', name: string) => { allowed: boolean; reason?: string };
 }) {
   const t = themes[themeMode];
   const q = search.trim().toLowerCase();
@@ -109,30 +117,62 @@ export function SemanticTreeView({
   if (roots.length === 0) {
     return <div style={{ padding: '16px 12px', fontSize: 11.5, color: t.textMuted, textAlign: 'center' }}>{q ? 'No matches.' : 'No semantic objects.'}</div>;
   }
-  return <>{roots.map((node) => <TreeNodeRow key={node.id} node={node} t={t} q={q} onInsert={onInsert} depth={0} />)}</>;
+  return <>{roots.map((node) => <TreeNodeRow key={node.id} node={node} t={t} q={q} onInsert={onInsert} depth={0} selectionMode={selectionMode} selected={selected} onToggleSelection={onToggleSelection} canSelect={canSelect} />)}</>;
 }
 
-function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; t: Theme; q: string; onInsert: (ref: string) => void; depth: number }) {
+function TreeNodeRow({ node, t, q, onInsert, depth, selectionMode, selected, onToggleSelection, canSelect }: {
+  node: SemanticTreeNode;
+  t: Theme;
+  q: string;
+  onInsert: (ref: string) => void;
+  depth: number;
+  selectionMode: boolean;
+  selected: Set<string>;
+  onToggleSelection?: (kind: 'metric' | 'dimension', name: string) => void;
+  canSelect: (kind: 'metric' | 'dimension', name: string) => { allowed: boolean; reason?: string };
+}) {
   const hasChildren = (node.children?.length ?? 0) > 0;
   const [open, setOpen] = useState(depth < 1 || Boolean(q));
+  useEffect(() => {
+    if (q) setOpen(true);
+  }, [q]);
   const insertable = INSERTABLE.has(node.kind);
   const icon = resolveNodeIcon(node);
   const Icon = icon?.Icon;
   const pad = 10 + depth * 13;
+  const selectionKind = node.kind === 'metric' || node.kind === 'measure'
+    ? 'metric'
+    : node.kind === 'dimension' || node.kind === 'time_dimension'
+      ? 'dimension'
+      : null;
+  const name = nodeName(node);
+  const selectionKey = selectionKind ? `${selectionKind}:${name}` : '';
+  const selection = selectionKind ? canSelect(selectionKind, name) : { allowed: false as const };
 
   if (!hasChildren) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0, borderBottom: `1px solid ${t.cellBorder}` }}>
         <button
           type="button"
-          onClick={() => insertable && onInsert(nodeRef(node))}
-          title={insertable ? `Insert ${nodeRef(node)}` : node.label}
+          onClick={() => {
+            if (selectionMode && selectionKind && selection.allowed) onToggleSelection?.(selectionKind, name);
+            else if (!selectionMode && insertable) onInsert(nodeRef(node));
+          }}
+          disabled={selectionMode && Boolean(selectionKind) && !selection.allowed}
+          title={selectionMode && selectionKind
+            ? selection.allowed ? `Select ${node.label}` : selection.reason || 'Not compatible with the current selection'
+            : insertable ? `Insert ${nodeRef(node)}` : node.label}
           style={{
             display: 'flex', alignItems: 'center', gap: 7, flex: 1, minWidth: 0, boxSizing: 'border-box',
             padding: `5px 6px 5px ${pad + 15}px`, border: 'none', background: 'transparent',
-            cursor: insertable ? 'pointer' : 'default', textAlign: 'left', fontFamily: t.font, color: t.textPrimary,
+            cursor: selectionMode && selectionKind ? selection.allowed ? 'pointer' : 'not-allowed' : insertable ? 'pointer' : 'default',
+            textAlign: 'left', fontFamily: t.font, color: selection.allowed || !selectionKind ? t.textPrimary : t.textMuted,
+            opacity: selectionMode && selectionKind && !selection.allowed ? 0.55 : 1,
           }}
         >
+          {selectionMode && selectionKind && (
+            <input type="checkbox" readOnly checked={selected.has(selectionKey)} disabled={!selection.allowed} style={{ accentColor: t.accent, margin: 0, flexShrink: 0 }} />
+          )}
           {Icon && <Icon size={13} color={icon.tone(t)} style={{ flexShrink: 0 }} />}
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{node.label}</span>
         </button>
@@ -156,7 +196,7 @@ function TreeNodeRow({ node, t, q, onInsert, depth }: { node: SemanticTreeNode; 
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontWeight: 600 }}>{node.label}</span>
         <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{node.count ?? children.length}</span>
       </button>
-      {open && children.map((child) => <TreeNodeRow key={child.id} node={child} t={t} q={q} onInsert={onInsert} depth={depth + 1} />)}
+      {open && children.map((child) => <TreeNodeRow key={child.id} node={child} t={t} q={q} onInsert={onInsert} depth={depth + 1} selectionMode={selectionMode} selected={selected} onToggleSelection={onToggleSelection} canSelect={canSelect} />)}
     </div>
   );
 }

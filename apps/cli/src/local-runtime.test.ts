@@ -3,6 +3,7 @@ import {
   applyRequestedTopNToExploratorySql,
   buildAgentValueProbeSql,
   agentRunDeadlineMs,
+  agentAnswerHasExecutionFailure,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
@@ -18,6 +19,7 @@ import {
   generateSemanticCompostingDrafts,
   buildSemanticLayerDiagnostics,
   buildSemanticTableMapping,
+  conversationTurnInputFromRun,
   createBlockArtifacts,
   createDqlArtifactGenerationSessionForProject,
   createDqlGenerationSessionForProject,
@@ -771,7 +773,10 @@ describe('dbt-first onboarding runtime API', () => {
         model: "ref('orders')",
         measures: [{ name: 'order_revenue', agg: 'sum', expr: 'revenue' }],
       }],
-      metrics: [{ name: 'total_order_revenue', type: 'simple', type_params: { measure: 'order_revenue' } }],
+      metrics: [
+        { name: 'total_order_revenue', type: 'simple', type_params: { measure: { name: 'order_revenue' } } },
+        { name: 'revenue_growth', type: 'derived', type_params: { expr: 'total_order_revenue', metrics: [{ name: 'total_order_revenue' }] } },
+      ],
     }));
     let server: Server | undefined;
     try {
@@ -846,10 +851,20 @@ describe('dbt-first onboarding runtime API', () => {
       expect(existsSync(join(projectRoot, 'semantic-layer'))).toBe(false);
       const semanticLayer = await (await fetch(`${base}/api/semantic-layer`)).json() as {
         provider: string;
-        metrics: Array<{ name: string }>;
+        metrics: Array<{ name: string; execution?: { status: string; engine: string | null; reason: string | null } }>;
       };
       expect(semanticLayer.provider).toBe('dbt');
       expect(semanticLayer.metrics.map((metric) => metric.name)).toContain('total_order_revenue');
+      expect(semanticLayer.metrics.find((metric) => metric.name === 'total_order_revenue')?.execution).toEqual({
+        status: 'ready',
+        engine: 'native',
+        reason: null,
+      });
+      expect(semanticLayer.metrics.find((metric) => metric.name === 'revenue_growth')?.execution).toEqual({
+        status: 'requires_setup',
+        engine: null,
+        reason: expect.stringContaining('requires MetricFlow execution'),
+      });
       const status = await (await fetch(`${base}/api/onboarding/status`)).json() as { requestId: string; snapshotId: string; modeling: { enabled: boolean; snapshotState: string }; preparation: { id: string; status: string } };
       expect(status.requestId).toMatch(/^onboarding-status-/);
       expect(status.snapshotId).toMatch(/^[a-f0-9]{64}$/);
@@ -1097,9 +1112,46 @@ describe('exploratory result contracts', () => {
 });
 
 describe('agent run runtime API', () => {
+  it('AGT-012 preserves bounded member values beyond the eight-row visual preview', () => {
+    const rows = Array.from({ length: 10 }, (_, index) => ({
+      product_name: index === 9 ? 'flame impala' : 'product_' + index,
+      location_name: 'Philadelphia',
+      revenue: 100 - index,
+    }));
+    const turn = conversationTurnInputFromRun({
+      id: 'run_member_memory',
+      question: 'top products by region',
+      status: 'completed',
+      route: 'generated_answer',
+      trustState: 'review_required',
+      artifacts: [{
+        kind: 'answer',
+        payload: {
+          result: {
+            columns: ['product_name', 'location_name', 'revenue'],
+            rows,
+            rowCount: 10,
+          },
+        },
+      }],
+      evaluations: [],
+      nextActions: [],
+    } as any);
+
+    expect(turn.result?.rowsSample).toHaveLength(8);
+    expect(turn.result?.dimensionValues?.product_name).toContain('flame impala');
+  });
+
+  it('UI-010 classifies governed SQL execution errors as failed outcomes', () => {
+    expect(agentAnswerHasExecutionFailure({ executionError: 'DuckDB lock conflict' })).toBe(true);
+    expect(agentAnswerHasExecutionFailure({ executionError: '   ' })).toBe(false);
+    expect(agentAnswerHasExecutionFailure({})).toBe(false);
+  });
+
   it('preserves conversation context when parsing governed agent run requests', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'who are the top 5 customers for these categories?',
+      selectedEvidenceId: 'semantic:metric:customer_lifetime_spend',
       requestedMode: 'ask',
       conversationContext: {
         sourceCertifiedBlock: 'food_vs_drink_revenue',
@@ -1116,6 +1168,7 @@ describe('agent run runtime API', () => {
     expect(parsed.request?.reasoningEffort).toBe('high');
     expect(parsed.request?.analysisDepth).toBe('deep');
     expect(parsed.request?.thinkingMode).toBe('low');
+    expect(parsed.request?.selectedEvidenceId).toBe('semantic:metric:customer_lifetime_spend');
     expect(parsed.request?.conversationContext).toEqual({
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       resultColumns: ['category', 'revenue'],

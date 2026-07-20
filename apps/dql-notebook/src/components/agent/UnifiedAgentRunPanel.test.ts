@@ -15,6 +15,8 @@ let preferredAskInspectorTab: typeof UnifiedAgentRunPanelModule.preferredAskInsp
 let inlineAskChartConfig: typeof UnifiedAgentRunPanelModule.inlineAskChartConfig;
 let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryFromItems;
 let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor;
+let clarificationSelectionInput: typeof UnifiedAgentRunPanelModule.clarificationSelectionInput;
+let isAgentRunPinnable: typeof UnifiedAgentRunPanelModule.isAgentRunPinnable;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -32,6 +34,46 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     inlineAskChartConfig = module.inlineAskChartConfig;
     agentRunHistoryFromItems = module.agentRunHistoryFromItems;
     liveAgentActivityFor = module.liveAgentActivityFor;
+    clarificationSelectionInput = module.clarificationSelectionInput;
+    isAgentRunPinnable = module.isAgentRunPinnable;
+  });
+
+  it('UI-010 preserves a governed clarification choice as stable identity input', () => {
+    expect(clarificationSelectionInput({
+      id: 'semantic:metric:dbt_core_models.total_ccu_count',
+      label: 'Total CCU Count',
+      description: 'Billable CCU consumption.',
+      kind: 'semantic_metric',
+    })).toEqual({
+      question: 'Total CCU Count',
+      selectedEvidenceId: 'semantic:metric:dbt_core_models.total_ccu_count',
+    });
+  });
+
+  it('UI-010 does not expose failed grounding drafts as reusable answers', () => {
+    const failedRun = {
+      status: 'blocked',
+      artifacts: [{
+        id: 'draft-1',
+        kind: 'dql_block_draft',
+        title: 'Invalid draft',
+        trustState: 'blocked',
+        payload: {},
+      }],
+    } as Parameters<typeof isAgentRunPinnable>[0];
+    expect(isAgentRunPinnable(failedRun)).toBe(false);
+
+    const completedRun = {
+      status: 'completed',
+      artifacts: [{
+        id: 'answer-1',
+        kind: 'answer',
+        title: 'Executed answer',
+        trustState: 'review_required',
+        payload: {},
+      }],
+    } as Parameters<typeof isAgentRunPinnable>[0];
+    expect(isAgentRunPinnable(completedRun)).toBe(true);
   });
 
   it('shows a lightweight search → match → query activity trail instead of planning phases', () => {

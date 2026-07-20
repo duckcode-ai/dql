@@ -117,6 +117,69 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('AGT-012 rejects a trusted product member applied to a location column', () => {
+    const context = pack();
+    context.allowedSqlContext.relations.push(
+      {
+        relation: 'analytics.products',
+        name: 'products',
+        source: 'test',
+        columns: [{ name: 'product_id' }, { name: 'product_name' }],
+      },
+      {
+        relation: 'analytics.locations',
+        name: 'locations',
+        source: 'test',
+        columns: [{ name: 'location_id' }, { name: 'location_name' }],
+      },
+    );
+
+    const result = validateSqlAgainstLocalContext(
+      "SELECT location_name FROM analytics.locations WHERE location_name = 'Flame Impala'",
+      context,
+      { memberBindings: [{ dimension: 'product', values: ['Flame Impala'] }] },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'misbound_filter',
+      offending: { column: 'location_name' },
+    });
+    if (!result.ok) expect(result.error).toContain('binding dimension is product');
+  });
+
+  it('AGT-012 accepts a trusted member on its typed dimension column', () => {
+    const context = pack();
+    context.allowedSqlContext.relations.push({
+      relation: 'analytics.products',
+      name: 'products',
+      source: 'test',
+      columns: [{ name: 'product_id' }, { name: 'product_name' }],
+    });
+
+    expect(validateSqlAgainstLocalContext(
+      "SELECT product_name FROM analytics.products WHERE product_name = 'Flame Impala'",
+      context,
+      { memberBindings: [{ dimension: 'product', values: ['Flame Impala'] }] },
+    ).ok).toBe(true);
+  });
+
+  it('AGT-012 validates typed bindings through normalized text predicates', () => {
+    const context = pack();
+    context.allowedSqlContext.relations.push({
+      relation: 'analytics.products',
+      name: 'products',
+      source: 'test',
+      columns: [{ name: 'product_id' }, { name: 'product_name' }],
+    });
+
+    expect(validateSqlAgainstLocalContext(
+      "SELECT product_name FROM analytics.products AS p WHERE LOWER(p.product_name) = LOWER('Flame Impala')",
+      context,
+      { memberBindings: [{ dimension: 'product', values: ['Flame Impala'] }] },
+    ).ok).toBe(true);
+  });
+
   it('prefers complete live schema over a partial fully-qualified context card', () => {
     const context = pack();
     context.allowedSqlContext.relations = [

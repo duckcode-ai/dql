@@ -38,9 +38,12 @@ an acceptance-matrix update.
 | AGT-008 | App Business Stories verbalize server-computed facts from the settled dashboard run; unsupported numbers, comparisons, causal claims, grains, or filters are rejected. |
 | AGT-009 | Analytical natural-language requests perform broad governed retrieval before general routing, then use at most one bounded AI meaning-resolution call over qualified retrieved candidates; explicit qualified references may bypass that call. |
 | AGT-010 | Relevance and business meaning select the concept before trust selects the execution route; every AI recommendation is identifier-bound and must pass deterministic compatibility, policy, compilation, and execution guards. |
+| AGT-011 | Clarification choices carry stable evidence IDs; selecting one rehydrates that evidence and its semantic/dbt/runtime dependencies against the original analytical question before compilation and execution. |
+| AGT-012 | A question or prior result member is resolved once into a typed dimension/value binding with provenance and confidence; retrieval, planning, certified/semantic fit, SQL generation, validation, and execution preserve that binding without reinterpreting it as metadata text. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
 | API-003 | Browser Ask, CLI, MCP, and Chat use the same snapshot, retrieval, meaning-resolution, route, trust, and error contracts and expose only redacted phase diagnostics. |
+| API-004 | Semantic discovery declares per-metric execution capability; modern dbt/MetricFlow artifact shapes normalize without changing metric meaning, and failed composition returns stable runtime-required or field-incompatible errors. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
@@ -48,6 +51,8 @@ an acceptance-matrix update.
 | UI-006 | Domain Studio presents the nested Domain Package hierarchy and focused Areas with shareable deep links; Ask visibly preserves and can clear the selected Area context. |
 | UI-007 | One Settings hub under Govern owns Overview, Project & dbt, Database, AI provider, Agent memory, and Advanced. Guided Setup launches from Settings and automatically once per project on first install and each installed CLI version change; it embeds the same project, database, and provider editors, AI is optional, saved settings remain untouched without successful test/apply, and Setup has no separate rail destination. Successful dbt Apply automatically prepares the shared governed search snapshot and exposes truthful background progress without requiring another command. |
 | UI-008 | Governed Context exposes compiler-backed Domain Knowledge 360 with qualified objects, provenance, capsules, skills, and route state; business-360/API/CLI/MCP views must resolve the same snapshot and bounded neighborhood rather than independently rebuilding lineage. |
+| UI-009 | Notebooks provide one searchable semantic composer for executable metrics and compatible dimensions, bounded preview/run, and insertion as a semantic DQL cell that preserves governed bindings; setup-required metrics remain discoverable with an actionable reason. |
+| UI-010 | Ask renders ambiguity as identifier-bound governed choices and never presents failed grounding, policy, model, provider, or timeout outcomes as passed, reusable answers. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
@@ -62,6 +67,9 @@ an acceptance-matrix update.
 | E2E-005 | Release proves built-CLI parity across Settings and Guided Setup, automatic shared dbt snapshot/index preparation with no duplicate first-Ask rebuild, one-time first-install/version-upgrade setup prompts, all provider modes and enterprise URLs, dbt/profile/database preservation and rollback, optional-AI behavior, accurate readiness states, project-local/global npm command availability, PATH-independent internal npm resolution, and unchanged Cloud embed contracts. |
 | E2E-006 | Release proves retrieval-first meaning resolution and route parity at enterprise scale: 7,000 similar/late-position metrics, 10,000 dbt models, 300,000 columns, trust-versus-relevance conflicts, bounded call budgets, accurate ambiguity, and identical built-CLI browser/CLI/MCP/Chat outcomes. |
 | E2E-007 | Release proves deterministic manifest graph compilation, cross-domain route states, compact skill capsules, exact per-turn KnowledgeLens persistence, and Domain 360/Ask parity in the built CLI while preserving v2 compatibility and the Cloud embed contract. |
+| E2E-008 | Release proves modern dbt semantic artifacts, filtered/simple and MetricFlow-only capability states, compatible metric/dimension selection, preview execution, and semantic-cell insertion in the built notebook. |
+| E2E-009 | Release proves ambiguity selection preserves the original question and semantic identity, admits the selected backing relation into inspected SQL context, executes it, and retains truthful grounding/timeout UI states. |
+| E2E-010 | Release proves named-member follow-ups bind the exact prior result value, reject otherwise-relevant assets that cannot honor the bound dimension, use at most one bounded generation call for uncovered joins, and execute only rows satisfying the binding. |
 
 ## OSS and Cloud boundary
 
