@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.8.3)
+## Current State (v1.8.4)
 
 DQL OSS is ready for local-first use cases:
 
@@ -52,8 +52,9 @@ The OSS release is intentionally local and single-user:
   and pagination are not yet implemented.
 - Snowflake semantic views require a live Snowflake connection at notebook
   startup; offline cache and clearer unavailable-state messaging are planned.
-- dbt semantic model discovery reads local project artifacts/files. dbt Cloud
-  API integration is not part of the current OSS path.
+- dbt semantic model discovery reads local project artifacts/files. Optional
+  dbt Cloud Semantic Layer execution requires a tested environment ID, regional
+  endpoint, and service token; DQL does not manage dbt Cloud projects or jobs.
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 

@@ -6,6 +6,46 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.4 - 2026-07-20
+
+### Enterprise semantic execution and reusable Ask inputs
+
+This patch gives imported dbt semantic metrics one consistent execution path
+across Ask, Notebook, and Block Studio, while restoring parameterized certified
+answers that can be inspected and rerun without another AI planning pass.
+
+### Added
+
+- **Shared semantic runtime selector.** Supported metrics compile natively;
+  derived and MetricFlow-owned definitions can use a compatible local
+  MetricFlow CLI or tested regional dbt Cloud Semantic Layer connection.
+- **Enterprise semantic setup and capability states.** Settings tests and saves
+  redacted dbt Cloud credentials, and semantic discovery reports whether each
+  metric is ready, requires setup, or is unsupported without hiding it.
+- **Scalable semantic selection.** Block Studio and the notebook use indexed,
+  model-aware metric and dimension trees designed for thousands of members.
+- **Typed certified-block invocation parity.** Ask, Notebook, native tools, CLI,
+  and MCP share one values-only parameter contract with question and
+  prior-result provenance.
+
+### Fixed
+
+- **Ask retains reusable DQL inputs.** Certified result cards show applied
+  parameter values and the shared input controls; Apply reruns the saved block
+  directly instead of starting another AI search.
+- **Semantic metrics no longer degrade into guessed leaf SQL.** Runtime-owned
+  derived, ratio, cumulative, and non-additive metrics either compile through
+  their configured adapter or return an actionable setup state.
+- **Repeated dimensions remain model-qualified.** Common names such as
+  `report_date` resolve through the selected metric's owning semantic model,
+  avoiding ambiguous-column SQL.
+- **Generated SQL validation respects the active warehouse dialect.** Valid
+  Snowflake and Databricks syntax is checked with the configured dialect while
+  malformed SQL still fails before execution.
+- **Block Studio refresh is truthful and automatic.** Large semantic catalogs
+  show loading/setup status accurately, saved blocks refresh compiled lineage,
+  and focused block views avoid unrelated graph noise.
+
 ## v1.8.3 - 2026-07-20
 
 ### Durable agent runs and coherent retrieval diagnostics
