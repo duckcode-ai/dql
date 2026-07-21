@@ -8,6 +8,7 @@ import {
   metricFlowCompileMode,
   MetricFlowUnavailableError,
   repairMetricFlowGroupBy,
+  parseMetricFlowDimensionList,
 } from './metricflow.js';
 
 describe('MetricFlow compile wrapper', () => {
@@ -155,5 +156,43 @@ consumption_date`;
     );
     expect(repaired?.timeDimension?.name).toBe('bcm_hdr__consumption_date');
     expect(repaired?.filters?.[0]?.dimension).toBe('bcm_hdr__consumption_date');
+  });
+});
+
+
+describe('parseMetricFlowDimensionList (mf list dimensions output)', () => {
+  it('parses entity-qualified names and time-dimension grains', () => {
+    const stdout = [
+      "✔ 🔍 Found 3 dimensions for metrics ['total_bcm']",
+      '• bcm_hdr__customer_name',
+      '• bcm_hdr__region',
+      '• metric_time',
+      "  Queryable Granularities: ['day', 'week', 'month']",
+    ].join('\n');
+    const dims = parseMetricFlowDimensionList(stdout);
+    expect(dims.map((d) => d.qualifiedName)).toEqual([
+      'bcm_hdr__customer_name',
+      'bcm_hdr__region',
+      'metric_time',
+    ]);
+    const metricTime = dims.find((d) => d.qualifiedName === 'metric_time');
+    expect(metricTime?.granularities).toEqual(['day', 'week', 'month']);
+    // A non-time dimension carries no grains.
+    expect(dims.find((d) => d.qualifiedName === 'bcm_hdr__region')?.granularities).toBeUndefined();
+  });
+
+  it('tolerates bare names, alternate bullets, and unknown header lines', () => {
+    const dims = parseMetricFlowDimensionList([
+      'Dimensions:',
+      '- customer_name',
+      '  * bcm_ccu_pc__product_category',
+      'total: 2',
+    ].join('\n'));
+    expect(dims.map((d) => d.qualifiedName)).toContain('customer_name');
+    expect(dims.map((d) => d.qualifiedName)).toContain('bcm_ccu_pc__product_category');
+  });
+
+  it('returns [] for output with no recognizable dimension lines', () => {
+    expect(parseMetricFlowDimensionList('ERROR: could not connect to warehouse')).toEqual([]);
   });
 });

@@ -711,4 +711,33 @@ saved_queries:
     expect(composed?.sql).toContain('SUM');
     expect(composed?.sql?.toLowerCase()).toContain('customer_name');
   });
+
+  describe('explainCompatibleDimensions (Phase 2)', () => {
+    function bcmLayer() {
+      writeBcmYamlProject(tmpDir);
+      return new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+    }
+
+    it('returns a compatible dimension on the metric own model with its qualified name', () => {
+      const layer = bcmLayer();
+      const { compatible } = layer.explainCompatibleDimensions(['total_bcm']);
+      const customer = compatible.find((d) => d.name === 'customer_name');
+      expect(customer).toBeTruthy();
+      expect(customer?.qualifiedName).toBe('bcm_hdr__customer_name');
+    });
+
+    it('flags a disjoint-model dimension as no_join_path', () => {
+      const layer = bcmLayer();
+      const { incompatible } = layer.explainCompatibleDimensions(['total_bcm']);
+      // product_category lives on bcm_ccu_pc, which never joins to bcm_hdr.
+      const pc = incompatible.find((d) => d.name === 'product_category');
+      expect(pc?.reason).toBe('no_join_path');
+    });
+
+    it('reports metric_unresolved for an unknown metric name', () => {
+      const layer = bcmLayer();
+      const { incompatible } = layer.explainCompatibleDimensions(['does_not_exist']);
+      expect(incompatible).toContainEqual({ name: 'does_not_exist', reason: 'metric_unresolved' });
+    });
+  });
 });

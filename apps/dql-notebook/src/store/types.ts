@@ -755,7 +755,20 @@ export interface SemanticDimension {
   owner: string | null;
   cube?: string | null;
   isTimeDimension?: boolean;
+  /** MetricFlow-qualified group-by name (`<entity>__<name>`), when known. */
+  qualifiedName?: string | null;
+  /** Real queryable grains for a time dimension. */
+  granularities?: string[] | null;
   typeParams?: Record<string, unknown> | null;
+}
+
+/** The full compatibility answer: which dimensions a metric set can be grouped
+ *  by, which cannot (with reasons), and which engine produced the answer. */
+export interface SemanticCompatibility {
+  dimensions: SemanticDimension[];
+  engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  incompatible: Array<{ name: string; qualifiedName?: string | null; reason: string }>;
+  degraded?: string | null;
 }
 
 export interface SemanticEntity {

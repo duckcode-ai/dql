@@ -28,6 +28,7 @@ import type {
   SchemaColumn,
   SemanticLayerState,
   SemanticDimension,
+  SemanticCompatibility,
   SemanticEntity,
   SemanticMeasure,
   SemanticMetric,
@@ -4110,6 +4111,26 @@ export const api = {
     } catch {
       return [];
     }
+  },
+
+  /**
+   * Full compatibility result including engine, qualified names, real grains,
+   * and incompatibility reasons. Unlike getCompatibleDimensions, this THROWS on
+   * failure so the UI can render an explicit error state instead of graying
+   * every dimension with no explanation.
+   */
+  async getCompatibility(metrics: string[]): Promise<SemanticCompatibility> {
+    const search = new URLSearchParams();
+    if (metrics.length > 0) search.set('metrics', metrics.join(','));
+    const result = await request<SemanticCompatibility>(
+      `/api/semantic-layer/compatible-dims?${search.toString()}`,
+    );
+    return {
+      dimensions: result.dimensions ?? [],
+      engine: result.engine ?? 'native',
+      incompatible: result.incompatible ?? [],
+      degraded: result.degraded ?? null,
+    };
   },
 
   async composeQuery(

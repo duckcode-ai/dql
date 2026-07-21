@@ -174,3 +174,33 @@ describe('shared semantic runtime selector', () => {
     expect(JSON.stringify(status)).not.toContain('cloud-secret');
   });
 });
+
+describe('describeRuntimeCompatibility (native cascade fallback)', () => {
+  function bcmLayer(): SemanticLayer {
+    // A metric on bcm_hdr with one own-model dimension carrying its qualified name.
+    return new SemanticLayer({
+      metrics: [
+        { name: 'total_bcm', label: 'Total BCM', description: '', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr', objectKind: 'metric' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr', qualifiedName: 'bcm_hdr__customer_name', entityLink: 'bcm_hdr' },
+      ],
+    });
+  }
+
+  it('falls back to native and carries the qualified name when no runtime is active', async () => {
+    // The suite's beforeEach points DQL_METRICFLOW_BIN at a missing path and no
+    // dbt Cloud is configured, so the active adapter resolves to native.
+    const { describeRuntimeCompatibility } = await import('./semantic-runtime.js');
+    const result = await describeRuntimeCompatibility(root, bcmLayer(), ['total_bcm']);
+    expect(result.engine).toBe('native');
+    const customer = result.dimensions.find((d) => d.name === 'customer_name');
+    expect(customer?.qualifiedName).toBe('bcm_hdr__customer_name');
+  });
+
+  it('returns metric_unresolved for an unknown metric', async () => {
+    const { describeRuntimeCompatibility } = await import('./semantic-runtime.js');
+    const result = await describeRuntimeCompatibility(root, bcmLayer(), ['nope']);
+    expect(result.incompatible).toContainEqual({ name: 'nope', qualifiedName: undefined, reason: 'metric_unresolved' });
+  });
+});

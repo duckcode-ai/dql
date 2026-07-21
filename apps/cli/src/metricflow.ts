@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -87,6 +87,91 @@ export interface MetricFlowCompileResult {
   command: string[];
   stdout: string;
   stderr: string;
+}
+
+export interface MetricFlowDimension {
+  /** Entity-qualified group-by name exactly as MetricFlow addresses it. */
+  qualifiedName: string;
+  /** Queryable grains, when MetricFlow reports them (time dimensions). */
+  granularities?: string[];
+}
+
+interface MetricFlowDimensionListRequest {
+  projectRoot: string;
+  dbtProjectPath?: string;
+  profilesDir?: string;
+  metrics: string[];
+}
+
+// Cache `mf list dimensions` by (binary + metrics-set + semantic_manifest mtime).
+// The UI calls this on every metric toggle and mf cold-start is seconds.
+const metricFlowDimensionCache = new Map<string, MetricFlowDimension[]>();
+
+/**
+ * Ask MetricFlow itself which dimensions a metric set can be grouped by, via
+ * `mf list dimensions --metrics X,Y`. This is the EXACT truth for the executing
+ * engine — entity-qualified names and real queryable grains — which the native
+ * reachable-table heuristic can only approximate. Tolerant to output-format
+ * drift across MetricFlow versions: unrecognized lines are ignored and a parse
+ * that yields nothing returns [] so the caller falls back to native.
+ */
+export function listMetricFlowDimensions(request: MetricFlowDimensionListRequest): MetricFlowDimension[] {
+  const dbtRoot = resolveDbtProjectRoot(request.projectRoot, request.dbtProjectPath);
+  const manifestPath = join(dbtRoot, 'target', 'semantic_manifest.json');
+  if (!existsSync(manifestPath) || request.metrics.length === 0) return [];
+
+  const resolvedCli = resolveMetricFlowCli(request.projectRoot);
+  const bin = resolvedCli?.bin ?? process.env.DQL_METRICFLOW_BIN ?? process.env.METRICFLOW_BIN ?? 'mf';
+  let mtime = '';
+  try { mtime = String(statSync(manifestPath).mtimeMs); } catch { /* ignore */ }
+  const cacheKey = `${bin}::${mtime}::${[...request.metrics].sort().join(',')}`;
+  const cached = metricFlowDimensionCache.get(cacheKey);
+  if (cached) return cached;
+
+  const args = ['list', 'dimensions', '--metrics', request.metrics.join(',')];
+  const result = spawnSync(bin, args, {
+    cwd: dbtRoot,
+    encoding: 'utf-8',
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      ...(request.profilesDir ? { DBT_PROFILES_DIR: resolve(request.projectRoot, request.profilesDir) } : {}),
+    },
+  });
+  if (result.error || result.status !== 0) return [];
+
+  const parsed = parseMetricFlowDimensionList(result.stdout ?? '');
+  if (parsed.length > 0) metricFlowDimensionCache.set(cacheKey, parsed);
+  return parsed;
+}
+
+/** Parse `mf list dimensions` stdout into qualified names + grains. Kept
+ *  separate + exported so its format tolerance is unit-testable without mf. */
+export function parseMetricFlowDimensionList(stdout: string): MetricFlowDimension[] {
+  const dimensions: MetricFlowDimension[] = [];
+  let current: MetricFlowDimension | undefined;
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    // A dimension entry: a bullet or bare token that is a valid identifier,
+    // optionally entity-qualified with `__`. Skip headers/counts/emoji lines.
+    const nameMatch = /^(?:[•*-]\s*)?([A-Za-z_][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)$/.exec(line);
+    if (nameMatch) {
+      current = { qualifiedName: nameMatch[1] };
+      dimensions.push(current);
+      continue;
+    }
+    // A grain hint attaches to the dimension it follows.
+    const grainMatch = /queryable\s+granularities?\s*[:=]?\s*\[?([^\]]+)\]?/i.exec(line);
+    if (grainMatch && current) {
+      const grains = grainMatch[1]
+        .split(/[,\s]+/)
+        .map((g) => g.replace(/['"]/g, '').trim().toLowerCase())
+        .filter(Boolean);
+      if (grains.length > 0) current.granularities = grains;
+    }
+  }
+  return dimensions;
 }
 
 export type MetricFlowCompileMode = 'legacy-compile' | 'explain';

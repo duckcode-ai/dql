@@ -1492,10 +1492,36 @@ export class SemanticLayer {
   }
 
   listCompatibleDimensions(metricNames: string[]): DimensionDefinition[] {
+    return this.explainCompatibleDimensions(metricNames).compatible;
+  }
+
+  /**
+   * Authoritative per-metric dimension compatibility. Returns the dimensions a
+   * metric (or set of metrics) can be grouped by — each carrying its MetricFlow
+   * qualified name and entity path — PLUS the dimensions that are NOT compatible
+   * and why. This is the single native source the compatibility endpoint, the
+   * query-qualification boundary, and the agent all consume.
+   *
+   * Reasons:
+   *   - `no_join_path`             the dimension's model is unreachable from
+   *                                every selected metric's model.
+   *   - `not_shared_across_metrics` reachable from some but not all metrics.
+   *   - `metric_unresolved`         a requested metric name is unknown.
+   */
+  explainCompatibleDimensions(metricNames: string[]): {
+    compatible: Array<DimensionDefinition & { qualifiedName?: string; entityPath?: string[] }>;
+    incompatible: Array<{ name: string; qualifiedName?: string; reason: 'no_join_path' | 'not_shared_across_metrics' | 'metric_unresolved' }>;
+  } {
     const resolvedMetrics = metricNames
       .map((name) => this.metrics.get(name))
       .filter((metric): metric is MetricDefinition => Boolean(metric));
-    if (resolvedMetrics.length === 0) return [];
+    const unresolved = metricNames.filter((name) => !this.metrics.get(name));
+    if (resolvedMetrics.length === 0) {
+      return {
+        compatible: [],
+        incompatible: unresolved.map((name) => ({ name, reason: 'metric_unresolved' as const })),
+      };
+    }
 
     const resolveCubeNameForTable = (table: string): string | undefined => {
       for (const cube of this.cubes.values()) {
@@ -1603,21 +1629,81 @@ export class SemanticLayer {
       return reachableTables;
     });
 
-    const reachableTables = metricTables.slice(1).reduce((common, tables) => {
+    // Shared = reachable for EVERY metric (intersection); union = reachable for
+    // at least one. The gap between them is what earns `not_shared_across_metrics`.
+    const sharedTables = metricTables.slice(1).reduce((common, tables) => {
       for (const table of common) if (!tables.has(table)) common.delete(table);
       return common;
     }, new Set(metricTables[0]));
+    const unionTables = new Set<string>();
+    for (const tables of metricTables) for (const t of tables) unionTables.add(t);
 
-    const compatibleVariants = Array.from(this.dimensionVariants.values())
-      .flat()
-      .filter((dimension) => reachableTables.has(dimension.table));
-    const names = Array.from(new Set(compatibleVariants.map((dimension) => dimension.name)));
-    return names
-      .map((name) => this.resolveDimensionForMetrics(name, resolvedMetrics))
-      .filter((dimension): dimension is DimensionDefinition =>
-        Boolean(dimension && reachableTables.has(dimension.table)),
-      )
-      .sort((a, b) => a.label.localeCompare(b.label));
+    // Entity path from a metric's model to a dimension's cube, along join
+    // `entity` links — the head of a MetricFlow multi-hop group-by name.
+    // Deterministic: shortest path, ties broken by the lexicographically
+    // smallest entity sequence. Empty when the dimension lives on the metric's
+    // own model (the caller then uses the stored single-hop qualifiedName).
+    const entityPathTo = (targetCube: string): string[] | undefined => {
+      let best: string[] | undefined;
+      for (const metric of resolvedMetrics) {
+        const startCube = metric.cube ?? resolveCubeNameForTable(metric.table);
+        if (!startCube) continue;
+        if (startCube === targetCube) return [];
+        // BFS carrying the entity trail.
+        const queue: Array<{ cube: string; trail: string[] }> = [{ cube: startCube, trail: [] }];
+        const seen = new Set<string>([startCube]);
+        while (queue.length > 0) {
+          const { cube, trail } = queue.shift()!;
+          for (const join of this.joinGraph.get(cube) ?? []) {
+            const nextTrail = join.entity ? [...trail, join.entity] : trail;
+            if (join.right === targetCube) {
+              if (!best
+                || nextTrail.length < best.length
+                || (nextTrail.length === best.length && nextTrail.join('__') < best.join('__'))) {
+                best = nextTrail;
+              }
+              continue;
+            }
+            if (seen.has(join.right)) continue;
+            seen.add(join.right);
+            queue.push({ cube: join.right, trail: nextTrail });
+          }
+        }
+      }
+      return best;
+    };
+
+    const qualifiedNameFor = (dimension: DimensionDefinition): string | undefined => {
+      const cube = dimension.cube ?? resolveCubeNameForTable(dimension.table);
+      const path = cube ? entityPathTo(cube) : undefined;
+      if (path && path.length > 0) return [...path, dimension.name].join('__');
+      // Same-model (empty path) or unresolved path: fall back to the stored
+      // single-hop primary-entity qualification computed at extraction time.
+      return dimension.qualifiedName;
+    };
+
+    const compatible: Array<DimensionDefinition & { qualifiedName?: string; entityPath?: string[] }> = [];
+    const incompatible: Array<{ name: string; qualifiedName?: string; reason: 'no_join_path' | 'not_shared_across_metrics' | 'metric_unresolved' }> = [];
+    for (const name of unresolved) incompatible.push({ name, reason: 'metric_unresolved' });
+
+    const seenNames = new Set<string>();
+    for (const dimension of Array.from(this.dimensionVariants.values()).flat()) {
+      if (seenNames.has(dimension.name)) continue;
+      seenNames.add(dimension.name);
+      const resolved = this.resolveDimensionForMetrics(dimension.name, resolvedMetrics) ?? dimension;
+      const qualifiedName = qualifiedNameFor(resolved);
+      if (sharedTables.has(resolved.table)) {
+        const cube = resolved.cube ?? resolveCubeNameForTable(resolved.table);
+        compatible.push({ ...resolved, qualifiedName, entityPath: cube ? entityPathTo(cube) : undefined });
+      } else if (unionTables.has(resolved.table)) {
+        incompatible.push({ name: resolved.name, qualifiedName, reason: 'not_shared_across_metrics' });
+      } else {
+        incompatible.push({ name: resolved.name, qualifiedName, reason: 'no_join_path' });
+      }
+    }
+
+    compatible.sort((a, b) => a.label.localeCompare(b.label));
+    return { compatible, incompatible };
   }
 
   /**

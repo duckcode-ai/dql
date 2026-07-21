@@ -5,7 +5,7 @@ import {
   testDbtCloudSemanticConnection,
   type DbtCloudSemanticTestResult,
 } from './dbt-cloud-semantic.js';
-import { compileMetricFlowQuery, hasMetricFlowCli, MetricFlowUnavailableError, resolveMetricFlowCli } from './metricflow.js';
+import { compileMetricFlowQuery, hasMetricFlowCli, listMetricFlowDimensions, MetricFlowUnavailableError, resolveMetricFlowCli } from './metricflow.js';
 import {
   getEffectiveDbtCloudSemanticSettings,
   getSemanticRuntimeSettings,
@@ -421,33 +421,124 @@ export async function compileSemanticRuntimeQuery(
   return null;
 }
 
+/** A compatible dimension enriched with its MetricFlow-qualified name and, for
+ *  time dimensions, real queryable grains. */
+export type RuntimeCompatibleDimension = ReturnType<SemanticLayer['listDimensions']>[number] & {
+  qualifiedName?: string;
+  granularities?: string[];
+};
+
+export interface RuntimeCompatibilityResult {
+  /** The engine that produced this compatibility answer. */
+  engine: SemanticRuntimeAdapterId;
+  dimensions: RuntimeCompatibleDimension[];
+  incompatible: Array<{ name: string; qualifiedName?: string; reason: string }>;
+  /** Set when a preferred runtime failed and we fell back (e.g. mf → native). */
+  degraded?: string;
+}
+
+/**
+ * The authoritative per-metric dimension-compatibility answer, resolved through
+ * the SAME cascade that executes the query, so the builder can never offer a
+ * dimension the runtime would reject:
+ *   dbt Cloud (already qualified + real grains) → `mf list dimensions` → native.
+ * mf failures fall through to native with a `degraded` note (never throw).
+ */
+export async function describeRuntimeCompatibility(
+  projectRoot: string,
+  semanticLayer: SemanticLayer,
+  metrics: string[],
+  projectConfig?: SemanticRuntimeProjectConfig,
+): Promise<RuntimeCompatibilityResult> {
+  if (metrics.length === 0) return { engine: 'native', dimensions: [], incompatible: [] };
+  const status = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
+
+  const nativeExplain = (): RuntimeCompatibilityResult => {
+    const { compatible, incompatible } = semanticLayer.explainCompatibleDimensions(metrics);
+    return {
+      engine: 'native',
+      dimensions: compatible.map((d) => ({ ...d, qualifiedName: d.qualifiedName })),
+      incompatible: incompatible.map((d) => ({ name: d.name, qualifiedName: d.qualifiedName, reason: d.reason })),
+    };
+  };
+
+  // dbt Cloud is truth when active: it returns entity-qualified names and real
+  // queryable grains straight from the semantic layer.
+  if (status.active === 'dbt-cloud') {
+    try {
+      const cloud = await listDbtCloudCompatibleDimensions(getEffectiveDbtCloudSemanticSettings(projectRoot), metrics);
+      const localByName = new Map(semanticLayer.listDimensions().map((d) => [d.name.toLowerCase(), d]));
+      const dimensions: RuntimeCompatibleDimension[] = cloud.map((dimension) => {
+        const local = localByName.get(dimension.name.toLowerCase());
+        const isTime = dimension.type?.toLowerCase() === 'time';
+        return {
+          ...(local ?? {
+            name: dimension.name,
+            label: dimension.name.replace(/[_-]+/g, ' '),
+            description: dimension.description ?? '',
+            domain: '',
+            sql: dimension.name,
+            type: isTime ? 'date' : 'string',
+            table: '',
+            isTimeDimension: isTime,
+            source: { provider: 'dbt', objectType: 'dimension', objectId: dimension.name, objectName: dimension.name },
+          }),
+          qualifiedName: dimension.name,
+          granularities: dimension.granularities.map((v) => v.toLowerCase()),
+        } as RuntimeCompatibleDimension;
+      });
+      return { engine: 'dbt-cloud', dimensions, incompatible: [] };
+    } catch (error) {
+      const native = nativeExplain();
+      return { ...native, degraded: `dbt Cloud dimension listing failed (${error instanceof Error ? error.message : String(error)}); showing native compatibility.` };
+    }
+  }
+
+  // Local MetricFlow: ask mf itself, then hydrate labels/types from the local
+  // catalog by matching each qualified name's tail (same trick as the cloud path).
+  if (status.active === 'metricflow-cli') {
+    const dbtProjectPath = projectConfig?.semanticLayer?.provider === 'dbt'
+      ? projectConfig.semanticLayer.projectPath
+      : projectConfig?.dbt?.projectDir;
+    const mfDims = listMetricFlowDimensions({ projectRoot, dbtProjectPath, profilesDir: projectConfig?.dbt?.profilesDir, metrics });
+    if (mfDims.length > 0) {
+      const localByTail = new Map(semanticLayer.listDimensions().map((d) => [d.name.toLowerCase(), d]));
+      const dimensions: RuntimeCompatibleDimension[] = mfDims.map((mf) => {
+        const tail = mf.qualifiedName.split('__').pop()!.toLowerCase();
+        const local = localByTail.get(tail);
+        const isTime = Boolean(mf.granularities?.length) || Boolean(local?.isTimeDimension);
+        return {
+          ...(local ?? {
+            name: tail,
+            label: tail.replace(/[_-]+/g, ' '),
+            description: '',
+            domain: '',
+            sql: tail,
+            type: isTime ? 'date' : 'string',
+            table: '',
+            isTimeDimension: isTime,
+            source: { provider: 'dbt', objectType: 'dimension', objectId: tail, objectName: tail },
+          }),
+          qualifiedName: mf.qualifiedName,
+          granularities: mf.granularities,
+        } as RuntimeCompatibleDimension;
+      });
+      return { engine: 'metricflow-cli', dimensions, incompatible: [] };
+    }
+    return { ...nativeExplain(), degraded: '`mf list dimensions` returned nothing; showing native compatibility.' };
+  }
+
+  return nativeExplain();
+}
+
 export async function listRuntimeCompatibleDimensions(
   projectRoot: string,
   semanticLayer: SemanticLayer,
   metrics: string[],
+  projectConfig?: SemanticRuntimeProjectConfig,
 ): Promise<Array<ReturnType<SemanticLayer['listDimensions']>[number]>> {
-  if (metrics.length === 0) return [];
-  const status = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
-  if (status.active === 'dbt-cloud') {
-    const cloud = await listDbtCloudCompatibleDimensions(
-      getEffectiveDbtCloudSemanticSettings(projectRoot),
-      metrics,
-    );
-    const localByName = new Map(semanticLayer.listDimensions().map((dimension) => [dimension.name.toLowerCase(), dimension]));
-    return cloud.map((dimension) => localByName.get(dimension.name.toLowerCase()) ?? {
-      name: dimension.name,
-      label: dimension.name.replace(/[_-]+/g, ' '),
-      description: dimension.description ?? '',
-      domain: '',
-      sql: dimension.name,
-      type: dimension.type?.toLowerCase() === 'time' ? 'date' : 'string',
-      table: '',
-      isTimeDimension: dimension.type?.toLowerCase() === 'time',
-      granularities: dimension.granularities.map((value) => value.toLowerCase()),
-      source: { provider: 'dbt', objectType: 'dimension', objectId: dimension.name, objectName: dimension.name },
-    });
-  }
-  return semanticLayer.listCompatibleDimensions(metrics);
+  const result = await describeRuntimeCompatibility(projectRoot, semanticLayer, metrics, projectConfig);
+  return result.dimensions;
 }
 
 export function semanticMetricExecutionCapability(

@@ -341,9 +341,9 @@ import {
 } from './metricflow-installer.js';
 import {
   compileSemanticRuntimeQuery,
+  describeRuntimeCompatibility,
   getSemanticRuntimeStatus,
   isSemanticRuntimeError,
-  listRuntimeCompatibleDimensions,
   semanticMetricExecutionCapability as runtimeMetricExecutionCapability,
   SemanticRuntimeRequiredError,
   testSemanticRuntimeDraft,
@@ -10787,7 +10787,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean);
-      const dimensions = (await listRuntimeCompatibleDimensions(projectRoot, semanticLayer, metrics)).map((d) => ({
+      const compat = await describeRuntimeCompatibility(projectRoot, semanticLayer, metrics, projectConfig);
+      const dimensions = compat.dimensions.map((d) => ({
         name: d.name,
         label: d.label,
         description: d.description,
@@ -10797,9 +10798,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         table: d.table,
         tags: d.tags ?? [],
         owner: d.owner ?? null,
+        // Additive: qualified name, real grains, and time flag (existing fields
+        // above are byte-identical for compatibility).
+        qualifiedName: d.qualifiedName ?? null,
+        granularities: d.granularities ?? (d as { granularities?: string[] }).granularities ?? null,
+        isTimeDimension: Boolean((d as { isTimeDimension?: boolean }).isTimeDimension),
       }));
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ dimensions }));
+      res.end(serializeJSON({
+        dimensions,
+        engine: compat.engine,
+        incompatible: compat.incompatible,
+        degraded: compat.degraded ?? null,
+      }));
       return;
     }
     if (req.method === 'GET' && path === '/api/user-prefs/favorites') {
