@@ -190,6 +190,7 @@ export class DbtProvider implements SemanticLayerProvider {
     // First pass: collect all semantic models so we can resolve measure references
     const allModels: DbtSemanticModel[] = [];
     const allDbtMetrics: DbtMetric[] = [];
+    const allSavedQueries: DbtSavedQuery[] = [];
 
     for (const filePath of yamlFiles) {
       try {
@@ -209,6 +210,16 @@ export class DbtProvider implements SemanticLayerProvider {
           for (const metric of doc.metrics) {
             if (metric && typeof metric === 'object') {
               allDbtMetrics.push(metric as DbtMetric);
+            }
+          }
+        }
+
+        // Saved queries were parsed only on the manifest-JSON path; a project
+        // that authors them in source YAML lost them entirely. Parse here too.
+        if (Array.isArray(doc.saved_queries)) {
+          for (const savedQuery of doc.saved_queries) {
+            if (savedQuery && typeof savedQuery === 'object' && 'name' in savedQuery) {
+              allSavedQueries.push(savedQuery as DbtSavedQuery);
             }
           }
         }
@@ -246,6 +257,10 @@ export class DbtProvider implements SemanticLayerProvider {
       if (metric) {
         layer.addMetric(metric);
       }
+    }
+
+    for (const savedQuery of allSavedQueries) {
+      layer.addSavedQuery(convertSavedQuery(savedQuery));
     }
 
     return layer;
@@ -657,6 +672,35 @@ function registerSemanticModel(
   }
 }
 
+/** The five MetricFlow time grains, coarsest-last. A column stored at grain N
+ * can be truncated to any grain ≥ N but never finer. */
+const GRAIN_ORDER = ['day', 'week', 'month', 'quarter', 'year'] as const;
+type TimeGrain = typeof GRAIN_ORDER[number];
+
+function isTimeGrain(value: unknown): value is TimeGrain {
+  return typeof value === 'string' && (GRAIN_ORDER as readonly string[]).includes(value);
+}
+
+/** Grains available for a column whose base (finest) grain is `base`. Unknown
+ * base ⇒ all five (backward-compatible). */
+function grainsAtOrAbove(base: TimeGrain | undefined): TimeGrain[] {
+  if (!base) return [...GRAIN_ORDER];
+  return GRAIN_ORDER.slice(GRAIN_ORDER.indexOf(base));
+}
+
+/** The MetricFlow primary-entity name of a semantic model — the head used to
+ * qualify its dimensions as `<primaryEntity>__<dim>`. First primary/natural/
+ * unique entity wins (matches buildPrimaryEntityIndex). Falls back to the model
+ * name so a qualifiedName is always producible. */
+function primaryEntityNameOf(model: DbtSemanticModel): string {
+  for (const entity of model.entities ?? []) {
+    if (entity.type === 'primary' || entity.type === 'natural' || entity.type === 'unique') {
+      return entity.name;
+    }
+  }
+  return model.name;
+}
+
 /** Convert a dbt semantic model to a DQL CubeDefinition. */
 function convertSemanticModel(
   model: DbtSemanticModel,
@@ -665,6 +709,7 @@ function convertSemanticModel(
 ): CubeDefinition {
   const tableName = resolveTableName(model);
   const domain = deriveDbtDomain(model);
+  const primaryEntity = primaryEntityNameOf(model);
 
   const measures: MetricDefinition[] = (model.measures ?? []).map((m) => ({
     name: m.name,
@@ -699,10 +744,21 @@ function convertSemanticModel(
     const dqlType = DIM_TYPE_MAP[dim.type] ?? 'string';
     const sqlExpr = dim.expr ?? dim.name;
 
+    // MetricFlow addresses group-bys by the owning model's PRIMARY entity, not
+    // the model name: `<primaryEntity>__<dim>`. Stamp this canonical single-hop
+    // identity so the compatibility service and query boundary can send the
+    // runtime the name it expects. Multi-hop names (grouping across a join) are
+    // computed per-request.
+    const qualifiedName = `${primaryEntity}__${dim.name}`;
+
     if (dim.type === 'time') {
-      const granularity = dim.type_params?.time_granularity ?? 'day';
-      const validGranularities = ['day', 'week', 'month', 'quarter', 'year'] as const;
-      const defaultGrans: TimeDimensionDefinition['granularities'] = ['day', 'week', 'month', 'quarter', 'year'];
+      // The declared base grain bounds how finely this column can be truncated.
+      // Previously read then discarded (every time dim advertised all five
+      // grains); now it narrows the offered set: a month-grain column offers
+      // month/quarter/year, never day/week.
+      const baseGranularity = isTimeGrain(dim.type_params?.time_granularity)
+        ? dim.type_params.time_granularity
+        : undefined;
       const isPrimary = model.defaults?.agg_time_dimension === dim.name;
 
           timeDimensions.push({
@@ -715,8 +771,11 @@ function convertSemanticModel(
         cube: model.name,
         expr: dim.expr,
         isTimeDimension: true,
+        qualifiedName,
+        entityLink: primaryEntity,
         typeParams: dim.type_params,
-        granularities: defaultGrans,
+        granularities: grainsAtOrAbove(baseGranularity),
+        baseGranularity,
         primaryTime: isPrimary,
           domain,
           source: dbtSource('time_dimension', `${model.name}.${dim.name}`, dim.name, {
@@ -735,6 +794,8 @@ function convertSemanticModel(
         table: tableName,
         cube: model.name,
         expr: dim.expr,
+        qualifiedName,
+        entityLink: primaryEntity,
         typeParams: dim.type_params,
           domain,
           source: dbtSource('dimension', `${model.name}.${dim.name}`, dim.name, {
@@ -765,6 +826,9 @@ function convertSemanticModel(
       right: target?.cube ?? entity.name,
       type: 'left',
       sql: `\${left}.${leftKey} = \${right}.${target?.key ?? entity.expr ?? entity.name}`,
+      // The foreign-entity name this join traverses — the compatibility service
+      // concatenates these to build MetricFlow multi-hop group-by names.
+      entity: entity.name,
     });
   }
 
@@ -904,6 +968,9 @@ function convertDbtMetric(
     cube: resolvedMeasure?.modelName,
     aggregation: dbtMetric.type,
     metricType: dbtMetric.type,
+    // A real dbt metric node — always a metric, never a measure, even when it is
+    // a derived/ratio/cumulative type that only runs through a full runtime.
+    objectKind: 'metric',
     typeParams: dbtMetric.type_params,
     displayFormat: parseSemanticDisplayFormat(dbtMetric.meta ?? (dbtMetric.config as Record<string, unknown> | undefined)?.meta),
     filter: dbtMetric.filter ?? dbtMetric.filters,
@@ -958,6 +1025,18 @@ function deriveDbtMetricDomain(metric: DbtMetric, modelName?: string): string {
   )?.replace(/[^a-z0-9/_-]+/gi, '-').toLowerCase() || 'uncategorized';
 }
 
+/** MetricFlow order_by entries are `name` or `-name` (descending). */
+function parseSavedQueryOrderBy(orderBy: string[] | undefined): SavedQueryDefinition['orderBy'] {
+  if (!Array.isArray(orderBy) || orderBy.length === 0) return undefined;
+  const parsed = orderBy
+    .map((raw) => String(raw).trim())
+    .filter(Boolean)
+    .map((raw) => raw.startsWith('-')
+      ? { name: raw.slice(1), direction: 'desc' as const }
+      : { name: raw, direction: 'asc' as const });
+  return parsed.length > 0 ? parsed : undefined;
+}
+
 function convertSavedQuery(savedQuery: DbtSavedQuery): SavedQueryDefinition {
   const groupBy = savedQuery.query_params?.group_by ?? [];
   const timeRef = groupBy.find((value) => value.includes('__')) ?? groupBy.find((value) => value.toLowerCase().includes('metric_time'));
@@ -973,6 +1052,8 @@ function convertSavedQuery(savedQuery: DbtSavedQuery): SavedQueryDefinition {
     timeDimension: timeDimension || undefined,
     granularity,
     filters: savedQuery.query_params?.where,
+    orderBy: parseSavedQueryOrderBy(savedQuery.query_params?.order_by),
+    limit: typeof savedQuery.query_params?.limit === 'number' ? savedQuery.query_params.limit : undefined,
     exports: savedQuery.exports,
     tags: Array.isArray(savedQuery.config?.tags) ? savedQuery.config.tags.map(String) : undefined,
     source: dbtSource('saved_query', savedQuery.unique_id ?? savedQuery.name, savedQuery.name, savedQuery as unknown as Record<string, unknown>),

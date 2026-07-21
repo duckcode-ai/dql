@@ -144,6 +144,8 @@ export type ManifestKnowledgeObjectKind =
   | 'business_view'
   | 'metric'
   | 'dimension'
+  | 'semantic_measure'
+  | 'semantic_entity'
   | 'dbt_model'
   | 'dbt_source'
   | 'source_table'
@@ -675,6 +677,10 @@ export interface ManifestMetric {
   sql?: string;
   owner?: string;
   tags?: string[];
+  /** dbt metric type (simple/ratio/derived/cumulative/conversion). */
+  metricType?: string;
+  /** 'metric' vs a dbt measure projected as a composable metric. */
+  objectKind?: 'metric' | 'measure';
   /** Relative path to the YAML file */
   filePath?: string;
 }
@@ -690,6 +696,11 @@ export interface ManifestDimension {
   sql?: string;
   owner?: string;
   tags?: string[];
+  /** Canonical MetricFlow single-hop group-by name (`<entity>__<name>`). */
+  qualifiedName?: string;
+  /** Real queryable grains for a time dimension (bounded by its base grain). */
+  granularities?: string[];
+  isTimeDimension?: boolean;
   filePath?: string;
 }
 

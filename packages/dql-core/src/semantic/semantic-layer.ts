@@ -34,6 +34,14 @@ export interface MetricDefinition {
   aggTimeDimension?: string;
   /** Display contract (currency/percent/decimals) from dbt meta or DQL YAML. */
   displayFormat?: SemanticDisplayFormat;
+  /**
+   * Distinguishes a real dbt metric from a dbt MEASURE that was projected into
+   * the metrics map for native composition (see {@link SemanticLayer.addCube}).
+   * `listMetrics({ includeMeasures: false })` filters on this so the UI metric
+   * picker and the agent's metric matcher stop seeing measures as duplicate
+   * metrics. Undefined is treated as a real metric for backward compatibility.
+   */
+  objectKind?: 'metric' | 'measure';
   source?: SemanticSourceMetadata;
 }
 
@@ -63,6 +71,16 @@ export interface DimensionDefinition {
   cube?: string;
   expr?: string;
   isTimeDimension?: boolean;
+  /**
+   * Canonical MetricFlow group-by identity for this dimension, single-hop:
+   * `<primaryEntity>__<name>` (e.g. `bcm_hdr__customer_name`). Additive — the
+   * bare `name` remains the identity key everywhere. Multi-hop qualified names
+   * (grouping a metric on a joined model's dimension) are computed per-request
+   * by the compatibility service, not stored here.
+   */
+  qualifiedName?: string;
+  /** Primary-entity name of the owning semantic model (source of qualifiedName). */
+  entityLink?: string;
   typeParams?: Record<string, unknown>;
   source?: SemanticSourceMetadata;
 }
@@ -129,6 +147,8 @@ export interface SavedQueryDefinition {
   timeDimension?: string;
   granularity?: string;
   filters?: Array<Record<string, unknown>> | Record<string, unknown> | string;
+  orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+  limit?: number;
   exports?: Array<Record<string, unknown>>;
   tags?: string[];
   owner?: string;
@@ -204,10 +224,23 @@ export interface JoinDefinition {
   right: string;  // cube name
   type: 'inner' | 'left' | 'right' | 'full';
   sql: string;    // e.g. "${left}.customer_id = ${right}.id"
+  /**
+   * Foreign-entity name this join traverses, when derived from a dbt entity
+   * (e.g. `bcm_hdr`). The compatibility service concatenates these along a join
+   * path to build MetricFlow multi-hop group-by names (`bcm_hdr__customer_name`).
+   */
+  entity?: string;
 }
 
 export interface TimeDimensionDefinition extends DimensionDefinition {
   granularities: ('day' | 'week' | 'month' | 'quarter' | 'year')[];
+  /**
+   * The dbt-declared base grain (`type_params.time_granularity`). A column
+   * stored at month grain cannot be truncated finer than month, so
+   * `granularities` advertises only grains ≥ this. Undefined ⇒ base unknown
+   * and all five grains are offered (backward-compatible default).
+   */
+  baseGranularity?: 'day' | 'week' | 'month' | 'quarter' | 'year';
   primaryTime?: boolean;
 }
 
@@ -503,7 +536,11 @@ export class SemanticLayer {
   }
 
   addMetric(metric: MetricDefinition): void {
-    this.metrics.set(metric.name, metric);
+    // A real dbt metric (or DQL YAML metric) is authoritative for its name and
+    // overrides any measure-derived entry of the same name (dbt emits both a
+    // measure and a metric when `create_metric: true`). Default the tag to
+    // 'metric' so the de-conflation filter treats untagged entries as metrics.
+    this.metrics.set(metric.name, { ...metric, objectKind: metric.objectKind ?? 'metric' });
   }
 
   addDimension(dimension: DimensionDefinition): void {
@@ -512,8 +549,13 @@ export class SemanticLayer {
 
   addCube(cube: CubeDefinition): void {
     this.cubes.set(cube.name, cube);
-    // Auto-populate flat maps for backward compatibility
-    for (const m of cube.measures) this.metrics.set(m.name, { ...m, cube: m.cube ?? cube.name, domain: m.domain || cube.domain, owner: m.owner ?? cube.owner, source: m.source ?? cube.source });
+    // Auto-populate flat maps for backward compatibility. Measures are projected
+    // into the metrics map so native composition can aggregate them, but they are
+    // tagged `objectKind: 'measure'` so the UI picker and agent matcher can filter
+    // them back out (a real dbt metric of the same name, added later via
+    // addMetric, overrides with 'metric'). We must NOT stop populating the map —
+    // canComposeMetric/composeQuery/listCompatibleDimensions all read it.
+    for (const m of cube.measures) this.metrics.set(m.name, { ...m, objectKind: m.objectKind ?? 'measure', cube: m.cube ?? cube.name, domain: m.domain || cube.domain, owner: m.owner ?? cube.owner, source: m.source ?? cube.source });
     for (const d of cube.dimensions) this.registerDimension({ ...d, cube: d.cube ?? cube.name, domain: d.domain ?? cube.domain, owner: d.owner ?? cube.owner, source: d.source ?? cube.source });
     for (const td of cube.timeDimensions) this.registerDimension({ ...td, cube: td.cube ?? cube.name, domain: td.domain ?? cube.domain, owner: td.owner ?? cube.owner, source: td.source ?? cube.source });
     for (const segment of cube.segments) this.segments.set(segment.name, { ...segment, cube: segment.cube || cube.name, domain: segment.domain ?? cube.domain, owner: segment.owner ?? cube.owner, source: segment.source ?? cube.source });
@@ -1185,9 +1227,49 @@ export class SemanticLayer {
     return this.savedQueries.get(name);
   }
 
-  listMetrics(domain?: string): MetricDefinition[] {
-    const all = Array.from(this.metrics.values());
+  /**
+   * List metrics. By default returns everything in the metrics map — including
+   * measures projected in by {@link addCube} — for backward compatibility.
+   * Pass `{ includeMeasures: false }` to exclude measure-derived entries so the
+   * UI metric picker and the agent's metric matcher see only real metrics.
+   */
+  listMetrics(domain?: string, opts?: { includeMeasures?: boolean }): MetricDefinition[] {
+    let all = Array.from(this.metrics.values());
+    if (opts?.includeMeasures === false) {
+      all = all.filter((m) => m.objectKind !== 'measure');
+    }
     return domain ? all.filter((m) => m.domain === domain) : all;
+  }
+
+  /**
+   * Resolve a group-by reference that may be a bare dimension name
+   * (`customer_name`) OR a MetricFlow-qualified name (`bcm_hdr__customer_name`).
+   * The single tolerance point that lets native composition accept both
+   * spellings without changing what it emits. Returns the best-matching
+   * dimension variant, or undefined when nothing matches.
+   */
+  resolveGroupBy(name: string): DimensionDefinition | undefined {
+    if (!name) return undefined;
+    // Exact bare-name hit first.
+    const direct = this.dimensions.get(name);
+    if (direct) return direct;
+    // Qualified `<entityPath>__<dim>`: match the trailing dimension segment,
+    // preferring a variant whose entityLink/cube matches the qualifier head.
+    if (name.includes('__')) {
+      const segments = name.split('__');
+      const leaf = segments[segments.length - 1]!;
+      const qualifier = segments[segments.length - 2];
+      const variants = this.dimensionVariants.get(leaf) ?? (this.dimensions.has(leaf) ? [this.dimensions.get(leaf)!] : []);
+      if (variants.length > 0) {
+        const byEntity = qualifier
+          ? variants.find((d) => d.entityLink === qualifier || d.cube === qualifier)
+          : undefined;
+        return byEntity ?? variants.find((d) => d.qualifiedName === name) ?? variants[0];
+      }
+    }
+    // Bare leaf with no direct map hit (e.g. a variant-only dimension).
+    const variants = this.dimensionVariants.get(name);
+    return variants?.[0];
   }
 
   listDimensions(domain?: string): DimensionDefinition[] {
@@ -1212,6 +1294,15 @@ export class SemanticLayer {
 
   listTimeDimensions(domain?: string): TimeDimensionDefinition[] {
     return this.listDimensions(domain).filter((d): d is TimeDimensionDefinition => Boolean(d.isTimeDimension || d.source?.objectType === 'time_dimension'));
+  }
+
+  /** The time-dimension record for a name, including its real `granularities`. */
+  getTimeDimension(name: string): TimeDimensionDefinition | undefined {
+    const dim = this.dimensions.get(name);
+    if (dim && (dim.isTimeDimension || dim.source?.objectType === 'time_dimension')) {
+      return dim as TimeDimensionDefinition;
+    }
+    return this.listTimeDimensions().find((d) => d.name === name);
   }
 
   listSemanticModels(domain?: string): SemanticModelDefinition[] {

@@ -1441,11 +1441,14 @@ function loadSemanticDefinitions(
         sql: m.sql,
         owner: m.owner,
         tags: m.tags,
+        metricType: m.metricType,
+        objectKind: m.objectKind,
         filePath: semanticDefinitionFilePath(projectRoot, semanticDir, m.source?.extra),
       };
     }
 
     for (const d of layer.listDimensions()) {
+      const timeDim = layer.getTimeDimension(d.name);
       dimensions[d.name] = {
         name: d.name,
         label: d.label,
@@ -1457,6 +1460,9 @@ function loadSemanticDefinitions(
         sql: d.sql,
         owner: d.owner,
         tags: d.tags,
+        qualifiedName: d.qualifiedName,
+        isTimeDimension: d.isTimeDimension,
+        granularities: timeDim?.granularities,
         filePath: semanticDefinitionFilePath(projectRoot, semanticDir, d.source?.extra),
       };
     }

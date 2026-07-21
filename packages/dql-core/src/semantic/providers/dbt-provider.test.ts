@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DbtProvider } from './dbt-provider.js';
+import { writeBcmYamlProject, writeBcmManifestProject } from './__fixtures__/bcm-fixture.js';
 
 describe('DbtProvider', () => {
   let tmpDir: string;
@@ -166,7 +167,7 @@ metrics:
     // The join must target the CUBE (`locations`) with the real key on both sides.
     const orders = layer.getCube('orders')!;
     expect(orders.joins).toEqual([
-      { name: 'locations', left: 'orders', right: 'locations', type: 'left', sql: '${left}.location_id = ${right}.location_id' },
+      { name: 'locations', left: 'orders', right: 'locations', type: 'left', sql: '${left}.location_id = ${right}.location_id', entity: 'location' },
     ]);
 
     // End-to-end: the metric on orders composes by a dimension on locations.
@@ -601,5 +602,113 @@ metrics:
     const layer = provider.load({ provider: 'dbt' }, tmpDir);
     expect(layer.listMetrics()).toEqual([]);
     expect(layer.listCubes()).toEqual([]);
+  });
+});
+
+describe('DbtProvider — semantic catalog foundation (Phase 1)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dbt-bcm-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  for (const variant of ['yaml', 'manifest'] as const) {
+    describe(`${variant} parse path`, () => {
+      function loadBcm() {
+        if (variant === 'yaml') writeBcmYamlProject(tmpDir);
+        else writeBcmManifestProject(tmpDir);
+        return new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+      }
+
+      it('stamps entity-qualified dimension names from the model primary entity', () => {
+        const layer = loadBcm();
+        const customer = layer.getDimension('customer_name');
+        expect(customer?.qualifiedName).toBe('bcm_hdr__customer_name');
+        expect(customer?.entityLink).toBe('bcm_hdr');
+      });
+
+      it('extracts the real time grain and narrows granularities to >= base', () => {
+        const layer = loadBcm();
+        const month = layer.getTimeDimension('consumption_month');
+        expect(month?.baseGranularity).toBe('month');
+        expect(month?.granularities).toEqual(['month', 'quarter', 'year']);
+        expect(month?.granularities).not.toContain('day');
+      });
+
+      it('tags measures as objectKind measure and real metrics as metric', () => {
+        const layer = loadBcm();
+        const all = layer.listMetrics();
+        const bcmAmount = all.find((m) => m.name === 'bcm_amount');
+        const totalBcm = all.find((m) => m.name === 'total_bcm');
+        expect(bcmAmount?.objectKind).toBe('measure');
+        expect(totalBcm?.objectKind).toBe('metric');
+      });
+
+      it('excludes measures from the metric list when asked', () => {
+        const layer = loadBcm();
+        const metricsOnly = layer.listMetrics(undefined, { includeMeasures: false }).map((m) => m.name);
+        expect(metricsOnly).toContain('total_bcm');
+        expect(metricsOnly).toContain('percent_mom_bcm');
+        expect(metricsOnly).not.toContain('bcm_amount');
+        expect(metricsOnly).not.toContain('bcm_line_amount');
+      });
+
+      it('keeps derived metrics as catalog-only (not natively composable)', () => {
+        const layer = loadBcm();
+        expect(layer.canComposeMetric('total_bcm')).toBe(true);
+        expect(layer.canComposeMetric('percent_mom_bcm')).toBe(false);
+      });
+
+      it('records the foreign-entity name on the derived join', () => {
+        const layer = loadBcm();
+        const dtl = layer.getCube('bcm_dtl');
+        const join = dtl?.joins.find((j) => j.right === 'bcm_hdr');
+        expect(join?.entity).toBe('bcm_hdr');
+      });
+
+      it('resolveGroupBy accepts bare and qualified spellings identically', () => {
+        const layer = loadBcm();
+        const bare = layer.resolveGroupBy('customer_name');
+        const qualified = layer.resolveGroupBy('bcm_hdr__customer_name');
+        expect(bare?.name).toBe('customer_name');
+        expect(qualified?.name).toBe('customer_name');
+      });
+    });
+  }
+
+  it('parses saved queries on the raw-YAML path (previously dropped)', () => {
+    writeBcmYamlProject(tmpDir);
+    writeFileSync(
+      join(tmpDir, 'models', 'saved_queries.yml'),
+      `
+saved_queries:
+  - name: bcm_by_customer
+    query_params:
+      metrics: [total_bcm]
+      group_by: [customer_name]
+      order_by: ["-total_bcm"]
+      limit: 10
+`,
+      'utf-8',
+    );
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+    const saved = layer.getSavedQuery('bcm_by_customer');
+    expect(saved?.metrics).toEqual(['total_bcm']);
+    expect(saved?.orderBy).toEqual([{ name: 'total_bcm', direction: 'desc' }]);
+    expect(saved?.limit).toBe(10);
+  });
+
+  it('measure-backed native composition still works after de-conflation', () => {
+    writeBcmYamlProject(tmpDir);
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+    // total_bcm is a simple metric over the bcm_amount measure — it must still
+    // compose to executable SQL even though bcm_amount is now tagged a measure.
+    const composed = layer.composeQuery({ metrics: ['total_bcm'], dimensions: ['customer_name'], driver: 'duckdb' });
+    expect(composed?.sql).toContain('SUM');
+    expect(composed?.sql?.toLowerCase()).toContain('customer_name');
   });
 });
