@@ -2688,12 +2688,34 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     return input.executeGeneratedSql(parsed.sql!, artifact ? { ...artifact, limit: requestedLimit } : undefined);
   };
   if (input.executeGeneratedSql && !result) {
+    // Fanout gate for native semantic direct-joins: a duplicate join-key row on
+    // the joined side multiplies fact rows BEFORE aggregation, so every summed
+    // value inflates silently (seen in the field as trillions-scale "governed"
+    // answers). Probe first; on structural contradiction, refuse with the cause
+    // instead of presenting wrong numbers — and never hand the error to SQL
+    // repair, which would regenerate the same multiplying join.
+    let fanoutContradiction = false;
+    if (
+      !executionError
+      && semanticBridgeAnswer?.composeResult?.fanoutProbeSql
+      && semanticBridgeAnswer.sql.trim() === parsed.sql?.trim()
+    ) {
+      const inflationError = await probeSemanticJoinFanout(
+        semanticBridgeAnswer.composeResult.fanoutProbeSql,
+        semanticBridgeAnswer.composeResult.tables,
+        input.executeGeneratedSql,
+      );
+      if (inflationError) {
+        executionError = inflationError;
+        fanoutContradiction = true;
+      }
+    }
     try {
       if (!executionError) result = await executeCurrentSql();
     } catch (err) {
       executionError = err instanceof Error ? err.message : String(err);
     }
-    if (executionError) {
+    if (executionError && !fanoutContradiction) {
       if (isRetryableGeneratedSqlError(executionError)) {
         const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);
         if (localRepairSql && canUseLaneRepair(repairBudgetState, 'execution')) {
@@ -6671,4 +6693,66 @@ function uniqueAssets(assets: AgentEvidenceAsset[]): AgentEvidenceAsset[] {
     if (!byId.has(asset.nodeId)) byId.set(asset.nodeId, asset);
   }
   return Array.from(byId.values());
+}
+
+/**
+ * Execute the semantic layer's fanout probe and translate a structural
+ * contradiction into an actionable refusal message. Probe failures (missing
+ * permissions, dialect quirks) return undefined — the probe protects against
+ * silent inflation but must never become a new way for a healthy query to fail.
+ */
+export async function probeSemanticJoinFanout(
+  probeSql: string,
+  joinedTables: string[],
+  executeSql: (sql: string, artifact?: never) => Promise<AgentResultPayload>,
+): Promise<string | undefined> {
+  try {
+    const payload = await (executeSql as (sql: string) => Promise<AgentResultPayload>)(probeSql);
+    const counts = parseFanoutProbeCounts(payload);
+    if (!counts || counts.base <= 0 || counts.joined <= counts.base) return undefined;
+    const factor = counts.joined / counts.base;
+    const tables = joinedTables.filter(Boolean).join(', ');
+    return [
+      `Blocked a governed semantic answer whose join inflates results: joining ${tables || 'the declared tables'}`,
+      `turned ${counts.base.toLocaleString('en-US')} base rows into ${counts.joined.toLocaleString('en-US')} (×${factor >= 10 ? Math.round(factor) : factor.toFixed(1)}).`,
+      'The declared join key is not unique on the joined side, so every aggregated value would be multiplied.',
+      'Deduplicate the joined model (for example, filter a slowly-changing dimension to current records)',
+      'or execute this metric through MetricFlow / dbt Cloud, then retry. No numbers were shown because they would be wrong.',
+    ].join(' ');
+  } catch {
+    return undefined;
+  }
+}
+
+function parseFanoutProbeCounts(payload: AgentResultPayload): { base: number; joined: number } | null {
+  const row = payload.rows?.[0];
+  if (row === undefined || row === null) return null;
+  const toCount = (value: unknown): number | null => {
+    const parsed = typeof value === 'number'
+      ? value
+      : typeof value === 'bigint'
+        ? Number(value)
+        : typeof value === 'string'
+          ? Number(value)
+          : Number.NaN;
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  if (Array.isArray(row)) {
+    const base = toCount(row[0]);
+    const joined = toCount(row[1]);
+    return base !== null && joined !== null ? { base, joined } : null;
+  }
+  if (typeof row === 'object') {
+    const record = row as Record<string, unknown>;
+    const lookup = (name: string): number | null => {
+      for (const [key, value] of Object.entries(record)) {
+        if (key.toLowerCase() === name) return toCount(value);
+      }
+      return null;
+    };
+    const base = lookup('base_rows');
+    const joined = lookup('joined_rows');
+    return base !== null && joined !== null ? { base, joined } : null;
+  }
+  return null;
 }

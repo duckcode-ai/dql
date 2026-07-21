@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -8162,5 +8162,51 @@ describe("retrieval-miss recovery + humanized context-validation refusals (Slice
     // Machine detail preserved for Inspect.
     expect(result.refusalDetails?.message).toContain("outside the inspected metadata context");
     expect(result.validationWarnings?.some((warning) => warning.startsWith("SQL context validation detail:"))).toBe(true);
+  });
+});
+
+
+describe("probeSemanticJoinFanout (governed semantic fanout gate)", () => {
+  const PROBE_SQL = "SELECT (SELECT COUNT(*) FROM f) AS base_rows, (SELECT COUNT(*) FROM f JOIN d ON f.k = d.k) AS joined_rows";
+  const payload = (rows: unknown[]) => ({ columns: ["base_rows", "joined_rows"], rows, rowCount: rows.length });
+
+  it("blocks with an actionable message when the join multiplies rows", async () => {
+    const message = await probeSemanticJoinFanout(PROBE_SQL, ["fct_consumption", "dim_customer"], async () =>
+      payload([{ base_rows: 1_000, joined_rows: 250_000 }]) as never);
+    expect(message).toContain("join inflates results");
+    expect(message).toContain("fct_consumption, dim_customer");
+    expect(message).toContain("×250");
+    expect(message).toContain("not unique on the joined side");
+  });
+
+  it("passes clean N:1 joins (joined count equals base count)", async () => {
+    const message = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
+      payload([{ base_rows: 1_000, joined_rows: 1_000 }]) as never);
+    expect(message).toBeUndefined();
+  });
+
+  it("passes row-reducing inner joins (fewer rows is loss, not inflation)", async () => {
+    const message = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
+      payload([{ base_rows: 1_000, joined_rows: 900 }]) as never);
+    expect(message).toBeUndefined();
+  });
+
+  it("parses warehouse casing and array-shaped rows", async () => {
+    const upper = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
+      payload([{ BASE_ROWS: "100", JOINED_ROWS: "700" }]) as never);
+    expect(upper).toContain("×7");
+    const arrays = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
+      payload([[100, 700]]) as never);
+    expect(arrays).toContain("×7");
+  });
+
+  it("never blocks when the probe itself fails or returns garbage", async () => {
+    const failed = await probeSemanticJoinFanout(PROBE_SQL, ["f"], async () => {
+      throw new Error("permission denied");
+    });
+    expect(failed).toBeUndefined();
+    const garbage = await probeSemanticJoinFanout(PROBE_SQL, ["f"], async () =>
+      payload([{ something: "else" }]) as never);
+    expect(garbage).toBeUndefined();
   });
 });

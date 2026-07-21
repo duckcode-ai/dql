@@ -163,6 +163,26 @@ describe('SemanticLayer', () => {
     expect(result?.sql).toContain('LEFT JOIN dev.products AS products ON order_item.product_id = products.product_id');
     expect(result?.sql).toContain("WHERE customers.customer_name = 'Melissa Lopez'");
     expect(result?.sql).toContain('GROUP BY products.product_name');
+
+    // Direct joins aggregate AFTER joining, so a duplicate join key on the
+    // joined side would inflate SUMs. The compose result must carry the
+    // structural fanout probe (base vs joined row counts) for the executor.
+    expect(result?.fanoutProbeSql).toContain('AS base_rows');
+    expect(result?.fanoutProbeSql).toContain('AS joined_rows');
+    expect(result?.fanoutProbeSql).toContain('FROM dev.order_items AS order_item');
+    expect(result?.fanoutProbeSql).toContain('LEFT JOIN dev.customers AS customers');
+    // The probe is structural: no WHERE — filters could mask key duplication.
+    expect(result?.fanoutProbeSql).not.toContain('WHERE');
+  });
+
+  it('omits the fanout probe for single-table compositions', () => {
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders' }],
+      dimensions: [{ name: 'region', label: 'Region', description: '', sql: 'region', type: 'string', table: 'orders' }],
+    });
+    const result = layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' });
+    expect(result?.sql).toContain('SUM(amount) AS revenue');
+    expect(result?.fanoutProbeSql).toBeUndefined();
   });
 
   it('pre-aggregates metrics from different fact tables before joining at a conformed grain', () => {

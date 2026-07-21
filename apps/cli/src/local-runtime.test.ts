@@ -212,6 +212,32 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
       analysisDepth: 'deep',
     })).toBe(120_000);
   });
+
+  it('gives subscription-CLI providers a transport-sized default budget', () => {
+    // A cold `claude`/`codex` spawn per LLM call cannot fit the API-sized 45s
+    // default — simple office questions were dying at the bounded deadline.
+    expect(agentRunDeadlineMs(
+      { question: 'who are the top 10 customers for bcm?', requestedMode: 'ask' },
+      {} as NodeJS.ProcessEnv,
+      'claude-code',
+    )).toBe(150_000);
+    expect(agentRunDeadlineMs(
+      { question: 'investigate revenue drivers', requestedMode: 'research' },
+      {} as NodeJS.ProcessEnv,
+      'codex',
+    )).toBe(300_000);
+    // API providers keep the tight budget; env overrides still win everywhere.
+    expect(agentRunDeadlineMs(
+      { question: 'total revenue?', requestedMode: 'ask' },
+      {} as NodeJS.ProcessEnv,
+      'anthropic',
+    )).toBe(45_000);
+    expect(agentRunDeadlineMs(
+      { question: 'total revenue?', requestedMode: 'ask' },
+      { DQL_AGENT_LOOKUP_DEADLINE_MS: '60000' } as unknown as NodeJS.ProcessEnv,
+      'claude-code',
+    )).toBe(60_000);
+  });
 });
 
 describe('Ask AI runtime schema augmentation', () => {

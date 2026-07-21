@@ -251,6 +251,13 @@ export interface ComposeQueryResult {
   tables: string[];
   /** Compilation strategy used to protect multi-fact metric grain. */
   strategy?: 'direct_join' | 'aggregate_islands';
+  /**
+   * Present when a direct_join composition includes JOIN clauses. Executors
+   * SHOULD run this one-row probe (base_rows, joined_rows) before trusting the
+   * composed SQL: joined_rows > base_rows means the join multiplies fact rows
+   * (non-unique key on the joined side) and every aggregated value is inflated.
+   */
+  fanoutProbeSql?: string;
   /** Dimension/time aliases that form the aggregate-island join grain. */
   grainKeys?: string[];
 }
@@ -904,6 +911,20 @@ export class SemanticLayer {
     if (orderByParts.length > 0) sql += `\nORDER BY ${orderByParts.join(', ')}`;
     if (limit) sql += `\n${dialect.limitClause(limit)}`;
 
+    // A direct join aggregates AFTER joining: any duplicate join-key row on the
+    // joined side multiplies fact rows before SUM and silently inflates every
+    // number (observed in the field as trillions-scale "governed" answers).
+    // Emit a structural probe the executor can run first: if the unfiltered
+    // joined row count exceeds the primary table's row count, the declared key
+    // is not unique on the joined side and the composed SQL must not be trusted.
+    const fanoutProbeSql = joinClauses.length > 0
+      ? [
+          'SELECT',
+          `  (SELECT COUNT(*) ${fromClause}) AS base_rows,`,
+          `  (SELECT COUNT(*) ${fromClause}\n${joinClauses.map((clause) => `   ${clause}`).join('\n')}) AS joined_rows`,
+        ].join('\n')
+      : undefined;
+
     return {
       sql,
       joins: joinClauses,
@@ -912,6 +933,7 @@ export class SemanticLayer {
         ...joinsUsed.map((join) => this.cubes.get(join.right)?.table ?? join.right),
       ])),
       strategy: 'direct_join',
+      ...(fanoutProbeSql ? { fanoutProbeSql } : {}),
       grainKeys: [
         ...resolvedDimensions.map((dimension) => dimension.name),
         ...(timeDimDef && timeDimension ? [`${timeDimDef.name}_${timeDimension.granularity}`] : []),

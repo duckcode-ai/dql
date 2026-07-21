@@ -645,12 +645,29 @@ function agentColumnDisplayFormats(projectRoot: string, columns: string[]): Reco
   return formats;
 }
 
+/** Subscription CLI providers spawn a cold external process per LLM call (2-15s
+ * startup each) across a multi-call loop, so the API-sized 45s default made even
+ * simple questions "reach the bounded execution deadline" on office laptops with
+ * no env override. The defaults must fit the transport's physics. */
+const AGENT_CLI_LOOKUP_DEADLINE_MS = 150_000;
+const AGENT_CLI_RESEARCH_DEADLINE_MS = 300_000;
+
 export function agentRunDeadlineMs(
   request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth'>,
   env: NodeJS.ProcessEnv = process.env,
+  activeProviderId?: string | null,
 ): number {
-  const lookupDeadline = resolveAgentDeadlineMs('DQL_AGENT_LOOKUP_DEADLINE_MS', AGENT_LOOKUP_DEADLINE_MS, env);
-  const researchDeadline = resolveAgentDeadlineMs('DQL_AGENT_RESEARCH_DEADLINE_MS', AGENT_RESEARCH_DEADLINE_MS, env);
+  const cliProvider = activeProviderId === 'claude-code' || activeProviderId === 'codex';
+  const lookupDeadline = resolveAgentDeadlineMs(
+    'DQL_AGENT_LOOKUP_DEADLINE_MS',
+    cliProvider ? AGENT_CLI_LOOKUP_DEADLINE_MS : AGENT_LOOKUP_DEADLINE_MS,
+    env,
+  );
+  const researchDeadline = resolveAgentDeadlineMs(
+    'DQL_AGENT_RESEARCH_DEADLINE_MS',
+    cliProvider ? AGENT_CLI_RESEARCH_DEADLINE_MS : AGENT_RESEARCH_DEADLINE_MS,
+    env,
+  );
   if (request.requestedMode === 'research' || request.analysisDepth === 'deep') {
     return researchDeadline;
   }
@@ -5750,7 +5767,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const runController = new AbortController();
         parsed.request.signal = AbortSignal.any([
           runController.signal,
-          AbortSignal.timeout(agentRunDeadlineMs(parsed.request)),
+          AbortSignal.timeout(agentRunDeadlineMs(parsed.request, process.env, getActiveProvider(projectRoot))),
         ]);
         if (runId) activeAgentRunControllers.set(runId, runController);
         try {
