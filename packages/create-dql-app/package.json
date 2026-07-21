@@ -1,6 +1,6 @@
 {
   "name": "create-dql-app",
-  "version": "1.8.8",
+  "version": "1.8.9",
   "description": "Scaffold a new DQL project. Run with: npx create-dql-app <name>",
   "license": "MIT",
   "author": "DuckCode AI Labs",
@@ -29,7 +29,7 @@
   "type": "module",
   "scripts": {
     "test": "node test/smoke.mjs",
-    "build": "echo 'no build step — pure JS'"
+    "build": "echo 'no build step \u2014 pure JS'"
   },
   "engines": {
     "node": ">=20"

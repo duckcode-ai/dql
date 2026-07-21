@@ -1,7 +1,7 @@
 {
   "name": "@duckcodeailabs/dql-plugin-api",
-  "version": "1.8.8",
-  "description": "Stable plugin contracts for DQL — connectors, chart renderers, governance rule packs. Frozen at v1.0.",
+  "version": "1.8.9",
+  "description": "Stable plugin contracts for DQL \u2014 connectors, chart renderers, governance rule packs. Frozen at v1.0.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
