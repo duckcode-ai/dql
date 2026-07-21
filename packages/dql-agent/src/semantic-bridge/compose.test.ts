@@ -238,3 +238,41 @@ describe('composeSemanticQueryForQuestion — grain-aware metric disambiguation'
     expect(result?.sql).toContain('CROSS JOIN metric_2_refunds');
   });
 });
+
+describe('metric/measure de-conflation (Phase 5)', () => {
+  it('prefers a real metric over a same-concept measure of the same table', () => {
+    // A dbt measure `bcm_amount` and a real metric `total_bcm` both live on
+    // bcm_hdr; addCube tags the measure objectKind:'measure'. A "total bcm"
+    // question must bind the METRIC, not the measure.
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'bcm_amount', label: 'BCM Amount', description: 'Billed consumption measure.', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', objectKind: 'measure' },
+        { name: 'total_bcm', label: 'Total BCM', description: 'Total billed consumption.', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', objectKind: 'metric' },
+      ],
+      dimensions: [{ name: 'customer_name', label: 'Customer', description: 'Customer.', domain: 'bcm', sql: 'customer_name', type: 'string', table: 'bcm_hdr' }],
+    });
+    const question = 'total bcm by customer';
+    const compiled = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    });
+    expect(compiled?.metric).toBe('total_bcm');
+  });
+
+  it('still binds a measure when the question names only the measure (fallback)', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'bcm_line_amount', label: 'BCM Line Amount', description: 'Line-level billed consumption.', domain: 'bcm', sql: 'SUM(line_amount)', type: 'sum', table: 'bcm_dtl', objectKind: 'measure' },
+      ],
+      dimensions: [{ name: 'line_status', label: 'Line status', description: 'Status.', domain: 'bcm', sql: 'line_status', type: 'string', table: 'bcm_dtl' }],
+    });
+    const question = 'bcm line amount by line status';
+    const compiled = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    });
+    expect(compiled?.metric).toBe('bcm_line_amount');
+  });
+});

@@ -19,7 +19,13 @@ export async function selectSemanticMembersViaLlm(input: {
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
 }): Promise<SemanticMemberSelection | undefined> {
-  const metrics = rankMembersForQuestion(input.semanticLayer.listMetrics(), input.question);
+  // Show REAL metrics, not dbt measures projected into the metrics map — the
+  // model shouldn't pick a raw measure when a governed metric exists. If no real
+  // metric matches, fall back to the full pool so measure-backed questions work.
+  const rankedRealMetrics = rankMembersForQuestion(input.semanticLayer.listMetrics(undefined, { includeMeasures: false }), input.question);
+  const metrics = rankedRealMetrics.length > 0
+    ? rankedRealMetrics
+    : rankMembersForQuestion(input.semanticLayer.listMetrics(), input.question);
   if (metrics.length === 0) return undefined;
   const dimensions = rankMembersForQuestion(input.semanticLayer.listDimensions(), input.question);
   const rawTimeDimensions = input.semanticLayer.listTimeDimensions?.() ?? dimensions.filter((dimension) => dimension.isTimeDimension);
@@ -27,13 +33,20 @@ export async function selectSemanticMembersViaLlm(input: {
   const visibleMetrics = metrics.slice(0, 60);
   const visibleDimensions = dimensions.slice(0, 80);
   const visibleTimeDimensions = timeDimensions.slice(0, 20);
+  // Real per-column grains so the model picks a grain the column actually
+  // supports (a month-grain column cannot be sliced by day).
+  const grainsFor = (dimension: typeof visibleTimeDimensions[number]): string[] =>
+    input.semanticLayer.getTimeDimension?.(dimension.name)?.granularities ?? [];
 
   const catalog = [
     'METRICS:',
     ...visibleMetrics.map((metric) => `- ${metric.name}${metric.label && metric.label !== metric.name ? ` (${metric.label})` : ''}${metric.description ? `: ${metric.description}` : ''}`),
     'DIMENSIONS:',
     ...visibleDimensions.map((dimension) => `- ${dimension.name}${dimension.label && dimension.label !== dimension.name ? ` (${dimension.label})` : ''}`),
-    ...(visibleTimeDimensions.length > 0 ? ['TIME DIMENSIONS (use for grain):', ...visibleTimeDimensions.map((dimension) => `- ${dimension.name}`)] : []),
+    ...(visibleTimeDimensions.length > 0 ? ['TIME DIMENSIONS (use for grain):', ...visibleTimeDimensions.map((dimension) => {
+      const grains = grainsFor(dimension);
+      return `- ${dimension.name}${grains.length > 0 ? ` [grains: ${grains.join(', ')}]` : ''}`;
+    })] : []),
   ].join('\n');
 
   const messages: AgentMessage[] = [

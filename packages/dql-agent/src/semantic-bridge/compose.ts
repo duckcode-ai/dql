@@ -79,7 +79,15 @@ export interface ComposeSemanticQueryInput {
 export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput): SemanticBridgeQueryResult | undefined {
   if (input.questionPlan.requestedShape.topN?.scope === 'per_group') return undefined;
 
-  const metrics = selectMetrics(input.semanticLayer.listMetrics(), input);
+  // Prefer REAL metrics over dbt measures projected into the metrics map: match
+  // against metrics-only first, and only fall back to the full pool (measures
+  // included) when the question names no real metric — so "consumption % by
+  // customer" picks the ratio metric, while "total bcm_amount" can still bind
+  // its backing measure. De-conflation without touching the store.
+  const metrics = ((): MetricDefinition[] => {
+    const metricsOnly = selectMetrics(input.semanticLayer.listMetrics(undefined, { includeMeasures: false }), input);
+    return metricsOnly.length > 0 ? metricsOnly : selectMetrics(input.semanticLayer.listMetrics(), input);
+  })();
   const primaryMetric = metrics[0];
   if (!primaryMetric) return undefined;
 
