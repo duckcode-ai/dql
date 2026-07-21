@@ -43,6 +43,16 @@ export function managedMetricFlowBin(projectRoot: string): string {
 /** Resolve the semantic compiler without mutating PATH. A DQL-managed,
  * project-local runtime is considered before the user's ambient executable so
  * Settings installations work after completion without restarting the server. */
+// MetricFlow is a Python CLI: a cold start through a venv routinely takes
+// 2-6+ seconds on a loaded machine. Probing with a tight timeout on EVERY
+// request made readiness flap — pass when idle, time out under load — and the
+// adapter then silently fell back to native, which read as "MetricFlow
+// disconnects after connecting". Cache POSITIVE resolutions per binary for the
+// process lifetime (a working binary stays trusted; if it is later removed,
+// the actual compile fails with a clear error). Negative results are never
+// cached so a Settings-installed runtime is discovered without a restart.
+const metricFlowCliCache = new Map<string, MetricFlowCliResolution>();
+
 export function resolveMetricFlowCli(projectRoot?: string): MetricFlowCliResolution | null {
   const explicit = process.env.DQL_METRICFLOW_BIN || process.env.METRICFLOW_BIN;
   const candidates: Array<{ bin: string; source: MetricFlowCliSource }> = explicit
@@ -53,16 +63,20 @@ export function resolveMetricFlowCli(projectRoot?: string): MetricFlowCliResolut
       ];
   for (const candidate of candidates) {
     if (candidate.source === 'managed' && !existsSync(candidate.bin)) continue;
+    const cached = metricFlowCliCache.get(candidate.bin);
+    if (cached) return cached;
     const result = spawnSync(candidate.bin, ['--version'], {
       encoding: 'utf-8',
       env: process.env,
-      timeout: 3000,
+      timeout: 10_000,
     });
     if (!result.error && result.status === 0) {
-      return {
+      const resolution: MetricFlowCliResolution = {
         ...candidate,
         version: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim().split('\n')[0] ?? '',
       };
+      metricFlowCliCache.set(candidate.bin, resolution);
+      return resolution;
     }
   }
   return null;
