@@ -772,8 +772,13 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
   try {
     if (!store.getThread(threadId)) return;
     const turn = store.appendTurn(threadId, conversationTurnInputFromRun(run));
-    // Fold the turn into the thread's working state + rolling summary (incremental).
-    advanceThreadState(store, threadId, turn);
+    // Fold the turn into the thread's working state + rolling summary — but
+    // ONLY for turns that produced a real answer. A failed/blocked/no-answer
+    // turn folding its (possibly misparsed) filters and measures into working
+    // state poisoned every subsequent ask: the SAME question that worked once
+    // then failed forever because the bad turn's phantom state carried forward.
+    const producedAnswer = run.status === 'completed' || run.status === 'needs_review';
+    if (producedAnswer) advanceThreadState(store, threadId, turn);
   } catch {
     // Conversation persistence is additive; a failed write must not fail the run.
   }

@@ -956,6 +956,20 @@ export async function buildLocalContextPack(
     const mode = request.mode ?? 'question';
     const followUp = normalizeFollowUpContext(request.followUp);
     const questionPlan = buildAnalysisQuestionPlan(request.question, followUp ?? undefined);
+    if (questionPlan.requestedShape.filters.length > 0) {
+      // Title-cased governed names ("Previous Day BCM") must not survive as
+      // member filters — see reclassifyGovernedNameMentions.
+      try {
+        reclassifyGovernedNameMentions(
+          questionPlan,
+          buildGovernedTermIndex(runtimeCatalog.listObjects({
+            objectTypes: ['semantic_metric', 'semantic_measure', 'semantic_dimension', 'dql_block'],
+            limit: 2000,
+          })),
+          request.question,
+        );
+      } catch { /* reclassification is best-effort; the plan stays usable */ }
+    }
 
     // ── Conversation-aware context reuse ──────────────────────────────────
     // The prior turn's pack is fuel: a filter/limit-only REFINEMENT re-stamps it
@@ -7290,4 +7304,83 @@ function tokenize(text: string): string[] {
 function scoreText(value: string, terms: string[]): number {
   const lower = value.toLowerCase();
   return terms.reduce((score, term) => score + (lower.includes(term) ? 1 : 0), 0);
+}
+
+/** Normalized lookup of governed metric/measure/dimension/block names AND labels. */
+export function buildGovernedTermIndex(
+  objects: Array<Pick<MetadataObject, 'objectType' | 'name' | 'payload'>>,
+): Map<string, 'metric' | 'dimension'> {
+  const index = new Map<string, 'metric' | 'dimension'>();
+  const put = (text: unknown, kind: 'metric' | 'dimension') => {
+    if (typeof text !== 'string') return;
+    const key = normalizeGovernedTerm(text);
+    if (key.length >= 3 && !index.has(key)) index.set(key, kind);
+  };
+  for (const object of objects) {
+    const kind = object.objectType === 'semantic_dimension' ? 'dimension' : 'metric';
+    put(object.name, kind);
+    put((object.payload as Record<string, unknown> | undefined)?.label, kind);
+  }
+  return index;
+}
+
+function normalizeGovernedTerm(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * A "filter" phrase that is really a governed metric/dimension NAME or LABEL
+ * must never be treated as a member value. Metric labels render in Title Case
+ * ("Previous Day BCM"), so users naturally type them capitalized — and the
+ * planner's proper-noun heuristic then extracted "Previous Day" as a
+ * named-entity filter, which failed to bind and surfaced as "not enough to
+ * choose a safe metric" (while the lowercase phrasing worked). Reclassify:
+ * drop the phrase from filters and feed the matched governed name into
+ * metricTerms so ranking sees the actual intent. Case-insensitive by
+ * construction. Returns audit notes (empty when nothing matched).
+ */
+export function reclassifyGovernedNameMentions(
+  plan: AnalysisQuestionPlan,
+  index: Map<string, 'metric' | 'dimension'>,
+  question: string,
+): string[] {
+  if (index.size === 0 || plan.requestedShape.filters.length === 0) return [];
+  const questionNorm = ` ${normalizeGovernedTerm(question)} `;
+  const notes: string[] = [];
+  const keptFilters: string[] = [];
+  for (const filter of plan.requestedShape.filters) {
+    const filterNorm = normalizeGovernedTerm(filter);
+    let matched: { key: string; kind: 'metric' | 'dimension' } | undefined;
+    if (filterNorm.length >= 3) {
+      const direct = index.get(filterNorm);
+      if (direct) {
+        matched = { key: filterNorm, kind: direct };
+      } else {
+        for (const [key, kind] of index) {
+          const isSubPhrase = key === filterNorm
+            || key.startsWith(`${filterNorm} `)
+            || key.endsWith(` ${filterNorm}`)
+            || key.includes(` ${filterNorm} `);
+          if (!isSubPhrase) continue;
+          // Every token of the governed name must appear in the question —
+          // "Previous Day" only reclassifies when "bcm" is also present.
+          const tokens = key.split(' ');
+          if (tokens.every((token) => questionNorm.includes(` ${token} `))) {
+            matched = { key, kind };
+            break;
+          }
+        }
+      }
+    }
+    if (!matched) {
+      keptFilters.push(filter);
+      continue;
+    }
+    notes.push(`Reclassified "${filter}" from member filter to governed ${matched.kind} reference ("${matched.key}").`);
+    if (matched.kind === 'metric' && !plan.metricTerms.includes(matched.key)) {
+      plan.metricTerms.push(matched.key);
+    }
+  }
+  if (notes.length > 0) plan.requestedShape.filters = keptFilters;
+  return notes;
 }

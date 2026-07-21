@@ -15,7 +15,10 @@ import {
   recordQueryRun,
   toAgentRetrievalEvidence,
   upsertMetadataSnapshot,
+  buildGovernedTermIndex,
+  reclassifyGovernedNameMentions,
 } from './catalog.js';
+import { buildAnalysisQuestionPlan } from './analysis-planner.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import { resolveSemanticLayerWithDiagnostics, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { recordCorrectionTrace, reviewHint } from '../hints/git-store.js';
@@ -2454,3 +2457,34 @@ function productUsageRuntimeSchema() {
     }],
   };
 }
+
+describe('governed-name reclassification (BCM vs bcm fix)', () => {
+  const index = buildGovernedTermIndex([
+    { objectType: 'semantic_metric', name: 'previous_day_bcm', payload: { label: 'Previous Day BCM' } },
+    { objectType: 'semantic_dimension', name: 'usage_source', payload: { label: 'Usage Source' } },
+  ] as never);
+
+  it('reclassifies a Title-Case metric label fragment from filter to metric term', () => {
+    const plan = buildAnalysisQuestionPlan('what is the Previous Day BCM');
+    expect(plan.requestedShape.filters).toContain('Previous Day');
+    const notes = reclassifyGovernedNameMentions(plan, index, 'what is the Previous Day BCM');
+    expect(notes).toHaveLength(1);
+    expect(plan.requestedShape.filters).not.toContain('Previous Day');
+    expect(plan.metricTerms).toContain('previous day bcm');
+  });
+
+  it('leaves genuine member values (Capital One) as filters', () => {
+    const plan = buildAnalysisQuestionPlan('what is the total BCM for Capital One');
+    const before = [...plan.requestedShape.filters];
+    reclassifyGovernedNameMentions(plan, index, 'what is the total BCM for Capital One');
+    // "Capital One" matches no governed name — it must survive as a filter.
+    expect(plan.requestedShape.filters.filter((f) => /capital/i.test(f))).toEqual(before.filter((f) => /capital/i.test(f)));
+  });
+
+  it('requires the full governed name to appear in the question before reclassifying', () => {
+    const plan = buildAnalysisQuestionPlan('sales for Previous Day period');
+    const notes = reclassifyGovernedNameMentions(plan, index, 'sales for Previous Day period');
+    // "bcm" is absent from the question, so "Previous Day" stays whatever it was.
+    expect(notes).toEqual([]);
+  });
+});

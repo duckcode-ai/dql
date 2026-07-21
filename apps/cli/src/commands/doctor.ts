@@ -103,6 +103,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   checks.push(await checkDqlVersionDrift(projectRoot));
   checks.push(checkRetrievalHealth(projectRoot, config));
   checks.push(await checkSemanticExecutionRuntime(projectRoot, resolveProjectSemanticConfig(config, projectRoot)));
+  if (isDbt) checks.push(checkDbtArtifactFreshness(projectRoot));
 
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
@@ -946,7 +947,7 @@ async function checkSemanticExecutionRuntime(projectRoot: string, semanticConfig
     if (!result.layer) {
       return { name: 'Semantic execution runtime', ok: true, detail: 'no semantic layer configured (optional)' };
     }
-    const runtime = await getSemanticRuntimeStatus(projectRoot);
+    const runtime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
     const metrics = result.layer.listMetrics();
     const composable = metrics.filter((metric) => result.layer!.canComposeMetric(metric.name)).length;
     const runtimeOnly = metrics.length - composable;
@@ -966,4 +967,44 @@ async function checkSemanticExecutionRuntime(projectRoot: string, semanticConfig
       detail: `status unavailable (${error instanceof Error ? error.message : String(error)})`,
     };
   }
+}
+
+/**
+ * dbt artifact freshness: DQL reads target/manifest.json and
+ * target/semantic_manifest.json AS-IS with no staleness gate — regenerating
+ * dbt without re-running `dql compile` (or running `dbt run` mid-session)
+ * silently degrades metric selection and MetricFlow execution. Surface it.
+ */
+function checkDbtArtifactFreshness(projectRoot: string): Check {
+  const manifestPath = resolveDbtManifestPath(projectRoot);
+  if (!manifestPath || !existsSync(manifestPath)) {
+    return {
+      name: 'dbt artifacts',
+      ok: true,
+      detail: 'no dbt manifest resolved (non-dbt project, or run dbt parse first)',
+    };
+  }
+  const semanticPath = join(dirname(manifestPath), 'semantic_manifest.json');
+  const dqlManifestPath = join(projectRoot, 'dql-manifest.json');
+  const mtime = (path: string): number | undefined => {
+    try { return existsSync(path) ? statSync(path).mtimeMs : undefined; } catch { return undefined; }
+  };
+  const manifestM = mtime(manifestPath);
+  const semanticM = mtime(semanticPath);
+  const compiledM = mtime(dqlManifestPath);
+  const problems: string[] = [];
+  if (semanticM === undefined) {
+    problems.push('target/semantic_manifest.json is MISSING — MetricFlow metrics cannot load or execute; run `dbt parse`.');
+  }
+  if (compiledM !== undefined && manifestM !== undefined && manifestM > compiledM) {
+    problems.push('dbt manifest is NEWER than the last dql compile — metric/dimension changes are invisible to the agent; run `dql compile`.');
+  }
+  if (compiledM !== undefined && semanticM !== undefined && semanticM > compiledM) {
+    problems.push('semantic_manifest.json is NEWER than the last dql compile; run `dql compile`.');
+  }
+  const summary = `manifest=${manifestM ? new Date(manifestM).toISOString() : 'missing'}, semantic_manifest=${semanticM ? new Date(semanticM).toISOString() : 'MISSING'}, dql-compile=${compiledM ? new Date(compiledM).toISOString() : 'never'}`;
+  if (problems.length === 0) {
+    return { name: 'dbt artifacts', ok: true, detail: summary };
+  }
+  return { name: 'dbt artifacts', ok: false, detail: `${summary}. ${problems.join(' ')} Note: avoid running dbt while Ask sessions are active — artifacts are read per question.` };
 }

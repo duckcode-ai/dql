@@ -143,10 +143,14 @@ export function validateSqlAgainstLocalContext(
     metadataObjectCount: contextPack.objects.length,
   })) {
     const missing = contextPack.missingContext.map((item) => item.message).join(' ');
+    // Embed the four gate counts so an INTERMITTENT refusal self-diagnoses
+    // from the message alone: schema=0 with relations=0 points at a failed
+    // runtime scan / rebuild race, not at the user's question.
+    const gateCounts = `[context counts: relations=${allowed.size}, runtimeSchema=${options.runtimeSchema?.length ?? 0}, sourceSql=${contextPack.allowedSqlContext.sourceBlockSql.length}, objects=${contextPack.objects.length}]`;
     return {
       ok: false,
       code: 'insufficient_context',
-      error: `Metadata context is insufficient for SQL generation. ${missing || contextPack.routeDecision.reason}`,
+      error: `Metadata context is insufficient for SQL generation. ${missing || contextPack.routeDecision.reason} ${gateCounts}`,
       ...base,
     };
   }
