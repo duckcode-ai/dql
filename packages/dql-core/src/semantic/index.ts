@@ -8,9 +8,11 @@ export {
   parsePreAggregationDefinition,
   parseBlockCompanionDefinition,
   parseCubeDefinition,
+  parseSemanticDisplayFormat,
 } from './semantic-layer.js';
 export type {
   SemanticSourceMetadata,
+  SemanticDisplayFormat,
   MetricDefinition,
   DimensionDefinition,
   MeasureDefinition,

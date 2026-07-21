@@ -18,6 +18,7 @@ import {
   type JoinDefinition,
   type CubeDefinition,
   type TimeDimensionDefinition,
+  parseSemanticDisplayFormat,
 } from '../semantic-layer.js';
 import type { SemanticLayerProvider, SemanticLayerProviderConfig } from './provider.js';
 
@@ -822,6 +823,7 @@ function convertMeasure(
     table: cube.table,
     cube: model.name,
     aggTimeDimension: measure.agg_time_dimension ?? model.defaults?.agg_time_dimension,
+    displayFormat: parseSemanticDisplayFormat((measure as Record<string, unknown>).meta ?? (measure.config as Record<string, unknown> | undefined)?.meta),
     createMetric: measure.create_metric,
     nonAdditiveDimension: measure.non_additive_dimension,
     filter: measure.filter,
@@ -903,6 +905,7 @@ function convertDbtMetric(
     aggregation: dbtMetric.type,
     metricType: dbtMetric.type,
     typeParams: dbtMetric.type_params,
+    displayFormat: parseSemanticDisplayFormat(dbtMetric.meta ?? (dbtMetric.config as Record<string, unknown> | undefined)?.meta),
     filter: dbtMetric.filter ?? dbtMetric.filters,
     aggTimeDimension: resolvedMeasure?.measure.agg_time_dimension,
     source: dbtSource('metric', dbtMetric.unique_id ?? dbtMetric.name, dbtMetric.name, dbtMetric as unknown as Record<string, unknown>),

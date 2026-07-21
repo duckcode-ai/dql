@@ -32,7 +32,21 @@ export interface MetricDefinition {
   typeParams?: Record<string, unknown>;
   filter?: string | Record<string, unknown> | Array<Record<string, unknown>>;
   aggTimeDimension?: string;
+  /** Display contract (currency/percent/decimals) from dbt meta or DQL YAML. */
+  displayFormat?: SemanticDisplayFormat;
   source?: SemanticSourceMetadata;
+}
+
+/**
+ * How a metric/measure value should be RENDERED. Declared once in metadata
+ * (dbt `meta: {format: currency, currency: USD, decimals: 2}` or a DQL YAML
+ * `format:` block) so every surface — narration, synthesis, tables, charts —
+ * formats identically instead of each layer guessing from the column name.
+ */
+export interface SemanticDisplayFormat {
+  kind: 'currency' | 'percent' | 'number' | 'count' | 'duration';
+  currency?: string;
+  decimals?: number;
 }
 
 export interface DimensionDefinition {
@@ -66,6 +80,8 @@ export interface MeasureDefinition {
   createMetric?: boolean;
   nonAdditiveDimension?: Record<string, unknown>;
   filter?: string | Record<string, unknown> | Array<Record<string, unknown>>;
+  /** Display contract (currency/percent/decimals) from dbt meta or DQL YAML. */
+  displayFormat?: SemanticDisplayFormat;
   tags?: string[];
   owner?: string;
   source?: SemanticSourceMetadata;
@@ -910,6 +926,29 @@ export class SemanticLayer {
    */
   canComposeMetric(name: string): boolean {
     return Boolean(this.resolveComposableMetric(name));
+  }
+
+  /**
+   * Resolve the DISPLAY format for a metric/measure name: explicit
+   * declaration first (metric, then its backing measure), then a conservative
+   * inference from metric type (ratio → percent). Returns undefined when
+   * nothing is declared — callers keep their name-based fallback for ad-hoc
+   * columns, but governed values format from the contract, not the guess.
+   */
+  displayFormatFor(name: string): SemanticDisplayFormat | undefined {
+    const metric = this.metrics.get(name);
+    if (metric?.displayFormat) return metric.displayFormat;
+    const measure = this.measures.get(name);
+    if (measure?.displayFormat) return measure.displayFormat;
+    if (metric) {
+      const backing = this.resolveComposableMetric(name);
+      if (backing) {
+        const backingMeasure = this.measures.get(backing.sql) ?? this.measures.get(metric.name);
+        if (backingMeasure?.displayFormat) return backingMeasure.displayFormat;
+      }
+      if (metric.metricType === 'ratio') return { kind: 'percent' };
+    }
+    return undefined;
   }
 
   /**
@@ -1947,4 +1986,45 @@ function parseSourceMetadata(value: unknown): SemanticSourceMetadata | undefined
 
 function parseStatus(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Normalize a display-format declaration from dbt `meta` or DQL YAML. Accepts
+ * `meta.format: "currency"`, `meta: {format: {kind: percent, decimals: 1}}`,
+ * `meta.currency: "EUR"`, and common shorthands ("usd", "$", "%").
+ */
+export function parseSemanticDisplayFormat(meta: unknown): SemanticDisplayFormat | undefined {
+  if (!meta || typeof meta !== 'object') return undefined;
+  const record = meta as Record<string, unknown>;
+  const raw = record.format ?? record.display_format ?? record.displayFormat;
+  const currencyHint = typeof record.currency === 'string' ? record.currency.toUpperCase() : undefined;
+  const decimalsHint = Number.isFinite(Number(record.decimals)) ? Math.max(0, Math.min(6, Math.floor(Number(record.decimals)))) : undefined;
+  const fromKind = (kind: string, extra: Partial<SemanticDisplayFormat> = {}): SemanticDisplayFormat | undefined => {
+    const normalized = kind.trim().toLowerCase();
+    if (['currency', 'money', 'usd', '$', 'dollar', 'dollars'].includes(normalized)) {
+      return { kind: 'currency', currency: extra.currency ?? currencyHint ?? 'USD', decimals: extra.decimals ?? decimalsHint ?? 2 };
+    }
+    if (['percent', 'percentage', 'pct', '%'].includes(normalized)) {
+      return { kind: 'percent', ...(extra.decimals ?? decimalsHint) !== undefined ? { decimals: extra.decimals ?? decimalsHint } : {} };
+    }
+    if (['count', 'integer', 'int'].includes(normalized)) return { kind: 'count' };
+    if (['number', 'decimal', 'float'].includes(normalized)) {
+      return { kind: 'number', ...(extra.decimals ?? decimalsHint) !== undefined ? { decimals: extra.decimals ?? decimalsHint } : {} };
+    }
+    if (normalized === 'duration') return { kind: 'duration' };
+    return undefined;
+  };
+  if (typeof raw === 'string') return fromKind(raw);
+  if (raw && typeof raw === 'object') {
+    const nested = raw as Record<string, unknown>;
+    const kind = typeof nested.kind === 'string' ? nested.kind : typeof nested.format === 'string' ? nested.format : undefined;
+    if (kind) {
+      return fromKind(kind, {
+        currency: typeof nested.currency === 'string' ? nested.currency.toUpperCase() : undefined,
+        decimals: Number.isFinite(Number(nested.decimals)) ? Math.max(0, Math.min(6, Math.floor(Number(nested.decimals)))) : undefined,
+      });
+    }
+  }
+  if (currencyHint) return { kind: 'currency', currency: currencyHint, decimals: decimalsHint ?? 2 };
+  return undefined;
 }

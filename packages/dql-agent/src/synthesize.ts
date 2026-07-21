@@ -1,3 +1,5 @@
+import type { SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
+
 /**
  * Answer synthesis — turn a governed result into a reply whose *shape* matches the
  * question, instead of one static template for everything.
@@ -104,6 +106,14 @@ export interface SynthesizeInput {
   gaps?: string[];
   /** Compiler-owned ranking direction; prose must not reverse it. */
   rankingDirection?: 'top' | 'bottom';
+  /**
+   * Governed display contract per result column (from semantic-layer
+   * displayFormat metadata). Overrides the column-name inference so governed
+   * values render with the declared currency/decimals instead of a guess —
+   * `total_bcm` formats as $ because its metric SAYS so, not because the
+   * column name happens to contain "revenue".
+   */
+  columnFormats?: Record<string, SemanticDisplayFormat>;
 }
 
 /** Injected text completion, optionally streaming token deltas. */
@@ -178,13 +188,13 @@ function buildSystemPrompt(format: SynthesisFormat, audience: "analyst" | "stake
   return lines.join("\n");
 }
 
-function previewToText(preview: SynthesizeResultPreview | undefined, limit = 20): string {
+function previewToText(preview: SynthesizeResultPreview | undefined, limit = 20, formats?: Record<string, SemanticDisplayFormat>): string {
   if (!preview || preview.rows.length === 0) return "(no rows)";
   const cols = preview.columns.length > 0 ? preview.columns : Object.keys(preview.rows[0] ?? {});
   const header = `| ${cols.join(" | ")} |`;
   const sep = `| ${cols.map(() => "---").join(" | ")} |`;
   const body = preview.rows.slice(0, limit).map((row) =>
-    `| ${cols.map((col) => formatBusinessValue(col, row[col])).join(" | ")} |`,
+    `| ${cols.map((col) => formatBusinessValue(col, row[col], formats?.[col])).join(" | ")} |`,
   );
   const more = preview.rows.length > limit ? `\n(${preview.rows.length - limit} more rows not shown)` : "";
   return [header, sep, ...body].join("\n") + more;
@@ -213,9 +223,32 @@ function numericCell(value: unknown): number | undefined {
   return undefined;
 }
 
-function formatBusinessValue(column: string, value: unknown): string {
+function formatBusinessValue(column: string, value: unknown, format?: SemanticDisplayFormat): string {
   const numeric = numericCell(value);
   if (numeric === undefined) return formatCell(value).replace(/_/g, " ");
+  if (format) {
+    if (format.kind === 'currency') {
+      return new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: format.currency ?? "USD",
+        minimumFractionDigits: format.decimals ?? 2,
+        maximumFractionDigits: format.decimals ?? 2,
+      }).format(numeric);
+    }
+    if (format.kind === 'percent') {
+      const normalized = Math.abs(numeric) <= 1 ? numeric : numeric / 100;
+      return new Intl.NumberFormat("en-US", { style: "percent", maximumFractionDigits: format.decimals ?? 2 }).format(normalized);
+    }
+    if (format.kind === 'count') {
+      return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(numeric);
+    }
+    if (format.kind === 'number') {
+      return new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: format.decimals ?? 0,
+        maximumFractionDigits: format.decimals ?? 2,
+      }).format(numeric);
+    }
+  }
   const isCount = /(?:^|_)(?:count|orders?|customers?|accounts?|users?|products?|items?|units?|quantity|rank|position|days?|months?|years?|distinct)(?:_|$)/i.test(column);
   const isPercent = /(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)|(?:^|_)margin(?:_|$)/i.test(column);
   const isCurrency = /(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i.test(column);
@@ -270,6 +303,7 @@ function businessRowLabel(
   preview: SynthesizeResultPreview,
   row: Record<string, unknown>,
   identityColumn: string | undefined,
+  formats?: Record<string, SemanticDisplayFormat>,
 ): string {
   if (!identityColumn) return "The leading result";
   // Multi-grain rows need enough identity to distinguish repeated labels. For
@@ -286,7 +320,7 @@ function businessRowLabel(
       && String(row[column]).trim().length > 0),
   ].slice(0, 2);
   return identityColumns
-    .map((column) => formatBusinessValue(column, row[column]))
+    .map((column) => formatBusinessValue(column, row[column], formats?.[column]))
     .filter(Boolean)
     .join(" — ");
 }
@@ -323,6 +357,7 @@ function visibleProfileFields(preview: SynthesizeResultPreview, identityColumn?:
 /** Offline-safe stakeholder prose built only from executed values. */
 function deterministicBusinessNarrative(input: SynthesizeInput, format: SynthesisFormat): string | undefined {
   const preview = input.resultPreview;
+  const formats = input.columnFormats;
   if (!preview) return undefined;
   if (preview.rows.length === 0) return "No matching records were found for this question.";
 
@@ -330,16 +365,16 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
   const measure = measureColumn(input);
   if (preview.rows.length === 1) {
     const row = preview.rows[0];
-    const identityValue = identityColumn ? formatBusinessValue(identityColumn, row[identityColumn]) : undefined;
+    const identityValue = identityColumn ? formatBusinessValue(identityColumn, row[identityColumn], formats?.[identityColumn]) : undefined;
     const fields = visibleProfileFields(preview, identityColumn).filter((column) => row[column] !== null && row[column] !== undefined && row[column] !== "");
     const leadFields = fields.slice(0, 3);
-    const lead = leadFields.map((column) => `**${humanizeColumn(column)}:** ${formatBusinessValue(column, row[column])}`).join(" · ");
+    const lead = leadFields.map((column) => `**${humanizeColumn(column)}:** ${formatBusinessValue(column, row[column], formats?.[column])}`).join(" · ");
     const headline = identityValue
       ? `**${identityValue}**${lead ? ` — ${lead}.` : "."}`
       : lead || "One matching record was found.";
     const remaining = fields.slice(3, 7);
     return remaining.length > 0
-      ? `${headline}\n${remaining.map((column) => `- **${humanizeColumn(column)}:** ${formatBusinessValue(column, row[column])}`).join("\n")}`
+      ? `${headline}\n${remaining.map((column) => `- **${humanizeColumn(column)}:** ${formatBusinessValue(column, row[column], formats?.[column])}`).join("\n")}`
       : headline;
   }
 
@@ -353,13 +388,13 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
         : right.value - left.value);
     const top = ranked[0];
     if (top) {
-      const topLabel = businessRowLabel(preview, top.row, identityColumn);
+      const topLabel = businessRowLabel(preview, top.row, identityColumn, formats);
       const scope = preview.rowCount > preview.rows.length ? "Among the displayed results, " : "";
       const directionLabel = rankingDirection === 'bottom' ? 'lowest' : 'highest';
-      const headline = `${scope}**${topLabel}** has the ${directionLabel} ${humanizeColumn(measure).toLowerCase()} at **${formatBusinessValue(measure, top.value)}**.`;
+      const headline = `${scope}**${topLabel}** has the ${directionLabel} ${humanizeColumn(measure).toLowerCase()} at **${formatBusinessValue(measure, top.value, formats?.[measure])}**.`;
       const next = ranked.slice(1, 3).map((entry) => {
-        const label = identityColumn ? businessRowLabel(preview, entry.row, identityColumn) : "Another result";
-        return `- **${label}:** ${formatBusinessValue(measure, entry.value)}`;
+        const label = identityColumn ? businessRowLabel(preview, entry.row, identityColumn, formats) : "Another result";
+        return `- **${label}:** ${formatBusinessValue(measure, entry.value, formats?.[measure])}`;
       });
       const causationCaveat = format === "research"
         ? "\nThis result shows the pattern, but it does not by itself establish the underlying cause."
@@ -370,7 +405,7 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
 
   const first = preview.rows[0];
   const fields = preview.columns.filter((column) => !isTechnicalColumn(column)).slice(0, 4);
-  return fields.map((column) => `**${humanizeColumn(column)}:** ${formatBusinessValue(column, first[column])}`).join(" · ");
+  return fields.map((column) => `**${humanizeColumn(column)}:** ${formatBusinessValue(column, first[column], formats?.[column])}`).join(" · ");
 }
 
 function rankingDirectionFromQuestion(question: string): 'top' | 'bottom' {
@@ -435,7 +470,7 @@ function buildUserPrompt(input: SynthesizeInput): string {
     const sampleLabel = input.resultPreview.rowCount > shown
       ? `Result (${input.resultPreview.rowCount} rows total; SAMPLE of first ${shown} shown):`
       : `Result (${input.resultPreview.rowCount} rows):`;
-    lines.push(`${sampleLabel}\n${previewToText(input.resultPreview)}`);
+    lines.push(`${sampleLabel}\n${previewToText(input.resultPreview, 20, input.columnFormats)}`);
     const statsText = statsToText(input.resultPreview.stats, input.resultPreview.rowCount);
     if (statsText) lines.push(statsText);
   }

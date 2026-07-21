@@ -5,6 +5,7 @@ import {
   parseDimensionDefinition,
   parseHierarchyDefinition,
   parseBlockCompanionDefinition,
+  parseSemanticDisplayFormat,
 } from './semantic-layer.js';
 import { getDialect } from './sql-dialect.js';
 
@@ -801,5 +802,40 @@ describe('derived-metric dimension compatibility (office-test survivor fix)', ()
     const layer = layerWithDerived();
     expect(layer.canComposeMetric('previous_day_bcm')).toBe(false);
     expect(layer.canComposeMetric('bcm')).toBe(true);
+  });
+});
+
+describe('display-format contract', () => {
+  it('parses dbt meta shorthands and structured forms', () => {
+    expect(parseSemanticDisplayFormat({ format: 'currency' })).toEqual({ kind: 'currency', currency: 'USD', decimals: 2 });
+    expect(parseSemanticDisplayFormat({ format: 'usd' })).toEqual({ kind: 'currency', currency: 'USD', decimals: 2 });
+    expect(parseSemanticDisplayFormat({ format: '%' })).toEqual({ kind: 'percent' });
+    expect(parseSemanticDisplayFormat({ format: { kind: 'percent', decimals: 1 } })).toEqual({ kind: 'percent', decimals: 1 });
+    expect(parseSemanticDisplayFormat({ currency: 'eur' })).toEqual({ kind: 'currency', currency: 'EUR', decimals: 2 });
+    expect(parseSemanticDisplayFormat({ format: 'count' })).toEqual({ kind: 'count' });
+    expect(parseSemanticDisplayFormat({})).toBeUndefined();
+    expect(parseSemanticDisplayFormat(undefined)).toBeUndefined();
+  });
+
+  it('resolves formats metric-first, then measure, then ratio inference', () => {
+    const layer = new SemanticLayer({
+      metrics: [
+        { name: 'bcm', label: 'BCM', description: '', domain: 'usage', sql: 'bcm', type: 'custom', table: '', typeParams: { measure: { name: 'bcm' } } },
+        { name: 'arr', label: 'ARR', description: '', domain: 'finance', sql: 'arr', type: 'custom', table: 'facts', displayFormat: { kind: 'currency', currency: 'USD', decimals: 0 } },
+        { name: 'dod_ratio', label: 'DoD', description: '', domain: 'usage', sql: 'dod_ratio', type: 'custom', table: '', metricType: 'ratio', typeParams: {} },
+      ],
+      dimensions: [],
+      measures: [
+        { name: 'bcm', label: 'BCM', description: '', agg: 'sum', table: 'usage_daily', displayFormat: { kind: 'currency', currency: 'USD', decimals: 2 } },
+      ],
+      semanticModels: [
+        { name: 'usage_daily', label: 'Usage daily', description: '', table: 'usage_daily', entities: [], measures: ['bcm'], dimensions: [], timeDimensions: [] },
+      ],
+    });
+
+    expect(layer.displayFormatFor('arr')).toEqual({ kind: 'currency', currency: 'USD', decimals: 0 });
+    expect(layer.displayFormatFor('bcm')).toEqual({ kind: 'currency', currency: 'USD', decimals: 2 });
+    expect(layer.displayFormatFor('dod_ratio')).toEqual({ kind: 'percent' });
+    expect(layer.displayFormatFor('nonexistent')).toBeUndefined();
   });
 });

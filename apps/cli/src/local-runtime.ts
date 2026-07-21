@@ -1,3 +1,4 @@
+import type { SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -250,6 +251,7 @@ import {
   type ConversationalKind,
   type PlanBlock,
   type ReasoningEffort,
+  loadAgentSemanticLayer,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps-api.js';
@@ -629,6 +631,20 @@ function resolveAgentDeadlineMs(envKey: string, fallback: number, env: NodeJS.Pr
  * calls, repair, and execution. Ordinary Ask never inherits Research's budget
  * merely because it spans two tables; explicit/deep investigation does.
  */
+/** Resolve governed display formats for result columns from the semantic layer (best-effort, cached per call). */
+function agentColumnDisplayFormats(projectRoot: string, columns: string[]): Record<string, SemanticDisplayFormat> {
+  const formats: Record<string, SemanticDisplayFormat> = {};
+  try {
+    const layer = loadAgentSemanticLayer(projectRoot);
+    if (!layer) return formats;
+    for (const column of columns) {
+      const format = layer.displayFormatFor(column);
+      if (format) formats[column] = format;
+    }
+  } catch { /* formatting is presentation-only; never fail an answer over it */ }
+  return formats;
+}
+
 export function agentRunDeadlineMs(
   request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth'>,
   env: NodeJS.ProcessEnv = process.env,
@@ -2159,6 +2175,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             draftText: draft,
             gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
             rankingDirection: governedAnswer.contextPack?.questionPlan.requestedShape.rankingDirection,
+            // Governed display contract: metric/measure displayFormat metadata
+            // beats column-name guessing, so $ and decimals stay consistent
+            // between the narration and the table for names like total_bcm.
+            ...(preview ? { columnFormats: agentColumnDisplayFormats(projectRoot, preview.columns) } : {}),
           },
           provider
             ? {

@@ -239,3 +239,48 @@ describe("business value semantics", () => {
     expect(result.text).not.toContain("$");
   });
 });
+
+describe('governed display formats (columnFormats contract)', () => {
+  it('formats governed columns from the declared contract, not the column-name guess', async () => {
+    const result = await synthesizeAnswer({
+      question: 'what is the total bcm by usage source?',
+      audience: 'stakeholder',
+      resultPreview: {
+        columns: ['usage_source', 'total_bcm', 'dod_change'],
+        rows: [
+          { usage_source: 'api', total_bcm: 1234567.891, dod_change: 0.0423 },
+          { usage_source: 'batch', total_bcm: 234.5, dod_change: -0.011 },
+        ],
+        rowCount: 2,
+      },
+      columnFormats: {
+        total_bcm: { kind: 'currency', currency: 'USD', decimals: 2 },
+        dod_change: { kind: 'percent', decimals: 1 },
+      },
+    });
+
+    expect(result.text).toContain('$1,234,567.89');
+    // `bcm` matches no currency-name regex — without the contract this
+    // rendered as a bare number.
+    expect(result.text).not.toContain('1234567.891');
+  });
+
+  it('formats percent contract columns in single-row profiles', async () => {
+    const result = await synthesizeAnswer({
+      question: 'how is the api usage source doing?',
+      audience: 'stakeholder',
+      resultPreview: {
+        columns: ['usage_source', 'total_bcm', 'dod_change'],
+        rows: [{ usage_source: 'api', total_bcm: 1234567.891, dod_change: 0.0423 }],
+        rowCount: 1,
+      },
+      columnFormats: {
+        total_bcm: { kind: 'currency', currency: 'USD', decimals: 2 },
+        dod_change: { kind: 'percent', decimals: 1 },
+      },
+    });
+
+    expect(result.text).toContain('$1,234,567.89');
+    expect(result.text).toContain('4.2%');
+  });
+});
