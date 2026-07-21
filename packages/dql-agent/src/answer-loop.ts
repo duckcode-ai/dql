@@ -1837,7 +1837,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
   if (!semanticBridgeAnswer && semanticRuntimeFailure) {
-    const text = `The governed semantic metric was found, but its semantic runtime could not compile the request: ${semanticRuntimeFailure}`;
+    const text = `The governed semantic metric was found, but its semantic runtime could not compile the request: ${compactSemanticRuntimeFailure(semanticRuntimeFailure)}`;
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -1847,7 +1847,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       text,
       answer: text,
       refusalCode: 'modeling_gap',
-      refusalDetails: { code: 'semantic_runtime_required', message: text },
+      // The answer shows the compact business-readable failure; the FULL compiler
+      // output stays here for Inspect/debugging.
+      refusalDetails: { code: 'semantic_runtime_required', message: semanticRuntimeFailure },
       citations: [],
       memoryContext: input.memoryContext,
       evidence: buildNoAnswerEvidence({
@@ -6755,4 +6757,26 @@ function parseFanoutProbeCounts(payload: AgentResultPayload): { base: number; jo
     return base !== null && joined !== null ? { base, joined } : null;
   }
   return null;
+}
+
+/**
+ * Reduce a raw semantic-runtime compiler failure (often a full MetricFlow
+ * resolver dump with repeated errors, suggestion arrays, log paths, and a bug-
+ * report link) to the one sentence a business user can act on. The full text is
+ * preserved separately in refusalDetails for Inspect.
+ */
+export function compactSemanticRuntimeFailure(failure: string): string {
+  const groupBy = /does not match any of the available group-by-items for\s+SimpleMetric\('([^']+)'\)/i.exec(failure);
+  if (groupBy) {
+    const input = /Query Input:\s*\n?\s*['"]?([A-Za-z0-9_.]+)['"]?/.exec(failure)?.[1];
+    const suggestions = /Suggestions:\s*\[([^\]]*)\]/.exec(failure)?.[1]
+      ?.split(',').map((item) => item.replace(/['"\s]/g, '')).filter(Boolean).slice(0, 3) ?? [];
+    return [
+      `MetricFlow could not group ${groupBy[1]}${input ? ` by "${input}"` : ''} — the dimension needs its entity-qualified name.`,
+      suggestions.length > 0 ? `Valid options include: ${suggestions.join(', ')}.` : '',
+      'Ask again naming one of those dimensions, or update the semantic model so the join path is unambiguous.',
+    ].filter(Boolean).join(' ');
+  }
+  const firstLine = failure.split('\n').map((line) => line.trim()).find(Boolean) ?? failure;
+  return firstLine.length > 300 ? `${firstLine.slice(0, 300)}…` : firstLine;
 }

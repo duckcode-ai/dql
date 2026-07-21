@@ -7,6 +7,7 @@ import {
   hasMetricFlowCli,
   metricFlowCompileMode,
   MetricFlowUnavailableError,
+  repairMetricFlowGroupBy,
 } from './metricflow.js';
 
 describe('MetricFlow compile wrapper', () => {
@@ -87,5 +88,72 @@ describe('MetricFlow compile wrapper', () => {
     chmodSync(bin, 0o755);
     process.env.DQL_METRICFLOW_BIN = bin;
     expect(hasMetricFlowCli()).toBe(false);
+  });
+});
+
+
+describe('repairMetricFlowGroupBy (entity-qualified group-by retry)', () => {
+  // Verbatim shape of the office failure: bare dimension name sent, MetricFlow
+  // suggests the entity-qualified candidates.
+  const OFFICE_ERROR = `ERROR: Got error(s) during query resolution.
+Error #1: Message:
+The given input does not match any of the available group-by-items for SimpleMetric('total_bcm'). Common issues are:
+    Incorrect names.
+    No valid join paths exist from the measure to the group-by-item.
+Suggestions: [ 'bcm_hdr__effective_customer_account_name', 'bcm_tdp_pc__customer_account_id',
+'bcm_hdr__customer_account_id', 'bcm_ccu_pc__customer_account_id',
+'bcm_ccu_pc__bcm_dtl__customer_account_id', 'bcm_tdp_pc__bcm_dtl__customer_account_id', ]
+Query Input:
+effective_customer_account_name
+Issue Location:
+[Resolve Query(['percent_mom_bcm'])]`;
+
+  const request = {
+    projectRoot: '/tmp/p',
+    metrics: ['total_bcm'],
+    dimensions: ['effective_customer_account_name'],
+    orderBy: [{ name: 'total_bcm', direction: 'desc' as const }],
+    limit: 10,
+  };
+
+  it('rewrites the failing bare dimension to the unique qualified suggestion', () => {
+    const repaired = repairMetricFlowGroupBy(request, OFFICE_ERROR);
+    expect(repaired?.dimensions).toEqual(['bcm_hdr__effective_customer_account_name']);
+    // Untouched fields survive.
+    expect(repaired?.metrics).toEqual(['total_bcm']);
+    expect(repaired?.limit).toBe(10);
+  });
+
+  it('refuses to guess when multiple suggestions tie at the same hop depth', () => {
+    const ambiguous = OFFICE_ERROR.replace('effective_customer_account_name\n', 'customer_account_id\n')
+      .replace('Query Input:\neffective_customer_account_name', 'Query Input:\ncustomer_account_id');
+    const repaired = repairMetricFlowGroupBy(
+      { ...request, dimensions: ['customer_account_id'] },
+      ambiguous,
+    );
+    // bcm_tdp_pc__, bcm_hdr__, bcm_ccu_pc__customer_account_id all sit at 2 hops.
+    expect(repaired).toBeNull();
+  });
+
+  it('ignores unrelated failures', () => {
+    expect(repairMetricFlowGroupBy(request, 'ERROR: database is locked')).toBeNull();
+  });
+
+  it('qualifies time dimensions and filter dimensions with the same rename', () => {
+    const timeError = `The given input does not match any of the available group-by-items for SimpleMetric('total_bcm').
+Suggestions: [ 'bcm_hdr__consumption_date', ]
+Query Input:
+consumption_date`;
+    const repaired = repairMetricFlowGroupBy(
+      {
+        ...request,
+        dimensions: [],
+        timeDimension: { name: 'consumption_date', granularity: 'day' },
+        filters: [{ dimension: 'consumption_date', operator: 'gte', values: ['2026-01-01'] }],
+      },
+      timeError,
+    );
+    expect(repaired?.timeDimension?.name).toBe('bcm_hdr__consumption_date');
+    expect(repaired?.filters?.[0]?.dimension).toBe('bcm_hdr__consumption_date');
   });
 });

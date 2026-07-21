@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -8208,5 +8208,30 @@ describe("probeSemanticJoinFanout (governed semantic fanout gate)", () => {
     const garbage = await probeSemanticJoinFanout(PROBE_SQL, ["f"], async () =>
       payload([{ something: "else" }]) as never);
     expect(garbage).toBeUndefined();
+  });
+});
+
+
+describe("compactSemanticRuntimeFailure", () => {
+  it("reduces a MetricFlow group-by resolver dump to one actionable sentence", () => {
+    const raw = `MetricFlow compile failed (1): ERROR: Got error(s) during query resolution.
+Error #1: Message:
+The given input does not match any of the available group-by-items for SimpleMetric('total_bcm'). Common issues are:
+    Incorrect names.
+Suggestions: [ 'bcm_hdr__effective_customer_account_name', 'bcm_hdr__customer_account_id', ]
+Query Input:
+effective_customer_account_name
+Log File:: /Users/u/dbt/logs/metricflow.log`;
+    const compact = compactSemanticRuntimeFailure(raw);
+    expect(compact).toContain("could not group total_bcm");
+    expect(compact).toContain('"effective_customer_account_name"');
+    expect(compact).toContain("bcm_hdr__effective_customer_account_name");
+    expect(compact.length).toBeLessThan(400);
+    expect(compact).not.toContain("Log File");
+  });
+
+  it("truncates other long failures to their first line", () => {
+    const compact = compactSemanticRuntimeFailure(`database timeout after 30s\nstack line 1\nstack line 2`);
+    expect(compact).toBe("database timeout after 30s");
   });
 });

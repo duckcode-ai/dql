@@ -381,6 +381,37 @@ export async function matchSemanticMetric(
     },
   );
 
+  // Name-proximity tie-breaker. Sibling metrics that share the question's
+  // measure token score identically ("BCM" hits total_bcm AND percent_mom_bcm
+  // with the same name fraction + family), and the old alphabetical fallback
+  // then picked percent_mom_bcm — a month-over-month ratio — for a plain
+  // "top customers for BCM" ask. Among near-tied leaders, prefer the metric
+  // whose NAME carries the fewest tokens the question never said: the user's
+  // mention is closest to the base metric, and every unrequested modifier
+  // (percent, mom, forecast, prior…) is evidence of a more specific intent
+  // the question did not express.
+  const nameDistance = (metric: KGNode): number => {
+    let extras = 0;
+    for (const token of tokenize(metric.name.replace(/[_.]+/g, ' '))) {
+      if (!qContent.has(token) && !STOPWORDS.has(token)) extras += 1;
+    }
+    return extras;
+  };
+  const leader = ranked[0];
+  const bestByProximity = leader
+    ? ranked
+        .filter((entry) => entry.score >= leader.score * 0.98)
+        .sort((left, right) =>
+          nameDistance(left.item.metric) - nameDistance(right.item.metric)
+          || right.score - left.score
+          || left.item.metric.name.localeCompare(right.item.metric.name))[0]
+    : undefined;
+  if (bestByProximity && bestByProximity !== leader) {
+    const index = ranked.indexOf(bestByProximity);
+    ranked.splice(index, 1);
+    ranked.unshift(bestByProximity);
+  }
+
   const best = ranked[0];
   if (!best) return null;
   const second = ranked[1];

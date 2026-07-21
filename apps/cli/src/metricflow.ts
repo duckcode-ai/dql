@@ -125,17 +125,24 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
 
   const resolvedCli = resolveMetricFlowCli(request.projectRoot);
   const bin = resolvedCli?.bin ?? process.env.DQL_METRICFLOW_BIN ?? process.env.METRICFLOW_BIN ?? 'mf';
-  const args = buildMetricFlowArgs(request, metricFlowCompileMode(resolvedCli?.version ?? ''));
-  const result = spawnSync(bin, args, {
-    cwd: dbtRoot,
-    encoding: 'utf-8',
-    env: {
-      ...process.env,
-      ...(request.profilesDir
-        ? { DBT_PROFILES_DIR: resolve(request.projectRoot, request.profilesDir) }
-        : {}),
-    },
-  });
+  const mode = metricFlowCompileMode(resolvedCli?.version ?? '');
+  const spawn = (spawnRequest: MetricFlowQueryRequest) => {
+    const args = buildMetricFlowArgs(spawnRequest, mode);
+    return {
+      args,
+      result: spawnSync(bin, args, {
+        cwd: dbtRoot,
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          ...(spawnRequest.profilesDir
+            ? { DBT_PROFILES_DIR: resolve(spawnRequest.projectRoot, spawnRequest.profilesDir) }
+            : {}),
+        },
+      }),
+    };
+  };
+  let { args, result } = spawn(request);
 
   if (result.error) {
     if ((result.error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -146,8 +153,25 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
     throw result.error;
   }
 
-  const stdout = result.stdout ?? '';
-  const stderr = result.stderr ?? '';
+  let stdout = result.stdout ?? '';
+  let stderr = result.stderr ?? '';
+  if (result.status !== 0) {
+    // MetricFlow group-by items are ENTITY-QUALIFIED ("bcm_hdr__customer_name"),
+    // while DQL's semantic layer speaks bare dimension names ("customer_name").
+    // On a group-by resolution failure MetricFlow lists the valid qualified
+    // names — adopt its own suggestion and retry ONCE rather than surfacing a
+    // wall of resolver errors for a question that has an exact governed answer.
+    const repaired = repairMetricFlowGroupBy(request, `${stderr}\n${stdout}`);
+    if (repaired) {
+      const retry = spawn(repaired);
+      if (!retry.result.error && retry.result.status === 0) {
+        args = retry.args;
+        result = retry.result;
+        stdout = retry.result.stdout ?? '';
+        stderr = retry.result.stderr ?? '';
+      }
+    }
+  }
   if (result.status !== 0) {
     throw new Error(`MetricFlow compile failed (${result.status}): ${stderr || stdout || 'no output'}`);
   }
@@ -162,6 +186,71 @@ export function compileMetricFlowQuery(request: MetricFlowQueryRequest): MetricF
     command: [bin, ...args],
     stdout,
     stderr,
+  };
+}
+
+/**
+ * Parse a MetricFlow "does not match any of the available group-by-items"
+ * failure and rewrite the failing bare names to the qualified names MetricFlow
+ * itself suggested. Returns the corrected request, or null when the failure is
+ * not a group-by resolution problem or no suggestion unambiguously matches.
+ *
+ * Selection rule per failing input: among the suggested qualified names whose
+ * final segment equals the input (`…__<input>`), take the one with the fewest
+ * entity hops; ties on hop count → null (genuinely ambiguous, do not guess).
+ */
+export function repairMetricFlowGroupBy(
+  request: MetricFlowQueryRequest,
+  output: string,
+): MetricFlowQueryRequest | null {
+  if (!/does not match any of the available group-by-items/i.test(output)) return null;
+
+  const inputs = [...output.matchAll(/Query Input:\s*\n?\s*['"]?([A-Za-z0-9_.]+)['"]?/g)]
+    .map((match) => match[1]);
+  const suggestions = [...output.matchAll(/Suggestions:\s*\[([^\]]*)\]/g)]
+    .flatMap((match) => match[1].split(',').map((item) => item.replace(/['"\s]/g, '')).filter(Boolean));
+  if (inputs.length === 0 || suggestions.length === 0) return null;
+
+  const uniqueSuggestions = [...new Set(suggestions)];
+  const resolveQualified = (input: string): string | null => {
+    // Strip an existing granularity suffix for matching (metric_time__day).
+    const bare = input.includes('__') ? input.split('__').pop()! : input;
+    const candidates = uniqueSuggestions.filter((name) => {
+      const tail = name.split('__').pop();
+      return tail === bare || name === input;
+    });
+    if (candidates.length === 0) return null;
+    const byHops = [...candidates].sort((a, b) => a.split('__').length - b.split('__').length);
+    const fewest = byHops[0].split('__').length;
+    if (byHops.filter((name) => name.split('__').length === fewest).length > 1) return null;
+    return byHops[0];
+  };
+
+  const renames = new Map<string, string>();
+  for (const input of new Set(inputs)) {
+    const qualified = resolveQualified(input);
+    if (!qualified || qualified === input) continue;
+    renames.set(input, qualified);
+  }
+  if (renames.size === 0) return null;
+
+  const renameOf = (name: string): string => renames.get(name) ?? name;
+  return {
+    ...request,
+    dimensions: request.dimensions.map(renameOf),
+    ...(request.timeDimension
+      ? { timeDimension: { ...request.timeDimension, name: renameOf(request.timeDimension.name) } }
+      : {}),
+    ...(request.filters
+      ? {
+          filters: request.filters.map((filter) => filter.dimension
+            ? { ...filter, dimension: renameOf(filter.dimension) }
+            : filter),
+        }
+      : {}),
+    ...(request.orderBy
+      ? { orderBy: request.orderBy.map((order) => ({ ...order, name: renameOf(order.name) })) }
+      : {}),
   };
 }
 

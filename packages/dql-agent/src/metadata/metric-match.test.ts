@@ -197,3 +197,29 @@ describe('executability-aware selection (Slice 2)', () => {
     expect(match?.metric.name).toBe('total_acm');
   });
 });
+
+describe('name-proximity tie-breaker (BCM sibling metrics)', () => {
+  // "who are the top 10 customers for BCM" scored total_bcm and percent_mom_bcm
+  // identically (same name-token hit + family) and the alphabetical fallback
+  // picked the month-over-month RATIO. The base metric — fewest name tokens the
+  // question never said — must win the tie.
+  const bcmMetrics: KGNode[] = [
+    metric('percent_mom_bcm', 'Month over month percent change in billed consumption'),
+    metric('percent_dod_bcm', 'Day over day percent change in billed consumption'),
+    metric('total_bcm', 'Total billed consumption'),
+  ];
+
+  it('picks the base metric for a bare measure mention', async () => {
+    const match = await matchSemanticMetric('who are the top 10 customers for BCM', bcmMetrics, {
+      measureTerms: ['bcm'],
+    });
+    expect(match?.metric.name).toBe('total_bcm');
+  });
+
+  it('still picks the ratio metric when the question asks for it', async () => {
+    const match = await matchSemanticMetric('percent month over month BCM change', bcmMetrics, {
+      measureTerms: ['percent mom bcm'],
+    });
+    expect(match?.metric.name).toBe('percent_mom_bcm');
+  });
+});
