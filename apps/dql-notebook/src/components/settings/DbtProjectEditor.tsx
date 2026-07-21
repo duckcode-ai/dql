@@ -31,6 +31,13 @@ export type DbtProjectConfigured = {
   readinessDetail?: string;
 };
 
+const RUNTIME_LABEL: Record<string, string> = {
+  auto: 'Auto',
+  native: 'Native (DQL)',
+  'metricflow-cli': 'Local MetricFlow',
+  'dbt-cloud': 'dbt Cloud',
+};
+
 export function DbtProjectEditor({
   compact = false,
   onConfigured,
@@ -236,13 +243,27 @@ export function DbtProjectEditor({
   };
 
   const semanticPayload = () => ({
-    preference: 'auto' as const,
+    preference: semanticRuntime?.preference ?? 'auto',
     dbtCloud: {
       host: semanticHost,
       environmentId: semanticEnvironmentId,
       serviceToken: semanticToken,
     },
   });
+
+  const applyRuntimePreference = async (preference: 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud') => {
+    setSemanticBusy('apply');
+    setSemanticMessage(null);
+    try {
+      const result = await api.setSemanticRuntimePreference(preference);
+      setSemanticRuntime(result);
+      setSemanticMessage({ ok: true, text: `Preferred runtime set to ${RUNTIME_LABEL[preference] ?? preference}.` });
+    } catch (error) {
+      setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSemanticBusy(null);
+    }
+  };
 
   const testSemanticRuntime = async () => {
     setSemanticBusy('test');
@@ -370,6 +391,28 @@ export function DbtProjectEditor({
           <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Semantic execution adapters</div>
           <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5 }}>
             Adapter code is included with DQL. Auto uses dbt Cloud when tested, then local MetricFlow, and safely falls back to the native compiler for simple metrics.
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            <label style={{ fontSize: 11, fontWeight: 700, color: t.textSecondary }}>Preferred runtime</label>
+            <select
+              value={semanticRuntime?.preference ?? 'auto'}
+              onChange={(event) => { void applyRuntimePreference(event.target.value as 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud'); }}
+              disabled={semanticBusy === 'apply'}
+              style={{ fontSize: 11.5, padding: '4px 8px', borderRadius: 7, border: '1px solid var(--border-subtle)', background: t.cellBg, color: t.textPrimary, fontFamily: t.font }}
+            >
+              <option value="auto">Auto (recommended)</option>
+              <option value="dbt-cloud">dbt Cloud</option>
+              <option value="metricflow-cli">Local MetricFlow</option>
+              <option value="native">Native (DQL)</option>
+            </select>
+            {semanticRuntime?.runtime.active ? (
+              <span style={{ fontSize: 10.5, color: t.textMuted }}>
+                Active: <strong style={{ color: t.textSecondary }}>{RUNTIME_LABEL[semanticRuntime.runtime.active] ?? semanticRuntime.runtime.active}</strong>
+                {semanticRuntime.preference && semanticRuntime.preference !== 'auto' && semanticRuntime.preference !== semanticRuntime.runtime.active
+                  ? ` (preferred ${RUNTIME_LABEL[semanticRuntime.preference] ?? semanticRuntime.preference} is not ready)`
+                  : ''}
+              </span>
+            ) : null}
           </div>
         </div>
 

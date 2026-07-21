@@ -14,7 +14,44 @@ import type {
   BlockStudioOpenPayload,
   BlockStudioDbtStatus,
   BlockParameterDefinition,
+  SemanticDimension,
+  SemanticCompatibility,
 } from '../../store/types';
+
+/** Display name for the engine that will actually execute a semantic query. */
+const RUNTIME_ENGINE_LABEL: Record<string, string> = {
+  native: 'Native (DQL)',
+  'metricflow-cli': 'Local MetricFlow',
+  'dbt-cloud': 'dbt Cloud',
+};
+
+/** Turn a machine incompatibility reason into a one-line explanation. */
+function describeIncompatibility(reason: string): string {
+  switch (reason) {
+    case 'no_join_path': return 'No join path from this metric’s model to this dimension.';
+    case 'not_shared_across_metrics': return 'Not reachable from every selected metric.';
+    case 'metric_unresolved': return 'The selected metric could not be resolved.';
+    default: return 'Not compatible with the selected metrics.';
+  }
+}
+
+const ALL_TIME_GRAINS = ['day', 'week', 'month', 'quarter', 'year'];
+
+/** The grains a selected time dimension actually supports — from the
+ *  compatibility answer or the catalog time-dimension list — falling back to all
+ *  five when the base grain is unknown. */
+function selectedTimeGrains(
+  timeDimensionName: string | undefined,
+  compatibleDimByName: Map<string, SemanticDimension>,
+  timeDimensions: SemanticDimension[],
+): string[] {
+  if (!timeDimensionName) return ALL_TIME_GRAINS;
+  const fromCompat = compatibleDimByName.get(timeDimensionName)?.granularities;
+  if (fromCompat && fromCompat.length > 0) return fromCompat;
+  const fromCatalog = timeDimensions.find((d) => d.name === timeDimensionName)?.granularities;
+  if (fromCatalog && fromCatalog.length > 0) return fromCatalog;
+  return ALL_TIME_GRAINS;
+}
 import { themes } from '../../themes/notebook-theme';
 import type { Theme, ThemeMode } from '../../themes/notebook-theme';
 import { SQLCellEditor } from '../cells/SQLCellEditor';
@@ -2342,21 +2379,43 @@ function SemanticBlockBuilder({
   const values = { ...parsedValues, filters: parsedValues.requestedFilters };
   const [compatibleDimensions, setCompatibleDimensions] = useState(semanticLayer.dimensions);
   const [loadingCompatibility, setLoadingCompatibility] = useState(false);
+  // The FULL compatibility answer so the builder can show which engine will run,
+  // per-dimension incompatibility reasons, and — crucially — an explicit error
+  // state instead of silently graying every dimension when the call fails.
+  const [compatibility, setCompatibility] = useState<SemanticCompatibility | null>(null);
+  const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
+  const [compatibilityReloadKey, setCompatibilityReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     if (values.metrics.length === 0) {
       setCompatibleDimensions(semanticLayer.dimensions);
+      setCompatibility(null);
+      setCompatibilityError(null);
       return;
     }
     setLoadingCompatibility(true);
-    void api.getCompatibleDimensions(values.metrics).then((dimensions) => {
-      if (!cancelled) setCompatibleDimensions(dimensions);
+    setCompatibilityError(null);
+    void api.getCompatibility(values.metrics).then((result) => {
+      if (cancelled) return;
+      setCompatibility(result);
+      setCompatibleDimensions(result.dimensions);
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      // Do NOT gray every dimension on failure — keep the last-known list and
+      // surface the error so the user knows compatibility could not be checked.
+      setCompatibilityError(error instanceof Error ? error.message : String(error));
     }).finally(() => {
       if (!cancelled) setLoadingCompatibility(false);
     });
     return () => { cancelled = true; };
-  }, [semanticLayer.dimensions, values.metrics.join('|')]);
+  }, [semanticLayer.dimensions, values.metrics.join('|'), compatibilityReloadKey]);
   const compatibleNames = new Set(compatibleDimensions.map((dimension) => dimension.name));
+  // A failed compatibility check must not read as "everything is incompatible":
+  // when we have no fresh answer, treat all dimensions as selectable.
+  const compatibilityUnknown = Boolean(compatibilityError) || (values.metrics.length > 0 && !compatibility && !loadingCompatibility);
+  const qualifiedByName = new Map(compatibleDimensions.map((d) => [d.name, d.qualifiedName ?? undefined] as const));
+  const reasonByName = new Map((compatibility?.incompatible ?? []).map((item) => [item.name, describeIncompatibility(item.reason)] as const));
+  const compatibleDimByName = new Map(compatibleDimensions.map((d) => [d.name, d] as const));
   const allDimensions = Array.from(new Map([...semanticLayer.dimensions, ...semanticLayer.timeDimensions].map((dimension) => [dimension.name, dimension])).values());
   const compactInput = compactBuilderInputStyle(t);
   const [metricSearch, setMetricSearch] = useState('');
@@ -2418,11 +2477,26 @@ function SemanticBlockBuilder({
               <button type="button" onClick={onSetupRuntime} style={{ border: 'none', background: 'transparent', color: t.accent, fontSize: 10.5, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>Set up runtime →</button>
             </div>
           )}
+          {(compatibility?.engine || compatibility?.degraded) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: t.textMuted, marginTop: 2 }}>
+              <span style={{ padding: '1px 7px', borderRadius: 999, background: 'var(--accent-dim)', color: 'var(--accent)', fontWeight: 700 }}>
+                Runs via {RUNTIME_ENGINE_LABEL[compatibility.engine] ?? compatibility.engine}
+              </span>
+              {compatibility.degraded && <span style={{ color: 'var(--status-warning)' }}>{compatibility.degraded}</span>}
+            </div>
+          )}
+          {compatibilityError && (
+            <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--status-warning)', lineHeight: 1.4, marginTop: 4 }}>
+              <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>Could not check dimension compatibility: {compatibilityError}. Showing the last-known list.</span>
+              <button type="button" onClick={() => setCompatibilityReloadKey((k) => k + 1)} style={secondaryImportButtonStyle(t)}>Retry</button>
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
             <FieldLabel label="Time dimension" t={t}>
               <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={compactInput}>
                 <option value="">None</option>
-                {semanticLayer.timeDimensions.filter((dimension) => values.metrics.length === 0 || compatibleNames.has(dimension.name)).map((dimension) => (
+                {semanticLayer.timeDimensions.filter((dimension) => values.metrics.length === 0 || compatibilityUnknown || compatibleNames.has(dimension.name)).map((dimension) => (
                   <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
                 ))}
               </select>
@@ -2430,7 +2504,7 @@ function SemanticBlockBuilder({
             <FieldLabel label="Grain" t={t}>
               <select value={values.granularity} onChange={(event) => onChange(setSemanticScalar(source, 'granularity', event.target.value))} style={compactInput}>
                 <option value="">None</option>
-                {['day', 'week', 'month', 'quarter', 'year'].map((grain) => <option key={grain} value={grain}>{grain}</option>)}
+                {selectedTimeGrains(values.timeDimension, compatibleDimByName, semanticLayer.timeDimensions).map((grain) => <option key={grain} value={grain}>{grain}</option>)}
               </select>
             </FieldLabel>
           </div>
@@ -2487,8 +2561,10 @@ function SemanticBlockBuilder({
             pool={allDimensions}
             selected={values.dimensions}
             resolveLabel={(name) => dimensionByName.get(name)?.label || name}
+            resolveMachineName={(name) => qualifiedByName.get(name) ?? dimensionByName.get(name)?.name ?? name}
+            reasonFor={(name) => reasonByName.get(name)}
             onToggle={toggleDimension}
-            compatible={(name) => values.metrics.length === 0 || compatibleNames.has(name)}
+            compatible={(name) => values.metrics.length === 0 || compatibilityUnknown || compatibleNames.has(name)}
             disabled={values.metrics.length === 0}
             emptyHint="Choose a metric first; dimensions are checked against its governed join path."
             t={t}
@@ -2595,6 +2671,8 @@ function EnterpriseSemanticPicker({
   pool = [],
   selected,
   resolveLabel,
+  resolveMachineName,
+  reasonFor,
   onToggle,
   compatible = () => true,
   disabled = false,
@@ -2610,6 +2688,10 @@ function EnterpriseSemanticPicker({
   pool?: SemanticPickerField[];
   selected: string[];
   resolveLabel: (name: string) => string;
+  /** The machine identifier to show under the label (qualified name ?? name). */
+  resolveMachineName?: (name: string) => string | undefined;
+  /** Human explanation for an incompatible row (shown as its tooltip). */
+  reasonFor?: (name: string) => string | undefined;
   onToggle: (name: string) => void;
   compatible?: (name: string) => boolean;
   disabled?: boolean;
@@ -2675,17 +2757,25 @@ function EnterpriseSemanticPicker({
               ) : results.map((field) => {
                 const isSelected = selected.includes(field.name);
                 const isCompatible = compatible(field.name);
+                const machineName = resolveMachineName?.(field.name) ?? field.name;
+                const showMachine = machineName !== (field.label || field.name);
+                const incompatReason = !isCompatible
+                  ? (reasonFor?.(field.name) ?? 'Not compatible with every selected metric')
+                  : undefined;
                 return (
                   <button
                     key={field.name}
                     type="button"
                     disabled={!isCompatible}
                     onClick={() => { onToggle(field.name); if (!isSelected) closePicker(); }}
-                    title={isCompatible ? field.description || field.name : 'Not compatible with every selected metric'}
+                    title={incompatReason ?? field.description ?? machineName}
                     style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 10px', border: 'none', background: isSelected ? chipBg : 'none', cursor: isCompatible ? 'pointer' : 'not-allowed', textAlign: 'left', fontFamily: t.font, borderBottom: '1px solid var(--border-subtle)', opacity: isCompatible ? 1 : 0.5 }}
                   >
                     <span style={{ flexShrink: 0, width: 16, height: 16, borderRadius: 4, background: chipBg, color: chipColor, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: kind === 'metric' ? 10 : 9, fontWeight: 700, fontFamily: t.fontMono }}>{glyph}</span>
-                    <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontFamily: t.fontMono, color: t.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{field.label || field.name}</span>
+                    <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1, overflow: 'hidden' }}>
+                      <span style={{ fontSize: 12, fontFamily: t.font, color: t.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{field.label || field.name}</span>
+                      {showMachine ? <span style={{ fontSize: 10, fontFamily: t.fontMono, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{machineName}</span> : null}
+                    </span>
                     <span style={{ flexShrink: 0, fontSize: 10, color: t.textMuted }}>{field.domain || field.type || ''}</span>
                   </button>
                 );

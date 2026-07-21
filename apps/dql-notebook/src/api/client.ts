@@ -3868,6 +3868,14 @@ export const api = {
     });
   },
 
+  /** Persist the runtime preference alone (no dbt Cloud test needed). */
+  async setSemanticRuntimePreference(preference: 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud'): Promise<SemanticRuntimeSettingsResponse & { ok: boolean }> {
+    return request<SemanticRuntimeSettingsResponse & { ok: boolean }>('/api/semantic-runtime/preference', {
+      method: 'POST',
+      body: JSON.stringify({ preference }),
+    });
+  },
+
   async getSemanticLayer(): Promise<Omit<SemanticLayerState, 'loading'>> {
     try {
       return await request<Omit<SemanticLayerState, 'loading'>>('/api/semantic-layer');

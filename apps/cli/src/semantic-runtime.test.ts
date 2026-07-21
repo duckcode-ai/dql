@@ -239,3 +239,14 @@ describe('qualifyForMetricFlow (Phase 3 boundary)', () => {
     expect(request.timeDimension?.name).toBe('metric_time');
   });
 });
+
+describe('saveSemanticRuntimePreference (Phase 4)', () => {
+  it('persists a runtime preference with no dbt Cloud test required', async () => {
+    const { saveSemanticRuntimePreference } = await import('./semantic-runtime-settings.js');
+    const saved = saveSemanticRuntimePreference(root, 'metricflow-cli');
+    expect(saved.preference).toBe('metricflow-cli');
+    // Round-trips through the store.
+    const { getSemanticRuntimeSettings } = await import('./semantic-runtime-settings.js');
+    expect(getSemanticRuntimeSettings(root).preference).toBe('metricflow-cli');
+  });
+});

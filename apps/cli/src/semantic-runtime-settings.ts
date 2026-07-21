@@ -179,6 +179,22 @@ export function saveTestedSemanticRuntimeSettings(
   return getSemanticRuntimeSettings(projectRoot);
 }
 
+/**
+ * Persist ONLY the runtime preference (auto / native / metricflow-cli /
+ * dbt-cloud). Unlike saveTestedSemanticRuntimeSettings this requires no dbt
+ * Cloud test, so a user can prefer Native or Local MetricFlow without any
+ * cloud credentials configured.
+ */
+export function saveSemanticRuntimePreference(
+  projectRoot: string,
+  preference: SemanticRuntimePreference,
+): RedactedSemanticRuntimeSettings {
+  const stored = readStored(projectRoot);
+  stored.preference = preference;
+  writeStored(projectRoot, stored);
+  return getSemanticRuntimeSettings(projectRoot);
+}
+
 export function semanticRuntimeDraft(
   projectRoot: string,
   input: SemanticRuntimeSettingsInput,

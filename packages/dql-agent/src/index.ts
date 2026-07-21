@@ -78,7 +78,7 @@ export type {
   SeedDefaultSkillsOptions,
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
-export { answer, parseProposal } from "./answer-loop.js";
+export { answer, parseProposal, compactSemanticRuntimeFailure } from "./answer-loop.js";
 export type { SemanticQueryCompiler } from "./answer-loop.js";
 export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
 export type { DomainContextEnvelope, KnowledgeLens, ResolveDomainContextInput } from './domain-context.js';

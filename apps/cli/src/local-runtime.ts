@@ -151,6 +151,7 @@ import {
   ensureMetadataCatalogFresh,
   readIndexedDomainKnowledge,
   readIndexedKnowledge360,
+  compactSemanticRuntimeFailure,
   propose,
   proposePlan,
   recordCorrectionTrace,
@@ -352,6 +353,7 @@ import {
 import {
   getSemanticRuntimeSettings,
   saveTestedSemanticRuntimeSettings,
+  saveSemanticRuntimePreference,
   type SemanticRuntimeSettingsInput,
 } from './semantic-runtime-settings.js';
 import {
@@ -9621,8 +9623,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(preview));
       } catch (error) {
+        const raw = error instanceof Error ? error.message : String(error);
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        // `error` stays the full compiler output (the UI shows it in a
+        // collapsible); `friendlyMessage` is the one actionable sentence.
+        res.end(serializeJSON({ error: raw, friendlyMessage: compactSemanticRuntimeFailure(raw) }));
       }
       return;
     }
@@ -10282,6 +10287,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const result = await testSemanticRuntimeDraft(projectRoot, body);
         const settings = saveTestedSemanticRuntimeSettings(projectRoot, body, result);
         const runtime = await getSemanticRuntimeStatus(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, ...settings, runtime }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+    // Set the runtime preference alone (no dbt Cloud test required), so a user
+    // can prefer Native / Local MetricFlow / dbt Cloud explicitly.
+    if (req.method === 'POST' && path === '/api/semantic-runtime/preference') {
+      try {
+        const body = await readJSON(req) as { preference?: string };
+        const preference = body.preference;
+        if (preference !== 'auto' && preference !== 'native' && preference !== 'metricflow-cli' && preference !== 'dbt-cloud') {
+          throw new Error('preference must be one of: auto, native, metricflow-cli, dbt-cloud');
+        }
+        const settings = saveSemanticRuntimePreference(projectRoot, preference);
+        const runtime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, ...settings, runtime }));
       } catch (error) {
