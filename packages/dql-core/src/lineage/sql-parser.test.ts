@@ -44,6 +44,27 @@ describe('extractTablesFromSql', () => {
     expect(result.ctes).toEqual(['monthly_revenue']);
   });
 
+  it('AGT-005/E2E-008 treats a quoted generated alias as a CTE instead of a Snowflake table', () => {
+    const sql = `
+      WITH "subq_2" AS (
+        SELECT customer_id, product_id FROM analytics.order_items
+      )
+      SELECT s.customer_id
+      FROM "subq_2" AS s
+      JOIN analytics.products AS p ON s.product_id = p.product_id
+    `;
+    const result = extractTablesFromSql(sql);
+    const analysis = analyzeSqlReferences(sql, 'snowflake');
+
+    expect(result.ctes).toContain('subq_2');
+    expect(result.tables).toEqual(expect.arrayContaining(['analytics.order_items', 'analytics.products']));
+    expect(result.tables).not.toContain('subq_2');
+    expect(result.tables).not.toContain('"');
+    expect(analysis.ctes).toContain('subq_2');
+    expect(analysis.tables).not.toContain('subq_2');
+    expect(analysis.tables).not.toContain('"');
+  });
+
   it('handles multiple CTEs', () => {
     const result = extractTablesFromSql(`
       WITH

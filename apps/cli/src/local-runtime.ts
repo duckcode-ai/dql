@@ -1720,7 +1720,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 'The selected semantic members could not be composed. Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime for derived metrics.',
               );
             }
-            return { sql: compiled.sql, engine: compiled.engine };
+            return {
+              sql: compiled.sql,
+              engine: compiled.engine,
+              selection: {
+                ...selection,
+                metrics: compiled.effectiveRequest.metrics,
+                dimensions: compiled.effectiveRequest.dimensions,
+                ...(compiled.effectiveRequest.timeDimension
+                  ? { timeDimension: compiled.effectiveRequest.timeDimension }
+                  : {}),
+              },
+            };
           },
         } : {}),
         ...(routeDecision?.meaningResolution?.selectedConceptIds.length
@@ -11278,6 +11289,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tables: composed.tables,
           joins: composed.joins,
           engine: composed.engine,
+          effectiveRequest: composed.effectiveRequest,
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
@@ -11362,6 +11374,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           joins: composed.joins,
           tables: composed.tables,
           engine: composed.engine,
+          effectiveRequest: composed.effectiveRequest,
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
@@ -16225,7 +16238,13 @@ async function composeRuntimeSemanticQuery(
     driver?: ConnectionConfig['driver'];
     tableMapping?: Record<string, string>;
   },
-): Promise<{ sql: string; joins: string[]; tables: string[]; engine: 'native' | 'metricflow-cli' | 'dbt-cloud' } | null> {
+): Promise<{
+  sql: string;
+  joins: string[];
+  tables: string[];
+  engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  effectiveRequest: SemanticRuntimeQueryRequest;
+} | null> {
   return compileSemanticRuntimeQuery(request, {
     projectRoot: context.projectRoot,
     projectConfig: context.projectConfig,

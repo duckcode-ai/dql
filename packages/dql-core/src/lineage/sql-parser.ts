@@ -322,10 +322,15 @@ function extractCteNames(sql: string): string[] {
 
   // From the WITH keyword, extract comma-separated CTE definitions
   const afterWith = sql.slice(withMatch.index + withMatch[0].length);
-  const cteDefPattern = /([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(/gi;
+  // AGT-005 / E2E-008: generated SQL commonly quotes internal aliases (for example Snowflake
+  // emits `WITH "subq_2" AS (...)`). Treat every supported identifier quoting
+  // style as a CTE name; otherwise the alias is later mistaken for a physical
+  // warehouse relation and the validation probe tries to query it directly.
+  const cteDefPattern = /("(?:[^"]|"")+"|`[^`]+`|\[[^\]]+\]|[a-zA-Z_][a-zA-Z0-9_$]*)\s+AS\s*\(/gi;
 
   for (const match of afterWith.matchAll(cteDefPattern)) {
-    ctes.push(match[1]);
+    const name = normalizeSqlIdentifier(match[1]);
+    if (name) ctes.push(name);
   }
 
   return ctes;
@@ -355,10 +360,17 @@ function collectSqlTables(
   const relation = relationFromTableNode(obj);
   if (relation && obj.type !== 'column_ref') {
     const normalized = normalizeSqlIdentifier(relation);
-    const alias = stringField(obj, 'as') ?? stringField(obj, 'alias') ?? relation.split('.').at(-1);
-    if (alias) state.aliasToRelation.set(normalizeSqlIdentifier(alias), relation);
-    if (!state.ctes.has(normalized) && !isSqlFunctionRelation(relation)) {
-      state.tableRefs.set(normalized, relation);
+    // Some parser dialects expose a quote token as a synthetic table node for
+    // a quoted CTE. An empty normalized identifier is never a real relation.
+    if (normalized) {
+      const alias = stringField(obj, 'as') ?? stringField(obj, 'alias') ?? relation.split('.').at(-1);
+      if (alias) {
+        const normalizedAlias = normalizeSqlIdentifier(alias);
+        if (normalizedAlias) state.aliasToRelation.set(normalizedAlias, relation);
+      }
+      if (!state.ctes.has(normalized) && !isSqlFunctionRelation(relation)) {
+        state.tableRefs.set(normalized, relation);
+      }
     }
   }
 
@@ -443,7 +455,7 @@ function stringField(obj: Record<string, unknown>, key: string): string | undefi
 }
 
 function normalizeSqlIdentifier(value: string): string {
-  return value.replace(/["`]/g, '').replace(/\s*\.\s*/g, '.').trim().toLowerCase();
+  return value.replace(/["`\[\]]/g, '').replace(/\s*\.\s*/g, '.').trim().toLowerCase();
 }
 
 function isSqlFunctionRelation(relation: string): boolean {

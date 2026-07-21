@@ -7312,7 +7312,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.evidence?.toolCalls?.some((call) => call.name === "compile_semantic_query")).toBe(true);
   });
 
-  it("compiles an exact derived metric through the host semantic adapter before AI planning", async () => {
+  it("AGT-001 compiles an exact derived metric through the host semantic adapter before AI planning", async () => {
     kg.rebuild([revenueMetric("revenue_ratio", "Revenue ratio")], []);
     const semanticLayer = new SemanticLayer({
       metrics: [{
@@ -7331,6 +7331,11 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     const compiler = vi.fn(async () => ({
       sql: "SELECT 0.82 AS revenue_ratio",
       engine: "dbt-cloud" as const,
+      selection: {
+        metrics: ["revenue_ratio"],
+        dimensions: [],
+        timeDimension: { name: "metric_time", granularity: "day" },
+      },
     }));
 
     const result = await answer({
@@ -7351,8 +7356,46 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(provider.calls).toHaveLength(0);
     expect(result.kind).not.toBe("no_answer");
     expect(result.proposedSql).toBe("SELECT 0.82 AS revenue_ratio");
+    expect(result.dqlArtifact?.source).toContain('time_dimension = "metric_time"');
+    expect(result.dqlArtifact?.source).toContain('granularity = "day"');
     expect(result.evidence?.toolCalls?.some((call) =>
       call.name === "compile_semantic_query" && call.outputSummary?.includes("dbt-cloud"))).toBe(true);
+  });
+
+  it("AGT-005 does not re-plan or fall into exploratory SQL after an exact governed metric compiler failure", async () => {
+    kg.rebuild([revenueMetric("revenue_ratio", "Revenue ratio")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: "revenue_ratio",
+        label: "Revenue Ratio",
+        description: "Revenue divided by target revenue.",
+        domain: "finance",
+        sql: "revenue_ratio",
+        type: "custom",
+        table: "",
+        metricType: "ratio",
+      }],
+      dimensions: [],
+    });
+    const provider = new StubProvider([]);
+    const compiler = vi.fn(async () => {
+      throw new Error("MetricFlow could not compile this governed metric.");
+    });
+
+    const result = await answer({
+      question: "what is the revenue ratio",
+      provider,
+      kg,
+      semanticLayer,
+      semanticQueryCompiler: compiler,
+      executeGeneratedSql: vi.fn(),
+    });
+
+    expect(compiler).toHaveBeenCalledOnce();
+    expect(provider.calls).toHaveLength(0);
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalDetails?.code).toBe("semantic_runtime_required");
+    expect(result.exploratoryCandidate).toBeUndefined();
   });
 
   it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {

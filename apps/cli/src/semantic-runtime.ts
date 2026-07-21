@@ -1,4 +1,4 @@
-import type { ComposeQueryResult, SemanticLayer } from '@duckcodeailabs/dql-core';
+import type { ComposeQueryResult, MetricDefinition, SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
   compileDbtCloudSemanticQuery,
   listDbtCloudCompatibleDimensions,
@@ -68,6 +68,8 @@ export interface SemanticRuntimeCompileContext {
 
 export interface SemanticRuntimeCompileResult extends ComposeQueryResult {
   engine: SemanticRuntimeAdapterId;
+  /** The governed request actually compiled after deterministic normalization. */
+  effectiveRequest: SemanticRuntimeQueryRequest;
 }
 
 export class SemanticRuntimeRequiredError extends Error {
@@ -80,6 +82,181 @@ export class SemanticRuntimeRequiredError extends Error {
 }
 
 const cloudProbeCache = new Map<string, { expiresAt: number; result: DbtCloudSemanticTestResult }>();
+
+const OFFSET_PARAMETER_KEYS = new Set(['offsetwindow', 'offsettograin']);
+const METRIC_DEPENDENCY_KEYS = new Set([
+  'metric',
+  'metrics',
+  'inputmetric',
+  'inputmetrics',
+  'numerator',
+  'denominator',
+  'basemetric',
+]);
+const TIME_GRAIN_ORDER = ['minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
+
+/**
+ * API-004 / AGT-001: MetricFlow requires `metric_time` whenever an input metric uses a time offset.
+ * dbt stores that requirement in the metric definition, so normalize it once at
+ * the shared runtime boundary instead of asking every UI and agent route to infer
+ * the same compiler constraint independently.
+ */
+export function normalizeSemanticRuntimeQueryRequest(
+  request: SemanticRuntimeQueryRequest,
+  semanticLayer: SemanticLayer,
+): SemanticRuntimeQueryRequest {
+  const normalized: SemanticRuntimeQueryRequest = {
+    ...request,
+    metrics: [...request.metrics],
+    dimensions: [...request.dimensions],
+    filters: request.filters?.map((filter) => ({
+      ...filter,
+      ...(filter.values ? { values: [...filter.values] } : {}),
+    })),
+    orderBy: request.orderBy?.map((order) => ({ ...order })),
+    ...(request.timeDimension ? { timeDimension: { ...request.timeDimension } } : {}),
+  };
+  if (normalized.savedQuery || normalized.timeDimension || hasMetricTimeGrouping(normalized.dimensions)) {
+    return normalized;
+  }
+
+  const metrics = semanticLayer.listMetrics();
+  const metricByName = new Map(metrics.map((metric) => [metric.name.toLowerCase(), metric]));
+  const grains = new Set<string>();
+  const visited = new Set<string>();
+  for (const metricName of normalized.metrics) {
+    const metric = resolveMetricDefinition(metricName, metrics, metricByName);
+    if (metric) collectMetricOffsetGrains(metric, metrics, metricByName, visited, grains);
+  }
+  const granularity = finestTimeGrain(grains);
+  return granularity
+    ? { ...normalized, timeDimension: { name: 'metric_time', granularity } }
+    : normalized;
+}
+
+function hasMetricTimeGrouping(dimensions: string[]): boolean {
+  return dimensions.some((dimension) => {
+    const value = dimension.replace(/["`\[\]]/g, '').toLowerCase();
+    return value === 'metric_time' || value.startsWith('metric_time__');
+  });
+}
+
+function collectMetricOffsetGrains(
+  metric: MetricDefinition,
+  metrics: MetricDefinition[],
+  metricByName: Map<string, MetricDefinition>,
+  visited: Set<string>,
+  grains: Set<string>,
+): void {
+  const identity = metric.name.toLowerCase();
+  if (visited.has(identity)) return;
+  visited.add(identity);
+  const typeParams = metric.typeParams
+    ?? readRecord(readRecord(metric.source?.extra)?.raw)?.type_params;
+  if (!typeParams || typeof typeParams !== 'object') return;
+
+  collectOffsetGrains(typeParams, grains);
+  for (const dependencyName of collectMetricDependencyNames(typeParams)) {
+    const dependency = resolveMetricDefinition(dependencyName, metrics, metricByName);
+    if (dependency) collectMetricOffsetGrains(dependency, metrics, metricByName, visited, grains);
+  }
+}
+
+function collectOffsetGrains(value: unknown, grains: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) collectOffsetGrains(item, grains);
+    return;
+  }
+  const record = readRecord(value);
+  if (!record) return;
+  for (const [key, nested] of Object.entries(record)) {
+    const normalizedKey = normalizeSemanticKey(key);
+    if (OFFSET_PARAMETER_KEYS.has(normalizedKey)) {
+      const grain = readTimeGrain(nested);
+      if (grain) grains.add(grain);
+    }
+    collectOffsetGrains(nested, grains);
+  }
+}
+
+function collectMetricDependencyNames(value: unknown): Set<string> {
+  const names = new Set<string>();
+  const visit = (nested: unknown): void => {
+    if (Array.isArray(nested)) {
+      for (const item of nested) visit(item);
+      return;
+    }
+    const record = readRecord(nested);
+    if (!record) return;
+    for (const [key, child] of Object.entries(record)) {
+      if (METRIC_DEPENDENCY_KEYS.has(normalizeSemanticKey(key))) collectNamedReferences(child, names);
+      visit(child);
+    }
+  };
+  visit(value);
+  return names;
+}
+
+function collectNamedReferences(value: unknown, names: Set<string>): void {
+  if (typeof value === 'string' && value.trim()) {
+    names.add(value.trim());
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectNamedReferences(item, names);
+    return;
+  }
+  const record = readRecord(value);
+  if (!record) return;
+  for (const key of ['name', 'metric', 'metric_name']) {
+    const candidate = record[key];
+    if (typeof candidate === 'string' && candidate.trim()) names.add(candidate.trim());
+  }
+}
+
+function readTimeGrain(value: unknown): string | undefined {
+  if (typeof value === 'string') return normalizeTimeGrain(value);
+  const record = readRecord(value);
+  if (!record) return undefined;
+  for (const key of ['granularity', 'grain', 'value', 'name']) {
+    const candidate = record[key];
+    if (typeof candidate === 'string') {
+      const grain = normalizeTimeGrain(candidate);
+      if (grain) return grain;
+    }
+  }
+  return undefined;
+}
+
+function normalizeTimeGrain(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, '_');
+  return TIME_GRAIN_ORDER.includes(normalized) ? normalized : undefined;
+}
+
+function finestTimeGrain(grains: Set<string>): string | undefined {
+  return TIME_GRAIN_ORDER.find((grain) => grains.has(grain));
+}
+
+function normalizeSemanticKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function resolveMetricDefinition(
+  name: string,
+  metrics: MetricDefinition[],
+  metricByName: Map<string, MetricDefinition>,
+): MetricDefinition | undefined {
+  const normalized = name.toLowerCase();
+  return metricByName.get(normalized)
+    ?? metrics.find((metric) => metric.name.toLowerCase().endsWith(`.${normalized}`)
+      || normalized.endsWith(`.${metric.name.toLowerCase()}`));
+}
 
 export async function getSemanticRuntimeStatus(
   projectRoot: string,
@@ -164,8 +341,9 @@ export async function compileSemanticRuntimeQuery(
   request: SemanticRuntimeQueryRequest,
   context: SemanticRuntimeCompileContext,
 ): Promise<SemanticRuntimeCompileResult | null> {
+  const effectiveRequest = normalizeSemanticRuntimeQueryRequest(request, context.semanticLayer);
   const status = await getSemanticRuntimeStatus(context.projectRoot, { probeConfiguredCloud: true });
-  const explicit = request.engine;
+  const explicit = effectiveRequest.engine;
   const fullRuntimeRequested = explicit === 'metricflow' || explicit === 'metricflow-cli' || explicit === 'dbt-cloud';
   const candidates: SemanticRuntimeAdapterId[] = explicit === 'native'
     ? ['native']
@@ -187,9 +365,9 @@ export async function compileSemanticRuntimeQuery(
       try {
         const result = await compileDbtCloudSemanticQuery(
           getEffectiveDbtCloudSemanticSettings(context.projectRoot),
-          request,
+          effectiveRequest,
         );
-        return { sql: result.sql, joins: [], tables: [], engine: 'dbt-cloud' };
+        return { sql: result.sql, joins: [], tables: [], engine: 'dbt-cloud', effectiveRequest };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
         if (explicit === 'dbt-cloud') throw lastRuntimeError;
@@ -206,15 +384,15 @@ export async function compileSemanticRuntimeQuery(
           projectRoot: context.projectRoot,
           dbtProjectPath,
           profilesDir: context.projectConfig.dbt?.profilesDir,
-          metrics: request.metrics,
-          dimensions: request.dimensions,
-          filters: request.filters,
-          timeDimension: request.timeDimension,
-          orderBy: request.orderBy,
-          limit: request.limit,
-          savedQuery: request.savedQuery,
+          metrics: effectiveRequest.metrics,
+          dimensions: effectiveRequest.dimensions,
+          filters: effectiveRequest.filters,
+          timeDimension: effectiveRequest.timeDimension,
+          orderBy: effectiveRequest.orderBy,
+          limit: effectiveRequest.limit,
+          savedQuery: effectiveRequest.savedQuery,
         });
-        return { sql: compiled.sql, joins: [], tables: [], engine: 'metricflow-cli' };
+        return { sql: compiled.sql, joins: [], tables: [], engine: 'metricflow-cli', effectiveRequest };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
         if (explicit === 'metricflow-cli' || explicit === 'metricflow') throw lastRuntimeError;
@@ -222,22 +400,22 @@ export async function compileSemanticRuntimeQuery(
       }
     }
     const composed = context.semanticLayer.composeQuery({
-      metrics: request.metrics,
-      dimensions: request.dimensions,
-      filters: request.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
-      limit: request.limit,
-      timeDimension: request.timeDimension,
-      orderBy: request.orderBy,
+      metrics: effectiveRequest.metrics,
+      dimensions: effectiveRequest.dimensions,
+      filters: effectiveRequest.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
+      limit: effectiveRequest.limit,
+      timeDimension: effectiveRequest.timeDimension,
+      orderBy: effectiveRequest.orderBy,
       driver: context.driver,
       tableMapping: context.tableMapping,
     });
-    if (composed) return { ...composed, engine: 'native' };
+    if (composed) return { ...composed, engine: 'native', effectiveRequest };
   }
 
   if (fullRuntimeRequested) {
     throw lastRuntimeError ?? new SemanticRuntimeRequiredError(status.setup ?? 'The requested semantic runtime is unavailable.');
   }
-  if (lastRuntimeError && !context.semanticLayer.canComposeMetric(request.metrics[0] ?? '')) {
+  if (lastRuntimeError && !context.semanticLayer.canComposeMetric(effectiveRequest.metrics[0] ?? '')) {
     throw new SemanticRuntimeRequiredError(lastRuntimeError.message);
   }
   return null;

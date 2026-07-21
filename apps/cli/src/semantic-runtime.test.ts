@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
-import { compileSemanticRuntimeQuery, getSemanticRuntimeStatus } from './semantic-runtime.js';
+import {
+  compileSemanticRuntimeQuery,
+  getSemanticRuntimeStatus,
+  normalizeSemanticRuntimeQueryRequest,
+} from './semantic-runtime.js';
 import { managedMetricFlowBin } from './metricflow.js';
 
 let root: string;
@@ -27,12 +31,41 @@ function layer(): SemanticLayer {
     metrics: [
       { name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'SUM(amount)', type: 'sum', table: 'orders' },
       { name: 'revenue_ratio', label: 'Revenue ratio', description: '', domain: 'sales', sql: 'revenue_ratio', type: 'custom', table: '', metricType: 'ratio' },
+      {
+        name: 'previous_day_revenue',
+        label: 'Previous day revenue',
+        description: '',
+        domain: 'sales',
+        sql: 'previous_day_revenue',
+        type: 'custom',
+        table: '',
+        metricType: 'derived',
+        typeParams: {
+          metrics: [{ name: 'revenue', offset_window: { count: 1, granularity: 'day' } }],
+        },
+      },
     ],
     dimensions: [],
   });
 }
 
 describe('shared semantic runtime selector', () => {
+  it('API-004/AGT-001 adds metric_time at the offset grain without overriding an explicit time selection', () => {
+    expect(normalizeSemanticRuntimeQueryRequest({
+      metrics: ['previous_day_revenue'],
+      dimensions: [],
+    }, layer())).toMatchObject({
+      timeDimension: { name: 'metric_time', granularity: 'day' },
+    });
+    expect(normalizeSemanticRuntimeQueryRequest({
+      metrics: ['previous_day_revenue'],
+      dimensions: [],
+      timeDimension: { name: 'metric_time', granularity: 'month' },
+    }, layer())).toMatchObject({
+      timeDimension: { name: 'metric_time', granularity: 'month' },
+    });
+  });
+
   it('uses the bundled native compiler for composable metrics', async () => {
     const result = await compileSemanticRuntimeQuery({ metrics: ['revenue'], dimensions: [] }, {
       projectRoot: root,
@@ -63,6 +96,34 @@ describe('shared semantic runtime selector', () => {
       semanticLayer: layer(),
     });
     expect(result).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+  });
+
+  it('API-004/E2E-008 passes the inferred metric_time group-by to MetricFlow for an offset metric', async () => {
+    mkdirSync(join(root, 'target'), { recursive: true });
+    writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
+    const bin = join(root, 'mf');
+    const argsPath = join(root, 'mf-args.txt');
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then exit 0; fi',
+      `printf "%s\\n" "$*" > '${argsPath.replace(/'/g, "'\\''")}'`,
+      'printf "%s\\n" "SELECT previous_day_revenue FROM metricflow_compiled"',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+
+    const result = await compileSemanticRuntimeQuery({
+      metrics: ['previous_day_revenue'],
+      dimensions: [],
+    }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.' } },
+      detectedProvider: 'dbt',
+      semanticLayer: layer(),
+    });
+
+    expect(result?.effectiveRequest.timeDimension).toEqual({ name: 'metric_time', granularity: 'day' });
+    expect(readFileSync(argsPath, 'utf8')).toContain('--group-by metric_time__day');
   });
 
   it('activates a managed project-local runtime immediately and forwards the configured profiles directory', async () => {

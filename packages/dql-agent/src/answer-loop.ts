@@ -113,6 +113,8 @@ export type AnalysisDepth = CascadeAnalysisDepth;
 export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Promise<{
   sql: string;
   engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  /** The compiler may add deterministic requirements such as metric_time. */
+  selection?: SemanticMemberSelection;
 }>;
 
 /**
@@ -1711,7 +1713,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           semanticBridgeAnswer = composeSemanticQueryFromCompiledMembers({
             semanticLayer: input.semanticLayer,
             question,
-            selection,
+            selection: compiled.selection ?? selection,
             sql: compiled.sql,
           });
           if (semanticBridgeAnswer) {
@@ -1734,7 +1736,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // pick members (the query_semantic_model contract); the compiler still owns the
     // SQL, so a paraphrased metric question stays governed instead of dropping to
     // Lane-3 generation.
-    if (!semanticBridgeAnswer) {
+    // AGT-005: a governed runtime failure is terminal for this selected metric. Do not
+    // spend another model call re-selecting the same member or silently fall
+    // into exploratory SQL; surface the compiler's actionable error instead.
+    if (!semanticBridgeAnswer && !semanticRuntimeFailure) {
       const selection = await selectSemanticMembersViaLlm({
         provider,
         semanticLayer: input.semanticLayer,
@@ -1756,7 +1761,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             composed = composeSemanticQueryFromCompiledMembers({
               semanticLayer: input.semanticLayer,
               question,
-              selection,
+              selection: compiled.selection ?? selection,
               sql: compiled.sql,
             });
             if (composed) {

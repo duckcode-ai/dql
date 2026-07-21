@@ -37,6 +37,8 @@ export interface SemanticStageToolsInput {
   semanticQueryCompiler?: (selection: SemanticMemberSelection) => Promise<{
     sql: string;
     engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
+    /** The compiler may add deterministic requirements such as metric_time. */
+    selection?: SemanticMemberSelection;
   }>;
   /** Records the compiled result of the last successful compile_semantic_query call. */
   onCompiled?: (result: {
@@ -174,7 +176,7 @@ function compileSemanticQueryTool(input: SemanticStageToolsInput): AgentToolDefi
           compiled = composeSemanticQueryFromCompiledMembers({
             semanticLayer: layer,
             question: typeof record.question === 'string' ? record.question : metrics.join(', '),
-            selection,
+            selection: external.selection ?? selection,
             sql: external.sql,
           });
         } catch (error) {

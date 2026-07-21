@@ -6,6 +6,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.6 - 2026-07-20
+
+### Reliable governed metric compilation
+
+This patch repairs two deterministic orchestration gaps that could make valid
+MetricFlow and Snowflake queries fail before execution.
+
+### Fixed
+
+- **Offset metrics include their required time grain.** The shared semantic
+  runtime detects dbt metric offset metadata and adds `metric_time` at the
+  appropriate grain for Ask, Notebook, Block Studio, local MetricFlow, and dbt
+  Cloud without overriding an explicit user selection.
+- **Generated CTE aliases stay query-local.** Quoted aliases such as
+  `"subq_2"` are classified as CTEs instead of Snowflake tables, so bounded
+  validation probes only real warehouse relations.
+- **Governed compiler failures do not trigger noisy replanning.** Once an exact
+  governed metric reaches its semantic runtime, a compiler failure is returned
+  as an actionable governed error rather than causing another AI selection pass
+  or silently falling through to exploratory SQL.
+
 ## v1.8.5 - 2026-07-20
 
 ### Managed MetricFlow setup
