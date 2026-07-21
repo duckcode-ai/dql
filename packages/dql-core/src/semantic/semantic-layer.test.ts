@@ -760,3 +760,46 @@ describe('SQL Dialect support', () => {
     }
   });
 });
+
+describe('derived-metric dimension compatibility (office-test survivor fix)', () => {
+  const layerWithDerived = () => new SemanticLayer({
+    metrics: [
+      { name: 'bcm', label: 'BCM', description: '', domain: 'usage', sql: 'bcm', type: 'custom', table: '', typeParams: { measure: { name: 'bcm' } } },
+      // Derived metric referencing another metric — some dbt versions omit
+      // transitive input_measures, which used to leave the reachable-table set
+      // empty and gray out EVERY dimension (including the time dimension).
+      { name: 'previous_day_bcm', label: 'Previous Day BCM', description: '', domain: 'usage', sql: 'previous_day_bcm', type: 'custom', table: '', metricType: 'derived', typeParams: { metrics: [{ name: 'bcm', offset_window: '1 day' }] } },
+      // Ratio metric via numerator/denominator references.
+      { name: 'percent_dod_acm', label: 'Percent DoD ACM', description: '', domain: 'usage', sql: 'percent_dod_acm', type: 'custom', table: '', metricType: 'ratio', typeParams: { numerator: { name: 'previous_day_bcm' }, denominator: { name: 'bcm' } } },
+    ],
+    dimensions: [
+      { name: 'usage_source', label: 'Usage source', description: '', sql: 'usage_source', type: 'string', table: 'usage_daily' },
+      { name: 'report_date', label: 'Report date', description: '', sql: 'report_date', type: 'date', table: 'usage_daily' },
+    ],
+    measures: [
+      { name: 'bcm', label: 'BCM', description: '', agg: 'sum', table: 'usage_daily' },
+    ],
+    semanticModels: [
+      { name: 'usage_daily', label: 'Usage daily', description: '', table: 'usage_daily', entities: [], measures: ['bcm'], dimensions: ['usage_source'], timeDimensions: ['report_date'] },
+    ],
+  });
+
+  it('reaches dimensions through the referenced-metric graph for derived metrics', () => {
+    const layer = layerWithDerived();
+    const names = layer.listCompatibleDimensions(['previous_day_bcm']).map((dimension) => dimension.name);
+    expect(names).toContain('usage_source');
+    expect(names).toContain('report_date');
+  });
+
+  it('reaches dimensions through numerator/denominator for ratio metrics (two hops)', () => {
+    const layer = layerWithDerived();
+    const names = layer.listCompatibleDimensions(['percent_dod_acm']).map((dimension) => dimension.name);
+    expect(names).toContain('usage_source');
+  });
+
+  it('still refuses native composition for the derived metric itself', () => {
+    const layer = layerWithDerived();
+    expect(layer.canComposeMetric('previous_day_bcm')).toBe(false);
+    expect(layer.canComposeMetric('bcm')).toBe(true);
+  });
+});

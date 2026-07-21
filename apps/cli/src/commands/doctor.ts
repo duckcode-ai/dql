@@ -20,6 +20,7 @@ import { listProviderSettings } from '../settings/provider-settings.js';
 import { describeNpmInvocation, resolveNpmInvocation } from '../npm-runtime.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from '../version-status.js';
 import { resolveRetrievalHealthStatus } from '../retrieval-health.js';
+import { getSemanticRuntimeStatus } from '../semantic-runtime.js';
 
 interface Check {
   name: string;
@@ -101,6 +102,7 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   checks.push(checkOutputContractDrift(projectRoot));
   checks.push(await checkDqlVersionDrift(projectRoot));
   checks.push(checkRetrievalHealth(projectRoot, config));
+  checks.push(await checkSemanticExecutionRuntime(projectRoot, resolveProjectSemanticConfig(config, projectRoot)));
 
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
@@ -926,4 +928,42 @@ function checkRetrievalHealth(projectRoot: string, config: ReturnType<typeof loa
     advisory: true,
     detail: `${summary}. ${health.warnings.join(' ')}`,
   };
+}
+
+/**
+ * Semantic EXECUTION health: how many metrics can DQL compose natively vs
+ * require a full semantic runtime (dbt Cloud Semantic Layer / MetricFlow CLI),
+ * and which engine is active. This is the one-glance answer to "why is my
+ * derived metric graying out / erroring" — the definition can be perfectly
+ * governed while execution needs a runtime that is not configured.
+ */
+async function checkSemanticExecutionRuntime(projectRoot: string, semanticConfig: unknown): Promise<Check> {
+  try {
+    const result = resolveSemanticLayerWithDiagnostics(
+      semanticConfig as Parameters<typeof resolveSemanticLayerWithDiagnostics>[0],
+      projectRoot,
+    );
+    if (!result.layer) {
+      return { name: 'Semantic execution runtime', ok: true, detail: 'no semantic layer configured (optional)' };
+    }
+    const runtime = await getSemanticRuntimeStatus(projectRoot);
+    const metrics = result.layer.listMetrics();
+    const composable = metrics.filter((metric) => result.layer!.canComposeMetric(metric.name)).length;
+    const runtimeOnly = metrics.length - composable;
+    const summary = `engine=${runtime.active}, metrics=${metrics.length} (${composable} native-composable, ${runtimeOnly} need a full semantic runtime)`;
+    if (runtimeOnly === 0 || runtime.active !== 'native') {
+      return { name: 'Semantic execution runtime', ok: true, detail: summary };
+    }
+    return {
+      name: 'Semantic execution runtime',
+      ok: false,
+      detail: `${summary}. ${runtimeOnly} derived/ratio/cumulative metric(s) cannot execute locally — their panels gray out and Ask falls back. ${runtime.setup ?? 'Configure dbt Cloud Semantic Layer or local MetricFlow in Settings to enable them.'}`,
+    };
+  } catch (error) {
+    return {
+      name: 'Semantic execution runtime',
+      ok: true,
+      detail: `status unavailable (${error instanceof Error ? error.message : String(error)})`,
+    };
+  }
 }

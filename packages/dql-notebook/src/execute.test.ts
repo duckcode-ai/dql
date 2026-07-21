@@ -134,3 +134,42 @@ describe('buildExecutionPlan', () => {
     expect(plan?.sql).toContain('LIMIT 5');
   });
 });
+
+describe('semantic block compose failures (honest reasons)', () => {
+  const semanticBlockSource = (metric: string) => [
+    `block "Daily" {`,
+    `  domain = "usage"`,
+    `  type = "semantic"`,
+    `  metric = "${metric}"`,
+    `  query = """@metric(${metric})"""`,
+    `}`,
+  ].join('\n');
+
+  it('names a MetricFlow-only metric as the cause instead of blaming definitions', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'previous_day_bcm', label: 'Previous Day BCM', description: '', domain: 'usage',
+        sql: 'previous_day_bcm', type: 'custom', table: '', metricType: 'derived',
+        typeParams: { metrics: [{ name: 'bcm' }] },
+      }],
+      dimensions: [],
+    });
+
+    expect(() => buildExecutionPlan({
+      id: 'cell-derived',
+      type: 'dql',
+      title: 'Previous Day BCM',
+      source: semanticBlockSource('previous_day_bcm'),
+    }, { semanticLayer })).toThrow(/derived metric DQL cannot compose natively.*MetricFlow/);
+  });
+
+  it('says the metric is undefined when it really is missing', () => {
+    const semanticLayer = new SemanticLayer({ metrics: [], dimensions: [] });
+    expect(() => buildExecutionPlan({
+      id: 'cell-missing',
+      type: 'dql',
+      title: 'Missing',
+      source: semanticBlockSource('nonexistent_metric'),
+    }, { semanticLayer })).toThrow(/not defined in the semantic layer/);
+  });
+});

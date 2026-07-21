@@ -227,9 +227,22 @@ function buildSemanticPlan(
     tableMapping,
   });
   if (!composed) {
+    // Distinguish the three real causes instead of sending users to check
+    // definitions that are usually fine: (a) the metric genuinely is not
+    // defined, (b) it exists but is a derived/ratio/cumulative metric DQL
+    // cannot compose natively (needs dbt Cloud Semantic Layer or local
+    // MetricFlow), (c) everything resolves but the dimension set is unjoinable.
+    const reasons = metrics.map((name) => {
+      if (semanticLayer.canComposeMetric(name)) return null;
+      const metric = semanticLayer.getMetric(name);
+      if (!metric) return `metric "${name}" is not defined in the semantic layer`;
+      const kind = metric.metricType || metric.type || 'metric';
+      return `metric "${name}" exists but is a ${kind} metric DQL cannot compose natively — run it through a full semantic runtime (dbt Cloud Semantic Layer or local MetricFlow)`;
+    }).filter((reason): reason is string => Boolean(reason));
     throw new Error(
-      `Could not compose SQL for semantic block "${block.name}". ` +
-      `Check that metrics [${metrics.join(', ')}] exist in your semantic-layer/ definitions.`,
+      reasons.length > 0
+        ? `Could not compose SQL for semantic block "${block.name}": ${reasons.join('; ')}.`
+        : `Could not compose SQL for semantic block "${block.name}". The metrics resolved, but the selected dimensions do not share a governed join path with them — remove or replace the unjoinable dimension.`,
     );
   }
 

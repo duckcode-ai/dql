@@ -1352,20 +1352,74 @@ export class SemanticLayer {
       return undefined;
     };
 
-    const metricTables = resolvedMetrics.map((metric) => {
-      const reachableTables = new Set<string>();
-      const measureNames = new Set<string>();
+    const collectMeasureNames = (metric: MetricDefinition, measureNames: Set<string>): void => {
       const measure = metric.typeParams?.measure;
+      if (typeof measure === 'string' && measure.trim()) measureNames.add(measure.trim());
       if (measure && typeof measure === 'object' && !Array.isArray(measure) && typeof (measure as Record<string, unknown>).name === 'string') {
         measureNames.add(String((measure as Record<string, unknown>).name));
       }
       const inputs = metric.typeParams?.input_measures;
       if (Array.isArray(inputs)) {
         for (const input of inputs) {
-          if (input && typeof input === 'object' && typeof (input as Record<string, unknown>).name === 'string') {
+          if (typeof input === 'string' && input.trim()) measureNames.add(input.trim());
+          else if (input && typeof input === 'object' && typeof (input as Record<string, unknown>).name === 'string') {
             measureNames.add(String((input as Record<string, unknown>).name));
           }
         }
+      }
+    };
+
+    // Derived/ratio metrics reference OTHER metrics (type_params.metrics /
+    // numerator / denominator) rather than carrying measures directly. Some dbt
+    // versions omit transitive input_measures, which left the reachable-table
+    // set empty and the semantic panel graying EVERY dimension (including the
+    // time dimension) for those metrics. Walk the referenced-metric graph
+    // (bounded) so dimension compatibility reflects the metric's real models
+    // even when the metric itself executes through a MetricFlow runtime.
+    const referencedMetricNames = (metric: MetricDefinition): string[] => {
+      const names = new Set<string>();
+      const visit = (value: unknown): void => {
+        if (!value) return;
+        if (typeof value === 'string') {
+          if (value.trim()) names.add(value.trim());
+          return;
+        }
+        if (Array.isArray(value)) {
+          for (const item of value) visit(item);
+          return;
+        }
+        if (typeof value === 'object') {
+          const raw = value as Record<string, unknown>;
+          for (const key of ['name', 'metric', 'metric_name']) {
+            if (typeof raw[key] === 'string') visit(raw[key]);
+          }
+        }
+      };
+      const typeParams = (metric.typeParams ?? {}) as Record<string, unknown>;
+      visit(typeParams.metrics);
+      visit(typeParams.numerator);
+      visit(typeParams.denominator);
+      return Array.from(names);
+    };
+
+    const metricTables = resolvedMetrics.map((metric) => {
+      const reachableTables = new Set<string>();
+      const measureNames = new Set<string>();
+      collectMeasureNames(metric, measureNames);
+      const visited = new Set<string>([metric.name]);
+      let frontier = referencedMetricNames(metric);
+      for (let depth = 0; depth < 3 && frontier.length > 0; depth += 1) {
+        const next: string[] = [];
+        for (const name of frontier) {
+          if (visited.has(name)) continue;
+          visited.add(name);
+          const referenced = this.metrics.get(name);
+          if (!referenced) continue;
+          collectMeasureNames(referenced, measureNames);
+          if (referenced.table) reachableTables.add(referenced.table);
+          next.push(...referencedMetricNames(referenced));
+        }
+        frontier = next;
       }
       if (metric.table) reachableTables.add(metric.table);
       for (const measureName of measureNames) {
