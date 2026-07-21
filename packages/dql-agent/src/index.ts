@@ -266,6 +266,17 @@ export type {
 } from "./answer-loop.js";
 export { matchSemanticMetric } from "./metadata/metric-match.js";
 export {
+  aggregationIntegrityIssuesForSql,
+  buildGrainLedger,
+  detectFanoutRisks,
+  fanoutWarningsForSql,
+  type AggregationIntegrityIssue,
+  type AggregationIntegrityIssueKind,
+  type FanoutRisk,
+  type GrainLedger,
+  type RelationGrain,
+} from "./metadata/grain-ledger.js";
+export {
   runAgenticToolLoop,
   parseTextToolCall,
   type AgenticToolLoopOptions,

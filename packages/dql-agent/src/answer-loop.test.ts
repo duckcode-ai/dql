@@ -5543,6 +5543,53 @@ describe("answer (block-first loop)", () => {
     );
   });
 
+  it("AGT-005 repairs premature currency rounding before any SQL is executed", async () => {
+    const provider = new StubProvider([
+      "```sql\nSELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) AS booked_amount FROM analytics.fct_orders o\n```",
+      "```sql\nSELECT ROUND(COALESCE(SUM(o.amount), 0), 2) AS booked_amount FROM analytics.fct_orders o\n```",
+    ]);
+    const executed: string[] = [];
+    const question = "What is the total booked amount?";
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations(question, [{
+        relation: "analytics.fct_orders",
+        name: "fct_orders",
+        source: "dbt manifest",
+        columns: [{ name: "amount", type: "DECIMAL(18,2)" }],
+        rank: 1,
+        score: 80,
+        reason: "selected amount fact table",
+      }], {
+        metricTerms: ["booked amount"],
+        dimensionTerms: [],
+        mode: "ad_hoc",
+        routeIntent: "ad_hoc_analysis",
+      }),
+      executeGeneratedSql: async (sql) => {
+        executed.push(sql);
+        return {
+          columns: ["booked_amount"],
+          rows: [{ booked_amount: 300567.85 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(provider.calls).toHaveLength(2);
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toContain("ROUND(COALESCE(SUM(o.amount), 0), 2)");
+    expect(executed[0]).not.toContain("SUM(ROUND(");
+    expect(provider.calls[1]!.map((message) => message.content).join("\n")).toContain("Preserve the source DECIMAL/NUMERIC precision");
+    expect(result.result?.rows).toEqual([{ booked_amount: 300567.85 }]);
+    expect(result.validationWarnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("Repaired after context-validation failure")]),
+    );
+  });
+
   it("repairs a ranked query that omits its ranked entity before execution", async () => {
     const provider = new StubProvider([
       "```sql\nSELECT region, SUM(revenue) AS revenue FROM analytics.sales GROUP BY region LIMIT 10\n```",

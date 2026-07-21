@@ -866,6 +866,8 @@ function renderContextValidationRefusalForUser(
       return 'This comparison needs a baseline period or value that the drafted query did not include. Say what to compare against (for example, the prior month) and I will run it.';
     case 'unsafe_sql':
       return 'The drafted query used a statement type that is not allowed in this governed preview, so I did not run it.';
+    case 'unsafe_aggregation':
+      return 'I drafted a query, but it could change the metric meaning by rounding too early, losing decimal precision, summing a non-additive value, or multiplying rows across a join. I did not run it. Use the governed semantic metric, or review the native grain and join keys before retrying.';
     case 'insufficient_context':
       if (/could not be parsed|parse error|syntax/i.test(machineError)) {
         return 'I drafted a query, but its SQL syntax did not match the connected warehouse, so I did not run it. The failed draft is available in Inspect; retrying will generate a warehouse-specific query.';
@@ -886,6 +888,7 @@ function refusalCodeForValidation(code: SqlContextValidationCode | undefined): A
   }
   if (code === 'ambiguous_filter') return 'ambiguous';
   if (code === 'misbound_filter') return 'grounding_gap';
+  if (code === 'unsafe_aggregation') return 'policy_blocked';
   return 'model_declined';
 }
 
@@ -2224,6 +2227,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         filterValues: input.followUp?.filters,
         trustedFilterValues: trustedFollowUpFilterValues(input.followUp),
         memberBindings: input.followUp?.memberBindings,
+        enforceAggregationIntegrity: !governedMetricAnswer,
       });
   const rankedGrainGap = missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions);
   contextValidation = initialValidation.ok && rankedGrainGap
@@ -2298,7 +2302,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   //      stands instead of guessing a measure.
   //   2) Otherwise fall back to a CLEAN governed-metric definition (direct or exact
   //      leaf-measure; no fuzzy family guess that could answer the wrong measure).
-  if (!contextValidation.ok && semanticMetricRoute && semanticMetricMatch && !rankedGrainGap) {
+  if (!contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && semanticMetricRoute && semanticMetricMatch && !rankedGrainGap) {
     const grounded = contextLedger.validateRuntimeGrounding(parsed.sql);
     // Runtime grounding proves that relations and columns exist; it cannot prove
     // that a resolved business member was bound to the right dimension. Never
@@ -2322,7 +2326,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
 
-  if (!contextValidation.ok && !governedMetricAnswer && input.expandGroundingContext && canUseLaneRepair(repairBudgetState, 'reground')) {
+  if (!contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && !governedMetricAnswer && input.expandGroundingContext && canUseLaneRepair(repairBudgetState, 'reground')) {
     recordLaneRepair(repairBudgetState, 'reground');
     try {
       const expansion = await input.expandGroundingContext({
@@ -2399,6 +2403,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         'For every required grouping alias, select the best matching inspected business column, project it with that exact alias, and include the same expression in GROUP BY.',
         'When the warehouse uses a different physical name (for example a location field for a requested region), keep the inspected physical column and alias it to the requested business name. Do not silently drop the grouping.',
         'Preserve every requested dimension and measure that was already correct; change only what the validation error requires.',
+        'For amount calculations, preserve DECIMAL/NUMERIC inputs, aggregate at the proven native grain, apply COALESCE to the aggregate, and ROUND only the outer final result. Never repair by rounding rows before SUM/AVG or casting money to FLOAT/DOUBLE/REAL.',
         'Correct it using ONLY the relations and columns from the inspected context above.',
         'If a needed column lives on a different relation, JOIN that relation using the suggested join paths.',
         'If the requested column does not exist anywhere in the inspected context, return the closest answerable SQL and say what is missing.',
@@ -2439,10 +2444,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       // Repair is best-effort — the refusal below stays the honest fallback.
     }
   }
-  // W1.3 — deterministic, warn-only fan-out check. When the generated SQL aggregates
-  // an additive measure across a one-to-many join (grain ledger knows the keys), the
-  // number can silently double-count. Surface a caution so it is reviewed. This never
-  // blocks: it only appends to warnings, and it is conservative (no key data ⇒ no flag).
+  // W1.3 defense in depth. Model-authored SQL has already passed the blocking
+  // aggregation-integrity guard in ContextLedger. Keep an advisory warning here
+  // for compiler-owned/governed paths, which intentionally bypass model-SQL
+  // enforcement but still benefit from visible grain diagnostics.
   if (contextValidation.ok && parsed.sql && input.contextPack?.objects?.length) {
     try {
       const fanoutWarnings = fanoutWarningsForSql(parsed.sql, input.contextPack.objects);
@@ -2962,6 +2967,14 @@ Rules:
    or use a grain-preserving value only when the owning entity remains in the
    output. Never SUM the repeated parent value at child grain. If the question
    requires allocating a parent value to children, ask for the allocation rule.
+   Preserve financial precision throughout the calculation. Never ROUND,
+   truncate, format, or cast an amount to FLOAT/DOUBLE/REAL before SUM, AVG,
+   deduplication, or native-grain pre-aggregation. Aggregate the raw
+   DECIMAL/NUMERIC expression first; apply null/default handling to the
+   aggregate; then round only the outer final projection when presentation
+   requires it (for example ROUND(COALESCE(SUM(o.amount), 0), 2)). Do not use a
+   rounded or formatted alias as an input to another calculation. Currency
+   symbols and compact display units belong to result presentation, not SQL.
    For an entity-relative measure comparison such as "customers who paid less
    tax than Melissa", first aggregate the measure for every peer at the same
    entity grain, obtain the named reference entity's aggregate in a CTE or
@@ -3300,7 +3313,7 @@ function analyticalPlanAllowsDbtExploration(plan: AnalyticalPathPlan): boolean {
 // definition as the measure rather than reinventing it, so the number stays consistent
 // with the governed metric — only the join/grouping around it is generated.
 function metricAnchorInstruction(metricName: string, def: { expr: string; table: string }): string {
-  return `A GOVERNED metric matched this question, but the semantic layer could not compose the exact requested shape on its own (the breakdown likely needs a join the metric's table does not own). You MUST compute the measure using this certified definition — do NOT redefine, rename, or approximate it:\n  metric "${metricName}": ${def.expr}   (defined over ${def.table})\nCompose ONE read-only SELECT/WITH using explicit aliases for every relation and include every output the user requested. Preserve the metric at its native grain before joining to a lower-grain dimension. NEVER SUM a lifetime, cumulative, balance, snapshot, rate, ratio, or already-aggregated value after a one-to-many join. If the requested result retains the metric's owning entity, expose the native-grain value (or a grain-preserving MAX after deduplication) for each entity/dimension pair; if it asks to allocate that value to the child dimension, request the missing allocation policy instead of inventing one. Join ${def.table} to other grounded tables only along documented keys. State the join path, output grain, and whether each measure is an entity-level attribute or an allocated child-level measure. Reusing the governed definition keeps the answer consistent with the certified metric; if the semantic layer cannot authorize the requested dimensional composition, keep the result exploratory/review-required rather than claiming semantic provenance.`;
+  return `A GOVERNED metric matched this question, but the semantic layer could not compose the exact requested shape on its own (the breakdown likely needs a join the metric's table does not own). You MUST compute the measure using this certified definition — do NOT redefine, rename, or approximate it:\n  metric "${metricName}": ${def.expr}   (defined over ${def.table})\nCompose ONE read-only SELECT/WITH using explicit aliases for every relation and include every output the user requested. Preserve the metric at its native grain before joining to a lower-grain dimension. NEVER SUM a lifetime, cumulative, balance, snapshot, rate, ratio, or already-aggregated value after a one-to-many join. If the requested result retains the metric's owning entity, expose the native-grain value (or a grain-preserving MAX after deduplication) for each entity/dimension pair; if it asks to allocate that value to the child dimension, request the missing allocation policy instead of inventing one. Preserve DECIMAL/NUMERIC precision: do not ROUND or cast to FLOAT/DOUBLE/REAL before aggregation, and use outer ROUND(COALESCE(aggregate, 0), scale) only for final presentation. Join ${def.table} to other grounded tables only along documented keys. State the join path, output grain, and whether each measure is an entity-level attribute or an allocated child-level measure. Reusing the governed definition keeps the answer consistent with the certified metric; if the semantic layer cannot authorize the requested dimensional composition, keep the result exploratory/review-required rather than claiming semantic provenance.`;
 }
 
 function renderContextPrompt(
@@ -5405,6 +5418,7 @@ async function generateProposalWithOptionalTools(input: {
     'You may use the supplied DQL tools to inspect semantic members, certified context, metadata context, and bounded repair options.',
     `Tool budget for this question: ${toolBudget.maxToolCalls} call(s) (${toolBudget.effortClass}: ${toolBudget.reason}). Stop as soon as a lane can answer.`,
     'Prefer a governed semantic compile (search_semantic_layer → compile_semantic_query) over hand-written SQL when the semantic layer contains the requested metric/dimensions/time grain.',
+    'For amounts, balances, and financial metrics, preserve the semantic aggregation and DECIMAL/NUMERIC precision. Never ROUND or cast to FLOAT/DOUBLE/REAL before SUM/AVG, and never sum a parent/snapshot value across a fan-out join.',
     'When the supplied context is missing a table, column, or join key, DISCOVER it with `search_metadata` (find candidate relations) then `get_table_schema` (confirm real columns + inferred join keys) before declining. Use `search_project_files` for a bounded live source grep when indexed retrieval missed an identifier; use `scan_manifest` for cached graph objects; do not loop on the same failed context.',
     'When unsure a relation/column exists, validate a composed query with `validate_sql` rather than guessing.',
     'Final response must be a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',

@@ -287,6 +287,57 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+  it('AGT-005 retains non-additive semantic measure contracts for retrieval and SQL guards', () => {
+    const layer = new SemanticLayer({
+      dimensions: [],
+      metrics: [{
+        name: 'ending_balance',
+        label: 'Ending Balance',
+        description: 'Account balance at the end of the reporting date.',
+        domain: 'finance',
+        sql: '',
+        type: 'custom',
+        metricType: 'simple',
+        typeParams: { measure: { name: 'ending_balance' } },
+        table: '',
+      }],
+      measures: [{
+        name: 'ending_balance',
+        label: 'Ending Balance',
+        description: 'Ending balance snapshot.',
+        domain: 'finance',
+        agg: 'sum',
+        expr: 'ending_balance_amount',
+        table: 'account_snapshot',
+        nonAdditiveDimension: { name: 'snapshot_date', window_choice: 'max' },
+      }],
+    });
+
+    const graph = buildKGFromSemanticLayer(layer);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'metric:ending_balance',
+        payload: expect.objectContaining({
+          backingMeasureNames: ['ending_balance'],
+          nonAdditiveMeasures: [{
+            name: 'ending_balance',
+            table: 'account_snapshot',
+            expression: 'ending_balance_amount',
+            nonAdditiveDimension: { name: 'snapshot_date', window_choice: 'max' },
+          }],
+          nonAdditiveDimensions: [{ name: 'snapshot_date', window_choice: 'max' }],
+        }),
+      }),
+      expect.objectContaining({
+        nodeId: 'measure:ending_balance',
+        payload: expect.objectContaining({
+          expression: 'ending_balance_amount',
+          nonAdditiveDimension: { name: 'snapshot_date', window_choice: 'max' },
+        }),
+      }),
+    ]));
+  });
+
   it('keeps synthetic physical dimensions model-scoped above the PERF-001 threshold', () => {
     const dimensions = Array.from({ length: 50_001 }, (_, index) => ({
       name: `column_${index}`,

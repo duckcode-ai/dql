@@ -33,6 +33,17 @@ export interface FanoutRisk {
   message: string;
 }
 
+export type AggregationIntegrityIssueKind =
+  | 'premature_rounding'
+  | 'lossy_numeric_cast'
+  | 'fanout'
+  | 'non_additive_measure';
+
+export interface AggregationIntegrityIssue {
+  kind: AggregationIntegrityIssueKind;
+  message: string;
+}
+
 /** Additive aggregates whose value changes when rows are duplicated. MIN/MAX are safe. */
 const ADDITIVE_AGGREGATES = new Set(['SUM', 'AVG', 'COUNT']);
 
@@ -180,4 +191,233 @@ export function fanoutWarningsForSql(sql: string, objects: MetadataObject[], dia
   } catch {
     return [];
   }
+}
+
+/**
+ * AGT-005 / AGT-010 numeric contract for model-authored SQL.
+ *
+ * SQL parsing proves syntax and identifiers, not whether a number still means
+ * the governed metric. This guard rejects four high-confidence wrong-number
+ * shapes before execution:
+ *   - rounding inside SUM/AVG (precision is lost before aggregation),
+ *   - explicit conversion of aggregate inputs to approximate floating types,
+ *   - a ledger-proven one-to-many fan-out, and
+ *   - hand aggregation of a semantic measure that declares a non-additive
+ *     dimension and therefore must be compiled by its semantic runtime.
+ *
+ * COALESCE is intentionally not rejected: SUM(COALESCE(x, 0)) is valid for a
+ * raw additive measure. The system prompt prefers COALESCE(SUM(x), 0), while
+ * the deterministic guards focus on changes that can alter the metric meaning.
+ */
+export function aggregationIntegrityIssuesForSql(
+  sql: string,
+  objects: MetadataObject[],
+  dialect = 'duckdb',
+): AggregationIntegrityIssue[] {
+  const issues: AggregationIntegrityIssue[] = [];
+  for (const call of additiveAggregateCalls(sql)) {
+    if (/\bround\s*\(/i.test(call.body)) {
+      issues.push({
+        kind: 'premature_rounding',
+        message:
+          `${call.func} rounds an input before aggregation. Preserve the source DECIMAL/NUMERIC precision, ` +
+          `aggregate at the proven native grain, then apply ROUND only to the outer final result (for example ROUND(COALESCE(SUM(amount), 0), 2)).`,
+      });
+    }
+    if (hasLossyNumericCast(call.body)) {
+      issues.push({
+        kind: 'lossy_numeric_cast',
+        message:
+          `${call.func} converts an input to FLOAT/DOUBLE/REAL before aggregation. Amount calculations must retain the warehouse DECIMAL/NUMERIC type until final presentation.`,
+      });
+    }
+  }
+
+  let analysis: SqlReferenceAnalysis;
+  try {
+    analysis = analyzeSqlReferences(sql, dialect);
+  } catch {
+    return dedupeAggregationIssues(issues);
+  }
+  if (!analysis.parsed) return dedupeAggregationIssues(issues);
+
+  const ledger = buildGrainLedger(objects);
+  // The shared parser intentionally flattens aliases across CTE scopes. A join
+  // in one CTE must not be used as proof that an aggregate in another CTE fans
+  // out. Until scope ids are retained by SqlReferenceAnalysis, only a single
+  // SELECT scope is high-confidence enough to fail closed; multi-CTE findings
+  // remain visible through fanoutWarningsForSql's advisory path.
+  if (ledger.size > 0 && analysis.ctes.length === 0) {
+    for (const risk of detectFanoutRisks(analysis, ledger)) {
+      issues.push({ kind: 'fanout', message: risk.message });
+    }
+  }
+
+  const contracts = semanticNonAdditiveContracts(objects);
+  for (const aggregate of analysis.aggregates) {
+    if (!['SUM', 'AVG'].includes(aggregate.func) || !aggregate.column) continue;
+    for (const contract of contracts) {
+      if (!contract.columns.has(normalizeColumn(aggregate.column))) continue;
+      const aggregateRelation = normalizeRelationTail(aggregate.relation);
+      const contractRelation = normalizeRelationTail(contract.table);
+      if (aggregateRelation && contractRelation && aggregateRelation !== contractRelation) continue;
+      issues.push({
+        kind: 'non_additive_measure',
+        message:
+          `${aggregate.func}(${aggregate.column}) bypasses the non-additive contract for semantic measure ${contract.name}. ` +
+          `Compile the governed metric through the semantic runtime so its ${contract.dimensionLabel} rule and native grain are preserved; do not hand-sum it.`,
+      });
+    }
+  }
+
+  return dedupeAggregationIssues(issues);
+}
+
+interface AdditiveAggregateCall {
+  func: 'SUM' | 'AVG';
+  body: string;
+}
+
+function additiveAggregateCalls(sql: string): AdditiveAggregateCall[] {
+  const masked = maskSqlLiteralsAndComments(sql);
+  const calls: AdditiveAggregateCall[] = [];
+  const pattern = /\b(SUM|AVG)\s*\(/gi;
+  for (const match of masked.matchAll(pattern)) {
+    const open = (match.index ?? 0) + match[0].lastIndexOf('(');
+    const close = matchingSqlParen(masked, open);
+    if (close < 0) continue;
+    calls.push({
+      func: match[1]!.toUpperCase() as 'SUM' | 'AVG',
+      body: masked.slice(open + 1, close),
+    });
+  }
+  return calls;
+}
+
+function matchingSqlParen(sql: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < sql.length; index += 1) {
+    if (sql[index] === '(') depth += 1;
+    else if (sql[index] === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/** Mask literals/comments while preserving indices and structural parentheses. */
+function maskSqlLiteralsAndComments(sql: string): string {
+  const chars = [...sql];
+  let index = 0;
+  const blank = (position: number) => {
+    if (chars[position] !== '\n' && chars[position] !== '\r') chars[position] = ' ';
+  };
+  while (index < chars.length) {
+    if (chars[index] === '-' && chars[index + 1] === '-') {
+      blank(index++);
+      blank(index++);
+      while (index < chars.length && chars[index] !== '\n') blank(index++);
+      continue;
+    }
+    if (chars[index] === '/' && chars[index + 1] === '*') {
+      blank(index++);
+      blank(index++);
+      while (index < chars.length) {
+        const closes = chars[index] === '*' && chars[index + 1] === '/';
+        blank(index++);
+        if (closes) {
+          blank(index++);
+          break;
+        }
+      }
+      continue;
+    }
+    const quote = chars[index];
+    if (quote === "'" || quote === '"' || quote === '`' || quote === '[') {
+      const closeQuote = quote === '[' ? ']' : quote;
+      blank(index++);
+      while (index < chars.length) {
+        const closes = chars[index] === closeQuote;
+        blank(index++);
+        if (!closes) continue;
+        if (quote !== '[' && chars[index] === closeQuote) {
+          blank(index++);
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    index += 1;
+  }
+  return chars.join('');
+}
+
+function hasLossyNumericCast(body: string): boolean {
+  return /::\s*(?:float(?:4|8)?|double(?:\s+precision)?|real)\b/i.test(body)
+    || /\bcast\s*\([\s\S]*?\bas\s+(?:float(?:4|8)?|double(?:\s+precision)?|real)\b/i.test(body);
+}
+
+interface SemanticNonAdditiveContract {
+  name: string;
+  table?: string;
+  columns: Set<string>;
+  dimensionLabel: string;
+}
+
+function semanticNonAdditiveContracts(objects: MetadataObject[]): SemanticNonAdditiveContract[] {
+  const contracts: SemanticNonAdditiveContract[] = [];
+  for (const object of objects) {
+    if (object.objectType !== 'semantic_measure' && object.objectType !== 'semantic_metric') continue;
+    const payload = object.payload ?? {};
+    if (object.objectType === 'semantic_metric' && Array.isArray(payload.nonAdditiveMeasures)) {
+      for (const entry of payload.nonAdditiveMeasures) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const measure = entry as Record<string, unknown>;
+        const name = typeof measure.name === 'string' ? measure.name : object.name;
+        const expression = typeof measure.expression === 'string' ? measure.expression.trim() : '';
+        const column = expression.replace(/^([A-Za-z_][\w$]*\.)/, '');
+        if (!/^[A-Za-z_][\w$]*$/.test(column)) continue;
+        contracts.push({
+          name,
+          table: typeof measure.table === 'string' ? measure.table : undefined,
+          columns: new Set([normalizeColumn(column)]),
+          dimensionLabel: describeNonAdditiveDimension(measure.nonAdditiveDimension),
+        });
+      }
+    }
+    const nonAdditive = payload.nonAdditiveDimension
+      ?? payload.non_additive_dimension
+      ?? payload.nonAdditiveDimensions;
+    if (!nonAdditive || (Array.isArray(nonAdditive) && nonAdditive.length === 0)) continue;
+    const columns = new Set<string>();
+    const nameTail = object.name.split('.').at(-1);
+    if (nameTail) columns.add(normalizeColumn(nameTail));
+    for (const value of [payload.expression, payload.expr, payload.formula]) {
+      if (typeof value !== 'string') continue;
+      const simpleColumn = value.trim().replace(/^([A-Za-z_][\w$]*\.)/, '');
+      if (/^[A-Za-z_][\w$]*$/.test(simpleColumn)) columns.add(normalizeColumn(simpleColumn));
+    }
+    if (columns.size === 0) continue;
+    contracts.push({
+      name: object.name,
+      table: typeof payload.table === 'string' ? payload.table : undefined,
+      columns,
+      dimensionLabel: describeNonAdditiveDimension(nonAdditive),
+    });
+  }
+  return contracts;
+}
+
+function describeNonAdditiveDimension(value: unknown): string {
+  if (Array.isArray(value)) return 'declared non-additive dimension';
+  if (!value || typeof value !== 'object') return 'declared non-additive dimension';
+  const record = value as Record<string, unknown>;
+  const name = typeof record.name === 'string' ? record.name : undefined;
+  return name ? `${name} non-additive` : 'declared non-additive dimension';
+}
+
+function dedupeAggregationIssues(issues: AggregationIntegrityIssue[]): AggregationIntegrityIssue[] {
+  return [...new Map(issues.map((issue) => [`${issue.kind}:${issue.message}`, issue])).values()];
 }

@@ -276,4 +276,20 @@ describe('analyzeSqlReferences', () => {
       ]),
     );
   });
+
+  it('AGT-005 attributes wrapped and calculated aggregates to their source relation', () => {
+    const result = analyzeSqlReferences(`
+      SELECT
+        SUM(ROUND(COALESCE(o.amount, 0), 2)) AS rounded_amount,
+        SUM(o.unit_price * o.quantity) AS extended_amount
+      FROM analytics.fct_orders o
+    `);
+
+    expect(result.aggregates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ func: 'SUM', column: 'amount', relation: 'analytics.fct_orders' }),
+        expect.objectContaining({ func: 'SUM', column: undefined, relation: 'analytics.fct_orders' }),
+      ]),
+    );
+  });
 });

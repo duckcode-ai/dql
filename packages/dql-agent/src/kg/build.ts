@@ -607,7 +607,35 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
   const edges: KGEdge[] = [];
   if (!layer) return { nodes, edges };
 
+  const semanticMeasures = layer.listMeasures();
+  const measuresByName = new Map<string, (typeof semanticMeasures)[number][]>();
+  for (const measure of semanticMeasures) {
+    for (const key of [measure.name, qualifiedSemanticName(measure.cube, measure.name)]) {
+      const current = measuresByName.get(key) ?? [];
+      if (!current.some((candidate) => candidate === measure)) current.push(measure);
+      measuresByName.set(key, current);
+    }
+  }
+
   for (const metric of layer.listMetrics()) {
+    const backingCandidates = semanticMetricBackingMeasureNames(metric)
+      .flatMap((name) => measuresByName.get(name) ?? [])
+      .filter((measure, index, values) => values.indexOf(measure) === index);
+    const scopedBackingMeasures = metric.cube
+      ? backingCandidates.filter((measure) => measure.cube === metric.cube)
+      : backingCandidates;
+    const backingMeasures = scopedBackingMeasures.length > 0 ? scopedBackingMeasures : backingCandidates;
+    const nonAdditiveMeasures = backingMeasures
+      .filter((measure) => Boolean(measure.nonAdditiveDimension))
+      .map((measure) => ({
+        name: measure.name,
+        table: measure.table,
+        expression: measure.expr,
+        nonAdditiveDimension: measure.nonAdditiveDimension,
+      }));
+    const nonAdditiveDimensions = backingMeasures
+      .map((measure) => measure.nonAdditiveDimension)
+      .filter((value): value is Record<string, unknown> => Boolean(value));
     const nodeId = `metric:${qualifiedSemanticName(metric.cube, metric.name)}`;
     nodes.push({
       nodeId,
@@ -625,7 +653,18 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         metric.aggregation ? `aggregation: ${metric.aggregation}` : '',
         metric.table ? `table: ${metric.table}` : '',
         metric.sql ? `sql: ${metric.sql}` : '',
+        nonAdditiveDimensions.length > 0 ? 'non-additive: semantic runtime required' : '',
       ].filter(Boolean).join('\n') || undefined,
+      payload: {
+        metricType: metric.metricType,
+        aggregation: metric.aggregation,
+        table: metric.table,
+        formula: metric.sql,
+        aggTimeDimension: metric.aggTimeDimension,
+        backingMeasureNames: backingMeasures.map((measure) => measure.name),
+        nonAdditiveMeasures,
+        nonAdditiveDimensions,
+      },
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(metric.status),
       provenance: metric.source?.provider === 'dbt'
@@ -670,7 +709,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
     if (dimension.cube) edges.push({ src: nodeId, dst: `semantic_model:${dimension.cube}`, kind: 'depends_on' });
   }
 
-  for (const measure of layer.listMeasures()) {
+  for (const measure of semanticMeasures) {
     const nodeId = `measure:${qualifiedSemanticName(measure.cube, measure.name)}`;
     nodes.push({
       nodeId,
@@ -688,7 +727,15 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         measure.table ? `table: ${measure.table}` : '',
         measure.expr ? `expr: ${measure.expr}` : '',
         measure.aggTimeDimension ? `agg_time_dimension: ${measure.aggTimeDimension}` : '',
+        measure.nonAdditiveDimension ? `non-additive dimension: ${JSON.stringify(measure.nonAdditiveDimension)}` : '',
       ].filter(Boolean).join('\n') || undefined,
+      payload: {
+        aggregation: measure.agg,
+        table: measure.table,
+        expression: measure.expr,
+        aggTimeDimension: measure.aggTimeDimension,
+        nonAdditiveDimension: measure.nonAdditiveDimension,
+      },
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(semanticObjectStatus(measure)),
       provenance: measure.source?.provider === 'dbt'
@@ -789,6 +836,25 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
   }
 
   return { nodes, edges };
+}
+
+function semanticMetricBackingMeasureNames(metric: {
+  name: string;
+  cube?: string;
+  typeParams?: Record<string, unknown>;
+}): string[] {
+  const names = new Set<string>([metric.name, qualifiedSemanticName(metric.cube, metric.name)]);
+  const add = (value: unknown): void => {
+    if (typeof value === 'string' && value.trim()) names.add(value.trim());
+    else if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const name = (value as Record<string, unknown>).name;
+      if (typeof name === 'string' && name.trim()) names.add(name.trim());
+    }
+  };
+  add(metric.typeParams?.measure);
+  const inputs = metric.typeParams?.input_measures;
+  if (Array.isArray(inputs)) for (const input of inputs) add(input);
+  return [...names];
 }
 
 function qualifiedSemanticName(cube: string | undefined, name: string): string {

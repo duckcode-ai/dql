@@ -32,6 +32,7 @@ export interface ContextLedgerSqlValidationOptions {
   filterValues?: string[];
   trustedFilterValues?: string[];
   memberBindings?: Array<{ dimension: string; values: string[] }>;
+  enforceAggregationIntegrity?: boolean;
 }
 
 export interface ContextLedgerExpansionResult {

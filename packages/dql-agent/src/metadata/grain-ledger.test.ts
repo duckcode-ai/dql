@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
-import { buildGrainLedger, detectFanoutRisks, type GrainLedger } from './grain-ledger.js';
+import {
+  aggregationIntegrityIssuesForSql,
+  buildGrainLedger,
+  detectFanoutRisks,
+  type GrainLedger,
+} from './grain-ledger.js';
 import { extractDbtUniqueColumns } from './catalog.js';
 import type { MetadataObject } from './catalog.js';
 
@@ -33,6 +38,20 @@ describe('detectFanoutRisks (W1.3)', () => {
     expect(found.length).toBeGreaterThan(0);
     expect(found[0].aggregatedRelation).toBe('fct_orders');
     expect(found[0].fanoutRelation).toBe('order_items');
+  });
+
+  it('AGT-005 catches fan-out when ROUND and COALESCE wrap the aggregated amount', () => {
+    const found = risks(
+      `SELECT SUM(ROUND(COALESCE(o.order_total, 0), 2)) AS revenue
+       FROM fct_orders o
+       JOIN order_items oi ON oi.order_id = o.order_id`,
+      ledger,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      aggregatedRelation: 'fct_orders',
+      fanoutRelation: 'order_items',
+    });
   });
 
   it('does NOT flag the grain-safe revenue per customer (order grain, no order_items join)', () => {
@@ -94,6 +113,115 @@ describe('detectFanoutRisks (W1.3)', () => {
       new Map(),
     );
     expect(found).toEqual([]);
+  });
+});
+
+describe('aggregationIntegrityIssuesForSql (AGT-005 / AGT-010)', () => {
+  const objects: MetadataObject[] = [
+    {
+      objectKey: 'dbt:model:fct_orders',
+      objectType: 'dbt_model',
+      name: 'fct_orders',
+      payload: { relation: 'analytics.fct_orders', uniqueColumns: ['order_id'] },
+    },
+    {
+      objectKey: 'dbt:model:order_items',
+      objectType: 'dbt_model',
+      name: 'order_items',
+      payload: { relation: 'analytics.order_items', uniqueColumns: ['order_item_id'] },
+    },
+  ];
+
+  it('rejects rounding before SUM but accepts final-result rounding', () => {
+    const unsafe = aggregationIntegrityIssuesForSql(
+      'SELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) FROM analytics.fct_orders o',
+      objects,
+    );
+    const safe = aggregationIntegrityIssuesForSql(
+      'SELECT ROUND(COALESCE(SUM(o.amount), 0), 2) FROM analytics.fct_orders o',
+      objects,
+    );
+
+    expect(unsafe).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'premature_rounding' }),
+    ]));
+    expect(safe).toEqual([]);
+  });
+
+  it('rejects explicit approximate casts inside an amount aggregate', () => {
+    const issues = aggregationIntegrityIssuesForSql(
+      'SELECT SUM(CAST(o.amount AS DOUBLE)) FROM analytics.fct_orders o',
+      objects,
+    );
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'lossy_numeric_cast' }),
+    ]));
+  });
+
+  it('rejects ledger-proven row multiplication before execution', () => {
+    const issues = aggregationIntegrityIssuesForSql(
+      `SELECT SUM(o.order_total) AS total
+       FROM analytics.fct_orders o
+       JOIN analytics.order_items oi ON oi.order_id = o.order_id`,
+      objects,
+    );
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'fanout' }),
+    ]));
+  });
+
+  it('does not treat a join in a separate CTE as fan-out proof for an aggregate scope', () => {
+    const issues = aggregationIntegrityIssuesForSql(`
+      WITH amount_total AS (
+        SELECT SUM(o.order_total) AS total FROM analytics.fct_orders o
+      ), unrelated_join AS (
+        SELECT o.order_id FROM analytics.fct_orders o
+        JOIN analytics.order_items oi ON oi.order_id = o.order_id
+      )
+      SELECT a.total FROM amount_total a
+    `, objects);
+    expect(issues.filter((issue) => issue.kind === 'fanout')).toEqual([]);
+  });
+
+  it('requires semantic compilation for declared non-additive measures', () => {
+    const issues = aggregationIntegrityIssuesForSql(
+      'SELECT SUM(s.ending_balance) FROM analytics.account_snapshot s',
+      [{
+        objectKey: 'semantic:measure:account_snapshot.ending_balance',
+        objectType: 'semantic_measure',
+        name: 'account_snapshot.ending_balance',
+        payload: {
+          table: 'analytics.account_snapshot',
+          expression: 'ending_balance',
+          nonAdditiveDimension: { name: 'snapshot_date', window_choice: 'max' },
+        },
+      }],
+    );
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'non_additive_measure' }),
+    ]));
+  });
+
+  it('retains the non-additive guard when the selected context contains only its metric', () => {
+    const issues = aggregationIntegrityIssuesForSql(
+      'SELECT SUM(s.ending_balance_amount) FROM analytics.account_snapshot s',
+      [{
+        objectKey: 'semantic:metric:ending_balance',
+        objectType: 'semantic_metric',
+        name: 'ending_balance',
+        payload: {
+          nonAdditiveMeasures: [{
+            name: 'ending_balance',
+            table: 'analytics.account_snapshot',
+            expression: 'ending_balance_amount',
+            nonAdditiveDimension: { name: 'snapshot_date', window_choice: 'max' },
+          }],
+        },
+      }],
+    );
+    expect(issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'non_additive_measure' }),
+    ]));
   });
 });
 

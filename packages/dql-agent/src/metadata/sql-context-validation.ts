@@ -7,6 +7,7 @@ import type {
 } from './catalog.js';
 import { sourceSqlShapeColumns } from './sql-shape.js';
 import { shouldClarifyBeforeGeneration } from '../cascade/triage.js';
+import { aggregationIntegrityIssuesForSql } from './grain-ledger.js';
 
 export type SqlContextValidationCode =
   | 'unknown_relation'
@@ -14,6 +15,7 @@ export type SqlContextValidationCode =
   | 'missing_baseline'
   | 'ambiguous_filter'
   | 'misbound_filter'
+  | 'unsafe_aggregation'
   | 'unsafe_sql'
   | 'insufficient_context';
 
@@ -50,6 +52,8 @@ export interface SqlContextValidationOptions {
     dimension: string;
     values: string[];
   }>;
+  /** Semantic-compiler SQL owns its aggregation contract; model-authored SQL must pass it here. */
+  enforceAggregationIntegrity?: boolean;
   /**
    * Runtime schema shown to the model in the prompt. When supplied, validation
    * uses the union of the metadata context pack and this runtime context so the
@@ -121,8 +125,15 @@ export function validateSqlAgainstLocalContext(
   }
 
   const allowed = buildAllowedRelationLookup(contextPack, options.runtimeSchema, options.dialect);
+  const aggregationIssues = options.enforceAggregationIntegrity === false
+    ? []
+    : aggregationIntegrityIssuesForSql(sql, contextPack?.objects ?? [], options.dialect);
 
-  if (!contextPack && allowed.size === 0) return { ok: true, ...base };
+  if (!contextPack && allowed.size === 0) {
+    return aggregationIssues.length > 0
+      ? aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns)
+      : { ok: true, ...base };
+  }
   if (contextPack?.routeDecision?.route === 'clarify' && shouldClarifyBeforeGeneration({
     intent: contextPack.routeDecision.intent,
     routeDecision: contextPack.routeDecision,
@@ -141,6 +152,9 @@ export function validateSqlAgainstLocalContext(
   }
 
   if (!contextPack?.allowedSqlContext && allowed.size === 0) {
+    if (aggregationIssues.length > 0) {
+      return aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns);
+    }
     return {
       ok: true,
       ...base,
@@ -149,6 +163,9 @@ export function validateSqlAgainstLocalContext(
   }
 
   if (allowed.size === 0) {
+    if (aggregationIssues.length > 0) {
+      return aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns);
+    }
     return {
       ok: true,
       ...base,
@@ -220,6 +237,10 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
+  if (aggregationIssues.length > 0) {
+    return aggregationIntegrityFailure(aggregationIssues, warnings, referencedRelations, referencedColumns);
+  }
+
   if (options.intent === 'diagnose_change' && !contextHasTimeLikeColumn(allowed)) {
     return {
       ok: false,
@@ -260,6 +281,22 @@ export function validateSqlAgainstLocalContext(
 
   return {
     ok: true,
+    warnings,
+    referencedRelations,
+    referencedColumns,
+  };
+}
+
+function aggregationIntegrityFailure(
+  issues: ReturnType<typeof aggregationIntegrityIssuesForSql>,
+  warnings: string[],
+  referencedRelations: string[],
+  referencedColumns: Array<{ relation?: string; column: string }>,
+): SqlContextValidationResult {
+  return {
+    ok: false,
+    code: 'unsafe_aggregation',
+    error: `Generated SQL changes the amount/metric aggregation contract: ${issues.map((issue) => issue.message).join(' ')}`,
     warnings,
     referencedRelations,
     referencedColumns,

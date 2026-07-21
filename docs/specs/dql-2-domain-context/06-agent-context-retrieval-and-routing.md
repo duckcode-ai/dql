@@ -232,6 +232,17 @@ phrases such as "product revenue" remain measures, not invented dimensions. A
 bounded correction receives the exact answer contract and must preserve already
 correct dimensions and measures.
 
+Amount and financial calculations preserve the selected metric's aggregation
+contract, native grain, and warehouse `DECIMAL`/`NUMERIC` precision. Generated
+SQL may not round, truncate, format, or cast to an approximate floating type
+before `SUM`, `AVG`, deduplication, or native-grain pre-aggregation. Null/default
+handling applies to the aggregate and display rounding applies only to the outer
+final projection. A dbt-key-proven one-to-many fanout, hand aggregation of a
+declared non-additive semantic measure, or premature rounding/casting fails the
+deterministic SQL guard before any preview execution. The bounded repair receives
+the exact violation; a failed repair remains terminal and review-required
+(`AGT-005`, `AGT-010`, `REL-002`).
+
 A failed grounding, compiler, policy, provider, or deadline outcome is terminal
 for that run. It may expose redacted diagnostics and a targeted research/modeling
 action, but it cannot retain an invalid reusable draft, passed-answer badge, or

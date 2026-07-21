@@ -6,6 +6,30 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.7 - 2026-07-20
+
+### Amount aggregation integrity
+
+This patch prevents AI-generated SQL from changing governed amount semantics
+through premature rounding, approximate numeric casts, non-additive aggregation,
+or proven one-to-many fanout.
+
+### Fixed
+
+- **Financial precision is preserved until final presentation.** Generated SQL
+  aggregates native `DECIMAL`/`NUMERIC` values before applying null defaults or
+  outer rounding, instead of rounding individual rows before `SUM` or `AVG`.
+- **Unsafe amount SQL is blocked before execution.** The agent and exploratory
+  CLI lanes reject premature rounding, lossy floating-point casts, proven
+  fanout, and hand aggregation of non-additive semantic measures; one bounded
+  repair may produce a safe native-grain query.
+- **Wrapped aggregates retain source lineage.** Expressions such as
+  `SUM(ROUND(COALESCE(amount, 0), 2))` are attributed to their source relation
+  and column so deterministic grain checks cannot be bypassed by wrappers.
+- **Semantic metric contracts survive retrieval.** Knowledge-graph objects now
+  retain backing measures, aggregation, time-grain, and non-additive metadata so
+  Ask can preserve the governed calculation even in metric-only context.
+
 ## v1.8.6 - 2026-07-20
 
 ### Reliable governed metric compilation

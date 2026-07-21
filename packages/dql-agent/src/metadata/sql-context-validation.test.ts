@@ -18,6 +18,62 @@ describe('validateSqlAgainstLocalContext', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('AGT-005 rejects pre-aggregation rounding and preserves final currency rounding', () => {
+    const unsafe = validateSqlAgainstLocalContext(
+      'SELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) AS amount FROM analytics.fct_orders o',
+      pack(),
+    );
+    const safe = validateSqlAgainstLocalContext(
+      'SELECT ROUND(COALESCE(SUM(o.amount), 0), 2) AS amount FROM analytics.fct_orders o',
+      pack(),
+    );
+
+    expect(unsafe).toMatchObject({ ok: false, code: 'unsafe_aggregation' });
+    expect(safe.ok).toBe(true);
+  });
+
+  it('AGT-010 rejects a dbt-key-proven fan-out instead of returning an inflated amount', () => {
+    const context = pack();
+    context.allowedSqlContext.relations.push({
+      relation: 'analytics.order_items',
+      name: 'order_items',
+      source: 'test',
+      columns: [{ name: 'order_item_id' }, { name: 'order_id' }],
+    });
+    context.objects = [
+      {
+        objectKey: 'dbt:model:fct_orders',
+        objectType: 'dbt_model',
+        name: 'fct_orders',
+        payload: { relation: 'analytics.fct_orders', uniqueColumns: ['order_id'] },
+      },
+      {
+        objectKey: 'dbt:model:order_items',
+        objectType: 'dbt_model',
+        name: 'order_items',
+        payload: { relation: 'analytics.order_items', uniqueColumns: ['order_item_id'] },
+      },
+    ];
+
+    const result = validateSqlAgainstLocalContext(`
+      SELECT SUM(o.amount) AS amount
+      FROM analytics.fct_orders o
+      JOIN analytics.order_items oi ON oi.order_id = o.order_id
+    `, context);
+
+    expect(result).toMatchObject({ ok: false, code: 'unsafe_aggregation' });
+    if (!result.ok) expect(result.error).toContain('Possible fan-out');
+  });
+
+  it('allows semantic-compiler SQL to retain its governed aggregation contract', () => {
+    const result = validateSqlAgainstLocalContext(
+      'SELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) AS amount FROM analytics.fct_orders o',
+      pack(),
+      { enforceAggregationIntegrity: false },
+    );
+    expect(result.ok).toBe(true);
+  });
+
   it('accepts inspected source columns and output aliases selected from a joined CTE', () => {
     const result = validateSqlAgainstLocalContext(`
       WITH enterprise AS (

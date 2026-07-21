@@ -306,10 +306,57 @@ function collectSqlAggregates(
       const name = readColumnRefName(argExpr);
       column = name === '*' ? undefined : name;
       relation = resolveColumnRefRelation(argExpr, state.aliasToRelation, state.singleRelation);
+    } else if (argExpr) {
+      // Generated analytical SQL commonly wraps the measure before aggregation,
+      // for example SUM(ROUND(COALESCE(o.amount, 0), 2)) or
+      // SUM(o.unit_price * o.quantity). The old direct-column-only extraction
+      // lost the owning relation for those expressions, which made the fan-out
+      // guard blind to exactly the wrong-number queries it is meant to stop.
+      // Attribute the aggregate when every referenced input belongs to one
+      // physical relation; retain a column only when the expression has one
+      // distinct input column.
+      const refs = collectAggregateArgumentColumnRefs(
+        argExpr,
+        state.aliasToRelation,
+        state.singleRelation,
+      );
+      const relations = Array.from(new Set(refs.map((ref) => ref.relation).filter((value): value is string => Boolean(value))));
+      const columns = Array.from(new Set(refs.map((ref) => ref.column).filter((value) => value !== '*')));
+      if (relations.length === 1) relation = relations[0];
+      if (columns.length === 1) column = columns[0];
     }
     state.aggregates.push({ func: obj.name.toUpperCase(), distinct, column, relation });
   }
   for (const value of Object.values(obj)) collectSqlAggregates(value, state);
+}
+
+function collectAggregateArgumentColumnRefs(
+  node: unknown,
+  aliasToRelation: Map<string, string>,
+  singleRelation?: string,
+): Array<{ column: string; relation?: string }> {
+  const refs: Array<{ column: string; relation?: string }> = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.type === 'column_ref') {
+      const column = readColumnRefName(record);
+      if (column) {
+        refs.push({
+          column,
+          relation: resolveColumnRefRelation(record, aliasToRelation, singleRelation),
+        });
+      }
+      return;
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(node);
+  return refs;
 }
 
 /** Extract CTE names from WITH ... AS (...) patterns */

@@ -136,6 +136,7 @@ import {
   buildBlockBusinessFingerprint,
   buildBlockSqlFingerprints,
   buildAnalysisQuestionPlan,
+  aggregationIntegrityIssuesForSql,
   buildLocalContextPack,
   toAgentRetrievalEvidence,
   defaultConversationPath,
@@ -14991,10 +14992,14 @@ export function repairExploratorySqlBeforeExecution(
   repairedSql = repairExploratoryMisleadingPercentAliases(repairedSql, question, repairs);
   const grainRepair = repairExploratoryNonAdditiveAggregates(repairedSql, schemaContext, repairs, dialect);
   repairedSql = grainRepair.sql;
+  const numericIssue = aggregationIntegrityIssuesForSql(repairedSql, [], dialect)
+    .find((issue) => issue.kind === 'premature_rounding' || issue.kind === 'lossy_numeric_cast');
   return {
     sql: repairedSql,
     repairs,
-    ...(grainRepair.blockedReason ? { blockedReason: grainRepair.blockedReason } : {}),
+    ...(grainRepair.blockedReason || numericIssue
+      ? { blockedReason: grainRepair.blockedReason ?? numericIssue!.message }
+      : {}),
   };
 }
 

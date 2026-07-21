@@ -2918,6 +2918,28 @@ describe('EXP-001 exploratory join probes', () => {
     expect(ratioExpression.sql).toContain('AS revenue_pct');
   });
 
+  it('AGT-005 blocks premature amount rounding in the exploratory execution lane', () => {
+    const unsafe = repairExploratorySqlBeforeExecution(
+      'SELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) AS total_amount FROM analytics.orders o',
+      [{
+        relation: 'analytics.orders',
+        name: 'orders',
+        columns: [{ name: 'amount', type: 'DECIMAL(18,2)' }],
+      }],
+    );
+    const safe = repairExploratorySqlBeforeExecution(
+      'SELECT ROUND(COALESCE(SUM(o.amount), 0), 2) AS total_amount FROM analytics.orders o',
+      [{
+        relation: 'analytics.orders',
+        name: 'orders',
+        columns: [{ name: 'amount', type: 'DECIMAL(18,2)' }],
+      }],
+    );
+
+    expect(unsafe.blockedReason).toContain('rounds an input before aggregation');
+    expect(safe.blockedReason).toBeUndefined();
+  });
+
   it('uses safely quoted identifiers and fixed bounded samples', () => {
     const sql = buildExploratoryJoinProbeSql({
       leftRelation: 'analytics.orders',

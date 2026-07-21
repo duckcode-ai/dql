@@ -276,7 +276,8 @@ not aspirational documentation (`PERF-001`).
 - unit: parsers, identities, selectors, fingerprints, skills, policies;
 - compiler: deterministic v2/v3 manifests and no dbt fact duplication;
 - integration: snapshot atomicity, APIs, CLI, MCP, migration, source patches;
-- agent evaluations: route selection, ambiguity, fanout, exports, stale proof,
+- agent evaluations: route selection, ambiguity, fanout, native-grain amount
+  aggregation, decimal precision, non-additive measures, exports, stale proof,
   corrections, limited-context Ask, similar-name meaning, trust-versus-relevance,
   identifier binding, call budgets, and surface parity;
 - browser: real built `dql notebook` against the functional fixture;
