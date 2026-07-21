@@ -77,6 +77,8 @@ export interface CLIFlags {
   maxWrongCertified?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
   noExamples?: boolean;
+  /** `dql eval --init` — write a starter eval/golden.yaml template into the project. */
+  init?: boolean;
   /** `dql diff --impact` — compute downstream impact + re-cert gate for changed blocks. */
   impact?: boolean;
   /** `dql diff --impact --write-recertification` — mark impacted semantic YAML as pending recertification. */
@@ -236,6 +238,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       if (Number.isFinite(value) && value >= 0) flags.maxWrongCertified = value;
     } else if (arg === '--no-examples') {
       flags.noExamples = true;
+    } else if (arg === '--init') {
+      flags.init = true;
     } else if (arg === '--impact') {
       flags.impact = true;
     } else if (arg === '--write-recertification' || arg === '--write-recertification-changeset') {

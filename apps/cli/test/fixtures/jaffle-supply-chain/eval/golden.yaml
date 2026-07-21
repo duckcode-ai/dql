@@ -48,3 +48,20 @@ cases:
   - name: off-topic weather question refuses safely
     question: "What is the weather in Chicago?"
     expectRefuse: true
+
+  # --- Question-plan shape + thread cases (accuracy-harness extension) ---
+
+  - name: Title-Case block name is read as the block, not a member filter
+    question: "Show me the Top Products by revenue"
+    expectNoFilters: ["Top Products"]
+
+  - name: member-value filters survive question planning
+    question: "Top products by revenue for Vogue Vignettes"
+    expectFilters: ["Vogue Vignettes"]
+
+  - name: follow-up naming a different topic does not stay stuck on the prior block
+    priorQuestion: "What are the top products by revenue?"
+    topicRelation: shift
+    question: "What is revenue by food and drink?"
+    expectRoute: certified
+    expectBlock: food_vs_drink_revenue

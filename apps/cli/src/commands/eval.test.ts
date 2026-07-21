@@ -39,13 +39,23 @@ function makePlan(overrides: {
   route: PlanAgentAnswerResult['routeDecision']['route'];
   exactObjectKey?: string;
   blocking?: boolean;
+  metricTerms?: string[];
+  filters?: string[];
+  objectKeys?: string[];
 }): PlanAgentAnswerResult {
   const missingContext = overrides.blocking
     ? [{ kind: 'metadata' as const, message: 'no safe source', severity: 'blocking' as const }]
     : [];
+  const contextPack = {
+    questionPlan: {
+      metricTerms: overrides.metricTerms ?? [],
+      requestedShape: { filters: overrides.filters ?? [] },
+    },
+    objects: (overrides.objectKeys ?? []).map((objectKey) => ({ objectKey })),
+  } as unknown as PlanAgentAnswerResult['contextPack'];
   return {
     contextPackId: 'pack-1',
-    contextPack: {} as PlanAgentAnswerResult['contextPack'],
+    contextPack,
     routeDecision: {
       route: overrides.route,
       intent: 'exact_certified_lookup',
@@ -378,6 +388,8 @@ describe('computeDistributions', () => {
         insufficient_context: 1,
         conflict: 1,
         wrong_grain: 0,
+        question_plan: 0,
+        follow_up: 0,
       },
       sources: {
         block_example: 1,
@@ -520,7 +532,7 @@ describe('runEval (end-to-end against the real router)', () => {
     });
 
     expect(report.ok).toBe(true);
-    expect(report.scores.total).toBe(14);
+    expect(report.scores.total).toBe(17);
     expect(report.scores.answerRate).toBe(1);
     expect(report.scores.routeAccuracy).toBe(1);
     expect(report.scores.blockSelectionAccuracy).toBe(1);
@@ -588,5 +600,125 @@ describe('runEval (end-to-end against the real router)', () => {
     } else {
       expect(process.exitCode).toBe(1);
     }
+  });
+});
+
+// ---- Question-plan shape + follow-up scoring (accuracy-harness extension) ----
+
+describe('scoreCase plan-shape expectations', () => {
+  const manifest = makeManifest({});
+  const base: EvalCase = {
+    name: 'shape',
+    question: 'What is the Previous Day BCM?',
+    source: 'yaml',
+    category: 'question_plan',
+  };
+
+  it('passes when metric terms and filter guards hold', () => {
+    const result = scoreCase(
+      { ...base, expectMetricTerms: ['previous day bcm'], expectNoFilters: ['Previous Day'] },
+      makePlan({ route: 'generated_sql', metricTerms: ['previous day bcm'], filters: [] }),
+      manifest,
+    );
+    expect(result.passed).toBe(true);
+    expect(result.planShapeMatch).toBe(true);
+  });
+
+  it('fails when a governed name was misparsed as a member filter', () => {
+    const result = scoreCase(
+      { ...base, expectNoFilters: ['Previous Day'] },
+      makePlan({ route: 'generated_sql', filters: ['Previous Day'] }),
+      manifest,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join(' ')).toContain('misparsed as a member filter');
+  });
+
+  it('fails when a real member filter was dropped', () => {
+    const result = scoreCase(
+      { ...base, expectFilters: ['Capital One'] },
+      makePlan({ route: 'generated_sql', filters: [] }),
+      manifest,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join(' ')).toContain('was dropped');
+  });
+
+  it('normalizes case and underscores when matching metric terms', () => {
+    const result = scoreCase(
+      { ...base, expectMetricTerms: ['previous_day_bcm'] },
+      makePlan({ route: 'generated_sql', metricTerms: ['Previous Day BCM total'] }),
+      manifest,
+    );
+    expect(result.planShapeMatch).toBe(true);
+  });
+
+  it('guards against sticky metric carry via expectNoMetricTerms', () => {
+    const result = scoreCase(
+      { ...base, expectNoMetricTerms: ['daily consumption'] },
+      makePlan({ route: 'generated_sql', metricTerms: ['daily_consumption'] }),
+      manifest,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.failures.join(' ')).toContain('must not carry');
+  });
+
+  it('checks required evidence object keys in the context pack', () => {
+    const found = scoreCase(
+      { ...base, expectEvidence: ['semantic:metric:consumption.previous_day_bcm'] },
+      makePlan({ route: 'generated_sql', objectKeys: ['semantic:metric:consumption.previous_day_bcm'] }),
+      manifest,
+    );
+    expect(found.passed).toBe(true);
+
+    const missing = scoreCase(
+      { ...base, expectEvidence: ['semantic:metric:consumption.previous_day_bcm'] },
+      makePlan({ route: 'generated_sql', objectKeys: [] }),
+      manifest,
+    );
+    expect(missing.passed).toBe(false);
+    expect(missing.failures.join(' ')).toContain('missing evidence');
+  });
+});
+
+describe('loadYamlEvalCases follow-up and plan-shape fields', () => {
+  it('parses thread and plan-shape expectations from yaml', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dql-eval-yaml-'));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, 'eval'), { recursive: true });
+    writeFileSync(
+      join(dir, 'eval', 'golden.yaml'),
+      [
+        'cases:',
+        '  - name: follow-up switches metric',
+        '    priorQuestion: "daily consumption today"',
+        '    topicRelation: continuation',
+        '    priorMeasures: ["daily_consumption"]',
+        '    question: "consumption % by customer"',
+        '    expectMetricTerms: ["percent"]',
+        '    expectNoMetricTerms: ["daily consumption"]',
+        '  - name: title case is not a filter',
+        '    question: "What is the Previous Day BCM?"',
+        '    expectNoFilters: ["Previous Day"]',
+        '    expectEvidence: ["semantic:metric:consumption.previous_day_bcm"]',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const cases = loadYamlEvalCases(dir);
+    expect(cases).toHaveLength(2);
+    expect(cases[0]).toMatchObject({
+      category: 'follow_up',
+      priorQuestion: 'daily consumption today',
+      topicRelation: 'continuation',
+      priorMeasures: ['daily_consumption'],
+      expectMetricTerms: ['percent'],
+      expectNoMetricTerms: ['daily consumption'],
+    });
+    expect(cases[1]).toMatchObject({
+      category: 'question_plan',
+      expectNoFilters: ['Previous Day'],
+      expectEvidence: ['semantic:metric:consumption.previous_day_bcm'],
+    });
   });
 });

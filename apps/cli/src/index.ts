@@ -267,18 +267,28 @@ const COMMAND_HELP: Record<string, string> = {
     dql eval [path] [--format json]
     dql eval [path] --min-route-accuracy <0..1> --min-refusal <0..1>
     dql eval [path] --no-examples
+    dql eval [path] --init          Write a starter eval/golden.yaml template
 
   Replays every certified block's examples[].question plus any eval/*.yaml
   cases through the existing agent router (no warehouse, no LLM judging) and
-  scores route accuracy, block selection, grain match, and refusal precision/
-  recall. Exits non-zero below the configured thresholds, so it is CI-gateable.
+  scores route accuracy, block selection, grain match, question-plan shape,
+  and refusal precision/recall. Exits non-zero below the configured
+  thresholds, so it is CI-gateable.
 
   eval/*.yaml cases:
     - question: "..."
       expectRoute: certified | generated | missing_context | research
-      expectBlock: "<block name>"   # optional
-      expectGrain: "<grain>"        # optional
-      expectRefuse: true            # optional; shorthand for missing_context
+      expectBlock: "<block name>"        # optional
+      expectGrain: "<grain>"             # optional
+      expectRefuse: true                 # optional; shorthand for missing_context
+      expectMetricTerms: ["<term>"]      # optional; must appear in the question plan
+      expectNoMetricTerms: ["<term>"]    # optional; sticky-metric-carry guard
+      expectFilters: ["<phrase>"]        # optional; member filters that must survive
+      expectNoFilters: ["<phrase>"]      # optional; phrases that must NOT become filters
+      expectEvidence: ["<objectKey>"]    # optional; must be in the context pack
+      priorQuestion: "..."               # optional; replayed first (thread case)
+      topicRelation: continuation | refinement | return | shift
+      priorMeasures: ["<measure>"]       # optional; prior turn's answered measures
   `,
   verify: `
   dql verify — Verify dql-manifest.json is reproducible
