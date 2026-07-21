@@ -53,6 +53,8 @@ export interface SqlReferenceAnalysis {
   statementTypes: string[];
   tables: string[];
   ctes: string[];
+  /** Query-internal FROM/JOIN subquery aliases, never physical relations. */
+  derivedRelations: string[];
   columns: SqlColumnReference[];
   /** Equality join conditions (for grain / fan-out analysis). Empty when unparsed. */
   joins: SqlJoinCondition[];
@@ -164,6 +166,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
       statementTypes: [],
       tables: fallback.tables,
       ctes: fallback.ctes,
+      derivedRelations: [],
       columns: [],
       joins: [],
       aggregates: [],
@@ -174,6 +177,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
 
   const statements = Array.isArray(astRoot) ? astRoot : [astRoot];
   const ctes = new Set(extractCteNames(sql).map((name) => normalizeSqlIdentifier(name)));
+  const derivedRelations = new Set<string>();
   const tableRefs = new Map<string, string>();
   const aliasToRelation = new Map<string, string>();
   const statementTypes = new Set<string>();
@@ -183,6 +187,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
     if (type) statementTypes.add(type);
     collectSqlTables(statement, {
       ctes,
+      derivedRelations,
       tableRefs,
       aliasToRelation,
     });
@@ -192,6 +197,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
   for (const statement of statements) {
     collectSqlColumns(statement, {
       ctes,
+      derivedRelations,
       aliasToRelation,
       singleRelation: tableRefs.size === 1 ? Array.from(tableRefs.values())[0] : undefined,
       columns,
@@ -203,7 +209,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
   const aggregates: SqlAggregateReference[] = [];
   for (const statement of statements) {
     collectSqlJoins(statement, { ctes, aliasToRelation, joins });
-    collectSqlAggregates(statement, { ctes, aliasToRelation, singleRelation, aggregates });
+    collectSqlAggregates(statement, { ctes, derivedRelations, aliasToRelation, singleRelation, aggregates });
   }
 
   return {
@@ -211,6 +217,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
     statementTypes: Array.from(statementTypes),
     tables: Array.from(tableRefs.values()),
     ctes: Array.from(ctes),
+    derivedRelations: Array.from(derivedRelations),
     columns: dedupeColumnReferences(columns),
     joins,
     aggregates,
@@ -285,6 +292,7 @@ function collectSqlAggregates(
   node: unknown,
   state: {
     ctes: Set<string>;
+    derivedRelations: Set<string>;
     aliasToRelation: Map<string, string>;
     singleRelation?: string;
     aggregates: SqlAggregateReference[];
@@ -305,7 +313,8 @@ function collectSqlAggregates(
     if (argExpr?.type === 'column_ref') {
       const name = readColumnRefName(argExpr);
       column = name === '*' ? undefined : name;
-      relation = resolveColumnRefRelation(argExpr, state.aliasToRelation, state.singleRelation);
+      const resolved = resolveColumnRefRelation(argExpr, state.aliasToRelation, state.singleRelation);
+      relation = resolved && !state.derivedRelations.has(normalizeSqlIdentifier(resolved)) ? resolved : undefined;
     } else if (argExpr) {
       // Generated analytical SQL commonly wraps the measure before aggregation,
       // for example SUM(ROUND(COALESCE(o.amount, 0), 2)) or
@@ -319,6 +328,7 @@ function collectSqlAggregates(
         argExpr,
         state.aliasToRelation,
         state.singleRelation,
+        state.derivedRelations,
       );
       const relations = Array.from(new Set(refs.map((ref) => ref.relation).filter((value): value is string => Boolean(value))));
       const columns = Array.from(new Set(refs.map((ref) => ref.column).filter((value) => value !== '*')));
@@ -334,6 +344,7 @@ function collectAggregateArgumentColumnRefs(
   node: unknown,
   aliasToRelation: Map<string, string>,
   singleRelation?: string,
+  derivedRelations: Set<string> = new Set(),
 ): Array<{ column: string; relation?: string }> {
   const refs: Array<{ column: string; relation?: string }> = [];
   const visit = (value: unknown): void => {
@@ -346,9 +357,10 @@ function collectAggregateArgumentColumnRefs(
     if (record.type === 'column_ref') {
       const column = readColumnRefName(record);
       if (column) {
+        const resolved = resolveColumnRefRelation(record, aliasToRelation, singleRelation);
         refs.push({
           column,
-          relation: resolveColumnRefRelation(record, aliasToRelation, singleRelation),
+          relation: resolved && !derivedRelations.has(normalizeSqlIdentifier(resolved)) ? resolved : undefined,
         });
       }
       return;
@@ -387,6 +399,7 @@ function collectSqlTables(
   node: unknown,
   state: {
     ctes: Set<string>;
+    derivedRelations: Set<string>;
     tableRefs: Map<string, string>;
     aliasToRelation: Map<string, string>;
   },
@@ -402,6 +415,12 @@ function collectSqlTables(
   if (parentKey === 'with' || parentKey === 'cte') {
     const cteName = stringField(obj, 'name') ?? stringField(obj, 'as');
     if (cteName) state.ctes.add(normalizeSqlIdentifier(cteName));
+  }
+
+  const derivedAlias = derivedRelationAlias(obj);
+  if (derivedAlias) {
+    state.derivedRelations.add(derivedAlias);
+    state.aliasToRelation.set(derivedAlias, derivedAlias);
   }
 
   const relation = relationFromTableNode(obj);
@@ -430,6 +449,7 @@ function collectSqlColumns(
   node: unknown,
   state: {
     ctes: Set<string>;
+    derivedRelations: Set<string>;
     aliasToRelation: Map<string, string>;
     singleRelation?: string;
     columns: SqlColumnReference[];
@@ -450,7 +470,8 @@ function collectSqlColumns(
       const relation = tableAlias
         ? state.aliasToRelation.get(tableAlias) ?? rawTable
         : state.singleRelation;
-      if (!relation || !state.ctes.has(normalizeSqlIdentifier(relation))) {
+      const normalizedRelation = relation ? normalizeSqlIdentifier(relation) : undefined;
+      if (!relation || (!state.ctes.has(normalizedRelation!) && !state.derivedRelations.has(normalizedRelation!))) {
         state.columns.push({
           column,
           tableAlias: rawTable,
@@ -463,6 +484,16 @@ function collectSqlColumns(
   }
 
   for (const value of Object.values(obj)) collectSqlColumns(value, state);
+}
+
+/** Return the alias for a FROM/JOIN item backed by a nested SELECT AST. */
+function derivedRelationAlias(obj: Record<string, unknown>): string | undefined {
+  const expression = obj.expr;
+  if (!expression || typeof expression !== 'object' || Array.isArray(expression)) return undefined;
+  const ast = (expression as Record<string, unknown>).ast;
+  if (!ast || typeof ast !== 'object') return undefined;
+  const alias = stringField(obj, 'as') ?? stringField(obj, 'alias');
+  return alias ? normalizeSqlIdentifier(alias) : undefined;
 }
 
 function relationFromTableNode(obj: Record<string, unknown>): string | undefined {

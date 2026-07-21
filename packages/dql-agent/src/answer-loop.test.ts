@@ -834,6 +834,75 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.validation?.status).toBe("passed");
   });
 
+  it("AGT-010/UI-011 executes certified top-N answers with the artifact's recorded bound", async () => {
+    const question = "Run the certified block top_customers and show the top 3 customers by revenue";
+    const executedSource = `block "top_customers" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  query = """SELECT customer_name, revenue FROM customers ORDER BY revenue DESC"""
+}`;
+    const executionReceipt = {
+      sourceFingerprint: "a".repeat(64),
+      compiledSqlFingerprint: "b".repeat(64),
+      parameterFingerprint: "c".repeat(64),
+      resultFingerprint: "d".repeat(64),
+    };
+    kg.rebuild([{
+      nodeId: "block:top_customers",
+      kind: "block",
+      name: "top_customers",
+      domain: "commerce",
+      status: "certified",
+      description: "Customers ranked by revenue.",
+      examples: [{ question }],
+      sourceTier: "certified_artifact",
+      certification: "certified",
+      provenance: "DQL block",
+      sourcePath: "blocks/top_customers.dql",
+      declaredOutputs: ["customer_name", "revenue"],
+      sql: "SELECT customer_name, revenue FROM customers ORDER BY revenue DESC",
+    }], []);
+    let receivedInvocation: Parameters<NonNullable<Parameters<typeof answer>[0]["executeCertifiedBlock"]>>[1];
+
+    const result = await answer({
+      question,
+      provider: new StubProvider("should not be called"),
+      kg,
+      blockHints: ["top_customers"],
+      executeCertifiedBlock: async (_block, invocation) => {
+        receivedInvocation = invocation;
+        return {
+          columns: ["customer_name", "revenue"],
+          rows: [
+            { customer_name: "A", revenue: 100 },
+            { customer_name: "B", revenue: 90 },
+            { customer_name: "C", revenue: 80 },
+          ],
+          rowCount: 3,
+          sql: "SELECT * FROM (SELECT customer_name, revenue FROM customers ORDER BY revenue DESC) AS dql_agent_preview LIMIT 3",
+          executionReceipt,
+          dqlArtifact: {
+            kind: "certified_block",
+            name: "top_customers",
+            source: executedSource,
+            sourcePath: "blocks/top_customers.dql",
+            persistence: "saved",
+            trustState: "certified",
+            limit: 3,
+            executionReceipt,
+          },
+        };
+      },
+    });
+
+    expect(receivedInvocation?.rowLimit).toBe(3);
+    expect(result.result?.rowCount).toBe(3);
+    expect(result.dqlArtifact?.limit).toBe(3);
+    expect(result.dqlArtifact?.source).toBe(executedSource);
+    expect(result.dqlArtifact?.executionReceipt).toEqual(executionReceipt);
+  });
+
   it("AGT-005/AGT-012 binds a question member to a certified block parameter and preserves the artifact contract", async () => {
     kg.rebuild([{
       nodeId: "block:product_revenue_for_product",
@@ -6871,7 +6940,6 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       "SELECT o.customer_id, p.product_id AS product, SUM(o.amount) AS revenue FROM analytics.fct_orders o JOIN analytics.dim_products p ON o.product_id = p.product_id GROUP BY o.customer_id, p.product_id",
       "```",
     ].join("\n"));
-
     const result = await answer({
       question: "Who are the top customers by product revenue?",
       provider,
@@ -7536,7 +7604,6 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       ],
     });
     const provider = new StubProvider("should not be called");
-
     const result = await answer({
       question: "Show revenue and orders by channel",
       provider,
@@ -7602,6 +7669,13 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       }),
       "```",
     ].join("\n"));
+    let executedArtifact: Parameters<NonNullable<Parameters<typeof answer>[0]['executeGeneratedSql']>>[1];
+    const executionReceipt = {
+      sourceFingerprint: 'a'.repeat(64),
+      compiledSqlFingerprint: 'b'.repeat(64),
+      parameterFingerprint: 'c'.repeat(64),
+      resultFingerprint: 'd'.repeat(64),
+    };
 
     const result = await answer({
       question: "Show revenue by product",
@@ -7618,12 +7692,17 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
           ],
         },
       ],
-      executeGeneratedSql: async (sql) => ({
-        columns: ["product_name", "total_revenue"],
-        rows: [{ product_name: "JAF-001", total_revenue: 123 }],
-        rowCount: 1,
-        sql,
-      }),
+      executeGeneratedSql: async (sql, artifact) => {
+        executedArtifact = artifact;
+        return {
+          columns: ["product_name", "total_revenue"],
+          rows: [{ product_name: "JAF-001", total_revenue: 123 }],
+          rowCount: 1,
+          sql,
+          dqlArtifact: artifact,
+          executionReceipt,
+        };
+      },
     });
 
     // Two calls: one governed member-selection attempt (declines — product is not
@@ -7632,6 +7711,8 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(provider.calls).toHaveLength(2);
     expect(result.route?.tier).toBe("generated_sql");
     expect(result.dqlArtifact?.kind).toBe("sql_block");
+    expect(executedArtifact?.limit).toBe(200);
+    expect(result.dqlArtifact?.executionReceipt).toEqual(executionReceipt);
     expect(result.dqlArtifact?.source).toContain('type = "custom"');
     expect(result.dqlArtifact?.source).toContain("SELECT product_name, SUM(amount) AS total_revenue FROM orders GROUP BY product_name");
   });
@@ -7678,22 +7759,39 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       ],
     });
     const provider = new StubProvider("should not be called");
+    const executeGeneratedSql = vi.fn(async (sql: string) => ({
+      columns: ["channel", "order_date_month", "total_revenue"],
+      rows: [{ channel: "Online", order_date_month: "2026-01-01", total_revenue: 123 }],
+      rowCount: 1,
+      sql,
+    }));
+    const executeDqlArtifact = vi.fn(async (artifact) => ({
+      columns: ["channel", "order_date_month", "total_revenue"],
+      rows: [{ channel: "Online", order_date_month: "2026-01-01", total_revenue: 123 }],
+      rowCount: 1,
+      sql: "SELECT governed_semantic_result",
+      dqlArtifact: artifact,
+      executionReceipt: {
+        sourceFingerprint: 'a'.repeat(64),
+        compiledSqlFingerprint: 'b'.repeat(64),
+        parameterFingerprint: 'c'.repeat(64),
+        resultFingerprint: 'd'.repeat(64),
+      },
+    }));
 
     const result = await answer({
       question: "Show top 5 monthly revenue for Online channel",
       provider,
       kg,
       semanticLayer,
-      executeGeneratedSql: async (sql) => ({
-        columns: ["channel", "order_date_month", "total_revenue"],
-        rows: [{ channel: "Online", order_date_month: "2026-01-01", total_revenue: 123 }],
-        rowCount: 1,
-        sql,
-      }),
+      executeGeneratedSql,
+      executeDqlArtifact,
     });
 
     expect(result.route?.tier).toBe("semantic_metric");
     expect(provider.calls).toHaveLength(0);
+    expect(executeDqlArtifact).toHaveBeenCalledTimes(1);
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
     expect(result.proposedSql).toContain("WHERE channel = 'Online'");
     expect(result.proposedSql).toContain("ORDER BY total_revenue DESC");
     expect(result.proposedSql).toContain("LIMIT 5");

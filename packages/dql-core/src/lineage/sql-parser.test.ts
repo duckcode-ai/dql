@@ -264,6 +264,26 @@ describe('analyzeSqlReferences', () => {
     ]);
   });
 
+  it('AGT-010/EXP-003 classifies nested subquery aliases as derived instead of physical relations', () => {
+    const result = analyzeSqlReferences(`
+      SELECT "subq_2".customer_id, p.product_name
+      FROM (
+        SELECT customer_id, product_id
+        FROM analytics.order_items
+      ) AS "subq_2"
+      JOIN analytics.products AS p
+        ON "subq_2".product_id = p.product_id
+    `, 'snowflake');
+
+    expect(result.parsed).toBe(true);
+    expect(result.derivedRelations).toContain('subq_2');
+    expect(result.tables).toEqual(expect.arrayContaining(['analytics.order_items', 'analytics.products']));
+    expect(result.tables).not.toContain('subq_2');
+    expect(result.columns).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: 'subq_2' }),
+    ]));
+  });
+
   it('extracts aggregate function references with their relation and distinct flag', () => {
     const result = analyzeSqlReferences(`
       SELECT SUM(o.order_total) AS revenue, COUNT(DISTINCT o.customer_id) AS customers

@@ -240,6 +240,13 @@ Required cross-surface scenarios (`E2E-011`):
    return equivalent resolved values and redacted audit identity.
 5. Ambiguous members, unmapped parameters, structural SQL input, and unresolved
    required values fail closed before certified execution.
+6. The first displayed Ask result and an immediate unchanged Apply carry the
+   same source, parameter, compiled-SQL, and result fingerprints. Top-N bounds
+   remain identical, and an optional saved draft path cannot replace the exact
+   transient source that produced the answer.
+7. Snowflake-style CTEs and nested SELECT aliases such as `subq_2` remain
+   statement-internal; exploratory validation probes only their physical source
+   relations and never queries the alias as a warehouse object.
 
 ## Scale fixture
 

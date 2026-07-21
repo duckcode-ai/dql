@@ -99,6 +99,15 @@ to a table. They show the applied values and reuse the same parameter controls
 as other Notebook DQL results, so changing an input reruns the saved artifact
 directly without another metadata search or AI planning pass (`UI-011`).
 
+The artifact is finalized before the displayed query executes. Initial Ask and
+Apply use the same source, compiler, resolved values, and row bound. A redacted
+execution receipt fingerprints that source, compiled SQL, parameter set, and
+result; an unchanged Apply may refresh mutable data but must reproduce the same
+source/parameter/compiled-SQL contract. Generated SQL is never parameterized or
+translated into a second artifact after its result has already been produced,
+and a transient artifact's supplied source is not silently replaced by a draft
+file at its optional source path (`AGT-010`, `API-003`, `UI-011`).
+
 ## Domain/modeling APIs
 
 | Method | Path | Contract |

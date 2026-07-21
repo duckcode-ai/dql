@@ -6,6 +6,32 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.8.8 - 2026-07-21
+
+### Ask and Apply execution integrity
+
+This patch gives certified, semantic, and generated answers one executable DQL
+contract, so the result shown by Ask and the result produced by Apply cannot be
+silently compiled from different source or inputs.
+
+### Fixed
+
+- **Artifacts are finalized before execution.** Ask now executes the same DQL
+  source, compiled SQL, parameters, and row bound that it returns to the UI;
+  certified results preserve their literal executed source instead of rebuilding
+  it afterward from catalog metadata.
+- **Apply detects execution drift.** Redacted fingerprints bind source, compiled
+  SQL, parameters, and results. Changed source or compiler output is rejected
+  with a refresh instruction rather than displaying mismatched data.
+- **Saved paths cannot replace transient answer source.** A `sourcePath` remains
+  useful metadata, but it no longer overrides the exact DQL source attached to
+  an AI answer.
+- **Nested aliases remain query-local.** Snowflake aliases such as `subq_2` from
+  nested SELECTs are classified as derived relations and excluded from physical
+  warehouse probes while their underlying tables are still validated.
+- **Top-N is stable across reruns.** Certified, semantic, and generated routes
+  execute with the same global limit recorded on the reusable artifact.
+
 ## v1.8.7 - 2026-07-20
 
 ### Amount aggregation integrity

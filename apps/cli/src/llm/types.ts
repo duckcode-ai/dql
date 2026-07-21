@@ -139,7 +139,8 @@ export interface AgentRunRequest {
   /** Final guard invoked before execution and answer publication. */
   assertProjectSnapshot?: (snapshotId: string) => void;
   executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
-  executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
+  executeGeneratedSql?: (sql: string, artifact?: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
+  executeDqlArtifact?: (artifact: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;
   /** Active warehouse dialect so Lane-2 semantic compiles emit dialect-correct SQL. */
   semanticDriver?: string;

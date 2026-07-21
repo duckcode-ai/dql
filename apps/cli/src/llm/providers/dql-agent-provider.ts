@@ -476,6 +476,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             executeGeneratedSql: req.executeGeneratedSql
               ? async (...args) => { guardSnapshot(); return req.executeGeneratedSql!(...args); }
               : undefined,
+            executeDqlArtifact: req.executeDqlArtifact
+              ? async (...args) => { guardSnapshot(); return req.executeDqlArtifact!(...args); }
+              : undefined,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot),
             answerLoopTools,
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT

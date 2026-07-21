@@ -4,6 +4,7 @@ export {
 } from './dql-artifact.js';
 export type {
   DqlArtifactFilter,
+  DqlArtifactExecutionReceipt,
   DqlArtifactKind,
   DqlArtifactOrderBy,
   DqlArtifactPersistence,

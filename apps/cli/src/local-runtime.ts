@@ -88,6 +88,8 @@ import {
   type DashboardDisplayTrustState,
   type DashboardGridItem,
   type DQLManifest,
+  type DqlArtifactReference,
+  type DqlArtifactExecutionReceipt,
   type ManifestBlock,
   canonicalize,
   canonicalizeNotebook,
@@ -1742,7 +1744,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? { preferredExecutionId: routeDecision.meaningResolution.recommendedExecutionId }
           : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
-        executeGeneratedSql: executeGeneratedSqlForAgent,
+        executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(request.question, sql, artifact),
+        executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(artifact, request.question),
         getSchemaContext: getSchemaContextForAgent,
       },
       (turn) => {
@@ -1854,51 +1857,57 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     ];
   }
 
+  function generatedSqlArtifactContract(
+    question: string,
+    sql: string,
+    seed?: DqlArtifactReference,
+  ): DqlArtifactReference {
+    const parameterized = parameterizeSqlForDqlImport(sql);
+    const artifactName = seed?.name
+      ?? seed?.source.match(/\bblock\s+"([^"]+)"/i)?.[1]
+      ?? deriveGeneratedDraftSlug(question);
+    const domain = seed?.source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1] ?? 'uncategorized';
+    const source = candidateToDqlSource({
+      name: artifactName,
+      domain,
+      description: question,
+      owner: '',
+      tags: ['ai-generated', 'review-required'],
+      terms: [],
+      pattern: '',
+      grain: '',
+      entities: [],
+      outputs: [],
+      dimensions: [],
+      allowedFilters: parameterized.allowedFilters,
+      parameterPolicy: parameterized.parameterPolicy,
+      filterBindings: parameterized.filterBindings,
+      parameterDecisions: parameterized.parameterDecisions,
+      sourceSystems: [],
+      replacementFor: [],
+      reviewCadence: 'monthly',
+      sql: parameterized.sql,
+      llmContext: `Review-required DQL generated for: ${question}`,
+    });
+    return {
+      ...(seed ?? { kind: 'sql_block' as const }),
+      kind: 'sql_block',
+      name: artifactName,
+      source,
+    };
+  }
+
   /**
-   * PRD-001 / AGT-002 / AGT-006 / EXP-002 — every answer surface receives the
-   * same executable DQL artifact. Generated SQL is parameterized before the
-   * artifact leaves the runtime; it remains compiled evidence, not the primary
-   * user-facing object. Saving later persists this exact source without another
-   * model call.
+   * AGT-010 / API-003 / UI-011 — attach the exact artifact already used for
+   * execution. Post-execution translation is forbidden because it creates a
+   * second query contract whose Apply result can differ from the displayed Ask
+   * result.
    */
   function attachExecutableDqlArtifactContract(governedAnswer: AgentAnswer, question: string): void {
     const originalSql = governedAnswer.proposedSql?.trim() || governedAnswer.sql?.trim();
-    let artifact = governedAnswer.dqlArtifact;
-    if ((!artifact || artifact.kind === 'sql_block') && originalSql) {
-      const parameterized = parameterizeSqlForDqlImport(originalSql);
-      const artifactName = artifact?.name
-        ?? artifact?.source.match(/\bblock\s+"([^"]+)"/i)?.[1]
-        ?? deriveGeneratedDraftSlug(question);
-      const domain = artifact?.source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1] ?? 'uncategorized';
-      const source = candidateToDqlSource({
-        name: artifactName,
-        domain,
-        description: question,
-        owner: '',
-        tags: ['ai-generated', 'review-required'],
-        terms: [],
-        pattern: '',
-        grain: '',
-        entities: [],
-        outputs: [],
-        dimensions: [],
-        allowedFilters: parameterized.allowedFilters,
-        parameterPolicy: parameterized.parameterPolicy,
-        filterBindings: parameterized.filterBindings,
-        parameterDecisions: parameterized.parameterDecisions,
-        sourceSystems: [],
-        replacementFor: [],
-        reviewCadence: 'monthly',
-        sql: parameterized.sql,
-        llmContext: `Review-required DQL generated for: ${question}`,
-      });
-      artifact = {
-        ...(artifact ?? { kind: 'sql_block' as const }),
-        kind: 'sql_block',
-        name: artifactName,
-        source,
-      };
-    }
+    const executedArtifact = normalizeDqlArtifactReference(governedAnswer.result?.dqlArtifact);
+    let artifact = executedArtifact ?? governedAnswer.dqlArtifact;
+    if (!artifact && originalSql) artifact = generatedSqlArtifactContract(question, originalSql);
     if (!artifact?.source) return;
     const invocation = prepareBlockInvocation({
       source: artifact.source,
@@ -1914,8 +1923,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
       persistence: artifact.sourcePath ? 'saved' : 'transient',
       trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
-      ...(originalSql ? { compiledSql: originalSql } : {}),
+      ...(governedAnswer.result?.sql ? { compiledSql: governedAnswer.result.sql } : originalSql ? { compiledSql: originalSql } : {}),
+      ...(governedAnswer.result?.executionReceipt ? { executionReceipt: governedAnswer.result.executionReceipt } : {}),
     };
+    if (governedAnswer.result) delete governedAnswer.result.dqlArtifact;
   }
 
   const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit }) => {
@@ -3312,6 +3323,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       question?: string;
       parameters?: Record<string, unknown>;
       parameterSources?: Record<string, 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default'>;
+      rowLimit?: number;
     },
   ): Promise<AgentResultPayload> => {
     const invocation = prepareBlockInvocation({
@@ -3352,27 +3364,37 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       projectRoot,
       projectConfig,
     );
+    const executionSql = invocationInput?.rowLimit
+      ? buildAgentPreviewSql(prepared.sql, invocationInput.rowLimit)
+      : prepared.sql;
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
     assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
     const rawResult = await executor.executeQuery(
-      prepared.sql,
+      executionSql,
       plan?.sqlParams ?? [],
       runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
       prepared.connection,
     );
     const normalized = normalizeQueryResult(rawResult);
+    const executionReceipt = createDqlArtifactExecutionReceipt(
+      source,
+      executionSql,
+      invocation.values,
+      normalized,
+    );
     return {
       columns: normalized.columns,
       rows: normalized.rows,
       rowCount: normalized.rowCount,
       executionTime: normalized.executionTime,
       chartConfig: plan?.chartConfig ?? (metadata.chartType ? { chart: metadata.chartType } : undefined),
-      sql: prepared.sql,
+      sql: executionSql,
       ...(metadata.name ? { blockName: metadata.name } : {}),
       ...(metadata.path ? { blockPath: metadata.path } : {}),
       parameters: invocation.resolvedParameters,
       auditId: invocation.auditId,
+      executionReceipt,
     };
   };
 
@@ -3390,12 +3412,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       throw new Error(`Block "${block.name}" is not certified and cannot be rerun as a certified answer.`);
     }
     const source = readFileSync(join(projectRoot, block.filePath), 'utf-8');
-    return executeDqlArtifactSourceForAgent(source, {
+    const result = await executeDqlArtifactSourceForAgent(source, {
       name: block.name,
       path: block.filePath,
       domain: block.domain,
       chartType: block.chartType,
     }, invocationInput);
+    return {
+      ...result,
+      dqlArtifact: {
+        kind: 'certified_block',
+        name: block.name,
+        source,
+        sourcePath: block.filePath,
+        persistence: 'saved',
+        trustState: 'certified',
+        compiledSql: result.sql,
+        executionReceipt: result.executionReceipt,
+        ...(invocationInput?.rowLimit ? { limit: invocationInput.rowLimit } : {}),
+        ...(invocationInput?.parameters && Object.keys(invocationInput.parameters).length > 0
+          ? { parameterValues: invocationInput.parameters }
+          : {}),
+      },
+    };
   };
 
   const executeCertifiedBlockForAgent = async (
@@ -3411,30 +3450,63 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     );
   };
 
-  const executeGeneratedSqlForAgent = async (sql: string): Promise<AgentResultPayload> => {
-    const activeConnection = requireActiveConnection();
-    const boundedSql = buildAgentPreviewSql(sql);
-    const semantic = prepareSemanticSql(boundedSql, semanticLayer);
-    if (semantic.unresolvedRefs.length > 0) {
-      throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
-    }
-    const prepared = prepareLocalExecution(semantic.sql, activeConnection, projectRoot, projectConfig);
-    const app = loadRuntimeApp(projectRoot, activePersonaAppId());
-    assertAppAccess({ app, domain: app?.domain, level: 'execute' });
-    const rawResult = await executor.executeQuery(
-      prepared.sql,
-      [],
-      runtimeVariables({}),
-      prepared.connection,
+  // Secondary agent surfaces use this compatibility callback. Delegate to the
+  // same artifact-first path as Ask so research/app/notebook execution cannot
+  // silently reintroduce a raw-SQL result followed by a different DQL artifact.
+  const executeGeneratedSqlForAgent = async (
+    sql: string,
+    artifact?: DqlArtifactReference,
+  ): Promise<AgentResultPayload> => executeGeneratedArtifactForAgent(
+    artifact?.name ?? 'AI-generated query',
+    sql,
+    artifact,
+  );
+
+  const executeArtifactReferenceForAgent = async (
+    artifact: DqlArtifactReference,
+    question: string,
+  ): Promise<AgentResultPayload> => {
+    const invocation = prepareBlockInvocation({
+      source: artifact.source,
+      parameters: artifact.parameterValues,
+      question,
+      surface: 'ask_ai',
+    });
+    const result = await executeDqlArtifactSourceForAgent(
+      artifact.source,
+      {
+        name: artifact.name,
+        path: artifact.sourcePath,
+        domain: artifact.source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1],
+      },
+      {
+        question,
+        parameters: invocation.values,
+        rowLimit: artifact.limit ?? 200,
+      },
     );
-    const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
     return {
-      columns: normalized.columns,
-      rows: normalized.rows,
-      rowCount: normalized.rowCount,
-      executionTime: normalized.executionTime,
-      sql: prepared.sql,
+      ...result,
+      dqlArtifact: {
+        ...artifact,
+        ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
+        ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
+        compiledSql: result.sql,
+        executionReceipt: result.executionReceipt,
+      },
     };
+  };
+
+  const executeGeneratedArtifactForAgent = async (
+    question: string,
+    sql: string,
+    seed?: DqlArtifactReference,
+  ): Promise<AgentResultPayload> => {
+    const artifact = generatedSqlArtifactContract(question, sql, seed);
+    return executeArtifactReferenceForAgent(
+      { ...artifact, limit: seed?.limit ?? artifact.limit ?? 200 },
+      question,
+    );
   };
 
   /**
@@ -3475,7 +3547,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (!analysis.parsed) {
       return { proofs: [], sql: boundedSql, repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
     }
-    const probeableJoins = probeableExploratoryJoins(analysis.joins, analysis.ctes);
+    const probeableJoins = probeableExploratoryJoins(
+      analysis.joins,
+      analysis.ctes,
+      analysis.derivedRelations,
+    );
 
     // A normal customer → order → order-item → product question needs three
     // joins. Keep the lane bounded, but do not reject this common dbt-star path
@@ -3554,7 +3630,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return { proofs, sql: boundedSql, repairs, error: contradiction };
         }
       }
-      const result = await executeGeneratedSqlForAgent(boundedSql);
+      const result = await executeGeneratedArtifactForAgent(question, boundedSql);
       return { result, proofs, sql: boundedSql, repairs };
     } catch (error) {
       return { proofs, sql: boundedSql, repairs, error: error instanceof Error ? error.message : String(error) };
@@ -11797,11 +11873,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           blockName = block.name;
           domain = block.domain;
           chartType = block.chartType;
-        } else if (sourcePath) {
+        } else if (!source.trim() && sourcePath) {
           const filePath = safeJoin(projectRoot, sourcePath);
           if (filePath && existsSync(filePath) && !statSync(filePath).isDirectory()) source = readFileSync(filePath, 'utf-8');
         }
         if (!source.trim()) throw new Error('Provide an executable DQL artifact or block name.');
+        const expectedReceipt = requestedArtifact?.executionReceipt;
+        if (expectedReceipt && expectedReceipt.sourceFingerprint !== executionFingerprint(source)) {
+          throw new Error('DQL artifact source changed after the answer was produced. Refresh the answer before applying it.');
+        }
         const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
           ? body.parameters as Record<string, unknown>
           : requestedArtifact?.parameterValues ?? {};
@@ -11813,7 +11893,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }, {
           parameters,
           question: typeof body.question === 'string' ? body.question : undefined,
+          rowLimit: requestedArtifact?.limit,
         });
+        const actualReceipt = result.executionReceipt;
+        if (expectedReceipt && actualReceipt) {
+          if (
+            expectedReceipt.parameterFingerprint === actualReceipt.parameterFingerprint
+            && expectedReceipt.compiledSqlFingerprint !== actualReceipt.compiledSqlFingerprint
+          ) {
+            throw new Error('DQL artifact execution changed while its source and inputs were unchanged. Refresh the answer before applying it.');
+          }
+        }
         const contract = prepareBlockInvocation({
           source,
           parameters,
@@ -11835,6 +11925,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             persistence: sourcePath ? 'saved' : 'transient',
             trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
             compiledSql: result.sql,
+            executionReceipt: result.executionReceipt,
+            ...(requestedArtifact?.limit ? { limit: requestedArtifact.limit } : {}),
           },
         }));
       } catch (error) {
@@ -14127,6 +14219,42 @@ function stableShortHash(value: string): string {
   return createHash('sha1').update(value).digest('hex').slice(0, 10);
 }
 
+function createDqlArtifactExecutionReceipt(
+  source: string,
+  compiledSql: string,
+  parameters: Record<string, unknown>,
+  result: { columns: unknown[]; rows: unknown[]; rowCount: number },
+): DqlArtifactExecutionReceipt {
+  return {
+    sourceFingerprint: executionFingerprint(source),
+    compiledSqlFingerprint: executionFingerprint(compiledSql),
+    parameterFingerprint: executionFingerprint(stableExecutionValue(parameters)),
+    resultFingerprint: executionFingerprint(stableExecutionValue({
+      columns: result.columns,
+      rows: result.rows,
+      rowCount: result.rowCount,
+    })),
+  };
+}
+
+function executionFingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function stableExecutionValue(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (!item || typeof item !== 'object') {
+      if (typeof item === 'bigint') return item.toString();
+      return item;
+    }
+    if (seen.has(item)) return '[Circular]';
+    seen.add(item);
+    if (Array.isArray(item)) return item;
+    return Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)));
+  });
+}
+
 function renderCompostingPrBody(candidates: SemanticCompostingMetricCandidate[]): string {
   const lines = [
     '# Semantic Composting Changeset',
@@ -14955,13 +15083,16 @@ const AGENT_PREVIEW_FORBIDDEN_SQL = [
   'vacuum',
 ];
 
-export function buildAgentPreviewSql(sql: string): string {
+export function buildAgentPreviewSql(sql: string, rowLimit = 200): string {
   const trimmed = sql.trim();
   if (!trimmed) throw new Error('Generated SQL preview is empty.');
+  const boundedRowLimit = Number.isFinite(rowLimit)
+    ? Math.max(1, Math.min(10_000, Math.floor(rowLimit)))
+    : 200;
   const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
   const readOnlyError = readOnlySqlValidationError(withoutTrailingSemicolon, 'Generated SQL preview');
   if (readOnlyError) throw new Error(readOnlyError);
-  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT 200`;
+  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT ${boundedRowLimit}`;
 }
 
 export interface ExploratorySqlPreflightResult {
@@ -15315,22 +15446,24 @@ SELECT
 }
 
 /**
- * CTE names are query-internal derived relations, not warehouse tables. A join
- * whose endpoint is a CTE (e.g. `WITH joy_items AS (…) … JOIN joy_items`) must
- * be excluded from declared-path enforcement and from join probes — probing
- * `FROM "joy_items"` throws a DuckDB catalog error for a table that was never
- * supposed to exist. The physical joins INSIDE the CTE are still present in
- * the parsed join list and get validated/probed on their own.
+ * CTE names and nested SELECT aliases are query-internal derived relations, not
+ * warehouse tables. A join whose endpoint is `joy_items` or generated
+ * `subq_2` must be excluded from declared-path enforcement and join probes —
+ * probing it as `FROM "subq_2"` asks Snowflake for an object that only exists
+ * inside the statement. Physical joins inside the derived relation remain in
+ * the parsed join list and are validated/probed on their own.
  */
 export function probeableExploratoryJoins<T extends { leftRelation?: string; rightRelation?: string }>(
   joins: T[],
   ctes: string[],
+  derivedRelations: string[] = [],
 ): T[] {
-  const cteNames = new Set(ctes.map((name) => name.split('.').at(-1)?.toLowerCase() ?? name.toLowerCase()));
-  if (cteNames.size === 0) return joins;
+  const internalNames = new Set([...ctes, ...derivedRelations]
+    .map((name) => name.replace(/["`\[\]]/g, '').split('.').at(-1)?.toLowerCase() ?? name.toLowerCase()));
+  if (internalNames.size === 0) return joins;
   return joins.filter((join) => ![join.leftRelation, join.rightRelation].some((relation) => {
     const bare = relation?.replace(/["`\[\]]/g, '').split('.').at(-1)?.toLowerCase();
-    return Boolean(bare && cteNames.has(bare));
+    return Boolean(bare && internalNames.has(bare));
   }));
 }
 

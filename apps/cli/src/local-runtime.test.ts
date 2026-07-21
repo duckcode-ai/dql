@@ -388,13 +388,21 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
   }
   query = """SELECT \${category} AS selected_category, \${top_n} AS selected_limit"""
 }`);
+    writeFileSync(join(blockDir, 'conflicting_draft.dql'), `block "Conflicting Draft" {
+  domain = "commerce"
+  type = "custom"
+  status = "draft"
+  query = """SELECT 'wrong_source' AS selected_category, 999 AS selected_limit"""
+}`);
 
-    const executeQuery = vi.fn(async (_sql, _params, variables: Record<string, unknown>): Promise<QueryResult> => ({
+    const executeQuery = vi.fn(async (sql, _params, variables: Record<string, unknown>): Promise<QueryResult> => ({
       columns: [
         { name: 'selected_category', type: 'string', driverType: 'VARCHAR' },
         { name: 'selected_limit', type: 'number', driverType: 'INTEGER' },
       ],
-      rows: [{ selected_category: variables.category, selected_limit: variables.top_n }],
+      rows: [sql.includes('wrong_source')
+        ? { selected_category: 'wrong_source', selected_limit: 999 }
+        : { selected_category: variables.category, selected_limit: variables.top_n }],
       rowCount: 1,
       executionTimeMs: 1,
     }));
@@ -453,7 +461,14 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
       const generated = await generatedResponse.json() as {
         error?: string;
         result: { rows: Array<Record<string, unknown>> };
-        artifact: { trustState: string; persistence: string; parameters: Array<{ name: string; type: string }>; parameterValues: Record<string, unknown> };
+        artifact: {
+          source: string;
+          trustState: string;
+          persistence: string;
+          parameters: Array<{ name: string; type: string }>;
+          parameterValues: Record<string, unknown>;
+          executionReceipt: Record<string, string>;
+        };
       };
       expect({ status: generatedResponse.status, error: generated.error }).toEqual({ status: 200, error: undefined });
       expect(generated.result.rows).toEqual([{ selected_category: 'Tea', selected_limit: 7 }]);
@@ -466,6 +481,76 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
           expect.objectContaining({ name: 'top_n', type: 'number' }),
         ]),
       });
+      expect(generated.artifact.executionReceipt).toMatchObject({
+        sourceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        compiledSqlFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        parameterFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        resultFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+
+      const parityResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ artifact: generated.artifact, parameters: { category: 'Tea', top_n: 7 } }),
+      });
+      const parity = await parityResponse.json() as typeof generated;
+      expect({ status: parityResponse.status, error: parity.error }).toEqual({ status: 200, error: undefined });
+      expect(parity.result.rows).toEqual(generated.result.rows);
+      expect(parity.artifact.executionReceipt).toEqual(generated.artifact.executionReceipt);
+
+      const driftResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: {
+            ...generated.artifact,
+            executionReceipt: {
+              ...generated.artifact.executionReceipt,
+              compiledSqlFingerprint: 'f'.repeat(64),
+            },
+          },
+          parameters: { category: 'Tea', top_n: 7 },
+        }),
+      });
+      expect(driftResponse.status).toBe(400);
+      await expect(driftResponse.json()).resolves.toMatchObject({
+        error: expect.stringContaining('changed while its source and inputs were unchanged'),
+      });
+
+      const sourceDriftResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: {
+            ...generated.artifact,
+            source: generated.artifact.source.replace('selected_limit', 'changed_limit'),
+          },
+          parameters: { category: 'Tea', top_n: 7 },
+        }),
+      });
+      expect(sourceDriftResponse.status).toBe(400);
+      await expect(sourceDriftResponse.json()).resolves.toMatchObject({
+        error: expect.stringContaining('source changed after the answer was produced'),
+      });
+
+      const exactSourceResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: {
+            kind: 'sql_block',
+            name: 'Generated Runtime Parameter',
+            source: generatedSource,
+            sourcePath: 'domains/commerce/blocks/conflicting_draft.dql',
+            persistence: 'saved',
+            trustState: 'review_required',
+          },
+          parameters: { category: 'Tea', top_n: 7 },
+        }),
+      });
+      const exactSource = await exactSourceResponse.json() as typeof generated;
+      expect({ status: exactSourceResponse.status, error: exactSource.error }).toEqual({ status: 200, error: undefined });
+      expect(exactSource.result.rows).toEqual([{ selected_category: 'Tea', selected_limit: 7 }]);
 
       const questionBoundResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
         method: 'POST',
@@ -488,7 +573,7 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
         expect.objectContaining({ name: 'top_n', value: 4, source: 'question' }),
       ]));
       expect(questionBound.artifact.parameterValues).toEqual({ category: 'Tea', top_n: 4 });
-      expect(executeQuery).toHaveBeenCalledTimes(3);
+      expect(executeQuery).toHaveBeenCalledTimes(6);
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
@@ -4522,5 +4607,10 @@ describe('probeableExploratoryJoins (Slice 1c — CTE endpoints are not warehous
   it('does not drop a physical table that merely shares a suffix token', () => {
     const lookalike = { ...physical, leftRelation: 'jaffle_shop.dev.items' };
     expect(probeableExploratoryJoins([lookalike], ['joy_items'])).toEqual([lookalike]);
+  });
+
+  it('AGT-010/EXP-003 drops a generated nested-subquery alias such as subq_2', () => {
+    const derivedJoin = { ...cteJoin, leftRelation: '"subq_2"' };
+    expect(probeableExploratoryJoins([physical, derivedJoin], [], ['subq_2'])).toEqual([physical]);
   });
 });

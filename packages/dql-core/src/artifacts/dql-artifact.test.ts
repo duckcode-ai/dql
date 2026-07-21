@@ -22,6 +22,12 @@ describe('normalizeDqlArtifactReference', () => {
       persistence: 'transient',
       trustState: 'governed',
       compiledSql: ' SELECT 1 ',
+      executionReceipt: {
+        sourceFingerprint: 'A'.repeat(64),
+        compiledSqlFingerprint: 'b'.repeat(64),
+        parameterFingerprint: 'c'.repeat(64),
+        resultFingerprint: 'd'.repeat(64),
+      },
     })).toEqual({
       kind: 'semantic_block',
       source: 'block "revenue" { type = "semantic" }',
@@ -41,6 +47,12 @@ describe('normalizeDqlArtifactReference', () => {
       persistence: 'transient',
       trustState: 'governed',
       compiledSql: 'SELECT 1',
+      executionReceipt: {
+        sourceFingerprint: 'a'.repeat(64),
+        compiledSqlFingerprint: 'b'.repeat(64),
+        parameterFingerprint: 'c'.repeat(64),
+        resultFingerprint: 'd'.repeat(64),
+      },
     });
   });
 

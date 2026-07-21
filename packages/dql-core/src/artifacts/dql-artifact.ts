@@ -20,6 +20,17 @@ export interface DqlArtifactTimeDimension {
   granularity: string;
 }
 
+/**
+ * Redacted proof that an Ask result was produced by this executable artifact.
+ * Fingerprints deliberately contain no SQL text, parameter values, or rows.
+ */
+export interface DqlArtifactExecutionReceipt {
+  sourceFingerprint: string;
+  compiledSqlFingerprint: string;
+  parameterFingerprint: string;
+  resultFingerprint: string;
+}
+
 export interface DqlArtifactReference {
   kind: DqlArtifactKind;
   source: string;
@@ -41,6 +52,8 @@ export interface DqlArtifactReference {
   trustState?: DqlArtifactTrustState;
   /** Optional compiled evidence. The DQL source remains the primary artifact. */
   compiledSql?: string;
+  /** Exact execution contract used for the displayed result. */
+  executionReceipt?: DqlArtifactExecutionReceipt;
 }
 
 export function normalizeDqlArtifactReference(value: unknown): DqlArtifactReference | undefined {
@@ -65,8 +78,27 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
     persistence: normalizeDqlArtifactPersistence(record.persistence),
     trustState: normalizeDqlArtifactTrustState(record.trustState),
     compiledSql: cleanString(record.compiledSql),
+    executionReceipt: normalizeExecutionReceipt(record.executionReceipt),
     ...(limit === undefined ? {} : { limit }),
   };
+}
+
+function normalizeExecutionReceipt(value: unknown): DqlArtifactExecutionReceipt | undefined {
+  const record = objectRecord(value);
+  if (!record) return undefined;
+  const sourceFingerprint = normalizeFingerprint(record.sourceFingerprint);
+  const compiledSqlFingerprint = normalizeFingerprint(record.compiledSqlFingerprint);
+  const parameterFingerprint = normalizeFingerprint(record.parameterFingerprint);
+  const resultFingerprint = normalizeFingerprint(record.resultFingerprint);
+  return sourceFingerprint && compiledSqlFingerprint && parameterFingerprint && resultFingerprint
+    ? { sourceFingerprint, compiledSqlFingerprint, parameterFingerprint, resultFingerprint }
+    : undefined;
+}
+
+function normalizeFingerprint(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value.trim())
+    ? value.trim().toLowerCase()
+    : undefined;
 }
 
 export function normalizeDqlArtifactKind(value: unknown): DqlArtifactKind | undefined {

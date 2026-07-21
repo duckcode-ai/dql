@@ -21,6 +21,7 @@ import {
   type ResolvedTrustLabel,
   type TrustLabelId,
   type DqlArtifactReference,
+  type DqlArtifactExecutionReceipt,
   type DQLManifest,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
@@ -705,12 +706,18 @@ export interface AgentResultPayload {
     source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default';
   }>;
   auditId?: string;
+  /** Internal canonical artifact used by the execution host for this result. */
+  dqlArtifact?: DqlArtifactReference;
+  /** Redacted proof binding source, compiled SQL, parameters, and rows. */
+  executionReceipt?: DqlArtifactExecutionReceipt;
 }
 
 export interface CertifiedBlockInvocationInput {
   question?: string;
   parameters?: Record<string, unknown>;
   parameterSources?: Record<string, 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default'>;
+  /** Execute with the same global row bound recorded on the reusable artifact. */
+  rowLimit?: number;
 }
 
 export interface AnswerLoopInput {
@@ -784,7 +791,9 @@ export interface AnswerLoopInput {
    * AI-generated and review-required; this only lets local hosts show bounded
    * data evidence before an analyst promotes the query into a certified block.
    */
-  executeGeneratedSql?: (sql: string) => Promise<AgentResultPayload>;
+  executeGeneratedSql?: (sql: string, artifact?: DqlArtifactReference) => Promise<AgentResultPayload>;
+  /** Execute an already-finalized governed artifact without translating it back through generated SQL. */
+  executeDqlArtifact?: (artifact: DqlArtifactReference) => Promise<AgentResultPayload>;
   captureGeneratedDraft?: (proposal: {
     question: string;
     sql: string;
@@ -1347,6 +1356,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         result = await input.executeCertifiedBlock(artifactHit.node, {
           question,
           ...certifiedInvocationInputs(artifactHit.node, questionPlan),
+          rowLimit: questionPlan.requestedShape.topN?.scope === 'per_group'
+            ? undefined
+            : questionPlan.requestedShape.topN?.n,
         });
         result = trimResultToRequestedTopN(result, questionPlan);
       } catch (err) {
@@ -1442,7 +1454,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       sql: result?.sql,
       suggestedViz: result?.chartConfig ? chartNameFromConfig(result.chartConfig) : undefined,
     });
-    const dqlArtifact = buildCertifiedBlockDqlArtifact(artifactHit.node, result);
+    const dqlArtifact = buildCertifiedBlockDqlArtifact(
+      artifactHit.node,
+      result,
+      questionPlan.requestedShape.topN?.scope === 'per_group'
+        ? undefined
+        : questionPlan.requestedShape.topN?.n,
+    );
     const recoverableCertifiedFailure = artifactHit.node.kind === 'block'
       && executionError !== undefined
       && isRetryableCertifiedExecutionError(executionError);
@@ -2626,9 +2644,39 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   if (deepCandidateExecutionError) {
     executionError = deepCandidateExecutionError;
   }
+  const executeCurrentSql = (): Promise<AgentResultPayload> => {
+    const requestedLimit = questionPlan.requestedShape.topN?.scope === 'per_group'
+      ? 200
+      : questionPlan.requestedShape.topN?.n ?? 200;
+    const semanticArtifact = semanticBridgeAnswer?.dqlArtifact;
+    if (
+      semanticArtifact
+      && input.executeDqlArtifact
+      && semanticBridgeAnswer?.sql.trim() === parsed.sql?.trim()
+    ) {
+      return input.executeDqlArtifact({ ...semanticArtifact, limit: requestedLimit });
+    }
+    if (!input.executeGeneratedSql) throw new Error('No generated SQL executor is configured.');
+    const artifact = buildGeneratedSqlDqlArtifact({
+      question,
+      sql: parsed.sql,
+      intent,
+      domain,
+      followUp: input.followUp,
+      contextPack: input.contextPack,
+      sourceBlock: followUpSourceBlock ?? undefined,
+      sourceDqlArtifact: input.followUp?.priorDqlArtifact,
+      proposedEntity: parsed.proposedEntity,
+      requestedFilters: mergeProposalStringLists(input.followUp?.filters, parsed.requestedFilters),
+      requestedDimensions: mergeProposalStringLists(input.followUp?.dimensions, parsed.requestedDimensions),
+      validationWarnings: [...contextValidation.warnings, ...deepCandidateNotes],
+      outputs: parsed.outputs,
+    });
+    return input.executeGeneratedSql(parsed.sql!, artifact ? { ...artifact, limit: requestedLimit } : undefined);
+  };
   if (input.executeGeneratedSql && !result) {
     try {
-      if (!executionError) result = await input.executeGeneratedSql(parsed.sql);
+      if (!executionError) result = await executeCurrentSql();
     } catch (err) {
       executionError = err instanceof Error ? err.message : String(err);
     }
@@ -2656,7 +2704,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               ],
             };
             try {
-              result = await input.executeGeneratedSql(parsed.sql);
+              result = await executeCurrentSql();
               executionError = undefined;
             } catch (retryErr) {
               executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -2702,7 +2750,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
                 ],
               };
               try {
-                result = await input.executeGeneratedSql(parsed.sql);
+                result = await executeCurrentSql();
                 executionError = undefined;
               } catch (retryErr) {
                 executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -2777,7 +2825,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const generatedOutputs = parsed.outputs?.length ? parsed.outputs : resultColumnNames(result);
     const generatedRequestedFilters = mergeProposalStringLists(input.followUp?.filters, parsed.requestedFilters);
     const generatedRequestedDimensions = mergeProposalStringLists(input.followUp?.dimensions, parsed.requestedDimensions);
-    const dqlArtifact = semanticBridgeAnswer?.dqlArtifact ?? buildGeneratedSqlDqlArtifact({
+    const baseDqlArtifact = result?.dqlArtifact ?? semanticBridgeAnswer?.dqlArtifact ?? buildGeneratedSqlDqlArtifact({
       question,
       sql: parsed.sql,
       intent,
@@ -2792,6 +2840,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       validationWarnings,
       outputs: generatedOutputs,
     });
+    const requestedTopN = questionPlan.requestedShape.topN?.scope === 'per_group'
+      ? undefined
+      : questionPlan.requestedShape.topN?.n;
+    const dqlArtifact = baseDqlArtifact
+      ? {
+          ...baseDqlArtifact,
+          ...(requestedTopN ? { limit: requestedTopN } : {}),
+          ...(result?.executionReceipt ? { executionReceipt: result.executionReceipt } : {}),
+        }
+      : undefined;
     let draftBlock: GeneratedDraftBlock | undefined;
     let draftCaptureError: string | undefined;
     if (input.captureGeneratedDraft && parsed.sql) {
@@ -4118,6 +4176,7 @@ function applyParsedProposalMetadata(target: ParsedProposal, source: ParsedPropo
 function buildCertifiedBlockDqlArtifact(
   block: KGNode,
   result?: AgentResultPayload,
+  limit?: number,
 ): NonNullable<AgentAnswer['dqlArtifact']> | undefined {
   if (block.kind !== 'block') return undefined;
   const parameters = block.parameters ?? [];
@@ -4128,7 +4187,19 @@ function buildCertifiedBlockDqlArtifact(
     ...(Object.keys(parameterValues).length > 0 ? { parameterValues } : {}),
     persistence: 'saved' as const,
     trustState: 'certified' as const,
+    ...(limit ? { limit } : {}),
+    ...(result?.executionReceipt ? { executionReceipt: result.executionReceipt } : {}),
   };
+  if (result?.dqlArtifact?.source) {
+    return {
+      ...result.dqlArtifact,
+      kind: 'certified_block',
+      name: block.name,
+      sourcePath: result.dqlArtifact.sourcePath ?? block.sourcePath,
+      compiledSql: result.sql ?? result.dqlArtifact.compiledSql,
+      ...artifactRuntime,
+    };
+  }
   const sql = block.sql?.trim() ?? result?.sql?.trim() ?? block.examples?.find((example) => example.sql?.trim())?.sql?.trim();
   if (!sql) {
     // The block answered but its SQL was not inlined in the index (navigation /
