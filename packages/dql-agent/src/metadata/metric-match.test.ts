@@ -146,3 +146,41 @@ describe('matchSemanticMetric (spec 17, part C)', () => {
     expect(a?.metric.name).toBe(b?.metric.name);
   });
 });
+
+describe('executability-aware selection (Slice 2)', () => {
+  const metricNode = (name: string, description: string) => ({
+    nodeId: `metric:${name}`,
+    kind: 'metric' as const,
+    name,
+    description,
+    status: 'certified',
+  }) as never;
+
+  it('prefers the executable sibling on a lexical tie', async () => {
+    const metrics = [
+      metricNode('total_acm', 'Total ACM consumption measured daily'),
+      metricNode('percent_dod_acm', 'Percent day over day ACM consumption measured daily'),
+    ];
+    const match = await matchSemanticMetric('what is the total ACM consumption', metrics, {
+      canExecute: (name) => name === 'total_acm',
+    });
+    expect(match?.metric.name).toBe('total_acm');
+  });
+
+  it('still surfaces a runtime-only metric on a strong direct name match', async () => {
+    const metrics = [
+      metricNode('total_acm', 'Total ACM consumption measured daily'),
+      metricNode('percent_dod_acm', 'Percent day over day ACM consumption measured daily'),
+    ];
+    const match = await matchSemanticMetric('show percent dod acm', metrics, {
+      canExecute: (name) => name === 'total_acm',
+    });
+    expect(match?.metric.name).toBe('percent_dod_acm');
+  });
+
+  it('changes nothing when no executability signal is supplied', async () => {
+    const metrics = [metricNode('total_acm', 'Total ACM consumption measured daily')];
+    const match = await matchSemanticMetric('total acm consumption', metrics, {});
+    expect(match?.metric.name).toBe('total_acm');
+  });
+});

@@ -23,6 +23,60 @@ export function certifiedFitAllowsTier1(fit: CertifiedBlockFit): boolean {
   return (fit.kind === 'exact' || fit.kind === 'trim_safe') && fit.confidence === 'high';
 }
 
+export type CertifiedTerminationBypass = 'named_block' | 'exact_example' | 'definition_lookup';
+
+export interface CertifiedTerminationVerdict {
+  allow: boolean;
+  fit: CertifiedBlockFit;
+  bypass?: CertifiedTerminationBypass;
+  reason: string;
+}
+
+/**
+ * THE single authority for "may this certified block TERMINATE the answer".
+ *
+ * Four semi-independent layers (catalog route planner, answer-loop Stage-1
+ * pickers, router shortcuts, engine routing) each used to re-derive this from
+ * `certifiedFitAllowsTier1` plus local bypass/inferred-contract rules — and the
+ * seams between them produced certified answers that silently ignored the
+ * user's request (an unfiltered top-10 ranking for a member-scoped follow-up).
+ * Every layer must consume this verdict instead of re-deriving it.
+ *
+ * One rule is absolute: a typed member binding the block cannot apply is NEVER
+ * bypassable. Tier-1 executes blocks verbatim, so naming a block ("run
+ * top_beverage_customers for Joy Lam") does not authorize silently dropping
+ * the "for Joy Lam" part — that demotes to the adaptation/generated lane.
+ */
+export function certifiedTerminationVerdict(input: {
+  fit: CertifiedBlockFit;
+  bypass?: CertifiedTerminationBypass;
+  allowInferredContract?: boolean;
+}): CertifiedTerminationVerdict {
+  const { fit } = input;
+  if (fit.unsupportedFilters.length > 0) {
+    return {
+      allow: false,
+      fit,
+      reason: `the block cannot apply required filter(s): ${fit.unsupportedFilters.join(', ')} — Tier-1 executes verbatim`,
+    };
+  }
+  if (input.bypass) {
+    return { allow: true, fit, bypass: input.bypass, reason: `directly requested (${input.bypass}); grain implicitly accepted` };
+  }
+  if (certifiedFitAllowsTier1(fit)) {
+    return { allow: true, fit, reason: 'exact or trim-safe fit at high confidence' };
+  }
+  if (input.allowInferredContract
+    && fit.kind === 'exact'
+    && fit.confidence === 'medium'
+    && fit.missingDimensions.length === 0
+    && fit.missingOutputs.length === 0
+    && !fit.grainMismatch) {
+    return { allow: true, fit, reason: 'inferred-contract exact fit with no shape gaps' };
+  }
+  return { allow: false, fit, reason: fit.reasons[0] ?? 'fit below the Tier-1 threshold' };
+}
+
 export function evaluateCertifiedBlockFit(input: {
   question: string;
   plan: AnalysisQuestionPlan;

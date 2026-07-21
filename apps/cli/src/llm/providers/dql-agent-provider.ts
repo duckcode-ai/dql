@@ -31,6 +31,7 @@ import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
 import { rethrowIfCancelled } from '../cancellation.js';
+import { getSemanticRuntimeStatus } from '../../semantic-runtime.js';
 import { blockProposalDqlMetadata } from '../proposal-metadata.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
 import { ClaudeCodeCliProvider, CodexCliProvider } from '../../providers/subscription-cli.js';
@@ -349,6 +350,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             limit: 6,
           });
           const semanticLayer = loadAgentSemanticLayer(req.projectRoot);
+          const semanticRuntimeActive = semanticLayer
+            ? await getSemanticRuntimeStatus(req.projectRoot).then((status) => status.active).catch(() => 'native' as const)
+            : 'native' as const;
           const questionPlan = buildAnalysisQuestionPlan(question, followUp);
           const contextBudget = contextRetrievalBudgetForQuestion({
             questionPlan,
@@ -461,6 +465,17 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             memoryContext,
             schemaContext,
             semanticLayer,
+            // Runtime-aware executability for metric SELECTION: with a full
+            // semantic runtime active (dbt Cloud / MetricFlow CLI) every
+            // governed metric is executable; native-only hosts demote
+            // runtime-only metrics so they cannot outrank an executable
+            // sibling on a lexical tie.
+            ...(semanticLayer
+              ? {
+                  canExecuteSemanticMetric: (metricName: string) =>
+                    semanticRuntimeActive !== 'native' || semanticLayer.canComposeMetric(metricName),
+                }
+              : {}),
             contextPack,
             signal,
             reasoningEffort: req.reasoningEffort,

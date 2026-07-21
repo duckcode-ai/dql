@@ -66,6 +66,7 @@ import {
 } from './grain-gate.js';
 import {
   certifiedFitAllowsTier1,
+  certifiedTerminationVerdict,
   evaluateCertifiedBlockFit,
   type CertifiedBlockFit,
 } from './block-fit.js';
@@ -4299,8 +4300,20 @@ async function planContextPackRoute(input: {
     input.allowedSqlContext.sourceBlockSql.length > 0 ||
     input.objects.some((object) => object.objectType.startsWith('semantic_'));
   const grainGateDemotes = Boolean(grainGate && !grainGate.allow && canGenerateFromContext);
-  const blockFitDemotes = Boolean(blockFit && !certifiedFitAllowsTier1(blockFit) && !directCertifiedBypass && canGenerateFromContext);
-  const certifiedFitPassed = !blockFit || certifiedFitAllowsTier1(blockFit) || directCertifiedBypass;
+  // ONE authority decides certified termination (see certifiedTerminationVerdict):
+  // the direct-request bypass rides inside the verdict, and a typed member
+  // binding the block cannot apply is never bypassable — even a directly named
+  // block must not answer a member-scoped question with unfiltered rows.
+  const terminationVerdict = blockFit
+    ? certifiedTerminationVerdict({
+        fit: blockFit,
+        bypass: directCertifiedBypass
+          ? (exactExampleMatch ? 'exact_example' : intent === 'definition_lookup' ? 'definition_lookup' : 'named_block')
+          : undefined,
+      })
+    : undefined;
+  const blockFitDemotes = Boolean(terminationVerdict && !terminationVerdict.allow && canGenerateFromContext);
+  const certifiedFitPassed = !terminationVerdict || terminationVerdict.allow;
 
   if (!grainGateDemotes && !blockFitDemotes && certifiedFitPassed && exact && (
     certifiedApplicability?.kind === 'exact_answer'

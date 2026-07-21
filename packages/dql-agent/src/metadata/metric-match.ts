@@ -207,6 +207,15 @@ export interface MatchSemanticMetricOptions {
    * so ad-hoc questions still fall through to generated SQL. Default 0.3.
    */
   threshold?: number;
+  /**
+   * Executability signal (composable natively OR a full semantic runtime is
+   * active). Non-executable metrics are DEMOTED (x0.6) rather than excluded:
+   * an acronym-sibling that DQL can actually run should win a lexical tie, but
+   * a strong direct match on a runtime-only metric still surfaces so the
+   * honest "requires a semantic runtime" path can explain itself instead of a
+   * lookalike silently answering with the wrong number.
+   */
+  canExecute?: (metricName: string) => boolean;
   /** Vector-similarity weight; defaults to a small conservative blend. */
   alpha?: number;
   provider?: EmbeddingProvider;
@@ -333,7 +342,20 @@ export async function matchSemanticMetric(
   // grounded candidates to the expensive hybrid ranker. This removes the old
   // 400-row correctness cap without replacing it with a 7,000-vector latency
   // cliff.
-  const rankedCandidates = items
+  // A metric the user FULLY NAMES is never demoted: "show percent dod acm"
+  // must resolve to percent_dod_acm (and then the honest requires-runtime path
+  // explains itself) rather than let a partial executable lookalike win.
+  const questionTokens = new Set(tokenize(question.replace(/[_.]+/g, ' ')));
+  const fullyNamed = (name: string): boolean => {
+    const nameTokens = tokenize(name.replace(/[_.]+/g, ' '));
+    return nameTokens.length > 0 && nameTokens.every((token) => questionTokens.has(token));
+  };
+  const executabilityAdjusted = options.canExecute
+    ? items.map((entry) => options.canExecute!(entry.metric.name) || fullyNamed(entry.metric.name)
+        ? entry
+        : { ...entry, ftsScore: entry.ftsScore * 0.6 })
+    : items;
+  const rankedCandidates = executabilityAdjusted
     .filter((entry) => entry.grounded || entry.ftsScore > 0)
     .sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name))
     .slice(0, 96);

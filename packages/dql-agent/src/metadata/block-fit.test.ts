@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildAnalysisQuestionPlan } from './analysis-planner.js';
-import { evaluateCertifiedBlockFit } from './block-fit.js';
+import { certifiedTerminationVerdict, evaluateCertifiedBlockFit } from './block-fit.js';
 import type { MetadataObject } from './catalog.js';
 
 function certifiedBlock(name: string, payload: Record<string, unknown>): MetadataObject {
@@ -325,5 +325,55 @@ describe('member bindings vs Tier-1 termination (Slice 1c)', () => {
     const fit = evaluateCertifiedBlockFit({ question, plan: buildAnalysisQuestionPlan(question, joyFollowUp), block: rankingBlock(['customer_name']) as never });
     expect(fit.kind).toBe('exact');
     expect(fit.unsupportedFilters).toEqual([]);
+  });
+});
+
+describe('certifiedTerminationVerdict — the single authority (Slice 2)', () => {
+  const fit = (overrides: Partial<import('./block-fit.js').CertifiedBlockFit>): import('./block-fit.js').CertifiedBlockFit => ({
+    kind: 'exact',
+    confidence: 'high',
+    reasons: [],
+    missingOutputs: [],
+    missingDimensions: [],
+    unsupportedFilters: [],
+    topNAction: 'none',
+    inferredContract: false,
+    ...overrides,
+  });
+
+  it('allows exact/trim-safe fits at high confidence', () => {
+    expect(certifiedTerminationVerdict({ fit: fit({}) }).allow).toBe(true);
+    expect(certifiedTerminationVerdict({ fit: fit({ kind: 'trim_safe' }) }).allow).toBe(true);
+  });
+
+  it('denies context-only fits without a bypass', () => {
+    const verdict = certifiedTerminationVerdict({ fit: fit({ kind: 'context_only', reasons: ['missing requested dimensions: category'] }) });
+    expect(verdict.allow).toBe(false);
+    expect(verdict.reason).toContain('missing requested dimensions');
+  });
+
+  it('lets a direct request bypass a shape mismatch (grain implicitly accepted)', () => {
+    const verdict = certifiedTerminationVerdict({ fit: fit({ kind: 'context_only' }), bypass: 'named_block' });
+    expect(verdict.allow).toBe(true);
+    expect(verdict.bypass).toBe('named_block');
+  });
+
+  it('NEVER bypasses an unapplied member binding — naming the block does not drop the filter', () => {
+    const bound = fit({ kind: 'context_only', unsupportedFilters: ['Joy Lam'] });
+    for (const bypass of ['named_block', 'exact_example', 'definition_lookup'] as const) {
+      const verdict = certifiedTerminationVerdict({ fit: bound, bypass });
+      expect(verdict.allow, bypass).toBe(false);
+      expect(verdict.reason).toContain('Joy Lam');
+    }
+  });
+
+  it('honors the inferred-contract allowance only when the shape has no gaps', () => {
+    const medium = fit({ confidence: 'medium', inferredContract: true });
+    expect(certifiedTerminationVerdict({ fit: medium }).allow).toBe(false);
+    expect(certifiedTerminationVerdict({ fit: medium, allowInferredContract: true }).allow).toBe(true);
+    expect(certifiedTerminationVerdict({
+      fit: fit({ confidence: 'medium', missingDimensions: ['category'] }),
+      allowInferredContract: true,
+    }).allow).toBe(false);
   });
 });

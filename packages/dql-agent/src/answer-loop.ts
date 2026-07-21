@@ -37,7 +37,8 @@ import { domainContextSearchDomains, type DomainContextEnvelope } from './domain
 import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
 import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metadata/drafts.js';
 import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan } from './metadata/analysis-planner.js';
-import { certifiedFitAllowsTier1, evaluateCertifiedBlockFit } from './metadata/block-fit.js';
+import { certifiedFitAllowsTier1,
+  certifiedTerminationVerdict, evaluateCertifiedBlockFit } from './metadata/block-fit.js';
 import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricDefinition, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
 import { decideAgentAction, type IntentDecision } from './intent-controller.js';
 import type {
@@ -817,6 +818,14 @@ export interface AnswerLoopInput {
    * back to generated SQL.
    */
   semanticLayer?: SemanticLayer;
+  /**
+   * Executability signal for metric SELECTION (composable natively OR the
+   * host's semantic runtime — dbt Cloud / MetricFlow CLI — can run it). When
+   * absent, defaults to the semantic layer's native composability so
+   * runtime-only metrics are demoted rather than silently outranking an
+   * executable sibling. Hosts with a full runtime should pass () => true-ish.
+   */
+  canExecuteSemanticMetric?: (metricName: string) => boolean;
   semanticDriver?: string;
   semanticTableMapping?: Record<string, string>;
   /** Host-owned compiler shared by Notebook, Block Studio, and Ask. */
@@ -1262,10 +1271,14 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     semanticMetricNodes,
     kg,
   );
+  const semanticLayerForExec = input.semanticLayer;
+  const canExecuteSemanticMetricForMatch = input.canExecuteSemanticMetric
+    ?? (semanticLayerForExec ? (name: string) => semanticLayerForExec.canComposeMetric(name) : undefined);
   let semanticMetricMatch = preferredSemanticMetric
     ? { metric: preferredSemanticMetric, score: 1, basis: 'name' as const }
     : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
         measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
+        ...(canExecuteSemanticMetricForMatch ? { canExecute: canExecuteSemanticMetricForMatch } : {}),
       }).catch(() => null);
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
@@ -4830,7 +4843,7 @@ function pickCertifiedArtifact(input: {
     if (executableHit && hasExactExecutableArtifactSignal(input.question, executableHit.node)) {
       return executableHit;
     }
-    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg);
+    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg, input.excludedArtifactIds, input.question, input.questionPlan);
     if (businessHit) return businessHit;
   }
 
@@ -4847,7 +4860,7 @@ function pickCertifiedArtifact(input: {
 
   const hasExecutableCandidate = input.executableArtifactHits.some((hit) => hit.score >= CERTIFIED_HIT_THRESHOLD);
   if (!hasExecutableCandidate) {
-    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg, input.excludedArtifactIds);
+    const businessHit = pickFirstCertifiedHit(input.businessHits, input.kg, input.excludedArtifactIds, input.question, input.questionPlan);
     if (businessHit) return businessHit;
   }
 
@@ -4865,8 +4878,14 @@ function pickFirstCertifiedHit(
     if (hit.score < CERTIFIED_HIT_THRESHOLD) break;
     if (excludedNodeIds?.has(hit.node.nodeId)) continue;
     if (!isCertifiedHit(hit, kg)) continue;
-    if (question && questionPlan && hit.node.kind === 'block' && !hasCertifiedNodeFit(question, questionPlan, hit.node)) continue;
-    if (question && !questionPlan && hit.node.kind === 'block' && !hasCompatibleCertifiedBlockMatch(question, hit.node)) continue;
+    // An executable BLOCK may only terminate through the fit verdict. The old
+    // plan-absent fallback (token overlap + ranking direction) let a block
+    // answer with zero shape/member-binding awareness; without a plan a block
+    // is context, never a certified termination.
+    if (hit.node.kind === 'block') {
+      if (!question || !questionPlan) continue;
+      if (!hasCertifiedNodeFit(question, questionPlan, hit.node)) continue;
+    }
     return hit;
   }
   return null;
@@ -4995,10 +5014,6 @@ function hasMeaningfulCertifiedBlockSignal(question: string, node: KGNode): bool
 
 type RankingDirection = 'top' | 'bottom';
 
-function hasCompatibleCertifiedBlockMatch(question: string, node: KGNode): boolean {
-  return hasMeaningfulCertifiedBlockSignal(question, node)
-    && hasCompatibleRankingDirection(question, node);
-}
 
 function hasCertifiedNodeFit(
   question: string,
@@ -5021,14 +5036,10 @@ function hasCertifiedNodeFit(
     exactExampleMatch: exactExampleMatch || exactObjectRequest,
     definitionLookup,
   });
-  if (certifiedFitAllowsTier1(fit)) return true;
-  return Boolean(options.allowInferredContract
-    && fit.kind === 'exact'
-    && fit.confidence === 'medium'
-    && fit.missingDimensions.length === 0
-    && fit.missingOutputs.length === 0
-    && fit.unsupportedFilters.length === 0
-    && !fit.grainMismatch);
+  // Delegate the termination decision to THE single authority instead of a
+  // loop-local re-derivation (the seams between such copies produced certified
+  // answers that ignored member-scoped follow-ups).
+  return certifiedTerminationVerdict({ fit, allowInferredContract: options.allowInferredContract }).allow;
 }
 
 function objectNameInQuestion(question: string, node: Pick<KGNode, 'name'>): boolean {
