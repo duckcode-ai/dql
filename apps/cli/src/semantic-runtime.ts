@@ -68,8 +68,21 @@ export interface SemanticRuntimeCompileContext {
 
 export interface SemanticRuntimeCompileResult extends ComposeQueryResult {
   engine: SemanticRuntimeAdapterId;
-  /** The governed request actually compiled after deterministic normalization. */
+  /**
+   * The governed request as the USER expressed it (bare dimension names), after
+   * deterministic normalization. Echoed to callers and back into `.dql` sources
+   * — it must never carry MetricFlow-qualified names, or saved blocks would
+   * silently rewrite to `entity__dim` spellings.
+   */
   effectiveRequest: SemanticRuntimeQueryRequest;
+  /**
+   * The request actually SENT to a full runtime (MetricFlow / dbt Cloud), with
+   * dimensions/filters/order-by/time qualified to entity-qualified names. Absent
+   * for native compilation (which speaks bare names). Diagnostic only.
+   */
+  runtimeRequest?: SemanticRuntimeQueryRequest;
+  /** Non-fatal advisories (e.g. a time grain clamped up to the column's base). */
+  warnings?: string[];
 }
 
 export class SemanticRuntimeRequiredError extends Error {
@@ -337,6 +350,57 @@ export async function testSemanticRuntimeDraft(
   return testDbtCloudSemanticConnection(draft);
 }
 
+/**
+ * Rewrite a semantic request's dimension references (dimensions, filter
+ * dimensions, order-by names, time dimension) from bare names to the
+ * MetricFlow entity-qualified names the runtime expects, using the
+ * compatibility service as the source of truth. Names it can't resolve pass
+ * through unchanged (the 1.8.13 group-by suggestion-retry is the safety net).
+ * `metric_time` is never rewritten. Also clamps a requested time grain up to
+ * the column's base grain, collecting a warning. Pure — returns a new request.
+ */
+export function qualifyForMetricFlow(
+  request: SemanticRuntimeQueryRequest,
+  semanticLayer: SemanticLayer,
+): { request: SemanticRuntimeQueryRequest; warnings: string[] } {
+  const warnings: string[] = [];
+  const { compatible } = semanticLayer.explainCompatibleDimensions(request.metrics);
+  const qualifiedByName = new Map<string, string>();
+  for (const dim of compatible) {
+    if (dim.qualifiedName) qualifiedByName.set(dim.name.toLowerCase(), dim.qualifiedName);
+  }
+  const qualify = (name: string | undefined): string | undefined => {
+    if (!name) return name;
+    if (name === 'metric_time' || name.includes('__')) return name; // already qualified / reserved
+    return qualifiedByName.get(name.toLowerCase()) ?? name;
+  };
+
+  const timeDimension = request.timeDimension
+    ? (() => {
+        const name = qualify(request.timeDimension!.name);
+        let granularity = request.timeDimension!.granularity;
+        const td = semanticLayer.getTimeDimension(request.timeDimension!.name);
+        if (td?.granularities?.length && !td.granularities.includes(granularity as typeof td.granularities[number])) {
+          const clamped = td.granularities[0];
+          warnings.push(`Time grain "${granularity}" is finer than ${request.timeDimension!.name}'s base grain; using "${clamped}".`);
+          granularity = clamped;
+        }
+        return { name: name!, granularity };
+      })()
+    : undefined;
+
+  return {
+    warnings,
+    request: {
+      ...request,
+      dimensions: request.dimensions.map((d) => qualify(d) ?? d),
+      ...(request.filters ? { filters: request.filters.map((f) => f.dimension ? { ...f, dimension: qualify(f.dimension) } : f) } : {}),
+      ...(request.orderBy ? { orderBy: request.orderBy.map((o) => ({ ...o, name: qualify(o.name) ?? o.name })) } : {}),
+      ...(timeDimension ? { timeDimension } : {}),
+    },
+  };
+}
+
 export async function compileSemanticRuntimeQuery(
   request: SemanticRuntimeQueryRequest,
   context: SemanticRuntimeCompileContext,
@@ -357,6 +421,10 @@ export async function compileSemanticRuntimeQuery(
             ? ['metricflow-cli', 'dbt-cloud', 'native']
             : ['native'];
 
+  // Qualify dimension references to MetricFlow entity-qualified names ONCE, at
+  // this boundary, for the full-runtime engines. Native keeps the bare request.
+  const { request: runtimeRequest, warnings: qualifyWarnings } = qualifyForMetricFlow(effectiveRequest, context.semanticLayer);
+
   let lastRuntimeError: Error | undefined;
   for (const adapter of candidates) {
     if (adapter === 'dbt-cloud') {
@@ -365,9 +433,9 @@ export async function compileSemanticRuntimeQuery(
       try {
         const result = await compileDbtCloudSemanticQuery(
           getEffectiveDbtCloudSemanticSettings(context.projectRoot),
-          effectiveRequest,
+          runtimeRequest,
         );
-        return { sql: result.sql, joins: [], tables: [], engine: 'dbt-cloud', effectiveRequest };
+        return { sql: result.sql, joins: [], tables: [], engine: 'dbt-cloud', effectiveRequest, runtimeRequest, warnings: qualifyWarnings };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
         if (explicit === 'dbt-cloud') throw lastRuntimeError;
@@ -384,15 +452,15 @@ export async function compileSemanticRuntimeQuery(
           projectRoot: context.projectRoot,
           dbtProjectPath,
           profilesDir: context.projectConfig.dbt?.profilesDir,
-          metrics: effectiveRequest.metrics,
-          dimensions: effectiveRequest.dimensions,
-          filters: effectiveRequest.filters,
-          timeDimension: effectiveRequest.timeDimension,
-          orderBy: effectiveRequest.orderBy,
-          limit: effectiveRequest.limit,
-          savedQuery: effectiveRequest.savedQuery,
+          metrics: runtimeRequest.metrics,
+          dimensions: runtimeRequest.dimensions,
+          filters: runtimeRequest.filters,
+          timeDimension: runtimeRequest.timeDimension,
+          orderBy: runtimeRequest.orderBy,
+          limit: runtimeRequest.limit,
+          savedQuery: runtimeRequest.savedQuery,
         });
-        return { sql: compiled.sql, joins: [], tables: [], engine: 'metricflow-cli', effectiveRequest };
+        return { sql: compiled.sql, joins: [], tables: [], engine: 'metricflow-cli', effectiveRequest, runtimeRequest, warnings: qualifyWarnings };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
         if (explicit === 'metricflow-cli' || explicit === 'metricflow') throw lastRuntimeError;

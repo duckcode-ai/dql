@@ -1074,9 +1074,13 @@ export class SemanticLayer {
     const allVariants = directVariants.length > 0
       ? directVariants
       : Array.from(this.dimensionVariants.values()).flat().filter((dimension) =>
-          semanticDimensionReferences(dimension).some((candidate) => candidate === reference),
+          // Accept the model-name qualification, the entity-qualified name
+          // (`<primaryEntity>__<dim>`), and the raw `${cube}__/.${name}` refs so
+          // native compose tolerates whatever spelling reaches it (Phase 3).
+          dimension.qualifiedName === reference
+          || semanticDimensionReferences(dimension).some((candidate) => candidate === reference),
         );
-    if (allVariants.length === 0) return this.dimensions.get(reference);
+    if (allVariants.length === 0) return this.dimensions.get(reference) ?? this.resolveGroupBy(reference);
     if (allVariants.length === 1) return allVariants[0];
 
     const metricTables = new Set(metrics.map((metric) => metric.table).filter(Boolean));

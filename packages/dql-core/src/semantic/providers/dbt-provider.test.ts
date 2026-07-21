@@ -740,4 +740,13 @@ saved_queries:
       expect(incompatible).toContainEqual({ name: 'does_not_exist', reason: 'metric_unresolved' });
     });
   });
+
+  it('native composeQuery accepts qualified names identically to bare (Phase 3)', () => {
+    writeBcmYamlProject(tmpDir);
+    const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+    const bare = layer.composeQuery({ metrics: ['total_bcm'], dimensions: ['customer_name'], driver: 'duckdb' });
+    const qualified = layer.composeQuery({ metrics: ['total_bcm'], dimensions: ['bcm_hdr__customer_name'], driver: 'duckdb' });
+    expect(qualified?.sql).toBeTruthy();
+    expect(qualified?.sql).toBe(bare?.sql);
+  });
 });

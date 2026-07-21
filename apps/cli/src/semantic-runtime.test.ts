@@ -204,3 +204,38 @@ describe('describeRuntimeCompatibility (native cascade fallback)', () => {
     expect(result.incompatible).toContainEqual({ name: 'nope', qualifiedName: undefined, reason: 'metric_unresolved' });
   });
 });
+
+describe('qualifyForMetricFlow (Phase 3 boundary)', () => {
+  function bcmLayer(): SemanticLayer {
+    return new SemanticLayer({
+      metrics: [
+        { name: 'total_bcm', label: 'Total BCM', description: '', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr', objectKind: 'metric' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr', qualifiedName: 'bcm_hdr__customer_name', entityLink: 'bcm_hdr' },
+      ],
+    });
+  }
+
+  it('rewrites bare dimension + order-by names to entity-qualified names', async () => {
+    const { qualifyForMetricFlow } = await import('./semantic-runtime.js');
+    const { request } = qualifyForMetricFlow({
+      metrics: ['total_bcm'],
+      dimensions: ['customer_name'],
+      orderBy: [{ name: 'customer_name', direction: 'asc' }],
+    }, bcmLayer());
+    expect(request.dimensions).toEqual(['bcm_hdr__customer_name']);
+    expect(request.orderBy?.[0]?.name).toBe('bcm_hdr__customer_name');
+  });
+
+  it('passes through unresolvable names and metric_time untouched', async () => {
+    const { qualifyForMetricFlow } = await import('./semantic-runtime.js');
+    const { request } = qualifyForMetricFlow({
+      metrics: ['total_bcm'],
+      dimensions: ['not_a_dim', 'bcm_hdr__customer_name'],
+      timeDimension: { name: 'metric_time', granularity: 'month' },
+    }, bcmLayer());
+    expect(request.dimensions).toEqual(['not_a_dim', 'bcm_hdr__customer_name']);
+    expect(request.timeDimension?.name).toBe('metric_time');
+  });
+});
