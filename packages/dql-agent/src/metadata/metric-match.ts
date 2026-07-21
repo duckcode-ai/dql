@@ -342,19 +342,26 @@ export async function matchSemanticMetric(
   // grounded candidates to the expensive hybrid ranker. This removes the old
   // 400-row correctness cap without replacing it with a 7,000-vector latency
   // cliff.
-  // A metric the user FULLY NAMES is never demoted: "show percent dod acm"
-  // must resolve to percent_dod_acm (and then the honest requires-runtime path
-  // explains itself) rather than let a partial executable lookalike win.
-  const questionTokens = new Set(tokenize(question.replace(/[_.]+/g, ' ')));
-  const fullyNamed = (name: string): boolean => {
-    const nameTokens = tokenize(name.replace(/[_.]+/g, ' '));
-    return nameTokens.length > 0 && nameTokens.every((token) => questionTokens.has(token));
-  };
-  const executabilityAdjusted = options.canExecute
-    ? items.map((entry) => options.canExecute!(entry.metric.name) || fullyNamed(entry.metric.name)
-        ? entry
-        : { ...entry, ftsScore: entry.ftsScore * 0.6 })
-    : items;
+  // Executability is a TIE-BREAKER, never an intent override. When the
+  // best-matched metric is runtime-only and an executable sibling scores
+  // within ~15%, prefer the executable one (an acronym-tie should pick the
+  // metric DQL can actually run). But when the runtime-only metric is the
+  // CLEAR match — "consumption % by customer" wanting a ratio metric — it
+  // must win and flow to the honest requires-runtime path; demoting it would
+  // silently answer with the WRONG metric, which is worse than any refusal.
+  const executabilityAdjusted = (() => {
+    if (!options.canExecute) return items;
+    const canExecute = options.canExecute;
+    const byScore = [...items].sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name));
+    const top = byScore[0];
+    if (!top || canExecute(top.metric.name)) return items;
+    const executableRival = byScore.find((entry) => entry !== top && canExecute(entry.metric.name) && entry.ftsScore >= top.ftsScore * 0.85);
+    if (!executableRival) return items;
+    // Near-tie: nudge the executable rival ahead of the runtime-only leader.
+    return items.map((entry) => entry === executableRival
+      ? { ...entry, ftsScore: Math.max(entry.ftsScore, top.ftsScore * 1.01) }
+      : entry);
+  })();
   const rankedCandidates = executabilityAdjusted
     .filter((entry) => entry.grounded || entry.ftsScore > 0)
     .sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name))

@@ -178,6 +178,19 @@ describe('executability-aware selection (Slice 2)', () => {
     expect(match?.metric.name).toBe('percent_dod_acm');
   });
 
+  it('keeps a CLEARLY better runtime-only match over a weaker executable sibling (honest beats wrong)', async () => {
+    // "consumption % by customer" — the ratio metric is the intent; the
+    // executable total must NOT silently answer instead.
+    const metrics = [
+      metricNode('total_consumption', 'Total consumption'),
+      metricNode('consumption_percent_share', 'Consumption percent share of total by customer, percentage breakdown'),
+    ];
+    const match = await matchSemanticMetric('consumption percent share by customer', metrics, {
+      canExecute: (name) => name === 'total_consumption',
+    });
+    expect(match?.metric.name).toBe('consumption_percent_share');
+  });
+
   it('changes nothing when no executability signal is supplied', async () => {
     const metrics = [metricNode('total_acm', 'Total ACM consumption measured daily')];
     const match = await matchSemanticMetric('total acm consumption', metrics, {});

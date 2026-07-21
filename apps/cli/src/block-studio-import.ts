@@ -768,6 +768,32 @@ export function parameterizeSqlForDqlImport(sql: string): DqlSqlParameterization
     },
   );
 
+  // Pattern filters are how models most often express a member scope
+  // (customer_name ILIKE '%Capital One%'). Parameterize them like equality
+  // literals so the Ask filter chooser can offer and re-apply the value —
+  // without this, LIKE-filtered answers exposed no runtime-editable inputs
+  // and the auto filter pickup appeared "missing". NOT LIKE stays literal.
+  nextSql = nextSql.replace(
+    /\b([A-Za-z_][A-Za-z0-9_.]*)\s+(I?LIKE)\s+('(?:''|[^'])*')/gi,
+    (match, column: string, likeKeyword: string, rawValue: string) => {
+      if (match.includes('${') || /\bnot\s+i?like\b/i.test(match)) return match;
+      const columnName = lastIdentifierPart(column);
+      if (!isRuntimeScopeColumn(columnName)) return match;
+      const literal = parseSqlLiteral(rawValue);
+      const name = addDecision({
+        name: columnName,
+        policy: 'dynamic',
+        value: literal,
+        valueType: 'string',
+        sourceExpression: column,
+        reason: 'Pattern filter is user scope and should be reusable.',
+        confidence: 0.8,
+      });
+      addBinding(columnName, column);
+      return `${column} ${likeKeyword} ${placeholder(name)}`;
+    },
+  );
+
   nextSql = nextSql.replace(
     /\b([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*('(?:''|[^'])*'|[0-9]+(?:\.[0-9]+)?)/gi,
     (match, column: string, rawValue: string) => {

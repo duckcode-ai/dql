@@ -470,3 +470,23 @@ order by total_records;
     expect(source).toContain('chart = "table"');
   });
 });
+
+describe('LIKE/ILIKE filter parameterization (auto filter pickup)', () => {
+  it('parameterizes an ILIKE member filter as a dynamic runtime input', () => {
+    const parameterized = parameterizeSqlForDqlImport(
+      "SELECT customer_name, SUM(amount) AS revenue FROM orders WHERE customer_name ILIKE '%Capital One%' GROUP BY customer_name",
+    );
+    expect(parameterized.sql).toContain('customer_name ILIKE ${customer_name}');
+    const param = parameterized.parameterDecisions.find((decision) => decision.name === 'customer_name');
+    expect(param?.policy).toBe('dynamic');
+    expect(param?.value).toBe('%Capital One%');
+  });
+
+  it('leaves NOT LIKE and non-scope columns untouched', () => {
+    const parameterized = parameterizeSqlForDqlImport(
+      "SELECT * FROM orders WHERE note NOT LIKE '%test%' AND internal_flag LIKE 'x%'",
+    );
+    expect(parameterized.sql).toContain("note NOT LIKE '%test%'");
+    expect(parameterized.sql).toContain("internal_flag LIKE 'x%'");
+  });
+});

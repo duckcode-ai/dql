@@ -520,3 +520,22 @@ function certifiedBlock(input: { description: string; tags: string[]; sql: strin
     },
   };
 }
+
+describe('follow-up measure carry (sticky-metric fix)', () => {
+  it('drops prior measures when the follow-up declares its own measure', () => {
+    const plan = buildAnalysisQuestionPlan('consumption percent share by customer', {
+      kind: 'drilldown',
+      priorMeasures: ['total_consumption_units'],
+    });
+    expect(plan.metricTerms).not.toContain('total_consumption_units');
+    expect(plan.metricTerms.join(' ')).toMatch(/percent|share|consumption/);
+  });
+
+  it('keeps the prior-measure carry for measure-less refinements', () => {
+    const plan = buildAnalysisQuestionPlan('and by region?', {
+      kind: 'drilldown',
+      priorMeasures: ['total_consumption_units'],
+    });
+    expect(plan.metricTerms).toContain('total_consumption_units');
+  });
+});

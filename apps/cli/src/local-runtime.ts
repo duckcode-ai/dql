@@ -1820,7 +1820,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // missing display format from the result semantics; otherwise an authored
     // KPI for `lifetime_spend` renders as a generic `671.4K` instead of `$671.4K`.
     // Agent `suggestedViz` remains a soft preference when no chart was authored.
-    const hasAuthoredChart = typeof existing.chart === 'string';
+    //
+    // EXCEPTION: a bare `chart = "table"` with no authored bindings on a
+    // NON-certified answer is the synthetic default that candidateToDqlSource
+    // stamps on every generated artifact (since the Ask Apply unification) —
+    // NOT an author's display choice. Treating it as authored suppressed the
+    // smart visualization for every generated Ask answer. Authored tables on
+    // certified blocks remain authoritative.
+    const certifiedAuthoredResult = Boolean(governedAnswer.sourceCertifiedBlock)
+      || governedAnswer.dqlArtifact?.kind === 'certified_block'
+      || governedAnswer.kind === 'certified';
+    const syntheticTableDefault = existing.chart === 'table'
+      && !certifiedAuthoredResult
+      && typeof existing.x !== 'string'
+      && typeof existing.y !== 'string';
+    const hasAuthoredChart = typeof existing.chart === 'string' && !syntheticTableDefault;
     const recommendation = recommendVisualization(projectRoot, {
       blockRef: governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
       prompt: question,

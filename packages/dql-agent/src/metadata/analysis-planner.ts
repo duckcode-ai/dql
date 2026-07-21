@@ -130,9 +130,10 @@ const STOP_WORDS = new Set([
 ]);
 
 const METRIC_WORDS = [
-  'amount', 'arr', 'average', 'avg', 'balance', 'bookings', 'churn', 'conversion', 'cost',
+  'amount', 'arr', 'average', 'avg', 'balance', 'bookings', 'churn', 'consumption', 'conversion', 'cost',
   'count', 'duration', 'expense', 'growth', 'kpi', 'margin', 'metric', 'mrr', 'orders',
-  'points', 'profit', 'quantity', 'rate', 'revenue', 'sales', 'score', 'scorer', 'scoring', 'spend', 'stats',
+  'percent', 'percentage', 'pct', 'points', 'profit', 'quantity', 'rate', 'ratio', 'revenue', 'sales',
+  'score', 'scorer', 'scoring', 'share', 'spend', 'stats',
   'statistics', 'tax', 'total', 'usage', 'value', 'volume',
 ];
 
@@ -808,7 +809,9 @@ function extractValueMentions(entities: AnalysisEntityMention[]): AnalysisValueM
 }
 
 function extractMetricTerms(question: string): string[] {
-  const lower = question.toLowerCase();
+  // "%" is how users actually type percent questions ("consumption % by
+  // customer"); normalize it so the measure-word scan can see it.
+  const lower = question.toLowerCase().replace(/%/g, ' percent ');
   const terms = new Set<string>();
   if (/\b(scorer|scorers|scoring|scored)\b/i.test(lower)) {
     terms.add('score');
@@ -998,6 +1001,15 @@ function resolveQuestionMetricTerms(
   followUpTerms: string[],
 ): string[] {
   if (!/\b(?:this|that|same|previous|prior)\s+(?:amount|value)\b/.test(lowerQuestion) || followUpTerms.length === 0) {
+    // A follow-up that DECLARES its own measure ("consumption % by customer")
+    // must not have the prior turn's measure competing in metric ranking — the
+    // carry exists for measure-less refinements ("and by region?"), not to let
+    // the previous metric outrank a newly named intent. This was the sticky-
+    // metric bug: prior measure tokens rode into measureTerms and out-scored
+    // the ratio metric the user actually asked for.
+    if (directTerms.length > 0 && followUpTerms.length > 0) {
+      return uniqueStrings(directTerms);
+    }
     return uniqueStrings([...directTerms, ...followUpTerms]);
   }
   const monetary = followUpTerms.filter((term) =>
