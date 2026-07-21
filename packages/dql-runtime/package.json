@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-runtime",
-  "version": "1.8.13",
+  "version": "1.9.0",
   "description": "DQL browser runtime: data fetching, Vega rendering, hot-reload client",
   "license": "Apache-2.0",
   "type": "module",
