@@ -28,7 +28,11 @@ function loadDatabase(): typeof Database {
 }
 
 /** Caps applied at write time so stored turns stay bounded (mirrors the in-request caps). */
-const MAX_SAMPLE_ROWS = 8;
+// Wide enough that a cross-result follow-up ("of the results above, the
+// average") computes over a realistic top-N result, not just a preview slice.
+// The sample is used for member resolution + deterministic compute, not dumped
+// into the prompt, so this does not bloat follow-up calls.
+const MAX_SAMPLE_ROWS = 50;
 const MAX_COLUMNS = 24;
 const MAX_DIMENSION_KEYS = 8;
 const MAX_DIMENSION_VALUES = 24;

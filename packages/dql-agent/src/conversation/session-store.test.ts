@@ -79,7 +79,9 @@ describe('ConversationStore', () => {
     const [stored] = store.recentTurns(thread.id, 1);
     expect(stored.id).toBe(turn.id);
     expect(stored.result?.columns).toHaveLength(24);
-    expect(stored.result?.rowsSample).toHaveLength(8);
+    // The sample is retained up to MAX_SAMPLE_ROWS (50) so cross-result
+    // follow-up compute covers a realistic top-N result.
+    expect(stored.result?.rowsSample).toHaveLength(20);
     expect(stored.result?.dimensionValues?.category).toHaveLength(24);
     expect(stored.result?.rowCount).toBe(2);
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });

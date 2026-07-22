@@ -32,6 +32,7 @@ import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillMetricHints, buildSkillsPrompt, expandQuestionWithSkillVocabulary, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { ConversationSnapshot } from './conversation/snapshot.js';
+import { detectResultSetOperation, computeResultSetOperation } from './conversation/result-ops.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import { domainContextSearchDomains, type DomainContextEnvelope } from './domain-context.js';
 import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
@@ -559,6 +560,17 @@ export interface AgentFollowUpContext {
   memberBindings?: AgentMemberBinding[];
   resolvedReferences?: string[];
   unresolvedReferences?: string[];
+  /**
+   * The prior turn's actual result rows (bounded sample), so a follow-up that
+   * computes ACROSS the shown results ("of these, the average") is answered from
+   * the returned rows instead of a fresh query. See result-ops.ts.
+   */
+  priorResult?: {
+    columns: string[];
+    rows: unknown[][];
+    measureColumns?: string[];
+    rowCount?: number;
+  };
 }
 
 export interface AgentEvidence {
@@ -1044,7 +1056,51 @@ function applyHollowAnswerGate(result: AgentAnswer): AgentAnswer {
   };
 }
 
+/**
+ * Answer a follow-up that computes ACROSS the prior result rows ("of the results
+ * above, what's the average?", "top 3 of these") from the returned rows, without
+ * a fresh warehouse query. Deterministic + exact; returns null when the question
+ * is not such an operation or the rows aren't available, so the normal cascade
+ * runs. Grounded in an already-shown (already-governed) result, but the
+ * arithmetic itself is analyst-review, not certified.
+ */
+function tryCrossResultAnswer(input: AnswerLoopInput): AgentAnswer | null {
+  const prior = input.followUp?.priorResult;
+  if (!prior || !Array.isArray(prior.rows) || prior.rows.length === 0) return null;
+  const op = detectResultSetOperation(input.question);
+  if (!op) return null;
+  const computed = computeResultSetOperation(op, prior);
+  if (!computed) return null;
+
+  const text = computed.text;
+  const answer: AgentAnswer = {
+    kind: 'uncertified',
+    sourceTier: 'business_context',
+    certification: 'analyst_review_required',
+    reviewStatus: 'none',
+    confidence: 1,
+    text,
+    answer: text,
+    trustLabel: 'Computed from prior results',
+    citations: [],
+    considered: [],
+  };
+  if (computed.result) {
+    answer.result = {
+      columns: computed.result.columns,
+      rows: computed.result.rows.map((row) =>
+        Object.fromEntries(computed.result!.columns.map((col, index) => [col, row[index]]))),
+      rowCount: computed.result.rowCount,
+    };
+  }
+  return answer;
+}
+
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
+  // Cross-result follow-up ("of these, the average") — computed from the prior
+  // rows, before the cascade, so it never re-queries or times out.
+  const crossResult = tryCrossResultAnswer(input);
+  if (crossResult) return crossResult;
   const result = applyHollowAnswerGate(await runAnswerLoop(input));
   // Attach the canonical trust label once, at the single exit point, so every
   // return site inside runAnswerLoop stays untouched and backward compatible.

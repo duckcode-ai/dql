@@ -1336,7 +1336,7 @@ describe('exploratory result contracts', () => {
 });
 
 describe('agent run runtime API', () => {
-  it('AGT-012 preserves bounded member values beyond the eight-row visual preview', () => {
+  it('AGT-012 retains the result-row sample for member values and cross-result compute', () => {
     const rows = Array.from({ length: 10 }, (_, index) => ({
       product_name: index === 9 ? 'flame impala' : 'product_' + index,
       location_name: 'Philadelphia',
@@ -1362,7 +1362,9 @@ describe('agent run runtime API', () => {
       nextActions: [],
     } as any);
 
-    expect(turn.result?.rowsSample).toHaveLength(8);
+    // The sample now retains the full bounded window (up to 50) so a
+    // cross-result follow-up can compute over the shown rows.
+    expect(turn.result?.rowsSample).toHaveLength(10);
     expect(turn.result?.dimensionValues?.product_name).toContain('flame impala');
   });
 

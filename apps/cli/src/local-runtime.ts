@@ -856,9 +856,12 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
   // valid row 9/10 member to disappear before the next turn (AGT-012/E2E-010).
   const memberRows = Array.isArray(result?.rows)
     ? result.rows.filter((row): row is Record<string, unknown> =>
-        Boolean(row && typeof row === 'object' && !Array.isArray(row))).slice(0, 24)
+        Boolean(row && typeof row === 'object' && !Array.isArray(row))).slice(0, 50)
     : [];
-  const rows = memberRows.slice(0, 8);
+  // The full retained window feeds both member resolution and cross-result
+  // follow-up compute ("of the results above, the average"). The store clamps
+  // it (MAX_SAMPLE_ROWS); rows are never dumped into the prompt.
+  const rows = memberRows;
   const rowsSample = rows.map((row) => columns.map((column) => row[column]));
   const contextPack = agentRunRecord(payload?.contextPack);
   const questionPlan = agentRunRecord(contextPack?.questionPlan);

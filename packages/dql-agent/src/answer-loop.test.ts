@@ -8235,3 +8235,33 @@ Log File:: /Users/u/dbt/logs/metricflow.log`;
     expect(compact).toBe("database timeout after 30s");
   });
 });
+
+describe("cross-result follow-up compute (answer() early lane)", () => {
+  const priorResult = {
+    columns: ["customer_name", "bcm"],
+    rows: [["Genesys", 2_096_396], ["Capital One", 1_333_994], ["Volkswagen", 1_275_636]],
+    measureColumns: ["bcm"],
+    rowCount: 3,
+  };
+
+  it("answers an aggregate over the prior rows without running the cascade", async () => {
+    const out = await answerBase({
+      question: "of the results above, what is the average?",
+      followUp: { kind: "contextual", priorResult },
+    } as unknown as Parameters<typeof answerBase>[0]);
+    expect(out.trustLabel).toBe("Computed from prior results");
+    expect(out.text).toContain("1,568,675.33");
+    expect(out.kind).toBe("uncertified");
+  });
+
+  it("returns a re-ranked sub-table as records for the UI", async () => {
+    const out = await answerBase({
+      question: "top 2 of these",
+      followUp: { kind: "contextual", priorResult },
+    } as unknown as Parameters<typeof answerBase>[0]);
+    expect(out.result?.rows).toEqual([
+      { customer_name: "Genesys", bcm: 2_096_396 },
+      { customer_name: "Capital One", bcm: 1_333_994 },
+    ]);
+  });
+});

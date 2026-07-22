@@ -927,6 +927,34 @@ export function resolveAgentFollowUpContext(
     })),
     resolvedReferences: resolvedReferences.labels,
     unresolvedReferences: resolvedReferences.unresolved,
+    // The prior turn's actual rows, so a follow-up can compute across the shown
+    // results ("of these, the average") without a fresh query. A relative
+    // comparison deliberately drops the prior contract, so skip it there too.
+    priorResult: relativeComparison ? undefined : priorResultDataFromTurn(activeResult, priorResultColumns),
+  };
+}
+
+/** Build the bounded prior-result rows (aligned to columns) for cross-result
+ *  follow-up computation, from a turn's persisted result sample. */
+function priorResultDataFromTurn(
+  activeResult: Record<string, unknown> | undefined,
+  columns: string[] | undefined,
+): AgentFollowUpContext['priorResult'] {
+  if (!activeResult || !columns || columns.length === 0) return undefined;
+  const sample = activeResult.rowsSample;
+  if (!Array.isArray(sample) || sample.length === 0) return undefined;
+  const rows = sample
+    .filter((row): row is unknown[] => Array.isArray(row))
+    .map((row) => columns.map((_, index) => row[index]));
+  if (rows.length === 0) return undefined;
+  const measureColumns = (arrayValue(activeResult.measureColumns) ?? [])
+    .filter((value): value is string => typeof value === 'string');
+  const rowCountRaw = activeResult.rowCount;
+  return {
+    columns,
+    rows,
+    ...(measureColumns.length > 0 ? { measureColumns } : {}),
+    ...(typeof rowCountRaw === 'number' ? { rowCount: rowCountRaw } : {}),
   };
 }
 
