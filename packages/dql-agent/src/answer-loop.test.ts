@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, repairAmbiguousColumn, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -8263,5 +8263,34 @@ describe("cross-result follow-up compute (answer() early lane)", () => {
       { customer_name: "Genesys", bcm: 2_096_396 },
       { customer_name: "Capital One", bcm: 1_333_994 },
     ]);
+  });
+});
+
+
+describe("repairAmbiguousColumn (generated SQL)", () => {
+  const schema = [
+    { name: "bcm_hdr", relation: "dev.bcm_hdr", columns: [{ name: "report_as_of_dt" }, { name: "customer_id" }, { name: "split_qty" }] },
+    { name: "bcm_dtl", relation: "dev.bcm_dtl", columns: [{ name: "report_as_of_dt" }, { name: "value_amt" }] },
+  ] as unknown as Parameters<typeof repairAmbiguousColumn>[2];
+
+  it("qualifies the ambiguous column to the driving (first FROM) table", () => {
+    const sql = "SELECT report_as_of_dt, SUM(h.split_qty) FROM dev.bcm_hdr h JOIN dev.bcm_dtl d ON h.customer_id = d.customer_id GROUP BY report_as_of_dt";
+    const out = repairAmbiguousColumn(sql, "SQL compilation error: ambiguous column name 'REPORT_AS_OF_DT'", schema);
+    expect(out).toContain("h.report_as_of_dt");
+    expect(out).toContain("GROUP BY h.report_as_of_dt");
+    expect(out).toContain("h.split_qty");
+  });
+
+  it("never rewrites an already-qualified reference or an AS output alias", () => {
+    const sql = "SELECT d.report_as_of_dt AS report_as_of_dt FROM dev.bcm_hdr h JOIN dev.bcm_dtl d ON h.customer_id = d.customer_id";
+    const out = repairAmbiguousColumn(sql, "ambiguous column name report_as_of_dt", schema);
+    if (out) {
+      expect(out).not.toContain("AS h.report_as_of_dt");
+      expect(out).not.toContain("AS d.report_as_of_dt");
+    }
+  });
+
+  it("returns undefined when the error is not an ambiguous-column error", () => {
+    expect(repairAmbiguousColumn("SELECT 1", "connection reset", schema)).toBeUndefined();
   });
 });

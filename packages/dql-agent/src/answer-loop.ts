@@ -5888,6 +5888,14 @@ function isRetryableCertifiedExecutionError(error: string): boolean {
 }
 
 function repairGeneratedSqlLocally(sql: string, error: string, schemaContext: AgentSchemaTable[]): string | undefined {
+  // Ambiguous column: a bare column exists in more than one joined table (e.g. a
+  // conformed `report_as_of_dt` on both the fact and a joined dimension), and the
+  // generated SQL referenced it unqualified. Qualify every UNQUALIFIED occurrence
+  // with the DRIVING table (first FROM) when it owns the column — the fact grain
+  // is the intended one, and it's exactly what the semantic compiler would emit.
+  const ambiguousRepair = repairAmbiguousColumn(sql, error, schemaContext);
+  if (ambiguousRepair) return ambiguousRepair;
+
   const missing = error.match(/(?:Values list|Referenced table)\s+"([^"]+)"\s+does not have a column named\s+"([^"]+)"/i)
     ?? error.match(/Referenced column\s+"([^"]+)"\s+not found/i);
   if (!missing) return undefined;
@@ -5902,6 +5910,37 @@ function repairGeneratedSqlLocally(sql: string, error: string, schemaContext: Ag
     return sql.replace(new RegExp(`\\b${escapeRegex(badAlias)}\\.${escapeRegex(missingColumn)}\\b`, 'gi'), `${replacementAlias}.${missingColumn}`);
   }
   return undefined;
+}
+
+/**
+ * Qualify an ambiguous bare column (Snowflake/DuckDB "ambiguous column name X")
+ * with the driving table's alias. Conservative: only touches occurrences that
+ * are NOT already qualified (`alias.X`) and NOT an output alias (`AS X`), and
+ * only when a joined table actually owns the column. Returns undefined when it
+ * can't safely repair, so the LLM repair path still runs.
+ */
+export function repairAmbiguousColumn(sql: string, error: string, schemaContext: AgentSchemaTable[]): string | undefined {
+  const match = error.match(/ambiguous column(?:\s+name)?['":\s]+`?"?([A-Za-z_][\w]*)"?`?/i);
+  const column = match?.[1];
+  if (!column) return undefined;
+
+  const aliasToRelation = extractSqlAliases(sql);
+  const owners = aliasesWithColumn(aliasToRelation, schemaContext, column);
+  // Prefer the first FROM table's alias when it owns the column (the fact grain).
+  const firstFrom = /\bfrom\s+[A-Za-z_][\w.]*(?:\s+as)?\s+([A-Za-z_]\w*)/i.exec(sql)?.[1];
+  const target = firstFrom && owners.includes(firstFrom) ? firstFrom : owners[0];
+  if (!target) return undefined;
+
+  const bare = new RegExp(`(?<![\\w.])${escapeRegex(column)}\\b`, 'gi');
+  let changed = false;
+  const repaired = sql.replace(bare, (m: string, offset: number, whole: string) => {
+    // Never rewrite an output alias `... AS column` (any run of whitespace).
+    if (/\bas\s+$/i.test(whole.slice(Math.max(0, offset - 8), offset))) return m;
+    changed = true;
+    // Preserve the occurrence's original casing (the error may upper-case it).
+    return `${target}.${m}`;
+  });
+  return changed && repaired !== sql ? repaired : undefined;
 }
 
 function extractSqlAliases(sql: string): Map<string, string> {
