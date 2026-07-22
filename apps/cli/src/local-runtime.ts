@@ -343,6 +343,7 @@ import {
 import {
   compileSemanticRuntimeQuery,
   describeRuntimeCompatibility,
+  explainMissingSemanticRuntime,
   getSemanticRuntimeStatus,
   isSemanticRuntimeError,
   semanticMetricExecutionCapability as runtimeMetricExecutionCapability,
@@ -1803,9 +1804,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               tableMapping: semanticTableMapping,
             });
             if (!compiled) {
-              throw new SemanticRuntimeRequiredError(
-                'The selected semantic members could not be composed. Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime for derived metrics.',
-              );
+              const dbtProjectPath = projectConfig.semanticLayer?.provider === 'dbt'
+                ? projectConfig.semanticLayer.projectPath
+                : projectConfig.dbt?.projectDir;
+              throw new SemanticRuntimeRequiredError(await explainMissingSemanticRuntime(projectRoot, dbtProjectPath));
             }
             return {
               sql: compiled.sql,

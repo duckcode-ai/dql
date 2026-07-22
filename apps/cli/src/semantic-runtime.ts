@@ -5,7 +5,7 @@ import {
   testDbtCloudSemanticConnection,
   type DbtCloudSemanticTestResult,
 } from './dbt-cloud-semantic.js';
-import { compileMetricFlowQuery, hasMetricFlowCli, listMetricFlowDimensions, MetricFlowUnavailableError, resolveMetricFlowCli } from './metricflow.js';
+import { compileMetricFlowQuery, hasDbtSemanticManifest, hasMetricFlowCli, listMetricFlowDimensions, managedMetricFlowBin, MetricFlowUnavailableError, resolveMetricFlowCli } from './metricflow.js';
 import {
   getEffectiveDbtCloudSemanticSettings,
   getSemanticRuntimeSettings,
@@ -359,6 +359,44 @@ export async function testSemanticRuntimeDraft(
  * `metric_time` is never rewritten. Also clamps a requested time grain up to
  * the column's base grain, collecting a warning. Pure — returns a new request.
  */
+/**
+ * Explain, actionably, why no full semantic runtime is active for a derived/
+ * ratio/cumulative metric — probing the REAL runtime state so the message names
+ * the actual gap instead of a generic "configure a runtime". Covers both traps:
+ *   • dbt Cloud is configured but its connection test is failing (bad host/env/
+ *     token or network) — so it never becomes active, and the query silently
+ *     falls back to native, which can't compose a derived metric;
+ *   • MetricFlow is installed but this server process can't find it, because the
+ *     server was launched from a shell without the dbt virtualenv on PATH.
+ */
+export async function explainMissingSemanticRuntime(projectRoot: string, dbtProjectPath?: string): Promise<string> {
+  const status = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
+  const cloud = status.adapters.find((adapter) => adapter.id === 'dbt-cloud');
+  const cli = resolveMetricFlowCli(projectRoot);
+  const head = 'This is a derived metric — it needs dbt Cloud or local MetricFlow, and neither is active for this server right now.';
+  const reasons: string[] = [];
+
+  // dbt Cloud is configured but not usable — the most likely cause once a user
+  // has "switched to cloud". `detail` carries the live connection-test error.
+  if (cloud?.configured && !cloud.ready) {
+    reasons.push(`dbt Cloud is configured but its connection test is not passing (${cloud.detail ?? 'not tested'}). In Settings → Semantic execution adapters → dbt Cloud, re-check Host, Environment ID, and the Semantic Layer service token, then “Test & save”.`);
+  }
+
+  // Local MetricFlow.
+  if (cli) {
+    if (!hasDbtSemanticManifest(projectRoot, dbtProjectPath)) {
+      reasons.push(`MetricFlow is installed (${cli.bin}) but target/semantic_manifest.json is missing — run \`dbt parse\` in the dbt project.`);
+    }
+  } else if (!cloud?.configured) {
+    const managed = managedMetricFlowBin(projectRoot);
+    reasons.push(`MetricFlow is not on this server’s PATH: start the server from the shell where \`mf\` works (activate your dbt virtualenv) and restart it, set DQL_METRICFLOW_BIN to the path from \`which mf\`, or install the managed runtime in Settings (${managed}).`);
+  }
+
+  return reasons.length > 0
+    ? `${head} ${reasons.join(' ')}`
+    : `${head} ${status.setup ?? 'Configure a runtime in Settings → Semantic execution adapters.'}`;
+}
+
 export function qualifyForMetricFlow(
   request: SemanticRuntimeQueryRequest,
   semanticLayer: SemanticLayer,

@@ -250,3 +250,39 @@ describe('saveSemanticRuntimePreference (Phase 4)', () => {
     expect(getSemanticRuntimeSettings(root).preference).toBe('metricflow-cli');
   });
 });
+
+describe('explainMissingSemanticRuntime (actionable config diagnosis)', () => {
+  it('tells the user MetricFlow is not found by the server, with fixes', async () => {
+    const { explainMissingSemanticRuntime } = await import('./semantic-runtime.js');
+    // beforeEach points DQL_METRICFLOW_BIN at a missing path → mf unresolvable,
+    // and no dbt Cloud is configured → the PATH-guidance branch.
+    const msg = await explainMissingSemanticRuntime(root);
+    expect(msg).toContain('MetricFlow is not on this server’s PATH');
+    expect(msg).toContain('DQL_METRICFLOW_BIN');
+    expect(msg).toContain('restart');
+    expect(msg).not.toContain('Configure dbt Cloud Semantic Layer or a compatible local MetricFlow runtime for derived metrics');
+  });
+
+  it('names a failing dbt Cloud connection when cloud is the configured runtime', async () => {
+    // Configure dbt Cloud via env (configured=true, no stored pass) so the live
+    // probe runs and fails against the fake host → configured-but-not-ready.
+    const priorEnv = {
+      host: process.env.DBT_CLOUD_SEMANTIC_LAYER_HOST,
+      env: process.env.DBT_CLOUD_ENVIRONMENT_ID,
+      token: process.env.DBT_CLOUD_SERVICE_TOKEN,
+    };
+    process.env.DBT_CLOUD_SEMANTIC_LAYER_HOST = 'fake.getdbt.invalid';
+    process.env.DBT_CLOUD_ENVIRONMENT_ID = '123';
+    process.env.DBT_CLOUD_SERVICE_TOKEN = 'nope';
+    try {
+      const { explainMissingSemanticRuntime } = await import('./semantic-runtime.js');
+      const msg = await explainMissingSemanticRuntime(root);
+      expect(msg).toContain('dbt Cloud is configured');
+      expect(msg).toContain('Test & save');
+    } finally {
+      if (priorEnv.host === undefined) delete process.env.DBT_CLOUD_SEMANTIC_LAYER_HOST; else process.env.DBT_CLOUD_SEMANTIC_LAYER_HOST = priorEnv.host;
+      if (priorEnv.env === undefined) delete process.env.DBT_CLOUD_ENVIRONMENT_ID; else process.env.DBT_CLOUD_ENVIRONMENT_ID = priorEnv.env;
+      if (priorEnv.token === undefined) delete process.env.DBT_CLOUD_SERVICE_TOKEN; else process.env.DBT_CLOUD_SERVICE_TOKEN = priorEnv.token;
+    }
+  });
+})
