@@ -128,3 +128,36 @@ describe('selectSemanticMembersViaLlm', () => {
     expect(selection).toBeUndefined();
   });
 });
+
+describe('selectSemanticMembersViaLlm — compatible-dimension restriction', () => {
+  function capturingProvider(): { provider: AgentProvider; lastPrompt: () => string } {
+    let captured = '';
+    const provider = {
+      name: 'claude',
+      available: async () => true,
+      generate: async (messages: AgentMessage[]) => {
+        captured = messages.map((m) => m.content).join('\n');
+        return '{"metrics":["total_bcm"],"dimensions":["customer_name"]}';
+      },
+    } as AgentProvider;
+    return { provider, lastPrompt: () => captured };
+  }
+
+  it('shows only dimensions groupable by the candidate metric, hides unconnected ones', async () => {
+    const l = new SemanticLayer({
+      metrics: [{ name: 'total_bcm', label: 'Total BCM', description: 'Billed consumption.', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr' }],
+      dimensions: [
+        // On the metric's own model → compatible.
+        { name: 'customer_name', label: 'Customer', description: '', domain: 'bcm', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr' },
+        // On a disconnected model with no join path → NOT groupable.
+        { name: 'campaign_channel', label: 'Channel', description: '', domain: 'mkt', sql: 'channel', type: 'string', table: 'marketing_events', cube: 'marketing_events' },
+      ],
+    });
+    const { provider, lastPrompt } = capturingProvider();
+    await selectSemanticMembersViaLlm({ provider, semanticLayer: l, question: 'bcm by customer or channel' });
+    const prompt = lastPrompt();
+    expect(prompt).toContain('groupable by the metrics above');
+    expect(prompt).toContain('customer_name');
+    expect(prompt).not.toContain('campaign_channel');
+  });
+})

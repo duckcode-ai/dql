@@ -31,8 +31,27 @@ export async function selectSemanticMembersViaLlm(input: {
   const rawTimeDimensions = input.semanticLayer.listTimeDimensions?.() ?? dimensions.filter((dimension) => dimension.isTimeDimension);
   const timeDimensions = rankMembersForQuestion(rawTimeDimensions, input.question);
   const visibleMetrics = metrics.slice(0, 60);
-  const visibleDimensions = dimensions.slice(0, 80);
-  const visibleTimeDimensions = timeDimensions.slice(0, 20);
+
+  // Only show dimensions the model can actually GROUP the candidate metrics by.
+  // Showing the whole catalog let the model pick a dimension with no join path to
+  // the metric, which the runtime then rejected ("does not match any group-by-
+  // items") — so some questions worked and others didn't for the same metric.
+  // Build the UNION of compatible dimensions across the top candidate metrics
+  // (the model picks one metric, so a dim groupable by ANY candidate is valid),
+  // and keep the qualified name to hand the runtime the exact group-by it wants.
+  const candidateMetricNames = visibleMetrics.slice(0, 5).map((metric) => metric.name);
+  const compatibleByName = new Map<string, string | undefined>();
+  for (const metricName of candidateMetricNames) {
+    try {
+      for (const dim of input.semanticLayer.explainCompatibleDimensions([metricName]).compatible) {
+        if (!compatibleByName.has(dim.name)) compatibleByName.set(dim.name, dim.qualifiedName);
+      }
+    } catch { /* compatibility is best-effort; fall back to the full list below */ }
+  }
+  const restrictToCompatible = compatibleByName.size > 0;
+  const keepDimension = (name: string): boolean => !restrictToCompatible || compatibleByName.has(name);
+  const visibleDimensions = dimensions.filter((dimension) => keepDimension(dimension.name)).slice(0, 80);
+  const visibleTimeDimensions = timeDimensions.filter((dimension) => keepDimension(dimension.name)).slice(0, 20);
   // Real per-column grains so the model picks a grain the column actually
   // supports (a month-grain column cannot be sliced by day).
   const grainsFor = (dimension: typeof visibleTimeDimensions[number]): string[] =>
@@ -41,7 +60,9 @@ export async function selectSemanticMembersViaLlm(input: {
   const catalog = [
     'METRICS:',
     ...visibleMetrics.map((metric) => `- ${metric.name}${metric.label && metric.label !== metric.name ? ` (${metric.label})` : ''}${metric.description ? `: ${metric.description}` : ''}`),
-    'DIMENSIONS:',
+    restrictToCompatible
+      ? 'DIMENSIONS (only those groupable by the metrics above — do not use any other):'
+      : 'DIMENSIONS:',
     ...visibleDimensions.map((dimension) => `- ${dimension.name}${dimension.label && dimension.label !== dimension.name ? ` (${dimension.label})` : ''}`),
     ...(visibleTimeDimensions.length > 0 ? ['TIME DIMENSIONS (use for grain):', ...visibleTimeDimensions.map((dimension) => {
       const grains = grainsFor(dimension);
