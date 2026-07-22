@@ -6,7 +6,8 @@ Prove the complete product behavior and scale budgets on deterministic fixtures;
 repair integration defects without weakening safety contracts.
 
 Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
-`PERF-002`, `E2E-001`, `E2E-005`, `E2E-006`, and `E2E-007`. Dependencies: verified W01–W06.
+`PERF-002`, `E2E-001`, `E2E-005`, `E2E-006`, `E2E-007`, and `E2E-012`.
+Dependencies: verified W01–W06.
 
 ## Required implementation
 
@@ -30,6 +31,8 @@ Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
   every project-local connection setting.
 - Compare browser Ask, direct CLI, MCP, and Chat on the same snapshot and assert
   identical interpretation, selected qualified IDs, route, trust, and error.
+- Execute the plan-first stage harness through compilation and bounded fixture
+  execution; assert identical plan/result receipts rather than only router labels.
 
 ## Suggested ownership
 

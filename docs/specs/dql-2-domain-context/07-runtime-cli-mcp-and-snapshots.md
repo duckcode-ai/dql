@@ -1,5 +1,27 @@
 # Runtime, CLI, MCP, and project snapshots
 
+## Plan-first runtime contract
+
+Every governed surface acquires one `ProjectSearchSnapshotHandle` and invokes
+the same versioned planning service. The public runtime boundary accepts a
+`ResolvedAnalyticalPlan`, selects exactly one certified/semantic/governed/
+exploratory adapter, and produces an `ExecutableQueryPlan`. The execution
+gateway returns an `ExecutionReceipt` binding snapshot, resolved-plan,
+executable-plan, parameters, projected field identities, result grain, and
+result fingerprint (`AGT-013`, `AGT-014`, `API-006`).
+
+Semantic adapters expose capability inspection and cancellable compilation with
+an inherited deadline. Runtime-specific member spellings are adapter references,
+not semantic identity. Authentication, availability, timeout, compiler, and
+execution failures preserve stable redacted codes and never trigger another
+adapter or free-SQL fallback after executable-plan selection.
+
+All requested output fields are mandatory. The shared result guard validates
+field identity, grain, filters, temporal receipt, parameters, ranking, and
+bounds before an answer, reusable artifact, or successful UI state is emitted.
+SQL repair may correct serialization/dialect syntax only when the resolved and
+executable plan fingerprints remain unchanged.
+
 ## ProjectSnapshotService
 
 All manifest, catalog, semantic, Domain Package, skill, block, product, and

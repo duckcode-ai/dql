@@ -31,7 +31,7 @@ an acceptance-matrix update.
 | CTX-004 | Model Area identity is domain-qualified; explicit or inferred Area focus narrows modeling and Skill retrieval inside its owning domain. |
 | CTX-005 | Every Ask surface acquires one qualified immutable project-search snapshot containing DQL v3/modeling, certified assets, semantic metadata, dbt metadata, safe runtime schema, and approved hints; warm retrieval does not reparse source artifacts. |
 | CTX-006 | Manifest v3 owns one deterministic qualified knowledge graph for domains, Areas, terms, skills, certified assets, semantic/dbt provenance, governed interfaces, relationships, and products; legacy lineage, search, Domain 360, and agent context are compatibility projections of this graph. |
-| AGT-001 | Route order is certified block, MetricFlow, governed generation, clarify/refuse. |
+| AGT-001 | After meaning is fixed, route order is a completely compatible certified block, one compatible semantic adapter (`native`, `metricflow-cli`, or `dbt-cloud`), governed relational composition, bounded review-required exploration, then identifier-bound clarify/refuse. A failure after executable-plan selection never broadens the route. |
 | AGT-002 | AI discovery produces evidence-cited drafts only and never auto-certifies. |
 | AGT-003 | Ask is available before domain setup only in limited-context, review-required mode. |
 | AGT-007 | App planning and analytical answering are separate orchestrators that share one server-resolved snapshot, retrieval contracts, trust vocabulary, and evidence model. |
@@ -40,10 +40,16 @@ an acceptance-matrix update.
 | AGT-010 | Relevance and business meaning select the concept before trust selects the execution route; every AI recommendation is identifier-bound and must pass deterministic compatibility, policy, compilation, and execution guards. |
 | AGT-011 | Clarification choices carry stable evidence IDs; selecting one rehydrates that evidence and its semantic/dbt/runtime dependencies against the original analytical question before compilation and execution. |
 | AGT-012 | A question or prior result member is resolved once into a typed dimension/value binding with provenance and confidence; retrieval, planning, certified/semantic fit, SQL generation, validation, and execution preserve that binding without reinterpreting it as metadata text. |
+| AGT-013 | One immutable, snapshot-bound `ResolvedAnalyticalPlan` is the sole authority for meaning, qualified members, entity/time grain, filters, member bindings, relationship paths, execution capability, output contract, and follow-ups. |
+| AGT-014 | Certified and semantic adapters consume the exact resolved plan, perform no lexical lookup, join search, member reselection, metric substitution, semantic downgrade, or post-failure route fallback, and return an executable-plan/result contract tied to the plan fingerprint. |
+| AGT-015 | Governed SQL is compiled from constrained relational operators over qualified allowlisted IDs and exact relationship proof; DQL owns relations, keys, joins, aliases, parameters, qualification, and dialect rendering. |
+| AGT-016 | Deep Research applies typed deltas to the root plan and reuses its snapshot, Domain envelope, KnowledgeLens, relationship proof, and execution receipts; every numerical claim is receipt-backed and generated research remains review-required. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
 | API-003 | Browser Ask, CLI, MCP, and Chat use the same snapshot, retrieval, meaning-resolution, route, trust, and error contracts and expose only redacted phase diagnostics. |
 | API-004 | Semantic discovery declares per-metric execution capability; modern dbt/MetricFlow artifact shapes normalize without changing metric meaning; managed local-runtime setup is isolated, bounded, and status-reporting; and failed composition returns stable runtime-required or field-incompatible errors. |
+| API-005 | Ask, Notebook, native tools, CLI, and MCP invoke parameterized certified blocks through one typed values-only contract and return equivalent resolved values, provenance, and redacted audit identity. |
+| API-006 | Browser Ask, CLI, MCP, Chat, Notebook, Preview, and Block Studio use versioned resolved-plan, executable-plan, result-contract, and execution-receipt interfaces with identical fingerprints for equivalent requests. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
@@ -70,6 +76,8 @@ an acceptance-matrix update.
 | E2E-008 | Release proves modern dbt semantic artifacts, filtered/simple and MetricFlow-only capability states, isolated managed MetricFlow install/test/activation, compatible metric/dimension selection, setup navigation, preview execution, and semantic-cell insertion in the built notebook. |
 | E2E-009 | Release proves ambiguity selection preserves the original question and semantic identity, admits the selected backing relation into inspected SQL context, executes it, and retains truthful grounding/timeout UI states. |
 | E2E-010 | Release proves named-member follow-ups bind the exact prior result value, reject otherwise-relevant assets that cannot honor the bound dimension, use at most one bounded generation call for uncovered joins, and execute only rows satisfying the binding. |
+| E2E-011 | Release proves member/parameter binding, direct Ask rerun controls, first-result/Apply execution-receipt parity, transient-source preservation, derived-alias probe safety, and native/CLI/MCP invocation parity. |
+| E2E-012 | Release proves the plan-first answer engine end to end: qualified retrieval, Domain/Skill selection, meaning resolution, plan binding, exact compatibility/time/join proof, single-adapter compilation, result-contract validation, typed follow-ups, bounded Research, rollback, and legacy-cascade retirement. |
 
 ## OSS and Cloud boundary
 

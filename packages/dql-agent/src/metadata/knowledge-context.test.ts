@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { buildManifest } from '@duckcodeailabs/dql-core';
 import { resolveDomainContextEnvelope } from '../domain-context.js';
+import { materializeKnowledgeLensSkills } from '../answer-loop.js';
+import { loadSkills } from '../skills/loader.js';
 import { activeMetadataSnapshotPath, buildLocalContextPack, readIndexedDomainKnowledge } from './catalog.js';
 
 const sourceFixture = resolve(
@@ -45,12 +47,20 @@ describe('canonical knowledge graph context projection (CTX-006 / SKILL-003 / RE
     expect(pack.knowledgeLens).toMatchObject({
       mode: 'pinned',
       activeDomainId: 'growth',
-      snapshotId: 'snapshot-test',
+      snapshotId: pack.freshness.fingerprint,
       skillRefs: ['growth::skill::acquisition_analysis'],
       capsuleFingerprint: expect.any(String),
       skillFingerprints: { 'growth::skill::acquisition_analysis': expect.any(String) },
     });
+    expect(pack.knowledgeLens.snapshotId).not.toBe('snapshot-test');
     expect(pack.skills.map((skill) => skill.qualifiedId)).toContain('growth::skill::acquisition_analysis');
+    const materialized = materializeKnowledgeLensSkills(
+      pack,
+      loadSkills(projectRoot).skills.map((skill) => ({ ...skill, body: 'newer mutable disk body' })),
+    );
+    expect(materialized.map((skill) => skill.qualifiedId)).toEqual(pack.knowledgeLens.skillRefs);
+    expect(materialized[0]?.body).toBe(pack.skills[0]?.guidance);
+    expect(materialized[0]?.body).not.toBe('newer mutable disk body');
     expect(pack.objects.filter((object) => object.objectType === 'cross_domain_route')).toEqual(expect.arrayContaining([
       expect.objectContaining({ domain: 'growth', status: 'authorized' }),
       expect.objectContaining({ domain: 'growth', status: 'blocked' }),

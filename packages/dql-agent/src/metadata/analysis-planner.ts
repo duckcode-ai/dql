@@ -124,9 +124,9 @@ const STOP_WORDS = new Set([
   'about', 'after', 'again', 'against', 'all', 'also', 'and', 'answer', 'any', 'are', 'around',
   'based', 'before', 'between', 'build', 'can', 'complete', 'could', 'data', 'dataset', 'datasets',
   'deep', 'detail', 'detailed', 'does', 'for', 'from', 'give', 'have', 'help', 'into', 'latest',
-  'more', 'need', 'needs', 'over', 'please', 'provide', 'question', 'research', 'reserach', 'show',
+  'in', 'is', 'more', 'need', 'needs', 'of', 'our', 'over', 'please', 'provide', 'question', 'research', 'reserach', 'show',
   'that', 'the', 'their', 'them', 'this', 'through', 'use', 'using', 'what', 'when', 'where',
-  'which', 'with', 'would', 'you',
+  'which', 'was', 'were', 'with', 'would', 'you',
 ]);
 
 const METRIC_WORDS = [
@@ -178,7 +178,10 @@ export function buildAnalysisQuestionPlan(
   // Stakeholders occasionally paste semantic/dbt identifiers directly. Treat
   // underscores as word boundaries for intent extraction while retaining the
   // original question for exact output identifiers and auditability.
-  const languageQuestion = cleanQuestion.replace(/_/g, ' ');
+  const languageQuestion = cleanQuestion
+    .replace(/@(?:metric|dimension|measure|entity|model|block|term)\(([^)]+)\)/gi, (_match, identity: string) =>
+      identity.split(/[.:]/).at(-1) ?? identity)
+    .replace(/_/g, ' ');
   const lower = languageQuestion.toLowerCase();
   const entities = extractEntities(cleanQuestion);
   const valueMentions = extractValueMentions(entities);
@@ -189,8 +192,12 @@ export function buildAnalysisQuestionPlan(
   );
   const extractedDimensionTerms = extractDimensionTerms(languageQuestion);
   const filterTerms = extractFilterTerms(languageQuestion, entities);
-  const dimensionTerms = removeFilterOnlyDimensionTerms(languageQuestion, extractedDimensionTerms);
   const timeTerms = extractTimeTerms(languageQuestion);
+  const dimensionTerms = removeTemporalFilterDimensionTerms(
+    languageQuestion,
+    removeFilterOnlyDimensionTerms(languageQuestion, extractedDimensionTerms),
+    timeTerms,
+  );
   const mode = inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
   const routeIntent = routeIntentForMode(mode);
   const outputShape = outputShapeForMode(mode, lower, dimensionTerms);
@@ -844,6 +851,7 @@ function extractMetricTerms(question: string): string[] {
 function extractDimensionTerms(question: string): string[] {
   const lower = question.toLowerCase();
   const terms = new Set<string>();
+  const rankingByMeasure = /\b(?:top|bottom|highest|lowest|most|least|best|worst|rank(?:ed|ing)?)\b[^?.!,;]{0,80}\bby\s+/i.test(lower);
   if (/\b(?:cusomers?|custmers?|costomers?|clients?|buyers?)\b/i.test(lower)) terms.add('customer');
   for (const word of DIMENSION_WORDS) {
     if (new RegExp(`\\b(?:${escapeRegExp(word)}|${escapeRegExp(pluralizeDimensionWord(word))})\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
@@ -855,7 +863,11 @@ function extractDimensionTerms(question: string): string[] {
     // and shows up as a phantom required-output column.
     for (const piece of match[1].split(/\s+by\s+/)) {
       const value = piece.replace(/\b(where|for|with|and|or|from|over|in|per|of)\b.*$/i, '').trim();
-      if (value) terms.add(normalizeTerm(value));
+      const normalized = normalizeTerm(value);
+      const isRankingMeasurePhrase = rankingByMeasure
+        && normalized.split(/\s+/).length > 1
+        && METRIC_WORDS.some((word) => new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(normalized));
+      if (normalized && !isRankingMeasurePhrase) terms.add(normalized);
     }
   }
   return uniqueStrings([...terms]).slice(0, 16);
@@ -902,6 +914,24 @@ function removeFilterOnlyDimensionTerms(question: string, dimensions: string[]):
     }
   }
   return dimensions.filter((dimension) => !filterOnly.has(dimension));
+}
+
+function removeTemporalFilterDimensionTerms(
+  question: string,
+  dimensions: string[],
+  timeTerms: string[],
+): string[] {
+  const relativeTemporalFilter = timeTerms.some((term) =>
+    /^(?:today|yesterday|ytd|mtd|qtd|wtd|(?:last|this|next|previous|prior)\s+)/.test(term));
+  if (!relativeTemporalFilter) return dimensions;
+  return dimensions.filter((dimension) => {
+    if (!/^(?:day|week|month|quarter|year|season|period)$/.test(dimension)) return true;
+    const word = escapeRegExp(dimension);
+    return new RegExp(
+      `\\b(?:by|per)\\s+(?:the\\s+)?${word}s?\\b|\\b(?:for each|group(?:ed)? by|split by)\\b[^?.!,;]{0,24}\\b${word}s?\\b`,
+      'i',
+    ).test(question);
+  });
 }
 
 function pluralizeDimensionWord(word: string): string {
@@ -974,6 +1004,14 @@ function extractTimeTerms(question: string): string[] {
   for (const word of ['date', 'day', 'week', 'month', 'quarter', 'year', 'season', 'period']) {
     if (new RegExp(`\\b${word}\\b`, 'i').test(question)) terms.push(word);
   }
+  const adjectiveGrains: Array<[RegExp, string]> = [
+    [/\bdaily\b/i, 'day'],
+    [/\bweekly\b/i, 'week'],
+    [/\bmonthly\b/i, 'month'],
+    [/\bquarterly\b/i, 'quarter'],
+    [/\b(?:yearly|annual(?:ly)?)\b/i, 'year'],
+  ];
+  for (const [pattern, grain] of adjectiveGrains) if (pattern.test(question)) terms.push(grain);
   return uniqueStrings(terms).slice(0, 12);
 }
 

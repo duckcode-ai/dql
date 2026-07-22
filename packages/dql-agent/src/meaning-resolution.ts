@@ -6,6 +6,8 @@
  * the host after it validates the selected candidates and route.
  */
 
+import type { KnowledgeLens } from './domain-context.js';
+
 export type AgentEvidenceKind =
   | "certified_block"
   | "semantic_metric"
@@ -22,6 +24,8 @@ export type AgentEvidenceCompatibility = "compatible" | "partial" | "incompatibl
 export interface AgentEvidenceCandidate {
   /** Stable, source-qualified ID. Leaf names are not valid identities. */
   id: string;
+  /** Canonical registry identity; `id` may remain a legacy execution key during shadow rollout. */
+  qualifiedId?: string;
   kind: AgentEvidenceKind;
   trustTier: AgentEvidenceTrustTier;
   name: string;
@@ -51,6 +55,7 @@ export interface AgentEvidenceCandidate {
 export interface AgentRetrievalEvidence {
   snapshotId?: string;
   sourceFingerprint?: string;
+  knowledgeLens?: KnowledgeLens;
   candidates: AgentEvidenceCandidate[];
   parsedIntent?: Partial<MeaningQueryIntent>;
   diagnostics?: {
@@ -185,6 +190,11 @@ export function validateMeaningResolution(
   candidates: AgentEvidenceCandidate[],
 ): { ok: true; resolution: MeaningResolution } | { ok: false; reason: string } {
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const selectedConceptIds = value.selectedConceptIds.length > 0
+    ? value.selectedConceptIds
+    : value.recommendedExecutionId
+      ? [value.recommendedExecutionId]
+      : [];
   const referencedIds = [
     ...value.selectedConceptIds,
     ...(value.recommendedExecutionId ? [value.recommendedExecutionId] : []),
@@ -192,15 +202,15 @@ export function validateMeaningResolution(
   ];
   const invented = referencedIds.find((id) => !byId.has(id));
   if (invented) return { ok: false, reason: `The resolver referenced evidence that was not retrieved: ${invented}` };
-  if (value.confidence !== "low" && value.selectedConceptIds.length === 0) {
+  if (value.confidence !== "low" && selectedConceptIds.length === 0) {
     return { ok: false, reason: "A medium/high-confidence resolution must select at least one retrieved concept." };
   }
-  const selected = value.selectedConceptIds.map((id) => byId.get(id)!);
+  const selected = selectedConceptIds.map((id) => byId.get(id)!);
   if (selected.some((candidate) => candidate.eligible === false || candidate.compatibility === "incompatible")) {
     return { ok: false, reason: "The resolver selected ineligible or incompatible evidence." };
   }
   const rejectedIds = new Set(value.rejectedCandidates.map((candidate) => candidate.id));
-  if (value.selectedConceptIds.some((id) => rejectedIds.has(id))) {
+  if (selectedConceptIds.some((id) => rejectedIds.has(id))) {
     return { ok: false, reason: "The resolver both selected and rejected the same evidence." };
   }
   const executionId = value.recommendedExecutionId ?? value.selectedConceptIds[0];
@@ -222,7 +232,12 @@ export function validateMeaningResolution(
       return { ok: false, reason: "A semantic route requires deterministic measure, grain, and dimension compatibility." };
     }
   }
-  return { ok: true, resolution: value };
+  return {
+    ok: true,
+    resolution: selectedConceptIds === value.selectedConceptIds
+      ? value
+      : { ...value, selectedConceptIds },
+  };
 }
 
 export function routeForEvidenceCandidate(candidate: AgentEvidenceCandidate): MeaningExecutionRoute {

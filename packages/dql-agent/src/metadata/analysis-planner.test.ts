@@ -8,6 +8,24 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('treats a ranking metric after by as the measure, not a phantom dimension', () => {
+    const plan = buildAnalysisQuestionPlan('Who are the top 10 customers by monthly rollover balance amount?');
+
+    expect(plan.dimensionTerms).toEqual(['customer']);
+    expect(plan.timeTerms).toContain('month');
+    expect(plan.requestedShape.dimensions).toEqual(['customer']);
+    expect(plan.requestedShape.requiredOutputs).not.toContain('monthly_rollover_balance_amount');
+  });
+
+  it('treats a relative month as a filter/time grain instead of an output dimension', () => {
+    const filtered = buildAnalysisQuestionPlan('Show actual rollover balance by region for last month.');
+    const grouped = buildAnalysisQuestionPlan('Show actual rollover balance by region and by month.');
+
+    expect(filtered.requestedShape.dimensions).toEqual(['region']);
+    expect(filtered.timeTerms).toEqual(expect.arrayContaining(['last month', 'month']));
+    expect(grouped.requestedShape.dimensions).toEqual(expect.arrayContaining(['region', 'month']));
+  });
+
   it('AGT-005 models entity-relative measures as peer comparisons', () => {
     const plan = buildAnalysisQuestionPlan('Who are the other customers who paid less tax than Melissa?');
 

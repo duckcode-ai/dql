@@ -72,6 +72,14 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.action).toBe("answer");
     expect(decision.category).toBe("data_lookup");
     expect(decision.meaningResolution?.selectedConceptIds).toEqual(["semantic:consumption:rollover_balance_amount"]);
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      mode: 'authoritative',
+      snapshotId: 'snapshot-1',
+      selectedConceptIds: ['semantic:consumption:rollover_balance_amount'],
+      capability: 'semantic_execution',
+      query: { dimensions: [expect.objectContaining({ requested: 'customer', status: 'resolved' })] },
+    });
+    expect(Object.isFrozen(decision.resolvedAnalyticalPlan)).toBe(true);
     expect(decision.retrievalEvidence?.candidateIds).toHaveLength(2);
   });
 
@@ -212,7 +220,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.retrievalEvidence?.candidateIds).toHaveLength(2);
   });
 
-  it("rejects invented resolver IDs and preserves a hard clarification", async () => {
+  it("rejects invented resolver IDs as a stable system block", async () => {
     const candidates = [candidate(), candidate({
       id: "semantic:billing:monthly_rollover_amount",
       name: "Monthly Rollover Amount",
@@ -225,10 +233,10 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     });
     const ask = request("monthly rollover amount");
     const decision = await router.decide(ask);
-    expect(decision.action).toBe("clarify");
-    expect(decision.requiresClarification).toBe(true);
-    expect(decision.clarifyingQuestion).toMatch(/Which meaning/i);
-    expect(answerAnywayRoute(selectRoute(ask, decision), ask, "stakeholder", decision)).toBe("clarify");
+    expect(decision.action).toBe("answer");
+    expect(decision.requiresClarification).toBe(false);
+    expect(decision.meaningResolutionErrorCode).toBe('invalid_evidence_reference');
+    expect(answerAnywayRoute(selectRoute(ask, decision), ask, "stakeholder", decision)).toBe("blocked");
   });
 
   it("keeps a low-confidence business ambiguity out of generated SQL", async () => {
@@ -325,7 +333,10 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       trustTier: "certified",
       name: "top_beverage_customers",
       definition: "Top customers ranked by beverage revenue. One row per customer.",
-      dimensions: ["customer"],
+      dimensions: [
+        "semantic:beverage:dimension:customer",
+        "semantic:beverage:dimension:category",
+      ],
       relevanceScore: 1,
       compatibility: "compatible",
       exactMatch: false,
@@ -345,6 +356,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       kind: "sql_table",
       trustTier: "exploratory",
       name: "dev.products",
+      dimensions: [],
       relevanceScore: 0.88,
       compatibility: "unknown",
     });

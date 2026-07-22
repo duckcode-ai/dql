@@ -161,9 +161,13 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-The OSS release candidate gates pass locally for `1.8.8`. Re-run the published
-package smoke checks after publishing so `latest` is validated against the same
-version as the repo.
+The OSS release candidate correctness gates pass locally for `1.10.0`. Re-run
+the published package smoke checks after publishing so `latest` is validated
+against the same version as the repo. The tracked `PERF-001` scale fixture has
+no route-parity, concept-resolution, certified-execution, or invented-ID
+failures, but several cold-start and warm-context latency budgets remain above
+target. Maintainer approval records this as a disclosed OSS release exception;
+it is not a GA performance claim.
 
 Validated release gates (re-run the browser smoke after the examples
 restructure — bundled examples were removed in favor of the external
@@ -174,6 +178,9 @@ jaffle-shop-duckdb repo):
   Apps dashboard/notebook smoke checks pass in the browser.
 - `dql preview` works for KPI, line chart, and RLS-decorated block examples.
 - `pnpm release:dry-run` completes successfully.
+- The plan-first answer-engine fixture passes 11/11 functional scenarios; the
+  remaining `PERF-001` latency exceptions are documented in the implementation
+  evidence and roadmap.
 - Local `node apps/cli/dist/index.js --help` and
   `node apps/cli/dist/index.js --version` resolve successfully.
 - After publishing, verify `npx @duckcodeailabs/dql-cli@latest --version`

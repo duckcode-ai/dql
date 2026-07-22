@@ -101,6 +101,11 @@ export function buildKGFromManifest(manifest: DQLManifest): {
         sources: [...(block.tableDependencies ?? []), ...(block.rawTableRefs ?? [])],
         sourceSystems: block.sourceSystems,
       }),
+      payload: {
+        qualifiedId: `${block.domain ?? 'global'}::block::${block.name}`,
+        localId: block.name,
+        aliases: [block.name],
+      },
       datalexContract: block.datalexContract,
       businessRules: block.businessRules ?? block.invariants,
       caveats: block.caveats,
@@ -608,6 +613,8 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
   if (!layer) return { nodes, edges };
 
   const semanticMeasures = layer.listMeasures();
+  const semanticDimensions = layer.listDimensions();
+  const semanticModels = layer.listSemanticModels();
   const measuresByName = new Map<string, (typeof semanticMeasures)[number][]>();
   for (const measure of semanticMeasures) {
     for (const key of [measure.name, qualifiedSemanticName(measure.cube, measure.name)]) {
@@ -618,6 +625,27 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
   }
 
   for (const metric of layer.listMetrics()) {
+    const model = semanticModels.find((candidate) => candidate.name === metric.cube);
+    const availableDimensions = semanticDimensions.filter((dimension) => !metric.cube || dimension.cube === metric.cube);
+    // MetricFlow may deduplicate same-named domain dimensions in its flattened
+    // registry. The semantic model retains the authoritative per-model shape,
+    // so use it to recover dimensions/time even when listDimensions() only
+    // exposes another model's copy of the shared concept.
+    const modelDimensionNames = Array.from(new Set([
+      ...(model?.dimensions ?? []),
+      ...(model?.timeDimensions ?? []),
+      ...availableDimensions.map((dimension) => dimension.name),
+    ]));
+    const qualifiedDimensions = modelDimensionNames.map((name) => {
+      const dimension = availableDimensions.find((candidate) => candidate.name === name);
+      return stringValue(semanticIdentityPayload('dimension', dimension ?? {
+        name,
+        domain: metric.domain ?? model?.domain,
+        cube: metric.cube,
+      }).qualifiedId) ?? qualifiedSemanticName(metric.cube, name);
+    });
+    const hasTimeDimension = (model?.timeDimensions.length ?? 0) > 0
+      || availableDimensions.some((dimension) => dimension.isTimeDimension || dimension.type === 'date');
     const backingCandidates = semanticMetricBackingMeasureNames(metric)
       .flatMap((name) => measuresByName.get(name) ?? [])
       .filter((measure, index, values) => values.indexOf(measure) === index);
@@ -656,6 +684,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         nonAdditiveDimensions.length > 0 ? 'non-additive: semantic runtime required' : '',
       ].filter(Boolean).join('\n') || undefined,
       payload: {
+        ...semanticIdentityPayload('metric', metric),
         metricType: metric.metricType,
         aggregation: metric.aggregation,
         table: metric.table,
@@ -664,6 +693,9 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         backingMeasureNames: backingMeasures.map((measure) => measure.name),
         nonAdditiveMeasures,
         nonAdditiveDimensions,
+        dimensions: qualifiedDimensions,
+        entities: model?.entities ?? [],
+        timeGrains: hasTimeDimension ? ['day', 'week', 'month', 'quarter', 'year'] : [],
       },
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(metric.status),
@@ -675,7 +707,6 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
     if (metric.cube) edges.push({ src: nodeId, dst: `semantic_model:${metric.cube}`, kind: 'depends_on' });
   }
 
-  const semanticDimensions = layer.listDimensions();
   // PERF-001: dbt fallback semantics may expose every physical column as a
   // synthetic dimension. At enterprise scale the model nodes already retain
   // their bounded column lists; duplicating 300k dimensions into KG + FTS is
@@ -699,6 +730,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         dimension.table ? `table: ${dimension.table}` : '',
         dimension.sql ? `sql: ${dimension.sql}` : '',
       ].filter(Boolean).join('\n') || undefined,
+      payload: semanticIdentityPayload('dimension', dimension),
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(dimension.status),
       provenance: dimension.source?.provider === 'dbt'
@@ -730,6 +762,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         measure.nonAdditiveDimension ? `non-additive dimension: ${JSON.stringify(measure.nonAdditiveDimension)}` : '',
       ].filter(Boolean).join('\n') || undefined,
       payload: {
+        ...semanticIdentityPayload('measure', measure),
         aggregation: measure.agg,
         table: measure.table,
         expression: measure.expr,
@@ -764,6 +797,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         entity.table ? `table: ${entity.table}` : '',
         entity.expr ? `expr: ${entity.expr}` : '',
       ].filter(Boolean).join('\n') || undefined,
+      payload: semanticIdentityPayload('entity', entity),
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(semanticObjectStatus(entity)),
       provenance: entity.source?.provider === 'dbt'
@@ -795,6 +829,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         model.dimensions.length ? `dimensions: ${model.dimensions.join(', ')}` : '',
         model.timeDimensions.length ? `time_dimensions: ${model.timeDimensions.join(', ')}` : '',
       ].filter(Boolean).join('\n') || undefined,
+      payload: semanticIdentityPayload('model', model),
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(semanticObjectStatus(model)),
       provenance: model.source?.provider === 'dbt'
@@ -824,6 +859,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         query.timeDimension ? `time_dimension: ${query.timeDimension}` : '',
         query.granularity ? `granularity: ${query.granularity}` : '',
       ].filter(Boolean).join('\n') || undefined,
+      payload: semanticIdentityPayload('saved_query', query),
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(semanticObjectStatus(query)),
       provenance: query.source?.provider === 'dbt'
@@ -859,6 +895,62 @@ function semanticMetricBackingMeasureNames(metric: {
 
 function qualifiedSemanticName(cube: string | undefined, name: string): string {
   return cube ? `${cube}.${name}` : name;
+}
+
+/**
+ * Canonical semantic registry identity carried into the immutable search
+ * snapshot. A source-authored `meta.concept_id` wins; otherwise DQL derives a
+ * deterministic domain-qualified ID while preserving native dbt IDs as exact
+ * aliases. This is additive: legacy object keys remain stable during rollout.
+ *
+ * Acceptance: ID-001, CTX-005, AGT-013.
+ */
+function semanticIdentityPayload(
+  kind: 'metric' | 'dimension' | 'measure' | 'entity' | 'model' | 'saved_query',
+  item: {
+    name: string;
+    label?: string;
+    domain?: string;
+    cube?: string;
+    source?: { objectId?: string; extra?: Record<string, unknown> };
+  },
+): Record<string, unknown> {
+  const raw = recordValue(item.source?.extra?.raw);
+  const meta = recordValue(raw.meta);
+  const dqlMeta = recordValue(meta.dql);
+  const authoredConceptId = stringValue(meta.concept_id)
+    ?? stringValue(meta.conceptId)
+    ?? stringValue(dqlMeta.concept_id)
+    ?? stringValue(dqlMeta.conceptId);
+  const domain = normalizeSemanticIdentityPart(item.domain ?? item.cube ?? 'uncategorized');
+  const localName = normalizeSemanticIdentityPart(item.name);
+  const qualifiedId = authoredConceptId
+    ?? (kind === 'metric'
+      ? `semantic:${domain}:${localName}`
+      : `semantic:${domain}:${kind}:${localName}`);
+  const sourceNativeId = stringValue(item.source?.objectId);
+  const aliases = Array.from(new Set([
+    item.name,
+    item.label,
+    item.cube ? qualifiedSemanticName(item.cube, item.name) : undefined,
+    sourceNativeId,
+  ].filter((value): value is string => Boolean(value?.trim()))));
+  return {
+    qualifiedId,
+    localId: item.name,
+    sourceNativeId,
+    aliases,
+  };
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function normalizeSemanticIdentityPart(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
 }
 
 function semanticSourcePath(extra: Record<string, unknown> | undefined): string | undefined {

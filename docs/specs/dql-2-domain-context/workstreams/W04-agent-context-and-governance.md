@@ -8,7 +8,8 @@ tools, MCP, and final SQL safety through one snapshot-scoped context path.
 Acceptance IDs: `REL-001`, `REL-002`, `CONTRACT-001`, `SKILL-001`, `SKILL-002`,
 `CTX-001`, `CTX-002`, `CTX-004`, `AGT-001`, `AGT-002`, `AGT-003`.
 Also owns `CTX-005`, `AGT-009`, `AGT-010`, `API-003`, `PERF-002`, and
-`SEC-003`, `CTX-006`, `REL-003`, and `SKILL-003` for the Ask path.
+`SEC-003`, `CTX-006`, `REL-003`, `SKILL-003`, `AGT-013` through `AGT-016`,
+and `API-006` for the Ask/Research path.
 Dependencies: verified W01/W02; W03 discovery contracts available.
 
 ## Required implementation
@@ -22,6 +23,8 @@ Dependencies: verified W01/W02; W03 discovery contracts available.
   in parallel; preserve relevance, trust, and compatibility as separate fields.
 - Build bounded evidence cards and run one identifier-bound AI meaning resolver
   for natural-language ambiguity before deterministic compatibility checks.
+- Bind the validated meaning result into one immutable `ResolvedAnalyticalPlan`;
+  downstream routes and compilers may not rematch or substitute its members.
 - Enforce cascade order block → MetricFlow → governed SQL → clarify/refuse.
 - Replace heuristic candidate join paths with certified v3 relationship paths;
   retain final independent SQL validation.
@@ -32,6 +35,8 @@ Dependencies: verified W01/W02; W03 discovery contracts available.
 - Select structured skills from that immutable snapshot, hydrate only bounded
   prompt guidance, and persist the exact capsule/skill hashes in a per-turn
   `KnowledgeLens`. Domain affinity alone must not select an unrelated skill.
+- Compile governed SQL from constrained relational operators over qualified IDs
+  and make Research consume typed deltas to the same plan and receipts.
 
 ## Suggested ownership
 

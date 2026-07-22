@@ -16,6 +16,7 @@ import type { MetadataAgentIntent } from './metadata/catalog.js';
 import { matchSemanticMetric } from './metadata/metric-match.js';
 import type { KGNode } from './kg/types.js';
 import type { PlanBlock } from './app-planner.js';
+import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 
 /** One ReAct step: a thought, the asset-bound action, and what observing it tells us. */
 export interface ResearchStep {
@@ -47,7 +48,26 @@ export interface ResearchPlan {
   sources: string[];
   /** True when the question is answerable directly (single step, no research needed). */
   done: boolean;
+  /** Root analytical contract reused by every research branch. */
+  rootPlanId?: string;
+  budget: ResearchBudget;
 }
+
+export interface ResearchBudget {
+  plannerCalls: 1;
+  sqlExecutions: 6;
+  repairs: 1;
+  narratorCalls: 1;
+  wallClockMs: 120_000;
+}
+
+export const RESEARCH_BUDGET: ResearchBudget = {
+  plannerCalls: 1,
+  sqlExecutions: 6,
+  repairs: 1,
+  narratorCalls: 1,
+  wallClockMs: 120_000,
+};
 
 const TIME_DIM_RE = /(_at$|_date$|_time$|_ts$|^date$|^month$|^week$|^day$|ordered_at|created)/i;
 
@@ -107,6 +127,8 @@ export async function planResearch(input: {
   history?: Array<{ role: 'user' | 'assistant'; text: string }>;
   /** The user explicitly asked to research/dig deeper — don't collapse to a single-step answer. */
   forceInvestigate?: boolean;
+  /** Authoritative root plan. When present, research never re-matches meaning. */
+  rootPlan?: ResolvedAnalyticalPlan;
 }): Promise<ResearchPlan> {
   // Prefer a metric that already has certified blocks (so the research plan can use
   // its time/breakdown dimensions), falling back to the best overall match.
@@ -119,13 +141,29 @@ export async function planResearch(input: {
   const backedMetrics = input.metrics.filter(
     (m) => backedNames.has(m.name.toLowerCase()) || backedNames.has(m.name.toLowerCase().split('.').pop() ?? ''),
   );
-  const match =
-    (backedMetrics.length > 0 ? await matchSemanticMetric(input.question, backedMetrics).catch(() => null) : null) ??
-    (await matchSemanticMetric(input.question, input.metrics).catch(() => null));
-  const metricName = match?.metric.name;
+  const rootMetric = input.rootPlan?.executionId
+    ? input.metrics.find((metric) => nodeIdentities(metric).includes(input.rootPlan!.executionId!))
+    : undefined;
+  const match = input.rootPlan
+    ? null
+    : (backedMetrics.length > 0 ? await matchSemanticMetric(input.question, backedMetrics).catch(() => null) : null) ??
+      (await matchSemanticMetric(input.question, input.metrics).catch(() => null));
+  const metricName = rootMetric?.name ?? match?.metric.name;
   const metricBlocks = blocksForMetric(input.blocks, metricName);
 
-  const decision = decideAgentAction({
+  const decision = input.rootPlan
+    ? {
+        action: input.rootPlan.capability === 'blocked'
+          ? 'clarify' as const
+          : (input.forceInvestigate || input.rootPlan.questionType === 'diagnosis' || input.rootPlan.questionType === 'research')
+            ? 'investigate' as const
+            : 'answer' as const,
+        confidence: input.rootPlan.confidence === 'high' ? 0.9 : input.rootPlan.confidence === 'medium' ? 0.72 : 0.45,
+        reason: `Research reuses resolved plan ${input.rootPlan.planId}.`,
+        followsUp: Boolean(input.isFollowUp),
+        ...(input.rootPlan.clarification ? { clarifyingQuestion: input.rootPlan.clarification } : {}),
+      }
+    : decideAgentAction({
     question: input.question,
     intent: input.intent ?? 'definition_lookup',
     signals: {
@@ -137,7 +175,7 @@ export async function planResearch(input: {
     },
     isFollowUp: input.isFollowUp,
     history: input.history,
-  });
+      });
 
   // When the user explicitly forced research, don't collapse to the single-step "answer"
   // path — investigate. A SOFT "nothing matched cleanly" clarify also becomes an
@@ -152,7 +190,10 @@ export async function planResearch(input: {
       : decision.action;
 
   const sources = new Set<string>();
-  if (metricName) sources.add(metricName);
+  if (input.rootPlan) {
+    for (const id of input.rootPlan.selectedConceptIds) sources.add(id);
+    if (input.rootPlan.executionId) sources.add(input.rootPlan.executionId);
+  } else if (metricName) sources.add(metricName);
   for (const b of metricBlocks) sources.add(b.name);
 
   // ── compose_app: hand off to the app planner (P1). ───────────────────────────
@@ -168,6 +209,8 @@ export async function planResearch(input: {
       }],
       sources: Array.from(sources),
       done: false,
+      rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,
+      budget: RESEARCH_BUDGET,
     };
   }
 
@@ -182,6 +225,8 @@ export async function planResearch(input: {
       followUp,
       sources: Array.from(sources),
       done: false,
+      rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,
+      budget: RESEARCH_BUDGET,
     };
   }
 
@@ -189,14 +234,17 @@ export async function planResearch(input: {
   if (action === 'investigate') {
     const steps: ResearchStep[] = [];
     const label = metricName ? humanize(metricName) : humanize(input.question);
+    const metricTarget = input.rootPlan?.executionId ?? metricName;
     if (metricName) {
       steps.push({
         thought: `Establish the baseline for ${label}.`,
-        action: { kind: 'lookup_metric', target: metricName },
+        action: { kind: 'lookup_metric', target: metricTarget! },
         expectation: `The current ${label} value to reason from.`,
       });
     }
-    const timeDim = timeDimensionOf(metricBlocks);
+    const timeDim = input.rootPlan?.query.dimensions.find((binding) => /date|time|month|week|year/i.test(binding.requested))?.qualifiedId
+      ?? (input.rootPlan?.query.timeGrain || input.rootPlan?.query.timeRange ? 'resolved-plan-time' : undefined)
+      ?? timeDimensionOf(metricBlocks);
     if (timeDim) {
       steps.push({
         thought: `See how ${label} moved over time to locate the change.`,
@@ -204,8 +252,12 @@ export async function planResearch(input: {
         expectation: `When ${label} shifted, and by how much.`,
       });
     }
-    const dims = (requestedDimensions(input.question).filter((d) => !TIME_DIM_RE.test(d))
-      .filter((d) => categoricalDimensionsOf(metricBlocks).includes(d)));
+    const dims = input.rootPlan
+      ? input.rootPlan.query.dimensions
+          .filter((binding) => !TIME_DIM_RE.test(binding.requested))
+          .map((binding) => binding.qualifiedId ?? binding.requested)
+      : requestedDimensions(input.question).filter((d) => !TIME_DIM_RE.test(d))
+          .filter((d) => categoricalDimensionsOf(metricBlocks).includes(d));
     const breakdownDim = dims[0] ?? categoricalDimensionsOf(metricBlocks)[0];
     if (breakdownDim) {
       steps.push({
@@ -216,7 +268,7 @@ export async function planResearch(input: {
     } else if (metricName) {
       steps.push({
         thought: `No breakdown dimension is certified yet — check lineage for drivers.`,
-        action: { kind: 'check_lineage', target: metricName },
+        action: { kind: 'check_lineage', target: metricTarget! },
         expectation: `Upstream models/metrics that feed ${label}.`,
       });
     }
@@ -227,6 +279,8 @@ export async function planResearch(input: {
       steps,
       sources: Array.from(sources),
       done: false,
+      rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,
+      budget: RESEARCH_BUDGET,
     };
   }
 
@@ -239,7 +293,7 @@ export async function planResearch(input: {
       }
     : {
         thought: metricName ? `The governed metric answers this directly.` : `Answer from the catalog.`,
-        action: { kind: 'lookup_metric', target: metricName ?? humanize(input.question) },
+        action: { kind: 'lookup_metric', target: input.rootPlan?.executionId ?? metricName ?? humanize(input.question) },
         expectation: metricName ? `The governed ${humanize(metricName)} value.` : `A grounded answer.`,
       };
   return {
@@ -249,7 +303,19 @@ export async function planResearch(input: {
     steps: [answerStep],
     sources: Array.from(sources),
     done: true,
+    rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,
+    budget: RESEARCH_BUDGET,
   };
+}
+
+function nodeIdentities(node: KGNode): string[] {
+  const payload = node.payload ?? {};
+  return [
+    node.nodeId,
+    typeof payload.qualifiedId === 'string' ? payload.qualifiedId : undefined,
+    typeof payload.sourceNativeId === 'string' ? payload.sourceNativeId : undefined,
+    ...(Array.isArray(payload.aliases) ? payload.aliases.filter((value): value is string => typeof value === 'string') : []),
+  ].filter((value): value is string => Boolean(value));
 }
 
 /**

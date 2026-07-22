@@ -298,6 +298,8 @@ export interface SetupLaunchResponse {
   requestId: string;
   version: string;
   acknowledgedVersion: string | null;
+  dbtAppliedVersion: string | null;
+  requiresDbtReapply: boolean;
   shouldOpen: boolean;
   reason: 'first_install' | 'version_upgrade' | null;
 }
@@ -307,6 +309,7 @@ export type DbtOnboardingErrorCode =
   | 'DBT_MANIFEST_MISSING'
   | 'DBT_ARTIFACT_INVALID'
   | 'DBT_PARSE_FAILED'
+  | 'DBT_REAPPLY_REQUIRED'
   | 'SOURCE_CHANGED'
   | 'SNAPSHOT_BUILD_FAILED'
   | 'DOMAIN_COLLISION'

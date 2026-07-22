@@ -23,7 +23,7 @@ export interface EmbeddingProvider {
 }
 
 /** Cosine similarity in [-1, 1]; 0 for degenerate vectors. */
-export function cosineSimilarity(a: number[], b: number[]): number {
+export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length === 0 || a.length !== b.length) return 0;
   let dot = 0;
   let na = 0;

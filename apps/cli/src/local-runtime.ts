@@ -141,6 +141,7 @@ import {
   buildAnalysisQuestionPlan,
   aggregationIntegrityIssuesForSql,
   buildLocalContextPack,
+  applyContextPackCompatibility,
   toAgentRetrievalEvidence,
   defaultConversationPath,
   defaultMemoryPath,
@@ -1829,6 +1830,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(routeDecision?.meaningResolution?.recommendedExecutionId
           ? { preferredExecutionId: routeDecision.meaningResolution.recommendedExecutionId }
           : {}),
+        ...(routeDecision?.resolvedAnalyticalPlan
+          ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
+          : {}),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(request.question, sql, artifact),
         executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(artifact, request.question),
@@ -2538,6 +2542,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         history: request.history,
         // When the user explicitly picked research, investigate — don't collapse to one step.
         forceInvestigate: request.requestedMode === 'research',
+        rootPlan: routeDecision?.resolvedAnalyticalPlan,
       });
       // Direct governed answer ("the metric answers this directly"): don't wrap it in
       // a review-required research dossier — run the query through the answer loop and
@@ -3135,55 +3140,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const meaningEvidence = pack.retrievalDiagnostics.meaningEvidence;
     if (!meaningEvidence) {
       return {
-        snapshotId: pack.id,
+        snapshotId: pack.knowledgeLens.snapshotId,
         sourceFingerprint: pack.freshness.fingerprint ?? undefined,
+        knowledgeLens: pack.knowledgeLens,
         candidates: [],
         diagnostics: { durationMs: Date.now() - startedAt },
       };
     }
     const evidence = toAgentRetrievalEvidence(meaningEvidence, pack.questionPlan, {
-      snapshotId: pack.id,
+      snapshotId: pack.knowledgeLens.snapshotId,
       sourceFingerprint: pack.freshness.fingerprint ?? undefined,
+      knowledgeLens: pack.knowledgeLens,
       durationMs: Date.now() - startedAt,
       truncated: pack.retrievalDiagnostics.topRejected.length > 0,
     });
-    const certifiedFits = new Map(pack.retrievalDiagnostics.certifiedCandidateFits.map((fit) => [fit.objectKey, fit]));
-    const semanticEvidence = new Set(pack.routeDecision.selectedEvidence
-      .filter((item) => item.role === 'semantic_metric')
-      .map((item) => item.objectKey));
-    return {
-      ...evidence,
-      candidates: evidence.candidates.map((candidate): AgentEvidenceCandidate => {
-        if (candidate.kind === 'certified_block') {
-          const fit = certifiedFits.get(candidate.id);
-          return {
-            ...candidate,
-            compatibility: fit?.action === 'certified_answer'
-              ? 'compatible'
-              : fit?.action === 'rejected_for_fit'
-                ? 'incompatible'
-                : 'partial',
-          };
-        }
-        if ((candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
-          && (semanticEvidence.has(candidate.id) || request.selectedEvidenceId === candidate.id)
-          && (request.selectedEvidenceId === candidate.id
-            || (pack.routeDecision.route !== 'clarify' && pack.routeDecision.route !== 'conflict'))) {
-          const requestedDimensions = pack.questionPlan.requestedShape.dimensions.map((dimension) => dimension.toLowerCase());
-          const availableDimensions = (candidate.dimensions ?? []).map((dimension) => dimension.toLowerCase());
-          const dimensionsFit = requestedDimensions.length === 0 || requestedDimensions.every((requested) =>
-            availableDimensions.some((available) => available === requested || available.endsWith(`.${requested}`))
-          );
-          const requestedTimeGrain = pack.questionPlan.timeTerms[0]?.toLowerCase();
-          const availableTimeGrains = (candidate.timeGrains ?? []).map((grain) => grain.toLowerCase());
-          const timeGrainFits = !requestedTimeGrain
-            || availableTimeGrains.includes(requestedTimeGrain);
-          return { ...candidate, compatibility: dimensionsFit && timeGrainFits ? 'compatible' : 'partial' };
-        }
-        if (candidate.trustTier === 'governed_sql') return { ...candidate, compatibility: 'partial' };
-        return candidate;
-      }),
-    };
+    return applyContextPackCompatibility(evidence, pack, request.selectedEvidenceId);
   };
 
   const buildRankedAgentRunCatalogContext = async (request: AgentRunRequest): Promise<string> => {
@@ -4998,13 +4969,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/onboarding/launch') {
       const requestId = apiRequestId('onboarding-launch');
-      const acknowledgedVersion = readUserPrefs(userPrefsPath).setup?.acknowledgedVersion ?? null;
+      const prefs = readUserPrefs(userPrefsPath);
+      const acknowledgedVersion = prefs.setup?.acknowledgedVersion ?? null;
+      const dbtAppliedVersion = prefs.setup?.dbtAppliedVersion ?? null;
       const shouldOpen = acknowledgedVersion !== runtimeVersion;
+      const configuredDbtSource = projectConfig.dbt?.repoUrl ?? projectConfig.dbt?.projectDir;
+      const configuredDbtRoot = findDbtProjectPath(projectRoot, projectConfig);
+      const dbtConfigured = existsSync(join(configuredDbtRoot, 'dbt_project.yml'))
+        || Boolean(configuredDbtSource && !/\{\{[^}]+\}\}/.test(configuredDbtSource));
+      const requiresDbtReapply = Boolean(
+        shouldOpen
+        && acknowledgedVersion
+        && dbtConfigured
+        && dbtAppliedVersion !== runtimeVersion,
+      );
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
         requestId,
         version: runtimeVersion,
         acknowledgedVersion,
+        dbtAppliedVersion,
+        requiresDbtReapply,
         shouldOpen,
         reason: shouldOpen ? (acknowledgedVersion ? 'version_upgrade' : 'first_install') : null,
       }));
@@ -5014,7 +4999,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/onboarding/acknowledge') {
       const requestId = apiRequestId('onboarding-acknowledge');
       const prefs = readUserPrefs(userPrefsPath);
+      const configuredDbtSource = projectConfig.dbt?.repoUrl ?? projectConfig.dbt?.projectDir;
+      const configuredDbtRoot = findDbtProjectPath(projectRoot, projectConfig);
+      const dbtConfigured = existsSync(join(configuredDbtRoot, 'dbt_project.yml'))
+        || Boolean(configuredDbtSource && !/\{\{[^}]+\}\}/.test(configuredDbtSource));
+      const isVersionUpgrade = Boolean(
+        prefs.setup?.acknowledgedVersion
+        && prefs.setup.acknowledgedVersion !== runtimeVersion,
+      );
+      if (isVersionUpgrade && dbtConfigured && prefs.setup?.dbtAppliedVersion !== runtimeVersion) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          code: 'DBT_REAPPLY_REQUIRED',
+          message: `Reapply the saved dbt project with DQL ${runtimeVersion} before completing the update review.`,
+          nextActions: ['Open Project & dbt, preview the prefilled project, then choose Reapply project.'],
+        })));
+        return;
+      }
       prefs.setup = {
+        ...prefs.setup,
         acknowledgedVersion: runtimeVersion,
         acknowledgedAt: new Date().toISOString(),
       };
@@ -5197,6 +5201,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           await reloadSemanticLayer();
           throw Object.assign(new Error(`dbt-first configuration did not compile and was rolled back: ${error instanceof Error ? error.message : String(error)}`), { code: 'SNAPSHOT_BUILD_FAILED' });
         }
+        // An OSS version upgrade is acknowledged only after the user explicitly
+        // previews and reapplies the saved dbt project. Record that successful
+        // user-controlled compile without replacing their other preferences.
+        const prefs = readUserPrefs(userPrefsPath);
+        prefs.setup = {
+          ...prefs.setup,
+          dbtAppliedVersion: runtimeVersion,
+          dbtAppliedAt: new Date().toISOString(),
+        };
+        writeUserPrefs(userPrefsPath, prefs);
         const preparation = startDbtPreparationJob({
           kind: 'dbt_prepare',
           snapshotId,
@@ -16125,8 +16139,10 @@ interface UserPrefs {
   favorites: string[];
   recentlyUsed: string[];
   setup?: {
-    acknowledgedVersion: string;
+    acknowledgedVersion?: string;
     acknowledgedAt?: string;
+    dbtAppliedVersion?: string;
+    dbtAppliedAt?: string;
   };
 }
 
@@ -16139,15 +16155,21 @@ function readUserPrefs(userPrefsPath: string): UserPrefs {
     const acknowledgedVersion = typeof raw.setup?.acknowledgedVersion === 'string'
       ? raw.setup.acknowledgedVersion.trim()
       : '';
+    const dbtAppliedVersion = typeof raw.setup?.dbtAppliedVersion === 'string'
+      ? raw.setup.dbtAppliedVersion.trim()
+      : '';
+    const setup = acknowledgedVersion || dbtAppliedVersion
+      ? {
+          ...(acknowledgedVersion ? { acknowledgedVersion } : {}),
+          ...(typeof raw.setup?.acknowledgedAt === 'string' ? { acknowledgedAt: raw.setup.acknowledgedAt } : {}),
+          ...(dbtAppliedVersion ? { dbtAppliedVersion } : {}),
+          ...(typeof raw.setup?.dbtAppliedAt === 'string' ? { dbtAppliedAt: raw.setup.dbtAppliedAt } : {}),
+        }
+      : undefined;
     return {
       favorites: Array.isArray(raw.favorites) ? raw.favorites.map(String) : [],
       recentlyUsed: Array.isArray(raw.recentlyUsed) ? raw.recentlyUsed.map(String) : [],
-      ...(acknowledgedVersion ? {
-        setup: {
-          acknowledgedVersion,
-          ...(typeof raw.setup?.acknowledgedAt === 'string' ? { acknowledgedAt: raw.setup.acknowledgedAt } : {}),
-        },
-      } : {}),
+      ...(setup ? { setup } : {}),
     };
   } catch {
     return { favorites: [], recentlyUsed: [] };

@@ -282,7 +282,7 @@ type: string
     expect(report.cache.contextPackObjects).toBeGreaterThan(0);
     expect(report.retrieval.topRejectedEvidence.length).toBeGreaterThan(0);
     expect(report.retrieval.topRejectedEvidence[0]).toEqual(expect.objectContaining({
-      objectType: 'dql_block',
+      objectKey: expect.stringContaining('Enterprise Metadata Coverage'),
       reason: expect.stringContaining('Outside balanced context window'),
     }));
   });

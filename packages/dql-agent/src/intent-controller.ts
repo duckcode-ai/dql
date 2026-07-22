@@ -17,6 +17,7 @@
 
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 import type { MeaningResolution } from './meaning-resolution.js';
+import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse';
@@ -88,6 +89,10 @@ export interface IntentDecision {
    * IDs as a query specification, but must still validate/authorize execution.
    */
   meaningResolution?: MeaningResolution;
+  /** R3 shadow plan; R4 promotes this exact fingerprint to execution authority. */
+  resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Stable system failure from qualified meaning validation; never a user ambiguity. */
+  meaningResolutionErrorCode?: 'invalid_evidence_reference';
   /** Redacted retrieval trace; deliberately excludes definitions and raw values. */
   retrievalEvidence?: {
     snapshotId?: string;

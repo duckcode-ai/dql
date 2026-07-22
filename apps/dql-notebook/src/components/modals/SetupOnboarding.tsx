@@ -45,6 +45,20 @@ export function SetupOnboarding({
   const [aiProvider, setAiProvider] = useState<ProviderSettings | null>(null);
   const [aiSkipped, setAiSkipped] = useState(false);
   const [acknowledging, setAcknowledging] = useState(false);
+  const [upgradeReapplied, setUpgradeReapplied] = useState(!launch?.requiresDbtReapply);
+  const [acknowledgeError, setAcknowledgeError] = useState<string | null>(null);
+
+  const requiresUpgradeReapply = Boolean(
+    launch?.reason === 'version_upgrade'
+    && launch.requiresDbtReapply
+    && !upgradeReapplied,
+  );
+
+  useEffect(() => {
+    setUpgradeReapplied(!launch?.requiresDbtReapply);
+    setAcknowledgeError(null);
+    if (launch?.requiresDbtReapply) setStep(1);
+  }, [launch?.requiresDbtReapply, launch?.version]);
 
   useEffect(() => {
     let alive = true;
@@ -78,31 +92,37 @@ export function SetupOnboarding({
     return () => { alive = false; };
   }, []);
 
-  const acknowledge = async () => {
+  const acknowledge = async (): Promise<boolean> => {
     setAcknowledging(true);
+    setAcknowledgeError(null);
     try {
       await api.acknowledgeSetupLaunch();
-    } catch {
-      // Closing remains available if local preference persistence fails; the
-      // next launch will offer the review again instead of recording a lie.
+      onAcknowledged?.();
+      return true;
+    } catch (error) {
+      setAcknowledgeError(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setAcknowledging(false);
-      onAcknowledged?.();
     }
   };
   const close = () => {
-    if (acknowledging) return;
-    void acknowledge().finally(() => dispatch({ type: 'CLOSE_SETUP' }));
+    if (acknowledging || requiresUpgradeReapply) return;
+    void acknowledge().then((acknowledged) => {
+      if (acknowledged) dispatch({ type: 'CLOSE_SETUP' });
+    });
   };
   const finishTo = (target: SetupTarget) => {
-    if (acknowledging) return;
-    void acknowledge().finally(() => {
+    if (acknowledging || requiresUpgradeReapply) return;
+    void acknowledge().then((acknowledged) => {
+      if (!acknowledged) return;
       dispatch({ type: 'SET_MAIN_VIEW', view: target });
       if (target === 'notebook') dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' });
       dispatch({ type: 'CLOSE_SETUP' });
     });
   };
   const onProjectConfigured = (project: DbtProjectConfigured) => {
+    setUpgradeReapplied(true);
     setProjectState(project.readiness === 'ready' ? 'passed' : 'configured');
     setProjectDetail(project.readinessDetail || `${project.name} · ${project.summary}`);
   };
@@ -114,13 +134,15 @@ export function SetupOnboarding({
 
   const hint = useMemo(() => {
     if (loading) return 'Loading existing project-local configuration…';
-    if (step === 1) return projectState === 'missing'
+    if (step === 1) return requiresUpgradeReapply
+      ? `Required for DQL ${launch?.version}: Preview and Reapply the prefilled dbt project.`
+      : projectState === 'missing'
       ? 'Preview before applying; existing dbt settings stay untouched.'
       : `${projectState === 'passed' ? 'Ready' : 'Configured'} · ${projectDetail}`;
     if (step === 2) return databaseState === 'passed' ? `Test passed · ${databaseDetail}` : databaseState === 'configured' ? databaseDetail : 'A failed test rolls back to the previous connection.';
     if (step === 3) return aiSkipped ? 'AI skipped · limited-AI mode remains available.' : aiState === 'missing' ? 'Optional · skip for now or configure a provider.' : `${aiState === 'passed' ? 'Test passed' : 'Configured'} · ${providerSummary(aiProvider)}`;
     return 'Setup complete';
-  }, [aiProvider, aiSkipped, aiState, databaseDetail, databaseState, loading, projectDetail, projectState, step]);
+  }, [aiProvider, aiSkipped, aiState, databaseDetail, databaseState, launch?.version, loading, projectDetail, projectState, requiresUpgradeReapply, step]);
 
   const supportingText = t.textSecondary;
   const primaryButton: React.CSSProperties = {
@@ -139,7 +161,9 @@ export function SetupOnboarding({
       ? `Welcome to DQL ${launch.version}`
       : 'Guided Setup';
   const launchNotice = launch?.reason === 'version_upgrade'
-    ? `DQL was updated${launch.acknowledgedVersion ? ` from ${launch.acknowledgedVersion}` : ''} to ${launch.version}. Review the saved project, database, and optional AI connections. Nothing is replaced unless its preview, test, or apply succeeds.`
+    ? requiresUpgradeReapply
+      ? `DQL was updated${launch.acknowledgedVersion ? ` from ${launch.acknowledgedVersion}` : ''} to ${launch.version}. Reapply the prefilled dbt project to rebuild its OSS governed snapshot with this version. Saved paths and credentials remain unchanged until Apply succeeds.`
+      : `DQL was updated${launch.acknowledgedVersion ? ` from ${launch.acknowledgedVersion}` : ''} to ${launch.version}. The dbt project was reapplied with this version; review the remaining saved connections before finishing.`
     : launch?.reason === 'first_install'
       ? `DQL ${launch.version} is installed. Connect the project and database before entering the workspace; AI remains optional.`
       : null;
@@ -169,7 +193,7 @@ export function SetupOnboarding({
           ) : null}
           {step === 1 ? (
             <SetupSection eyebrow="Step 1 of 4" title="Connect your dbt project" description="Preview a local project or Git repository, then apply it only after the manifest is valid." t={t}>
-              <DbtProjectEditor compact onConfigured={onProjectConfigured} />
+              <DbtProjectEditor compact reapplyRequired={requiresUpgradeReapply} onConfigured={onProjectConfigured} />
             </SetupSection>
           ) : null}
 
@@ -216,17 +240,20 @@ export function SetupOnboarding({
         {step > 1 ? <button type="button" onClick={() => setStep((current) => Math.max(1, current - 1))} style={secondaryButton}><ArrowLeft size={13} /> Back</button> : null}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: t.textMuted, maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{hint}</span>
-        <button type="button" disabled={acknowledging} onClick={close} style={{ ...secondaryButton, opacity: acknowledging ? 0.65 : 1 }}>
+        {acknowledgeError ? <span role="alert" style={{ fontSize: 11, color: 'var(--status-error)', maxWidth: 320 }}>{acknowledgeError}</span> : null}
+        <button type="button" disabled={acknowledging || requiresUpgradeReapply} onClick={close} style={{ ...secondaryButton, opacity: acknowledging || requiresUpgradeReapply ? 0.5 : 1, cursor: acknowledging || requiresUpgradeReapply ? 'not-allowed' : 'pointer' }}>
           {acknowledging
             ? 'Saving review…'
+            : requiresUpgradeReapply
+              ? 'Reapply required'
             : launch?.reason === 'version_upgrade'
-              ? 'Continue without changes'
+              ? 'Close update review'
               : projectState === 'missing' && databaseState === 'missing'
                 ? 'Skip setup'
                 : 'Close setup'}
         </button>
         {step < 4 ? (
-          <button type="button" onClick={() => setStep((current) => Math.min(4, current + 1))} style={primaryButton}>
+          <button type="button" disabled={step === 1 && requiresUpgradeReapply} onClick={() => setStep((current) => Math.min(4, current + 1))} style={{ ...primaryButton, opacity: step === 1 && requiresUpgradeReapply ? 0.5 : 1, cursor: step === 1 && requiresUpgradeReapply ? 'not-allowed' : 'pointer' }}>
             {step === 1 ? 'Continue to database' : step === 2 ? 'Continue to optional AI' : 'Continue to finish'} <ArrowRight size={13} />
           </button>
         ) : (

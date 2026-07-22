@@ -40,9 +40,11 @@ const RUNTIME_LABEL: Record<string, string> = {
 
 export function DbtProjectEditor({
   compact = false,
+  reapplyRequired = false,
   onConfigured,
 }: {
   compact?: boolean;
+  reapplyRequired?: boolean;
   onConfigured?: (project: DbtProjectConfigured) => void;
 }) {
   const { state, dispatch } = useNotebook();
@@ -320,14 +322,18 @@ export function DbtProjectEditor({
   const metricFlowFailed = metricFlowJob?.state === 'failed';
   const preparing = preparation?.status === 'queued' || preparation?.status === 'running';
   const preparationFailed = preparation?.status === 'failed' || preparation?.status === 'cancelled';
-  const projectStatusTitle = preparationFailed
+  const projectStatusTitle = reapplyRequired
+    ? 'Reapply required after DQL update'
+    : preparationFailed
     ? 'dbt project needs attention'
     : preparing
       ? 'Preparing governed search'
       : configured
         ? 'dbt project ready'
         : 'dbt project missing';
-  const projectStatusDetail = preparation?.message
+  const projectStatusDetail = reapplyRequired
+    ? 'Review the prefilled project, choose Preview, then Reapply project.'
+    : preparation?.message
     ?? (configured ? status?.dbt?.repoUrl || status?.dbt?.projectDir || 'Configured dbt project.' : 'Choose a local path or Git repository.');
   const input: React.CSSProperties = {
     width: '100%', boxSizing: 'border-box', height: 36, borderRadius: 8,
@@ -351,9 +357,9 @@ export function DbtProjectEditor({
         </div>
       ) : null}
 
-      <div style={{ border: `1px solid ${preparationFailed ? 'var(--status-error-border)' : preparing ? 'var(--status-info-border)' : configured ? 'var(--status-success-border)' : 'var(--border-subtle)'}`, borderRadius: 12, background: t.cellBg, padding: '14px 16px', display: 'flex', gap: 11, alignItems: 'center' }}>
-        <span style={{ width: 34, height: 34, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: preparationFailed ? 'var(--status-error)' : preparing ? 'var(--status-info)' : configured ? 'var(--status-success)' : 'var(--status-warning)', background: preparationFailed ? 'var(--status-error-bg)' : preparing ? 'var(--status-info-bg)' : configured ? 'var(--status-success-bg)' : 'var(--status-warning-bg)' }}>
-          {preparationFailed ? <AlertCircle size={17} /> : preparing ? <LoaderCircle className="dql-dbt-preparing-icon" size={17} /> : configured ? <CheckCircle2 size={17} /> : <GitBranch size={17} />}
+      <div style={{ border: `1px solid ${reapplyRequired ? 'var(--status-warning-border)' : preparationFailed ? 'var(--status-error-border)' : preparing ? 'var(--status-info-border)' : configured ? 'var(--status-success-border)' : 'var(--border-subtle)'}`, borderRadius: 12, background: t.cellBg, padding: '14px 16px', display: 'flex', gap: 11, alignItems: 'center' }}>
+        <span style={{ width: 34, height: 34, borderRadius: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: reapplyRequired ? 'var(--status-warning)' : preparationFailed ? 'var(--status-error)' : preparing ? 'var(--status-info)' : configured ? 'var(--status-success)' : 'var(--status-warning)', background: reapplyRequired ? 'var(--status-warning-bg)' : preparationFailed ? 'var(--status-error-bg)' : preparing ? 'var(--status-info-bg)' : configured ? 'var(--status-success-bg)' : 'var(--status-warning-bg)' }}>
+          {reapplyRequired ? <RefreshCw size={17} /> : preparationFailed ? <AlertCircle size={17} /> : preparing ? <LoaderCircle className="dql-dbt-preparing-icon" size={17} /> : configured ? <CheckCircle2 size={17} /> : <GitBranch size={17} />}
         </span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>{projectStatusTitle}</div>
@@ -362,7 +368,7 @@ export function DbtProjectEditor({
           </div>
           {preparing ? <div aria-label="dbt preparation progress" style={{ width: 'min(360px, 100%)', height: 3, borderRadius: 999, background: 'var(--border-subtle)', marginTop: 7, overflow: 'hidden' }}><span style={{ display: 'block', width: `${Math.max(8, preparation?.progress ?? 8)}%`, height: '100%', borderRadius: 999, background: t.accent, transition: 'width 180ms ease' }} /></div> : null}
         </div>
-        {configured ? <button type="button" onClick={() => void refresh()} disabled={Boolean(busy)} style={secondary}><RefreshCw size={12} style={{ verticalAlign: -2, marginRight: 6 }} />{busy === 'refresh' ? 'Refreshing…' : 'Refresh'}</button> : null}
+        {configured && !reapplyRequired ? <button type="button" onClick={() => void refresh()} disabled={Boolean(busy)} style={secondary}><RefreshCw size={12} style={{ verticalAlign: -2, marginRight: 6 }} />{busy === 'refresh' ? 'Refreshing…' : 'Refresh'}</button> : null}
       </div>
 
       <style>{`@keyframes dql-dbt-preparing-spin { to { transform: rotate(360deg); } } .dql-dbt-preparing-icon { animation: dql-dbt-preparing-spin 1s linear infinite; } @media (prefers-reduced-motion: reduce) { .dql-dbt-preparing-icon { animation: none; } }`}</style>
@@ -382,7 +388,7 @@ export function DbtProjectEditor({
         {message ? <div role={message.ok ? 'status' : 'alert'} style={{ fontSize: 11.5, lineHeight: 1.5, color: message.ok ? 'var(--status-success)' : 'var(--status-error)' }}>{message.text}</div> : null}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <button type="button" onClick={() => void inspect()} disabled={Boolean(busy)} style={secondary}>{busy === 'preview' ? 'Inspecting…' : 'Preview'}</button>
-          {preview ? <button type="button" onClick={() => void apply()} disabled={Boolean(busy)} style={{ ...secondary, border: 'none', background: t.accent, color: '#fff' }}>{busy === 'apply' ? 'Applying…' : 'Apply project'}</button> : null}
+          {preview ? <button type="button" onClick={() => void apply()} disabled={Boolean(busy)} style={{ ...secondary, border: 'none', background: t.accent, color: '#fff' }}>{busy === 'apply' ? 'Applying…' : reapplyRequired ? 'Reapply project' : 'Apply project'}</button> : null}
         </div>
       </div>
 

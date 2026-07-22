@@ -109,6 +109,7 @@ describe('buildKGFromManifest', () => {
         }),
         expect.objectContaining({
           nodeId: 'block:Revenue Total',
+          payload: expect.objectContaining({ qualifiedId: 'revenue::block::Revenue Total' }),
           datalexContract: 'commerce.Revenue.net_revenue@1',
           sql: 'select sum(amount) as revenue from fct_orders',
         }),
@@ -278,6 +279,9 @@ describe('buildKGFromManifest', () => {
         nodeId: 'metric:total_revenue',
         status: 'certified',
         certification: 'certified',
+        payload: expect.objectContaining({
+          dimensions: [expect.stringContaining('channel')],
+        }),
       }),
       expect.objectContaining({
         nodeId: 'dimension:channel',
@@ -333,6 +337,38 @@ describe('buildKGFromManifest', () => {
         payload: expect.objectContaining({
           expression: 'ending_balance_amount',
           nonAdditiveDimension: { name: 'snapshot_date', window_choice: 'max' },
+        }),
+      }),
+    ]));
+  });
+
+  it('AGT-014 preserves a metric model dimension/time contract when flattened dimensions were deduplicated', () => {
+    const layer = {
+      listMetrics: () => [{
+        name: 'rollover_balance_amount', cube: 'consumption_balance', domain: 'consumption',
+        typeParams: {},
+      }],
+      listDimensions: () => [],
+      listMeasures: () => [],
+      listEntities: () => [],
+      listSemanticModels: () => [{
+        name: 'consumption_balance', domain: 'consumption', table: 'fct_consumption', model: 'fct_consumption',
+        entities: ['customer'], measures: [], dimensions: ['customer', 'region'], timeDimensions: ['metric_date'],
+      }],
+      listSavedQueries: () => [],
+    } as unknown as SemanticLayer;
+
+    const graph = buildKGFromSemanticLayer(layer);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: 'metric:consumption_balance.rollover_balance_amount',
+        payload: expect.objectContaining({
+          dimensions: [
+            'semantic:consumption:dimension:customer',
+            'semantic:consumption:dimension:region',
+            'semantic:consumption:dimension:metric_date',
+          ],
+          timeGrains: ['day', 'week', 'month', 'quarter', 'year'],
         }),
       }),
     ]));

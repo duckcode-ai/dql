@@ -47,6 +47,45 @@ export type AgentRunRoute =
   | "clarify"
   | "blocked";
 
+export interface ResolvedPlanShadowComparison {
+  planId: string;
+  fingerprint: string;
+  plannedRoute: AgentRunRoute;
+  actualRoute: AgentRunRoute;
+  matches: boolean;
+}
+
+/**
+ * Compare the pre-execution plan with the legacy route without changing the
+ * route. This is the R3 shadow-mode cutover signal used before R4 enforcement.
+ * Acceptance: AGT-013, API-006.
+ */
+export function compareResolvedPlanShadow(
+  decision: IntentDecision,
+  actualRoute: AgentRunRoute,
+): ResolvedPlanShadowComparison | undefined {
+  const plan = decision.resolvedAnalyticalPlan;
+  if (!plan) return undefined;
+  const plannedRoute: AgentRunRoute = decision.action === 'investigate'
+    ? 'research'
+    : plan.capability === 'certified_execution'
+    ? 'certified_answer'
+    : plan.capability === 'semantic_execution'
+      ? 'semantic_answer'
+      : plan.capability === 'governed_relational'
+        ? 'generated_answer'
+        : plan.capability === 'bounded_exploration'
+          ? 'research'
+          : 'blocked';
+  return {
+    planId: plan.planId,
+    fingerprint: plan.fingerprint,
+    plannedRoute,
+    actualRoute,
+    matches: plannedRoute === actualRoute,
+  };
+}
+
 /**
  * How the run's answer should be read for trust. `governed` is the default (a
  * data answer grounded in certified/generated SQL). `conversational` and
@@ -907,13 +946,23 @@ export class AgentRunEngine {
           route,
           payload: { stepId, index: stepCount, goal: planned.goal, successCriteria: planned.successCriteria },
         });
+        const resolvedPlanShadow = stepCount === 1
+          ? compareResolvedPlanShadow(routeDecision, route)
+          : undefined;
         emit({
           type: "route.decided",
           message: stepCount === 1
             ? routeDecision.reason
             : `Routed step ${stepCount} to ${route.replaceAll("_", " ")}.`,
           route,
-          payload: stepCount === 1 ? routeDecision : { route, goal: planned.goal },
+          payload: stepCount === 1
+            ? {
+                ...routeDecision,
+                ...(resolvedPlanShadow
+                  ? { resolvedPlanShadow }
+                  : {}),
+              }
+            : { route, goal: planned.goal },
         });
 
         let attempt = 0;
@@ -1519,6 +1568,20 @@ function requestedModeToAction(mode: AgentRunRequestedMode | undefined): IntentD
 }
 
 export function selectRoute(request: AgentRunRequest, decision: IntentDecision): AgentRunRoute {
+  if (decision.meaningResolutionErrorCode === 'invalid_evidence_reference') return 'blocked';
+  const explicitMode = request.requestedMode;
+  if (explicitMode && explicitMode !== 'auto' && explicitMode !== 'ask') {
+    return selectCascadeRunRoute(request, decision);
+  }
+  if (decision.action !== 'answer') return selectCascadeRunRoute(request, decision);
+  const plan = decision.resolvedAnalyticalPlan;
+  if (plan?.mode === 'authoritative' && decision.requiresClarification !== true) {
+    if (plan.capability === 'certified_execution') return 'certified_answer';
+    if (plan.capability === 'semantic_execution') return 'semantic_answer';
+    if (plan.capability === 'governed_relational') return 'generated_answer';
+    if (plan.capability === 'bounded_exploration') return 'research';
+    return 'blocked';
+  }
   // Retrieval + meaning resolution already established a compatible execution
   // class. Route directly to the shared answer executor instead of paying for a
   // planner/tool-search pass. The executor still owns authorization and runtime

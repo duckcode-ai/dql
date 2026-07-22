@@ -35,6 +35,7 @@ import {
   type MeaningExecutionRoute,
   type MeaningResolution,
 } from "./meaning-resolution.js";
+import { buildResolvedAnalyticalPlan, type ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 
 /** The router's fine-grained classification of a turn. */
 export interface RouterClassification {
@@ -74,6 +75,8 @@ export interface HybridRouterOptions {
   resolveMeaning?: AgentMeaningResolver;
   /** Maximum candidate cards sent to meaning resolution. Default 12. */
   maxMeaningCandidates?: number;
+  /** Authoritative by default; `shadow` is the bounded rollback switch. */
+  resolvedPlanMode?: ResolvedAnalyticalPlan['mode'];
   /** Deterministic confidence at/above which the LLM is never called. Default 0.7. */
   llmThreshold?: number;
   /** Max cached classifications. Default 200. */
@@ -436,12 +439,21 @@ function routeDecisionForResolution(
   candidates: AgentEvidenceCandidate[],
   resolution: MeaningResolution,
   source: "llm" | "heuristic",
+  question = resolution.interpretedQuestion,
+  mode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
 ): IntentDecision {
   const needsClarification = resolution.confidence === "low" || resolution.recommendedRoute === "clarify";
   const analytical = resolution.questionType === "diagnosis" || resolution.questionType === "research";
   const reason = needsClarification
     ? `The retrieved evidence supports multiple business meanings: ${resolution.interpretedQuestion}`
     : `Resolved the question against ${resolution.selectedConceptIds.join(", ")}: ${resolution.interpretedQuestion}`;
+  const resolvedAnalyticalPlan = buildResolvedAnalyticalPlan({
+    question,
+    resolution,
+    evidence,
+    candidates,
+    mode,
+  });
   return {
     ...base,
     action: needsClarification ? "clarify" : analytical ? "investigate" : "answer",
@@ -451,6 +463,7 @@ function routeDecisionForResolution(
     category: analytical ? "data_analysis" : needsClarification ? "unclear" : "data_lookup",
     depth: analytical ? "deep" : "quick",
     meaningResolution: resolution,
+    resolvedAnalyticalPlan,
     retrievalEvidence: retrievalTrace(evidence, candidates),
     requiresClarification: needsClarification,
     ...(needsClarification ? { clarificationOptions: buildClarificationOptions(candidates) } : {}),
@@ -516,10 +529,11 @@ function routeWithoutMeaningModel(
   base: IntentDecision,
   evidence: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[],
+  planMode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
 ): IntentDecision {
   const exactCompatible = candidates.filter((candidate) => candidate.exactMatch && candidate.compatibility !== "incompatible");
   if (exactCompatible.length === 1 && !hasMateriallyRelatedCompetitor(exactCompatible[0], candidates)) {
-    return routeDecisionForResolution(base, evidence, candidates, directResolution(request, evidence, exactCompatible[0]), "heuristic");
+    return routeDecisionForResolution(base, evidence, candidates, directResolution(request, evidence, exactCompatible[0]), "heuristic", request.question, planMode);
   }
   if (base.action === "investigate") {
     return {
@@ -571,6 +585,13 @@ function dominantCompatibleGovernedCandidate(
   // block whose complete output/filter/grain contract has already passed.
   if (best.kind !== "certified_block") return undefined;
   if (best.relevanceScore < 0.82) return undefined;
+  // Deterministic fit proves executability, not business meaning. Preserve the
+  // one bounded meaning call whenever a plausible semantic interpretation is
+  // present, even if the certified block won lexical ranking.
+  if (candidates.some((candidate) =>
+    (candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
+    && candidate.compatibility !== 'incompatible'
+    && candidate.relevanceScore >= 0.45)) return undefined;
   const competitorFloor = Math.max(0.7, best.relevanceScore - 0.12);
   const hasExecutableCompetitor = compatible.some((candidate) =>
     candidate.id !== best.id && candidate.relevanceScore >= competitorFloor
@@ -687,6 +708,8 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               candidates,
               directResolution(request, evidence, explicit),
               "heuristic",
+              request.question,
+              options.resolvedPlanMode ?? 'authoritative',
             );
           }
 
@@ -700,6 +723,8 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               candidates,
               directResolution(request, evidence, exactCompatible[0]),
               "heuristic",
+              request.question,
+              options.resolvedPlanMode ?? 'authoritative',
             );
           }
 
@@ -711,11 +736,13 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               candidates,
               directResolution(request, evidence, dominant),
               "heuristic",
+              request.question,
+              options.resolvedPlanMode ?? 'authoritative',
             );
           }
 
           if (shouldDeferCompositionalFollowUpToExecutor(base, candidates)) {
-            return routeWithoutMeaningModel(request, base, evidence, candidates);
+            return routeWithoutMeaningModel(request, base, evidence, candidates, options.resolvedPlanMode ?? 'authoritative');
           }
 
           const key = cacheKey(request, evidence);
@@ -739,7 +766,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               if (validated.ok) {
                 return remember(
                   key,
-                  routeDecisionForResolution(base, evidence, candidates, validated.resolution, "llm"),
+                  routeDecisionForResolution(base, evidence, candidates, validated.resolution, "llm", request.question, options.resolvedPlanMode ?? 'authoritative'),
                 );
               }
               const invalidResolution: MeaningResolution = {
@@ -753,14 +780,30 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                 recommendedRoute: "clarify",
                 clarifyingQuestion: buildEvidenceClarification(candidates, [validated.reason]),
               };
-              return remember(key, routeDecisionForResolution(base, evidence, candidates, invalidResolution, "llm"));
+              const invalidDecision = routeDecisionForResolution(
+                base,
+                evidence,
+                candidates,
+                invalidResolution,
+                "llm",
+                request.question,
+                options.resolvedPlanMode ?? 'authoritative',
+              );
+              return remember(key, {
+                ...invalidDecision,
+                action: 'answer',
+                requiresClarification: false,
+                clarificationOptions: undefined,
+                clarifyingQuestion: undefined,
+                meaningResolutionErrorCode: 'invalid_evidence_reference',
+              });
             }
           } catch (error) {
             rethrowCancellation(error, request.signal, options.signal);
             // A resolver transport/parse failure falls back without losing the
             // retrieval signal or permitting a general-knowledge misroute.
           }
-          return routeWithoutMeaningModel(request, base, evidence, candidates);
+          return routeWithoutMeaningModel(request, base, evidence, candidates, options.resolvedPlanMode ?? 'authoritative');
         }
       }
 

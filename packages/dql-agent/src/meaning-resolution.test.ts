@@ -92,6 +92,17 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     )).toMatchObject({ ok: false });
   });
 
+  it("normalizes a compatible recommended execution into the selected plan scope", () => {
+    const validated = validateMeaningResolution(
+      resolution({ selectedConceptIds: [] }),
+      [candidate()],
+    );
+    expect(validated).toMatchObject({
+      ok: true,
+      resolution: { selectedConceptIds: ['semantic:consumption:rollover_balance_amount'] },
+    });
+  });
+
   it("rejects a direct semantic route when deterministic shape compatibility is only partial", () => {
     expect(validateMeaningResolution(
       resolution(),

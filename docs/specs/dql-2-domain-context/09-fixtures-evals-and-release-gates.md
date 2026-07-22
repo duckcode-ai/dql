@@ -254,6 +254,19 @@ Generate deterministic artifacts representing 10,000 dbt models, 30 columns
 per model, 7,000 semantic metrics, 100 domains, 1,000 entities, 2,000
 relationships, 1,000 skills, 2,000 blocks/views, and 500 Apps/Notebooks.
 
+The executable answer-engine harness, not a YAML-shape test, consumes the same
+fixture and records each stage: snapshot/envelope acquisition, retrieval lane
+and rank, eligibility/rejection reason, selected Skill IDs/hashes, meaning IDs,
+resolved-plan fingerprint, compatibility/time/join proof, route/adapter, compiled
+query/result fingerprints, stable error, call counts, timings, bytes, RSS, and
+source-artifact reads. Browser, direct CLI, MCP, and Chat compare these identities
+rather than comparing prose or SQL formatting (`API-006`, `E2E-012`).
+
+Explicit Research is bounded to one planner, six SQL executions, one total
+repair, one narrator, and the existing 120-second wall-clock budget. Every
+numeric claim must reference a successful execution receipt; partial evidence
+cannot be presented as a completed causal conclusion (`AGT-016`).
+
 Budgets on the documented reference developer machine:
 
 | Operation | Budget |

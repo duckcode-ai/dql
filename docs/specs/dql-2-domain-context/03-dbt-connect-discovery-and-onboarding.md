@@ -44,6 +44,16 @@ Project → Database → optional AI → Finish workflow launched by Settings Ov
 or first-run prompts. Both surfaces embed the same project, profile/database,
 and provider editors and readiness rules (`UI-007`).
 
+For the OSS npm distribution, a runtime-version upgrade reopens Guided Setup at
+the prefilled Project & dbt step. When a dbt project is already configured, the
+new runtime version cannot be acknowledged until the user explicitly runs
+Preview → Reapply. No saved path, connection, credential, provider setting, or
+source file changes before Apply succeeds; a failed compile rolls back to the
+previous configuration and active snapshot. Projects without dbt may continue
+without this gate. The successful Apply version is stored only in local user
+preferences so every later npm version can require one fresh, user-controlled
+snapshot preparation (`UI-007`, `E2E-005`).
+
 ## Onboarding APIs
 
 | Method | Path | Purpose |
@@ -67,6 +77,7 @@ and return `SOURCE_CHANGED` on optimistic-concurrency failure (`API-001`).
 - `DBT_MANIFEST_MISSING`
 - `DBT_ARTIFACT_INVALID`
 - `DBT_PARSE_FAILED`
+- `DBT_REAPPLY_REQUIRED`
 - `SOURCE_CHANGED`
 - `SNAPSHOT_BUILD_FAILED`
 - `DOMAIN_COLLISION`

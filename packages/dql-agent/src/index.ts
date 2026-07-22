@@ -78,7 +78,7 @@ export type {
   SeedDefaultSkillsOptions,
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
-export { answer, parseProposal, compactSemanticRuntimeFailure } from "./answer-loop.js";
+export { answer, parseProposal, compactSemanticRuntimeFailure, materializeKnowledgeLensSkills } from "./answer-loop.js";
 export { detectResultSetOperation, computeResultSetOperation } from "./conversation/result-ops.js";
 export type { ResultSetOperation, PriorResultData, ResultSetComputation } from "./conversation/result-ops.js";
 export type { SemanticQueryCompiler } from "./answer-loop.js";
@@ -110,6 +110,7 @@ export {
   defaultAgentRunStorePath,
   selectRoute,
   routeReasoningEffort,
+  compareResolvedPlanShadow,
 } from "./agent-run-engine.js";
 export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
 export {
@@ -161,6 +162,7 @@ export type {
   AgentRunStopReason,
   AgentRunStore,
   AgentRunTrustState,
+  ResolvedPlanShadowComparison,
 } from "./agent-run-engine.js";
 export { defaultAgentRunGates } from "./agent-run-gates.js";
 export {
@@ -266,6 +268,55 @@ export type {
   AiRoute,
   AiRouteTier,
 } from "./answer-loop.js";
+export { buildResolvedAnalyticalPlan, deriveResolvedAnalyticalPlan, resolvePlanTimeRange } from './resolved-analytical-plan.js';
+export type {
+  BuildResolvedAnalyticalPlanInput,
+  ResolvedAnalyticalPlan,
+  ResolvedAnalyticalPlanDelta,
+  ResolvedPlanCapability,
+  ResolvedPlanCompatibilityProof,
+  ResolvedPlanMemberBinding,
+} from './resolved-analytical-plan.js';
+export {
+  adaptResolvedAnalyticalPlan,
+  buildPlanExecutionRegistry,
+} from './plan-execution-adapter.js';
+export {
+  buildGovernedRelationalRegistry,
+  compileGovernedRelationalPlan,
+  finalizeGovernedCompilationReceipt,
+  renderGovernedRelationalAst,
+  renderGovernedRelationalDqlArtifact,
+} from './governed-relational-compiler.js';
+export {
+  buildTypedResearchBranches,
+  gateResearchConclusion,
+  ResearchBudgetController,
+  ResearchBudgetExceededError,
+} from './research-governance.js';
+export type {
+  ResearchBudgetCounter,
+  ResearchConclusionGate,
+  ResearchObservation,
+  TypedResearchBranch,
+  TypedResearchBranchInput,
+} from './research-governance.js';
+export type {
+  GovernedCompilationReceipt,
+  GovernedRelation,
+  GovernedRelationColumn,
+  GovernedRelationship,
+  GovernedRelationalAst,
+  GovernedRelationalCompileResult,
+  GovernedRelationalRegistry,
+  RelationalAggregate,
+} from './governed-relational-compiler.js';
+export type {
+  AdaptResolvedAnalyticalPlanInput,
+  PlanExecutionBinding,
+  PlanExecutionBlockedCode,
+  PlanExecutionRegistryEntry,
+} from './plan-execution-adapter.js';
 export { matchSemanticMetric } from "./metadata/metric-match.js";
 export {
   aggregationIntegrityIssuesForSql,
@@ -463,6 +514,8 @@ export {
   defaultMetadataPath,
   metadataSnapshotPath,
   activeMetadataSnapshotPath,
+  acquireActiveKnowledgeSnapshot,
+  activeKnowledgeSnapshotLeaseCount,
   currentMetadataFingerprint,
   ensureMetadataCatalogFresh,
   metadataObjectToAllowedSqlRelation,
@@ -470,10 +523,12 @@ export {
   openActiveKnowledgeSnapshot,
   readIndexedDomainKnowledge,
   readIndexedKnowledge360,
+  retrieveMetadataSnapshotCandidates,
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
   latestRuntimeSchemaSnapshotForProject,
   recordQueryRun,
+  applyContextPackCompatibility,
   toAgentRetrievalEvidence,
   upsertMetadataSnapshot,
 } from "./metadata/catalog.js";
@@ -657,6 +712,7 @@ export type {
   CertifiedFitConfirmationResult,
   EnsureMetadataCatalogOptions,
   EnsureMetadataCatalogResult,
+  ActiveKnowledgeSnapshotLease,
   DqlContextPack,
   LocalContextPack,
   MetadataCandidateConflict,
@@ -669,6 +725,12 @@ export type {
   MetadataFollowUpContext,
   MetadataMissingContext,
   MetadataObject,
+  MetadataIdentityResolution,
+  MetadataRetrievalLaneCandidate,
+  MetadataRetrievalLaneName,
+  MetadataRetrievalLaneResult,
+  MetadataSnapshotRetrievalResult,
+  MetadataVectorSearchResult,
   MetadataRouteDecision,
   GrainGateRouteInfo,
   MetadataDomainShard,
@@ -835,7 +897,7 @@ export function defaultKgPath(projectRoot: string): string {
   return join(projectRoot, ".dql", "cache", "agent-kg.sqlite");
 }
 
-const AGENT_INDEX_SCHEMA_VERSION = '2';
+const AGENT_INDEX_SCHEMA_VERSION = '3';
 const AGENT_RUNTIME_MARKER = join('.dql', 'cache', 'agent-runtime-version');
 
 /**

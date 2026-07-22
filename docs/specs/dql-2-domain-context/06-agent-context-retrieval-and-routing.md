@@ -89,11 +89,16 @@ business concept and compatibility are established (`AGT-010`).
 
 ## Evidence retrieval and AI meaning resolution
 
-Retrieval uses exact qualified references, canonical names and approved aliases,
-normalized phrase/token matching, FTS/BM25 over safe business fields, and typed
-graph proximity. Optional vector retrieval may rerank only an already-bounded
-lexical shortlist. Ranking occurs before lane quotas; file order, alphabetical
-order, and arbitrary first-N artifact slices cannot determine visibility.
+Retrieval uses independent exact-qualified-reference/approved-alias, normalized
+phrase/token, FTS/BM25, semantic-vector, and typed-graph candidate lanes. Domain,
+import, lifecycle, policy, and visibility eligibility is applied before ranking.
+The OSS vector index is stored with the immutable project-search snapshot; a
+hosted vector service is not required. Vector candidate generation covers
+metrics, certified blocks, Domain Capsules, terms, semantic models, and compact
+Skill descriptors. Warehouse columns are searched hierarchically only inside
+retrieved model/entity neighborhoods rather than through one global column
+vector index. Ranking occurs before lane quotas; file order, alphabetical order,
+and arbitrary first-N artifact slices cannot determine visibility.
 
 The initial bounded pool contains at most 25 candidates per lane. Eligibility
 and compatibility filtering occur before graph expansion and payload hydration.
@@ -143,6 +148,28 @@ only when compatibility leaves one unique executable candidate. Low confidence
 asks one focused question that explains the competing business meanings. The
 server, not the model, decides authorization, relationship authority, route
 trust, compilation, SQL validation, and execution (`AGT-009`, `AGT-010`).
+
+## Authoritative analytical plan
+
+The validated meaning result is input to a deterministic plan resolver; it is
+never reduced to prompt guidance or a preferred-ID hint. The resolver returns
+either one immutable `ResolvedAnalyticalPlan` or one typed clarification/refusal
+outcome. A valid plan contains no unresolved bare metric, measure, dimension,
+member, entity grain, time role/grain, filter, relationship path, capability, or
+required output (`AGT-013`).
+
+The plan records the project-search snapshot, Domain envelope and KnowledgeLens
+fingerprints; selected evidence and qualified semantic IDs; typed filters/member
+bindings; separate entity and temporal contracts; exact compatibility and
+relationship proofs; required operations; selected execution asset/adapter;
+result contract; budgets; and a deterministic content fingerprint. Compiler-
+required members such as `metric_time` are explicit technical bindings and may
+coexist with the user time axis without changing the requested output contract.
+
+Once the plan exists, no downstream component may re-search or reinterpret
+business meaning. It may only prove capability, compile, execute, validate the
+result contract, or return a stable error. A selected metric cannot be replaced
+because another metric is easier to join or compile (`AGT-014`).
 
 Clarification is a structured continuation, not another natural-language search.
 Each rendered choice contains a stable candidate ID, business label, definition,

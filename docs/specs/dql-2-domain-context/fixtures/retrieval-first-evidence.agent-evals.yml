@@ -71,14 +71,14 @@ concepts:
     timeGrains: [month]
     position: 200
 
-  - id: block:consumption:customer_rollover_report
+  - id: consumption::block::customer_rollover_report
     name: Customer Rollover Report
     meaning: Certified monthly report of actual rollover balances by customer.
     trust: certified
     inputs: [start_month, end_month]
     outputs: [customer_id, month, rollover_balance_amount]
 
-  - id: block:consumption:rollover_policy_summary
+  - id: consumption::block::rollover_policy_summary
     name: Rollover Policy Summary
     meaning: Certified prose summary of contractual rollover rules, with no balance output.
     trust: certified
@@ -117,7 +117,7 @@ cases:
     question: Who are the top 10 customers by monthly rollover balance amount?
     expected:
       selectedConceptIds: [semantic:consumption:rollover_balance_amount]
-      recommendedExecutionId: block:consumption:customer_rollover_report
+      recommendedExecutionId: consumption::block::customer_rollover_report
       route: certified
       trust: certified
       intent:
@@ -151,7 +151,7 @@ cases:
   - name: policy question uses policy evidence not a numeric metric
     question: What is our contractual rollover policy for this account?
     expected:
-      recommendedExecutionId: block:consumption:rollover_policy_summary
+      recommendedExecutionId: consumption::block::rollover_policy_summary
       rejectedConceptIds:
         - semantic:consumption:rollover_balance_amount
         - semantic:consumption:monthly_rollover_amount
@@ -164,7 +164,7 @@ cases:
     question: Show actual rollover balance by region for last month.
     expected:
       selectedConceptIds: [semantic:consumption:rollover_balance_amount]
-      rejectedExecutionIds: [block:consumption:rollover_policy_summary]
+      rejectedExecutionIds: [consumption::block::rollover_policy_summary]
       route: semantic
       trust: governed_semantic
       maxMeaningCalls: 1

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { planResearch } from './research-loop.js';
 import type { PlanBlock } from './app-planner.js';
 import type { KGNode } from './kg/types.js';
+import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 
 const revenueMetric: KGNode = {
   nodeId: 'metric:revenue',
@@ -38,6 +39,42 @@ describe('planResearch', () => {
     expect(kinds).toContain('breakdown');
     const breakdown = plan.steps.find((s) => s.action.kind === 'breakdown');
     expect(breakdown?.action.target).toBe('region');
+  });
+
+  it('reuses the root plan qualified metric instead of re-matching a similar name', async () => {
+    const plannedMetric: KGNode = {
+      nodeId: 'metric:rollover_balance',
+      kind: 'metric',
+      name: 'rollover_balance',
+      payload: { qualifiedId: 'semantic:consumption:rollover_balance' },
+    };
+    const wrongMetric: KGNode = {
+      nodeId: 'metric:rollover_risk',
+      kind: 'metric',
+      name: 'rollover_risk',
+      description: 'Why rollover risk is down by region.',
+    };
+    const rootPlan = {
+      planId: 'rap:root',
+      capability: 'semantic_execution',
+      questionType: 'diagnosis',
+      confidence: 'high',
+      selectedConceptIds: ['semantic:consumption:rollover_balance'],
+      executionId: 'semantic:consumption:rollover_balance',
+      query: { measures: [], dimensions: [], filters: [] },
+    } as unknown as ResolvedAnalyticalPlan;
+    const plan = await planResearch({
+      question: 'Why is rollover risk down by region?',
+      metrics: [wrongMetric, plannedMetric],
+      blocks: [],
+      rootPlan,
+      forceInvestigate: true,
+    });
+    expect(plan.rootPlanId).toBe('rap:root');
+    expect(plan.sources).toContain('semantic:consumption:rollover_balance');
+    expect(plan.steps.find((step) => step.action.kind === 'lookup_metric')?.action.target)
+      .toBe('semantic:consumption:rollover_balance');
+    expect(plan.budget).toMatchObject({ sqlExecutions: 6, repairs: 1, wallClockMs: 120_000 });
   });
 
   it('asks a follow-up with concrete options when the subject is unclear', async () => {

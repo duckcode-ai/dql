@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  acquireActiveKnowledgeSnapshot,
+  activeKnowledgeSnapshotLeaseCount,
   buildLocalContextPack,
   buildMetadataSnapshot,
   buildFollowUpSearchQuery,
@@ -13,6 +15,7 @@ import {
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
   recordQueryRun,
+  retrieveMetadataSnapshotCandidates,
   toAgentRetrievalEvidence,
   upsertMetadataSnapshot,
   buildGovernedTermIndex,
@@ -208,6 +211,13 @@ describe('local metadata catalog', () => {
           description: 'Remaining eligible balance carried into the next billing month.',
           payload: { label: 'Rollover Balance Amount', aggregation: 'sum', dimensions: ['customer', 'month'], table: 'fct_consumption' },
         },
+        ...Array.from({ length: 4 }, (_, index) => ({
+          objectKey: `semantic:measure:consumption.rollover_balance_amount_${index}`, objectType: 'semantic_measure',
+          name: `consumption.rollover_balance_amount_${index}`, fullName: `consumption.rollover_balance_amount_${index}`,
+          domain: 'consumption', status: 'approved',
+          description: 'Remaining eligible balance carried into the next billing month.',
+          payload: { label: 'Rollover Balance Amount', aggregation: 'sum', dimensions: ['customer', 'month'], table: 'fct_consumption' },
+        })),
         {
           objectKey: 'semantic:metric:consumption.rollover_risk_amount', objectType: 'semantic_metric',
           name: 'consumption.rollover_risk_amount', fullName: 'consumption.rollover_risk_amount',
@@ -253,6 +263,8 @@ describe('local metadata catalog', () => {
         'semantic:metric:consumption.rollover_risk_amount',
       ]),
     );
+    expect(meaning?.byEvidenceClass.semantic.filter((candidate) =>
+      candidate.definition === 'Remaining eligible balance carried into the next billing month.')).toHaveLength(1);
     expect(meaning?.byEvidenceClass.sql[0]).toMatchObject({
       objectKey: 'dbt:model:fct_consumption', trustTier: 'exploratory',
     });
@@ -312,6 +324,119 @@ describe('local metadata catalog', () => {
     }
     expect(secondStats.metadataRefreshed).toBe(false);
     expect(secondStats.metadataFingerprint).toBe(firstStats.metadataFingerprint);
+  });
+
+  it('CTX-002 leases one immutable snapshot while a newer snapshot activates', async () => {
+    const first = await ensureMetadataCatalogFresh(projectRoot, { force: true });
+    const oldLease = acquireActiveKnowledgeSnapshot(projectRoot);
+    expect(oldLease.snapshotId).toBe(first.fingerprint);
+    expect(activeKnowledgeSnapshotLeaseCount(oldLease.path)).toBe(1);
+
+    addGenericAthleteBoxScoreModel(projectRoot, 'snapshot_generation_two');
+    const second = await ensureMetadataCatalogFresh(projectRoot);
+    const newLease = acquireActiveKnowledgeSnapshot(projectRoot);
+    try {
+      expect(second.fingerprint).not.toBe(first.fingerprint);
+      expect(newLease.snapshotId).toBe(second.fingerprint);
+      expect(newLease.path).not.toBe(oldLease.path);
+      expect(oldLease.catalog.state('fingerprint')).toBe(first.fingerprint);
+      expect(oldLease.catalog.getObject('dbt:model:snapshot_generation_two')).toBeNull();
+      expect(newLease.catalog.getObject('dbt:model:snapshot_generation_two')).toMatchObject({
+        objectType: 'dbt_model',
+      });
+    } finally {
+      newLease.release();
+      oldLease.release();
+    }
+    expect(activeKnowledgeSnapshotLeaseCount()).toBe(0);
+  });
+
+  it('ID-001 resolves canonical semantic identities and fails closed on ambiguous aliases', async () => {
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({
+      provider: 'dbt',
+      projectPath: '.',
+    }, projectRoot).layer;
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      expect(catalog.resolveIdentity('semantic:consumption:rollover_balance_amount')).toMatchObject({
+        status: 'resolved',
+        matchedBy: 'qualified_id',
+        object: {
+          objectType: 'semantic_metric',
+          fullName: 'semantic:consumption:rollover_balance_amount',
+          payload: expect.objectContaining({
+            sourceNativeId: 'metric.scale.rollover_balance_amount',
+          }),
+        },
+      });
+      expect(catalog.resolveIdentity('metric.scale.rollover_balance_amount')).toMatchObject({
+        status: 'resolved',
+        matchedBy: 'source_native_id',
+      });
+      const ambiguous = catalog.resolveIdentity('Rollover Balance Amount');
+      expect(ambiguous.status).toBe('ambiguous');
+      expect(ambiguous.candidates).toHaveLength(2);
+      expect(catalog.findObjectByIdentity('Rollover Balance Amount')).toBeNull();
+    } finally {
+      catalog.close();
+    }
+  });
+
+  it('CTX-005 generates vector candidates independently and applies Domain eligibility before ranking', async () => {
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({
+      provider: 'dbt',
+      projectPath: '.',
+    }, projectRoot).layer;
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+    const provider = {
+      id: 'semantic-fixture-v1',
+      dimensions: 2,
+      async embed(texts: string[]): Promise<number[][]> {
+        return texts.map((text) => {
+          const normalized = text.toLowerCase();
+          if (normalized.includes('unused carryover inventory') || normalized.includes('remaining eligible balance')) return [1, 0];
+          if (normalized.includes('general-ledger liability')) return [0, 1];
+          return [0, 0];
+        });
+      },
+    };
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      await catalog.rebuildVectorIndex(provider);
+      const lexical = catalog.searchObjects({ query: 'unused carryover inventory', limit: 20 });
+      expect(lexical.map((object) => object.fullName)).not.toContain('semantic:consumption:rollover_balance_amount');
+
+      const retrieved = await retrieveMetadataSnapshotCandidates(catalog, {
+        question: 'unused carryover inventory',
+        embeddingProvider: provider,
+        domainContext: {
+          activeDomain: 'consumption',
+          ancestors: [],
+          allowedImports: [],
+          source: 'explicit_api',
+          confidence: 'high',
+          snapshotId: catalog.state('fingerprint')!,
+        },
+        limit: 20,
+      });
+      const vectorLane = retrieved.lanes.find((lane) => lane.lane === 'vector');
+      expect(vectorLane).toMatchObject({
+        provider: provider.id,
+        candidates: [
+          expect.objectContaining({
+            objectKey: 'semantic:metric:consumption_model.rollover_balance_amount',
+            rank: 1,
+          }),
+        ],
+      });
+      expect(vectorLane?.candidates.some((candidate) => candidate.objectKey.includes('billing_rollover'))).toBe(false);
+    } finally {
+      catalog.close();
+    }
   });
 
   it('SKILL-001 / CTX-002 snapshots parsed skills, invalidates on source changes, and returns only domain/Area-eligible guidance', async () => {
@@ -2087,6 +2212,56 @@ function addLargeSemanticManifest(root: string, metricCount: number): void {
       },
     },
     metrics,
+    saved_queries: {},
+  }), 'utf-8');
+}
+
+function writeQualifiedSemanticIdentityFixture(root: string): void {
+  writeFileSync(join(root, 'target', 'semantic_manifest.json'), JSON.stringify({
+    semantic_models: {
+      'semantic_model.scale.consumption_model': {
+        unique_id: 'semantic_model.scale.consumption_model',
+        package_name: 'scale',
+        name: 'consumption_model',
+        model: "ref('fct_player_performance')",
+        meta: { domain: 'consumption' },
+        entities: [{ name: 'account', type: 'primary', expr: 'account_id' }],
+        dimensions: [{ name: 'month', type: 'time', type_params: { time_granularity: 'month' } }],
+        measures: [{ name: 'rollover_balance_measure', agg: 'sum', expr: 'points' }],
+      },
+      'semantic_model.scale.billing_model': {
+        unique_id: 'semantic_model.scale.billing_model',
+        package_name: 'scale',
+        name: 'billing_model',
+        model: "ref('fct_player_performance')",
+        meta: { domain: 'billing' },
+        entities: [{ name: 'billing_account', type: 'primary', expr: 'account_id' }],
+        dimensions: [{ name: 'ledger_month', type: 'time', type_params: { time_granularity: 'month' } }],
+        measures: [{ name: 'billing_rollover_measure', agg: 'sum', expr: 'points' }],
+      },
+    },
+    metrics: {
+      'metric.scale.rollover_balance_amount': {
+        unique_id: 'metric.scale.rollover_balance_amount',
+        package_name: 'scale',
+        name: 'rollover_balance_amount',
+        label: 'Rollover Balance Amount',
+        description: 'Remaining eligible balance carried into the next billing month.',
+        type: 'simple',
+        type_params: { measure: 'rollover_balance_measure' },
+        meta: { domain: 'consumption', concept_id: 'semantic:consumption:rollover_balance_amount' },
+      },
+      'metric.scale.billing_rollover_balance_amount': {
+        unique_id: 'metric.scale.billing_rollover_balance_amount',
+        package_name: 'scale',
+        name: 'billing_rollover_balance_amount',
+        label: 'Rollover Balance Amount',
+        description: 'Posted general-ledger liability after billing close.',
+        type: 'simple',
+        type_params: { measure: 'billing_rollover_measure' },
+        meta: { domain: 'billing', concept_id: 'semantic:billing:rollover_balance_amount' },
+      },
+    },
     saved_queries: {},
   }), 'utf-8');
 }

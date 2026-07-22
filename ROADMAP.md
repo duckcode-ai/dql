@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.8.8)
+## Current State (v1.10.0)
 
 DQL OSS is ready for local-first use cases:
 
@@ -29,6 +29,17 @@ DQL OSS is ready for local-first use cases:
   the example dbt project for users without one.
 - Use local agent/MCP/Slack surfaces that prefer certified blocks and label
   fallback generated SQL as uncertified.
+- Resolve analytical questions into typed plans that bind semantic measures,
+  dimensions, entities, time dimensions, joins, filters, domains, skills, and
+  evidence before execution.
+- Use local hybrid retrieval across exact matches, BM25/lexical text,
+  embeddings, graph relationships, and bounded dbt repository text without
+  requiring an external vector database.
+- Route root-cause and deep-research questions through governed relational SQL
+  when certified metrics do not cover the requested analysis, with explicit
+  uncertified status, source receipts, and policy validation.
+- Require existing OSS projects to preview and reapply dbt context after an npm
+  CLI upgrade so their immutable snapshot matches the running DQL version.
 
 ## OSS Boundaries
 
@@ -57,6 +68,9 @@ The OSS release is intentionally local and single-user:
   endpoint, and service token; DQL does not manage dbt Cloud projects or jobs.
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
+- The `PERF-001` enterprise-scale correctness fixture passes, but several
+  cold-start and warm-context latency budgets remain above target. The v1.10.0
+  release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities
 
@@ -71,7 +85,8 @@ The OSS release is intentionally local and single-user:
 - Lineage depth: continue improving column-level lineage and dbt/OpenLineage
   interop.
 - Local scale: add pagination/streaming for large result sets and keep the
-  manifest stress gate healthy.
+  manifest stress gate healthy; bring every `PERF-001` latency measurement
+  within its release budget.
 
 ## Not Planned for OSS
 

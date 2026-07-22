@@ -788,6 +788,103 @@ describe('version-aware Guided Setup launch (UI-007, E2E-005)', () => {
     }
   });
 
+  it('requires configured OSS dbt projects to be previewed and reapplied before acknowledging an npm upgrade', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-upgrade-reapply-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dbt_project.yml'), 'name: upgrade_shop\nversion: 1\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'upgrade_shop' },
+      nodes: {
+        'model.upgrade_shop.orders': {
+          unique_id: 'model.upgrade_shop.orders',
+          resource_type: 'model',
+          name: 'orders',
+          original_file_path: 'models/orders.sql',
+          columns: {},
+          depends_on: { nodes: [] },
+          tags: [],
+        },
+      },
+      sources: {}, metrics: {}, exposures: {}, semantic_models: {}, groups: {}, child_map: {}, parent_map: {},
+    }));
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'upgrade-shop',
+      manifestVersion: 3,
+      modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: '.', manifestPath: 'target/manifest.json' },
+      semanticLayer: { provider: 'dbt', projectPath: '.' },
+    }));
+    writeFileSync(join(projectRoot, '.dql-user-prefs.json'), JSON.stringify({
+      favorites: ['revenue'],
+      recentlyUsed: ['orders'],
+      setup: { acknowledgedVersion: '0.0.1', acknowledgedAt: '2026-01-01T00:00:00.000Z' },
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const launch = await (await fetch(`${base}/api/onboarding/launch`)).json() as {
+        version: string;
+        shouldOpen: boolean;
+        reason: string;
+        requiresDbtReapply: boolean;
+        dbtAppliedVersion: string | null;
+      };
+      expect(launch).toMatchObject({
+        shouldOpen: true,
+        reason: 'version_upgrade',
+        requiresDbtReapply: true,
+        dbtAppliedVersion: null,
+      });
+
+      const premature = await fetch(`${base}/api/onboarding/acknowledge`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(premature.status).toBe(409);
+      await expect(premature.json()).resolves.toMatchObject({ code: 'DBT_REAPPLY_REQUIRED' });
+
+      const preview = await (await fetch(`${base}/api/onboarding/dbt/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json' }),
+      })).json() as { fingerprint: string };
+      const reapplied = await fetch(`${base}/api/onboarding/dbt/apply`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectDir: '.', manifestPath: 'target/manifest.json', expectedFingerprint: preview.fingerprint }),
+      });
+      expect(reapplied.status).toBe(200);
+
+      await expect((await fetch(`${base}/api/onboarding/launch`)).json()).resolves.toMatchObject({
+        version: launch.version,
+        shouldOpen: true,
+        reason: 'version_upgrade',
+        requiresDbtReapply: false,
+        dbtAppliedVersion: launch.version,
+      });
+      const acknowledged = await fetch(`${base}/api/onboarding/acknowledge`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(acknowledged.status).toBe(200);
+      expect(JSON.parse(readFileSync(join(projectRoot, '.dql-user-prefs.json'), 'utf-8'))).toMatchObject({
+        favorites: ['revenue'],
+        recentlyUsed: ['orders'],
+        setup: {
+          acknowledgedVersion: launch.version,
+          dbtAppliedVersion: launch.version,
+          acknowledgedAt: expect.any(String),
+          dbtAppliedAt: expect.any(String),
+        },
+      });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
   it('does not describe unresolved starter placeholders as a configured dbt project', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-setup-placeholder-'));
     tempDirs.push(projectRoot);

@@ -89,6 +89,21 @@ import {
 } from './cascade/cascade.js';
 import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
 import { stampTrustLabel } from './trust/stamp.js';
+import { deriveResolvedAnalyticalPlan, type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
+import {
+  adaptResolvedAnalyticalPlan,
+  buildPlanExecutionRegistry,
+  type PlanExecutionBinding,
+  type PlanExecutionBlockedCode,
+} from './plan-execution-adapter.js';
+import {
+  buildGovernedRelationalRegistry,
+  compileGovernedRelationalPlan,
+  finalizeGovernedCompilationReceipt,
+  renderGovernedRelationalDqlArtifact,
+  type GovernedCompilationReceipt,
+  type GovernedRelationalCompileResult,
+} from './governed-relational-compiler.js';
 import {
   QUICK_PROMPT_CONTEXT_BUDGET,
   canUseLaneRepair,
@@ -155,7 +170,7 @@ export interface AgentRefusalDetails {
    * grounding gaps, this preserves the exact validation code so repair loops can
    * re-ground the named identifier instead of parsing prose.
    */
-  code?: AnswerRefusalCode | SqlContextValidationCode | AnalyticalPolicyCode | 'semantic_runtime_required';
+  code?: AnswerRefusalCode | SqlContextValidationCode | AnalyticalPolicyCode | PlanExecutionBlockedCode | 'semantic_runtime_required';
   message: string;
   offending?: SqlContextValidationOffending;
 }
@@ -561,6 +576,10 @@ export interface AgentFollowUpContext {
   memberBindings?: AgentMemberBinding[];
   resolvedReferences?: string[];
   unresolvedReferences?: string[];
+  /** Prior typed contract; prose and SQL remain evidence-only. */
+  priorResolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Explicit qualified delta applied to the prior plan for this turn. */
+  resolvedAnalyticalPlanDelta?: ResolvedAnalyticalPlanDelta;
   /**
    * The prior turn's actual result rows (bounded sample), so a follow-up that
    * computes ACROSS the shown results ("of these, the average") is answered from
@@ -613,6 +632,16 @@ export interface AgentAnswer {
    * Advisory: callers route on it (compose_app → app build, investigate → research).
    */
   intentDecision?: IntentDecision;
+  /**
+   * Snapshot-bound interpretation produced before execution. The router emits
+   * authoritative plans by default; shadow mode is the bounded rollback path.
+   * Acceptance: AGT-013, API-006.
+   */
+  resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Versioned identity-only executable projection of the resolved plan. */
+  executablePlan?: PlanExecutionBinding;
+  /** Compiler/result receipt for the authoritative governed relational lane. */
+  governedCompilationReceipt?: GovernedCompilationReceipt;
   /** Final answer text (NL summary). */
   text: string;
   /**
@@ -736,6 +765,12 @@ export interface CertifiedBlockInvocationInput {
 
 export interface AnswerLoopInput {
   question: string;
+  /** Immutable interpretation selected by the evidence-first router. */
+  resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Internal: the single adapter result prepared once at the answer boundary. */
+  resolvedPlanExecutionBinding?: PlanExecutionBinding;
+  /** Internal: constrained AST/SQL compilation prepared at the answer boundary. */
+  governedRelationalCompilation?: GovernedRelationalCompileResult;
   /**
    * Current notebook/app context, such as upstream SQL or selected filters.
    * This is prompt context only. It is intentionally excluded from KG and
@@ -759,6 +794,8 @@ export interface AnswerLoopInput {
   manifest?: DQLManifest;
   /** Project + user-level Skills. */
   skills?: Skill[];
+  /** Internal handoff: `skills` already materialize the snapshot KnowledgeLens. */
+  skillsSelectionLocked?: boolean;
   /** Hints to prefer specific blocks first (vocabulary mappings from Skills). */
   blockHints?: string[];
   /**
@@ -1097,12 +1134,132 @@ function tryCrossResultAnswer(input: AnswerLoopInput): AgentAnswer | null {
   return answer;
 }
 
+/**
+ * Materialize exactly the Skill IDs/hashes selected in the immutable context
+ * pack. No downstream answer route may rerun trigger/domain selection or add a
+ * Skill that was not recorded in the KnowledgeLens.
+ *
+ * Acceptance: SKILL-003, AGT-013.
+ */
+export function materializeKnowledgeLensSkills(
+  contextPack: LocalContextPack,
+  available: Skill[],
+): Skill[] {
+  const byIdentity = new Map<string, Skill>();
+  for (const skill of available) {
+    byIdentity.set(skill.qualifiedId ?? skill.id, skill);
+    if (!byIdentity.has(skill.id)) byIdentity.set(skill.id, skill);
+  }
+  return (contextPack.skills ?? []).map((selected) => {
+    const identity = selected.qualifiedId ?? selected.id;
+    const source = byIdentity.get(identity) ?? byIdentity.get(selected.id);
+    if (source) {
+      // Guidance is the immutable, bounded snapshot body. Retain structured
+      // source fields but never reread or inject a newer disk body mid-run.
+      return { ...source, body: selected.guidance };
+    }
+    return {
+      id: selected.id,
+      localId: selected.id,
+      qualifiedId: selected.qualifiedId,
+      scope: 'project',
+      domain: selected.domain,
+      domains: selected.domains,
+      modelAreaRefs: selected.modelAreaRefs,
+      kind: selected.kind,
+      status: selected.status,
+      owner: selected.owner,
+      triggers: selected.triggers,
+      exclusions: selected.exclusions,
+      description: selected.description,
+      preferredMetrics: selected.preferredMetrics,
+      preferredBlocks: selected.preferredBlocks,
+      preferredDimensions: selected.preferredDimensions,
+      requiredFilters: selected.requiredFilters,
+      clarifyWhen: selected.clarifyWhen,
+      examples: [],
+      sourceRefs: selected.sourceRefs,
+      vocabulary: selected.vocabulary,
+      body: selected.guidance,
+      sourcePath: selected.sourcePath ?? `snapshot:${selected.objectKey}`,
+    };
+  });
+}
+
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
+  const inheritedPlan = !input.resolvedAnalyticalPlan
+    && input.followUp?.priorResolvedAnalyticalPlan
+    && input.followUp.resolvedAnalyticalPlanDelta
+    ? deriveResolvedAnalyticalPlan(
+        input.followUp.priorResolvedAnalyticalPlan,
+        input.followUp.resolvedAnalyticalPlanDelta,
+      )
+    : undefined;
+  const normalizedInput: AnswerLoopInput = inheritedPlan
+    ? { ...input, resolvedAnalyticalPlan: inheritedPlan }
+    : input;
+  const resolvedPlanExecutionBinding = normalizedInput.resolvedAnalyticalPlan
+    ? adaptResolvedAnalyticalPlan({
+        plan: normalizedInput.resolvedAnalyticalPlan,
+        registry: buildPlanExecutionRegistry({
+          nodes: [
+            ...normalizedInput.kg.getNodesByKind('block', 100_000),
+            ...normalizedInput.kg.getNodesByKind('metric', 100_000),
+            ...normalizedInput.kg.getNodesByKind('dimension', 100_000),
+          ],
+          objects: normalizedInput.contextPack?.objects,
+        }),
+        semanticLayer: normalizedInput.semanticLayer,
+        expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
+      })
+    : undefined;
+  const planBoundInput: AnswerLoopInput = resolvedPlanExecutionBinding
+    ? { ...normalizedInput, resolvedPlanExecutionBinding }
+    : normalizedInput;
+  const relationalSchemaContext = planBoundInput.schemaContext?.length
+    ? planBoundInput.schemaContext
+    : (planBoundInput.contextPack?.allowedSqlContext.relations ?? []).map((relation) => ({
+        relation: relation.relation,
+        name: relation.name,
+        columns: relation.columns.map((column) => ({
+          name: column.name,
+          type: column.type,
+          description: column.description,
+        })),
+      }));
+  const governedRelationalCompilation = planBoundInput.resolvedAnalyticalPlan?.mode === 'authoritative'
+    && planBoundInput.resolvedAnalyticalPlan.capability === 'governed_relational'
+    ? compileGovernedRelationalPlan({
+        plan: planBoundInput.resolvedAnalyticalPlan,
+        registry: buildGovernedRelationalRegistry({
+          snapshotId: planBoundInput.resolvedAnalyticalPlan.snapshotId,
+          schemaContext: relationalSchemaContext,
+          manifest: planBoundInput.manifest,
+        }),
+        driver: planBoundInput.semanticDriver,
+      })
+    : undefined;
+  const compiledInput: AnswerLoopInput = governedRelationalCompilation
+    ? { ...planBoundInput, governedRelationalCompilation }
+    : planBoundInput;
+  const executionInput = compiledInput.contextPack
+    ? {
+        ...compiledInput,
+        skills: materializeKnowledgeLensSkills(compiledInput.contextPack, compiledInput.skills ?? []),
+        skillsSelectionLocked: true,
+      }
+    : compiledInput;
   // Cross-result follow-up ("of these, the average") — computed from the prior
   // rows, before the cascade, so it never re-queries or times out.
-  const crossResult = tryCrossResultAnswer(input);
-  if (crossResult) return crossResult;
-  const result = applyHollowAnswerGate(await runAnswerLoop(input));
+  const crossResult = tryCrossResultAnswer(executionInput);
+  if (crossResult) {
+    return {
+      ...crossResult,
+      resolvedAnalyticalPlan: executionInput.resolvedAnalyticalPlan,
+      executablePlan: executionInput.resolvedPlanExecutionBinding,
+    };
+  }
+  const result = applyHollowAnswerGate(await runAnswerLoop(executionInput));
   // Attach the canonical trust label once, at the single exit point, so every
   // return site inside runAnswerLoop stays untouched and backward compatible.
   // Freshness-aware trust: for a certified answer, fold the source block's data
@@ -1131,6 +1288,8 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     ...publicResult,
     domainContext: input.domainContext,
     intentDecision,
+    resolvedAnalyticalPlan: executionInput.resolvedAnalyticalPlan,
+    executablePlan: executionInput.resolvedPlanExecutionBinding,
     trustLabelInfo,
     provenanceFooter: buildProvenanceFooter(result, trustLabelInfo),
     cascade: publicResult.cascade ?? createCascadeAnswerResult({
@@ -1151,15 +1310,17 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     // here so every return site inside runAnswerLoop stays untouched.
     appliedSkills:
       result.appliedSkills ??
-      selectRelevantSkills(input.skills ?? [], input.question, {
-        userId: input.userId ?? null,
-        modelAreaIds: input.domainContext?.modelAreaId ? [input.domainContext.modelAreaId] : [],
-        domains: Array.from(new Set([
-          ...domainContextSearchDomains(input.domainContext),
-          ...(input.domain ? [input.domain] : []),
-          ...(input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
-        ])),
-      }).map((s) => ({
+      (executionInput.skillsSelectionLocked
+        ? executionInput.skills ?? []
+        : selectRelevantSkills(executionInput.skills ?? [], executionInput.question, {
+            userId: executionInput.userId ?? null,
+            modelAreaIds: executionInput.domainContext?.modelAreaId ? [executionInput.domainContext.modelAreaId] : [],
+            domains: Array.from(new Set([
+              ...domainContextSearchDomains(executionInput.domainContext),
+              ...(executionInput.domain ? [executionInput.domain] : []),
+              ...(executionInput.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : []),
+            ])),
+          })).map((s) => ({
         id: s.id,
         description: s.description,
       })),
@@ -1250,11 +1411,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? (input.contextPack?.objects ?? []).slice(0, 20).flatMap((object) => object.domain ? [object.domain] : [])
       : []),
   ]));
-  const selectedSkills = selectRelevantSkills(skills, question, {
-    userId: userId ?? null,
-    domains: inferredDomains,
-    modelAreaIds: input.domainContext?.modelAreaId ? [input.domainContext.modelAreaId] : [],
-  });
+  const selectedSkills = input.skillsSelectionLocked
+    ? skills
+    : selectRelevantSkills(skills, question, {
+        userId: userId ?? null,
+        domains: inferredDomains,
+        modelAreaIds: input.domainContext?.modelAreaId ? [input.domainContext.modelAreaId] : [],
+      });
   const effectiveBlockHints = Array.from(new Set([
     ...blockHints,
     // Only selected skills may influence block ranking. Previously a preferred
@@ -1304,6 +1467,84 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     kg,
   );
   const repairBudgetState = createCascadeBudgetState(input.cascadeBudgetModel);
+  const authoritativePlanBinding = input.resolvedAnalyticalPlan?.mode === 'authoritative'
+    ? input.resolvedPlanExecutionBinding
+    : undefined;
+  const governedRelationalCompilation = input.governedRelationalCompilation;
+  if (governedRelationalCompilation?.status === 'blocked') {
+    const text = `The governed relational plan cannot compile safely: ${governedRelationalCompilation.reason}`;
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: governedRelationalCompilation.code.startsWith('RELATIONSHIP_') ? 'modeling_gap' : 'grounding_gap',
+      refusalDetails: { code: 'grounding_gap', message: `${governedRelationalCompilation.code}: ${governedRelationalCompilation.reason}` },
+      citations: contextPackCitations(input.contextPack, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
+  if (governedRelationalCompilation?.status === 'compiled') {
+    const dqlArtifact = renderGovernedRelationalDqlArtifact(governedRelationalCompilation);
+    let result: AgentResultPayload | undefined;
+    let executionError: string | undefined;
+    let receipt = governedRelationalCompilation.receipt;
+    if (input.executeDqlArtifact) {
+      try {
+        result = await input.executeDqlArtifact(dqlArtifact);
+        receipt = finalizeGovernedCompilationReceipt(receipt, result);
+      } catch (error) {
+        executionError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const text = executionError
+      ? `The governed relational query compiled, but execution failed: ${executionError}`
+      : result
+        ? `Compiled and executed the snapshot-bound governed relational plan. Returned ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`
+        : 'Compiled the snapshot-bound governed relational plan. Execution was not requested.';
+    return {
+      kind: executionError ? 'no_answer' : 'uncertified',
+      sourceTier: executionError ? 'no_answer' : 'dbt_manifest',
+      certification: executionError ? 'analyst_review_required' : 'governed',
+      reviewStatus: executionError ? 'analyst_review_required' : 'governed',
+      confidence: executionError ? 0 : 0.9,
+      text,
+      answer: text,
+      ...(executionError ? { executionError, refusalCode: 'grounding_gap' as const } : {}),
+      proposedSql: governedRelationalCompilation.sql,
+      sql: governedRelationalCompilation.sql,
+      dqlArtifact,
+      result,
+      governedCompilationReceipt: receipt,
+      citations: schemaCitations(schemaContext, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
+  if (authoritativePlanBinding?.status === 'blocked') {
+    const text = `The resolved analytical plan cannot execute safely: ${authoritativePlanBinding.reason}`;
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: authoritativePlanBinding.code === 'PLAN_BLOCKED' ? 'ambiguous' : 'grounding_gap',
+      refusalDetails: { code: authoritativePlanBinding.code, message: authoritativePlanBinding.reason },
+      citations: contextPackCitations(input.contextPack, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
   const fallbackIntent = classifyAgentIntent({
     question,
     followUp: input.followUp,
@@ -1323,20 +1564,29 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const node = kg.getNode(`metric:${metric}`);
     if (node && !semanticMetricNodes.some((candidate) => candidate.nodeId === node.nodeId)) semanticMetricNodes.push(node);
   }
-  const preferredSemanticMetric = resolvePreferredSemanticMetric(
-    [input.preferredExecutionId, ...(input.preferredEvidenceIds ?? [])],
-    semanticMetricNodes,
-    kg,
-  );
+  const authoritativeSemanticBinding = authoritativePlanBinding?.status === 'ready'
+    && authoritativePlanBinding.kind === 'semantic'
+    ? authoritativePlanBinding
+    : undefined;
+  const preferredSemanticMetric = authoritativeSemanticBinding?.metricNode
+    ?? (input.resolvedAnalyticalPlan?.mode === 'authoritative'
+      ? undefined
+      : resolvePreferredSemanticMetric(
+          [input.preferredExecutionId, ...(input.preferredEvidenceIds ?? [])],
+          semanticMetricNodes,
+          kg,
+        ));
   const semanticLayerForExec = input.semanticLayer;
   const canExecuteSemanticMetricForMatch = input.canExecuteSemanticMetric
     ?? (semanticLayerForExec ? (name: string) => semanticLayerForExec.canComposeMetric(name) : undefined);
   let semanticMetricMatch = preferredSemanticMetric
     ? { metric: preferredSemanticMetric, score: 1, basis: 'name' as const }
-    : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
-        measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
-        ...(canExecuteSemanticMetricForMatch ? { canExecute: canExecuteSemanticMetricForMatch } : {}),
-      }).catch(() => null);
+    : input.resolvedAnalyticalPlan?.mode === 'authoritative'
+      ? null
+      : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
+          measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
+          ...(canExecuteSemanticMetricForMatch ? { canExecute: canExecuteSemanticMetricForMatch } : {}),
+        }).catch(() => null);
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,
   // Apps, and notebooks are returned as governed citations/navigation targets.
@@ -1381,8 +1631,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           excludedArtifactIds,
           kg,
         }) : null;
-  let artifactHit = drilldownCertifiedHit ?? unsafeCatalogCertifiedHit
-    ?? (catalogCertifiedHit ? null : fallbackCertifiedHit);
+  const authoritativeCertifiedBinding = authoritativePlanBinding?.status === 'ready'
+    && authoritativePlanBinding.kind === 'certified'
+    ? authoritativePlanBinding
+    : undefined;
+  let artifactHit = authoritativeCertifiedBinding
+    ? { node: authoritativeCertifiedBinding.node, score: 1 }
+    : input.resolvedAnalyticalPlan?.mode === 'authoritative'
+      ? null
+      : drilldownCertifiedHit ?? unsafeCatalogCertifiedHit
+        ?? (catalogCertifiedHit ? null : fallbackCertifiedHit);
   let certifiedExecutionFallback: { node: KGNode; error: string } | undefined;
   // Certified remains first when it actually covers the question. If the
   // retrieved block does not fit but a governed semantic metric does, never
@@ -1531,8 +1789,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         ? undefined
         : questionPlan.requestedShape.topN?.n,
     );
+    const authoritativeCertifiedFailure = Boolean(authoritativeCertifiedBinding && executionError);
     const recoverableCertifiedFailure = artifactHit.node.kind === 'block'
       && executionError !== undefined
+      && !authoritativeCertifiedFailure
       && isRetryableCertifiedExecutionError(executionError);
     if (recoverableCertifiedFailure) {
       // A certified artifact is trusted evidence, not an obligation to return a
@@ -1544,16 +1804,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       artifactHit = null;
     } else {
       return {
-        kind: certifiedShapePassed ? 'certified' : 'uncertified',
-        sourceTier,
+        kind: authoritativeCertifiedFailure ? 'no_answer' : certifiedShapePassed ? 'certified' : 'uncertified',
+        sourceTier: authoritativeCertifiedFailure ? 'no_answer' : sourceTier,
         certification: certifiedShapePassed ? 'certified' : 'analyst_review_required',
-        reviewStatus: certifiedShapePassed ? 'certified' : 'analyst_review_required',
+        reviewStatus: authoritativeCertifiedFailure ? 'none' : certifiedShapePassed ? 'certified' : 'analyst_review_required',
         confidence: certifiedShapePassed ? 0.95 : 0.45,
         text,
         answer: text,
         block: artifactHit.node.kind === 'block' ? artifactHit.node : undefined,
         result,
         executionError,
+        ...(authoritativeCertifiedFailure ? { refusalCode: 'grounding_gap' as const } : {}),
         sql: result?.sql,
         dqlArtifact,
         trustLabel: certifiedShapePassed ? input.contextPack?.trustLabel ?? 'certified' : 'mixed',
@@ -1773,7 +2034,42 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
   let semanticRuntimeFailure: string | undefined;
   let semanticRuntimeCompiledAnswer = false;
-  if (input.semanticLayer && semanticMetricMatch) {
+  if (authoritativeSemanticBinding && input.semanticLayer) {
+    const selection = authoritativeSemanticBinding.selection;
+    semanticBridgeAnswer = composeSemanticQueryFromMembers({
+      semanticLayer: input.semanticLayer,
+      question,
+      selection,
+      ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
+      ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
+    });
+    if (!semanticBridgeAnswer && input.semanticQueryCompiler) {
+      try {
+        const compiled = await input.semanticQueryCompiler(selection);
+        semanticBridgeAnswer = composeSemanticQueryFromCompiledMembers({
+          semanticLayer: input.semanticLayer,
+          question,
+          selection: compiled.selection ?? selection,
+          sql: compiled.sql,
+        });
+        semanticRuntimeCompiledAnswer = Boolean(semanticBridgeAnswer && compiled.engine !== 'native');
+      } catch (error) {
+        semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (semanticBridgeAnswer) {
+      semanticBridgeToolCalls.push({
+        name: 'compile_resolved_analytical_plan',
+        status: 'checked',
+        inputSummary: `plan: ${authoritativeSemanticBinding.planId}; metric: ${selection.metrics.join(', ')}`,
+        outputSummary: 'Compiled the exact snapshot-bound member selection without rematching.',
+        order: 1,
+      });
+    } else if (!semanticRuntimeFailure) {
+      semanticRuntimeFailure = `The exact plan ${authoritativeSemanticBinding.planId} is not composable by the pinned semantic runtime.`;
+    }
+  }
+  if (!authoritativeSemanticBinding && input.semanticLayer && semanticMetricMatch) {
     semanticBridgeAnswer = composeSemanticQueryForQuestion({
       semanticLayer: input.semanticLayer,
       question,
@@ -2839,7 +3135,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     } catch (err) {
       executionError = err instanceof Error ? err.message : String(err);
     }
-    if (executionError && !fanoutContradiction) {
+    if (executionError && !fanoutContradiction && !authoritativeSemanticBinding) {
       if (isRetryableGeneratedSqlError(executionError)) {
         const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);
         if (localRepairSql && canUseLaneRepair(repairBudgetState, 'execution')) {
@@ -3056,19 +3352,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? semanticMetricMatch?.metric.certification
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
+    const governedMetricExecutionFailure = governedMetricAnswer && Boolean(executionError);
     return {
-      kind: 'uncertified',
-      sourceTier: governedMetricAnswer ? 'semantic_layer' : activeTier,
-      certification: governedMetricAnswer ? 'governed' : 'ai_generated',
-      reviewStatus: governedMetricAnswer ? 'governed' : 'draft_ready',
+      kind: governedMetricExecutionFailure ? 'no_answer' : 'uncertified',
+      sourceTier: governedMetricExecutionFailure ? 'no_answer' : governedMetricAnswer ? 'semantic_layer' : activeTier,
+      certification: governedMetricExecutionFailure ? 'analyst_review_required' : governedMetricAnswer ? 'governed' : 'ai_generated',
+      reviewStatus: governedMetricExecutionFailure ? 'none' : governedMetricAnswer ? 'governed' : 'draft_ready',
       semanticMetricCertification,
-      confidence: certifiedMetricAnswer ? 0.8 : governedMetricAnswer ? 0.72 : 0.55,
+      confidence: governedMetricExecutionFailure ? 0 : certifiedMetricAnswer ? 0.8 : governedMetricAnswer ? 0.72 : 0.55,
       text: generatedText,
       answer: generatedText,
       proposedSql: parsed.sql,
       sql: parsed.sql,
       result,
       executionError,
+      ...(governedMetricExecutionFailure ? { refusalCode: 'grounding_gap' as const } : {}),
       suggestedViz: parsed.viz ?? 'table',
       dqlArtifact: answerDqlArtifact,
       draftBlock,

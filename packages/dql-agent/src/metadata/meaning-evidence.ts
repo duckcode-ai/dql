@@ -2,12 +2,13 @@ import {
   scoreMetadataObjectWithAnalysisPlan,
   type AnalysisQuestionPlan,
 } from './analysis-planner.js';
-import type { MetadataObject } from './catalog.js';
+import type { LocalContextPack, MetadataObject } from './catalog.js';
 import type {
   AgentEvidenceCandidate,
   AgentEvidenceKind,
   AgentRetrievalEvidence,
 } from '../meaning-resolution.js';
+import type { KnowledgeLens } from '../domain-context.js';
 
 export type MetadataEvidenceClass = 'certified' | 'semantic' | 'sql';
 export type MetadataEvidenceTrust = 'certified' | 'semantic' | 'governed_sql' | 'exploratory';
@@ -55,6 +56,7 @@ export interface AgentRetrievalEvidenceAdapterOptions {
   sourceFingerprint?: string;
   durationMs?: number;
   truncated?: boolean;
+  knowledgeLens?: KnowledgeLens;
 }
 
 export interface MeaningEvidenceInputCandidate {
@@ -70,6 +72,7 @@ const GENERIC_MEANING_TOKENS = new Set([
   'weekly', 'quarterly', 'yearly', 'annual', 'count', 'number', 'rate', 'ratio',
 ]);
 const MAX_CANDIDATES_PER_CLASS = 4;
+const ANALYTICAL_TIME_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year', 'season', 'period']);
 
 /**
  * Produce compact meaning-rich cards for an AI resolver. Relevance and trust
@@ -115,8 +118,26 @@ export function buildMeaningEvidencePackage(
   const selectedByClass: Record<MetadataEvidenceClass, typeof eligible> = {
     certified: [], semantic: [], sql: [],
   };
+  const semanticMeaningIndexes = new Map<string, number>();
   for (const candidate of eligible) {
     const lane = selectedByClass[candidate.evidenceClass];
+    if (candidate.evidenceClass === 'semantic') {
+      const definitionKey = normalizeText(candidate.item.row.description ?? '');
+      const meaningKey = definitionKey ? `${candidate.item.row.domain ?? ''}|${definitionKey}` : '';
+      const existingIndex = meaningKey ? semanticMeaningIndexes.get(meaningKey) : undefined;
+      if (existingIndex !== undefined) {
+        const existing = lane[existingIndex];
+        if (existing && semanticExecutionPriority(candidate.item.row) < semanticExecutionPriority(existing.item.row)) {
+          lane[existingIndex] = candidate;
+        }
+        continue;
+      }
+      if (lane.length < MAX_CANDIDATES_PER_CLASS) {
+        if (meaningKey) semanticMeaningIndexes.set(meaningKey, lane.length);
+        lane.push(candidate);
+      }
+      continue;
+    }
     if (lane.length < MAX_CANDIDATES_PER_CLASS) lane.push(candidate);
   }
   const selected = (['certified', 'semantic', 'sql'] as const)
@@ -162,6 +183,7 @@ export function toAgentRetrievalEvidence(
   const maxRelevance = Math.max(1, ...evidence.candidates.map((candidate) => candidate.relevanceScore));
   const candidates: AgentEvidenceCandidate[] = evidence.candidates.map((candidate) => ({
     id: candidate.objectKey,
+    qualifiedId: candidate.qualifiedId,
     kind: agentEvidenceKind(candidate),
     trustTier: candidate.trustTier,
     name: candidate.name,
@@ -188,12 +210,13 @@ export function toAgentRetrievalEvidence(
   return {
     snapshotId: options.snapshotId,
     sourceFingerprint: options.sourceFingerprint,
+    knowledgeLens: options.knowledgeLens,
     candidates,
     parsedIntent: {
       measures: questionPlan.requestedShape.measures,
       dimensions: questionPlan.requestedShape.dimensions,
       filters: [],
-      ...(questionPlan.timeTerms[0] ? { timeGrain: questionPlan.timeTerms[0] } : {}),
+      ...(analysisTimeGrain(questionPlan) ? { timeGrain: analysisTimeGrain(questionPlan) } : {}),
       ...(questionPlan.requestedShape.rankingDirection
         ? { order: questionPlan.requestedShape.rankingDirection === 'top' ? 'desc' as const : 'asc' as const }
         : {}),
@@ -205,6 +228,67 @@ export function toAgentRetrievalEvidence(
       truncated: options.truncated ?? false,
     },
   };
+}
+
+/**
+ * One host-neutral compatibility projection shared by CLI, Browser Ask, MCP,
+ * Chat, Notebook, Preview, and Block Studio. Retrieval scores never grant
+ * executability; certified fit and semantic shape facts from the same snapshot do.
+ * Acceptance: AGT-013, API-003, API-006.
+ */
+export function applyContextPackCompatibility(
+  evidence: AgentRetrievalEvidence,
+  pack: LocalContextPack,
+  selectedEvidenceId?: string,
+): AgentRetrievalEvidence {
+  const certifiedFits = new Map(pack.retrievalDiagnostics.certifiedCandidateFits.map((fit) => [fit.objectKey, fit]));
+  const semanticEvidence = new Set(pack.routeDecision.selectedEvidence
+    .filter((item) => item.role === 'semantic_metric')
+    .map((item) => item.objectKey));
+  return {
+    ...evidence,
+    candidates: evidence.candidates.map((candidate): AgentEvidenceCandidate => {
+      if (candidate.kind === 'certified_block') {
+        const fit = certifiedFits.get(candidate.id);
+        return {
+          ...candidate,
+          compatibility: fit?.action === 'certified_answer'
+            ? 'compatible'
+            : fit?.action === 'rejected_for_fit'
+              ? 'incompatible'
+              : 'partial',
+        };
+      }
+      if ((candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
+        && (semanticEvidence.has(candidate.id) || selectedEvidenceId === candidate.id)
+        && (selectedEvidenceId === candidate.id
+          || (pack.routeDecision.route !== 'clarify' && pack.routeDecision.route !== 'conflict'))) {
+        const requestedDimensions = pack.questionPlan.requestedShape.dimensions.map((dimension) => normalizeText(dimension));
+        const availableDimensions = (candidate.dimensions ?? []).map((dimension) => normalizeText(dimension));
+        const dimensionsFit = requestedDimensions.length === 0 || requestedDimensions.every((requested) =>
+          availableDimensions.some((available) => available === requested || available.endsWith(` ${requested}`))
+        );
+        const requestedTimeGrain = analysisTimeGrain(pack.questionPlan);
+        const availableTimeGrains = (candidate.timeGrains ?? []).map((grain) => grain.toLowerCase());
+        const timeGrainFits = !requestedTimeGrain || availableTimeGrains.includes(requestedTimeGrain);
+        return { ...candidate, compatibility: dimensionsFit && timeGrainFits ? 'compatible' : 'partial' };
+      }
+      if (candidate.trustTier === 'governed_sql') return { ...candidate, compatibility: 'partial' };
+      return candidate;
+    }),
+  };
+}
+
+function analysisTimeGrain(plan: AnalysisQuestionPlan): string | undefined {
+  return plan.timeTerms
+    .map((term) => normalizeText(term))
+    .find((term) => ANALYTICAL_TIME_GRAINS.has(term));
+}
+
+function semanticExecutionPriority(object: MetadataObject): number {
+  if (object.objectType === 'semantic_metric') return 0;
+  if (object.objectType === 'semantic_measure') return 1;
+  return 2;
 }
 
 function evidenceClassFor(object: MetadataObject): MetadataEvidenceClass | undefined {

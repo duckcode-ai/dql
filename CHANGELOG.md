@@ -6,6 +6,56 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.0 - 2026-07-22
+
+### Plan-first governed analytics answer engine
+
+This release turns analytical questions into a typed, inspectable plan before
+execution. Certified metrics remain the preferred path, while deeper questions
+can use governed model and column evidence without silently inventing semantic
+objects or bypassing policy.
+
+### Added
+
+- **Resolved analytical plans.** Every answer route records the requested
+  measures, dimensions, time grain, filters, joins, domains, skills, evidence,
+  and execution strategy before SQL is compiled.
+- **Governed relational fallback.** When no certified semantic metric covers a
+  question, DQL can discover dbt models and columns through exact, BM25,
+  embedding, graph, and bounded repository-text evidence, then compile
+  exploratory SQL with explicit uncertified status and governance checks.
+- **Semantic-model relationship validation.** Metric selection validates its
+  owning measures, dimensions, entities, and time dimensions before execution,
+  returning actionable incompatibility errors instead of generating guessed
+  joins or invalid groupings.
+- **Domain- and skill-aware retrieval.** Domains narrow the eligible business
+  graph; skills contribute versioned analytical instructions and required
+  evidence. Both are carried into answer receipts and route diagnostics.
+- **Deep-research governance.** Multi-step investigations retain source,
+  transformation, route, and confidence receipts across follow-up queries.
+- **Cross-surface plan parity.** Ask, CLI, MCP, and notebook execution share the
+  same plan-first routing and governed compilation contracts.
+- **OSS dbt reapply on upgrade.** Updating the npm CLI now sends existing users
+  to Guided Setup to preview and explicitly reapply their dbt project context
+  before answering questions with a changed DQL version.
+
+### Changed
+
+- **Hybrid retrieval remains local.** Semantic embeddings augment the existing
+  exact, lexical/BM25, and knowledge-graph indexes; this release does not
+  require a second external vector database.
+- **Snapshot refresh is explicit.** Connecting or reapplying a dbt project
+  rebuilds the immutable context snapshot, while normal questions read that
+  versioned snapshot instead of rescanning the repository.
+
+### Known limitations
+
+- The enterprise-scale correctness fixture passes, but the tracked `PERF-001`
+  cold-start and warm-context latency budgets remain above target on the release
+  workstation. This is an accepted OSS release exception, not a GA performance
+  claim; the detailed measurements are recorded in the DQL 2.0 implementation
+  evidence.
+
 ## v1.8.8 - 2026-07-21
 
 ### Ask and Apply execution integrity

@@ -43,7 +43,7 @@ import {
 } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
 import type { KGEdge, KGNode } from '../kg/types.js';
-import type { DomainContextEnvelope, KnowledgeLens } from '../domain-context.js';
+import { domainContextSearchDomains, type DomainContextEnvelope, type KnowledgeLens } from '../domain-context.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import {
   buildAnalysisQuestionPlan,
@@ -73,7 +73,12 @@ import {
 import { retrieveScopedHints } from '../hints/retrieval.js';
 import type { QuestionScope } from '../hints/types.js';
 import { buildFtsMatch, sanitizeFtsQuery } from '../memory/fts-query.js';
-import { envEmbeddingProvider } from '../embeddings/provider.js';
+import {
+  cosineSimilarity,
+  envEmbeddingProvider,
+  HashedTokenEmbeddingProvider,
+  type EmbeddingProvider,
+} from '../embeddings/provider.js';
 import { matchExampleParaphrase } from './example-match.js';
 import { loadSkills, selectRelevantSkills, type Skill } from '../skills/loader.js';
 import {
@@ -81,7 +86,7 @@ import {
   type MetadataMeaningEvidencePackage,
 } from './meaning-evidence.js';
 
-export { toAgentRetrievalEvidence } from './meaning-evidence.js';
+export { applyContextPackCompatibility, toAgentRetrievalEvidence } from './meaning-evidence.js';
 
 export type {
   AgentRetrievalEvidenceAdapterOptions,
@@ -127,6 +132,45 @@ export interface MetadataObject {
   updatedAt?: string;
   score?: number;
   snippet?: string;
+}
+
+export interface MetadataIdentityResolution {
+  identity: string;
+  status: 'resolved' | 'ambiguous' | 'missing';
+  matchedBy?: 'object_key' | 'qualified_id' | 'source_native_id' | 'alias';
+  object?: MetadataObject;
+  candidates: MetadataObject[];
+}
+
+export interface MetadataVectorSearchResult {
+  providerId: string;
+  dimensions: number;
+  candidates: MetadataObject[];
+  unavailableReason?: string;
+}
+
+export type MetadataRetrievalLaneName = 'exact' | 'lexical' | 'vector' | 'graph';
+
+export interface MetadataRetrievalLaneCandidate {
+  objectKey: string;
+  objectType: string;
+  name: string;
+  rank: number;
+  score: number;
+  reason: string;
+}
+
+export interface MetadataRetrievalLaneResult {
+  lane: MetadataRetrievalLaneName;
+  provider?: string;
+  unavailableReason?: string;
+  candidates: MetadataRetrievalLaneCandidate[];
+}
+
+export interface MetadataSnapshotRetrievalResult {
+  snapshotId: string;
+  selected: MetadataObject[];
+  lanes: MetadataRetrievalLaneResult[];
 }
 
 export interface MetadataEdge {
@@ -187,6 +231,8 @@ export interface EnsureMetadataCatalogOptions {
   /** Parsed skills from the same project read used to prepare the KG. */
   skills?: Skill[];
   force?: boolean;
+  /** Optional explicit real embedding provider for the snapshot vector lane. */
+  embeddingProvider?: EmbeddingProvider;
 }
 
 export interface EnsureMetadataCatalogResult {
@@ -524,6 +570,8 @@ export interface LocalContextPack {
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
   retrievalDiagnostics: {
     strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context' | 'full_catalog';
+    /** Independent snapshot-bound candidate lanes; vector is not a BM25 reranker. */
+    lanes?: MetadataRetrievalLaneResult[];
     /** Qualified focused Model Area selected explicitly or inferred inside the active domain. */
     focusedModelAreaId?: string;
     modelAreaSource?: 'explicit' | 'inferred';
@@ -715,26 +763,42 @@ const OBJECT_PRIORITY: Record<string, number> = {
 
 const COLUMN_OBJECT_TYPES = new Set(['dbt_column', 'warehouse_column', 'runtime_column', 'runtime_value']);
 // v3 removes the legacy persisted plaintext runtime-value cache (SEC-003).
-const METADATA_INDEX_VERSION = 'metadata-index-v4-content-addressed-skills';
+const METADATA_INDEX_VERSION = 'metadata-index-v5-qualified-vector-lanes';
+const DEFAULT_VECTOR_PROVIDER = new HashedTokenEmbeddingProvider();
 
 export function defaultMetadataPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'cache', 'metadata.sqlite');
 }
 
 export function metadataSnapshotPath(projectRoot: string, fingerprint: string): string {
-  return join(projectRoot, '.dql', 'cache', 'snapshots', `${fingerprint}.sqlite`);
+  return join(projectRoot, '.dql', 'cache', 'snapshots', `${METADATA_INDEX_VERSION}-${fingerprint}.sqlite`);
 }
 
-export function activeMetadataSnapshotPath(projectRoot: string): string | null {
+interface ActiveMetadataSnapshotPointer {
+  snapshotId: string;
+  snapshotPath: string;
+  indexSchemaVersion?: string;
+}
+
+function readActiveMetadataSnapshotPointer(projectRoot: string): ActiveMetadataSnapshotPointer | null {
   const pointerPath = join(projectRoot, '.dql', 'cache', 'active-snapshot.json');
   if (!existsSync(pointerPath)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(pointerPath, 'utf8')) as { snapshotPath?: unknown };
-    const path = typeof parsed.snapshotPath === 'string' ? parsed.snapshotPath : '';
-    return path && existsSync(path) ? path : null;
+    const parsed = JSON.parse(readFileSync(pointerPath, 'utf8')) as Record<string, unknown>;
+    const snapshotId = typeof parsed.snapshotId === 'string' ? parsed.snapshotId : '';
+    const snapshotPath = typeof parsed.snapshotPath === 'string' ? parsed.snapshotPath : '';
+    const indexSchemaVersion = typeof parsed.indexSchemaVersion === 'string'
+      ? parsed.indexSchemaVersion
+      : undefined;
+    if (!snapshotId || !snapshotPath || !existsSync(snapshotPath)) return null;
+    return { snapshotId, snapshotPath, indexSchemaVersion };
   } catch {
     return null;
   }
+}
+
+export function activeMetadataSnapshotPath(projectRoot: string): string | null {
+  return readActiveMetadataSnapshotPointer(projectRoot)?.snapshotPath ?? null;
 }
 
 /** Read the prepared catalog identity without rebuilding the metadata snapshot. */
@@ -774,6 +838,53 @@ export function openMetadataCatalog(projectRoot: string, dbPath = defaultMetadat
 export function openActiveKnowledgeSnapshot(projectRoot: string): MetadataCatalog {
   const path = activeMetadataSnapshotPath(projectRoot) ?? defaultMetadataPath(projectRoot);
   return new MetadataCatalog(path, { readOnly: path !== defaultMetadataPath(projectRoot) });
+}
+
+export interface ActiveKnowledgeSnapshotLease {
+  readonly snapshotId: string;
+  readonly path: string;
+  readonly catalog: MetadataCatalog;
+  release(): void;
+}
+
+const activeKnowledgeSnapshotLeases = new Map<string, number>();
+
+/**
+ * Acquire one exact immutable SQLite file for a request lifetime. The active
+ * pointer is read once; later activations cannot redirect this lease to a
+ * different catalog. Callers must release in `finally`.
+ *
+ * Acceptance: CTX-002, CTX-005.
+ */
+export function acquireActiveKnowledgeSnapshot(projectRoot: string): ActiveKnowledgeSnapshotLease {
+  const pointer = readActiveMetadataSnapshotPointer(projectRoot);
+  const path = pointer?.snapshotPath ?? defaultMetadataPath(projectRoot);
+  const catalog = new MetadataCatalog(path, { readOnly: Boolean(pointer) });
+  const catalogFingerprint = catalog.state('fingerprint') ?? 'metadata-unavailable';
+  if (pointer && pointer.snapshotId !== catalogFingerprint) {
+    catalog.close();
+    throw new Error(`Active metadata snapshot pointer mismatch (pointer ${pointer.snapshotId}, catalog ${catalogFingerprint}).`);
+  }
+  activeKnowledgeSnapshotLeases.set(path, (activeKnowledgeSnapshotLeases.get(path) ?? 0) + 1);
+  let released = false;
+  return Object.freeze({
+    snapshotId: catalogFingerprint,
+    path,
+    catalog,
+    release(): void {
+      if (released) return;
+      released = true;
+      catalog.close();
+      const remaining = (activeKnowledgeSnapshotLeases.get(path) ?? 1) - 1;
+      if (remaining > 0) activeKnowledgeSnapshotLeases.set(path, remaining);
+      else activeKnowledgeSnapshotLeases.delete(path);
+    },
+  });
+}
+
+export function activeKnowledgeSnapshotLeaseCount(path?: string): number {
+  if (path) return activeKnowledgeSnapshotLeases.get(path) ?? 0;
+  return Array.from(activeKnowledgeSnapshotLeases.values()).reduce((sum, count) => sum + count, 0);
 }
 
 export interface IndexedDomainKnowledge {
@@ -932,6 +1043,112 @@ export function upsertMetadataSnapshot(projectRoot: string, snapshot: MetadataSn
   }
 }
 
+/**
+ * Run exact, BM25/lexical, vector, and graph candidate generation as
+ * independent lanes over one acquired snapshot. Domain/import eligibility is
+ * applied in SQL or before graph admission, never as a post-ranking boost.
+ *
+ * Acceptance: CTX-005, AGT-009, AGT-010.
+ */
+export async function retrieveMetadataSnapshotCandidates(
+  catalog: MetadataCatalog,
+  input: {
+    question: string;
+    searchQueries?: string[];
+    objectTypes?: string[];
+    domainContext?: DomainContextEnvelope;
+    embeddingProvider?: EmbeddingProvider;
+    limit?: number;
+  },
+): Promise<MetadataSnapshotRetrievalResult> {
+  const limit = Math.max(1, input.limit ?? 80);
+  const domains = domainContextSearchDomains(input.domainContext);
+  const isEligible = (object: MetadataObject): boolean => (
+    object.objectType !== 'skill'
+    && (!input.objectTypes?.length || input.objectTypes.includes(object.objectType))
+    && (domains.length === 0 || !object.domain || domains.includes(object.domain))
+  );
+  const explicitIdentities = explicitMetadataIdentities(input.question);
+  const exactObjects = explicitIdentities.flatMap((identity) => {
+    const resolution = catalog.resolveIdentity(identity);
+    return resolution.status === 'resolved' && resolution.object && isEligible(resolution.object)
+      ? [resolution.object]
+      : [];
+  });
+  const queries = uniqueMetadataSearchQueries(input.searchQueries?.length
+    ? input.searchQueries
+    : [input.question]);
+  const lexicalObjects = mergeObjects(queries.flatMap((query) => catalog.searchObjects({
+    query,
+    objectTypes: input.objectTypes,
+    domains: domains.length > 0 ? domains : undefined,
+    limit,
+  }))).filter(isEligible).slice(0, limit);
+  const vector = await catalog.searchVectorObjects({
+    query: input.question,
+    objectTypes: input.objectTypes,
+    domains: domains.length > 0 ? domains : undefined,
+    limit: Math.min(limit, 24),
+    provider: input.embeddingProvider,
+  });
+  const vectorObjects = vector.candidates.filter(isEligible);
+  const seedKeys = mergeObjects([...exactObjects, ...lexicalObjects.slice(0, 12), ...vectorObjects.slice(0, 12)])
+    .map((object) => object.objectKey);
+  const graphEdges = catalog.edgesForKeys(seedKeys, 1);
+  const graphObjects = catalog.getObjectsByKeys(
+    Array.from(new Set(graphEdges.flatMap((edge) => [edge.fromKey, edge.toKey]))),
+  ).filter((object) => isEligible(object) && !seedKeys.includes(object.objectKey)).slice(0, Math.min(limit, 24));
+  const lanes: MetadataRetrievalLaneResult[] = [
+    retrievalLane('exact', exactObjects, (object) => explicitIdentities.includes(object.objectKey)
+      ? 'exact object-key reference'
+      : 'resolved qualified/native/alias reference'),
+    retrievalLane('lexical', lexicalObjects, () => 'BM25/lexical candidate from the immutable snapshot'),
+    {
+      ...retrievalLane('vector', vectorObjects, () => `independent vector candidate from ${vector.providerId}`),
+      provider: vector.providerId,
+      unavailableReason: vector.unavailableReason,
+    },
+    retrievalLane('graph', graphObjects, () => 'one-hop neighbor of an eligible exact/lexical/vector seed'),
+  ];
+  const selected = mergeObjects([...exactObjects, ...lexicalObjects, ...vectorObjects, ...graphObjects])
+    .slice(0, limit * 2);
+  return {
+    snapshotId: catalog.state('fingerprint') ?? 'metadata-unavailable',
+    selected,
+    lanes,
+  };
+}
+
+function retrievalLane(
+  lane: MetadataRetrievalLaneName,
+  objects: MetadataObject[],
+  reason: (object: MetadataObject) => string,
+): MetadataRetrievalLaneResult {
+  return {
+    lane,
+    candidates: objects.map((object, index) => ({
+      objectKey: object.objectKey,
+      objectType: object.objectType,
+      name: object.name,
+      rank: index + 1,
+      score: Number((object.score ?? (1 / (index + 1))).toFixed(6)),
+      reason: reason(object),
+    })),
+  };
+}
+
+function explicitMetadataIdentities(question: string): string[] {
+  const identities: string[] = [];
+  for (const match of question.matchAll(/@(metric|dimension|measure|entity|model|block|term)\(([^)]+)\)/gi)) {
+    const identity = match[2]?.trim();
+    if (identity) identities.push(identity);
+  }
+  for (const match of question.matchAll(/\b(?:semantic|dql|dbt|skill):[a-z0-9_.:-]+/gi)) {
+    identities.push(match[0]);
+  }
+  return Array.from(new Set(identities));
+}
+
 export async function buildLocalContextPack(
   projectRoot: string,
   request: BuildLocalContextPackRequest,
@@ -949,8 +1166,9 @@ export async function buildLocalContextPack(
   // Static governed knowledge is read from the immutable content-addressed
   // snapshot selected at request start. Mutable run history, runtime schema,
   // and context packs stay in the working catalog and never alter that view.
-  const snapshotPath = activeMetadataSnapshotPath(projectRoot) ?? defaultMetadataPath(projectRoot);
-  const catalog = openActiveKnowledgeSnapshot(projectRoot);
+  const snapshotLease = acquireActiveKnowledgeSnapshot(projectRoot);
+  const snapshotPath = snapshotLease.path;
+  const catalog = snapshotLease.catalog;
   const runtimeCatalog = openMetadataCatalog(projectRoot);
   try {
     const mode = request.mode ?? 'question';
@@ -1053,13 +1271,14 @@ export async function buildLocalContextPack(
     // Leaving it in generic FTS results would bypass status/domain/area/exclusion
     // eligibility simply because a word in its body matched the question.
     const retrievalObjects = (rows: MetadataObject[]) => scopeObjects(rows).filter((row) => row.objectType !== 'skill');
-    const searchRows = retrievalObjects(mergeObjects(searchQueries.flatMap((query) =>
-      catalog.searchObjects({
-        query,
-        objectTypes: request.objectTypes,
-        limit: Math.max(request.limit ?? 80, 20),
-      })
-    )));
+    const snapshotRetrieval = await retrieveMetadataSnapshotCandidates(catalog, {
+      question: request.question,
+      searchQueries,
+      objectTypes: request.objectTypes,
+      domainContext: effectiveDomainContext,
+      limit: Math.max(request.limit ?? 80, 20),
+    });
+    const searchRows = retrievalObjects(snapshotRetrieval.selected);
     const schemaShapeCandidates = schemaShapeCandidateObjects(catalog, questionPlan, request, mergeObjects([...runtimeObjects, ...runtimeValueObjects]));
     const schemaShapeObjects = schemaShapeCandidates.map((candidate) => candidate.object);
     const exactCandidate = request.focusObjectKey ? catalog.getObject(request.focusObjectKey) : null;
@@ -1217,6 +1436,7 @@ export async function buildLocalContextPack(
       hintConflicts: hintResult.conflicts,
       retrievalDiagnostics: {
         strategy: usedFullCatalog ? 'full_catalog' : 'sqlite_fts',
+        lanes: snapshotRetrieval.lanes,
         focusedModelAreaId: focusedArea?.id,
         modelAreaSource: focusedArea?.source,
         selectedObjects: objects.length,
@@ -1254,7 +1474,7 @@ export async function buildLocalContextPack(
     const id = runtimeCatalog.insertContextPack(packPayload);
     return { ...payload, id };
   } finally {
-    catalog.close();
+    snapshotLease.release();
     runtimeCatalog.close();
   }
 }
@@ -1282,7 +1502,10 @@ function buildKnowledgeLens(
     modelAreaId: context?.modelAreaId,
     purpose: context?.purpose,
     skillRefs,
-    snapshotId: context?.snapshotId ?? catalog.state('fingerprint') ?? 'metadata-unavailable',
+    // The immutable search snapshot is authoritative. A caller-provided
+    // envelope may have been resolved against an earlier manifest signature;
+    // it cannot relabel the catalog that actually supplied evidence.
+    snapshotId: catalog.state('fingerprint') ?? 'metadata-unavailable',
     capsuleFingerprint: stringValue(capsule?.payload?.fingerprint)
       ?? stringValue(capsule?.payload?.sourceFingerprint),
     skillFingerprints: Object.keys(skillFingerprints).length > 0 ? skillFingerprints : undefined,
@@ -1738,6 +1961,15 @@ export class MetadataCatalog {
         tokenize = 'porter unicode61'
       );
 
+      CREATE TABLE IF NOT EXISTS metadata_vector_index (
+        object_key    TEXT PRIMARY KEY,
+        provider_id  TEXT NOT NULL,
+        dimensions   INTEGER NOT NULL,
+        vector       BLOB NOT NULL,
+        text_hash    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_metadata_vector_provider ON metadata_vector_index(provider_id);
+
       CREATE TABLE IF NOT EXISTS metadata_edges (
         edge_type    TEXT NOT NULL,
         from_key     TEXT NOT NULL,
@@ -1896,6 +2128,10 @@ export class MetadataCatalog {
       INSERT INTO metadata_fts (object_key, name, full_name, description, domain, owner, payload)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+    const insertVector = this.db.prepare(`
+      INSERT INTO metadata_vector_index (object_key, provider_id, dimensions, vector, text_hash)
+      VALUES (?, ?, ?, ?, ?)
+    `);
     const insertEdge = this.db.prepare(`
       INSERT OR IGNORE INTO metadata_edges (
         edge_type, from_key, to_key, confidence, payload_json, created_at
@@ -1930,6 +2166,7 @@ export class MetadataCatalog {
     const txn = this.db.transaction(() => {
       this.db.prepare('DELETE FROM metadata_edges').run();
       this.db.prepare('DELETE FROM metadata_fts').run();
+      this.db.prepare('DELETE FROM metadata_vector_index').run();
       this.db.prepare('DELETE FROM metadata_objects').run();
       this.db.prepare('DELETE FROM metadata_diagnostics').run();
       this.db.prepare('DELETE FROM metadata_source_fingerprints').run();
@@ -1961,6 +2198,17 @@ export class MetadataCatalog {
           object.owner ?? '',
           searchableMetadataPayload(payload),
         );
+        if (isVectorIndexObject(object)) {
+          const vectorText = metadataVectorText(object);
+          const vector = DEFAULT_VECTOR_PROVIDER.embedOne(vectorText);
+          insertVector.run(
+            object.objectKey,
+            DEFAULT_VECTOR_PROVIDER.id,
+            vector.length,
+            encodeFloat32Vector(vector),
+            sha256(vectorText),
+          );
+        }
       }
 
       for (const edge of snapshot.edges) {
@@ -2019,6 +2267,8 @@ export class MetadataCatalog {
       setState.run('compile_conflicts_json', JSON.stringify(snapshot.compileConflicts ?? []));
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
       setState.run('index_version', METADATA_INDEX_VERSION);
+      setState.run('vector_provider', DEFAULT_VECTOR_PROVIDER.id);
+      setState.run('vector_dimensions', String(DEFAULT_VECTOR_PROVIDER.dimensions));
     });
     txn();
   }
@@ -2062,6 +2312,9 @@ export class MetadataCatalog {
     const insertFts = this.db.prepare(`
       INSERT INTO metadata_fts (object_key, name, full_name, description, domain, owner, payload)
       VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    const insertVector = this.db.prepare(`
+      INSERT INTO metadata_vector_index (object_key, provider_id, dimensions, vector, text_hash)
+      VALUES (?, ?, ?, ?, ?)`);
     const insertEdge = this.db.prepare(`
       INSERT OR IGNORE INTO metadata_edges (edge_type, from_key, to_key, confidence, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?)`);
@@ -2083,6 +2336,7 @@ export class MetadataCatalog {
       INSERT OR REPLACE INTO skill_bodies (body_hash, encoding, compressed_body, original_length)
       VALUES (?, 'br', ?, ?)`);
     const deleteFtsForSource = this.db.prepare('DELETE FROM metadata_fts WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?)');
+    const deleteVectorsForSource = this.db.prepare('DELETE FROM metadata_vector_index WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?)');
     const deleteObjectsForSource = this.db.prepare('DELETE FROM metadata_objects WHERE COALESCE(source_path, source_system) = ?');
 
     const txn = this.db.transaction(() => {
@@ -2090,9 +2344,11 @@ export class MetadataCatalog {
       // fingerprinted, so always refreshed).
       for (const source of [...changedSources, ...removedSources]) {
         deleteFtsForSource.run(source);
+        deleteVectorsForSource.run(source);
         deleteObjectsForSource.run(source);
       }
       this.db.prepare('DELETE FROM metadata_fts WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE source_path IS NULL AND source_system IS NULL)').run();
+      this.db.prepare('DELETE FROM metadata_vector_index WHERE object_key IN (SELECT object_key FROM metadata_objects WHERE source_path IS NULL AND source_system IS NULL)').run();
       this.db.prepare('DELETE FROM metadata_objects WHERE source_path IS NULL AND source_system IS NULL').run();
 
       // Re-insert only objects from changed sources or sourceless; unchanged
@@ -2108,6 +2364,17 @@ export class MetadataCatalog {
           JSON.stringify(payload), object.updatedAt ?? now,
         );
         insertFts.run(object.objectKey, object.name, object.fullName ?? '', object.description ?? '', object.domain ?? '', object.owner ?? '', searchableMetadataPayload(payload));
+        if (isVectorIndexObject(object)) {
+          const vectorText = metadataVectorText(object);
+          const vector = DEFAULT_VECTOR_PROVIDER.embedOne(vectorText);
+          insertVector.run(
+            object.objectKey,
+            DEFAULT_VECTOR_PROVIDER.id,
+            vector.length,
+            encodeFloat32Vector(vector),
+            sha256(vectorText),
+          );
+        }
       }
 
       // Cross-source tables: rebuild fully.
@@ -2150,6 +2417,8 @@ export class MetadataCatalog {
       setState.run('compile_conflicts_json', JSON.stringify(snapshot.compileConflicts ?? []));
       setState.run('manifest_generated_at', snapshot.manifest.generatedAt);
       setState.run('index_version', METADATA_INDEX_VERSION);
+      setState.run('vector_provider', DEFAULT_VECTOR_PROVIDER.id);
+      setState.run('vector_dimensions', String(DEFAULT_VECTOR_PROVIDER.dimensions));
     });
     txn();
     return { mode: 'incremental', changedSources: changedSources.size };
@@ -2159,9 +2428,10 @@ export class MetadataCatalog {
     query: string;
     objectTypes?: string[];
     domain?: string;
+    domains?: string[];
     limit?: number;
   }): MetadataObject[] {
-    const { query, objectTypes, domain, limit = 40 } = options;
+    const { query, objectTypes, domain, domains, limit = 40 } = options;
     const match = buildFtsMatch(query, { prefix: true });
     if (!match.or) return this.listObjects({ objectTypes, domain, limit });
 
@@ -2174,6 +2444,9 @@ export class MetadataCatalog {
     if (domain) {
       filters.push('o.domain = ?');
       extraParams.push(domain);
+    } else if (domains?.length) {
+      filters.push(`(o.domain IS NULL OR o.domain IN (${domains.map(() => '?').join(', ')}))`);
+      extraParams.push(...domains);
     }
     const whereExtra = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
     const runMatch = (matchExpr: string): MetadataObjectRow[] => this.db.prepare(`
@@ -2212,6 +2485,112 @@ export class MetadataCatalog {
       ),
       snippet: row.snip ?? undefined,
     }));
+  }
+
+  /** Replace the snapshot vector lane with an explicitly configured provider. */
+  async rebuildVectorIndex(provider: EmbeddingProvider, batchSize = 96): Promise<void> {
+    const objects: MetadataObject[] = [];
+    this.scanObjects({ batchSize: 500 }, (rows) => {
+      objects.push(...rows.filter(isVectorIndexObject));
+    });
+    const encoded: Array<{ objectKey: string; dimensions: number; vector: Buffer; textHash: string }> = [];
+    let dimensions = 0;
+    for (let offset = 0; offset < objects.length; offset += Math.max(1, batchSize)) {
+      const batch = objects.slice(offset, offset + Math.max(1, batchSize));
+      const texts = batch.map(metadataVectorText);
+      const vectors = await provider.embed(texts);
+      if (vectors.length !== batch.length) {
+        throw new Error(`Embedding provider ${provider.id} returned ${vectors.length} vectors for ${batch.length} objects.`);
+      }
+      for (let index = 0; index < batch.length; index += 1) {
+        const vector = vectors[index] ?? [];
+        if (vector.length === 0) throw new Error(`Embedding provider ${provider.id} returned an empty vector.`);
+        if (dimensions === 0) dimensions = vector.length;
+        if (vector.length !== dimensions) {
+          throw new Error(`Embedding provider ${provider.id} changed dimensions from ${dimensions} to ${vector.length}.`);
+        }
+        encoded.push({
+          objectKey: batch[index]!.objectKey,
+          dimensions,
+          vector: encodeFloat32Vector(vector),
+          textHash: sha256(texts[index]!),
+        });
+      }
+    }
+    const insert = this.db.prepare(`
+      INSERT INTO metadata_vector_index (object_key, provider_id, dimensions, vector, text_hash)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    const setState = this.db.prepare('INSERT OR REPLACE INTO metadata_state (key, value) VALUES (?, ?)');
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM metadata_vector_index').run();
+      for (const item of encoded) {
+        insert.run(item.objectKey, provider.id, item.dimensions, item.vector, item.textHash);
+      }
+      setState.run('vector_provider', provider.id);
+      setState.run('vector_dimensions', String(dimensions));
+    })();
+  }
+
+  /** Independent vector candidate generation over all eligible snapshot cards. */
+  async searchVectorObjects(options: {
+    query: string;
+    objectTypes?: string[];
+    domains?: string[];
+    limit?: number;
+    provider?: EmbeddingProvider;
+  }): Promise<MetadataVectorSearchResult> {
+    const indexedProviderId = this.state('vector_provider') ?? DEFAULT_VECTOR_PROVIDER.id;
+    const indexedDimensions = Number(this.state('vector_dimensions') ?? DEFAULT_VECTOR_PROVIDER.dimensions);
+    const provider = options.provider ?? DEFAULT_VECTOR_PROVIDER;
+    if (provider.id !== indexedProviderId) {
+      return {
+        providerId: indexedProviderId,
+        dimensions: indexedDimensions,
+        candidates: [],
+        unavailableReason: `requested provider ${provider.id} does not match snapshot vector provider ${indexedProviderId}`,
+      };
+    }
+    const [queryVector] = provider === DEFAULT_VECTOR_PROVIDER
+      ? [DEFAULT_VECTOR_PROVIDER.embedOne(options.query)]
+      : await provider.embed([options.query]);
+    if (!queryVector || queryVector.length !== indexedDimensions) {
+      return {
+        providerId: indexedProviderId,
+        dimensions: indexedDimensions,
+        candidates: [],
+        unavailableReason: `query vector dimensions do not match snapshot index (${queryVector?.length ?? 0} vs ${indexedDimensions})`,
+      };
+    }
+    const filters: string[] = ['v.provider_id = ?'];
+    const params: unknown[] = [indexedProviderId];
+    if (options.objectTypes?.length) {
+      filters.push(`o.object_type IN (${options.objectTypes.map(() => '?').join(', ')})`);
+      params.push(...options.objectTypes);
+    }
+    if (options.domains?.length) {
+      filters.push(`(o.domain IS NULL OR o.domain IN (${options.domains.map(() => '?').join(', ')}))`);
+      params.push(...options.domains);
+    }
+    const rows = this.db.prepare(`
+      SELECT o.*, v.vector AS vector_blob
+      FROM metadata_vector_index AS v
+      JOIN metadata_objects AS o ON o.object_key = v.object_key
+      WHERE ${filters.join(' AND ')}
+      ORDER BY o.object_key
+    `).all(...params) as Array<MetadataObjectRow & { vector_blob: Buffer }>;
+    const candidates = rows
+      .map((row) => {
+        const cosine = cosineSimilarity(queryVector, decodeFloat32Vector(row.vector_blob));
+        return { ...rowToObject(row), score: Number(((cosine + 1) / 2).toFixed(6)) };
+      })
+      // A cosine of zero maps to 0.5 and is not evidence. Requiring positive
+      // separation prevents hash collisions/unrelated cards from flooding the
+      // downstream bounded context while retaining independent vector recall.
+      .filter((row) => (row.score ?? 0) > 0.55)
+      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.objectKey.localeCompare(right.objectKey))
+      .slice(0, Math.max(1, options.limit ?? 40));
+    return { providerId: indexedProviderId, dimensions: indexedDimensions, candidates };
   }
 
   listObjects(options: {
@@ -2348,13 +2727,47 @@ export class MetadataCatalog {
   }
 
   findObjectByIdentity(identity: string): MetadataObject | null {
+    return this.resolveIdentity(identity).object ?? null;
+  }
+
+  /** Resolve exact/qualified/native/alias identities without first-match wins. */
+  resolveIdentity(identity: string): MetadataIdentityResolution {
+    const normalized = identity.trim();
+    if (!normalized) return { identity, status: 'missing', candidates: [] };
+    const exact = this.db.prepare(`
+      SELECT * FROM metadata_objects WHERE object_key = ?
+    `).get(normalized) as MetadataObjectRow | undefined;
+    if (exact) {
+      const object = rowToObject(exact);
+      return { identity, status: 'resolved', matchedBy: 'object_key', object, candidates: [object] };
+    }
     const rows = this.db.prepare(`
-      SELECT * FROM metadata_objects
-      WHERE object_key = ? OR full_name = ?
-      ORDER BY CASE WHEN object_key = ? THEN 0 ELSE 1 END, object_key
-      LIMIT 2
-    `).all(identity, identity, identity) as MetadataObjectRow[];
-    return rows.length === 1 ? rowToObject(rows[0]!) : rows[0] ? rowToObject(rows[0]) : null;
+      SELECT DISTINCT o.*
+      FROM metadata_objects AS o
+      WHERE o.full_name = ?
+         OR json_extract(o.payload_json, '$.sourceNativeId') = ?
+         OR EXISTS (
+           SELECT 1
+           FROM json_each(COALESCE(json_extract(o.payload_json, '$.aliases'), '[]')) AS alias
+           WHERE alias.value = ?
+         )
+      ORDER BY o.object_key
+      LIMIT 21
+    `).all(normalized, normalized, normalized) as MetadataObjectRow[];
+    const candidates = rows.map(rowToObject);
+    if (candidates.length === 0) return { identity, status: 'missing', candidates: [] };
+    if (candidates.length > 1) return { identity, status: 'ambiguous', candidates };
+    const object = candidates[0]!;
+    const payload = object.payload ?? {};
+    const aliases = metadataStringArray(payload.aliases);
+    const matchedBy = object.fullName === normalized
+      ? 'qualified_id'
+      : stringValue(payload.sourceNativeId) === normalized
+        ? 'source_native_id'
+        : aliases.includes(normalized)
+          ? 'alias'
+          : 'qualified_id';
+    return { identity, status: 'resolved', matchedBy, object, candidates };
   }
 
   edgesForKeys(keys: string[], hops = 1): MetadataEdge[] {
@@ -2866,11 +3279,11 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     reviewCadence: node.reviewCadence,
     pattern: node.pattern,
     grain: node.grain,
-    entities: node.entities ?? [],
+    entities: node.entities ?? node.payload?.entities ?? [],
     declaredOutputs: node.declaredOutputs ?? [],
     outputs: node.outputs ?? [],
     outputContract: node.outputContract ?? [],
-    dimensions: node.dimensions ?? [],
+    dimensions: node.dimensions ?? node.payload?.dimensions ?? [],
     allowedFilters: node.allowedFilters ?? [],
     parameterPolicy: node.parameterPolicy ?? [],
     parameters: node.parameters ?? [],
@@ -4206,7 +4619,7 @@ async function planContextPackRoute(input: {
         plan: input.questionPlan,
         block: object,
         exactExampleMatch: hasExactExampleQuestion(input.request.question, object),
-        definitionLookup: intent === 'definition_lookup',
+        definitionLookup: intent === 'definition_lookup' && objectNameInQuestion(input.request.question, object),
       }),
       applicabilityScore: applicabilityByKey.get(object.objectKey)?.score ?? 0,
     }))
@@ -4259,7 +4672,7 @@ async function planContextPackRoute(input: {
   const exactExampleMatch = exact ? hasExactExampleQuestion(input.request.question, exact) : false;
   const directCertifiedBypass = Boolean(exact && (
     exactExampleMatch
-    || intent === 'definition_lookup'
+    || (intent === 'definition_lookup' && objectNameInQuestion(input.request.question, exact))
     || objectNameInQuestion(input.request.question, exact)
   ));
   const blockFitObject = exact
@@ -4270,7 +4683,8 @@ async function planContextPackRoute(input: {
         plan: input.questionPlan,
         block: blockFitObject,
         exactExampleMatch: exact ? exactExampleMatch : false,
-        definitionLookup: Boolean(exact && intent === 'definition_lookup'),
+        definitionLookup: Boolean(exact && intent === 'definition_lookup'
+          && objectNameInQuestion(input.request.question, blockFitObject)),
       })
     : undefined;
   const blockFit = rawBlockFit && blockFitObject
@@ -4696,8 +5110,14 @@ function isGeneratedMetadataIntent(intent: MetadataAgentIntent): boolean {
 function findExactCertifiedObject(question: string, intent: MetadataAgentIntent, objects: MetadataObject[]): MetadataObject | undefined {
   const candidates = objects.filter((object) => isCertifiedMetadataObject(object));
   if (intent === 'definition_lookup') {
-    return candidates.find((object) => object.objectType === 'dql_term' || object.objectType === 'business_view')
-      ?? candidates.find((object) => object.objectType === 'dql_block' && objectNameInQuestion(question, object));
+    // A definition-shaped sentence is not itself evidence of a match. Small
+    // catalogs often return every certified term; selecting the first one made
+    // unrelated questions (for example weather) look governed. Prefer an
+    // explicitly named/example block, then require the term/view name itself.
+    return candidates.find((object) => object.objectType === 'dql_block'
+      && (hasExactExampleQuestion(question, object) || objectNameInQuestion(question, object)))
+      ?? candidates.find((object) => (object.objectType === 'dql_term' || object.objectType === 'business_view')
+        && objectNameInQuestion(question, object));
   }
   const namedExact = candidates.find((object) =>
     object.objectType === 'dql_block' &&
@@ -6669,6 +7089,37 @@ function searchableMetadataPayload(payload: Record<string, unknown>): string {
   };
   visit(payload, 0);
   return tokens.join(' ');
+}
+
+const VECTOR_EXCLUDED_OBJECT_TYPES = new Set([
+  ...COLUMN_OBJECT_TYPES,
+  'skill',
+  'runtime_value',
+]);
+
+function isVectorIndexObject(object: MetadataObject): boolean {
+  return !VECTOR_EXCLUDED_OBJECT_TYPES.has(object.objectType);
+}
+
+function metadataVectorText(object: MetadataObject): string {
+  return [
+    object.name,
+    object.fullName ?? '',
+    object.description ?? '',
+    object.domain ?? '',
+    object.owner ?? '',
+    searchableMetadataPayload(object.payload ?? {}),
+  ].filter(Boolean).join('\n').slice(0, 16_000);
+}
+
+function encodeFloat32Vector(vector: ArrayLike<number>): Buffer {
+  const values = Float32Array.from(vector);
+  return Buffer.from(values.buffer, values.byteOffset, values.byteLength);
+}
+
+function decodeFloat32Vector(blob: Buffer): Float32Array {
+  const bytes = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  return new Float32Array(bytes);
 }
 
 function rowToObject(row: MetadataObjectRow): MetadataObject {

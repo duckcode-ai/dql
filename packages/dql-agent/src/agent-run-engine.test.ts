@@ -10,13 +10,14 @@ import {
   resolveClarificationContinuation,
   selectRoute,
   routeReasoningEffort,
+  compareResolvedPlanShadow,
   type AgentRouteExecutorResult,
   type AgentRunEvent,
   type AgentRunPlanner,
   type AgentRunRoute,
 } from "./agent-run-engine.js";
 import { defaultAgentRunGates } from "./agent-run-gates.js";
-import { decideAgentAction } from "./intent-controller.js";
+import { decideAgentAction, type IntentDecision } from "./intent-controller.js";
 
 describe("routeReasoningEffort", () => {
   it("runs cheap/mechanical routes at low effort", () => {
@@ -41,6 +42,35 @@ describe("routeReasoningEffort", () => {
 
   it("runs app assembly at medium effort (gap-fill sub-answers escalate on their own)", () => {
     expect(routeReasoningEffort("app_build")).toBe("medium");
+  });
+});
+
+describe("compareResolvedPlanShadow (AGT-013 / API-006)", () => {
+  const decision = {
+    action: 'answer',
+    confidence: 0.96,
+    reason: 'Resolved governed metric.',
+    followsUp: false,
+    resolvedAnalyticalPlan: {
+      planId: 'rap:metric-plan',
+      fingerprint: 'metric-plan-fingerprint',
+      capability: 'semantic_execution',
+    } as IntentDecision['resolvedAnalyticalPlan'],
+  } satisfies IntentDecision;
+
+  it("reports parity without influencing the legacy route", () => {
+    expect(compareResolvedPlanShadow(decision, 'semantic_answer')).toEqual({
+      planId: 'rap:metric-plan',
+      fingerprint: 'metric-plan-fingerprint',
+      plannedRoute: 'semantic_answer',
+      actualRoute: 'semantic_answer',
+      matches: true,
+    });
+    expect(compareResolvedPlanShadow(decision, 'generated_answer')).toMatchObject({
+      plannedRoute: 'semantic_answer',
+      actualRoute: 'generated_answer',
+      matches: false,
+    });
   });
 });
 
@@ -1145,6 +1175,31 @@ describe("clarification continuations", () => {
 });
 
 describe("selectRoute", () => {
+  it("uses the authoritative plan capability instead of the legacy recommended route", () => {
+    const decision = {
+      action: 'answer',
+      confidence: 0.9,
+      reason: 'Resolved.',
+      followsUp: false,
+      meaningResolution: {
+        interpretedQuestion: 'Revenue by customer',
+        questionType: 'ranking',
+        selectedConceptIds: ['dbt:column:orders.amount'],
+        queryIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [] },
+        rejectedCandidates: [],
+        confidence: 'high',
+        missingInformation: [],
+        recommendedRoute: 'semantic',
+      },
+      resolvedAnalyticalPlan: {
+        mode: 'authoritative',
+        capability: 'governed_relational',
+      } as IntentDecision['resolvedAnalyticalPlan'],
+    } satisfies IntentDecision;
+    expect(selectRoute({ question: 'Revenue by customer' }, decision)).toBe('generated_answer');
+    expect(selectRoute({ question: 'Revenue by customer', requestedMode: 'research' }, decision)).toBe('research');
+  });
+
   it("uses explicit mode before heuristics", () => {
     const decision = decideAgentAction({
       question: "build a dashboard but just give SQL",

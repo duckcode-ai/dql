@@ -1,6 +1,6 @@
 {
   "name": "@duckcodeailabs/dql-core",
-  "version": "1.9.5",
+  "version": "1.10.0",
   "description": "DQL language core: lexer, parser, AST, semantic analysis",
   "license": "Apache-2.0",
   "type": "module",
