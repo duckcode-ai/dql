@@ -33,6 +33,7 @@ import { buildSkillBlockHints, buildSkillMetricHints, buildSkillsPrompt, expandQ
 import type { AgentMemory } from './memory/sqlite-memory.js';
 import type { ConversationSnapshot } from './conversation/snapshot.js';
 import { detectResultSetOperation, computeResultSetOperation } from './conversation/result-ops.js';
+import { classifyGovernedQueryShape } from './semantic-bridge/query-shape.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
 import { domainContextSearchDomains, type DomainContextEnvelope } from './domain-context.js';
 import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
@@ -1830,16 +1831,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // spend another model call re-selecting the same member or silently fall
     // into exploratory SQL; surface the compiler's actionable error instead.
     if (!semanticBridgeAnswer && !semanticRuntimeFailure) {
-      const selection = await selectSemanticMembersViaLlm({
-        provider,
-        semanticLayer: input.semanticLayer,
-        question,
-        signal: input.signal,
-        reasoningEffort: input.reasoningEffort,
-      });
-      if (selection) {
+      const requestedGroupingDims = requestedGroupingDimensions(questionPlan);
+      const wantedBreakdown = questionPlan.requestedShape.dimensions.length > 0
+        || questionPlan.dimensionTerms.length > 0;
+      const requiredGroupingCount = requestedGroupingDims.length;
+      // Capture the narrowed semantic layer so the async closure below keeps the
+      // non-undefined type (TS resets narrowing across closure boundaries).
+      const bridgeLayer = input.semanticLayer;
+      // Compose a member selection: native first, then the runtime compiler for
+      // metrics native can't express. Side effects (runtime flags, tool calls)
+      // are recorded here so a retry reruns them cleanly.
+      const composeSelection = async (selection: SemanticMemberSelection) => {
         let composed = composeSemanticQueryFromMembers({
-          semanticLayer: input.semanticLayer,
+          semanticLayer: bridgeLayer,
           question,
           selection,
           ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
@@ -1849,7 +1853,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
           try {
             const compiled = await input.semanticQueryCompiler(selection);
             composed = composeSemanticQueryFromCompiledMembers({
-              semanticLayer: input.semanticLayer,
+              semanticLayer: bridgeLayer,
               question,
               selection: compiled.selection ?? selection,
               sql: compiled.sql,
@@ -1868,18 +1872,46 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
           }
         }
-        // Coverage guard: if the question asked for a breakdown but the LLM
-        // selection produced none, the governed answer would silently DROP the
-        // requested grouping (governed-but-wrong). Fall through to Lane-3
-        // generation, which can express the breakdown.
-        const wantedBreakdown = questionPlan.requestedShape.dimensions.length > 0
-          || questionPlan.dimensionTerms.length > 0;
-        const requiredGroupingCount = requestedGroupingDimensions(questionPlan).length;
-        const dropsBreakdown = Boolean(composed)
-          && wantedBreakdown
-          && composed!.dimensions.length < Math.max(1, requiredGroupingCount)
-          && !composed!.timeDimension;
-        if (composed && !dropsBreakdown) {
+        return composed;
+      };
+      // A governed answer that silently DROPS the requested grouping is governed-
+      // but-wrong. Detect it so we retry (forcing the breakdown) rather than
+      // adopting a scalar answer to a breakdown question.
+      const dropsBreakdown = (composed: SemanticBridgeQueryResult | undefined): boolean =>
+        Boolean(composed) && wantedBreakdown
+        && composed!.dimensions.length < Math.max(1, requiredGroupingCount)
+        && !composed!.timeDimension;
+
+      let selection = await selectSemanticMembersViaLlm({
+        provider,
+        semanticLayer: input.semanticLayer,
+        question,
+        signal: input.signal,
+        reasoningEffort: input.reasoningEffort,
+      });
+      if (selection) {
+        let composed = await composeSelection(selection);
+        // Retry ONCE forcing the requested breakdown dimensions before giving up
+        // on the governed lane — the model sometimes omits a group-by it could
+        // have kept. If it still can't, the Tier-2.5 gate decides refuse-vs-SQL.
+        if (composed && dropsBreakdown(composed) && requestedGroupingDims.length > 0 && !semanticRuntimeFailure) {
+          const retry = await selectSemanticMembersViaLlm({
+            provider,
+            semanticLayer: input.semanticLayer,
+            question,
+            signal: input.signal,
+            reasoningEffort: input.reasoningEffort,
+            requireDimensions: requestedGroupingDims,
+          });
+          if (retry) {
+            const retryComposed = await composeSelection(retry);
+            if (retryComposed && !dropsBreakdown(retryComposed)) {
+              composed = retryComposed;
+              selection = retry;
+            }
+          }
+        }
+        if (composed && !dropsBreakdown(composed)) {
           semanticBridgeAnswer = composed;
           semanticBridgeToolCalls.push({
             name: 'query_semantic_model',
@@ -2021,6 +2053,40 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // measure and only generates the join/grouping around it. Keeps the number
     // consistent with the governed metric. Degrades to plain generation when the metric
     // has no resolvable definition. The grain ledger + validation still gate the output.
+    // Structured-selection gate: a governed metric matched but the compiler-owned
+    // lanes above all failed. Refuse-with-reason ONLY when we are CONFIDENT the
+    // failure is a MODELING gap — the requested breakdown resolves to a DECLARED
+    // dimension the semantic models can't join to this metric (no_join_path). In
+    // that one case free SQL would misjoin or reference an ambiguous column, so we
+    // list the connected dimensions instead of guessing. Everything else — a
+    // paraphrase the compile tool can still resolve, a raw column answerable by
+    // safe single-table SQL, a genuine compiler gap (per-group topN/arithmetic/
+    // window/HAVING), or a derived metric needing the runtime — keeps its existing
+    // path (the compile_semantic_query tool + metric-anchored generation below).
+    if (input.semanticLayer && semanticMetricMatch) {
+      const shape = classifyGovernedQueryShape(questionPlan, semanticMetricMatch.metric.name, input.semanticLayer);
+      const modelingGap = shape === 'genuine_gap'
+        ? undefined
+        : resolveModelingGap(questionPlan, semanticMetricMatch.metric.name, input.semanticLayer);
+      if (modelingGap) {
+        return buildModelingGapRefusal({
+          question,
+          metricName: modelingGap.metricName,
+          incompatibleDimension: modelingGap.incompatibleDim,
+          semanticLayer: input.semanticLayer,
+          questionPlan,
+          contextPack: input.contextPack,
+          considered,
+          memoryContext: input.memoryContext,
+          artifactHits,
+          businessHits,
+          semanticHits,
+          manifestHits,
+          toolCalls: semanticBridgeToolCalls,
+          providerName: provider.name,
+        });
+      }
+    }
     const metricAnchor = semanticMetricMatch && input.semanticLayer
       ? resolveGovernedMetricDefinition(semanticMetricMatch.metric, semanticMetricNodes, input.semanticLayer)
       : undefined;
@@ -5885,6 +5951,133 @@ function isRetryableCertifiedExecutionError(error: string): boolean {
     || /\breferenced\s+column\b.*\bnot\s+found\b/i.test(error)
     || /\bcolumn\b.*\b(?:not\s+found|does\s+not\s+exist|not\s+recognized|unknown)\b/i.test(error)
     || /\btable\b.*\b(?:not\s+found|does\s+not\s+exist|unknown)\b/i.test(error);
+}
+
+/**
+ * A governed metric matched, the compiler-owned lanes couldn't build the exact
+ * shape, and the shape is one the compiler SHOULD handle — so the gap is a
+ * missing join/model relationship, not a reason to guess SQL. Refuse with the
+ * connected dimensions so the user knows exactly what to add. Mirrors the
+ * AGT-005 semantic-runtime-failure no_answer shape.
+ */
+/**
+ * Confident modeling-gap detector: does the requested breakdown resolve to a
+ * DECLARED dimension the semantic models can't join to this metric? Only then is
+ * a compose failure a real modeling gap (list the connected dims, refuse) rather
+ * than a paraphrase the compile tool can resolve or a raw column safe SQL can
+ * answer. Matching is intentionally CONSERVATIVE (name/label/qualified equality),
+ * so an uncertain match falls through to generation — never a false refusal.
+ */
+function resolveModelingGap(
+  questionPlan: AnalysisQuestionPlan,
+  metricName: string,
+  semanticLayer: SemanticLayer,
+): { metricName: string; incompatibleDim: string; connected: string[] } | undefined {
+  const canonical = semanticLayer.listMetrics().find((metric) =>
+    metric.name === metricName
+    || metric.name.endsWith(`.${metricName}`)
+    || metricName.endsWith(`.${metric.name}`))?.name ?? metricName;
+  let explained: ReturnType<SemanticLayer['explainCompatibleDimensions']>;
+  try {
+    explained = semanticLayer.explainCompatibleDimensions([canonical]);
+  } catch {
+    return undefined;
+  }
+  const { compatible, incompatible } = explained;
+  // A declared dimension the join graph can't reach from this metric. Ignore
+  // metric_unresolved (a name-resolution miss, not a user-facing modeling gap).
+  const gappy = incompatible.filter((dim) => dim.reason === 'no_join_path' || dim.reason === 'not_shared_across_metrics');
+  if (gappy.length === 0) return undefined;
+  const requested = [
+    ...questionPlan.requestedShape.dimensions,
+    ...questionPlan.dimensionTerms,
+  ].map((value) => value.trim()).filter(Boolean);
+  if (requested.length === 0) return undefined;
+  const lastSegment = (name?: string): string | undefined => name?.split(/[._]/).pop();
+  const matchesDim = (phrase: string, dim: { name: string; qualifiedName?: string; label?: string }): boolean =>
+    conceptsEquivalent(phrase, dim.name)
+    || (dim.label ? conceptsEquivalent(phrase, dim.label) : false)
+    || (dim.qualifiedName ? conceptsEquivalent(phrase, dim.qualifiedName) : false)
+    || (lastSegment(dim.qualifiedName) ? conceptsEquivalent(phrase, lastSegment(dim.qualifiedName)!) : false);
+  for (const phrase of requested) {
+    // A phrase that also matches a CONNECTED dimension is not a gap — the compose/
+    // retry lane owns it. Only refuse when the phrase matches an unconnected dim
+    // and nothing connected.
+    if (compatible.some((dim) => matchesDim(phrase, dim))) continue;
+    const hit = gappy.find((dim) => matchesDim(phrase, dim));
+    if (hit) {
+      const connected = compatible.map((dim) => dim.label || dim.name).slice(0, 12);
+      return { metricName: canonical, incompatibleDim: hit.name, connected };
+    }
+  }
+  return undefined;
+}
+
+function buildModelingGapRefusal(input: {
+  question: string;
+  metricName: string;
+  incompatibleDimension?: string;
+  semanticLayer: SemanticLayer;
+  questionPlan: AnalysisQuestionPlan;
+  contextPack?: LocalContextPack;
+  considered: KGSearchHit[];
+  memoryContext?: AgentMemory[];
+  artifactHits: KGSearchHit[];
+  businessHits: KGSearchHit[];
+  semanticHits: KGSearchHit[];
+  manifestHits: KGSearchHit[];
+  toolCalls: AgentEvidenceToolCall[];
+  providerName: string;
+}): AgentAnswer {
+  const compatible = (() => {
+    try {
+      return input.semanticLayer.explainCompatibleDimensions([input.metricName]).compatible;
+    } catch {
+      return [];
+    }
+  })();
+  const connected = compatible.map((dimension) => dimension.label || dimension.name).slice(0, 12);
+  const requested = [
+    ...input.questionPlan.requestedShape.dimensions,
+    ...input.questionPlan.dimensionTerms,
+  ].filter((value, index, all) => value && all.indexOf(value) === index);
+  const requestedText = input.incompatibleDimension
+    ? `by ${input.incompatibleDimension}`
+    : requested.length > 0 ? `by ${requested.join(', ')}` : 'by the requested breakdown';
+  const text = [
+    `“${input.metricName}” can’t be grouped ${requestedText} — the semantic models don’t declare a join path between them.`,
+    connected.length > 0
+      ? `It CAN be grouped by: ${connected.join(', ')}.`
+      : 'No compatible group-by dimension is modeled for this metric.',
+    'To enable this breakdown, add the relationship (a join/entity) in the dbt semantic models and recompile. Nothing was executed.',
+  ].join(' ');
+  return {
+    kind: 'no_answer',
+    sourceTier: 'no_answer',
+    certification: 'analyst_review_required',
+    reviewStatus: 'none',
+    confidence: 0,
+    text,
+    answer: text,
+    refusalCode: 'modeling_gap',
+    refusalDetails: { code: 'modeling_gap', message: text },
+    citations: [],
+    memoryContext: input.memoryContext,
+    evidence: buildNoAnswerEvidence({
+      question: input.question,
+      reason: text,
+      artifactHits: input.artifactHits,
+      businessHits: input.businessHits,
+      semanticHits: input.semanticHits,
+      manifestHits: input.manifestHits,
+      considered: input.considered,
+      memoryContext: input.memoryContext ?? [],
+      toolCalls: input.toolCalls,
+    }),
+    contextPack: input.contextPack,
+    considered: input.considered,
+    providerUsed: input.providerName,
+  };
 }
 
 function repairGeneratedSqlLocally(sql: string, error: string, schemaContext: AgentSchemaTable[]): string | undefined {

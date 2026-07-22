@@ -756,6 +756,13 @@ cases:
   # - name: unanswerable refuses
   #   question: "What is our employee attrition rate?"
   #   expectRefuse: true
+
+  # Modeling-gap refusal: a governed metric sliced by a DECLARED dimension that has
+  # no join path to it must refuse-with-reason (listing the connected dimensions),
+  # never hand-roll a cross-table join that misjoins or hits an ambiguous column.
+  # - name: unconnected breakdown refuses with reason
+  #   question: "total bcm by campaign channel"
+  #   expectRefuse: true
 `;
 
 function writeGoldenTemplate(projectRoot: string): void {

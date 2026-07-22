@@ -160,4 +160,34 @@ describe('selectSemanticMembersViaLlm — compatible-dimension restriction', () 
     expect(prompt).toContain('customer_name');
     expect(prompt).not.toContain('campaign_channel');
   });
+
+  it('requireDimensions forces the requested (connected) breakdown into the prompt', async () => {
+    const l = new SemanticLayer({
+      metrics: [{ name: 'total_bcm', label: 'Total BCM', description: 'Billed consumption.', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr' }],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', domain: 'bcm', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr' },
+      ],
+    });
+    const { provider, lastPrompt } = capturingProvider();
+    await selectSemanticMembersViaLlm({ provider, semanticLayer: l, question: 'total bcm', requireDimensions: ['customer_name'] });
+    const prompt = lastPrompt();
+    expect(prompt).toContain('You MUST include these dimensions as group-bys');
+    expect(prompt).toContain('customer_name');
+  });
+
+  it('requireDimensions drops an unconnected dimension rather than instructing an impossible group-by', async () => {
+    const l = new SemanticLayer({
+      metrics: [{ name: 'total_bcm', label: 'Total BCM', description: 'Billed consumption.', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr' }],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', domain: 'bcm', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr' },
+        { name: 'campaign_channel', label: 'Channel', description: '', domain: 'mkt', sql: 'channel', type: 'string', table: 'marketing_events', cube: 'marketing_events' },
+      ],
+    });
+    const { provider, lastPrompt } = capturingProvider();
+    await selectSemanticMembersViaLlm({ provider, semanticLayer: l, question: 'total bcm', requireDimensions: ['campaign_channel'] });
+    const prompt = lastPrompt();
+    // The unconnected dimension is filtered by the compatibility restriction, so no
+    // impossible "you MUST group by campaign_channel" instruction is emitted.
+    expect(prompt).not.toContain('You MUST include these dimensions as group-bys');
+  });
 })

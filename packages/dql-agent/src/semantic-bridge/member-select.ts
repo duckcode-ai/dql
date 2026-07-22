@@ -18,6 +18,12 @@ export async function selectSemanticMembersViaLlm(input: {
   question: string;
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Dimensions the selection MUST include as group-bys (a retry after a
+   * breakdown was dropped). The instruction is added to the prompt; the model
+   * still picks only from the compatible cards.
+   */
+  requireDimensions?: string[];
 }): Promise<SemanticMemberSelection | undefined> {
   // Show REAL metrics, not dbt measures projected into the metrics map — the
   // model shouldn't pick a raw measure when a governed metric exists. If no real
@@ -70,6 +76,7 @@ export async function selectSemanticMembersViaLlm(input: {
     })] : []),
   ].join('\n');
 
+  const requiredDims = (input.requireDimensions ?? []).filter((name) => keepDimension(name));
   const messages: AgentMessage[] = [
     {
       role: 'system',
@@ -78,6 +85,9 @@ export async function selectSemanticMembersViaLlm(input: {
         'Respond with a SINGLE json object, no prose, no code fences other than one ```json block:',
         '{"metrics": string[], "dimensions"?: string[], "timeDimension"?: {"name": string, "granularity": "day"|"week"|"month"|"quarter"|"year"}, "filters"?: [{"dimension": string, "operator": "equals"|"in", "values": string[]}], "limit"?: number}',
         'If no listed metric can answer the question, return {"metrics": []}.',
+        ...(requiredDims.length > 0
+          ? [`You MUST include these dimensions as group-bys (they are the requested breakdown): ${requiredDims.join(', ')}.`]
+          : []),
       ].join('\n'),
     },
     { role: 'user', content: `Question: ${input.question}\n\nAvailable governed members:\n${catalog}\n\nReturn the member selection as JSON.` },

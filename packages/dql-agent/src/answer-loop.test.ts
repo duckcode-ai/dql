@@ -7427,6 +7427,76 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.evidence?.toolCalls?.some((call) => call.name === "compile_semantic_query")).toBe(true);
   });
 
+  it("Structured selection: refuses a governed metric grouped by a DECLARED-but-unconnected dimension (modeling gap), never free SQL", async () => {
+    // total_revenue lives on `orders`; `warehouse_region` is a DECLARED dimension on a
+    // different table with NO join to orders. The old behavior hand-rolled a (wrong)
+    // cross-table join. The structured-selection contract instead REFUSES with the
+    // connected dimensions, because free SQL here would misjoin / reference an
+    // ambiguous column — exactly the office error family. This only fires when the
+    // requested breakdown resolves to a declared-but-unconnected dim (confident gap).
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "total_revenue", label: "Total Revenue", description: "Total recognized revenue.", domain: "finance", sql: "amount", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "channel", label: "Channel", description: "Sales channel.", domain: "finance", sql: "channel", type: "string", table: "orders" },
+        { name: "warehouse_region", label: "Warehouse Region", description: "Region of the fulfilling warehouse.", domain: "logistics", sql: "region", type: "string", table: "warehouses" },
+      ],
+    });
+    // Would emit (wrong) cross-table free SQL if we ever fell through — we must not.
+    const provider = new StubProvider('```json\n{"metrics":["total_revenue"],"dimensions":[]}\n```');
+    let executed = false;
+    const result = await answer({
+      question: "total revenue by warehouse region",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => { executed = true; return { columns: [], rows: [], rowCount: 0, sql }; },
+    });
+
+    expect(executed).toBe(false); // refused before any SQL ran
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("modeling_gap");
+    // Actionable: names the unconnected dimension, lists the connected one, points at the fix.
+    expect(result.text.toLowerCase()).toContain("warehouse_region");
+    expect(result.text).toContain("Channel");
+    expect(result.text.toLowerCase()).toContain("join path");
+  });
+
+  it("Structured selection: a per-group top-N (genuine compiler gap) still falls through to free SQL, never refused", async () => {
+    // "top 2 channels per warehouse region" is per-group top-N — neither the native
+    // compiler nor MetricFlow expresses it, so free SQL is the legitimate path. Even
+    // though warehouse_region is unconnected, a genuine_gap shape must NOT be refused.
+    kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: "total_revenue", label: "Total Revenue", description: "Total recognized revenue.", domain: "finance", sql: "amount", type: "sum", table: "orders" },
+      ],
+      dimensions: [
+        { name: "channel", label: "Channel", description: "Sales channel.", domain: "finance", sql: "channel", type: "string", table: "orders" },
+        { name: "warehouse_region", label: "Warehouse Region", description: "Region of the fulfilling warehouse.", domain: "logistics", sql: "region", type: "string", table: "warehouses" },
+      ],
+    });
+    const provider = new StubProvider([
+      '```json\n{"metrics":["total_revenue"],"dimensions":[]}\n```',
+      '```json\n{"summary":"Top channels per region.","sql":"SELECT o.channel, SUM(o.amount) AS total_revenue FROM orders o GROUP BY o.channel","outputs":["channel","total_revenue"]}\n```',
+    ]);
+    const result = await answer({
+      question: "top 2 channels per warehouse region by total revenue",
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({ columns: ["channel", "total_revenue"], rows: [{ channel: "Direct", total_revenue: 100 }], rowCount: 1, sql }),
+    });
+    // The contract point: a genuine compiler gap is NEVER converted into a
+    // modeling-gap refusal (it keeps the free-SQL path). Whether the stub's SQL
+    // then satisfies the per-group top-N contract is a separate validation concern.
+    expect(result.refusalCode).not.toBe("modeling_gap");
+    // And free-SQL generation was actually reached (member-select + retry + generation).
+    expect(provider.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
   it("AGT-001 compiles an exact derived metric through the host semantic adapter before AI planning", async () => {
     kg.rebuild([revenueMetric("revenue_ratio", "Revenue ratio")], []);
     const semanticLayer = new SemanticLayer({
