@@ -286,3 +286,25 @@ describe('explainMissingSemanticRuntime (actionable config diagnosis)', () => {
     }
   });
 })
+
+describe('looksLikeAuthFailure (expired/invalid token detection)', () => {
+  it('flags token/auth failures', async () => {
+    const { looksLikeAuthFailure } = await import('./semantic-runtime.js');
+    for (const d of [
+      '401 Unauthorized',
+      'HTTP 403 Forbidden',
+      'the token is expired',
+      'invalid token',
+      'authentication failed',
+      'permission denied',
+    ]) expect(looksLikeAuthFailure(d)).toBe(true);
+  });
+  it('does NOT flag host/network errors', async () => {
+    const { looksLikeAuthFailure } = await import('./semantic-runtime.js');
+    for (const d of [
+      'getaddrinfo ENOTFOUND fake.getdbt.invalid',
+      'connect ETIMEDOUT',
+      'Environment ID is missing',
+    ]) expect(looksLikeAuthFailure(d)).toBe(false);
+  });
+})

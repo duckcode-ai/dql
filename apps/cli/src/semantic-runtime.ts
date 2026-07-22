@@ -369,6 +369,12 @@ export async function testSemanticRuntimeDraft(
  *   • MetricFlow is installed but this server process can't find it, because the
  *     server was launched from a shell without the dbt virtualenv on PATH.
  */
+/** A dbt Cloud connection error that reads like a rejected/expired token rather
+ *  than a bad host or a network failure. Exported for testability. */
+export function looksLikeAuthFailure(detail: string): boolean {
+  return /\b(401|403|unauthori[sz]ed|forbidden|expired|invalid[\s-]*token|token[\s-]*(?:is[\s-]*)?(?:invalid|expired)|authenticat[a-z]*|permission denied|not[\s-]*authori[sz]ed)\b/i.test(detail);
+}
+
 export async function explainMissingSemanticRuntime(projectRoot: string, dbtProjectPath?: string): Promise<string> {
   const status = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
   const cloud = status.adapters.find((adapter) => adapter.id === 'dbt-cloud');
@@ -379,7 +385,15 @@ export async function explainMissingSemanticRuntime(projectRoot: string, dbtProj
   // dbt Cloud is configured but not usable — the most likely cause once a user
   // has "switched to cloud". `detail` carries the live connection-test error.
   if (cloud?.configured && !cloud.ready) {
-    reasons.push(`dbt Cloud is configured but its connection test is not passing (${cloud.detail ?? 'not tested'}). In Settings → Semantic execution adapters → dbt Cloud, re-check Host, Environment ID, and the Semantic Layer service token, then “Test & save”.`);
+    const detail = cloud.detail ?? 'not tested';
+    if (looksLikeAuthFailure(detail)) {
+      // An expired/invalid token is the "works, then stops after a while"
+      // symptom: a short-lived Semantic Layer session token was used instead of
+      // a durable service token, or the token lacks Semantic Layer permission.
+      reasons.push(`dbt Cloud rejected the service token (${detail}) — it has expired or lacks Semantic Layer permission. In dbt Cloud → Account Settings → Service Tokens, create a durable service token with the “Semantic Layer Only” permission set and no short expiration (do NOT copy the short-lived token from the Semantic Layer “Connect/Query” dialog — that one expires), paste it into Settings, then “Test & save”.`);
+    } else {
+      reasons.push(`dbt Cloud is configured but its connection test is not passing (${detail}). In Settings → Semantic execution adapters → dbt Cloud, re-check Host, Environment ID, and the Semantic Layer service token, then “Test & save”.`);
+    }
   }
 
   // Local MetricFlow.
