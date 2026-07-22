@@ -415,9 +415,9 @@ describe("AgentRunEngine", () => {
       status: "blocked",
       stopReason: "blocked",
     });
-    expect(run.summary).toContain("bounded execution deadline");
+    expect(run.summary).toContain("ran out of time");
     expect(run.events.at(-1)?.type).toBe("run.failed");
-    expect(store.get("run-routing-timeout")?.summary).toContain("bounded execution deadline");
+    expect(store.get("run-routing-timeout")?.summary).toContain("ran out of time");
   });
 
   it("persists runs to a project-local file store", async () => {

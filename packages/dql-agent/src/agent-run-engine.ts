@@ -1175,7 +1175,7 @@ export class AgentRunEngine {
       return run;
     } catch (err) {
       const message = err instanceof Error && err.name === "TimeoutError"
-        ? "This request reached its bounded execution deadline. No additional retry or Research run was started; refine the question or start Research explicitly for a longer investigation."
+        ? "I ran out of time building this query before it finished. This usually means the answer needs a cross-model join the governed semantic layer can't compose, so it fell to a full SQL build. Start Research for a longer run, lower the Thinking effort for faster steps, or narrow the question (fewer breakdowns/filters). Nothing was executed."
         : err instanceof Error ? err.message : String(err);
       emit({
         type: "run.failed",

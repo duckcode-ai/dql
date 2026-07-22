@@ -197,11 +197,23 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
     expect(deadline.aborted).toBe(true);
   });
 
-  it('keeps ordinary multi-table lookups on the short budget and reserves the longer budget for explicit deep work', () => {
+  it('keeps a bare scalar lookup on the short budget but gives analytical builds and deep work the longer budget', () => {
+    // A bare scalar metric ("total revenue") composes in one shot — short budget.
+    expect(agentRunDeadlineMs({
+      question: 'total revenue',
+      requestedMode: 'ask',
+    })).toBe(45_000);
+    // A metric + filter/breakdown needs an LLM SQL build (semantic can't compose
+    // the cross-model join), which does NOT fit 45s on a slow provider — it must
+    // get the research-sized budget so the build finishes instead of timing out.
     expect(agentRunDeadlineMs({
       question: 'what are the top products Melissa Lopez bought and what is the revenue?',
       requestedMode: 'ask',
-    })).toBe(45_000);
+    })).toBe(120_000);
+    expect(agentRunDeadlineMs({
+      question: 'top bcm customers from the south region',
+      requestedMode: 'ask',
+    })).toBe(120_000);
     expect(agentRunDeadlineMs({
       question: 'investigate why revenue declined and identify the drivers',
       requestedMode: 'research',
@@ -213,14 +225,44 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
     })).toBe(120_000);
   });
 
+  it('scales the budget for high reasoning effort and resolves thinkingMode', () => {
+    // "High" both slows every call and means deep — thinkingMode alone must lift
+    // the budget, or picking High reliably times out at the lookup deadline.
+    expect(agentRunDeadlineMs({
+      question: 'total revenue',
+      requestedMode: 'ask',
+      thinkingMode: 'high',
+    })).toBe(Math.round(120_000 * 1.8));
+    // Explicit high effort on an analytical build scales the research budget.
+    expect(agentRunDeadlineMs({
+      question: 'top customers in south region based on last 6 months',
+      requestedMode: 'ask',
+      reasoningEffort: 'high',
+    })).toBe(Math.round(120_000 * 1.8));
+    // Low effort trims a plain lookup slightly.
+    expect(agentRunDeadlineMs({
+      question: 'total revenue',
+      requestedMode: 'ask',
+      reasoningEffort: 'low',
+    })).toBe(Math.round(45_000 * 0.9));
+  });
+
   it('gives subscription-CLI providers a transport-sized default budget', () => {
     // A cold `claude`/`codex` spawn per LLM call cannot fit the API-sized 45s
     // default — simple office questions were dying at the bounded deadline.
+    // Bare scalar on CLI → the larger CLI lookup base (a build/ranking question
+    // would instead get the CLI research base, covered below).
     expect(agentRunDeadlineMs(
-      { question: 'who are the top 10 customers for bcm?', requestedMode: 'ask' },
+      { question: 'what is total bcm?', requestedMode: 'ask' },
       {} as NodeJS.ProcessEnv,
       'claude-code',
     )).toBe(150_000);
+    // An analytical build on CLI gets the CLI research base.
+    expect(agentRunDeadlineMs(
+      { question: 'top 10 customers for bcm', requestedMode: 'ask' },
+      {} as NodeJS.ProcessEnv,
+      'claude-code',
+    )).toBe(300_000);
     expect(agentRunDeadlineMs(
       { question: 'investigate revenue drivers', requestedMode: 'research' },
       {} as NodeJS.ProcessEnv,

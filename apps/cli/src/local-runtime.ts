@@ -654,8 +654,35 @@ function agentColumnDisplayFormats(projectRoot: string, columns: string[]): Reco
 const AGENT_CLI_LOOKUP_DEADLINE_MS = 150_000;
 const AGENT_CLI_RESEARCH_DEADLINE_MS = 300_000;
 
+/** High reasoning effort makes every LLM call materially slower, so the same
+ * multi-step build that fits a budget at medium effort overruns it at high. The
+ * budget must scale with effort or "High · thorough" reliably times out. */
+function reasoningEffortBudgetMultiplier(effort: unknown): number {
+  return effort === 'high' ? 1.8 : effort === 'low' ? 0.9 : 1;
+}
+
+/**
+ * A ranking/breakdown/filtered question needs LLM SQL generation (the grain
+ * dimension usually lives on a joined model the semantic layer can't compose),
+ * and that multi-call build does NOT fit the bare lookup budget on a slow or
+ * high-effort provider — it dead-ends at the deadline. It is not "research", but
+ * it needs research-sized time to finish. Detected from the requested SHAPE (a
+ * top-N, a member filter, a breakdown dimension, or a time window) rather than a
+ * recognized metric word, since office questions like "top bcm customers from
+ * the south region" name no metric the planner knows yet. A bare scalar
+ * ("total revenue") has none of these and stays on the short budget.
+ */
+function isAnalyticalBuildQuestion(plan: ReturnType<typeof buildAnalysisQuestionPlan>): boolean {
+  if (!plan.needsGeneratedSql) return false;
+  return plan.requestedShape.dimensions.length > 0
+    || plan.dimensionTerms.length > 0
+    || plan.requestedShape.filters.length > 0
+    || plan.timeTerms.length > 0
+    || Boolean(plan.requestedShape.topN);
+}
+
 export function agentRunDeadlineMs(
-  request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth'>,
+  request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth' | 'reasoningEffort' | 'thinkingMode'>,
   env: NodeJS.ProcessEnv = process.env,
   activeProviderId?: string | null,
 ): number {
@@ -670,11 +697,25 @@ export function agentRunDeadlineMs(
     cliProvider ? AGENT_CLI_RESEARCH_DEADLINE_MS : AGENT_RESEARCH_DEADLINE_MS,
     env,
   );
-  if (request.requestedMode === 'research' || request.analysisDepth === 'deep') {
-    return researchDeadline;
+  // The "Thinking" control sends a thinkingMode; explicit reasoningEffort/
+  // analysisDepth (CLI flags) take precedence but the mode is the common case.
+  // The deadline MUST see the resolved values — "High" both slows every call
+  // AND means deep — or picking High reliably times out at the lookup budget.
+  const resolvedMode = request.thinkingMode ? resolveThinkingMode(request.thinkingMode) : {};
+  const effectiveEffort = request.reasoningEffort ?? resolvedMode.reasoningEffort;
+  const effectiveDepth = request.analysisDepth ?? resolvedMode.analysisDepth;
+  // The budget is a CEILING, not a target — a fast answer returns immediately;
+  // the larger tiers only matter when the build genuinely needs the time.
+  const scale = (ms: number): number => Math.min(600_000, Math.round(ms * reasoningEffortBudgetMultiplier(effectiveEffort)));
+
+  if (request.requestedMode === 'research' || effectiveDepth === 'deep') {
+    return scale(researchDeadline);
   }
   const plan = buildAnalysisQuestionPlan(request.question);
-  return plan.needsResearchWorkspace ? researchDeadline : lookupDeadline;
+  if (plan.needsResearchWorkspace || isAnalyticalBuildQuestion(plan)) {
+    return scale(researchDeadline);
+  }
+  return scale(lookupDeadline);
 }
 
 export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
