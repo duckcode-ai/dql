@@ -678,15 +678,47 @@ export function semanticMetricExecutionCapability(
   };
 }
 
+// Timestamp of the last SUCCESSFUL probe per connection fingerprint. A dbt Cloud
+// connection that worked recently must not be demoted to "not ready" by a single
+// transient probe failure (network blip / cold connection / rate limit) — that
+// flipped the active runtime to native and stranded derived metrics on the
+// generic "configure a runtime" error for minutes at a time ("first works, then
+// not"). Mirrors the MetricFlow positive-resolution cache.
+const cloudLastGoodAt = new Map<string, number>();
+const CLOUD_TRUST_WINDOW_MS = 30 * 60_000; // treat a failure as transient if it worked within this window
+
 async function probeDbtCloudSemanticRuntime(projectRoot: string): Promise<DbtCloudSemanticTestResult> {
   const cloud = getEffectiveDbtCloudSemanticSettings(projectRoot);
   if (!cloud.configured || !cloud.fingerprint) {
     return { ok: false, message: 'dbt Cloud Semantic Layer is not configured.' };
   }
+  const now = Date.now();
   const cached = cloudProbeCache.get(cloud.fingerprint);
-  if (cached && cached.expiresAt > Date.now()) return cached.result;
+  if (cached && cached.expiresAt > now) return cached.result;
+
   const result = await testDbtCloudSemanticConnection(cloud);
-  cloudProbeCache.set(cloud.fingerprint, { expiresAt: Date.now() + 5 * 60_000, result });
+  if (result.ok) {
+    // A working connection stays trusted for a good while.
+    cloudProbeCache.set(cloud.fingerprint, { expiresAt: now + 5 * 60_000, result });
+    cloudLastGoodAt.set(cloud.fingerprint, now);
+    return result;
+  }
+
+  // Probe failed. If this connection succeeded within the trust window, treat the
+  // failure as transient: keep it ready (better to attempt the real compile and
+  // surface a specific cloud error than to silently fall back to native), and
+  // retry the probe soon rather than caching the failure for minutes.
+  const lastGoodAt = cloudLastGoodAt.get(cloud.fingerprint) ?? 0;
+  if (now - lastGoodAt < CLOUD_TRUST_WINDOW_MS) {
+    const transient: DbtCloudSemanticTestResult = {
+      ok: true,
+      message: 'Using the recent successful dbt Cloud connection; a readiness probe failed transiently.',
+    };
+    cloudProbeCache.set(cloud.fingerprint, { expiresAt: now + 20_000, result: transient });
+    return transient;
+  }
+  // No recent success — cache the failure only briefly so it self-heals fast.
+  cloudProbeCache.set(cloud.fingerprint, { expiresAt: now + 20_000, result });
   return result;
 }
 
