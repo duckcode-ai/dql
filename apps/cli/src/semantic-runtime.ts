@@ -3,6 +3,8 @@ import {
   type ComposeQueryResult,
   type MetricDefinition,
   type SemanticLayer,
+  type SemanticExecutionReceiptV1,
+  type SemanticTargetBindingV1,
 } from '@duckcodeailabs/dql-core';
 import {
   compileDbtCloudSemanticQuery,
@@ -88,7 +90,13 @@ export interface SemanticRuntimePathCandidate {
 }
 
 export interface SemanticRuntimeTraceStep {
-  id: 'resolve_members' | 'bind_entity_paths' | 'compile_semantic_query' | 'execute_query';
+  id:
+    | 'resolve_members'
+    | 'bind_entity_paths'
+    | 'compile_semantic_query'
+    | 'validate_execution_target'
+    | 'preflight_physical_sql'
+    | 'execute_query';
   label: string;
   status: 'completed' | 'failed' | 'not_started';
   detail: string;
@@ -103,6 +111,10 @@ export interface SemanticRuntimeTrace {
   bindings: SemanticRuntimeBinding[];
   warnings: string[];
   steps: SemanticRuntimeTraceStep[];
+  /** Redacted compiler-to-warehouse target proof shown in Trust & Steps. */
+  targetBinding?: SemanticTargetBindingV1;
+  /** Terminal receipt added by the shared execution gateway. */
+  executionReceipt?: SemanticExecutionReceiptV1;
   failure?: {
     code: 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_COMPILATION_FAILED';
     phase: 'path_binding' | 'compilation';
@@ -426,7 +438,11 @@ export async function getSemanticRuntimeStatus(
       message: error instanceof Error ? error.message : String(error),
     }));
   }
-  const cloudReady = Boolean(cloudTest?.ok);
+  // A successful catalog probe proves only that dbt Cloud can compile. It does
+  // not prove that the SQL will run on the connection selected in DQL. Existing
+  // pre-target-binding settings deliberately remain non-executable until the
+  // user reapplies them against an active warehouse connection.
+  const cloudReady = Boolean(cloudTest?.ok && cloud.executionTargetFingerprint);
   const preference = redacted.preference;
   const active = selectActiveAdapter(preference, cloudReady, cliReady);
   const adapters: SemanticRuntimeAdapterStatus[] = [
@@ -462,15 +478,19 @@ export async function getSemanticRuntimeStatus(
       source: cloud.source,
       detail: !cloud.configured
         ? 'Adapter is bundled; configure Host, Environment ID, and a Semantic Layer service token.'
-        : cloudReady
-          ? cloudTest?.message ?? 'Test passed.'
-          : cloudTest?.message ?? cloud.testMessage ?? 'Configured but not tested.',
+        : cloudTest?.ok && !cloud.executionTargetFingerprint
+          ? 'Catalog test passed, but no execution target is bound. Reapply dbt Cloud Semantic Layer settings with the intended warehouse connection active.'
+          : cloudReady
+            ? cloudTest?.message ?? 'Test passed.'
+            : cloudTest?.message ?? cloud.testMessage ?? 'Configured but not tested.',
     },
   ];
   const setup = active !== 'native'
     ? null
     : cloud.configured && !cloudReady
-      ? 'Test the configured dbt Cloud Semantic Layer connection, or install a compatible local MetricFlow runtime.'
+      ? cloudTest?.ok && !cloud.executionTargetFingerprint
+        ? 'Reapply dbt Cloud Semantic Layer settings with the intended warehouse connection active to bind compilation and execution targets.'
+        : 'Test the configured dbt Cloud Semantic Layer connection, or install a compatible local MetricFlow runtime.'
       : 'Configure dbt Cloud Semantic Layer, or install a compatible local MetricFlow runtime for derived, ratio, cumulative, and conversion metrics.';
   return { preference, active, adapters, setup };
 }

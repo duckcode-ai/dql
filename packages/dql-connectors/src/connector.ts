@@ -1,4 +1,4 @@
-import type { QueryResult } from './result-types.js';
+import type { QueryBatch, QueryExecutionOptions, QueryResult } from './result-types.js';
 
 export interface ConnectionConfig {
   driver:
@@ -116,7 +116,8 @@ export interface ColumnInfo {
 export interface DatabaseConnector {
   readonly driverName: DriverName;
   connect(config: ConnectionConfig): Promise<void>;
-  execute(sql: string, params?: unknown[]): Promise<QueryResult>;
+  execute(sql: string, params?: unknown[], options?: QueryExecutionOptions): Promise<QueryResult>;
+  stream?(sql: string, params?: unknown[], options?: QueryExecutionOptions): AsyncIterable<QueryBatch>;
   disconnect(): Promise<void>;
   ping(): Promise<boolean>;
   listTables?(): Promise<TableInfo[]>;

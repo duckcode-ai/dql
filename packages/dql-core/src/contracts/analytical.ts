@@ -9,6 +9,7 @@
 
 export const ANALYTICAL_QUESTION_FRAME_VERSION = 2 as const;
 export const ANALYTICAL_FAILURE_VERSION = 1 as const;
+export const ANALYTICAL_FAILURE_V2_VERSION = 2 as const;
 
 export type AnalyticalDimensionRole = 'group_by' | 'filter' | 'display' | 'rank_entity' | 'time_axis';
 
@@ -194,6 +195,29 @@ export interface AnalyticalFailureV1 {
   safeActions: string[];
 }
 
+export type AnalyticalFailureCodeV2 =
+  | AnalyticalFailureCode
+  | 'SEMANTIC_ADAPTER_NOT_READY'
+  | 'SEMANTIC_TARGET_BINDING_MISSING'
+  | 'EXECUTION_TARGET_MISMATCH'
+  | 'SEMANTIC_SOURCE_DRIFT'
+  | 'SEMANTIC_MEMBER_BINDING_FAILED'
+  | 'SEMANTIC_PATH_AMBIGUOUS'
+  | 'IDENTIFIER_SCOPE_INVALID'
+  | 'EXECUTION_CANCELLED'
+  | 'SEMANTIC_COMPILATION_TIMEOUT';
+
+export interface AnalyticalFailureV2 extends Omit<AnalyticalFailureV1, 'version' | 'code'> {
+  version: 2;
+  code: AnalyticalFailureCodeV2;
+  expectedTargetFingerprint?: string;
+  actualTargetFingerprint?: string;
+  adapterId?: string;
+  queryId?: string;
+  sqlState?: string;
+  vendorCode?: string;
+}
+
 export type AnalyticalTrustState = 'certified' | 'governed' | 'review_required';
 
 export type AnalyticalRepairChange = 'parameter_only' | 'display_only' | 'dql_source' | 'sql_text' | 'snapshot_refresh' | 'connection_change' | 'reviewed_draft_promotion';
@@ -221,6 +245,18 @@ const FAILURE_CODES = new Set<AnalyticalFailureCode>([
   'RESULT_CONTRACT_MISMATCH',
   'COMPILATION_FAILED',
   'POLICY_DENIED',
+]);
+const FAILURE_CODES_V2 = new Set<AnalyticalFailureCodeV2>([
+  ...FAILURE_CODES,
+  'SEMANTIC_ADAPTER_NOT_READY',
+  'SEMANTIC_TARGET_BINDING_MISSING',
+  'EXECUTION_TARGET_MISMATCH',
+  'SEMANTIC_SOURCE_DRIFT',
+  'SEMANTIC_MEMBER_BINDING_FAILED',
+  'SEMANTIC_PATH_AMBIGUOUS',
+  'IDENTIFIER_SCOPE_INVALID',
+  'EXECUTION_CANCELLED',
+  'SEMANTIC_COMPILATION_TIMEOUT',
 ]);
 const FAILURE_PHASES = new Set<AnalyticalFailurePhase>(['planning', 'compilation', 'validation', 'execution', 'result_validation']);
 const RECOVERABILITY = new Set<AnalyticalFailureRecoverability>([
@@ -368,6 +404,56 @@ export function normalizeAnalyticalFailureV1(value: unknown): AnalyticalFailureV
     ...(cleanString(record.planFingerprint) ? { planFingerprint: cleanString(record.planFingerprint) } : {}),
     ...(cleanString(record.dqlFingerprint) ? { dqlFingerprint: cleanString(record.dqlFingerprint) } : {}),
     ...(cleanString(record.sqlFingerprint) ? { sqlFingerprint: cleanString(record.sqlFingerprint) } : {}),
+    safeActions,
+  };
+}
+
+/** Strictly normalize the target-bound failure returned by any DQL surface. */
+export function normalizeAnalyticalFailureV2(value: unknown): AnalyticalFailureV2 | undefined {
+  const record = objectRecord(value);
+  if (!record || record.version !== ANALYTICAL_FAILURE_V2_VERSION) return undefined;
+  const runId = cleanString(record.runId);
+  const failureId = cleanString(record.failureId);
+  const code = enumValue(record.code, FAILURE_CODES_V2);
+  const phase = enumValue(record.phase, FAILURE_PHASES);
+  const message = cleanString(record.message);
+  const recoverability = enumValue(record.recoverability, RECOVERABILITY);
+  const snapshotId = cleanString(record.snapshotId);
+  const safeActions = cleanStringArray(record.safeActions);
+  if (!runId || !failureId || !code || !phase || !message || !recoverability || !snapshotId || !safeActions) {
+    return undefined;
+  }
+  if (!Array.isArray(record.failedBindings)) return undefined;
+  const failedBindings = record.failedBindings.flatMap((item) => {
+    const binding = objectRecord(item);
+    const reasonCode = cleanString(binding?.reasonCode);
+    if (!binding || !reasonCode) return [];
+    return [{
+      ...(cleanString(binding.qualifiedId) ? { qualifiedId: cleanString(binding.qualifiedId) } : {}),
+      ...(cleanString(binding.role) ? { role: cleanString(binding.role) } : {}),
+      reasonCode,
+    }];
+  });
+  if (failedBindings.length !== record.failedBindings.length) return undefined;
+  return {
+    version: ANALYTICAL_FAILURE_V2_VERSION,
+    runId,
+    failureId,
+    code,
+    phase,
+    message,
+    recoverability,
+    failedBindings,
+    snapshotId,
+    ...(cleanString(record.planFingerprint) ? { planFingerprint: cleanString(record.planFingerprint) } : {}),
+    ...(cleanString(record.dqlFingerprint) ? { dqlFingerprint: cleanString(record.dqlFingerprint) } : {}),
+    ...(cleanString(record.sqlFingerprint) ? { sqlFingerprint: cleanString(record.sqlFingerprint) } : {}),
+    ...(cleanString(record.expectedTargetFingerprint) ? { expectedTargetFingerprint: cleanString(record.expectedTargetFingerprint) } : {}),
+    ...(cleanString(record.actualTargetFingerprint) ? { actualTargetFingerprint: cleanString(record.actualTargetFingerprint) } : {}),
+    ...(cleanString(record.adapterId) ? { adapterId: cleanString(record.adapterId) } : {}),
+    ...(cleanString(record.queryId) ? { queryId: cleanString(record.queryId) } : {}),
+    ...(cleanString(record.sqlState) ? { sqlState: cleanString(record.sqlState) } : {}),
+    ...(cleanString(record.vendorCode) ? { vendorCode: cleanString(record.vendorCode) } : {}),
     safeActions,
   };
 }

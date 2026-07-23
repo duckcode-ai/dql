@@ -33,7 +33,7 @@ function assert(cond, msg) {
 // Must pin the current CLI so a fresh scaffold includes the supported OSS layout.
 // install of an older CLI fails there and never links the `dql` binary). Keep in
 // sync with templates/starter/package.json.
-const EXPECTED_CLI_RANGE = '^1.10.3';
+const EXPECTED_CLI_RANGE = '^1.10.4';
 
 function collectFiles(dir, predicate, out = []) {
   for (const entry of readdirSync(dir)) {

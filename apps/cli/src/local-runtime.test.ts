@@ -14,6 +14,7 @@ import {
   buildExploratoryJoinProbeSql,
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
+  buildRuntimeSchemaSearchSql,
   buildDbtStatus,
   buildDbtParseArgs,
   buildProposeReadiness,
@@ -3561,6 +3562,23 @@ describe('buildAgentSchemaContext', () => {
     expect(snapshotContext.map((table) => table.relation)).toEqual(
       expect.arrayContaining(['dev.orders', 'dev.supplies', 'dev.warehouse_bins']),
     );
+  });
+});
+
+describe('buildRuntimeSchemaSearchSql', () => {
+  it('searches table and column names using bounded safe business terms', () => {
+    const sql = buildRuntimeSchemaSearchSql("Revenue for Zoom customer's top accounts");
+    expect(sql).toContain("LOWER(table_name) LIKE '%revenue%'");
+    expect(sql).toContain("LOWER(column_name) LIKE '%zoom%'");
+    expect(sql).toContain('LIMIT 600');
+    expect(sql).not.toContain("customer's");
+  });
+
+  it('never emits user SQL syntax into the physical catalog query', () => {
+    const sql = buildRuntimeSchemaSearchSql("revenue'; DROP TABLE prod.secret; --");
+    expect(sql).not.toContain('DROP TABLE');
+    expect(sql).not.toContain("';");
+    expect(sql).toContain("LIKE '%revenue%'");
   });
 });
 

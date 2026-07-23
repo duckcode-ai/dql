@@ -395,6 +395,13 @@ sections when available:
 7. **Failure** — stable code, failed phase, safe message, failed qualified
    bindings, recoverability, and allowed next actions.
 
+For semantic runs, Plan/Lineage/Trust/Steps also expose the friendly label,
+qualified authoring identity, exact runtime reference, selected adapter,
+compiler target, redacted execution target, physical-preflight status,
+warehouse query ID when available, and the actual post-repair runtime request.
+These are projections of the canonical execution receipt rather than
+independently reconstructed client state (`API-006`, `API-007`, `UI-012`).
+
 The business answer remains primary. The inspector progressively discloses
 technical detail and is available even when no result rows exist.
 
@@ -444,6 +451,27 @@ interface AnalyticalFailureV1 {
   safeActions: string[];
 }
 ```
+
+The compatible v2 failure contract adds target-bound semantic execution
+failures without changing the meaning of v1 codes:
+
+- `SEMANTIC_ADAPTER_NOT_READY`;
+- `SEMANTIC_TARGET_BINDING_MISSING`;
+- `EXECUTION_TARGET_MISMATCH`;
+- `SEMANTIC_SOURCE_DRIFT`;
+- `SEMANTIC_MEMBER_BINDING_FAILED`;
+- `SEMANTIC_PATH_AMBIGUOUS`;
+- `IDENTIFIER_SCOPE_INVALID`;
+- `EXECUTION_CANCELLED`; and
+- `SEMANTIC_COMPILATION_TIMEOUT`.
+
+`EXECUTION_TARGET_MISMATCH` is distinct from `SNAPSHOT_DRIFT`: the governed
+source may be unchanged while the active account, database/catalog, schema,
+role, warehouse, dbt target, or dbt Cloud environment differs. It is emitted in
+phase `validation`, submits zero analytical queries, and is recoverable only by
+an explicit authorized connection change or setup reapplication. V1 payloads
+remain readable; new runs write the latest contract (`API-007`, `SEC-004`,
+`E2E-014`).
 
 The server retains the original artifact/receipt and returns only diagnostics
 the caller is authorized to inspect. Logs, telemetry, and streamed phase events

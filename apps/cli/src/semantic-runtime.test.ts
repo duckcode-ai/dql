@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { createWarehouseTargetIdentity, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import {
   compileSemanticRuntimeQuery,
@@ -210,7 +210,11 @@ describe('shared semantic runtime selector', () => {
     saveTestedSemanticRuntimeSettings(root, {
       preference: 'auto',
       dbtCloud: { host: 'semantic-layer.cloud.getdbt.com', environmentId: '99', serviceToken: 'cloud-secret' },
-    }, { ok: true, message: 'Test passed', metricCount: 7_500 });
+    }, { ok: true, message: 'Test passed', metricCount: 7_500 }, createWarehouseTargetIdentity({
+      connectionRef: 'connection:test',
+      driver: 'snowflake',
+      redactedContext: { account: 'acme', database: 'analytics', schema: 'semantic' },
+    }));
 
     const status = await getSemanticRuntimeStatus(root);
     expect(status.active).toBe('dbt-cloud');

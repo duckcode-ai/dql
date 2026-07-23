@@ -361,6 +361,8 @@ import {
   SemanticRuntimeRequiredError,
   testSemanticRuntimeDraft,
   type SemanticRuntimeTrace,
+  type SemanticRuntimeAdapterId,
+  type SemanticRuntimeCompileResult,
   type SemanticRuntimeQueryRequest,
   parseSemanticDimensionSelection,
 } from './semantic-runtime.js';
@@ -370,6 +372,15 @@ import {
   saveSemanticRuntimePreference,
   type SemanticRuntimeSettingsInput,
 } from './semantic-runtime-settings.js';
+import { observeWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
+import { configuredWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
+import {
+  executeTargetBoundSemanticQuery,
+  semanticExecutionFailureCode,
+  semanticExecutionFailureDetails,
+} from './semantic-execution/execution-gateway.js';
+import type { MetricFlowTargetMetadata } from './semantic-execution/target-binding.js';
+import { buildSemanticTargetBinding } from './semantic-execution/target-binding.js';
 import {
   NotebookDatasetWorkspace,
   type DatasetSource,
@@ -1098,6 +1109,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : null;
   let connection = configuredConnection ?? resolveDbtProfileRuntimeConnection(projectRoot, projectConfig);
   const projectSnapshots = new ProjectSnapshotService<DQLManifest>();
+  // Server-lifetime registry for exact compiler-owned SQL. The downstream DQL
+  // artifact executor uses this to preserve the selected adapter and target
+  // rather than treating compiled semantic SQL as unrelated generic SQL.
+  const compiledSemanticQueries = new Map<string, SemanticRuntimeCompileResult>();
   const dashboardRunEvidence = new Map<string, {
     appId: string;
     dashboardId: string;
@@ -1864,40 +1879,47 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
             projectSnapshot();
             projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
-            const compiled = await compileSemanticRuntimeQuery({
-              metrics: [binding.metric],
-              dimensions: [],
-              timeDimension: {
-                name: binding.timeDimension,
-                granularity: binding.granularity,
-              },
-              orderBy: [{ name: binding.outputField, direction: 'desc' }],
-              limit: 1,
-            }, {
+            const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, undefined);
+            const execution = await executeTargetBoundSemanticQuery({
+              executor,
+              connection: semanticConnection!,
               projectRoot,
-              projectConfig,
-              detectedProvider: semanticDetectedProvider,
-              semanticLayer: semanticLayer!,
-              driver: semanticDriver,
-              tableMapping: semanticTableMapping,
+              plannedAdapter,
+              metricFlow: plannedAdapter === 'metricflow-cli'
+                ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                : undefined,
+              compile: () => compileSemanticRuntimeQuery({
+                metrics: [binding.metric],
+                dimensions: [],
+                timeDimension: {
+                  name: binding.timeDimension,
+                  granularity: binding.granularity,
+                },
+                orderBy: [{ name: binding.outputField, direction: 'desc' }],
+                limit: 1,
+                engine: plannedAdapter,
+              }, {
+                projectRoot,
+                projectConfig,
+                detectedProvider: semanticDetectedProvider,
+                semanticLayer: semanticLayer!,
+                driver: semanticDriver,
+                tableMapping: semanticTableMapping,
+              }),
+              prepareSql: (sql) => prepareLocalExecution(
+                sql,
+                semanticConnection!,
+                projectRoot,
+                projectConfig,
+              ),
+              rowBound: 1,
             });
-            if (!compiled) {
+            if (!execution) {
               throw Object.assign(new Error('The authorized semantic freshness query could not be compiled.'), {
                 code: 'COMPILATION_FAILED',
               });
             }
-            const prepared = prepareLocalExecution(
-              compiled.sql,
-              semanticConnection!,
-              projectRoot,
-              projectConfig,
-            );
-            const result = await executor.executeQuery(
-              prepared.sql,
-              [],
-              runtimeVariables({}),
-              prepared.connection,
-            );
+            const result = execution.result;
             projectSnapshot();
             projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
             return {
@@ -1917,13 +1939,34 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               ...selection,
               dimensions: selection.dimensions ?? [],
             };
-            const compiled = await compileSemanticRuntimeQuery(requestedPath
+            const requestedSemanticQuery = requestedPath
               ? applySemanticPathSelection(
                   semanticRequest,
                   requestedPath.authoringReference,
                   requestedPath.entityPath,
                 )
-              : semanticRequest, {
+              : semanticRequest;
+            const plannedAdapter = await resolvePlannedSemanticAdapter(
+              projectRoot,
+              requestedSemanticQuery.engine,
+            );
+            const executionTarget = semanticConnection
+              ? await observeWarehouseTargetIdentity(executor, semanticConnection)
+              : undefined;
+            const targetBinding = executionTarget
+              ? buildSemanticTargetBinding({
+                  projectRoot,
+                  adapterId: plannedAdapter,
+                  executionTarget,
+                  metricFlow: plannedAdapter === 'metricflow-cli'
+                    ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                    : undefined,
+                })
+              : undefined;
+            const compiled = await compileSemanticRuntimeQuery({
+              ...requestedSemanticQuery,
+              engine: plannedAdapter,
+            }, {
               projectRoot,
               projectConfig,
               detectedProvider: semanticDetectedProvider,
@@ -1937,6 +1980,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 : projectConfig.dbt?.projectDir;
               throw new SemanticRuntimeRequiredError(await explainMissingSemanticRuntime(projectRoot, dbtProjectPath));
             }
+            compiledSemanticQueries.set(executionFingerprint(compiled.sql), compiled);
             return {
               sql: compiled.sql,
               engine: compiled.engine,
@@ -1948,7 +1992,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   ? { timeDimension: compiled.effectiveRequest.timeDimension }
                   : {}),
               },
-              trace: compiled.semanticTrace,
+              trace: {
+                ...compiled.semanticTrace,
+                ...(targetBinding ? { targetBinding } : {}),
+              },
             };
           },
         } : {}),
@@ -3583,7 +3630,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       throw new Error(`I need values for: ${invocation.unresolvedParameters.join(', ')}.`);
     }
     const activeConnection = requireActiveConnection();
-    const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+    const precompiledSemanticQuery = Boolean(extractBlockStudioSql(source));
+    const tableMapping = !precompiledSemanticQuery
+      ? await resolveSemanticTableMapping(executor, activeConnection, semanticLayer)
+      : undefined;
     const semanticCompose = semanticLayer
       ? await composeSemanticBlockSqlForRuntime(source, semanticLayer, {
           driver: activeConnection.driver,
@@ -3621,12 +3671,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
     assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
-    const rawResult = await executor.executeQuery(
-      executionSql,
-      plan?.sqlParams ?? [],
-      runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
-      prepared.connection,
-    );
+    const pinnedSemanticCompile = semanticCompose?.sql
+      ? compiledSemanticQueries.get(executionFingerprint(semanticCompose.sql))
+      : undefined;
+    const semanticExecution = pinnedSemanticCompile
+      ? await executeTargetBoundSemanticQuery({
+          executor,
+          connection: activeConnection,
+          projectRoot,
+          plannedAdapter: pinnedSemanticCompile.engine,
+          metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
+            ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+            : undefined,
+          compile: async () => pinnedSemanticCompile,
+          prepareSql: () => ({ sql: executionSql, connection: prepared.connection }),
+          rowBound: invocationInput?.rowLimit ?? pinnedSemanticCompile.effectiveRequest.limit,
+        })
+      : null;
+    const rawResult = semanticExecution?.result ?? await executor.executeQuery(
+        executionSql,
+        plan?.sqlParams ?? [],
+        runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
+        prepared.connection,
+      );
     const normalized = normalizeQueryResult(rawResult);
     const executionReceipt = createDqlArtifactExecutionReceipt(
       source,
@@ -3646,6 +3713,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       parameters: invocation.resolvedParameters,
       auditId: invocation.auditId,
       executionReceipt,
+      ...(semanticExecution ? {
+        semanticExecutionReceipt: semanticExecution.executionReceipt,
+        semanticTargetBinding: semanticExecution.targetBinding,
+        semanticTrace: semanticExecution.semanticTrace,
+      } : {}),
     };
   };
 
@@ -3891,19 +3963,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const getSchemaContextForAgent = async (question: string, preparedContextPack?: LocalContextPack): Promise<AgentSchemaTable[]> => {
     const scanRuntimeSchema = async (): Promise<{ ranked: AgentSchemaTable[]; snapshot: AgentSchemaTable[] }> => {
       if (!connection) return { ranked: [], snapshot: [] };
-      const result = await executor.executeQuery(
-        `SELECT table_schema, table_name, column_name, data_type
-         FROM information_schema.columns
-         WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
-         ORDER BY table_schema, table_name, ordinal_position
-         LIMIT 2000`,
+      const result = await executor.executePositional(
+        buildRuntimeSchemaSearchSql(question),
         [],
-        runtimeVariables({}),
         connection,
+        { maxRows: 600, maxBytes: 2 * 1024 * 1024, batchSize: 200, deadlineMs: 30_000 },
       );
       return {
         ranked: buildAgentSchemaContext(question, result.rows),
-        snapshot: buildAgentSchemaContext(question, result.rows, { includeUnscored: true, limit: 500 }),
+        snapshot: buildAgentSchemaContext(question, result.rows, { includeUnscored: true, limit: 100 }),
       };
     };
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question, preparedContextPack).catch(() => []);
@@ -3936,7 +4004,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           valueGrounding.searchSafeColumns,
         )
         : schemaContext.ranked;
-      recordAgentRuntimeSchemaSnapshot(projectRoot, schemaContext.snapshot, 'full information_schema runtime scan');
+      recordAgentRuntimeSchemaSnapshot(projectRoot, schemaContext.snapshot, 'question-scoped information_schema search');
       return enriched;
     } catch {
       return [];
@@ -8464,8 +8532,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           refreshedAt: dataset.refreshedAt,
           trustState: dataset.trustState,
         }));
+        const schemaLimit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+        const schemaOffset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        const schemaSearch = (url.searchParams.get('q') ?? '').trim();
         const { tables, columnsByPath } = connection
-          ? await introspectSchema(executor, connection)
+          ? await introspectSchema(executor, connection, {
+              limit: schemaLimit,
+              offset: schemaOffset,
+              search: schemaSearch,
+            })
           : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
         const dbTables = tables.map((t) => ({
           name: t.path,
@@ -10582,7 +10657,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const body = await readJSON(req) as SemanticRuntimeSettingsInput;
         const result = await testSemanticRuntimeDraft(projectRoot, body);
-        const settings = saveTestedSemanticRuntimeSettings(projectRoot, body, result);
+        const targetConnection = requireActiveConnection(connection);
+        const executionTarget = await observeWarehouseTargetIdentity(executor, targetConnection);
+        const settings = saveTestedSemanticRuntimeSettings(projectRoot, body, result, executionTarget);
         const runtime = await getSemanticRuntimeStatus(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true, ...settings, runtime }));
@@ -11734,25 +11811,41 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         };
         // Resolve which connection to use — request can override default
         const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
-        const driver = targetConnection.driver;
-        const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
-        const composed = await composeRuntimeSemanticQuery({
-          metrics,
-          dimensions,
-          filters,
-          limit,
-          timeDimension,
-          orderBy,
-          savedQuery,
-          engine,
-        }, semanticLayer, {
+        const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, engine);
+        const metricFlow = plannedAdapter === 'metricflow-cli'
+          ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+          : undefined;
+        const execution = await executeTargetBoundSemanticQuery({
+          executor,
+          connection: targetConnection,
           projectRoot,
-          projectConfig,
-          detectedProvider: semanticDetectedProvider,
-          driver,
-          tableMapping,
+          plannedAdapter,
+          metricFlow,
+          compile: async () => {
+            const tableMapping = plannedAdapter === 'native'
+              ? await resolveSemanticTableMapping(executor, targetConnection, semanticLayer)
+              : undefined;
+            return composeRuntimeSemanticQuery({
+              metrics,
+              dimensions,
+              filters,
+              limit,
+              timeDimension,
+              orderBy,
+              savedQuery,
+              engine: plannedAdapter,
+            }, semanticLayer!, {
+              projectRoot,
+              projectConfig,
+              detectedProvider: semanticDetectedProvider,
+              driver: targetConnection.driver,
+              tableMapping,
+            });
+          },
+          prepareSql: (sql) => prepareLocalExecution(sql, targetConnection, projectRoot, projectConfig),
+          rowBound: limit,
         });
-        if (!composed) {
+        if (!execution) {
           const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
           const semanticRuntime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
           const blocked = metrics.map((metricName) => ({
@@ -11769,20 +11862,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }));
           return;
         }
-        // Execute the composed SQL against the resolved connection
-        const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
-        const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          sql: composed.sql,
-          tables: composed.tables,
-          joins: composed.joins,
-          engine: composed.engine,
-          effectiveRequest: composed.effectiveRequest,
-          runtimeRequest: composed.runtimeRequest,
-          semanticTrace: composed.semanticTrace,
-          warnings: composed.warnings,
-          result: normalizeQueryResult(result),
+          sql: execution.compiled.sql,
+          executedSql: execution.preparedSql,
+          tables: execution.compiled.tables,
+          joins: execution.compiled.joins,
+          engine: execution.compiled.engine,
+          effectiveRequest: execution.compiled.effectiveRequest,
+          runtimeRequest: execution.compiled.runtimeRequest,
+          semanticTrace: execution.semanticTrace,
+          warnings: execution.compiled.warnings,
+          targetBinding: execution.targetBinding,
+          executionReceipt: execution.executionReceipt,
+          result: normalizeQueryResult(execution.result),
         }));
       } catch (error) {
         if (error instanceof DQLAccessDeniedError) {
@@ -11790,13 +11883,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: error.message, code: 'unauthorized' }));
           return;
         }
-        const runtimeCode = semanticRuntimeErrorCode(error);
-        const status = runtimeCode ? 400 : 500;
+        const runtimeCode = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
+        const status = runtimeCode === 'EXECUTION_TARGET_MISMATCH' ? 409 : runtimeCode ? 400 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
           code: runtimeCode,
-          details: semanticRuntimeErrorDetails(error),
+          details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
             : undefined,
@@ -11824,25 +11917,41 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           engine?: SemanticRuntimeQueryRequest['engine'];
         };
         const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
-        const driver = targetConnection.driver;
-        const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
-        const composed = await composeRuntimeSemanticQuery({
-          metrics,
-          dimensions,
-          filters,
-          limit,
-          timeDimension,
-          orderBy,
-          savedQuery,
-          engine,
-        }, semanticLayer, {
+        const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, engine);
+        const metricFlow = plannedAdapter === 'metricflow-cli'
+          ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+          : undefined;
+        const execution = await executeTargetBoundSemanticQuery({
+          executor,
+          connection: targetConnection,
           projectRoot,
-          projectConfig,
-          detectedProvider: semanticDetectedProvider,
-          driver,
-          tableMapping,
+          plannedAdapter,
+          metricFlow,
+          compile: async () => {
+            const tableMapping = plannedAdapter === 'native'
+              ? await resolveSemanticTableMapping(executor, targetConnection, semanticLayer)
+              : undefined;
+            return composeRuntimeSemanticQuery({
+              metrics,
+              dimensions,
+              filters,
+              limit,
+              timeDimension,
+              orderBy,
+              savedQuery,
+              engine: plannedAdapter,
+            }, semanticLayer!, {
+              projectRoot,
+              projectConfig,
+              detectedProvider: semanticDetectedProvider,
+              driver: targetConnection.driver,
+              tableMapping,
+            });
+          },
+          prepareSql: (sql) => prepareLocalExecution(sql, targetConnection, projectRoot, projectConfig),
+          rowBound: limit,
         });
-        if (!composed) {
+        if (!execution) {
           const provider = semanticConfig?.provider ?? semanticDetectedProvider ?? 'dql';
           const semanticRuntime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
           const blocked = metrics.map((metricName) => ({
@@ -11859,28 +11968,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }));
           return;
         }
-        const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
-        const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          sql: composed.sql,
-          joins: composed.joins,
-          tables: composed.tables,
-          engine: composed.engine,
-          effectiveRequest: composed.effectiveRequest,
-          runtimeRequest: composed.runtimeRequest,
-          semanticTrace: composed.semanticTrace,
-          warnings: composed.warnings,
-          result: normalizeQueryResult(result),
+          sql: execution.compiled.sql,
+          executedSql: execution.preparedSql,
+          joins: execution.compiled.joins,
+          tables: execution.compiled.tables,
+          engine: execution.compiled.engine,
+          effectiveRequest: execution.compiled.effectiveRequest,
+          runtimeRequest: execution.compiled.runtimeRequest,
+          semanticTrace: execution.semanticTrace,
+          warnings: execution.compiled.warnings,
+          targetBinding: execution.targetBinding,
+          executionReceipt: execution.executionReceipt,
+          result: normalizeQueryResult(execution.result),
         }));
       } catch (error) {
-        const runtimeCode = semanticRuntimeErrorCode(error);
-        const status = runtimeCode ? 400 : 500;
+        const runtimeCode = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
+        const status = runtimeCode === 'EXECUTION_TARGET_MISMATCH' ? 409 : runtimeCode ? 400 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
           code: runtimeCode,
-          details: semanticRuntimeErrorDetails(error),
+          details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
             : undefined,
@@ -12481,12 +12591,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         );
         const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
         assertAppAccess({ app, domain: resolved.domain ?? app?.domain, level: 'execute' });
-        const rawResult = await executor.executeQuery(
-          prepared.sql,
-          plan?.sqlParams ?? [],
-          runtimeVariables({ ...(plan?.variables ?? {}), ...(invocation?.values ?? {}) }),
-          prepared.connection,
-        );
+        const semanticExecution = semanticCompose?.compiled
+          ? await executeTargetBoundSemanticQuery({
+              executor,
+              connection: cellConnection,
+              projectRoot,
+              plannedAdapter: semanticCompose.compiled.engine,
+              metricFlow: semanticCompose.compiled.engine === 'metricflow-cli'
+                ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                : undefined,
+              // Compilation already produced the exact pinned adapter result
+              // used by the plan. The gateway validates target identity before
+              // accepting that result for preflight and execution.
+              compile: async () => semanticCompose.compiled!,
+              prepareSql: () => ({ sql: prepared.sql, connection: prepared.connection }),
+              rowBound: semanticCompose.compiled.effectiveRequest.limit,
+            })
+          : null;
+        const rawResult = semanticExecution?.result ?? await executor.executeQuery(
+            prepared.sql,
+            plan?.sqlParams ?? [],
+            runtimeVariables({ ...(plan?.variables ?? {}), ...(invocation?.values ?? {}) }),
+            prepared.connection,
+          );
         const normalized = normalizeQueryResult(rawResult);
         // Enforce the block's declared invariants against the result set. This
         // is additive: blocks without invariants produce `null` and the
@@ -12524,6 +12651,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           chartConfig: plan?.chartConfig,
           tests: plan?.tests,
           result: normalized,
+          ...(semanticExecution ? {
+            semanticTrace: semanticExecution.semanticTrace,
+            targetBinding: semanticExecution.targetBinding,
+            executionReceipt: semanticExecution.executionReceipt,
+            executedSql: semanticExecution.preparedSql,
+          } : {}),
           ...(invocation ? {
             invocation: {
               resolvedParameters: invocation.resolvedParameters,
@@ -12555,8 +12688,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             error: error instanceof Error ? error.message : String(error),
           });
         }
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+        const code = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
+        res.writeHead(code === 'EXECUTION_TARGET_MISMATCH' ? 409 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: error instanceof Error ? error.message : String(error),
+          code,
+          details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
+        }));
       }
       return;
     }
@@ -16500,20 +16638,35 @@ function writeUserPrefs(userPrefsPath: string, prefs: UserPrefs): void {
 async function introspectSchema(
   executor: QueryExecutor,
   connection: ConnectionConfig,
+  options: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+  } = {},
 ): Promise<{
   tables: Array<{ schema: string; name: string; path: string; type?: string }>;
   columnsByPath: Map<string, Array<{ name: string; type: string }>>;
 }> {
   let tables: Array<{ schema: string; name: string; path: string; type?: string }> = [];
-  let columnsByPath = new Map<string, Array<{ name: string; type: string }>>();
+  const columnsByPath = new Map<string, Array<{ name: string; type: string }>>();
+  const limit = Math.min(1_000, Math.max(1, Math.floor(options.limit ?? 200)));
+  const offset = Math.max(0, Math.floor(options.offset ?? 0));
+  const escapedSearch = options.search?.trim().replace(/'/g, "''");
+  const searchPredicate = escapedSearch
+    ? ` AND (LOWER(table_schema) LIKE LOWER('%${escapedSearch}%') OR LOWER(table_name) LIKE LOWER('%${escapedSearch}%'))`
+    : '';
 
-  // Tier 1: information_schema (PG, MySQL, Snowflake, MSSQL, DuckDB, Redshift, Fabric, Databricks)
+  // Runtime inventory is table-first and bounded. Columns are loaded only for
+  // a selected table through /api/describe-table; constructing one account-wide
+  // table+column tree is an enterprise-scale OOM risk (PERF-001 / CTX-005).
   try {
     const catalogRows = await executor.executeQuery(
       `SELECT table_schema, table_name, table_type
        FROM information_schema.tables
        WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
-       ORDER BY table_schema, table_name`,
+       ${searchPredicate}
+       ORDER BY table_schema, table_name
+       LIMIT ${limit} OFFSET ${offset}`,
       [], {}, connection,
     );
     tables = catalogRows.rows.map((row) => {
@@ -16523,26 +16676,6 @@ async function introspectSchema(
       const path = schema ? `${schema}.${name}` : name;
       return { schema, name, path, type };
     });
-
-    const columnRows = await executor.executeQuery(
-      `SELECT table_schema, table_name, column_name, data_type
-       FROM information_schema.columns
-       WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
-       ORDER BY table_schema, table_name, ordinal_position`,
-      [], {}, connection,
-    );
-    columnsByPath = columnRows.rows.reduce((map, row) => {
-      const schema = String(row['table_schema'] ?? row['TABLE_SCHEMA'] ?? 'default');
-      const tableName = String(row['table_name'] ?? row['TABLE_NAME'] ?? '');
-      const path = schema ? `${schema}.${tableName}` : tableName;
-      const next = map.get(path) ?? [];
-      next.push({
-        name: String(row['column_name'] ?? row['COLUMN_NAME'] ?? ''),
-        type: String(row['data_type'] ?? row['DATA_TYPE'] ?? ''),
-      });
-      map.set(path, next);
-      return map;
-    }, new Map<string, Array<{ name: string; type: string }>>());
     return { tables, columnsByPath };
   } catch {
     // Tier 1 failed — try connector methods
@@ -16553,22 +16686,17 @@ async function introspectSchema(
     const connector = await executor.getConnector(connection);
     if (typeof connector.listTables === 'function') {
       const rawTables = await connector.listTables();
-      tables = rawTables.map((t) => {
-        const schema = t.schema || 'default';
-        const path = t.schema ? `${t.schema}.${t.name}` : t.name;
-        return { schema, name: t.name, path, type: t.type };
-      });
-    }
-    if (typeof connector.listColumns === 'function') {
-      const rawColumns = await connector.listColumns();
-      columnsByPath = rawColumns.reduce((map, col) => {
-        const schema = col.schema || 'default';
-        const path = schema ? `${schema}.${col.table}` : col.table;
-        const next = map.get(path) ?? [];
-        next.push({ name: col.name, type: col.dataType });
-        map.set(path, next);
-        return map;
-      }, new Map<string, Array<{ name: string; type: string }>>());
+      const normalizedSearch = options.search?.trim().toLowerCase();
+      tables = rawTables
+        .filter((table) => !normalizedSearch
+          || table.schema.toLowerCase().includes(normalizedSearch)
+          || table.name.toLowerCase().includes(normalizedSearch))
+        .slice(offset, offset + limit)
+        .map((t) => {
+          const schema = t.schema || 'default';
+          const path = t.schema ? `${t.schema}.${t.name}` : t.name;
+          return { schema, name: t.name, path, type: t.type };
+        });
     }
   } catch {
     // Tier 3: tables only, no columns — already have what we have
@@ -16591,9 +16719,9 @@ function buildDatabaseSchemaTree(
 }>> {
   return (async () => {
     const dataFiles = scanDataFiles(projectRoot);
-    const { tables: dbTables, columnsByPath: dbColumnsByPath } = connection
-      ? await introspectSchema(executor, connection)
-      : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
+    const dbTables = connection
+      ? (await introspectSchema(executor, connection, { limit: 1_000 })).tables
+      : [];
 
     const schemaMap = new Map<string, Array<{ name: string; path: string; type?: string }>>();
     for (const table of dbTables) {
@@ -16603,7 +16731,25 @@ function buildDatabaseSchemaTree(
       schemaMap.set(schemaName, existing);
     }
 
-    const databaseNodes = Array.from(schemaMap.entries())
+    const databaseNodes: Array<{
+      id: string;
+      label: string;
+      kind: 'schema';
+      children: Array<{
+        id: string;
+        label: string;
+        kind: 'table';
+        path: string;
+        type?: string;
+        children: Array<{
+          id: string;
+          label: string;
+          kind: 'column';
+          path: string;
+          type: string;
+        }>;
+      }>;
+    }> = Array.from(schemaMap.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([schemaName, tables]) => ({
         id: `db-schema:${schemaName}`,
@@ -16617,13 +16763,8 @@ function buildDatabaseSchemaTree(
             kind: 'table' as const,
             path: table.path,
             type: table.type,
-            children: (dbColumnsByPath.get(table.path) ?? []).map((column) => ({
-              id: `db-column:${table.path}:${column.name}`,
-              label: column.name,
-              kind: 'column' as const,
-              path: table.path,
-              type: column.type,
-            })),
+            // Warehouse columns are loaded lazily for the selected table.
+            children: [],
           })),
       }));
 
@@ -16842,6 +16983,34 @@ function isDbtSemanticRuntime(
   return Boolean(semanticLayer?.listMetrics().some((metric) => metric.source?.provider === 'dbt'));
 }
 
+async function resolvePlannedSemanticAdapter(
+  projectRoot: string,
+  requested: SemanticRuntimeQueryRequest['engine'],
+): Promise<SemanticRuntimeAdapterId> {
+  if (requested === 'dbt-cloud') return 'dbt-cloud';
+  if (requested === 'metricflow' || requested === 'metricflow-cli') return 'metricflow-cli';
+  if (requested === 'native') return 'native';
+  return (await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true })).active;
+}
+
+function resolveMetricFlowTargetMetadata(
+  projectRoot: string,
+  projectConfig: ProjectConfig,
+): MetricFlowTargetMetadata | undefined {
+  const candidates = discoverDbtProfileConnections(projectRoot, projectConfig)
+    .filter((candidate) => candidate.missingFields.length === 0);
+  const candidate = candidates.find((item) =>
+    !item.warnings.some((warning) => warning.startsWith('Not the default dbt target')),
+  ) ?? (candidates.length === 1 ? candidates[0] : undefined);
+  if (!candidate) return undefined;
+  return {
+    expectedTarget: configuredWarehouseTargetIdentity(candidate.connection),
+    profileName: candidate.profileName,
+    targetName: candidate.targetName,
+    profilesPath: candidate.path,
+  };
+}
+
 async function composeRuntimeSemanticQuery(
   request: SemanticRuntimeQueryRequest,
   semanticLayer: SemanticLayer,
@@ -17050,7 +17219,9 @@ async function composeSemanticBlockSqlForRuntime(
     projectRoot: string;
     projectConfig: ProjectConfig;
   },
-): Promise<ReturnType<typeof composeSemanticBlockSql>> {
+): Promise<ReturnType<typeof composeSemanticBlockSql> & {
+  compiled?: SemanticRuntimeCompileResult;
+}> {
   const native = composeSemanticBlockSql(source, semanticLayer, options);
   const config = parseSemanticBlockConfig(source);
   if (config.blockType !== 'semantic') return native;
@@ -17096,6 +17267,7 @@ async function composeSemanticBlockSqlForRuntime(
       // no longer true for this run.
       diagnostics: native.diagnostics.filter((diagnostic) => diagnostic.code !== 'semantic_compose_failed'),
       semanticRefs: native.semanticRefs,
+      compiled,
     };
   } catch (error) {
     return {
@@ -23362,6 +23534,37 @@ export function buildAgentSchemaContext(
     .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
     .slice(0, limit)
     .map((entry) => entry.table);
+}
+
+const RUNTIME_SCHEMA_SEARCH_STOPWORDS = new Set([
+  'what', 'which', 'where', 'when', 'who', 'why', 'how', 'show', 'give', 'find',
+  'from', 'with', 'without', 'this', 'that', 'these', 'those', 'current', 'today',
+  'yesterday', 'last', 'year', 'month', 'week', 'day', 'top', 'bottom', 'their',
+  'have', 'does', 'into', 'than', 'then', 'also', 'all', 'the', 'and', 'for',
+]);
+
+/**
+ * Physical catalog evidence fallback. This is deliberately question-scoped and
+ * result-bounded: dbt/DQL metadata remains the planning authority, while
+ * information_schema confirms discoverable relations/columns in the selected
+ * execution target. Tokens are reduced to safe identifier characters before
+ * interpolation, so user text cannot become SQL syntax.
+ */
+export function buildRuntimeSchemaSearchSql(question: string): string {
+  const terms = Array.from(agentSchemaTokens(question))
+    .map((term) => term.toLowerCase().replace(/[^a-z0-9_]/g, ''))
+    .filter((term) => term.length >= 3 && !RUNTIME_SCHEMA_SEARCH_STOPWORDS.has(term))
+    .slice(0, 8);
+  const predicate = terms.length > 0
+    ? `\n  AND (\n${terms.map((term) =>
+        `    LOWER(table_name) LIKE '%${term}%' OR LOWER(column_name) LIKE '%${term}%'`,
+      ).join(' OR\n')}\n  )`
+    : '';
+  return `SELECT table_schema, table_name, column_name, data_type
+FROM information_schema.columns
+WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')${predicate}
+ORDER BY table_schema, table_name, ordinal_position
+LIMIT 600`;
 }
 
 function mergeAgentSchemaContexts(...contexts: AgentSchemaTable[][]): AgentSchemaTable[] {

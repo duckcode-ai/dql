@@ -36,4 +36,4 @@ spec and acceptance matrix first.
 
 | Date | Workstream | Requirement | Conflict/blocker | Decision/reference | Status |
 | ---- | ---------- | ----------- | ---------------- | ------------------ | ------ |
-| — | — | — | — | — | — |
+| 2026-07-23 | W02/W04/W05/W07 | `CTX-005`, `AGT-014`, `API-006`, `API-007`, `UI-012`, `PERF-001`, `E2E-008`, `E2E-014` | Enterprise Snowflake testing exposed eager all-column materialization, missing compiler-target/execution-target identity, lost semantic trace/connector diagnostics, and cross-surface execution drift despite prior implementation evidence. | Specs 07/10 amended; target-bound execution, bounded schema search/streaming, canonical receipts, structured failures, adapter pinning, and built-CLI regression coverage implemented on `codex/target-bound-semantic-runtime`. Independent enterprise-fixture verification remains required. | implemented |

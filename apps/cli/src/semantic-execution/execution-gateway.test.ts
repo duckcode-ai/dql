@@ -1,0 +1,144 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ConnectionConfig, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
+import type { SemanticRuntimeCompileResult } from '../semantic-runtime.js';
+import { saveTestedSemanticRuntimeSettings } from '../semantic-runtime-settings.js';
+import { createWarehouseTargetIdentity } from '@duckcodeailabs/dql-core';
+import { executeTargetBoundSemanticQuery } from './execution-gateway.js';
+
+let root: string;
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'dql-execution-gateway-'));
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+const connection: ConnectionConfig = {
+  driver: 'snowflake',
+  account: 'acme',
+  database: 'PROD',
+  schema: 'SEMANTIC',
+  role: 'ANALYST',
+  warehouse: 'REPORTING',
+};
+
+function result(rows: Array<Record<string, unknown>>): QueryResult {
+  return {
+    columns: Object.keys(rows[0] ?? {}).map((name) => ({ name, type: 'string', driverType: 'TEXT' })),
+    rows,
+    rowCount: rows.length,
+    executionTimeMs: 1,
+  };
+}
+
+function compiled(engine: SemanticRuntimeCompileResult['engine'] = 'native'): SemanticRuntimeCompileResult {
+  return {
+    sql: 'SELECT 42 AS REVENUE',
+    joins: [],
+    tables: [],
+    engine,
+    effectiveRequest: { metrics: ['revenue'], dimensions: [] },
+    semanticTrace: {
+      version: 1,
+      adapter: engine,
+      status: 'compiled',
+      authoringRequest: { metrics: ['revenue'], dimensions: [] },
+      bindings: [],
+      warnings: [],
+      steps: [
+        { id: 'resolve_members', label: 'Resolve', status: 'completed', detail: 'ok' },
+        { id: 'bind_entity_paths', label: 'Bind', status: 'completed', detail: 'ok' },
+        { id: 'compile_semantic_query', label: 'Compile', status: 'completed', detail: 'ok' },
+        { id: 'execute_query', label: 'Execute', status: 'not_started', detail: 'pending' },
+      ],
+    },
+  };
+}
+
+describe('target-bound semantic execution gateway', () => {
+  it('uses one ordered identity, physical preflight, and bounded execution path', async () => {
+    const sqlCalls: string[] = [];
+    const executor = {
+      executePositional: vi.fn(async (sql: string) => {
+        sqlCalls.push(sql);
+        if (sql.includes('CURRENT_ACCOUNT()')) {
+          return result([{
+            DQL_ACCOUNT: 'ACME',
+            DQL_DATABASE: 'PROD',
+            DQL_SCHEMA: 'SEMANTIC',
+            DQL_ROLE: 'ANALYST',
+            DQL_WAREHOUSE: 'REPORTING',
+          }]);
+        }
+        if (sql.startsWith('EXPLAIN USING TEXT')) return result([{ plan: 'ok' }]);
+        return { ...result([{ REVENUE: 42 }]), queryId: 'query-123' };
+      }),
+    } as unknown as QueryExecutor;
+
+    const execution = await executeTargetBoundSemanticQuery({
+      executor,
+      connection,
+      projectRoot: root,
+      plannedAdapter: 'native',
+      compile: async () => compiled(),
+      rowBound: 5,
+    });
+
+    expect(sqlCalls).toHaveLength(3);
+    expect(sqlCalls[0]).toContain('CURRENT_ACCOUNT()');
+    expect(sqlCalls[1]).toBe('EXPLAIN USING TEXT SELECT 42 AS REVENUE');
+    expect(sqlCalls[2]).toBe('SELECT 42 AS REVENUE');
+    expect(execution?.executionReceipt).toMatchObject({
+      adapterId: 'native',
+      queryId: 'query-123',
+      rowBound: 5,
+      outcome: 'succeeded',
+    });
+    expect(execution?.semanticTrace.steps.map((step) => step.id)).toContain('preflight_physical_sql');
+  });
+
+  it('rejects target drift before calling the selected dbt Cloud compiler', async () => {
+    saveTestedSemanticRuntimeSettings(root, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'secret',
+      },
+    }, { ok: true, message: 'ok', dialect: 'snowflake' }, createWarehouseTargetIdentity({
+      connectionRef: 'connection:prod',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME',
+        database: 'PROD',
+        schema: 'SEMANTIC',
+        role: 'ANALYST',
+        warehouse: 'REPORTING',
+      },
+    }));
+    const compile = vi.fn(async () => compiled('dbt-cloud'));
+    const executor = {
+      executePositional: vi.fn(async () => result([{
+        DQL_ACCOUNT: 'ACME',
+        DQL_DATABASE: 'DEV',
+        DQL_SCHEMA: 'SEMANTIC',
+        DQL_ROLE: 'ANALYST',
+        DQL_WAREHOUSE: 'REPORTING',
+      }])),
+    } as unknown as QueryExecutor;
+
+    await expect(executeTargetBoundSemanticQuery({
+      executor,
+      connection: { ...connection, database: 'DEV' },
+      projectRoot: root,
+      plannedAdapter: 'dbt-cloud',
+      compile,
+    })).rejects.toMatchObject({ code: 'EXECUTION_TARGET_MISMATCH' });
+    expect(compile).not.toHaveBeenCalled();
+  });
+});

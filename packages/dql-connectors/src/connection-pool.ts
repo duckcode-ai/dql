@@ -95,18 +95,34 @@ export function createConnectionConfigKey(config: ConnectionConfig): string {
 
 export class ConnectionPoolManager {
   private connectors: Map<string, DatabaseConnector> = new Map();
+  private pendingConnectors: Map<string, Promise<DatabaseConnector>> = new Map();
 
   async getConnector(config: ConnectionConfig): Promise<DatabaseConnector> {
     const key = this.configKey(config);
-    let connector = this.connectors.get(key);
+    const existing = this.connectors.get(key);
+    if (existing) return existing;
+    const pending = this.pendingConnectors.get(key);
+    if (pending) return pending;
 
-    if (!connector) {
-      connector = this.createConnector(config);
-      await connector.connect(config);
-      this.connectors.set(key, connector);
-    }
-
-    return connector;
+    const connectPromise = (async () => {
+      const connector = this.createConnector(config);
+      try {
+        await connector.connect(config);
+        this.connectors.set(key, connector);
+        return connector;
+      } catch (error) {
+        try {
+          await connector.disconnect();
+        } catch {
+          // The original connection error remains authoritative.
+        }
+        throw error;
+      } finally {
+        this.pendingConnectors.delete(key);
+      }
+    })();
+    this.pendingConnectors.set(key, connectPromise);
+    return connectPromise;
   }
 
   async removeConnector(config: ConnectionConfig): Promise<void> {
@@ -119,9 +135,11 @@ export class ConnectionPoolManager {
   }
 
   async disconnectAll(): Promise<void> {
+    await Promise.allSettled(this.pendingConnectors.values());
     const promises = [...this.connectors.values()].map((c) => c.disconnect());
     await Promise.all(promises);
     this.connectors.clear();
+    this.pendingConnectors.clear();
   }
 
   private createConnector(config: ConnectionConfig): DatabaseConnector {

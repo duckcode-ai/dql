@@ -73,15 +73,6 @@ function AppInner() {
     });
   }, [dispatch]);
 
-  // Load schema on mount
-  useEffect(() => {
-    dispatch({ type: 'SET_SCHEMA_LOADING', loading: true });
-    api.getSchema().then((tables) => {
-      dispatch({ type: 'SET_SCHEMA', tables });
-      dispatch({ type: 'SET_SCHEMA_LOADING', loading: false });
-    });
-  }, [dispatch]);
-
   // Hot reload — watches project files via SSE and refreshes state
   useHotReload();
 

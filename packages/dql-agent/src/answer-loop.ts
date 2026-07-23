@@ -211,6 +211,8 @@ export interface SemanticExecutionTrace {
     status: 'completed' | 'failed' | 'not_started';
     detail: string;
   }>;
+  targetBinding?: object;
+  executionReceipt?: object;
   failure?: {
     code: string;
     phase: string;
@@ -280,7 +282,7 @@ function semanticCompilerFailure(error: unknown): SemanticCompilerFailure {
 
 function semanticTraceAfterExecution(
   trace: SemanticExecutionTrace | undefined,
-  input: { executed: boolean; error?: string },
+  input: { executed: boolean; error?: string; result?: AgentResultPayload },
 ): SemanticExecutionTrace | undefined {
   if (!trace) return undefined;
   const executionStatus = input.error ? 'failed' : input.executed ? 'completed' : 'not_started';
@@ -291,6 +293,12 @@ function semanticTraceAfterExecution(
       : 'The compiler produced SQL, but execution was not requested.';
   return {
     ...trace,
+    ...(input.result?.semanticTargetBinding
+      ? { targetBinding: input.result.semanticTargetBinding }
+      : {}),
+    ...(input.result?.semanticExecutionReceipt
+      ? { executionReceipt: input.result.semanticExecutionReceipt }
+      : {}),
     status: input.error ? 'failed' : trace.status,
     steps: trace.steps.map((step) => step.id === 'execute_query'
       ? { ...step, status: executionStatus, detail: executionDetail }
@@ -954,6 +962,10 @@ export interface AgentResultPayload {
   dqlArtifact?: DqlArtifactReference;
   /** Redacted proof binding source, compiled SQL, parameters, and rows. */
   executionReceipt?: DqlArtifactExecutionReceipt;
+  /** Full target-bound semantic proof; separate from the compact DQL receipt. */
+  semanticExecutionReceipt?: object;
+  semanticTargetBinding?: object;
+  semanticTrace?: SemanticExecutionTrace;
 }
 
 export interface CertifiedBlockInvocationInput {
@@ -3912,6 +3924,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const finalSemanticExecutionTrace = semanticTraceAfterExecution(semanticExecutionTrace, {
       executed: Boolean(result),
       ...(executionError ? { error: executionError } : {}),
+      ...(result ? { result } : {}),
     });
     return {
       kind: governedMetricExecutionFailure ? 'no_answer' : 'uncertified',
@@ -4219,6 +4232,10 @@ async function executeSemanticAnalyticalGraph(input: {
     let result: AgentResultPayload;
     try {
       result = await executor();
+      semanticExecutionTrace = semanticTraceAfterExecution(semanticExecutionTrace, {
+        executed: true,
+        result,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return analyticalGraphFailureAnswer(

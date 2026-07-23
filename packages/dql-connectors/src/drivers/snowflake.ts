@@ -1,5 +1,13 @@
 import type { DatabaseConnector, ConnectionConfig, TableInfo, ColumnInfo } from '../connector.js';
-import type { QueryResult, ColumnMeta, ColumnType, Row } from '../result-types.js';
+import {
+  ConnectorQueryError,
+  type QueryBatch,
+  type QueryExecutionOptions,
+  type QueryResult,
+  type ColumnMeta,
+  type ColumnType,
+  type Row,
+} from '../result-types.js';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createPrivateKey } from 'node:crypto';
@@ -86,50 +94,161 @@ export class SnowflakeConnector implements DatabaseConnector {
 
   }
 
-  async execute(sql: string, params?: unknown[]): Promise<QueryResult> {
+  async execute(
+    sql: string,
+    params?: unknown[],
+    options: QueryExecutionOptions = {},
+  ): Promise<QueryResult> {
     if (!this.connection) {
       throw new Error('Snowflake connector not connected. Call connect() first.');
     }
 
     const startTime = performance.now();
+    const rows: Row[] = [];
+    let columns: ColumnMeta[] = [];
+    let queryId: string | undefined;
+    let truncated = false;
+    let bytesRead = 0;
 
-    return new Promise((resolve, reject) => {
-      this.connection.execute({
+    for await (const batch of this.stream(sql, params, options)) {
+      if (columns.length === 0) columns = batch.columns;
+      rows.push(...batch.rows);
+      queryId = batch.queryId ?? queryId;
+      truncated = truncated || Boolean(batch.truncated);
+      bytesRead += batch.byteCount;
+    }
+
+    return {
+      columns,
+      rows,
+      rowCount: rows.length,
+      executionTimeMs: performance.now() - startTime,
+      ...(queryId ? { queryId } : {}),
+      ...(truncated ? { truncated: true } : {}),
+      bytesRead,
+    };
+  }
+
+  async *stream(
+    sql: string,
+    params?: unknown[],
+    options: QueryExecutionOptions = {},
+  ): AsyncIterable<QueryBatch> {
+    if (!this.connection) {
+      throw new Error('Snowflake connector not connected. Call connect() first.');
+    }
+
+    const maxRows = boundedPositiveInteger(options.maxRows, 10_000, 1_000_000);
+    const maxBytes = boundedPositiveInteger(options.maxBytes, 16 * 1024 * 1024, 256 * 1024 * 1024);
+    const batchSize = boundedPositiveInteger(options.batchSize, 500, 1_000);
+    const deadlineMs = boundedPositiveInteger(options.deadlineMs, 120_000, 600_000);
+    let statement: any;
+    let submittedStatement: any;
+    let timedOut = false;
+    let cancelled = false;
+    const cancelStatement = () => {
+      const active = statement ?? submittedStatement;
+      if (!active || typeof active.cancel !== 'function') return;
+      try {
+        active.cancel(() => undefined);
+      } catch {
+        // Best-effort cancellation; the primary structured failure is retained.
+      }
+    };
+    const abort = () => {
+      cancelled = true;
+      cancelStatement();
+    };
+    if (options.signal?.aborted) {
+      throw snowflakeControlError('EXECUTION_CANCELLED', 'Snowflake query was cancelled before submission.');
+    }
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      cancelStatement();
+    }, deadlineMs);
+
+    try {
+      statement = await new Promise<any>((resolve, reject) => {
+        submittedStatement = this.connection.execute({
         sqlText: sql,
         binds: params ?? [],
-        complete: (err: Error | undefined, stmt: any, rows: any[]) => {
-          const executionTimeMs = performance.now() - startTime;
-
+        // Snowflake otherwise materializes every row in the complete callback.
+        // Streaming is mandatory for bounded enterprise result consumption.
+        streamResult: true,
+        complete: (err: Error | undefined, stmt: any) => {
           if (err) {
-            reject(new Error(`Snowflake query failed: ${err.message}`));
+            reject(snowflakeQueryError(err, stmt ?? submittedStatement));
             return;
           }
-
-          if (!rows || rows.length === 0) {
-            resolve({
-              columns: [],
-              rows: [],
-              rowCount: 0,
-              executionTimeMs,
-            });
-            return;
-          }
-
-          const columns: ColumnMeta[] = stmt.getColumns().map((col: any) => ({
-            name: col.getName(),
-            type: mapSnowflakeType(col.getType()),
-            driverType: col.getType(),
-          }));
-
-          resolve({
-            columns,
-            rows: rows as Row[],
-            rowCount: rows.length,
-            executionTimeMs,
-          });
+          resolve(stmt ?? submittedStatement);
         },
       });
-    });
+        if (cancelled || timedOut) cancelStatement();
+      });
+
+      if (timedOut) throw snowflakeControlError('TIMEOUT', `Snowflake query exceeded the ${deadlineMs}ms deadline.`);
+      if (cancelled) throw snowflakeControlError('EXECUTION_CANCELLED', 'Snowflake query was cancelled.');
+
+      const queryId = snowflakeStatementId(statement);
+      const columns: ColumnMeta[] = (statement.getColumns?.() ?? []).map((col: any) => ({
+        name: col.getName(),
+        type: mapSnowflakeType(col.getType()),
+        driverType: col.getType(),
+      }));
+      const rowStream = statement.streamRows();
+      let batchRows: Row[] = [];
+      let batchBytes = 0;
+      let totalRows = 0;
+      let totalBytes = 0;
+      let truncated = false;
+
+      try {
+        for await (const rawRow of rowStream as AsyncIterable<Row>) {
+          if (timedOut) throw snowflakeControlError('TIMEOUT', `Snowflake query exceeded the ${deadlineMs}ms deadline.`);
+          if (cancelled) throw snowflakeControlError('EXECUTION_CANCELLED', 'Snowflake query was cancelled.');
+          const rowBytes = serializedRowBytes(rawRow);
+          if (totalRows >= maxRows || totalBytes + rowBytes > maxBytes) {
+            truncated = true;
+            cancelStatement();
+            break;
+          }
+          batchRows.push(rawRow);
+          batchBytes += rowBytes;
+          totalRows += 1;
+          totalBytes += rowBytes;
+          if (batchRows.length >= batchSize) {
+            yield {
+              columns,
+              rows: batchRows,
+              rowCount: batchRows.length,
+              byteCount: batchBytes,
+              ...(queryId ? { queryId } : {}),
+            };
+            batchRows = [];
+            batchBytes = 0;
+          }
+        }
+      } catch (error) {
+        if (timedOut) throw snowflakeControlError('TIMEOUT', `Snowflake query exceeded the ${deadlineMs}ms deadline.`);
+        if (cancelled) throw snowflakeControlError('EXECUTION_CANCELLED', 'Snowflake query was cancelled.');
+        throw snowflakeQueryError(error, statement);
+      }
+
+      // Always yield a terminal batch so zero-row results retain columns/query ID
+      // and callers learn whether the bounded result was truncated.
+      yield {
+        columns,
+        rows: batchRows,
+        rowCount: batchRows.length,
+        byteCount: batchBytes,
+        ...(queryId ? { queryId } : {}),
+        ...(truncated ? { truncated: true } : {}),
+      };
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -190,6 +309,68 @@ export class SnowflakeConnector implements DatabaseConnector {
       ordinalPosition: Number(row['ORDINAL_POSITION'] ?? row['ordinal_position'] ?? 0),
     }));
   }
+}
+
+function boundedPositiveInteger(value: number | undefined, fallback: number, maximum: number): number {
+  if (!Number.isFinite(value) || Number(value) <= 0) return fallback;
+  return Math.min(maximum, Math.max(1, Math.floor(Number(value))));
+}
+
+function serializedRowBytes(row: Row): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(row, (_key, value: unknown) =>
+      typeof value === 'bigint' ? value.toString() : value), 'utf8');
+  } catch {
+    return Buffer.byteLength(String(row), 'utf8');
+  }
+}
+
+function snowflakeStatementId(statement: any): string | undefined {
+  try {
+    const value = statement?.getStatementId?.() ?? statement?.getQueryId?.();
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function snowflakeQueryError(error: unknown, statement?: any): ConnectorQueryError {
+  if (error instanceof ConnectorQueryError) return error;
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const linePosition = /line\s+(\d+)\s+(?:at\s+)?position\s+(\d+)/i.exec(rawMessage);
+  const queryId = cleanErrorString(record.queryId)
+    ?? cleanErrorString(record.queryID)
+    ?? snowflakeStatementId(statement);
+  return new ConnectorQueryError({
+    driver: 'snowflake',
+    message: `Snowflake query failed: ${rawMessage}`,
+    vendorCode: cleanErrorString(record.code) ?? cleanErrorString(record.errno),
+    sqlState: cleanErrorString(record.sqlState) ?? cleanErrorString(record.sqlstate),
+    queryId,
+    line: linePosition ? Number(linePosition[1]) : undefined,
+    position: linePosition ? Number(linePosition[2]) : undefined,
+    retryable: Boolean(record.retryable),
+    cause: error instanceof Error ? error : undefined,
+  });
+}
+
+function snowflakeControlError(
+  vendorCode: 'TIMEOUT' | 'EXECUTION_CANCELLED',
+  message: string,
+): ConnectorQueryError {
+  return new ConnectorQueryError({
+    driver: 'snowflake',
+    message,
+    vendorCode,
+    retryable: vendorCode === 'TIMEOUT',
+  });
+}
+
+function cleanErrorString(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
 }
 
 function applySnowflakeConnectionOptions(

@@ -6,6 +6,55 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.4 - 2026-07-23
+
+### Target-bound semantic execution and bounded Snowflake runtime
+
+This patch makes semantic compilation and warehouse execution one auditable
+operation. DQL now proves that dbt Cloud or local MetricFlow compiled for the
+same warehouse target that will execute the SQL, preflights the physical query,
+and retains the exact adapter, target, SQL, query ID, and failure evidence.
+
+### Fixed
+
+- **Compiler-to-warehouse target binding.** DQL observes the active account,
+  database, schema, role, and warehouse through the same pooled connection used
+  for execution. A dbt Cloud or MetricFlow target mismatch now fails with
+  `EXECUTION_TARGET_MISMATCH` before compilation or query execution.
+- **One pinned semantic runtime.** Notebook, preview, agent, freshness, and
+  semantic artifact execution share one gateway and one adapter decision.
+  Adapter failures remain visible and never silently downgrade to another
+  compiler or generated SQL route.
+- **Bounded Snowflake discovery and execution.** Startup no longer materializes
+  every warehouse column. Physical schema fallback is question-scoped and
+  paginated, while Snowflake rows are streamed with row, byte, batch, and
+  deadline limits plus cancellation support.
+- **Physical SQL preflight.** Compiler output is checked on the active warehouse
+  connection before execution, catching missing columns, ambiguous identifiers,
+  and permission failures without inventing semantic explanations.
+- **Structured connector diagnostics.** Snowflake vendor code, SQL state, query
+  ID, line, position, truncation, and cancellation evidence survive the
+  connector boundary and are available to repair flows.
+- **Target proof in Trust & Steps.** “How it was answered” reports the selected
+  adapter, compiler target, execution target, target fingerprint, preflight,
+  executed SQL fingerprint, query ID, and bounded execution receipt.
+- **Version-safe setup.** Existing OSS projects must preview and reapply their
+  dbt context after upgrading so saved dbt Cloud target binding is refreshed
+  for the running CLI version.
+- **Supported Node guardrail.** Snowflake runtime diagnostics accept supported
+  Node 20, 22, and 24 releases and refuse unsupported Node 26 instead of
+  continuing into unstable connector behavior.
+
+### Release exceptions
+
+- Acceptance IDs `CTX-005`, `AGT-014`, `API-006`, `API-007`, `UI-012`,
+  `PERF-001`, `E2E-008`, and `E2E-014` are implementer-validated. Independent
+  replay against the enterprise Snowflake and dbt Cloud fixture remains
+  required before they can be marked verified.
+- The tracked `PERF-001` latency exception remains. Bounded discovery and
+  streaming remove the observed eager-memory failure mode, but this patch makes
+  no GA latency claim.
+
 ## v1.10.3 - 2026-07-23
 
 ### Governed semantic paths and transparent execution

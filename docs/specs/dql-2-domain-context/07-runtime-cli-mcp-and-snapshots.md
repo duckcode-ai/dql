@@ -10,6 +10,24 @@ gateway returns an `ExecutionReceipt` binding snapshot, resolved-plan,
 executable-plan, parameters, projected field identities, result grain, and
 result fingerprint (`AGT-013`, `AGT-014`, `API-006`).
 
+### Semantic target binding
+
+Adapter selection and target selection are one atomic decision. A semantic
+executable plan binds the governed snapshot and semantic artifact fingerprint,
+the exact adapter and implementation version, the compiler target (`native`
+artifact, MetricFlow profile/target, or dbt Cloud environment), the authorized
+warehouse connection and its redacted observed context, and the compatibility
+proof joining compiler and execution targets.
+
+Compiler targets and warehouse targets are different identity domains and are
+never compared by a bare name alone. The execution gateway validates the
+binding immediately before query submission and executes on the same connector
+lease used for validation. A missing or changed binding returns
+`EXECUTION_TARGET_MISMATCH` with phase `validation`, submits zero analytical
+queries, and permits only explicit authorized rebinding or setup reapplication.
+It never selects another adapter, connection, relation, or SQL route
+(`AGT-013`, `AGT-014`, `API-006`, `API-007`, `SEC-004`).
+
 Semantic adapters expose capability inspection and cancellable compilation with
 an inherited deadline. Runtime-specific member spellings are adapter references,
 not semantic identity. Authentication, availability, timeout, compiler, and
@@ -41,6 +59,17 @@ working catalog contains safe runtime-schema records, approved hints, query
 runs, and context-pack history. One request binds both through the immutable
 snapshot ID; mutable observations cannot alter its governed evidence. Leaf
 names are ambiguity-aware aliases; they never replace qualified identity.
+
+Live warehouse metadata is represented as an immutable activated runtime-schema
+generation qualified by a redacted connection fingerprint. It observes
+physical existence, visibility, types, and drift only; it cannot define
+business meaning, overwrite dbt metadata, or authorize a relationship. Default
+refresh scope is the exact dbt relation set. Selected-schema discovery is an
+explicit setup/admin action; account-wide discovery never runs on application
+startup. Metadata reads are streamed, paginated, cancellable, and bounded by
+rows, bytes, and time. Opening the notebook reads the last active generation
+and issues zero live warehouse metadata queries (`CTX-005`, `PERF-001`,
+`PERF-002`, `SEC-003`).
 
 Compact exact/alias maps, metric headers, and graph adjacency are memory-resident.
 Verbose payloads, hundreds of thousands of columns, FTS, and graph records stay

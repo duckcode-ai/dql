@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.3)
+## Current State (v1.10.4)
 
 DQL OSS is ready for local-first use cases:
 
@@ -39,6 +39,14 @@ DQL OSS is ready for local-first use cases:
   labels and exact technical metric/group-by names.
 - Lock semantic execution to one tested dbt Cloud, local MetricFlow, or native
   adapter per request without silently changing engines after a failure.
+- Bind the semantic compiler target to the active warehouse account, database,
+  schema, role, and warehouse before compilation; preflight and execute through
+  the same bounded connector lease.
+- Search the physical warehouse catalog only through question-scoped,
+  paginated discovery when governed dbt context is insufficient, instead of
+  eagerly loading every table and column.
+- Stream and cap Snowflake results while retaining vendor error code, SQL
+  state, query ID, line, position, cancellation, and truncation evidence.
 - Resolve repeated MetricFlow dimensions through an explicit governed entity
   path, keep the DQL authoring identity stable, and expose the runtime-qualified
   member used by the selected adapter.
@@ -71,8 +79,9 @@ The OSS release is intentionally local and single-user:
   round-trip AST editing is still planned.
 - `dql migrate` is scaffold-first. SQL import is active; Tableau and Power BI
   helpers remain planned migration helpers.
-- Very large query results are loaded into memory before rendering. Streaming
-  and pagination are not yet implemented.
+- Snowflake connector reads are streamed and capped before notebook rendering,
+  but other connectors still need equivalent driver-level streaming and the UI
+  does not yet expose interactive continuation pagination.
 - Snowflake semantic views require a live Snowflake connection at notebook
   startup; offline cache and clearer unavailable-state messaging are planned.
 - dbt semantic model discovery reads local project artifacts/files. Optional
@@ -81,7 +90,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.3
+  cold-start and warm-context latency budgets remain above target. The v1.10.4
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

@@ -10,9 +10,11 @@
 export { DataLexContractRegistry } from './registry.js';
 export {
   ANALYTICAL_FAILURE_VERSION,
+  ANALYTICAL_FAILURE_V2_VERSION,
   ANALYTICAL_QUESTION_FRAME_VERSION,
   analyticalRepairTrustTransition,
   normalizeAnalyticalFailureV1,
+  normalizeAnalyticalFailureV2,
   normalizeAnalyticalQuestionFrameV2,
   normalizeMetricCapabilityContract,
   type AnalyticalAmbiguityV2,
@@ -20,9 +22,11 @@ export {
   type AnalyticalDimensionBindingV2,
   type AnalyticalDimensionRole,
   type AnalyticalFailureCode,
+  type AnalyticalFailureCodeV2,
   type AnalyticalFailurePhase,
   type AnalyticalFailureRecoverability,
   type AnalyticalFailureV1,
+  type AnalyticalFailureV2,
   type AnalyticalMemberBindingV2,
   type AnalyticalOperation,
   type AnalyticalPeriodKind,
@@ -38,6 +42,24 @@ export {
   type AnalyticalTrustState,
   type MetricCapabilityContract,
 } from './analytical.js';
+export {
+  SEMANTIC_EXECUTION_CONTRACT_VERSION,
+  compareWarehouseTargets,
+  createSemanticTargetBinding,
+  createWarehouseTargetIdentity,
+  semanticExecutionFingerprint,
+  type ExecutableSemanticQueryPlanV1,
+  type SemanticAdapterIdV1,
+  type SemanticCompileTargetV1,
+  type SemanticExecutionReceiptV1,
+  type SemanticRuntimeMemberBindingV1,
+  type SemanticSnapshotRefV1,
+  type SemanticTargetBindingV1,
+  type SemanticTargetProofKind,
+  type WarehouseTargetContextV1,
+  type WarehouseTargetIdentityV1,
+  type WarehouseTargetMismatchV1,
+} from './semantic-execution.js';
 export {
   parseContractRef,
   type ContractId,

@@ -1,5 +1,5 @@
 import type { DatabaseConnector, ConnectionConfig } from './connector.js';
-import type { QueryResult } from './result-types.js';
+import type { QueryExecutionOptions, QueryResult } from './result-types.js';
 import { ConnectionPoolManager } from './connection-pool.js';
 import { buildParamValues, expandArrayParameters, normalizeSQLPlaceholders, type SQLParamSpec } from './sql-params.js';
 
@@ -29,12 +29,14 @@ export class QueryExecutor {
     sql: string,
     paramValues: unknown[],
     config: ConnectionConfig,
+    options?: QueryExecutionOptions,
   ): Promise<QueryResult> {
     const connector = await this.pool.getConnector(config);
     const normalizedSQL = normalizeSQLPlaceholders(sql, config.driver);
     return connector.execute(
       normalizedSQL,
       paramValues && paramValues.length > 0 ? paramValues : undefined,
+      options,
     );
   }
 

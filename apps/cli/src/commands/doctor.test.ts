@@ -4,9 +4,18 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ensureMetadataCatalogFresh } from '@duckcodeailabs/dql-agent';
-import { runDoctor } from './doctor.js';
+import { isSnowflakeSupportedNodeVersion, runDoctor } from './doctor.js';
 
 const tempDirs: string[] = [];
+
+describe('Snowflake Node runtime support', () => {
+  it('accepts supported LTS majors and rejects unsupported majors', () => {
+    expect(isSnowflakeSupportedNodeVersion('20.19.0')).toBe(true);
+    expect(isSnowflakeSupportedNodeVersion('22.18.0')).toBe(true);
+    expect(isSnowflakeSupportedNodeVersion('24.4.1')).toBe(true);
+    expect(isSnowflakeSupportedNodeVersion('26.5.0')).toBe(false);
+  });
+});
 
 function makeProject(prefix: string): string {
   const projectDir = mkdtempSync(join(tmpdir(), prefix));

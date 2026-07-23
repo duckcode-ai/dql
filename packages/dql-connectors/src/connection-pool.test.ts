@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createConnectionConfigKey } from './connection-pool.js';
+import { ConnectionPoolManager, createConnectionConfigKey } from './connection-pool.js';
 
 describe('createConnectionConfigKey', () => {
   it('returns the same key for logically identical configs', () => {
@@ -99,5 +99,36 @@ describe('createConnectionConfigKey', () => {
       authMethod: 'workload_identity' as const,
       workloadIdentityProvider: 'AWS',
     }));
+  });
+});
+
+describe('ConnectionPoolManager singleflight', () => {
+  it('shares one in-flight connector creation for concurrent callers', async () => {
+    const pool = new ConnectionPoolManager();
+    let connectCalls = 0;
+    let releaseConnect: (() => void) | undefined;
+    const connector = {
+      driverName: 'snowflake' as const,
+      connect: async () => {
+        connectCalls += 1;
+        await new Promise<void>((resolve) => {
+          releaseConnect = resolve;
+        });
+      },
+      execute: async () => ({ columns: [], rows: [], rowCount: 0, executionTimeMs: 0 }),
+      disconnect: async () => undefined,
+      ping: async () => true,
+    };
+    (pool as any).createConnector = () => connector;
+    const config = { driver: 'snowflake' as const, account: 'acct', username: 'user' };
+
+    const first = pool.getConnector(config);
+    const second = pool.getConnector(config);
+    await Promise.resolve();
+    expect(connectCalls).toBe(1);
+    releaseConnect?.();
+
+    expect(await first).toBe(connector);
+    expect(await second).toBe(connector);
   });
 });

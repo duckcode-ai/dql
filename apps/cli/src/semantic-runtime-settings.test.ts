@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createWarehouseTargetIdentity } from '@duckcodeailabs/dql-core';
 import {
   getEffectiveDbtCloudSemanticSettings,
   getSemanticRuntimeSettings,
@@ -24,6 +25,18 @@ afterEach(() => {
 });
 
 describe('semantic runtime settings', () => {
+  const target = createWarehouseTargetIdentity({
+    connectionRef: 'connection:test',
+    driver: 'snowflake',
+    redactedContext: {
+      account: 'acme',
+      database: 'analytics',
+      schema: 'semantic',
+      role: 'analyst',
+      warehouse: 'reporting',
+    },
+  });
+
   it('normalizes regional hosts to the GraphQL endpoint', () => {
     expect(semanticLayerGraphqlEndpoint('semantic-layer.emea.dbt.com/')).toBe(
       'https://semantic-layer.emea.dbt.com/api/graphql',
@@ -41,11 +54,11 @@ describe('semantic runtime settings', () => {
         environmentId: '12345',
         serviceToken: 'dbtc_secret_value',
       },
-    }, { ok: true, message: 'Test passed', dialect: 'snowflake', metricCount: 7_500 });
+    }, { ok: true, message: 'Test passed', dialect: 'snowflake', metricCount: 7_500 }, target);
 
     saveTestedSemanticRuntimeSettings(root, {
       dbtCloud: { host: 'semantic-layer.emea.dbt.com', environmentId: '67890', serviceToken: '' },
-    }, { ok: true, message: 'Test passed again', dialect: 'databricks' });
+    }, { ok: true, message: 'Test passed again', dialect: 'databricks' }, target);
 
     expect(getEffectiveDbtCloudSemanticSettings(root)).toMatchObject({
       serviceToken: 'dbtc_secret_value',
@@ -56,6 +69,10 @@ describe('semantic runtime settings', () => {
     expect(redacted.dbtCloud.hasServiceToken).toBe(true);
     expect(JSON.stringify(redacted)).not.toContain('dbtc_secret_value');
     expect(readFileSync(semanticRuntimeSettingsPath(root), 'utf8')).toContain('dbtc_secret_value');
+    expect(redacted.dbtCloud).toMatchObject({
+      targetBindingState: 'bound',
+      executionTargetFingerprint: target.identityFingerprint,
+    });
   });
 
   it('detects a complete environment configuration without persisting credentials', () => {
@@ -74,7 +91,7 @@ describe('semantic runtime settings', () => {
   it('does not overwrite working settings with a failed test result', () => {
     saveTestedSemanticRuntimeSettings(root, {
       dbtCloud: { host: 'semantic-layer.cloud.getdbt.com', environmentId: '1', serviceToken: 'working' },
-    }, { ok: true, message: 'Test passed' });
+    }, { ok: true, message: 'Test passed' }, target);
 
     expect(() => saveTestedSemanticRuntimeSettings(root, {
       dbtCloud: { host: 'broken.example', environmentId: '2', serviceToken: 'broken' },
@@ -83,6 +100,21 @@ describe('semantic runtime settings', () => {
       host: 'https://semantic-layer.cloud.getdbt.com',
       environmentId: '1',
       serviceToken: 'working',
+    });
+  });
+
+  it('requires old tested settings to be reapplied before semantic execution', () => {
+    saveTestedSemanticRuntimeSettings(root, {
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '1',
+        serviceToken: 'working',
+      },
+    }, { ok: true, message: 'Catalog test passed' });
+
+    expect(getSemanticRuntimeSettings(root).dbtCloud).toMatchObject({
+      testState: 'passed',
+      targetBindingState: 'missing',
     });
   });
 });

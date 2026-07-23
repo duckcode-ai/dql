@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { WarehouseTargetContextV1, WarehouseTargetIdentityV1 } from '@duckcodeailabs/dql-core';
 
 export type SemanticRuntimePreference = 'auto' | 'native' | 'metricflow-cli' | 'dbt-cloud';
 export type SemanticRuntimeTestState = 'missing' | 'configured' | 'passed' | 'failed';
@@ -26,6 +27,8 @@ interface StoredDbtCloudSemanticSettings {
   testMessage?: string;
   dialect?: string;
   metricCount?: number;
+  executionTargetFingerprint?: string;
+  executionTargetContext?: WarehouseTargetContextV1;
 }
 
 interface StoredSemanticRuntimeSettings {
@@ -47,6 +50,8 @@ export interface EffectiveDbtCloudSemanticSettings {
   testMessage?: string;
   dialect?: string;
   metricCount?: number;
+  executionTargetFingerprint?: string;
+  executionTargetContext?: WarehouseTargetContextV1;
 }
 
 export interface RedactedSemanticRuntimeSettings {
@@ -63,6 +68,9 @@ export interface RedactedSemanticRuntimeSettings {
     testMessage?: string;
     dialect?: string;
     metricCount?: number;
+    executionTargetFingerprint?: string;
+    executionTargetContext?: WarehouseTargetContextV1;
+    targetBindingState: 'missing' | 'bound';
     envVars: string[];
   };
 }
@@ -97,6 +105,9 @@ export function getSemanticRuntimeSettings(projectRoot: string): RedactedSemanti
       testMessage: effective.testMessage,
       dialect: effective.dialect,
       metricCount: effective.metricCount,
+      executionTargetFingerprint: effective.executionTargetFingerprint,
+      executionTargetContext: effective.executionTargetContext,
+      targetBindingState: effective.executionTargetFingerprint ? 'bound' : 'missing',
       envVars: [...HOST_ENV_VARS, ...ENVIRONMENT_ENV_VARS, ...TOKEN_ENV_VARS],
     },
   };
@@ -134,6 +145,8 @@ export function getEffectiveDbtCloudSemanticSettings(projectRoot: string): Effec
     testMessage: locallyTested ? local?.testMessage : undefined,
     dialect: locallyTested ? local?.dialect : undefined,
     metricCount: locallyTested ? local?.metricCount : undefined,
+    executionTargetFingerprint: locallyTested ? local?.executionTargetFingerprint : undefined,
+    executionTargetContext: locallyTested ? local?.executionTargetContext : undefined,
   };
 }
 
@@ -141,6 +154,7 @@ export function saveTestedSemanticRuntimeSettings(
   projectRoot: string,
   input: SemanticRuntimeSettingsInput,
   test: { ok: boolean; message: string; dialect?: string; metricCount?: number },
+  executionTarget?: WarehouseTargetIdentityV1,
 ): RedactedSemanticRuntimeSettings {
   if (!test.ok) throw new Error(test.message || 'dbt Cloud Semantic Layer test failed.');
   const stored = readStored(projectRoot);
@@ -174,6 +188,8 @@ export function saveTestedSemanticRuntimeSettings(
     testMessage: test.message,
     dialect: test.dialect,
     metricCount: test.metricCount,
+    executionTargetFingerprint: executionTarget?.identityFingerprint,
+    executionTargetContext: executionTarget?.redactedContext,
   };
   writeStored(projectRoot, stored);
   return getSemanticRuntimeSettings(projectRoot);

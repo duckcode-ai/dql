@@ -92,6 +92,9 @@ export interface SemanticRuntimeSettingsResponse {
     testMessage?: string;
     dialect?: string;
     metricCount?: number;
+    executionTargetFingerprint?: string;
+    executionTargetContext?: Record<string, string>;
+    targetBindingState: 'missing' | 'bound';
     envVars: string[];
   };
   runtime: {
@@ -141,6 +144,8 @@ export interface SemanticRuntimeTrace {
   }>;
   warnings: string[];
   steps: Array<{ id: string; label: string; status: string; detail: string }>;
+  targetBinding?: Record<string, unknown>;
+  executionReceipt?: Record<string, unknown>;
   failure?: {
     code: string;
     phase: string;
@@ -4257,6 +4262,9 @@ export const api = {
     effectiveRequest?: Record<string, unknown>;
     runtimeRequest?: Record<string, unknown>;
     semanticTrace?: SemanticRuntimeTrace;
+    executedSql?: string;
+    targetBinding?: Record<string, unknown>;
+    executionReceipt?: Record<string, unknown>;
   } | {
     error: string;
     code?: string;
@@ -4277,6 +4285,9 @@ export const api = {
         effectiveRequest?: Record<string, unknown>;
         runtimeRequest?: Record<string, unknown>;
         semanticTrace?: SemanticRuntimeTrace;
+        executedSql?: string;
+        targetBinding?: Record<string, unknown>;
+        executionReceipt?: Record<string, unknown>;
       }>('/api/semantic-builder/preview', {
         method: 'POST',
         body: JSON.stringify(payload),

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
-import { normalizeSnowflakePrivateKeyForAuth } from './snowflake.js';
+import { Readable } from 'node:stream';
+import { ConnectorQueryError } from '../result-types.js';
+import { SnowflakeConnector, normalizeSnowflakePrivateKeyForAuth } from './snowflake.js';
 
 describe('normalizeSnowflakePrivateKeyForAuth', () => {
   it('normalizes RSA private keys to PKCS8 PEM', () => {
@@ -58,5 +60,71 @@ describe('normalizeSnowflakePrivateKeyForAuth', () => {
 
     expect(() => normalizeSnowflakePrivateKeyForAuth(privateKey, 'wrong-passphrase'))
       .toThrow(/Snowflake private key could not be parsed or decrypted/);
+  });
+});
+
+describe('SnowflakeConnector bounded streaming', () => {
+  it('uses streamResult, stops at the row bound, and preserves the query id', async () => {
+    const connector = new SnowflakeConnector();
+    let executeOptions: Record<string, unknown> | undefined;
+    let cancelled = false;
+    const statement = {
+      getColumns: () => [{
+        getName: () => 'VALUE',
+        getType: () => 'FIXED',
+      }],
+      getStatementId: () => '01abc-query',
+      streamRows: () => Readable.from([{ VALUE: 1 }, { VALUE: 2 }, { VALUE: 3 }]),
+      cancel: (complete: () => void) => {
+        cancelled = true;
+        complete();
+      },
+    };
+    (connector as any).connection = {
+      execute: (options: Record<string, any>) => {
+        executeOptions = options;
+        queueMicrotask(() => options.complete(undefined, statement));
+        return statement;
+      },
+    };
+
+    const result = await connector.execute('select value', [], {
+      maxRows: 2,
+      batchSize: 1,
+      maxBytes: 1024,
+    });
+
+    expect(executeOptions?.streamResult).toBe(true);
+    expect(result.rows).toEqual([{ VALUE: 1 }, { VALUE: 2 }]);
+    expect(result.truncated).toBe(true);
+    expect(result.queryId).toBe('01abc-query');
+    expect(cancelled).toBe(true);
+  });
+
+  it('preserves Snowflake SQLSTATE, vendor code, query id, line, and position', async () => {
+    const connector = new SnowflakeConnector();
+    const statement = {
+      getStatementId: () => '01failure-query',
+      cancel: (complete: () => void) => complete(),
+    };
+    (connector as any).connection = {
+      execute: (options: Record<string, any>) => {
+        queueMicrotask(() => options.complete(Object.assign(
+          new Error("SQL compilation error: error line 406 at position 8 invalid identifier 'CDM.BCM_ADJUSTMENT_TYPE'"),
+          { code: '000904', sqlState: '42000' },
+        ), statement));
+        return statement;
+      },
+    };
+
+    const error = await connector.execute('select bad_identifier').catch((caught) => caught);
+    expect(error).toBeInstanceOf(ConnectorQueryError);
+    expect(error).toMatchObject({
+      vendorCode: '000904',
+      sqlState: '42000',
+      queryId: '01failure-query',
+      line: 406,
+      position: 8,
+    });
   });
 });

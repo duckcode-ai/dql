@@ -108,6 +108,9 @@ export async function runDoctor(targetPath: string | null, flags: CLIFlags, rest
   if (defaultConnection?.driver === 'file' || defaultConnection?.driver === 'duckdb') {
     checks.push(checkDuckDBDependency(projectRoot));
   }
+  if (defaultConnection?.driver === 'snowflake') {
+    checks.push(checkSnowflakeNodeVersion());
+  }
   if (defaultConnection?.driver) {
     checks.push(await checkLocalQueryRuntime(projectRoot, defaultConnection));
   }
@@ -566,6 +569,20 @@ function checkNodeVersion(): Check {
     name: 'Node.js',
     ok: major >= 20,
     detail: `version=${process.versions.node} (requires Node 20 or newer)`,
+  };
+}
+
+export function isSnowflakeSupportedNodeVersion(version = process.versions.node): boolean {
+  const match = version.match(/^(\d+)/);
+  const major = match ? Number(match[1]) : 0;
+  return major === 20 || major === 22 || major === 24;
+}
+
+function checkSnowflakeNodeVersion(): Check {
+  return {
+    name: 'Snowflake Node.js runtime',
+    ok: isSnowflakeSupportedNodeVersion(),
+    detail: `version=${process.versions.node} (Snowflake supports Node 20, 22, or 24)`,
   };
 }
 

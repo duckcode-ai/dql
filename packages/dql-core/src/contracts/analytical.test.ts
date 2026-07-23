@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { analyticalRepairTrustTransition, normalizeAnalyticalFailureV1, normalizeAnalyticalQuestionFrameV2, type AnalyticalQuestionFrameV2 } from './analytical.js';
+import {
+  analyticalRepairTrustTransition,
+  normalizeAnalyticalFailureV1,
+  normalizeAnalyticalFailureV2,
+  normalizeAnalyticalQuestionFrameV2,
+  type AnalyticalQuestionFrameV2,
+} from './analytical.js';
 
 const comparisonFrame: AnalyticalQuestionFrameV2 = {
   version: 2,
@@ -123,6 +129,37 @@ describe('analytical cross-surface contracts (CONTRACT-002 / AGT-017 / API-007)'
       code: 'COLUMN_NOT_FOUND',
       phase: 'execution',
       failedBindings: [{ qualifiedId: 'commerce::dimension::report_date' }],
+    });
+  });
+
+  it('normalizes target mismatch and redacted connector diagnostics in v2', () => {
+    const failure = normalizeAnalyticalFailureV2({
+      version: 2,
+      runId: 'run-1',
+      failureId: 'failure-1',
+      code: 'EXECUTION_TARGET_MISMATCH',
+      phase: 'validation',
+      message: 'The semantic compiler target does not match the active connection.',
+      recoverability: 'change_authorized_connection',
+      failedBindings: [{ role: 'execution_target', reasonCode: 'database_mismatch' }],
+      snapshotId: 'snapshot-1',
+      expectedTargetFingerprint: 'expected-target',
+      actualTargetFingerprint: 'actual-target',
+      adapterId: 'dbt-cloud',
+      queryId: 'query-1',
+      sqlState: '42000',
+      vendorCode: '000904',
+      safeActions: ['Reapply setup', 'Choose the mapped connection'],
+    });
+
+    expect(failure).toMatchObject({
+      version: 2,
+      code: 'EXECUTION_TARGET_MISMATCH',
+      phase: 'validation',
+      expectedTargetFingerprint: 'expected-target',
+      actualTargetFingerprint: 'actual-target',
+      adapterId: 'dbt-cloud',
+      queryId: 'query-1',
     });
   });
 

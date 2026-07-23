@@ -2060,6 +2060,11 @@ function AnalyticalHowAnswered({
   const semanticRuntimeRequest = recordOf(semantic?.runtimeRequest);
   const semanticBindings = recordList(semantic?.bindings);
   const semanticSteps = recordList(semantic?.steps);
+  const semanticTargetBinding = recordOf(semantic?.targetBinding);
+  const semanticExecutionTarget = recordOf(semanticTargetBinding?.executionTarget);
+  const semanticTargetContext = recordOf(semanticExecutionTarget?.redactedContext);
+  const semanticCompileTarget = recordOf(semanticTargetBinding?.compileTarget);
+  const semanticReceipt = recordOf(semantic?.executionReceipt);
   const semanticCandidates = recordList(semanticFailure?.candidates);
   const timeContext = recordOf(frame?.timeContext);
   const comparison = recordOf(frame?.comparison);
@@ -2190,6 +2195,20 @@ function AnalyticalHowAnswered({
           ['Fact set', displayValue(contract.facts?.fingerprint)],
           ['Semantic adapter', displayValue(semantic?.adapter)],
           ['Semantic compile status', displayValue(semantic?.status)],
+          ['Target proof', displayValue(recordOf(semanticTargetBinding?.proof)?.status)],
+          ['Target binding', displayValue(semanticTargetBinding?.bindingFingerprint)],
+          ['Compile target', displayValue(semanticCompileTarget?.kind)],
+          ['Execution target', [
+            semanticExecutionTarget?.driver,
+            semanticTargetContext?.account,
+            semanticTargetContext?.database,
+            semanticTargetContext?.schema,
+            semanticTargetContext?.role,
+            semanticTargetContext?.warehouse,
+          ].map(displayValue).filter(Boolean).join(' · ')],
+          ['Semantic receipt', displayValue(semanticReceipt?.receiptId)],
+          ['Warehouse query ID', displayValue(semanticReceipt?.queryId)],
+          ['Executed SQL proof', displayValue(semanticReceipt?.executedSqlFingerprint)],
           ['Runtime metrics', stringList(semanticRuntimeRequest?.metrics).join(', ')],
           ['Runtime dimensions', stringList(semanticRuntimeRequest?.dimensions).join(', ')],
           ['Member bindings', semanticBindings.map((binding) =>

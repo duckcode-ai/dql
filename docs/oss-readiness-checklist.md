@@ -161,7 +161,7 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-The OSS release candidate correctness gates pass locally for `1.10.3`. Re-run
+The OSS release candidate correctness gates pass locally for `1.10.4`. Re-run
 the published package smoke checks after publishing so `latest` is validated
 against the same version as the repo. The tracked `PERF-001` scale fixture has
 no route-parity, concept-resolution, certified-execution, or invented-ID
@@ -169,9 +169,10 @@ failures, but several cold-start and warm-context latency budgets remain above
 target. RFC 0005 acceptance remains implementer-validated pending independent
 verification. The semantic identity/runtime acceptance set also remains
 implementer-validated pending independent verification. The governed semantic
-path and Trust & Steps acceptance set remains implementer-validated pending an
-enterprise dbt Cloud replay. Maintainer approval records these conditions as
-disclosed `v1.10.3` OSS release exceptions; none is a GA performance claim.
+path, target-bound execution, bounded Snowflake runtime, and Trust & Steps
+acceptance set remains implementer-validated pending an enterprise dbt Cloud
+and Snowflake replay. Maintainer approval records these conditions as disclosed
+`v1.10.4` OSS release exceptions; none is a GA performance claim.
 
 Validated release gates (re-run the browser smoke after the examples
 restructure — bundled examples were removed in favor of the external

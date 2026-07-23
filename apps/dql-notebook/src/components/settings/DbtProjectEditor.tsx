@@ -285,7 +285,10 @@ export function DbtProjectEditor({
       const result = await api.applyDbtCloudSemanticRuntime(semanticPayload());
       setSemanticRuntime(result);
       setSemanticToken('');
-      setSemanticMessage({ ok: true, text: result.dbtCloud.testMessage || 'dbt Cloud Semantic Layer tested and activated.' });
+      setSemanticMessage({
+        ok: true,
+        text: `${result.dbtCloud.testMessage || 'dbt Cloud Semantic Layer tested.'} Compilation is now bound to the active warehouse target.`,
+      });
     } catch (error) {
       setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -398,6 +401,13 @@ export function DbtProjectEditor({
           <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5 }}>
             Adapter code is included with DQL. Auto selects one ready adapter in priority order: dbt Cloud, local MetricFlow, then native for simple metrics. Once selected, an adapter failure is shown directly and never silently downgraded.
           </div>
+          {semanticRuntime?.dbtCloud.configured ? (
+            <div style={{ fontSize: 10.5, color: semanticRuntime.dbtCloud.targetBindingState === 'bound' ? 'var(--status-success)' : 'var(--status-warning)', marginTop: 6 }}>
+              dbt Cloud target: {semanticRuntime.dbtCloud.targetBindingState === 'bound'
+                ? `bound · ${semanticRuntime.dbtCloud.executionTargetFingerprint?.slice(0, 12)}`
+                : 'reapply required before execution'}
+            </div>
+          ) : null}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
             <label style={{ fontSize: 11, fontWeight: 700, color: t.textSecondary }}>Preferred runtime</label>
             <select
@@ -513,7 +523,7 @@ export function DbtProjectEditor({
             {semanticMessage ? <div role={semanticMessage.ok ? 'status' : 'alert'} style={{ fontSize: 11, color: semanticMessage.ok ? 'var(--status-success)' : 'var(--status-error)' }}>{semanticMessage.text}</div> : null}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button type="button" onClick={() => void testSemanticRuntime()} disabled={Boolean(semanticBusy)} style={secondary}>{semanticBusy === 'test' ? 'Testing…' : 'Test draft'}</button>
-              <button type="button" onClick={() => void applySemanticRuntime()} disabled={Boolean(semanticBusy)} style={{ ...secondary, border: 'none', background: t.accent, color: '#fff' }}>{semanticBusy === 'apply' ? 'Testing & saving…' : 'Test & save'}</button>
+              <button type="button" onClick={() => void applySemanticRuntime()} disabled={Boolean(semanticBusy)} style={{ ...secondary, border: 'none', background: t.accent, color: '#fff' }}>{semanticBusy === 'apply' ? 'Testing & binding…' : 'Test, bind & save'}</button>
             </div>
           </div>
         </details>
