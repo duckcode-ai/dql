@@ -96,10 +96,7 @@ export function assertSemanticExecutionTarget(input: {
 }): WarehouseTargetIdentityV1 {
   const expected = expectedExecutionTarget(input);
   const mismatches = compareWarehouseTargets(expected, input.executionTarget);
-  if (
-    mismatches.length > 0
-    || (input.adapterId === 'dbt-cloud' && expected.identityFingerprint !== input.executionTarget.identityFingerprint)
-  ) {
+  if (mismatches.length > 0) {
     throw new SemanticExecutionTargetMismatchError({
       adapterId: input.adapterId,
       expected,

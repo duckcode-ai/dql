@@ -3,6 +3,7 @@ import {
   configuredWarehouseTargetIdentity,
   connectionReference,
   observeWarehouseTargetIdentity,
+  WarehouseTargetIdentityObservationError,
 } from './connection-identity.js';
 
 describe('semantic execution connection identity', () => {
@@ -29,7 +30,10 @@ describe('semantic execution connection identity', () => {
       executePositional: async () => ({
         columns: [],
         rows: [{
-          DQL_ACCOUNT: 'XY123',
+          DQL_ACCOUNT: 'ACME-PROD',
+          DQL_ACCOUNT_LOCATOR: 'XY123',
+          DQL_ACCOUNT_NAME: 'PROD',
+          DQL_ORGANIZATION: 'ACME',
           DQL_DATABASE: 'PROD',
           DQL_SCHEMA: 'COMMON',
           DQL_ROLE: 'ANALYST',
@@ -46,10 +50,42 @@ describe('semantic execution connection identity', () => {
       schema: 'COMMON',
     });
     expect(identity.redactedContext).toMatchObject({
-      account: 'XY123',
+      account: 'ACME-PROD',
+      accountLocator: 'XY123',
+      accountName: 'PROD',
+      organization: 'ACME',
       database: 'PROD',
       warehouse: 'REPORTING_WH',
     });
+  });
+
+  it('fails closed when Snowflake identity cannot be observed', async () => {
+    const executor = {
+      executePositional: async () => {
+        throw new Error('connection unavailable');
+      },
+    };
+
+    await expect(observeWarehouseTargetIdentity(executor as any, {
+      driver: 'snowflake',
+      account: 'acme-prod',
+      database: 'PROD',
+      schema: 'COMMON',
+    })).rejects.toMatchObject({
+      code: 'WAREHOUSE_TARGET_IDENTITY_UNAVAILABLE',
+      name: WarehouseTargetIdentityObservationError.name,
+    });
+  });
+
+  it('normalizes a configured Snowflake account URL before offline comparison', () => {
+    const identity = configuredWarehouseTargetIdentity({
+      driver: 'snowflake',
+      host: 'https://acme-prod.snowflakecomputing.com',
+      database: 'PROD',
+      schema: 'COMMON',
+    });
+
+    expect(identity.redactedContext.account).toBe('ACME-PROD');
   });
 
   it('creates a deterministic configured target for offline validation', () => {

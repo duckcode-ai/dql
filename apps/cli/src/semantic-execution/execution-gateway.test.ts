@@ -20,7 +20,7 @@ afterEach(() => {
 
 const connection: ConnectionConfig = {
   driver: 'snowflake',
-  account: 'acme',
+  account: 'acme-prod',
   database: 'PROD',
   schema: 'SEMANTIC',
   role: 'ANALYST',
@@ -60,6 +60,19 @@ function compiled(engine: SemanticRuntimeCompileResult['engine'] = 'native'): Se
   };
 }
 
+function observedSnowflakeTarget(database: string) {
+  return {
+    DQL_ACCOUNT: 'ACME-PROD',
+    DQL_ACCOUNT_LOCATOR: 'XY12345',
+    DQL_ACCOUNT_NAME: 'PROD',
+    DQL_ORGANIZATION: 'ACME',
+    DQL_DATABASE: database,
+    DQL_SCHEMA: 'SEMANTIC',
+    DQL_ROLE: 'ANALYST',
+    DQL_WAREHOUSE: 'REPORTING',
+  };
+}
+
 describe('target-bound semantic execution gateway', () => {
   it('uses one ordered identity, physical preflight, and bounded execution path', async () => {
     const sqlCalls: string[] = [];
@@ -67,13 +80,7 @@ describe('target-bound semantic execution gateway', () => {
       executePositional: vi.fn(async (sql: string) => {
         sqlCalls.push(sql);
         if (sql.includes('CURRENT_ACCOUNT()')) {
-          return result([{
-            DQL_ACCOUNT: 'ACME',
-            DQL_DATABASE: 'PROD',
-            DQL_SCHEMA: 'SEMANTIC',
-            DQL_ROLE: 'ANALYST',
-            DQL_WAREHOUSE: 'REPORTING',
-          }]);
+          return result([observedSnowflakeTarget('PROD')]);
         }
         if (sql.startsWith('EXPLAIN USING TEXT')) return result([{ plan: 'ok' }]);
         return { ...result([{ REVENUE: 42 }]), queryId: 'query-123' };
@@ -122,7 +129,7 @@ describe('target-bound semantic execution gateway', () => {
       connectionRef: 'connection:prod',
       driver: 'snowflake',
       redactedContext: {
-        account: 'ACME',
+        account: 'ACME-PROD',
         database: 'PROD',
         schema: 'SEMANTIC',
         role: 'ANALYST',
@@ -131,13 +138,7 @@ describe('target-bound semantic execution gateway', () => {
     }));
     const compile = vi.fn(async () => compiled('dbt-cloud'));
     const executor = {
-      executePositional: vi.fn(async () => result([{
-        DQL_ACCOUNT: 'ACME',
-        DQL_DATABASE: 'DEV',
-        DQL_SCHEMA: 'SEMANTIC',
-        DQL_ROLE: 'ANALYST',
-        DQL_WAREHOUSE: 'REPORTING',
-      }])),
+      executePositional: vi.fn(async () => result([observedSnowflakeTarget('DEV')])),
     } as unknown as QueryExecutor;
 
     await expect(executeTargetBoundSemanticQuery({
@@ -154,13 +155,7 @@ describe('target-bound semantic execution gateway', () => {
     const executor = {
       executePositional: vi.fn(async (sql: string) => {
         if (sql.includes('CURRENT_ACCOUNT()')) {
-          return result([{
-            DQL_ACCOUNT: 'ACME',
-            DQL_DATABASE: 'PROD',
-            DQL_SCHEMA: 'SEMANTIC',
-            DQL_ROLE: 'ANALYST',
-            DQL_WAREHOUSE: 'REPORTING',
-          }]);
+          return result([observedSnowflakeTarget('PROD')]);
         }
         throw new ConnectorQueryError({
           driver: 'snowflake',

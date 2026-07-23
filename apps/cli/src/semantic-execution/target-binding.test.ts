@@ -53,6 +53,83 @@ describe('semantic target binding', () => {
     })).toThrow(SemanticExecutionTargetMismatchError);
   });
 
+  it('accepts a legacy dbt Cloud locator binding for the same canonical Snowflake account', () => {
+    const legacyLocator = createWarehouseTargetIdentity({
+      connectionRef: 'legacy-bound-target',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'XY12345',
+        database: 'PROD',
+        schema: 'SEMANTIC',
+        role: 'ANALYST',
+        warehouse: 'REPORTING',
+      },
+    });
+    saveTestedSemanticRuntimeSettings(root, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'secret',
+      },
+    }, { ok: true, message: 'ok', dialect: 'snowflake' }, legacyLocator);
+    const observed = createWarehouseTargetIdentity({
+      connectionRef: 'active-target',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME-PROD',
+        accountLocator: 'XY12345',
+        accountName: 'PROD',
+        organization: 'ACME',
+        database: 'PROD',
+        schema: 'SEMANTIC',
+        role: 'ANALYST',
+        warehouse: 'REPORTING',
+      },
+    });
+
+    expect(assertSemanticExecutionTarget({
+      projectRoot: root,
+      adapterId: 'dbt-cloud',
+      executionTarget: observed,
+    }).redactedContext.account).toBe('XY12345');
+  });
+
+  it('accepts a MetricFlow client account identifier for the same observed account locator', () => {
+    const profileTarget = createWarehouseTargetIdentity({
+      connectionRef: 'dbt-profile',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME-PROD',
+        database: 'PROD',
+        schema: 'SEMANTIC',
+        role: 'ANALYST',
+        warehouse: 'REPORTING',
+      },
+    });
+    const observed = createWarehouseTargetIdentity({
+      connectionRef: 'active-target',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME-PROD',
+        accountLocator: 'XY12345',
+        accountName: 'PROD',
+        organization: 'ACME',
+        database: 'PROD',
+        schema: 'SEMANTIC',
+        role: 'ANALYST',
+        warehouse: 'REPORTING',
+      },
+    });
+
+    expect(assertSemanticExecutionTarget({
+      projectRoot: root,
+      adapterId: 'metricflow-cli',
+      executionTarget: observed,
+      metricFlow: { expectedTarget: profileTarget },
+    })).toBe(profileTarget);
+  });
+
   it('records redacted target and adapter evidence without credentials', () => {
     const executionTarget = target('PROD');
     const binding = buildSemanticTargetBinding({

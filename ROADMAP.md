@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.5)
+## Current State (v1.10.6)
 
 DQL OSS is ready for local-first use cases:
 
@@ -42,6 +42,9 @@ DQL OSS is ready for local-first use cases:
 - Bind the semantic compiler target to the active warehouse account, database,
   schema, role, and warehouse before compilation; preflight and execute through
   the same bounded connector lease.
+- Treat Snowflake account locators and preferred `organization-account_name`
+  identifiers as bounded aliases for the same account while continuing to
+  block genuine account, database, schema, role, and warehouse drift.
 - Capture the complete paginated dbt Cloud metric inventory only during
   explicit Test & Apply, bind its fingerprint separately from the local dbt
   snapshot, and fail closed with `SEMANTIC_SOURCE_DRIFT` when the configured
@@ -97,7 +100,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.5
+  cold-start and warm-context latency budgets remain above target. The v1.10.6
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

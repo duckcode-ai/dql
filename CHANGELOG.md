@@ -6,6 +6,45 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.6 - 2026-07-23
+
+### Canonical Snowflake semantic target identity
+
+This patch fixes false semantic target drift when Snowflake represents the same
+account with an immutable account locator in one path and the preferred
+`organization-account_name` identifier in another. Existing dbt Cloud bindings
+and local MetricFlow profiles can now match the active warehouse without
+weakening the governed database, schema, role, or warehouse checks.
+
+### Fixed
+
+- **Canonical Snowflake account proof.** DQL observes `CURRENT_ACCOUNT()`,
+  `CURRENT_ACCOUNT_NAME()`, and `CURRENT_ORGANIZATION_NAME()` on the active
+  execution connection and retains the locator and client-facing account
+  identifier in the redacted target contract.
+- **Legacy binding compatibility.** Persisted dbt Cloud locator bindings and
+  dbt profile account identifiers are compared through bounded Snowflake
+  aliases instead of an obsolete exact fingerprint requirement.
+- **MetricFlow and dbt Cloud parity.** Both semantic adapters use the same
+  field-aware target comparison, preventing identifier-format drift from being
+  mistaken for a cross-account execution request.
+- **Fail-closed identity acquisition.** A failed Snowflake identity query no
+  longer saves or validates configured fallback values as observed warehouse
+  proof. Apply and execution stop with
+  `WAREHOUSE_TARGET_IDENTITY_UNAVAILABLE`.
+- **Strict true-drift protection.** Real account, database, schema, role, and
+  warehouse changes still fail before semantic compilation or SQL execution.
+
+### Release exceptions
+
+- Acceptance IDs `AGT-014`, `API-006`, `API-007`, `SEC-004`, and `E2E-014`
+  are implementer-validated. Independent replay against the enterprise
+  Snowflake, dbt Cloud, and local MetricFlow fixture remains required before
+  they can be marked verified.
+- The tracked `PERF-001` latency exception remains unchanged. This patch
+  changes target identity acquisition and comparison, not enterprise-scale
+  latency.
+
 ## v1.10.5 - 2026-07-23
 
 ### Semantic source integrity and resilient execution diagnostics

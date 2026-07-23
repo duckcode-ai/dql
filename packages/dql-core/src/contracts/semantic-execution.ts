@@ -27,7 +27,14 @@ export interface SemanticSnapshotRefV1 {
 }
 
 export interface WarehouseTargetContextV1 {
+  /**
+   * Preferred client-facing account identifier. For Snowflake this is normally
+   * `organization-account_name`, while accountLocator retains CURRENT_ACCOUNT().
+   */
   account?: string;
+  accountLocator?: string;
+  accountName?: string;
+  organization?: string;
   database?: string;
   schema?: string;
   role?: string;
@@ -226,7 +233,28 @@ export function compareWarehouseTargets(
   if (expected.dialect !== actual.dialect) {
     mismatches.push({ field: 'dialect', expected: expected.dialect, actual: actual.dialect });
   }
-  for (const field of ['account', 'database', 'schema', 'role', 'warehouse', 'catalog'] as const) {
+  if (
+    expected.driver === 'snowflake'
+    && actual.driver === 'snowflake'
+    && hasWarehouseAccountIdentity(expected.redactedContext)
+    && !snowflakeAccountsMatch(expected.redactedContext, actual.redactedContext)
+  ) {
+    mismatches.push({
+      field: 'account',
+      expected: displayWarehouseAccount(expected.redactedContext),
+      actual: displayWarehouseAccount(actual.redactedContext),
+    });
+  } else if (
+    expected.driver !== 'snowflake'
+    || actual.driver !== 'snowflake'
+  ) {
+    const expectedAccount = expected.redactedContext.account;
+    const actualAccount = actual.redactedContext.account;
+    if (expectedAccount !== undefined && expectedAccount !== actualAccount) {
+      mismatches.push({ field: 'account', expected: expectedAccount, actual: actualAccount });
+    }
+  }
+  for (const field of ['database', 'schema', 'role', 'warehouse', 'catalog'] as const) {
     const expectedValue = expected.redactedContext[field];
     const actualValue = actual.redactedContext[field];
     if (expectedValue !== undefined && expectedValue !== actualValue) {
@@ -258,6 +286,63 @@ function normalizeIdentifier(value: string): string {
 function normalizeOptionalIdentifier(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized.toUpperCase() : undefined;
+}
+
+function hasWarehouseAccountIdentity(context: WarehouseTargetContextV1): boolean {
+  return Boolean(context.account || context.accountLocator || context.accountName);
+}
+
+function displayWarehouseAccount(context: WarehouseTargetContextV1): string | undefined {
+  return context.account ?? context.accountLocator ?? context.accountName;
+}
+
+/**
+ * Snowflake exposes the same account through several supported identifiers:
+ * CURRENT_ACCOUNT() is the immutable locator, while clients normally use
+ * organization-account_name. Compare the bounded aliases rather than a bare
+ * string or identity fingerprint (AGT-014, API-006, SEC-004).
+ */
+function snowflakeAccountsMatch(
+  expected: WarehouseTargetContextV1,
+  actual: WarehouseTargetContextV1,
+): boolean {
+  const expectedAliases = snowflakeAccountAliases(expected);
+  const actualAliases = snowflakeAccountAliases(actual);
+  if (expectedAliases.size === 0) return true;
+  return [...expectedAliases].some((alias) => actualAliases.has(alias));
+}
+
+function snowflakeAccountAliases(context: WarehouseTargetContextV1): Set<string> {
+  const aliases = new Set<string>();
+  const add = (value: string | undefined) => {
+    const normalized = normalizeSnowflakeAccountIdentifier(value);
+    if (!normalized) return;
+    aliases.add(normalized);
+    aliases.add(normalized.replaceAll('_', '-'));
+    if (/\.(?:AWS|AZURE|GCP)(?:_[A-Z0-9_]+)?$/.test(normalized)) {
+      const locator = normalized.split('.')[0];
+      if (locator) aliases.add(locator);
+    }
+  };
+
+  add(context.account);
+  add(context.accountLocator);
+  add(context.accountName);
+  if (context.organization && context.accountName) {
+    add(`${context.organization}-${context.accountName}`);
+    add(`${context.organization}.${context.accountName}`);
+  }
+  return aliases;
+}
+
+function normalizeSnowflakeAccountIdentifier(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const withoutProtocol = trimmed.replace(/^https?:\/\//i, '');
+  const withoutPath = withoutProtocol.split('/')[0]?.split(':')[0];
+  const withoutHostSuffix = withoutPath?.replace(/\.snowflakecomputing\.com$/i, '');
+  const normalized = withoutHostSuffix?.trim().toUpperCase();
+  return normalized || undefined;
 }
 
 function stableExecutionValue(value: unknown): string {

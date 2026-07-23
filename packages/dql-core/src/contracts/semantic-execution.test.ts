@@ -54,6 +54,68 @@ describe('target-bound semantic execution contracts', () => {
     ]);
   });
 
+  it('treats Snowflake locator and organization-account name as one account', () => {
+    const configured = createWarehouseTargetIdentity({
+      connectionRef: 'dbt-profile',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'acme-prod',
+        database: 'ANALYTICS',
+        schema: 'COMMON',
+      },
+    });
+    const observed = createWarehouseTargetIdentity({
+      connectionRef: 'dql-connection',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME-PROD',
+        accountLocator: 'XY12345',
+        accountName: 'PROD',
+        organization: 'ACME',
+        database: 'ANALYTICS',
+        schema: 'COMMON',
+      },
+    });
+
+    expect(compareWarehouseTargets(configured, observed)).toEqual([]);
+    expect(compareWarehouseTargets(createWarehouseTargetIdentity({
+      connectionRef: 'legacy-profile',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'XY12345.us-east-2.aws',
+        database: 'ANALYTICS',
+        schema: 'COMMON',
+      },
+    }), observed)).toEqual([]);
+  });
+
+  it('still rejects genuinely different Snowflake accounts', () => {
+    const expected = createWarehouseTargetIdentity({
+      connectionRef: 'prod',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME-PROD',
+        accountLocator: 'XY12345',
+        accountName: 'PROD',
+        organization: 'ACME',
+      },
+    });
+    const actual = createWarehouseTargetIdentity({
+      connectionRef: 'dev',
+      driver: 'snowflake',
+      redactedContext: {
+        account: 'ACME-DEV',
+        accountLocator: 'AB98765',
+        accountName: 'DEV',
+        organization: 'ACME',
+      },
+    });
+
+    expect(compareWarehouseTargets(expected, actual)).toEqual([
+      { field: 'account', expected: 'ACME-PROD', actual: 'ACME-DEV' },
+    ]);
+  });
+
   it('fingerprints proof checks deterministically', () => {
     const target = createWarehouseTargetIdentity({
       connectionRef: 'prod',
