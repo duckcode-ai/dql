@@ -6,6 +6,55 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.5 - 2026-07-23
+
+### Semantic source integrity and resilient execution diagnostics
+
+This patch closes the remaining gap between local dbt authoring metadata and
+the semantic project actually deployed to dbt Cloud. DQL now persists a
+complete compiler-owned metric inventory during explicit Test & Apply, binds
+that proof to execution, and keeps Notebook and agent failures inspectable
+without terminating the local server.
+
+### Fixed
+
+- **Verified dbt Cloud metric inventory.** Test & Apply walks the paginated dbt
+  Cloud metric catalog, stores its deterministic fingerprint and completeness
+  state, and keeps that runtime proof separate from the local dbt semantic
+  snapshot.
+- **Fail-closed semantic source drift.** A missing, partial, or incompatible
+  cloud inventory now returns `SEMANTIC_SOURCE_DRIFT` with the unavailable
+  metrics and safe reapply action. DQL no longer treats a locally discovered
+  metric as proof that the configured cloud environment can compile it.
+- **Compiler-source target binding.** dbt Cloud execution requires both the
+  governed local snapshot and the persisted remote catalog fingerprint before
+  compilation. Compatibility checks expose the exact source proof used by the
+  selected adapter.
+- **Actionable physical preflight failures.** Snowflake validation preserves
+  the failing identifier, source line and position, bounded SQL excerpt,
+  compiled-SQL fingerprint, target binding, and safe repair actions instead of
+  reducing the failure to a generic query error.
+- **Complete Trust & Steps evidence.** “How it was answered” distinguishes the
+  local semantic snapshot from the runtime metric inventory, shows physical
+  preflight evidence, and links users directly to Project & dbt settings when
+  the semantic runtime must be reapplied.
+- **Notebook server resilience.** Async HTTP request rejections are caught and
+  returned as structured failures, preventing semantic catalog or compiler
+  errors from terminating the local Notebook process.
+- **Supported Snowflake runtime guard.** Snowflake startup accepts Node 20, 22,
+  and 24 and rejects unsupported Node majors, including Node 26, before loading
+  the driver.
+
+### Release exceptions
+
+- Acceptance IDs `API-004`, `API-007`, `UI-009`, `UI-012`, `SEC-004`,
+  `E2E-008`, and `E2E-014` are implementer-validated. Independent replay
+  against the enterprise Snowflake and dbt Cloud fixture remains required
+  before they can be marked verified.
+- The tracked `PERF-001` latency exception remains. Complete remote inventory
+  capture occurs only on explicit Test & Apply and is paginated, but this patch
+  makes no GA latency claim.
+
 ## v1.10.4 - 2026-07-23
 
 ### Target-bound semantic execution and bounded Snowflake runtime

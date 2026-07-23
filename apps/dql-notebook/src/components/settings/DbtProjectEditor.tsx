@@ -402,10 +402,15 @@ export function DbtProjectEditor({
             Adapter code is included with DQL. Auto selects one ready adapter in priority order: dbt Cloud, local MetricFlow, then native for simple metrics. Once selected, an adapter failure is shown directly and never silently downgraded.
           </div>
           {semanticRuntime?.dbtCloud.configured ? (
-            <div style={{ fontSize: 10.5, color: semanticRuntime.dbtCloud.targetBindingState === 'bound' ? 'var(--status-success)' : 'var(--status-warning)', marginTop: 6 }}>
+            <div style={{ fontSize: 10.5, color: semanticRuntime.dbtCloud.targetBindingState === 'bound' && semanticRuntime.dbtCloud.metricInventoryState === 'complete' ? 'var(--status-success)' : 'var(--status-warning)', marginTop: 6, lineHeight: 1.5 }}>
               dbt Cloud target: {semanticRuntime.dbtCloud.targetBindingState === 'bound'
                 ? `bound · ${semanticRuntime.dbtCloud.executionTargetFingerprint?.slice(0, 12)}`
                 : 'reapply required before execution'}
+              <br />
+              Metric inventory: {semanticRuntime.dbtCloud.metricInventoryState}
+              {semanticRuntime.dbtCloud.semanticCatalogFingerprint
+                ? ` · ${semanticRuntime.dbtCloud.semanticCatalogFingerprint.slice(0, 12)}`
+                : ' · reapply required'}
             </div>
           ) : null}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>

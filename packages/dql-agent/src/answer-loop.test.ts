@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, repairAmbiguousColumn, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -7564,6 +7564,59 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.semanticExecutionTrace?.steps.at(-1)).toMatchObject({
       id: "execute_query",
       status: "completed",
+    });
+  });
+
+  it("API-007/UI-012 preserves physical preflight evidence in the semantic failure trace", async () => {
+    const compiler = vi.fn(async () => ({
+      sql: "SELECT cdm.bcm_adjustment_type FROM governed_metric cdm",
+      engine: "dbt-cloud" as const,
+      selection: { metrics: ["revenue_ratio"], dimensions: [] },
+      trace: {
+        version: 1 as const,
+        adapter: "dbt-cloud" as const,
+        status: "compiled" as const,
+        authoringRequest: { metrics: ["revenue_ratio"], dimensions: [] },
+        runtimeRequest: { metrics: ["revenue_ratio"], dimensions: [] },
+        bindings: [],
+        warnings: [],
+        steps: [
+          { id: "resolve_members" as const, label: "Resolve members", status: "completed" as const, detail: "Resolved." },
+          { id: "bind_entity_paths" as const, label: "Bind paths", status: "completed" as const, detail: "Bound." },
+          { id: "compile_semantic_query" as const, label: "Compile", status: "completed" as const, detail: "Compiled." },
+          { id: "execute_query" as const, label: "Execute", status: "not_started" as const, detail: "Not started." },
+        ],
+      },
+    }));
+    const executionError = Object.assign(new Error("invalid identifier 'CDM.BCM_ADJUSTMENT_TYPE'"), {
+      code: "IDENTIFIER_SCOPE_INVALID",
+      details: {
+        phase: "validation",
+        identifier: "CDM.BCM_ADJUSTMENT_TYPE",
+        compiledSqlFingerprint: "sha256:compiled",
+        sqlExcerpt: { startLine: 1, endLine: 1, text: "SELECT cdm.bcm_adjustment_type FROM governed_metric cdm" },
+        safeActions: ["refresh_snapshot", "reapply_semantic_runtime", "open_sql_notebook"],
+      },
+    });
+
+    const compiled = await compiler();
+    const trace = semanticTraceAfterExecution(compiled.trace, {
+      executed: false,
+      error: executionError,
+    });
+
+    expect(trace?.status).toBe("failed");
+    expect(trace?.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "preflight_physical_sql", status: "failed" }),
+      expect.objectContaining({ id: "execute_query", status: "not_started" }),
+    ]));
+    expect(trace?.failure).toMatchObject({
+      code: "IDENTIFIER_SCOPE_INVALID",
+      phase: "validation",
+      identifier: "CDM.BCM_ADJUSTMENT_TYPE",
+      compiledSqlFingerprint: "sha256:compiled",
+      safeActions: ["refresh_snapshot", "reapply_semantic_runtime", "open_sql_notebook"],
+      sqlExcerpt: { startLine: 1, endLine: 1 },
     });
   });
 

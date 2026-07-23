@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import {
   api,
+  DqlApiError,
   type SemanticRuntimePathCandidate,
   type SemanticRuntimeTrace,
 } from '../../api/client';
@@ -404,13 +405,22 @@ export function SemanticPanel() {
       setCompatibleDimensionNames(null);
       return;
     }
-    void api.getCompatibleDimensions(Array.from(selectedMetrics)).then((dimensions) => {
+    void api.getCompatibility(Array.from(selectedMetrics)).then((compatibility) => {
       if (!cancelled) {
-        setCompatibleDimensionNames(new Set(dimensions.flatMap((dimension) => [
+        setCompatibleDimensionNames(new Set(compatibility.dimensions.flatMap((dimension) => [
           dimension.reference ?? dimension.name,
           dimension.name,
         ])));
       }
+    }).catch((compatibilityError) => {
+      if (cancelled) return;
+      setCompatibleDimensionNames(new Set());
+      setSelectedDimensions(new Set());
+      setComposeError(compatibilityError instanceof DqlApiError
+        ? `${compatibilityError.code ? `${compatibilityError.code}: ` : ''}${compatibilityError.message}`
+        : compatibilityError instanceof Error
+          ? compatibilityError.message
+          : 'Semantic compatibility could not be verified.');
     });
     return () => { cancelled = true; };
   }, [Array.from(selectedMetrics).sort().join('|')]);

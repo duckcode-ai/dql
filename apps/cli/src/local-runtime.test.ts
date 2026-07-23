@@ -38,6 +38,7 @@ import {
   extractBlockInvariants,
   formatLocalQueryRuntimeError,
   getConnectorInstallStatuses,
+  assertConnectionNodeCompatibility,
   ensureConnectorInstalledForStartup,
   loadProjectConfig,
   isAgentValueProbeColumn,
@@ -77,9 +78,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import type { Server } from 'node:http';
-import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
+import { createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { createAnalyticalFailure, recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
+import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 
 const tempDirs: string[] = [];
 
@@ -2698,6 +2700,94 @@ describe('ensureConnectorInstalledForStartup', () => {
     expect(() => ensureConnectorInstalledForStartup(projectRoot, 'file')).not.toThrow();
     expect(() => ensureConnectorInstalledForStartup(projectRoot, 'not-a-real-driver')).not.toThrow();
     expect(existsSync(join(projectRoot, '.dql/connectors'))).toBe(false);
+  });
+});
+
+describe('Snowflake Node runtime startup guard (API-007, E2E-014)', () => {
+  it('fails before connector startup on unsupported Node 26 and allows supported LTS releases', () => {
+    expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, '26.5.0')).toThrow(
+      expect.objectContaining({
+        code: 'UNSUPPORTED_NODE_RUNTIME',
+        message: expect.stringContaining('Use Node 20, 22, or 24'),
+      }),
+    );
+    expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, '22.18.0')).not.toThrow();
+    expect(() => assertConnectionNodeCompatibility({ driver: 'duckdb' }, '26.5.0')).not.toThrow();
+  });
+});
+
+describe('semantic compatibility server survival (API-004, API-007, E2E-014)', () => {
+  it('returns structured source drift and remains healthy when a selected cloud metric inventory is stale', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-semantic-server-survival-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'semantic-layer', 'metrics'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'semantic-survival',
+      semanticLayer: { provider: 'dql', path: 'semantic-layer' },
+    }));
+    writeFileSync(join(projectRoot, 'semantic-layer', 'metrics', 'revenue.yaml'), [
+      'name: revenue',
+      'label: Revenue',
+      'description: Governed revenue',
+      'domain: finance',
+      'sql: SUM(amount)',
+      'type: sum',
+      'table: orders',
+      '',
+    ].join('\n'));
+    saveTestedSemanticRuntimeSettings(projectRoot, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'secret',
+      },
+    }, { ok: true, message: 'Legacy connection-only test', dialect: 'snowflake' }, createWarehouseTargetIdentity({
+      connectionRef: 'connection:test',
+      driver: 'snowflake',
+      redactedContext: { account: 'ACME', database: 'ANALYTICS', schema: 'SEMANTIC' },
+    }));
+
+    const nativeFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const target = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (/^https?:\/\/127\.0\.0\.1/.test(target)) return nativeFetch(input, init);
+      return new Response(JSON.stringify({
+        data: {
+          environmentInfo: { dialect: 'snowflake' },
+          metricsPaginated: { totalItems: 1 },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const compatibility = await nativeFetch(`${base}/api/semantic-layer/compatible-dims?metrics=revenue`);
+      expect(compatibility.status).toBe(409);
+      await expect(compatibility.json()).resolves.toMatchObject({
+        code: 'SEMANTIC_SOURCE_DRIFT',
+        recoverable: true,
+        details: {
+          adapter: 'dbt-cloud',
+          metricInventoryState: 'missing',
+          requestedMetrics: ['revenue'],
+        },
+      });
+
+      const health = await nativeFetch(`${base}/api/health`);
+      expect(health.status).toBe(200);
+      await expect(health.json()).resolves.toMatchObject({ status: 'ok' });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
   });
 });
 

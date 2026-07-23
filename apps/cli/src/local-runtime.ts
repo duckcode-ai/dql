@@ -349,6 +349,7 @@ import {
   metricFlowAdapterForDriver,
 } from './metricflow-installer.js';
 import {
+  assertDbtCloudMetricInventory,
   applySemanticPathSelection,
   compileSemanticRuntimeQuery,
   decodeSemanticPathEvidenceId,
@@ -1358,12 +1359,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (!candidate) {
       throw new Error('No database connection is configured yet. Open Connections, add a warehouse or local DuckDB/file connection, then retry.');
     }
+    assertConnectionNodeCompatibility(candidate);
     return candidate;
   };
 
   // Auto-ensure the active connection's driver so a configured connection is never
   // left "broken" after a fresh clone, a CLI upgrade, or a Node version change (the
   // driver lives in gitignored, per-project .dql/connectors). Best-effort + non-fatal.
+  if (connection) assertConnectionNodeCompatibility(connection);
   ensureConnectorInstalledForStartup(projectRoot, connection?.driver);
 
   // Load semantic layer via provider system (dql native, dbt, cubejs, etc.)
@@ -1950,6 +1953,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               projectRoot,
               requestedSemanticQuery.engine,
             );
+            if (plannedAdapter === 'dbt-cloud') {
+              // Fail with the semantic trace contract before target binding so
+              // Ask can render the exact catalog-drift phase, recovery actions,
+              // and "nothing compiled/executed" evidence in Trust & Steps.
+              assertDbtCloudMetricInventory(
+                projectRoot,
+                requestedSemanticQuery.metrics,
+                requestedSemanticQuery,
+              );
+            }
             const executionTarget = semanticConnection
               ? await observeWarehouseTargetIdentity(executor, semanticConnection)
               : undefined;
@@ -5171,10 +5184,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     response.write(`data: ${serializeJSON(data)}\n\n`);
   };
 
-  const server = createServer(async (req, res) => {
+  const server = createServer((req, res) => {
     const requestUrl = req.url || '/';
     const url = new URL(requestUrl, 'http://127.0.0.1');
     const path = url.pathname || '/';
+    void (async () => {
 
     // Exact-origin CORS. Loopback dev origins are accepted; remote serving
     // requires an explicit allowlist and bearer token.
@@ -10645,8 +10659,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const body = await readJSON(req) as SemanticRuntimeSettingsInput;
         const result = await testSemanticRuntimeDraft(projectRoot, body);
+        const { metricNames: _metricNames, ...publicResult } = result;
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON(result));
+        res.end(serializeJSON(publicResult));
       } catch (error) {
         res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
@@ -10738,6 +10753,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           semanticLayer!,
           provider,
           semanticRuntime,
+          projectRoot,
         ),
       }));
       const measures = semanticLayer.listMeasures().map((m) => ({
@@ -11205,34 +11221,51 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean);
-      const compat = await describeRuntimeCompatibility(projectRoot, semanticLayer, metrics, projectConfig);
-      const dimensions = compat.dimensions.map((d) => ({
-        name: d.name,
-        label: d.label,
-        description: d.description,
-        domain: d.domain,
-        sql: d.sql,
-        type: d.type,
-        table: d.table,
-        tags: d.tags ?? [],
-        owner: d.owner ?? null,
-        cube: d.cube ?? null,
-        reference: semanticDimensionReference(d),
-        entityLink: d.entityLink ?? null,
-        canonicalId: `semantic:${d.domain || 'uncategorized'}:dimension:${semanticDimensionReference(d)}`,
-        // Additive: qualified name, real grains, and time flag (existing fields
-        // above are byte-identical for compatibility).
-        qualifiedName: d.qualifiedName ?? null,
-        granularities: d.granularities ?? (d as { granularities?: string[] }).granularities ?? null,
-        isTimeDimension: Boolean((d as { isTimeDimension?: boolean }).isTimeDimension),
-      }));
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({
-        dimensions,
-        engine: compat.engine,
-        incompatible: compat.incompatible,
-        degraded: compat.degraded ?? null,
-      }));
+      try {
+        const compat = await describeRuntimeCompatibility(projectRoot, semanticLayer, metrics, projectConfig);
+        const dimensions = compat.dimensions.map((d) => ({
+          name: d.name,
+          label: d.label,
+          description: d.description,
+          domain: d.domain,
+          sql: d.sql,
+          type: d.type,
+          table: d.table,
+          tags: d.tags ?? [],
+          owner: d.owner ?? null,
+          cube: d.cube ?? null,
+          reference: semanticDimensionReference(d),
+          entityLink: d.entityLink ?? null,
+          canonicalId: `semantic:${d.domain || 'uncategorized'}:dimension:${semanticDimensionReference(d)}`,
+          // Additive: qualified name, real grains, and time flag (existing fields
+          // above are byte-identical for compatibility).
+          qualifiedName: d.qualifiedName ?? null,
+          granularities: d.granularities ?? (d as { granularities?: string[] }).granularities ?? null,
+          isTimeDimension: Boolean((d as { isTimeDimension?: boolean }).isTimeDimension),
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          dimensions,
+          engine: compat.engine,
+          incompatible: compat.incompatible,
+          degraded: compat.degraded ?? null,
+        }));
+      } catch (error) {
+        const code = semanticRuntimeErrorCode(error) ?? 'SEMANTIC_COMPATIBILITY_FAILED';
+        res.writeHead(code === 'SEMANTIC_SOURCE_DRIFT' ? 409 : 400, {
+          'Content-Type': 'application/json; charset=utf-8',
+        });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId: apiRequestId('semantic-compatible-dimensions'),
+          code,
+          message: apiErrorMessage(error),
+          recoverable: true,
+          details: semanticRuntimeErrorDetails(error),
+          nextActions: code === 'SEMANTIC_SOURCE_DRIFT'
+            ? ['Deploy the intended dbt semantic project.', 'Reapply dbt Cloud Semantic Layer settings.']
+            : ['Check the selected semantic runtime and retry.'],
+        })));
+      }
       return;
     }
     if (req.method === 'GET' && path === '/api/user-prefs/favorites') {
@@ -11850,7 +11883,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const semanticRuntime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
           const blocked = metrics.map((metricName) => ({
             metric: metricName,
-            ...runtimeMetricExecutionCapability(metricName, semanticLayer!, provider, semanticRuntime),
+            ...runtimeMetricExecutionCapability(metricName, semanticLayer!, provider, semanticRuntime, projectRoot),
           })).filter((capability) => capability.status !== 'ready');
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({
@@ -11884,7 +11917,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const runtimeCode = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
-        const status = runtimeCode === 'EXECUTION_TARGET_MISMATCH' ? 409 : runtimeCode ? 400 : 500;
+        const status = runtimeCode === 'EXECUTION_TARGET_MISMATCH' || runtimeCode === 'SEMANTIC_SOURCE_DRIFT'
+          ? 409
+          : runtimeCode
+            ? 400
+            : 500;
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
@@ -11892,6 +11929,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
+            : runtimeCode === 'SEMANTIC_SOURCE_DRIFT'
+              ? 'Deploy the intended dbt semantic project, then reapply dbt Cloud Semantic Layer settings to refresh its metric inventory.'
             : undefined,
         }));
       }
@@ -11956,7 +11995,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const semanticRuntime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
           const blocked = metrics.map((metricName) => ({
             metric: metricName,
-            ...runtimeMetricExecutionCapability(metricName, semanticLayer!, provider, semanticRuntime),
+            ...runtimeMetricExecutionCapability(metricName, semanticLayer!, provider, semanticRuntime, projectRoot),
           })).filter((capability) => capability.status !== 'ready');
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({
@@ -11985,7 +12024,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }));
       } catch (error) {
         const runtimeCode = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
-        const status = runtimeCode === 'EXECUTION_TARGET_MISMATCH' ? 409 : runtimeCode ? 400 : 500;
+        const status = runtimeCode === 'EXECUTION_TARGET_MISMATCH' || runtimeCode === 'SEMANTIC_SOURCE_DRIFT'
+          ? 409
+          : runtimeCode
+            ? 400
+            : 500;
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
@@ -11993,6 +12036,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
+            : runtimeCode === 'SEMANTIC_SOURCE_DRIFT'
+              ? 'Deploy the intended dbt semantic project, then reapply dbt Cloud Semantic Layer settings to refresh its metric inventory.'
             : undefined,
         }));
       }
@@ -12758,6 +12803,31 @@ table: ${table}${tagList}
     const content = readFileSync(filePath);
     res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
     res.end(content);
+    })().catch((error) => {
+      // API-007/E2E-014: no rejected request promise may terminate the local
+      // notebook process. Route-specific handlers should still return their
+      // richer contracts; this boundary is the final server-survival guard.
+      if (res.writableEnded || res.destroyed) return;
+      const code = apiErrorCode(error, 'INTERNAL_RUNTIME_ERROR');
+      const message = apiErrorMessage(error);
+      if (res.headersSent) {
+        res.end();
+        return;
+      }
+      res.writeHead(code === 'SEMANTIC_SOURCE_DRIFT' ? 409 : 500, {
+        'Content-Type': 'application/json; charset=utf-8',
+      });
+      res.end(serializeJSON(apiErrorEnvelope({
+        requestId: apiRequestId('unhandled-runtime-request'),
+        code,
+        message,
+        recoverable: code !== 'POLICY_DENIED',
+        details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
+        nextActions: code === 'SEMANTIC_SOURCE_DRIFT'
+          ? ['Deploy the intended dbt semantic project.', 'Reapply dbt Cloud Semantic Layer settings.']
+          : ['Retry the request.', 'Open Trust & Steps for the stable failure details.'],
+      })));
+    });
   });
 
   opts.captureServer?.(server);
@@ -15121,6 +15191,30 @@ export function ensureConnectorInstalledForStartup(projectRoot: string, driver: 
     const detail = err instanceof Error ? err.message : String(err);
     console.log(`[dql] Could not auto-install the ${definition.label} driver (${detail}). Open the Connections page and click "Install" once you have network access.`);
   }
+}
+
+export function assertConnectionNodeCompatibility(
+  connection: Pick<ConnectionConfig, 'driver'>,
+  version = process.versions.node,
+): void {
+  if (connection.driver !== 'snowflake') return;
+  const major = Number(version.match(/^(\d+)/)?.[1] ?? 0);
+  if (major === 20 || major === 22 || major === 24) return;
+  throw Object.assign(
+    new Error(
+      `Snowflake notebook execution does not support Node.js ${version}. `
+      + 'Use Node 20, 22, or 24, reinstall project dependencies, and start the notebook again. '
+      + 'DQL stopped before loading the connector so the server cannot crash later under an unsupported runtime.',
+    ),
+    {
+      code: 'UNSUPPORTED_NODE_RUNTIME',
+      details: {
+        driver: 'snowflake',
+        version,
+        supportedMajorVersions: [20, 22, 24],
+      },
+    },
+  );
 }
 
 function getStoredConnections(raw: Record<string, unknown>): Record<string, unknown> {

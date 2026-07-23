@@ -6,6 +6,7 @@ import { createWarehouseTargetIdentity } from '@duckcodeailabs/dql-core';
 import { saveTestedSemanticRuntimeSettings } from '../semantic-runtime-settings.js';
 import {
   SemanticExecutionTargetMismatchError,
+  SemanticSourceBindingMissingError,
   assertSemanticExecutionTarget,
   buildSemanticTargetBinding,
 } from './target-binding.js';
@@ -63,5 +64,55 @@ describe('semantic target binding', () => {
     expect(binding.executionTarget.redactedContext.database).toBe('PROD');
     expect(binding.proof.checks.map((check) => check.kind)).toContain('warehouse_context');
     expect(JSON.stringify(binding)).not.toContain('password');
+  });
+
+  it('does not claim a verified dbt Cloud binding without a complete compiler inventory', () => {
+    saveTestedSemanticRuntimeSettings(root, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'secret',
+      },
+    }, { ok: true, message: 'connection only', dialect: 'snowflake' }, target('PROD'));
+
+    expect(() => buildSemanticTargetBinding({
+      projectRoot: root,
+      adapterId: 'dbt-cloud',
+      executionTarget: target('PROD'),
+    })).toThrow(SemanticSourceBindingMissingError);
+  });
+
+  it('binds the dbt Cloud compiler target to the runtime catalog fingerprint, not the local artifact fingerprint', () => {
+    saveTestedSemanticRuntimeSettings(root, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'secret',
+      },
+    }, {
+      ok: true,
+      message: 'catalog verified',
+      dialect: 'snowflake',
+      metricCount: 1,
+      metricNames: ['revenue'],
+      semanticCatalogFingerprint: 'cloud-catalog-fingerprint',
+      metricInventoryComplete: true,
+    }, target('PROD'));
+
+    const binding = buildSemanticTargetBinding({
+      projectRoot: root,
+      adapterId: 'dbt-cloud',
+      executionTarget: target('PROD'),
+    });
+    expect(binding.compileTarget).toMatchObject({
+      kind: 'dbt_cloud_environment',
+      semanticCatalogFingerprint: 'cloud-catalog-fingerprint',
+    });
+    expect(binding.proof.checks).toContainEqual({
+      kind: 'semantic_catalog',
+      fingerprint: 'cloud-catalog-fingerprint',
+    });
   });
 });

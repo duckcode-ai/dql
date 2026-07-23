@@ -73,10 +73,11 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   });
 
   it('UI-013 capability-gates repair actions without offering a permission bypass', () => {
-    expect(analyticalRepairActionLabels(['refresh_snapshot', 'edit_dql', 'open_sql_notebook'])).toEqual([
+    expect(analyticalRepairActionLabels(['refresh_snapshot', 'edit_dql', 'open_sql_notebook', 'reapply_semantic_runtime'])).toEqual([
       'Refresh snapshot and prepare retry',
       'Open DQL to repair',
       'Open SQL in Notebook',
+      'Reapply semantic runtime settings',
     ]);
     expect(analyticalRepairActionLabels(['request_access', 'change_authorized_connection'])).toEqual([
       'Change connection or request access',

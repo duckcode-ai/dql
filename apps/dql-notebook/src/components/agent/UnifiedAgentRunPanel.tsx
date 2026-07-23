@@ -2024,6 +2024,7 @@ export function analyticalRepairActionLabels(safeActions: string[]): string[] {
       : undefined,
     safeActions.includes('edit_dql') ? 'Open DQL to repair' : undefined,
     safeActions.includes('open_sql_notebook') ? 'Open SQL in Notebook' : undefined,
+    safeActions.includes('reapply_semantic_runtime') ? 'Reapply semantic runtime settings' : undefined,
   ].filter((label): label is string => Boolean(label));
 }
 
@@ -2061,6 +2062,7 @@ function AnalyticalHowAnswered({
   const semanticBindings = recordList(semantic?.bindings);
   const semanticSteps = recordList(semantic?.steps);
   const semanticTargetBinding = recordOf(semantic?.targetBinding);
+  const semanticSnapshot = recordOf(semanticTargetBinding?.semanticSnapshot);
   const semanticExecutionTarget = recordOf(semanticTargetBinding?.executionTarget);
   const semanticTargetContext = recordOf(semanticExecutionTarget?.redactedContext);
   const semanticCompileTarget = recordOf(semanticTargetBinding?.compileTarget);
@@ -2074,8 +2076,12 @@ function AnalyticalHowAnswered({
   const periods = recordList(timeContext?.periods);
   const outputs = recordList(frame?.requestedOutputs);
   const graphNodes = recordList(graph?.nodes);
-  const safeActions = stringList(failure?.safeActions);
+  const safeActions = Array.from(new Set([
+    ...stringList(failure?.safeActions),
+    ...stringList(semanticFailure?.safeActions),
+  ]));
   const failedBindings = recordList(failure?.failedBindings);
+  const semanticSqlExcerpt = recordOf(semanticFailure?.sqlExcerpt);
   const result = run.artifacts.map((artifact) => extractResult(payloadOf(artifact))).find(Boolean);
   const sourceTitle = dqlArtifact?.name ?? run.question;
   const [repairMessage, setRepairMessage] = useState<string | null>(null);
@@ -2126,6 +2132,11 @@ function AnalyticalHowAnswered({
     } catch (error) {
       setRepairMessage(error instanceof Error ? error.message : String(error));
     }
+  };
+  const openSemanticRuntimeSetup = () => {
+    dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' });
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
+    setRepairMessage('Opened Project & dbt settings. Test and apply the intended dbt Cloud Semantic Layer environment to refresh its verified metric inventory.');
   };
 
   return (
@@ -2198,6 +2209,8 @@ function AnalyticalHowAnswered({
           ['Target proof', displayValue(recordOf(semanticTargetBinding?.proof)?.status)],
           ['Target binding', displayValue(semanticTargetBinding?.bindingFingerprint)],
           ['Compile target', displayValue(semanticCompileTarget?.kind)],
+          ['Local semantic snapshot', displayValue(semanticSnapshot?.semanticCatalogFingerprint ?? semanticSnapshot?.sourceFingerprint)],
+          ['Runtime metric inventory proof', displayValue(semanticCompileTarget?.semanticCatalogFingerprint)],
           ['Execution target', [
             semanticExecutionTarget?.driver,
             semanticTargetContext?.account,
@@ -2257,9 +2270,20 @@ function AnalyticalHowAnswered({
               ['Safe actions', safeActions.join(', ')],
               ['DQL fingerprint', displayValue(failure.dqlFingerprint)],
               ['SQL fingerprint', displayValue(failure.sqlFingerprint)],
+              ['Semantic failure code', displayValue(semanticFailure?.code)],
+              ['Failing identifier', displayValue(semanticFailure?.identifier)],
+              ['Compiled SQL proof', displayValue(semanticFailure?.compiledSqlFingerprint)],
               ['Path candidates', semanticCandidates.map((candidate) =>
                 `${displayValue(candidate.label)}\n${displayValue(candidate.runtimeReference)}`).join('\n')],
             ]} t={t} mono />
+            {displayValue(semanticSqlExcerpt?.text) ? (
+              <div>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: t.textSecondary, marginBottom: 5 }}>
+                  Failing SQL context · lines {displayValue(semanticSqlExcerpt?.startLine)}–{displayValue(semanticSqlExcerpt?.endLine)}
+                </div>
+                <pre style={codeStyle(t)}>{displayValue(semanticSqlExcerpt?.text)}</pre>
+              </div>
+            ) : null}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} aria-label="Safe repair actions">
               {safeActions.includes('retry_same_plan') ? (
                 <button type="button" onClick={() => void deriveSimpleRepair('retry_same_plan')} style={smallButtonStyle(t)}>
@@ -2274,6 +2298,11 @@ function AnalyticalHowAnswered({
               {safeActions.includes('request_access') || safeActions.includes('change_authorized_connection') ? (
                 <button type="button" onClick={() => void openAccessRepair()} style={smallButtonStyle(t)}>
                   <ShieldAlert size={12} /> Change connection or request access
+                </button>
+              ) : null}
+              {safeActions.includes('reapply_semantic_runtime') ? (
+                <button type="button" onClick={openSemanticRuntimeSetup} style={smallButtonStyle(t)}>
+                  <RefreshCw size={12} /> Reapply semantic runtime settings
                 </button>
               ) : null}
             </div>

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { EffectiveDbtCloudSemanticSettings } from './semantic-runtime-settings.js';
 
 export interface DbtCloudSemanticQueryRequest {
@@ -15,6 +16,9 @@ export interface DbtCloudSemanticTestResult {
   message: string;
   dialect?: string;
   metricCount?: number;
+  metricNames?: string[];
+  semanticCatalogFingerprint?: string;
+  metricInventoryComplete?: boolean;
 }
 
 export interface DbtCloudSemanticCompileResult {
@@ -22,11 +26,19 @@ export interface DbtCloudSemanticCompileResult {
   engine: 'dbt-cloud';
 }
 
+export interface DbtCloudSemanticMetricInventory {
+  names: string[];
+  totalItems: number;
+  fingerprint: string;
+  complete: boolean;
+}
+
 type FetchLike = typeof fetch;
 
 export async function testDbtCloudSemanticConnection(
   settings: EffectiveDbtCloudSemanticSettings,
   fetchImpl: FetchLike = fetch,
+  options: { includeMetricInventory?: boolean } = {},
 ): Promise<DbtCloudSemanticTestResult> {
   assertConfigured(settings);
   const data = await graphqlRequest<{
@@ -43,11 +55,84 @@ export async function testDbtCloudSemanticConnection(
   const metricCount = typeof data.metricsPaginated?.totalItems === 'number'
     ? data.metricsPaginated.totalItems
     : undefined;
+  const inventory = options.includeMetricInventory === false
+    ? undefined
+    : await listDbtCloudSemanticMetrics(settings, fetchImpl);
   return {
     ok: true,
     message: `Test passed${dialect ? ` · ${dialect}` : ''}${metricCount !== undefined ? ` · ${metricCount.toLocaleString()} metrics` : ''}.`,
     dialect,
     metricCount,
+    ...(inventory ? {
+      metricNames: inventory.names,
+      semanticCatalogFingerprint: inventory.fingerprint,
+      metricInventoryComplete: inventory.complete,
+    } : {}),
+  };
+}
+
+/**
+ * API-004/PERF-002: capture a bounded, deterministic inventory of the metrics
+ * that the configured dbt Cloud environment can actually resolve. Local dbt
+ * artifacts are authoring evidence; this inventory is the compiler capability
+ * proof and must never be inferred from a count alone.
+ */
+export async function listDbtCloudSemanticMetrics(
+  settings: EffectiveDbtCloudSemanticSettings,
+  fetchImpl: FetchLike = fetch,
+): Promise<DbtCloudSemanticMetricInventory> {
+  assertConfigured(settings);
+  const pageSize = 500;
+  const maxPages = 100;
+  const names = new Set<string>();
+  let pageNum = 1;
+  let totalPages = 1;
+  let totalItems = 0;
+  do {
+    const data = await graphqlRequest<{
+      metricsPaginated?: {
+        items?: Array<{ name?: string | null }>;
+        totalPages?: number | null;
+        totalItems?: number | null;
+      };
+    }>(settings, {
+      query: `query DqlSemanticMetricInventory($environmentId: BigInt!, $pageNum: Int!, $pageSize: Int!) {
+        metricsPaginated(environmentId: $environmentId, pageNum: $pageNum, pageSize: $pageSize) {
+          items { name }
+          totalPages
+          totalItems
+        }
+      }`,
+      variables: {
+        environmentId: settings.environmentId,
+        pageNum,
+        pageSize,
+      },
+    }, fetchImpl);
+    const page = data.metricsPaginated;
+    for (const item of page?.items ?? []) {
+      const name = item.name?.trim();
+      if (name) names.add(name);
+    }
+    totalPages = Math.max(1, page?.totalPages ?? 1);
+    totalItems = Math.max(totalItems, page?.totalItems ?? names.size);
+    pageNum += 1;
+  } while (pageNum <= totalPages && pageNum <= maxPages);
+
+  const ordered = Array.from(names).sort((left, right) => left.localeCompare(right));
+  const complete = totalPages <= maxPages && ordered.length === totalItems;
+  return {
+    names: ordered,
+    totalItems,
+    complete,
+    fingerprint: createHash('sha256')
+      .update(JSON.stringify({
+        environmentId: settings.environmentId,
+        metrics: ordered,
+        totalItems,
+        complete,
+      }))
+      .digest('hex'),
   };
 }
 

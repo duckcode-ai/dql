@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   compileDbtCloudSemanticQuery,
   listDbtCloudCompatibleDimensions,
+  listDbtCloudSemanticMetrics,
   testDbtCloudSemanticConnection,
 } from './dbt-cloud-semantic.js';
 import type { EffectiveDbtCloudSemanticSettings } from './semantic-runtime-settings.js';
@@ -27,12 +28,48 @@ describe('dbt Cloud semantic adapter', () => {
   it('tests authentication with a redacted result and the service-token header', async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get('authorization')).toBe('Bearer secret-service-token');
-      return jsonResponse({ data: { environmentInfo: { dialect: 'snowflake' }, metricsPaginated: { totalItems: 7_500 } } });
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      return body.query.includes('DqlSemanticMetricInventory')
+        ? jsonResponse({ data: { metricsPaginated: {
+            items: [{ name: 'orders' }, { name: 'revenue' }, { name: 'revenue_yoy' }],
+            totalItems: 3,
+            totalPages: 1,
+          } } })
+        : jsonResponse({ data: { environmentInfo: { dialect: 'snowflake' }, metricsPaginated: { totalItems: 3 } } });
     });
 
     const result = await testDbtCloudSemanticConnection(settings, fetchMock as typeof fetch);
-    expect(result).toMatchObject({ ok: true, dialect: 'snowflake', metricCount: 7_500 });
+    expect(result).toMatchObject({
+      ok: true,
+      dialect: 'snowflake',
+      metricCount: 3,
+      metricNames: ['orders', 'revenue', 'revenue_yoy'],
+      metricInventoryComplete: true,
+      semanticCatalogFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     expect(JSON.stringify(result)).not.toContain('secret-service-token');
+  });
+
+  it('API-004 paginates and fingerprints the actual runtime metric inventory', async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { variables: { pageNum: number } };
+      return jsonResponse({ data: { metricsPaginated: {
+        items: body.variables.pageNum === 1
+          ? [{ name: 'revenue' }, { name: 'orders' }]
+          : [{ name: 'revenue_yoy' }],
+        totalItems: 3,
+        totalPages: 2,
+      } } });
+    });
+
+    const inventory = await listDbtCloudSemanticMetrics(settings, fetchMock as typeof fetch);
+    expect(inventory).toMatchObject({
+      names: ['orders', 'revenue', 'revenue_yoy'],
+      totalItems: 3,
+      complete: true,
+      fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('compiles unsaved member selections, filters, ordering, and limit through compileSql', async () => {

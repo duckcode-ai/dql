@@ -92,6 +92,8 @@ export interface SemanticRuntimeSettingsResponse {
     testMessage?: string;
     dialect?: string;
     metricCount?: number;
+    semanticCatalogFingerprint?: string;
+    metricInventoryState: 'missing' | 'partial' | 'complete';
     executionTargetFingerprint?: string;
     executionTargetContext?: Record<string, string>;
     targetBindingState: 'missing' | 'bound';

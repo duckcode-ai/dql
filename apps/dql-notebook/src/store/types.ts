@@ -726,6 +726,8 @@ export interface SemanticMetric {
     status: 'ready' | 'requires_setup' | 'unsupported';
     engine: 'native' | 'metricflow-cli' | 'dbt-cloud' | null;
     reason: string | null;
+    reasonCode?: 'SEMANTIC_SOURCE_DRIFT';
+    semanticCatalogFingerprint?: string;
   };
 }
 

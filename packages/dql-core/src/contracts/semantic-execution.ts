@@ -73,6 +73,7 @@ export type SemanticCompileTargetV1 =
 
 export type SemanticTargetProofKind =
   | 'semantic_source'
+  | 'semantic_catalog'
   | 'adapter_target_pin'
   | 'dialect'
   | 'warehouse_context'

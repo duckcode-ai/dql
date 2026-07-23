@@ -27,6 +27,9 @@ interface StoredDbtCloudSemanticSettings {
   testMessage?: string;
   dialect?: string;
   metricCount?: number;
+  metricNames?: string[];
+  semanticCatalogFingerprint?: string;
+  metricInventoryComplete?: boolean;
   executionTargetFingerprint?: string;
   executionTargetContext?: WarehouseTargetContextV1;
 }
@@ -50,6 +53,9 @@ export interface EffectiveDbtCloudSemanticSettings {
   testMessage?: string;
   dialect?: string;
   metricCount?: number;
+  metricNames?: string[];
+  semanticCatalogFingerprint?: string;
+  metricInventoryComplete?: boolean;
   executionTargetFingerprint?: string;
   executionTargetContext?: WarehouseTargetContextV1;
 }
@@ -68,6 +74,8 @@ export interface RedactedSemanticRuntimeSettings {
     testMessage?: string;
     dialect?: string;
     metricCount?: number;
+    semanticCatalogFingerprint?: string;
+    metricInventoryState: 'missing' | 'partial' | 'complete';
     executionTargetFingerprint?: string;
     executionTargetContext?: WarehouseTargetContextV1;
     targetBindingState: 'missing' | 'bound';
@@ -105,6 +113,12 @@ export function getSemanticRuntimeSettings(projectRoot: string): RedactedSemanti
       testMessage: effective.testMessage,
       dialect: effective.dialect,
       metricCount: effective.metricCount,
+      semanticCatalogFingerprint: effective.semanticCatalogFingerprint,
+      metricInventoryState: !effective.metricNames
+        ? 'missing'
+        : effective.metricInventoryComplete
+          ? 'complete'
+          : 'partial',
       executionTargetFingerprint: effective.executionTargetFingerprint,
       executionTargetContext: effective.executionTargetContext,
       targetBindingState: effective.executionTargetFingerprint ? 'bound' : 'missing',
@@ -145,6 +159,11 @@ export function getEffectiveDbtCloudSemanticSettings(projectRoot: string): Effec
     testMessage: locallyTested ? local?.testMessage : undefined,
     dialect: locallyTested ? local?.dialect : undefined,
     metricCount: locallyTested ? local?.metricCount : undefined,
+    metricNames: locallyTested && Array.isArray(local?.metricNames)
+      ? local.metricNames.filter((name): name is string => typeof name === 'string' && Boolean(name.trim()))
+      : undefined,
+    semanticCatalogFingerprint: locallyTested ? local?.semanticCatalogFingerprint : undefined,
+    metricInventoryComplete: locallyTested ? local?.metricInventoryComplete : undefined,
     executionTargetFingerprint: locallyTested ? local?.executionTargetFingerprint : undefined,
     executionTargetContext: locallyTested ? local?.executionTargetContext : undefined,
   };
@@ -153,7 +172,15 @@ export function getEffectiveDbtCloudSemanticSettings(projectRoot: string): Effec
 export function saveTestedSemanticRuntimeSettings(
   projectRoot: string,
   input: SemanticRuntimeSettingsInput,
-  test: { ok: boolean; message: string; dialect?: string; metricCount?: number },
+  test: {
+    ok: boolean;
+    message: string;
+    dialect?: string;
+    metricCount?: number;
+    metricNames?: string[];
+    semanticCatalogFingerprint?: string;
+    metricInventoryComplete?: boolean;
+  },
   executionTarget?: WarehouseTargetIdentityV1,
 ): RedactedSemanticRuntimeSettings {
   if (!test.ok) throw new Error(test.message || 'dbt Cloud Semantic Layer test failed.');
@@ -188,6 +215,9 @@ export function saveTestedSemanticRuntimeSettings(
     testMessage: test.message,
     dialect: test.dialect,
     metricCount: test.metricCount,
+    metricNames: test.metricNames,
+    semanticCatalogFingerprint: test.semanticCatalogFingerprint,
+    metricInventoryComplete: test.metricInventoryComplete,
     executionTargetFingerprint: executionTarget?.identityFingerprint,
     executionTargetContext: executionTarget?.redactedContext,
   };

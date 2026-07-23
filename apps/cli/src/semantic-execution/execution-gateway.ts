@@ -25,7 +25,7 @@ import {
 } from './target-binding.js';
 
 export class SemanticPhysicalPreflightError extends Error {
-  readonly code = 'PHYSICAL_PREFLIGHT_FAILED';
+  readonly code: 'IDENTIFIER_SCOPE_INVALID' | 'PHYSICAL_PREFLIGHT_FAILED';
   readonly details: {
     adapterId: SemanticAdapterIdV1;
     phase: 'validation';
@@ -34,25 +34,49 @@ export class SemanticPhysicalPreflightError extends Error {
     vendorCode?: string;
     line?: number;
     position?: number;
+    identifier?: string;
+    compiledSql?: string;
+    compiledSqlTruncated: boolean;
+    compiledSqlFingerprint: string;
+    sqlExcerpt?: { startLine: number; endLine: number; text: string };
+    targetBinding: SemanticTargetBindingV1;
+    safeActions: string[];
   };
 
-  constructor(adapterId: SemanticAdapterIdV1, error: unknown) {
+  constructor(
+    adapterId: SemanticAdapterIdV1,
+    error: unknown,
+    sql: string,
+    targetBinding: SemanticTargetBindingV1,
+  ) {
     const connector = error instanceof ConnectorQueryError ? error : undefined;
+    const detail = error instanceof Error ? error.message : String(error);
+    const identifier = extractInvalidIdentifier(detail);
+    const line = connector?.line ?? extractSqlLocation(detail).line;
+    const position = connector?.position ?? extractSqlLocation(detail).position;
+    const maxSqlChars = 1_000_000;
+    const compiledSql = sql.length <= maxSqlChars ? sql : sql.slice(0, maxSqlChars);
     super(
-      `The semantic query compiled, but warehouse validation failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `The semantic query compiled, but warehouse validation failed: ${detail}`,
       error instanceof Error ? { cause: error } : undefined,
     );
     this.name = 'SemanticPhysicalPreflightError';
+    this.code = identifier ? 'IDENTIFIER_SCOPE_INVALID' : 'PHYSICAL_PREFLIGHT_FAILED';
     this.details = {
       adapterId,
       phase: 'validation',
       queryId: connector?.queryId,
       sqlState: connector?.sqlState,
       vendorCode: connector?.vendorCode,
-      line: connector?.line,
-      position: connector?.position,
+      line,
+      position,
+      identifier,
+      compiledSql,
+      compiledSqlTruncated: sql.length > maxSqlChars,
+      compiledSqlFingerprint: semanticExecutionFingerprint(sql),
+      sqlExcerpt: line ? sqlExcerpt(sql, line) : undefined,
+      targetBinding,
+      safeActions: ['refresh_snapshot', 'reapply_semantic_runtime', 'open_sql_notebook'],
     };
   }
 }
@@ -106,6 +130,7 @@ export async function executeTargetBoundSemanticQuery(input: {
     preparedConnection,
     prepared.sql,
     compiled.engine,
+    targetBinding,
   );
   const executionStartedAt = Date.now();
   const rowBound = Math.max(1, Math.min(input.rowBound ?? 10_000, 100_000));
@@ -189,6 +214,7 @@ async function preflightCompiledSql(
   connection: ConnectionConfig,
   sql: string,
   adapterId: SemanticAdapterIdV1,
+  targetBinding: SemanticTargetBindingV1,
 ): Promise<void> {
   // Snowflake EXPLAIN resolves relations, columns, aliases and permissions
   // without accepting the result as an analytical execution.
@@ -201,8 +227,33 @@ async function preflightCompiledSql(
       { maxRows: 500, maxBytes: 1024 * 1024, batchSize: 100, deadlineMs: 60_000 },
     );
   } catch (error) {
-    throw new SemanticPhysicalPreflightError(adapterId, error);
+    throw new SemanticPhysicalPreflightError(adapterId, error, sql, targetBinding);
   }
+}
+
+function extractInvalidIdentifier(message: string): string | undefined {
+  return message.match(/\binvalid identifier\s+['"]([^'"]+)['"]/i)?.[1];
+}
+
+function extractSqlLocation(message: string): { line?: number; position?: number } {
+  const match = message.match(/\bline\s+(\d+)\s+at\s+position\s+(\d+)/i);
+  return match
+    ? { line: Number(match[1]), position: Number(match[2]) }
+    : {};
+}
+
+function sqlExcerpt(sql: string, line: number): { startLine: number; endLine: number; text: string } {
+  const lines = sql.split(/\r?\n/);
+  const boundedLine = Math.max(1, Math.min(line, lines.length));
+  const startLine = Math.max(1, boundedLine - 3);
+  const endLine = Math.min(lines.length, boundedLine + 3);
+  return {
+    startLine,
+    endLine,
+    text: lines.slice(startLine - 1, endLine)
+      .map((value, index) => `${String(startLine + index).padStart(4, ' ')} | ${value}`)
+      .join('\n'),
+  };
 }
 
 function runtimeBindingsFromTrace(trace: SemanticRuntimeTrace): SemanticRuntimeMemberBindingV1[] {

@@ -56,6 +56,30 @@ export class SemanticAdapterDriftError extends Error {
   }
 }
 
+export class SemanticSourceBindingMissingError extends Error {
+  readonly code = 'SEMANTIC_SOURCE_DRIFT';
+  readonly details: {
+    adapterId: 'dbt-cloud';
+    environmentId?: string;
+    metricInventoryState: 'missing' | 'partial';
+    safeActions: string[];
+  };
+
+  constructor(input: { environmentId?: string; metricInventoryState: 'missing' | 'partial' }) {
+    super(
+      'The dbt Cloud compiler target has no complete persisted metric inventory. '
+      + 'Reapply dbt Cloud Semantic Layer settings after deploying the intended semantic project.',
+    );
+    this.name = 'SemanticSourceBindingMissingError';
+    this.details = {
+      adapterId: 'dbt-cloud',
+      environmentId: input.environmentId,
+      metricInventoryState: input.metricInventoryState,
+      safeActions: ['refresh_snapshot', 'reapply_semantic_runtime'],
+    };
+  }
+}
+
 export interface MetricFlowTargetMetadata {
   expectedTarget?: WarehouseTargetIdentityV1;
   profileName?: string;
@@ -92,6 +116,15 @@ export function buildSemanticTargetBinding(input: {
   executionTarget: WarehouseTargetIdentityV1;
   metricFlow?: MetricFlowTargetMetadata;
 }): SemanticTargetBindingV1 {
+  if (input.adapterId === 'dbt-cloud') {
+    const cloud = getEffectiveDbtCloudSemanticSettings(input.projectRoot);
+    if (!cloud.metricNames || !cloud.semanticCatalogFingerprint || !cloud.metricInventoryComplete) {
+      throw new SemanticSourceBindingMissingError({
+        environmentId: cloud.environmentId,
+        metricInventoryState: cloud.metricNames ? 'partial' : 'missing',
+      });
+    }
+  }
   const expected = assertSemanticExecutionTarget(input);
   const semanticSnapshot = semanticSnapshotForProject(input.projectRoot);
   const compileTarget = compileTargetFor(input, semanticSnapshot);
@@ -121,6 +154,9 @@ export function buildSemanticTargetBinding(input: {
       status: 'verified',
       checks: [
         { kind: 'semantic_source', fingerprint: semanticSnapshot.sourceFingerprint },
+        ...(compileTarget.kind === 'dbt_cloud_environment'
+          ? [{ kind: 'semantic_catalog' as const, fingerprint: compileTarget.semanticCatalogFingerprint }]
+          : []),
         { kind: 'adapter_target_pin', fingerprint: expected.identityFingerprint },
         { kind: 'dialect', fingerprint: semanticExecutionFingerprint(expected.dialect) },
         { kind: 'warehouse_context', fingerprint: semanticExecutionFingerprint(expected.redactedContext) },
@@ -201,7 +237,11 @@ function compileTargetFor(
       kind: 'dbt_cloud_environment',
       hostFingerprint: semanticExecutionFingerprint(settings.host ?? 'missing-host'),
       environmentId: settings.environmentId ?? 'missing-environment',
-      semanticCatalogFingerprint: snapshot.semanticCatalogFingerprint,
+      semanticCatalogFingerprint: settings.semanticCatalogFingerprint
+        ?? semanticExecutionFingerprint({
+          environmentId: settings.environmentId ?? 'missing-environment',
+          state: 'metric-inventory-unverified',
+        }),
       dialect: settings.dialect ?? input.executionTarget.dialect,
     };
   }

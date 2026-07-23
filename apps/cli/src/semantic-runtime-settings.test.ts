@@ -115,6 +115,39 @@ describe('semantic runtime settings', () => {
     expect(getSemanticRuntimeSettings(root).dbtCloud).toMatchObject({
       testState: 'passed',
       targetBindingState: 'missing',
+      metricInventoryState: 'missing',
     });
+  });
+
+  it('persists the compiler metric inventory server-side and exposes only its redacted proof', () => {
+    saveTestedSemanticRuntimeSettings(root, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'working',
+      },
+    }, {
+      ok: true,
+      message: 'Catalog test passed',
+      dialect: 'snowflake',
+      metricCount: 2,
+      metricNames: ['revenue', 'revenue_yoy'],
+      semanticCatalogFingerprint: 'catalog-fingerprint',
+      metricInventoryComplete: true,
+    }, target);
+
+    expect(getEffectiveDbtCloudSemanticSettings(root)).toMatchObject({
+      metricNames: ['revenue', 'revenue_yoy'],
+      semanticCatalogFingerprint: 'catalog-fingerprint',
+      metricInventoryComplete: true,
+    });
+    const redacted = getSemanticRuntimeSettings(root);
+    expect(redacted.dbtCloud).toMatchObject({
+      metricCount: 2,
+      semanticCatalogFingerprint: 'catalog-fingerprint',
+      metricInventoryState: 'complete',
+    });
+    expect(JSON.stringify(redacted)).not.toContain('revenue_yoy');
   });
 });

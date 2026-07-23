@@ -217,6 +217,10 @@ export interface SemanticExecutionTrace {
     code: string;
     phase: string;
     message: string;
+    identifier?: string;
+    sqlExcerpt?: { startLine: number; endLine: number; text: string };
+    compiledSqlFingerprint?: string;
+    safeActions?: string[];
     candidates?: Array<{
       id: string;
       label: string;
@@ -280,35 +284,75 @@ function semanticCompilerFailure(error: unknown): SemanticCompilerFailure {
   };
 }
 
-function semanticTraceAfterExecution(
+export function semanticTraceAfterExecution(
   trace: SemanticExecutionTrace | undefined,
-  input: { executed: boolean; error?: string; result?: AgentResultPayload },
+  input: { executed: boolean; error?: unknown; result?: AgentResultPayload },
 ): SemanticExecutionTrace | undefined {
   if (!trace) return undefined;
-  const executionStatus = input.error ? 'failed' : input.executed ? 'completed' : 'not_started';
-  const executionDetail = input.error
-    ? `Warehouse execution failed: ${input.error}`
+  const errorRecord = input.error && typeof input.error === 'object'
+    ? input.error as Record<string, unknown>
+    : undefined;
+  const errorDetails = errorRecord?.details && typeof errorRecord.details === 'object'
+    ? errorRecord.details as Record<string, unknown>
+    : undefined;
+  const errorMessage = input.error instanceof Error
+    ? input.error.message
+    : typeof input.error === 'string'
+      ? input.error
+      : input.error
+        ? String(input.error)
+        : undefined;
+  const failureCode = typeof errorRecord?.code === 'string' ? errorRecord.code : 'EXECUTION_FAILED';
+  const failurePhase = typeof errorDetails?.phase === 'string' ? errorDetails.phase : 'execution';
+  const targetBinding = input.result?.semanticTargetBinding
+    ?? (errorDetails?.targetBinding && typeof errorDetails.targetBinding === 'object' ? errorDetails.targetBinding : undefined);
+  const executionStatus = errorMessage ? 'failed' : input.executed ? 'completed' : 'not_started';
+  const executionDetail = errorMessage
+    ? `Warehouse execution failed: ${errorMessage}`
     : input.executed
       ? 'The authorized warehouse query executed and returned a result.'
       : 'The compiler produced SQL, but execution was not requested.';
+  const preflightFailed = failurePhase === 'validation';
   return {
     ...trace,
-    ...(input.result?.semanticTargetBinding
-      ? { targetBinding: input.result.semanticTargetBinding }
-      : {}),
+    ...(targetBinding ? { targetBinding } : {}),
     ...(input.result?.semanticExecutionReceipt
       ? { executionReceipt: input.result.semanticExecutionReceipt }
       : {}),
-    status: input.error ? 'failed' : trace.status,
-    steps: trace.steps.map((step) => step.id === 'execute_query'
-      ? { ...step, status: executionStatus, detail: executionDetail }
-      : step),
-    ...(input.error
+    status: errorMessage ? 'failed' : trace.status,
+    steps: trace.steps.flatMap((step) => step.id === 'execute_query'
+      ? [
+          ...(targetBinding ? [{
+            id: 'validate_execution_target',
+            label: 'Validate semantic and warehouse targets',
+            status: 'completed' as const,
+            detail: 'The compiler and execution targets were bound before warehouse validation.',
+          }] : []),
+          ...(preflightFailed ? [{
+            id: 'preflight_physical_sql',
+            label: 'Preflight compiled physical SQL',
+            status: 'failed' as const,
+            detail: errorMessage ?? 'Warehouse validation failed.',
+          }] : []),
+          { ...step, status: preflightFailed ? 'not_started' as const : executionStatus, detail: preflightFailed ? 'Nothing was executed because physical SQL preflight failed.' : executionDetail },
+        ]
+      : [step]),
+    ...(errorMessage
       ? {
           failure: {
-            code: 'EXECUTION_FAILED',
-            phase: 'execution',
-            message: input.error,
+            code: failureCode,
+            phase: failurePhase,
+            message: errorMessage,
+            ...(typeof errorDetails?.identifier === 'string' ? { identifier: errorDetails.identifier } : {}),
+            ...(errorDetails?.sqlExcerpt && typeof errorDetails.sqlExcerpt === 'object'
+              ? { sqlExcerpt: errorDetails.sqlExcerpt as { startLine: number; endLine: number; text: string } }
+              : {}),
+            ...(typeof errorDetails?.compiledSqlFingerprint === 'string'
+              ? { compiledSqlFingerprint: errorDetails.compiledSqlFingerprint }
+              : {}),
+            ...(Array.isArray(errorDetails?.safeActions)
+              ? { safeActions: errorDetails.safeActions.filter((item): item is string => typeof item === 'string') }
+              : {}),
           },
         }
       : {}),
@@ -4246,7 +4290,7 @@ async function executeSemanticAnalyticalGraph(input: {
           phase: 'execution',
           dqlArtifact: composed.dqlArtifact,
           compiledSql: composed.sql,
-          semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: false, error: message }),
+          semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: false, error }),
         },
       );
     }

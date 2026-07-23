@@ -51,6 +51,8 @@ export interface SemanticMetricExecutionCapability {
   status: SemanticMetricExecutionStatus;
   engine: SemanticRuntimeAdapterId | null;
   reason: string | null;
+  reasonCode?: 'SEMANTIC_SOURCE_DRIFT';
+  semanticCatalogFingerprint?: string;
 }
 
 export interface SemanticRuntimeQueryRequest {
@@ -116,9 +118,14 @@ export interface SemanticRuntimeTrace {
   /** Terminal receipt added by the shared execution gateway. */
   executionReceipt?: SemanticExecutionReceiptV1;
   failure?: {
-    code: 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_COMPILATION_FAILED';
-    phase: 'path_binding' | 'compilation';
+    code: 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_COMPILATION_FAILED' | 'SEMANTIC_SOURCE_DRIFT';
+    phase: 'capability' | 'path_binding' | 'compilation';
     message: string;
+    environmentId?: string;
+    semanticCatalogFingerprint?: string;
+    metricInventoryState?: 'missing' | 'partial' | 'complete';
+    unavailableMetrics?: string[];
+    safeActions?: string[];
     candidates?: SemanticRuntimePathCandidate[];
   };
 }
@@ -159,6 +166,80 @@ export class SemanticRuntimeRequiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'SemanticRuntimeRequiredError';
+  }
+}
+
+export class SemanticSourceDriftError extends Error {
+  readonly code = 'SEMANTIC_SOURCE_DRIFT';
+  readonly details: {
+    adapter: 'dbt-cloud';
+    phase: 'capability';
+    environmentId?: string;
+    semanticCatalogFingerprint?: string;
+    metricInventoryState: 'missing' | 'partial' | 'complete';
+    requestedMetrics: string[];
+    unavailableMetrics: string[];
+    safeActions: string[];
+    semanticTrace?: SemanticRuntimeTrace;
+  };
+  readonly semanticTrace?: SemanticRuntimeTrace;
+
+  constructor(input: {
+    environmentId?: string;
+    semanticCatalogFingerprint?: string;
+    metricInventoryState: 'missing' | 'partial' | 'complete';
+    requestedMetrics: string[];
+    unavailableMetrics: string[];
+    authoringRequest?: SemanticRuntimeQueryRequest;
+  }) {
+    const unavailable = input.unavailableMetrics.length > 0
+      ? ` The configured environment does not contain: ${input.unavailableMetrics.join(', ')}.`
+      : '';
+    super(
+      'The configured dbt Cloud environment does not have a complete verified compiler metric inventory for this request.'
+      + unavailable
+      + ' Deploy the intended dbt semantic project, then reapply dbt Cloud Semantic Layer settings before running this metric.',
+    );
+    this.name = 'SemanticSourceDriftError';
+    this.semanticTrace = input.authoringRequest
+      ? {
+          version: 1,
+          adapter: 'dbt-cloud',
+          status: 'failed',
+          authoringRequest: input.authoringRequest,
+          bindings: [],
+          warnings: [],
+          steps: [
+            { id: 'resolve_members', label: 'Verify selected metrics in the compiler inventory', status: 'failed', detail: this.message },
+            { id: 'bind_entity_paths', label: 'Bind metric-relative entity paths', status: 'not_started', detail: 'Capability verification failed before path binding.' },
+            { id: 'compile_semantic_query', label: 'Compile with the selected semantic adapter', status: 'not_started', detail: 'Nothing was compiled.' },
+            { id: 'execute_query', label: 'Execute the compiled warehouse query', status: 'not_started', detail: 'Nothing was executed.' },
+          ],
+          failure: {
+            code: 'SEMANTIC_SOURCE_DRIFT',
+            phase: 'capability',
+            message: this.message,
+            ...(input.environmentId ? { environmentId: input.environmentId } : {}),
+            ...(input.semanticCatalogFingerprint
+              ? { semanticCatalogFingerprint: input.semanticCatalogFingerprint }
+              : {}),
+            metricInventoryState: input.metricInventoryState,
+            unavailableMetrics: [...input.unavailableMetrics],
+            safeActions: ['refresh_snapshot', 'reapply_semantic_runtime'],
+          },
+        }
+      : undefined;
+    this.details = {
+      adapter: 'dbt-cloud',
+      phase: 'capability',
+      environmentId: input.environmentId,
+      semanticCatalogFingerprint: input.semanticCatalogFingerprint,
+      metricInventoryState: input.metricInventoryState,
+      requestedMetrics: [...input.requestedMetrics],
+      unavailableMetrics: [...input.unavailableMetrics],
+      safeActions: ['refresh_snapshot', 'reapply_semantic_runtime'],
+      ...(this.semanticTrace ? { semanticTrace: this.semanticTrace } : {}),
+    };
   }
 }
 
@@ -236,6 +317,32 @@ export class SemanticRuntimePathAmbiguityError extends Error {
         candidates: input.candidates,
       },
     };
+  }
+}
+
+export function assertDbtCloudMetricInventory(
+  projectRoot: string,
+  metrics: string[],
+  authoringRequest?: SemanticRuntimeQueryRequest,
+): void {
+  if (metrics.length === 0) return;
+  const cloud = getEffectiveDbtCloudSemanticSettings(projectRoot);
+  const inventoryState = !cloud.metricNames
+    ? 'missing'
+    : cloud.metricInventoryComplete
+      ? 'complete'
+      : 'partial';
+  const available = new Set((cloud.metricNames ?? []).map((name) => name.toLowerCase()));
+  const unavailableMetrics = metrics.filter((metric) => !available.has(metric.toLowerCase()));
+  if (inventoryState !== 'complete' || unavailableMetrics.length > 0) {
+    throw new SemanticSourceDriftError({
+      environmentId: cloud.environmentId,
+      semanticCatalogFingerprint: cloud.semanticCatalogFingerprint,
+      metricInventoryState: inventoryState,
+      requestedMetrics: metrics,
+      unavailableMetrics,
+      ...(authoringRequest ? { authoringRequest } : {}),
+    });
   }
 }
 
@@ -833,6 +940,7 @@ export async function compileSemanticRuntimeQuery(
       const adapterStatus = status.adapters.find((item) => item.id === adapter);
       if (!adapterStatus?.ready) continue;
       try {
+        assertDbtCloudMetricInventory(context.projectRoot, runtimeRequest.metrics, effectiveRequest);
         const result = await compileDbtCloudSemanticQuery(
           getEffectiveDbtCloudSemanticSettings(context.projectRoot),
           runtimeRequest,
@@ -1013,6 +1121,7 @@ export async function describeRuntimeCompatibility(
   // queryable grains straight from the semantic layer.
   if (status.active === 'dbt-cloud') {
     try {
+      assertDbtCloudMetricInventory(projectRoot, metrics);
       const cloud = await listDbtCloudCompatibleDimensions(getEffectiveDbtCloudSemanticSettings(projectRoot), metrics);
       const dimensions: RuntimeCompatibleDimension[] = cloud.map((dimension) => {
         const local = semanticLayer.resolveDimension(dimension.name, metrics);
@@ -1035,6 +1144,11 @@ export async function describeRuntimeCompatibility(
       });
       return { engine: 'dbt-cloud', dimensions, incompatible: [] };
     } catch (error) {
+      // Preserve source-catalog drift as its own stable contract. Wrapping it in
+      // SEMANTIC_RUNTIME_REQUIRED would turn an environment mismatch into a
+      // generic setup error and prevents the UI/agent from offering the
+      // deploy-and-reapply recovery path.
+      if (error instanceof SemanticSourceDriftError) throw error;
       throw new SemanticRuntimeRequiredError(
         `dbt Cloud dimension listing failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -1093,11 +1207,32 @@ export function semanticMetricExecutionCapability(
   semanticLayer: SemanticLayer,
   provider: string,
   runtime: SemanticRuntimeStatus,
+  projectRoot?: string,
 ): SemanticMetricExecutionCapability {
   const fullRuntime = runtime.active === 'dbt-cloud' || runtime.active === 'metricflow-cli'
     ? runtime.active
     : null;
   if (provider === 'dbt' && fullRuntime) {
+    if (fullRuntime === 'dbt-cloud' && projectRoot) {
+      const cloud = getEffectiveDbtCloudSemanticSettings(projectRoot);
+      const inventoryState = !cloud.metricNames
+        ? 'missing'
+        : cloud.metricInventoryComplete
+          ? 'complete'
+          : 'partial';
+      const available = new Set((cloud.metricNames ?? []).map((name) => name.toLowerCase()));
+      if (inventoryState !== 'complete' || !available.has(metricName.toLowerCase())) {
+        return {
+          status: 'requires_setup',
+          engine: 'dbt-cloud',
+          reasonCode: 'SEMANTIC_SOURCE_DRIFT',
+          semanticCatalogFingerprint: cloud.semanticCatalogFingerprint,
+          reason: inventoryState !== 'complete'
+            ? 'Reapply dbt Cloud Semantic Layer settings to verify its metric inventory before execution.'
+            : `Metric "${metricName}" exists locally but is not deployed in dbt Cloud environment ${cloud.environmentId ?? 'unknown'}. Deploy it, then reapply the semantic runtime settings.`,
+        };
+      }
+    }
     return { status: 'ready', engine: fullRuntime, reason: null };
   }
   if (semanticLayer.canComposeMetric(metricName)) {
@@ -1137,7 +1272,7 @@ async function probeDbtCloudSemanticRuntime(projectRoot: string): Promise<DbtClo
   const cached = cloudProbeCache.get(cloud.fingerprint);
   if (cached && cached.expiresAt > now) return cached.result;
 
-  const result = await testDbtCloudSemanticConnection(cloud);
+  const result = await testDbtCloudSemanticConnection(cloud, fetch, { includeMetricInventory: false });
   if (result.ok) {
     // A working connection stays trusted for a good while.
     cloudProbeCache.set(cloud.fingerprint, { expiresAt: now + 5 * 60_000, result });
@@ -1181,7 +1316,8 @@ function selectActiveAdapter(
 }
 
 export function isSemanticRuntimeError(error: unknown): boolean {
-  return error instanceof SemanticRuntimeRequiredError
+  return error instanceof SemanticSourceDriftError
+    || error instanceof SemanticRuntimeRequiredError
     || error instanceof SemanticRuntimeCompilationError
     || error instanceof SemanticRuntimePathAmbiguityError
     || error instanceof MetricFlowUnavailableError;
@@ -1189,7 +1325,8 @@ export function isSemanticRuntimeError(error: unknown): boolean {
 
 export function semanticRuntimeErrorCode(
   error: unknown,
-): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_COMPILATION_FAILED' | 'SEMANTIC_PATH_AMBIGUOUS' | undefined {
+): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_COMPILATION_FAILED' | 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_SOURCE_DRIFT' | undefined {
+  if (error instanceof SemanticSourceDriftError) return error.code;
   if (error instanceof SemanticRuntimePathAmbiguityError) return error.code;
   if (error instanceof SemanticRuntimeCompilationError) return error.code;
   if (error instanceof SemanticRuntimeRequiredError || error instanceof MetricFlowUnavailableError) {
@@ -1199,6 +1336,7 @@ export function semanticRuntimeErrorCode(
 }
 
 export function semanticRuntimeErrorDetails(error: unknown): unknown {
+  if (error instanceof SemanticSourceDriftError) return error.details;
   if (error instanceof SemanticRuntimePathAmbiguityError) {
     return {
       ...error.details,

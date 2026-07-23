@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { createWarehouseTargetIdentity, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import {
+  assertDbtCloudMetricInventory,
   compileSemanticRuntimeQuery,
   getSemanticRuntimeStatus,
   normalizeSemanticRuntimeQueryRequest,
+  semanticMetricExecutionCapability,
   selectSemanticRuntimeAdapters,
 } from './semantic-runtime.js';
 import { managedMetricFlowBin } from './metricflow.js';
@@ -69,6 +71,44 @@ describe('shared semantic runtime selector', () => {
       projectConfig: {},
       semanticLayer: layer(),
     })).rejects.toMatchObject({ code: 'SEMANTIC_RUNTIME_REQUIRED' });
+  });
+
+  it('API-004 rejects a local metric absent from the persisted dbt Cloud compiler inventory', () => {
+    saveTestedSemanticRuntimeSettings(root, {
+      preference: 'dbt-cloud',
+      dbtCloud: {
+        host: 'semantic-layer.cloud.getdbt.com',
+        environmentId: '99',
+        serviceToken: 'secret',
+      },
+    }, {
+      ok: true,
+      message: 'Catalog verified',
+      dialect: 'snowflake',
+      metricCount: 1,
+      metricNames: ['revenue'],
+      semanticCatalogFingerprint: 'cloud-catalog',
+      metricInventoryComplete: true,
+    }, createWarehouseTargetIdentity({
+      connectionRef: 'connection:test',
+      driver: 'snowflake',
+      redactedContext: { account: 'acme', database: 'analytics', schema: 'semantic' },
+    }));
+
+    expect(() => assertDbtCloudMetricInventory(root, ['revenue_ratio'])).toThrow(
+      expect.objectContaining({ code: 'SEMANTIC_SOURCE_DRIFT' }),
+    );
+    expect(semanticMetricExecutionCapability('revenue_ratio', layer(), 'dbt', {
+      preference: 'dbt-cloud',
+      active: 'dbt-cloud',
+      setup: null,
+      adapters: [],
+    }, root)).toMatchObject({
+      status: 'requires_setup',
+      engine: 'dbt-cloud',
+      reasonCode: 'SEMANTIC_SOURCE_DRIFT',
+      semanticCatalogFingerprint: 'cloud-catalog',
+    });
   });
 
   it('API-004/AGT-001 adds metric_time at the offset grain without overriding an explicit time selection', () => {

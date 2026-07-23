@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ConnectionConfig, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
+import { ConnectorQueryError, type ConnectionConfig, type QueryExecutor, type QueryResult } from '@duckcodeailabs/dql-connectors';
 import type { SemanticRuntimeCompileResult } from '../semantic-runtime.js';
 import { saveTestedSemanticRuntimeSettings } from '../semantic-runtime-settings.js';
 import { createWarehouseTargetIdentity } from '@duckcodeailabs/dql-core';
@@ -110,7 +110,15 @@ describe('target-bound semantic execution gateway', () => {
         environmentId: '99',
         serviceToken: 'secret',
       },
-    }, { ok: true, message: 'ok', dialect: 'snowflake' }, createWarehouseTargetIdentity({
+    }, {
+      ok: true,
+      message: 'ok',
+      dialect: 'snowflake',
+      metricCount: 1,
+      metricNames: ['revenue'],
+      semanticCatalogFingerprint: 'cloud-catalog-99',
+      metricInventoryComplete: true,
+    }, createWarehouseTargetIdentity({
       connectionRef: 'connection:prod',
       driver: 'snowflake',
       redactedContext: {
@@ -140,5 +148,62 @@ describe('target-bound semantic execution gateway', () => {
       compile,
     })).rejects.toMatchObject({ code: 'EXECUTION_TARGET_MISMATCH' });
     expect(compile).not.toHaveBeenCalled();
+  });
+
+  it('API-007/UI-012 preserves the invalid identifier and bounded SQL context from physical preflight', async () => {
+    const executor = {
+      executePositional: vi.fn(async (sql: string) => {
+        if (sql.includes('CURRENT_ACCOUNT()')) {
+          return result([{
+            DQL_ACCOUNT: 'ACME',
+            DQL_DATABASE: 'PROD',
+            DQL_SCHEMA: 'SEMANTIC',
+            DQL_ROLE: 'ANALYST',
+            DQL_WAREHOUSE: 'REPORTING',
+          }]);
+        }
+        throw new ConnectorQueryError({
+          driver: 'snowflake',
+          message: "SQL compilation error: error line 5 at position 8 invalid identifier 'CDM.BCM_ADJUSTMENT_TYPE'",
+          line: 5,
+          position: 8,
+        });
+      }),
+    } as unknown as QueryExecutor;
+    const query = [
+      'WITH cdm AS (',
+      '  SELECT',
+      '    account_id,',
+      '    amount,',
+      '    CDM.BCM_ADJUSTMENT_TYPE',
+      '  FROM analytics.consumption_daily_metrics CDM',
+      ')',
+      'SELECT * FROM cdm',
+    ].join('\n');
+
+    await expect(executeTargetBoundSemanticQuery({
+      executor,
+      connection,
+      projectRoot: root,
+      plannedAdapter: 'native',
+      compile: async () => ({ ...compiled(), sql: query }),
+    })).rejects.toMatchObject({
+      code: 'IDENTIFIER_SCOPE_INVALID',
+      details: {
+        identifier: 'CDM.BCM_ADJUSTMENT_TYPE',
+        line: 5,
+        position: 8,
+        compiledSql: query,
+        compiledSqlTruncated: false,
+        sqlExcerpt: {
+          startLine: 2,
+          endLine: 8,
+          text: expect.stringContaining('5 |     CDM.BCM_ADJUSTMENT_TYPE'),
+        },
+        targetBinding: {
+          adapterId: 'native',
+        },
+      },
+    });
   });
 });

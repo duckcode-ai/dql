@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, KeyRound, Layers, Link2, Plus, Search, Type } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { NotebookFile, SchemaTable } from '../../store/types';
@@ -262,11 +262,20 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
       return;
     }
     setCompatibleDimensions(null);
-    void api.getCompatibleDimensions(Array.from(selectedMetrics)).then((dimensions) => {
+    void api.getCompatibility(Array.from(selectedMetrics)).then((compatibility) => {
       if (!active) return;
-      const names = new Set(dimensions.map((dimension) => dimension.reference ?? dimension.name));
+      const names = new Set(compatibility.dimensions.map((dimension) => dimension.reference ?? dimension.name));
       setCompatibleDimensions(names);
       setSelectedDimensions((current) => new Set(Array.from(current).filter((name) => names.has(name))));
+    }).catch((compatibilityError) => {
+      if (!active) return;
+      setCompatibleDimensions(new Set());
+      setSelectedDimensions(new Set());
+      setError(compatibilityError instanceof DqlApiError
+        ? `${compatibilityError.code ? `${compatibilityError.code}: ` : ''}${compatibilityError.message}`
+        : compatibilityError instanceof Error
+          ? compatibilityError.message
+          : 'Semantic compatibility could not be verified.');
     });
     return () => { active = false; };
   }, [Array.from(selectedMetrics).sort().join('|')]);
