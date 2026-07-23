@@ -54,6 +54,13 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(hasAnalyticalInspectorContract({
       analyticalFailure: { code: 'PERMISSION_DENIED', phase: 'execution' },
     })).toBe(true);
+    expect(hasAnalyticalInspectorContract({
+      semanticExecutionTrace: {
+        version: 1,
+        adapter: 'dbt-cloud',
+        status: 'ambiguous',
+      },
+    })).toBe(true);
     expect(analyticalInspectorSections()).toEqual([
       'Plan',
       'DQL',
@@ -98,6 +105,18 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     })).toEqual({
       question: 'Total CCU Count',
       selectedEvidenceId: 'semantic:metric:dbt_core_models.total_ccu_count',
+    });
+  });
+
+  it('UI-012 resubmits the original question while a semantic path option carries stable identity', () => {
+    expect(clarificationSelectionInput({
+      id: 'semantic-path:report_date:bcm_ccu_pc',
+      label: 'Use Report Date via bcm_ccu_pc',
+      question: 'Who are the top customers and what is their BCM this month?',
+      kind: 'semantic_entity_path',
+    })).toEqual({
+      question: 'Who are the top customers and what is their BCM this month?',
+      selectedEvidenceId: 'semantic-path:report_date:bcm_ccu_pc',
     });
   });
 

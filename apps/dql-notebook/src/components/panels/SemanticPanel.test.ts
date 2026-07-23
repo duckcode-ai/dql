@@ -33,4 +33,15 @@ describe('buildNotebookSemanticBlock', () => {
     );
     expect(source).not.toContain('Effective Customer Account Name');
   });
+
+  it('AGT-014/UI-012 persists the selected entity path without replacing the model-scoped identity', () => {
+    const source = buildNotebookSemanticBlock(
+      ['percent_dod_acm'],
+      ['sm_consumption_daily_metrics_detail.report_as_of_dt@via(bcm_ccu_pc)'],
+    );
+    expect(source).toContain(
+      'dimensions = ["sm_consumption_daily_metrics_detail.report_as_of_dt@via(bcm_ccu_pc)"]',
+    );
+    expect(source).not.toContain('dimensions = ["bcm_ccu_pc__bcm_dtl__report_as_of_dt"]');
+  });
 });

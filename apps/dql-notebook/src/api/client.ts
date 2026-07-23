@@ -116,6 +116,39 @@ export interface SemanticRuntimeSettingsInput {
   dbtCloud?: { host?: string; environmentId?: string; serviceToken?: string };
 }
 
+export interface SemanticRuntimePathCandidate {
+  id: string;
+  label: string;
+  description: string;
+  authoringReference: string;
+  runtimeReference: string;
+  entityPath: string[];
+  selectionReference: string;
+}
+
+export interface SemanticRuntimeTrace {
+  version: 1;
+  adapter: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  status: 'compiled' | 'ambiguous' | 'failed';
+  authoringRequest: Record<string, unknown>;
+  runtimeRequest?: Record<string, unknown>;
+  bindings: Array<{
+    role: string;
+    authoringReference: string;
+    runtimeReference: string;
+    entityPath: string[];
+    status: 'resolved' | 'ambiguous';
+  }>;
+  warnings: string[];
+  steps: Array<{ id: string; label: string; status: string; detail: string }>;
+  failure?: {
+    code: string;
+    phase: string;
+    message: string;
+    candidates?: SemanticRuntimePathCandidate[];
+  };
+}
+
 export type MetricFlowWarehouseAdapter = 'duckdb' | 'snowflake' | 'bigquery' | 'databricks' | 'redshift' | 'postgres' | 'trino';
 
 export interface MetricFlowInstallJob {
@@ -889,6 +922,7 @@ export interface AgentRunClarificationOption {
   label: string;
   description?: string;
   kind?: string;
+  question?: string;
 }
 
 export interface AgentRunEvent {
@@ -4214,14 +4248,53 @@ export const api = {
     timeDimension?: { name: string; granularity: string };
     orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
     limit?: number;
-  }): Promise<{ sql: string; joins: string[]; tables: string[]; result: QueryResult } | { error: string }> {
+  }): Promise<{
+    sql: string;
+    joins: string[];
+    tables: string[];
+    result: QueryResult;
+    engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
+    effectiveRequest?: Record<string, unknown>;
+    runtimeRequest?: Record<string, unknown>;
+    semanticTrace?: SemanticRuntimeTrace;
+  } | {
+    error: string;
+    code?: string;
+    details?: {
+      authoringReference?: string;
+      runtimeReference?: string;
+      candidates?: SemanticRuntimePathCandidate[];
+      semanticTrace?: SemanticRuntimeTrace;
+    };
+  }> {
     try {
-      return await request<{ sql: string; joins: string[]; tables: string[]; result: QueryResult }>('/api/semantic-builder/preview', {
+      return await request<{
+        sql: string;
+        joins: string[];
+        tables: string[];
+        result: QueryResult;
+        engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
+        effectiveRequest?: Record<string, unknown>;
+        runtimeRequest?: Record<string, unknown>;
+        semanticTrace?: SemanticRuntimeTrace;
+      }>('/api/semantic-builder/preview', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-    } catch (e: any) {
-      return { error: e.message ?? 'Failed to preview semantic block' };
+    } catch (error) {
+      if (error instanceof DqlApiError) {
+        return {
+          error: error.message,
+          code: error.code,
+          details: error.details as {
+            authoringReference?: string;
+            runtimeReference?: string;
+            candidates?: SemanticRuntimePathCandidate[];
+            semanticTrace?: SemanticRuntimeTrace;
+          } | undefined,
+        };
+      }
+      return { error: error instanceof Error ? error.message : 'Failed to preview semantic block' };
     }
   },
 

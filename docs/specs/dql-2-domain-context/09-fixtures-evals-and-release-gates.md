@@ -172,6 +172,12 @@ Required semantic-notebook scenarios (`E2E-008`):
 10. Valid warehouse-specific generated SQL (including Snowflake `QUALIFY`) passes
    every validation gate with the active dialect, while malformed SQL is never
    executed and raw parser traces remain in Inspect rather than chat.
+11. A MetricFlow time or categorical member reachable through two governed
+    entity paths stops before compilation, returns stable path choices, persists
+    the selected path beside the model-scoped DQL identity, and sends the exact
+    dunder-qualified runtime member on retry. Notebook and Ask show authoring
+    identity, runtime identity, adapter, compiler phase, and execution status in
+    Trust & Steps (`AGT-014`, `API-007`, `UI-012`, `E2E-008`, `E2E-009`).
 
 ## Structured clarification and grounding fixture
 

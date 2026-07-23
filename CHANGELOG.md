@@ -6,6 +6,43 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.3 - 2026-07-23
+
+### Governed semantic paths and transparent execution
+
+This patch makes repeated MetricFlow dimensions executable when more than one
+entity path can reach the same business dimension, while exposing the complete
+semantic decision and execution trace to notebook users.
+
+### Fixed
+
+- **Explicit governed path selection.** dbt Cloud ambiguity responses are
+  parsed into stable choices instead of triggering an invented cross-model
+  explanation or an unsafe SQL fallback. Users choose the intended entity path
+  before DQL executes anything.
+- **Runtime-qualified MetricFlow members.** DQL keeps the model-scoped
+  authoring identity and records a compiler-owned `@via(...)` selector, then
+  emits the exact MetricFlow runtime member such as
+  `bcm_ccu_pc__bcm_dtl__report_as_of_dt`.
+- **Preview-before-add semantics.** Semantic notebook cells can be added only
+  after the selected metric and dimensions compile and execute successfully.
+  A changed selection invalidates the previous preview.
+- **Trust & Steps execution trace.** “How it was answered” now reports the
+  selected adapter, authoring and runtime members, entity paths, compile state,
+  execution state, failure details, and governed repair choices.
+- **Accurate timeout and refusal behavior.** A timeout no longer claims that a
+  cross-model join caused the failure without evidence. Semantic path
+  ambiguity returns a clarification request and does not execute or silently
+  widen to generated SQL.
+
+### Release exceptions
+
+- Acceptance IDs `AGT-013`, `AGT-014`, `API-006`, `API-007`, `UI-012`,
+  `UI-013`, `E2E-008`, `E2E-009`, and `E2E-014` are implementer-validated
+  pending independent verification against the enterprise dbt Cloud fixture.
+- The existing tracked `PERF-001` latency exception remains unchanged. This
+  patch makes no GA latency claim.
+
 ## v1.10.2 - 2026-07-23
 
 ### Enterprise semantic identity and runtime authority

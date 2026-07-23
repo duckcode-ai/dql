@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.2)
+## Current State (v1.10.3)
 
 DQL OSS is ready for local-first use cases:
 
@@ -39,6 +39,9 @@ DQL OSS is ready for local-first use cases:
   labels and exact technical metric/group-by names.
 - Lock semantic execution to one tested dbt Cloud, local MetricFlow, or native
   adapter per request without silently changing engines after a failure.
+- Resolve repeated MetricFlow dimensions through an explicit governed entity
+  path, keep the DQL authoring identity stable, and expose the runtime-qualified
+  member used by the selected adapter.
 - Inspect Plan, DQL, Compiled SQL, Lineage, Trust & evidence, Actual steps, and
   Failure & repair, including safe same-plan repair actions for failed runs.
 - Use local hybrid retrieval across exact matches, BM25/lexical text,
@@ -78,7 +81,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.2
+  cold-start and warm-context latency budgets remain above target. The v1.10.3
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

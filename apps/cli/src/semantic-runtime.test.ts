@@ -304,6 +304,99 @@ describe('qualifyForMetricFlow (Phase 3 boundary)', () => {
     }, semanticLayer);
     expect(request.dimensions).toEqual(['bcm_hdr__report_date']);
   });
+
+  it('AGT-014/E2E-009 binds an explicit metric-relative entity path without replacing the DQL identity', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: 'percent_dod_acm', label: 'Percent DoD ACM', description: '', domain: 'consumption', sql: 'SUM(acm)', type: 'sum', table: 'sm_consumption_daily_metrics_detail', cube: 'sm_consumption_daily_metrics_detail', objectKind: 'metric' },
+      ],
+      dimensions: [
+        {
+          name: 'report_as_of_dt',
+          label: 'Report Date',
+          description: '',
+          sql: 'report_as_of_dt',
+          type: 'date',
+          table: 'sm_consumption_daily_metrics_detail',
+          cube: 'sm_consumption_daily_metrics_detail',
+          qualifiedName: 'bcm_dtl__report_as_of_dt',
+          entityLink: 'bcm_dtl',
+          isTimeDimension: true,
+        },
+      ],
+    });
+    const {
+      qualifyForMetricFlow,
+      parseSemanticDimensionSelection,
+    } = await import('./semantic-runtime.js');
+    const selected = 'sm_consumption_daily_metrics_detail.report_as_of_dt@via(bcm_ccu_pc)';
+    const { request, bindings } = qualifyForMetricFlow({
+      metrics: ['percent_dod_acm'],
+      dimensions: [selected],
+    }, semanticLayer);
+
+    expect(parseSemanticDimensionSelection(selected)).toEqual({
+      reference: 'sm_consumption_daily_metrics_detail.report_as_of_dt',
+      entityPath: ['bcm_ccu_pc'],
+    });
+    expect(request.dimensions).toEqual(['bcm_ccu_pc__bcm_dtl__report_as_of_dt']);
+    expect(bindings[0]).toMatchObject({
+      authoringReference: 'sm_consumption_daily_metrics_detail.report_as_of_dt',
+      runtimeReference: 'bcm_ccu_pc__bcm_dtl__report_as_of_dt',
+      entityPath: ['bcm_ccu_pc'],
+      status: 'resolved',
+    });
+  });
+
+  it('AGT-014/API-007 turns dbt Cloud path ambiguity into stable clarification candidates and a trace', async () => {
+    const {
+      semanticPathAmbiguityFromError,
+      decodeSemanticPathEvidenceId,
+    } = await import('./semantic-runtime.js');
+    const authoringReference = 'sm_consumption_daily_metrics_detail.report_as_of_dt';
+    const authoringRequest = {
+      metrics: ['percent_dod_acm'],
+      dimensions: [authoringReference],
+    };
+    const runtimeRequest = {
+      metrics: ['percent_dod_acm'],
+      dimensions: ['bcm_dtl__report_as_of_dt'],
+    };
+    const ambiguity = semanticPathAmbiguityFromError({
+      adapter: 'dbt-cloud',
+      error: new Error(`The given input is ambiguous and can't be resolved. The input could match:
+[
+  "TimeDimension('bcm_dtl__report_as_of_dt', 'day', entity_path=['bcm_ccu_pc'])",
+  "TimeDimension('bcm_dtl__report_as_of_dt', 'day', entity_path=['bcm_tdp_pc'])"
+]`),
+      authoringRequest,
+      runtimeRequest,
+      bindings: [{
+        role: 'dimension',
+        authoringReference,
+        runtimeReference: 'bcm_dtl__report_as_of_dt',
+        entityPath: [],
+        status: 'resolved',
+      }],
+      warnings: [],
+    });
+
+    expect(ambiguity?.code).toBe('SEMANTIC_PATH_AMBIGUOUS');
+    expect(ambiguity?.details.candidates.map((candidate) => candidate.runtimeReference)).toEqual([
+      'bcm_ccu_pc__bcm_dtl__report_as_of_dt',
+      'bcm_tdp_pc__bcm_dtl__report_as_of_dt',
+    ]);
+    expect(ambiguity?.semanticTrace.steps.map((step) => step.status)).toEqual([
+      'completed',
+      'failed',
+      'not_started',
+      'not_started',
+    ]);
+    expect(decodeSemanticPathEvidenceId(ambiguity?.details.candidates[0]?.id)).toEqual({
+      authoringReference,
+      entityPath: ['bcm_ccu_pc'],
+    });
+  });
 });
 
 describe('saveSemanticRuntimePreference (Phase 4)', () => {

@@ -1982,6 +1982,7 @@ interface AnalyticalInspectorContract {
   narrative?: Record<string, unknown>;
   freshness?: Record<string, unknown>;
   failure?: Record<string, unknown>;
+  semantic?: Record<string, unknown>;
 }
 
 export function hasAnalyticalInspectorContract(payload: Record<string, unknown>): boolean {
@@ -1989,7 +1990,8 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     recordOf(payload.resolvedAnalyticalPlan)
     || recordOf(payload.analyticalExecutionGraph)
     || recordOf(payload.analyticalExecutionReceipt)
-    || recordOf(payload.analyticalFailure),
+    || recordOf(payload.analyticalFailure)
+    || recordOf(payload.semanticExecutionTrace),
   );
 }
 
@@ -2005,6 +2007,7 @@ function analyticalInspectorContract(payload: Record<string, unknown>): Analytic
     narrative: recordOf(payload.analyticalNarrative),
     freshness: recordOf(payload.analyticalFreshnessObservation),
     failure: recordOf(payload.analyticalFailure),
+    semantic: recordOf(payload.semanticExecutionTrace),
   };
 }
 
@@ -2050,7 +2053,14 @@ function AnalyticalHowAnswered({
   const frame = contract.frame;
   const graph = contract.graph;
   const receipt = contract.receipt;
-  const failure = contract.failure;
+  const semantic = contract.semantic;
+  const semanticFailure = recordOf(semantic?.failure);
+  const failure = contract.failure ?? semanticFailure;
+  const semanticAuthoringRequest = recordOf(semantic?.authoringRequest);
+  const semanticRuntimeRequest = recordOf(semantic?.runtimeRequest);
+  const semanticBindings = recordList(semantic?.bindings);
+  const semanticSteps = recordList(semantic?.steps);
+  const semanticCandidates = recordList(semanticFailure?.candidates);
   const timeContext = recordOf(frame?.timeContext);
   const comparison = recordOf(frame?.comparison);
   const ranking = recordOf(frame?.ranking);
@@ -2128,6 +2138,8 @@ function AnalyticalHowAnswered({
           ['Comparison', comparison ? `${displayValue(comparison.basePeriodId)} vs ${stringList(comparison.comparisonPeriodIds).join(', ')} · ${displayValue(comparison.alignment)}` : 'Not requested'],
           ['Ranking', ranking ? `${displayValue(ranking.direction)} · top ${displayValue(ranking.limit)} · ${displayValue(ranking.tiePolicy)}` : 'Not requested'],
           ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
+          ['Semantic metrics', stringList(semanticAuthoringRequest?.metrics).join(', ')],
+          ['Semantic dimensions', stringList(semanticAuthoringRequest?.dimensions).join(', ')],
         ]} t={t} />
       </AnalyticalInspectorSection>
 
@@ -2176,11 +2188,27 @@ function AnalyticalHowAnswered({
           ['Result fingerprint', displayValue(receipt?.resultFingerprint)],
           ['Freshness observed through', displayValue(contract.freshness?.observedThrough)],
           ['Fact set', displayValue(contract.facts?.fingerprint)],
+          ['Semantic adapter', displayValue(semantic?.adapter)],
+          ['Semantic compile status', displayValue(semantic?.status)],
+          ['Runtime metrics', stringList(semanticRuntimeRequest?.metrics).join(', ')],
+          ['Runtime dimensions', stringList(semanticRuntimeRequest?.dimensions).join(', ')],
+          ['Member bindings', semanticBindings.map((binding) =>
+            `${displayValue(binding.authoringReference)} → ${displayValue(binding.runtimeReference)}`
+            + `${stringList(binding.entityPath).length ? ` via ${stringList(binding.entityPath).join(' → ')}` : ''}`
+            + ` (${displayValue(binding.status)})`).join('\n')],
         ]} t={t} mono />
       </AnalyticalInspectorSection>
 
       <AnalyticalInspectorSection index={6} label="Actual steps" t={t}>
         <div style={{ display: 'grid', gap: 6 }}>
+          {semanticSteps.map((step, index) => (
+            <div key={`semantic:${displayValue(step.id) || index}`} style={{ fontSize: 11.5, color: t.textSecondary }}>
+              <strong style={{ color: displayValue(step.status) === 'failed' ? 'var(--status-error)' : t.textPrimary }}>
+                {index + 1}. {displayValue(step.label)}
+              </strong>
+              {' '}— {displayValue(step.status)} · {displayValue(step.detail)}
+            </div>
+          ))}
           {run.steps.map((step) => (
             <div key={step.id} style={{ fontSize: 11.5, color: t.textSecondary }}>
               <strong style={{ color: t.textPrimary }}>{step.index + 1}. {step.goal}</strong> — {step.status}, {step.attempts} attempt{step.attempts === 1 ? '' : 's'}
@@ -2192,7 +2220,7 @@ function AnalyticalHowAnswered({
               {' '}· {displayValue(node.id)}
             </div>
           ))}
-          {run.steps.length === 0 && graphNodes.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
+          {semanticSteps.length === 0 && run.steps.length === 0 && graphNodes.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
         </div>
       </AnalyticalInspectorSection>
 
@@ -2210,6 +2238,8 @@ function AnalyticalHowAnswered({
               ['Safe actions', safeActions.join(', ')],
               ['DQL fingerprint', displayValue(failure.dqlFingerprint)],
               ['SQL fingerprint', displayValue(failure.sqlFingerprint)],
+              ['Path candidates', semanticCandidates.map((candidate) =>
+                `${displayValue(candidate.label)}\n${displayValue(candidate.runtimeReference)}`).join('\n')],
             ]} t={t} mono />
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} aria-label="Safe repair actions">
               {safeActions.includes('retry_same_plan') ? (
@@ -2302,7 +2332,7 @@ export function clarificationSelectionInput(option: AgentRunClarificationOption)
   question: string;
   selectedEvidenceId: string;
 } {
-  return { question: option.label, selectedEvidenceId: option.id };
+  return { question: option.question ?? option.label, selectedEvidenceId: option.id };
 }
 
 export function isAgentRunPinnable(run: AgentRun): boolean {

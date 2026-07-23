@@ -62,6 +62,55 @@ export interface SemanticRuntimeQueryRequest {
   engine?: 'native' | 'metricflow' | SemanticRuntimeAdapterId;
 }
 
+export type SemanticRuntimeBindingRole = 'dimension' | 'time_dimension' | 'filter' | 'order_by';
+
+export interface SemanticRuntimeBinding {
+  role: SemanticRuntimeBindingRole;
+  /** Stable DQL/model-scoped identity shown to the analyst. */
+  authoringReference: string;
+  /** Exact dunder-qualified member sent to MetricFlow or dbt Cloud. */
+  runtimeReference: string;
+  /** Metric-relative entity path selected ahead of the member's own qualified name. */
+  entityPath: string[];
+  status: 'resolved' | 'ambiguous';
+}
+
+export interface SemanticRuntimePathCandidate {
+  /** Stable evidence identity used by Ask clarification and retry. */
+  id: string;
+  label: string;
+  description: string;
+  authoringReference: string;
+  runtimeReference: string;
+  entityPath: string[];
+  /** DQL-safe reference that preserves the model identity and the selected path. */
+  selectionReference: string;
+}
+
+export interface SemanticRuntimeTraceStep {
+  id: 'resolve_members' | 'bind_entity_paths' | 'compile_semantic_query' | 'execute_query';
+  label: string;
+  status: 'completed' | 'failed' | 'not_started';
+  detail: string;
+}
+
+export interface SemanticRuntimeTrace {
+  version: 1;
+  adapter: SemanticRuntimeAdapterId;
+  status: 'compiled' | 'ambiguous' | 'failed';
+  authoringRequest: SemanticRuntimeQueryRequest;
+  runtimeRequest?: SemanticRuntimeQueryRequest;
+  bindings: SemanticRuntimeBinding[];
+  warnings: string[];
+  steps: SemanticRuntimeTraceStep[];
+  failure?: {
+    code: 'SEMANTIC_PATH_AMBIGUOUS' | 'SEMANTIC_COMPILATION_FAILED';
+    phase: 'path_binding' | 'compilation';
+    message: string;
+    candidates?: SemanticRuntimePathCandidate[];
+  };
+}
+
 export interface SemanticRuntimeCompileContext {
   projectRoot: string;
   projectConfig: SemanticRuntimeProjectConfig;
@@ -86,6 +135,8 @@ export interface SemanticRuntimeCompileResult extends ComposeQueryResult {
    * for native compilation (which speaks bare names). Diagnostic only.
    */
   runtimeRequest?: SemanticRuntimeQueryRequest;
+  /** Auditable authoring → runtime bindings and compiler phases. */
+  semanticTrace: SemanticRuntimeTrace;
   /** Non-fatal advisories (e.g. a time grain clamped up to the column's base). */
   warnings?: string[];
 }
@@ -110,6 +161,69 @@ export class SemanticRuntimeCompilationError extends Error {
     });
     this.name = 'SemanticRuntimeCompilationError';
     this.adapter = adapter;
+  }
+}
+
+export class SemanticRuntimePathAmbiguityError extends Error {
+  readonly code = 'SEMANTIC_PATH_AMBIGUOUS';
+  readonly adapter: Exclude<SemanticRuntimeAdapterId, 'native'>;
+  readonly details: {
+    authoringReference: string;
+    runtimeReference: string;
+    candidates: SemanticRuntimePathCandidate[];
+  };
+  readonly semanticTrace: SemanticRuntimeTrace;
+
+  constructor(input: {
+    adapter: Exclude<SemanticRuntimeAdapterId, 'native'>;
+    authoringRequest: SemanticRuntimeQueryRequest;
+    runtimeRequest: SemanticRuntimeQueryRequest;
+    bindings: SemanticRuntimeBinding[];
+    warnings: string[];
+    authoringReference: string;
+    runtimeReference: string;
+    candidates: SemanticRuntimePathCandidate[];
+  }) {
+    const choices = input.candidates.map((candidate) => candidate.label).join(' or ');
+    const message = `The semantic dimension "${input.authoringReference}" is reachable through more than one governed entity path (${choices}). Choose the intended path before DQL compiles or executes the query.`;
+    super(message);
+    this.name = 'SemanticRuntimePathAmbiguityError';
+    this.adapter = input.adapter;
+    this.details = {
+      authoringReference: input.authoringReference,
+      runtimeReference: input.runtimeReference,
+      candidates: input.candidates,
+    };
+    this.semanticTrace = {
+      version: 1,
+      adapter: input.adapter,
+      status: 'ambiguous',
+      authoringRequest: input.authoringRequest,
+      runtimeRequest: input.runtimeRequest,
+      bindings: [
+        ...input.bindings.filter((binding) => binding.runtimeReference !== input.runtimeReference),
+        {
+          role: inferSemanticBindingRole(input.authoringRequest, input.authoringReference),
+          authoringReference: input.authoringReference,
+          runtimeReference: input.runtimeReference,
+          entityPath: [],
+          status: 'ambiguous',
+        },
+      ],
+      warnings: input.warnings,
+      steps: [
+        { id: 'resolve_members', label: 'Resolve governed semantic members', status: 'completed', detail: 'Metric and dimension identities resolved from the pinned semantic snapshot.' },
+        { id: 'bind_entity_paths', label: 'Bind metric-relative entity paths', status: 'failed', detail: message },
+        { id: 'compile_semantic_query', label: 'Compile with the selected semantic adapter', status: 'not_started', detail: 'Compilation is gated until one entity path is selected.' },
+        { id: 'execute_query', label: 'Execute the compiled warehouse query', status: 'not_started', detail: 'Nothing was executed.' },
+      ],
+      failure: {
+        code: 'SEMANTIC_PATH_AMBIGUOUS',
+        phase: 'path_binding',
+        message,
+        candidates: input.candidates,
+      },
+    };
   }
 }
 
@@ -433,10 +547,10 @@ export async function explainMissingSemanticRuntime(projectRoot: string, dbtProj
 export function qualifyForMetricFlow(
   request: SemanticRuntimeQueryRequest,
   semanticLayer: SemanticLayer,
-): { request: SemanticRuntimeQueryRequest; warnings: string[] } {
+): { request: SemanticRuntimeQueryRequest; warnings: string[]; bindings: SemanticRuntimeBinding[] } {
   const warnings: string[] = [];
   const { compatible } = semanticLayer.explainCompatibleDimensions(request.metrics);
-  const qualifiedByReference = new Map<string, string>();
+  const qualifiedByReference = new Map<string, { runtimeReference: string; entityPath: string[] }>();
   for (const dim of compatible) {
     if (!dim.qualifiedName) continue;
     for (const reference of [
@@ -445,23 +559,55 @@ export function qualifyForMetricFlow(
       dim.source?.objectId,
       dim.qualifiedName,
     ]) {
-      if (reference) qualifiedByReference.set(reference.toLowerCase(), dim.qualifiedName);
+      if (reference) {
+        qualifiedByReference.set(reference.toLowerCase(), {
+          runtimeReference: dim.qualifiedName,
+          entityPath: dim.entityPath ?? [],
+        });
+      }
     }
   }
-  const qualify = (name: string | undefined): string | undefined => {
+  const bindings: SemanticRuntimeBinding[] = [];
+  const qualify = (name: string | undefined, role: SemanticRuntimeBindingRole): string | undefined => {
     if (!name) return name;
-    if (name === 'metric_time' || name.includes('__')) return name; // already qualified / reserved
-    const exact = semanticLayer.resolveDimension(name, request.metrics);
-    return qualifiedByReference.get(name.toLowerCase())
-      ?? exact?.qualifiedName
-      ?? name;
+    const selection = parseSemanticDimensionSelection(name);
+    const authoringReference = selection.reference;
+    let runtimeReference: string;
+    let entityPath = selection.entityPath ?? [];
+    if (authoringReference === 'metric_time' || (authoringReference.includes('__') && !selection.entityPath)) {
+      runtimeReference = authoringReference;
+    } else {
+      const exact = semanticLayer.resolveDimension(authoringReference, request.metrics);
+      const compatibleBinding = qualifiedByReference.get(authoringReference.toLowerCase());
+      const baseRuntimeReference = compatibleBinding?.runtimeReference
+        ?? exact?.qualifiedName
+        ?? authoringReference;
+      if (selection.entityPath?.length) {
+        const prefix = `${selection.entityPath.join('__')}__`;
+        runtimeReference = baseRuntimeReference.startsWith(prefix)
+          ? baseRuntimeReference
+          : `${prefix}${baseRuntimeReference}`;
+      } else {
+        runtimeReference = baseRuntimeReference;
+        entityPath = compatibleBinding?.entityPath ?? [];
+      }
+    }
+    bindings.push({
+      role,
+      authoringReference,
+      runtimeReference,
+      entityPath,
+      status: 'resolved',
+    });
+    return runtimeReference;
   };
 
   const timeDimension = request.timeDimension
     ? (() => {
-        const name = qualify(request.timeDimension!.name);
+        const selection = parseSemanticDimensionSelection(request.timeDimension!.name);
+        const name = qualify(request.timeDimension!.name, 'time_dimension');
         let granularity = request.timeDimension!.granularity;
-        const td = semanticLayer.getTimeDimension(request.timeDimension!.name);
+        const td = semanticLayer.getTimeDimension(selection.reference);
         if (td?.granularities?.length && !td.granularities.includes(granularity as typeof td.granularities[number])) {
           const clamped = td.granularities[0];
           warnings.push(`Time grain "${granularity}" is finer than ${request.timeDimension!.name}'s base grain; using "${clamped}".`);
@@ -473,13 +619,172 @@ export function qualifyForMetricFlow(
 
   return {
     warnings,
+    bindings,
     request: {
       ...request,
-      dimensions: request.dimensions.map((d) => qualify(d) ?? d),
-      ...(request.filters ? { filters: request.filters.map((f) => f.dimension ? { ...f, dimension: qualify(f.dimension) } : f) } : {}),
-      ...(request.orderBy ? { orderBy: request.orderBy.map((o) => ({ ...o, name: qualify(o.name) ?? o.name })) } : {}),
+      dimensions: request.dimensions.map((d) => qualify(d, 'dimension') ?? d),
+      ...(request.filters ? { filters: request.filters.map((f) => f.dimension ? { ...f, dimension: qualify(f.dimension, 'filter') } : f) } : {}),
+      ...(request.orderBy ? { orderBy: request.orderBy.map((o) => ({ ...o, name: qualify(o.name, 'order_by') ?? o.name })) } : {}),
       ...(timeDimension ? { timeDimension } : {}),
     },
+  };
+}
+
+const SEMANTIC_PATH_SELECTION = /^(.*?)@via\(([^)]+)\)$/;
+
+export function parseSemanticDimensionSelection(value: string): { reference: string; entityPath?: string[] } {
+  const match = value.trim().match(SEMANTIC_PATH_SELECTION);
+  if (!match) return { reference: value };
+  const entityPath = match[2]
+    .split('>')
+    .map((part) => part.trim())
+    .filter((part) => /^[A-Za-z0-9_]+$/.test(part));
+  return entityPath.length > 0
+    ? { reference: match[1].trim(), entityPath }
+    : { reference: match[1].trim() };
+}
+
+export function formatSemanticDimensionSelection(reference: string, entityPath: string[]): string {
+  return entityPath.length > 0 ? `${reference}@via(${entityPath.join('>')})` : reference;
+}
+
+export function applySemanticPathSelection(
+  request: SemanticRuntimeQueryRequest,
+  authoringReference: string,
+  entityPath: string[],
+): SemanticRuntimeQueryRequest {
+  const bind = (value: string): string => {
+    const parsed = parseSemanticDimensionSelection(value);
+    const selectedReference = parsed.reference.toLowerCase();
+    const requestedReference = authoringReference.toLowerCase();
+    const sameReference = selectedReference === requestedReference
+      || ((!selectedReference.includes('.') || !requestedReference.includes('.'))
+        && selectedReference.split('.').pop() === requestedReference.split('.').pop());
+    return sameReference ? formatSemanticDimensionSelection(parsed.reference, entityPath) : value;
+  };
+  return {
+    ...request,
+    dimensions: request.dimensions.map(bind),
+    ...(request.filters ? { filters: request.filters.map((filter) => filter.dimension ? { ...filter, dimension: bind(filter.dimension) } : filter) } : {}),
+    ...(request.orderBy ? { orderBy: request.orderBy.map((order) => ({ ...order, name: bind(order.name) })) } : {}),
+    ...(request.timeDimension ? { timeDimension: { ...request.timeDimension, name: bind(request.timeDimension.name) } } : {}),
+  };
+}
+
+export function encodeSemanticPathEvidenceId(authoringReference: string, entityPath: string[]): string {
+  return `semantic-path:${encodeURIComponent(authoringReference)}:${encodeURIComponent(entityPath.join('>'))}`;
+}
+
+export function decodeSemanticPathEvidenceId(value: string | undefined): {
+  authoringReference: string;
+  entityPath: string[];
+} | undefined {
+  if (!value?.startsWith('semantic-path:')) return undefined;
+  const [, encodedReference, encodedPath] = value.split(':');
+  if (!encodedReference || !encodedPath) return undefined;
+  try {
+    const entityPath = decodeURIComponent(encodedPath).split('>').filter(Boolean);
+    return entityPath.length > 0
+      ? { authoringReference: decodeURIComponent(encodedReference), entityPath }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferSemanticBindingRole(
+  request: SemanticRuntimeQueryRequest,
+  authoringReference: string,
+): SemanticRuntimeBindingRole {
+  const matches = (value: string | undefined) =>
+    parseSemanticDimensionSelection(value ?? '').reference.toLowerCase() === authoringReference.toLowerCase();
+  if (matches(request.timeDimension?.name)) return 'time_dimension';
+  if (request.filters?.some((filter) => matches(filter.dimension))) return 'filter';
+  if (request.orderBy?.some((order) => matches(order.name))) return 'order_by';
+  return 'dimension';
+}
+
+function semanticTraceForSuccess(input: {
+  adapter: SemanticRuntimeAdapterId;
+  authoringRequest: SemanticRuntimeQueryRequest;
+  runtimeRequest?: SemanticRuntimeQueryRequest;
+  bindings: SemanticRuntimeBinding[];
+  warnings: string[];
+}): SemanticRuntimeTrace {
+  return {
+    version: 1,
+    adapter: input.adapter,
+    status: 'compiled',
+    authoringRequest: input.authoringRequest,
+    ...(input.runtimeRequest ? { runtimeRequest: input.runtimeRequest } : {}),
+    bindings: input.bindings,
+    warnings: input.warnings,
+    steps: [
+      { id: 'resolve_members', label: 'Resolve governed semantic members', status: 'completed', detail: 'Metric and dimension identities resolved from the pinned semantic snapshot.' },
+      { id: 'bind_entity_paths', label: 'Bind metric-relative entity paths', status: 'completed', detail: input.bindings.length > 0 ? `${input.bindings.length} runtime member binding(s) resolved.` : 'No dimension path binding was required.' },
+      { id: 'compile_semantic_query', label: 'Compile with the selected semantic adapter', status: 'completed', detail: `Compiled through ${input.adapter}.` },
+      { id: 'execute_query', label: 'Execute the compiled warehouse query', status: 'not_started', detail: 'Execution is owned by the authorized host after compilation.' },
+    ],
+  };
+}
+
+export function semanticPathAmbiguityFromError(input: {
+  adapter: Exclude<SemanticRuntimeAdapterId, 'native'>;
+  error: unknown;
+  authoringRequest: SemanticRuntimeQueryRequest;
+  runtimeRequest: SemanticRuntimeQueryRequest;
+  bindings: SemanticRuntimeBinding[];
+  warnings: string[];
+}): SemanticRuntimePathAmbiguityError | undefined {
+  const message = input.error instanceof Error ? input.error.message : String(input.error);
+  if (!/ambiguous and can(?:not|'t) be resolved/i.test(message)) return undefined;
+  const parsedCandidates: Array<{ baseRuntimeReference: string; entityPath: string[] }> = [];
+  const candidatePattern = /(?:TimeDimension|Dimension)\(\s*['"]([^'"]+)['"][^)]*?entity_path=\[([^\]]*)\]/g;
+  for (const match of message.matchAll(candidatePattern)) {
+    const entityPath = Array.from(match[2].matchAll(/['"]([^'"]+)['"]/g), (item) => item[1]).filter(Boolean);
+    if (entityPath.length > 0) parsedCandidates.push({ baseRuntimeReference: match[1], entityPath });
+  }
+  if (parsedCandidates.length < 2) return undefined;
+  const runtimeReference = parsedCandidates[0].baseRuntimeReference;
+  const matchingBinding = input.bindings.find((binding) => binding.runtimeReference === runtimeReference);
+  const authoringReference = matchingBinding?.authoringReference
+    ?? input.authoringRequest.timeDimension?.name
+    ?? input.authoringRequest.dimensions[0]
+    ?? runtimeReference;
+  const candidates = parsedCandidates.map((candidate) => {
+    const runtimeName = `${candidate.entityPath.join('__')}__${candidate.baseRuntimeReference}`;
+    return {
+      id: encodeSemanticPathEvidenceId(authoringReference, candidate.entityPath),
+      label: `Use ${authoringReference} via ${candidate.entityPath.join(' → ')}`,
+      description: `Bind the governed member to ${runtimeName}. No SQL will run until this path is selected.`,
+      authoringReference,
+      runtimeReference: runtimeName,
+      entityPath: candidate.entityPath,
+      selectionReference: formatSemanticDimensionSelection(authoringReference, candidate.entityPath),
+    };
+  });
+  return new SemanticRuntimePathAmbiguityError({
+    adapter: input.adapter,
+    authoringRequest: input.authoringRequest,
+    runtimeRequest: input.runtimeRequest,
+    bindings: input.bindings,
+    warnings: input.warnings,
+    authoringReference,
+    runtimeReference,
+    candidates,
+  });
+}
+
+function semanticRequestWithoutPathSelectors(
+  request: SemanticRuntimeQueryRequest,
+): SemanticRuntimeQueryRequest {
+  const strip = (value: string) => parseSemanticDimensionSelection(value).reference;
+  return {
+    ...request,
+    dimensions: request.dimensions.map(strip),
+    ...(request.filters ? { filters: request.filters.map((filter) => filter.dimension ? { ...filter, dimension: strip(filter.dimension) } : filter) } : {}),
+    ...(request.orderBy ? { orderBy: request.orderBy.map((order) => ({ ...order, name: strip(order.name) })) } : {}),
+    ...(request.timeDimension ? { timeDimension: { ...request.timeDimension, name: strip(request.timeDimension.name) } } : {}),
   };
 }
 
@@ -496,7 +801,11 @@ export async function compileSemanticRuntimeQuery(
 
   // Qualify dimension references to MetricFlow entity-qualified names ONCE, at
   // this boundary, for the full-runtime engines. Native keeps the bare request.
-  const { request: runtimeRequest, warnings: qualifyWarnings } = qualifyForMetricFlow(effectiveRequest, context.semanticLayer);
+  const {
+    request: runtimeRequest,
+    warnings: qualifyWarnings,
+    bindings,
+  } = qualifyForMetricFlow(effectiveRequest, context.semanticLayer);
 
   let lastRuntimeError: Error | undefined;
   for (const adapter of candidates) {
@@ -508,10 +817,34 @@ export async function compileSemanticRuntimeQuery(
           getEffectiveDbtCloudSemanticSettings(context.projectRoot),
           runtimeRequest,
         );
-        return { sql: result.sql, joins: [], tables: [], engine: 'dbt-cloud', effectiveRequest, runtimeRequest, warnings: qualifyWarnings };
+        return {
+          sql: result.sql,
+          joins: [],
+          tables: [],
+          engine: 'dbt-cloud',
+          effectiveRequest,
+          runtimeRequest,
+          semanticTrace: semanticTraceForSuccess({
+            adapter: 'dbt-cloud',
+            authoringRequest: effectiveRequest,
+            runtimeRequest,
+            bindings,
+            warnings: qualifyWarnings,
+          }),
+          warnings: qualifyWarnings,
+        };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
         if (isSemanticRuntimeError(error)) throw error;
+        const ambiguity = semanticPathAmbiguityFromError({
+          adapter: 'dbt-cloud',
+          error,
+          authoringRequest: effectiveRequest,
+          runtimeRequest,
+          bindings,
+          warnings: qualifyWarnings,
+        });
+        if (ambiguity) throw ambiguity;
         throw new SemanticRuntimeCompilationError('dbt-cloud', error);
       }
     }
@@ -533,24 +866,65 @@ export async function compileSemanticRuntimeQuery(
           limit: runtimeRequest.limit,
           savedQuery: runtimeRequest.savedQuery,
         });
-        return { sql: compiled.sql, joins: [], tables: [], engine: 'metricflow-cli', effectiveRequest, runtimeRequest, warnings: qualifyWarnings };
+        return {
+          sql: compiled.sql,
+          joins: [],
+          tables: [],
+          engine: 'metricflow-cli',
+          effectiveRequest,
+          runtimeRequest,
+          semanticTrace: semanticTraceForSuccess({
+            adapter: 'metricflow-cli',
+            authoringRequest: effectiveRequest,
+            runtimeRequest,
+            bindings,
+            warnings: qualifyWarnings,
+          }),
+          warnings: qualifyWarnings,
+        };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
         if (isSemanticRuntimeError(error)) throw error;
+        const ambiguity = semanticPathAmbiguityFromError({
+          adapter: 'metricflow-cli',
+          error,
+          authoringRequest: effectiveRequest,
+          runtimeRequest,
+          bindings,
+          warnings: qualifyWarnings,
+        });
+        if (ambiguity) throw ambiguity;
         throw new SemanticRuntimeCompilationError('metricflow-cli', error);
       }
     }
+    const nativeRequest = semanticRequestWithoutPathSelectors(effectiveRequest);
     const composed = context.semanticLayer.composeQuery({
-      metrics: effectiveRequest.metrics,
-      dimensions: effectiveRequest.dimensions,
-      filters: effectiveRequest.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
-      limit: effectiveRequest.limit,
-      timeDimension: effectiveRequest.timeDimension,
-      orderBy: effectiveRequest.orderBy,
+      metrics: nativeRequest.metrics,
+      dimensions: nativeRequest.dimensions,
+      filters: nativeRequest.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
+      limit: nativeRequest.limit,
+      timeDimension: nativeRequest.timeDimension,
+      orderBy: nativeRequest.orderBy,
       driver: context.driver,
       tableMapping: context.tableMapping,
     });
-    if (composed) return { ...composed, engine: 'native', effectiveRequest };
+    if (composed) {
+      return {
+        ...composed,
+        engine: 'native',
+        effectiveRequest,
+        semanticTrace: semanticTraceForSuccess({
+          adapter: 'native',
+          authoringRequest: effectiveRequest,
+          bindings: bindings.map((binding) => ({
+            ...binding,
+            runtimeReference: parseSemanticDimensionSelection(binding.authoringReference).reference,
+            entityPath: [],
+          })),
+          warnings: [],
+        }),
+      };
+    }
   }
 
   if (fullRuntimeRequested || routeLockedToFullRuntime) {
@@ -789,15 +1163,33 @@ function selectActiveAdapter(
 export function isSemanticRuntimeError(error: unknown): boolean {
   return error instanceof SemanticRuntimeRequiredError
     || error instanceof SemanticRuntimeCompilationError
+    || error instanceof SemanticRuntimePathAmbiguityError
     || error instanceof MetricFlowUnavailableError;
 }
 
 export function semanticRuntimeErrorCode(
   error: unknown,
-): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_COMPILATION_FAILED' | undefined {
+): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_COMPILATION_FAILED' | 'SEMANTIC_PATH_AMBIGUOUS' | undefined {
+  if (error instanceof SemanticRuntimePathAmbiguityError) return error.code;
   if (error instanceof SemanticRuntimeCompilationError) return error.code;
   if (error instanceof SemanticRuntimeRequiredError || error instanceof MetricFlowUnavailableError) {
     return 'SEMANTIC_RUNTIME_REQUIRED';
+  }
+  return undefined;
+}
+
+export function semanticRuntimeErrorDetails(error: unknown): unknown {
+  if (error instanceof SemanticRuntimePathAmbiguityError) {
+    return {
+      ...error.details,
+      semanticTrace: error.semanticTrace,
+    };
+  }
+  if (error instanceof SemanticRuntimeCompilationError) {
+    return {
+      adapter: error.adapter,
+      phase: 'compilation',
+    };
   }
   return undefined;
 }

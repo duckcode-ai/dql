@@ -191,6 +191,24 @@ Use `metric = "name"` for one metric, or `metrics = ["metric_a", "metric_b"]`
 for a multi-metric semantic block. `dimensions = [...]` groups the semantic
 query by one or more semantic dimensions.
 
+Imported dbt dimensions keep their model-scoped authoring identity, for example
+`sm_consumption_daily_metrics_detail.report_as_of_dt`. If MetricFlow reports
+that the same member is reachable through multiple governed entity paths, the
+Semantic composer requires a preview and asks the analyst to select one. DQL
+persists that choice without replacing the authoring identity:
+
+```dql
+dimensions = [
+  "sm_consumption_daily_metrics_detail.report_as_of_dt@via(bcm_ccu_pc)"
+]
+```
+
+`@via(...)` is a compiler-owned relationship-path binding. The selected adapter
+turns the example into the exact runtime member
+`bcm_ccu_pc__bcm_dtl__report_as_of_dt`. Hand-written SQL must not infer or
+substitute this path. Trust & Steps shows both identities and whether member
+resolution, path binding, compilation, and execution completed.
+
 ## Business Term
 
 A `term` defines business vocabulary in DQL core. It does not require SQL.

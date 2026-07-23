@@ -349,15 +349,20 @@ import {
   metricFlowAdapterForDriver,
 } from './metricflow-installer.js';
 import {
+  applySemanticPathSelection,
   compileSemanticRuntimeQuery,
+  decodeSemanticPathEvidenceId,
   describeRuntimeCompatibility,
   explainMissingSemanticRuntime,
   getSemanticRuntimeStatus,
+  semanticRuntimeErrorDetails,
   semanticRuntimeErrorCode,
   semanticMetricExecutionCapability as runtimeMetricExecutionCapability,
   SemanticRuntimeRequiredError,
   testSemanticRuntimeDraft,
+  type SemanticRuntimeTrace,
   type SemanticRuntimeQueryRequest,
+  parseSemanticDimensionSelection,
 } from './semantic-runtime.js';
 import {
   getSemanticRuntimeSettings,
@@ -1907,10 +1912,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } : {}),
         ...(semanticLayer ? {
           semanticQueryCompiler: async (selection) => {
-            const compiled = await compileSemanticRuntimeQuery({
+            const requestedPath = decodeSemanticPathEvidenceId(request.selectedEvidenceId);
+            const semanticRequest: SemanticRuntimeQueryRequest = {
               ...selection,
               dimensions: selection.dimensions ?? [],
-            }, {
+            };
+            const compiled = await compileSemanticRuntimeQuery(requestedPath
+              ? applySemanticPathSelection(
+                  semanticRequest,
+                  requestedPath.authoringReference,
+                  requestedPath.entityPath,
+                )
+              : semanticRequest, {
               projectRoot,
               projectConfig,
               detectedProvider: semanticDetectedProvider,
@@ -1935,6 +1948,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   ? { timeDimension: compiled.effectiveRequest.timeDimension }
                   : {}),
               },
+              trace: compiled.semanticTrace,
             };
           },
         } : {}),
@@ -2465,6 +2479,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ? 'The governed query could not be executed.'
         : governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
+      ...(governedAnswer.clarificationOptions?.length
+        ? { clarificationOptions: governedAnswer.clarificationOptions }
+        : {}),
       status,
       trustState,
       stopReason,
@@ -2480,7 +2497,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // A refusal still keeps the DQL draft the answer loop produced (when any),
         // so the "Review DQL draft" next-action isn't a dead link and the user can
         // see the SQL that was about to run. Provider outages carry no draft.
-        ? (governedAnswer.dqlArtifact && !isProviderError && !isGroundingGap && !isModelDeclined && !isPolicyBlocked
+        ? (governedAnswer.semanticExecutionTrace
+            ? [agentRunArtifact(
+                'answer',
+                governedAnswer.refusalCode === 'ambiguous'
+                  ? 'Semantic path selection required'
+                  : 'Semantic compilation details',
+                governedAnswer,
+                undefined,
+                needsClarification ? 'not_applicable' : 'review_required',
+              )]
+            : governedAnswer.dqlArtifact && !isProviderError && !isGroundingGap && !isModelDeclined && !isPolicyBlocked
             ? [agentRunArtifact(
                 'dql_block_draft',
                 'DQL draft (review required)',
@@ -11752,6 +11779,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           joins: composed.joins,
           engine: composed.engine,
           effectiveRequest: composed.effectiveRequest,
+          runtimeRequest: composed.runtimeRequest,
+          semanticTrace: composed.semanticTrace,
+          warnings: composed.warnings,
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
@@ -11766,6 +11796,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
           code: runtimeCode,
+          details: semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
             : undefined,
@@ -11837,6 +11868,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tables: composed.tables,
           engine: composed.engine,
           effectiveRequest: composed.effectiveRequest,
+          runtimeRequest: composed.runtimeRequest,
+          semanticTrace: composed.semanticTrace,
+          warnings: composed.warnings,
           result: normalizeQueryResult(result),
         }));
       } catch (error) {
@@ -11846,6 +11880,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
           code: runtimeCode,
+          details: semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
             : undefined,
@@ -11947,6 +11982,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
           code: runtimeCode,
+          details: semanticRuntimeErrorDetails(error),
           hint: runtimeCode === 'SEMANTIC_RUNTIME_REQUIRED'
             ? 'Configure dbt Cloud Semantic Layer in Project & dbt settings, or install a compatible local MetricFlow runtime.'
             : undefined,
@@ -16822,6 +16858,9 @@ async function composeRuntimeSemanticQuery(
   tables: string[];
   engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
   effectiveRequest: SemanticRuntimeQueryRequest;
+  runtimeRequest?: SemanticRuntimeQueryRequest;
+  semanticTrace: SemanticRuntimeTrace;
+  warnings?: string[];
 } | null> {
   return compileSemanticRuntimeQuery(request, {
     projectRoot: context.projectRoot,
@@ -16838,13 +16877,18 @@ function composeRuntimeSemanticQueryNative(
   semanticLayer: SemanticLayer,
   context: { driver?: ConnectionConfig['driver']; tableMapping?: Record<string, string> },
 ): { sql: string; joins: string[]; tables: string[]; engine: 'native' } | null {
+  const stripPath = (value: string) => parseSemanticDimensionSelection(value).reference;
   const composed = semanticLayer.composeQuery({
     metrics: request.metrics,
-    dimensions: request.dimensions,
-    filters: request.filters as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
+    dimensions: request.dimensions.map(stripPath),
+    filters: request.filters?.map((filter) => filter.dimension
+      ? { ...filter, dimension: stripPath(filter.dimension) }
+      : filter) as Array<{ dimension: string; operator: string; values: string[] }> | undefined,
     limit: request.limit,
-    timeDimension: request.timeDimension,
-    orderBy: request.orderBy,
+    timeDimension: request.timeDimension
+      ? { ...request.timeDimension, name: stripPath(request.timeDimension.name) }
+      : undefined,
+    orderBy: request.orderBy?.map((order) => ({ ...order, name: stripPath(order.name) })),
     driver: context.driver,
     tableMapping: context.tableMapping,
   });
@@ -16904,8 +16948,8 @@ function composeSemanticBlockSql(
 
   const refValidation = semanticLayer.validateReferences([
     ...metrics,
-    ...config.dimensions,
-    ...(config.timeDimension ? [config.timeDimension] : []),
+    ...config.dimensions.map((dimension) => parseSemanticDimensionSelection(dimension).reference),
+    ...(config.timeDimension ? [parseSemanticDimensionSelection(config.timeDimension).reference] : []),
   ]);
   for (const unknown of refValidation.unknown) {
     diagnostics.push({

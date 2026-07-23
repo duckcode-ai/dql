@@ -470,9 +470,10 @@ describe("AgentRunEngine", () => {
       status: "blocked",
       stopReason: "blocked",
     });
-    expect(run.summary).toContain("ran out of time");
+    expect(run.summary).toContain("reached its time limit");
+    expect(run.summary).toContain("does not prove a cross-model join");
     expect(run.events.at(-1)?.type).toBe("run.failed");
-    expect(store.get("run-routing-timeout")?.summary).toContain("ran out of time");
+    expect(store.get("run-routing-timeout")?.summary).toContain("reached its time limit");
   });
 
   it("persists runs to a project-local file store", async () => {
@@ -1193,6 +1194,53 @@ describe("clarification continuations", () => {
     });
 
     const run = await engine.run({ question: "What is revenue?" });
+
+    expect(run.status).toBe("needs_clarification");
+    expect(run.clarificationOptions).toEqual(clarificationOptions);
+  });
+
+  it("AGT-014 preserves entity-path options discovered by the selected semantic executor", async () => {
+    const clarificationOptions = [{
+      id: "semantic-path:report_date:bcm_ccu_pc",
+      label: "Use Report Date via bcm_ccu_pc",
+      question: "Who are the top customers and what is their BCM this month?",
+      kind: "semantic_entity_path",
+    }];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-runtime-path-options",
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: "answer",
+          confidence: 0.9,
+          reason: "A governed semantic metric and dimension were resolved.",
+          requiresClarification: false,
+          meaningResolution: {
+            interpretedQuestion: "Who are the top customers and what is their BCM this month?",
+            questionType: "ranking",
+            selectedConceptIds: ["semantic:metric:total_bcm"],
+            recommendedExecutionId: "semantic:metric:total_bcm",
+            queryIntent: { measures: ["total_bcm"], dimensions: ["customer"], filters: [] },
+            rejectedCandidates: [],
+            confidence: "high",
+            missingInformation: [],
+            recommendedRoute: "semantic",
+          },
+        }),
+      },
+      executors: {
+        semantic_answer: () => ({
+          status: "needs_clarification",
+          trustState: "not_applicable",
+          stopReason: "needs_clarification",
+          answerRefusalCode: "ambiguous",
+          answer: "Choose the governed entity path for Report Date.",
+          clarificationOptions,
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "Who are the top customers and what is their BCM this month?" });
 
     expect(run.status).toBe("needs_clarification");
     expect(run.clarificationOptions).toEqual(clarificationOptions);

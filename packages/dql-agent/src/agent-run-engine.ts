@@ -167,6 +167,8 @@ export interface AgentRunClarificationOption {
   label: string;
   description?: string;
   kind?: string;
+  /** Question to resubmit while the stable option id carries the chosen binding. */
+  question?: string;
 }
 
 export interface AgentRunSelectedObject {
@@ -355,6 +357,8 @@ export interface AgentRouteExecutorResult {
   artifacts?: AgentRunArtifact[];
   evaluations?: AgentRunEvaluation[];
   nextActions?: AgentRunNextAction[];
+  /** Executor-discovered ambiguity options, such as MetricFlow entity paths. */
+  clarificationOptions?: AgentRunClarificationOption[];
   repairAttempts?: number;
 }
 
@@ -1190,6 +1194,7 @@ export class AgentRunEngine {
         }
 
         if (outcome.status === "blocked") break;
+        if (outcome.status === "needs_clarification") break;
         if (isTerminalSuccess(route, outcome)) break;
         // Otherwise continue to the next planned step (if any remain).
       }
@@ -1224,7 +1229,7 @@ export class AgentRunEngine {
       return run;
     } catch (err) {
       const message = err instanceof Error && err.name === "TimeoutError"
-        ? "I ran out of time building this query before it finished. This usually means the answer needs a cross-model join the governed semantic layer can't compose, so it fell to a full SQL build. Start Research for a longer run, lower the Thinking effort for faster steps, or narrow the question (fewer breakdowns/filters). Nothing was executed."
+        ? "This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry the same bounded question or use Research for a longer budget. No result was accepted."
         : err instanceof Error ? err.message : String(err);
       emit({
         type: "run.failed",
@@ -1355,8 +1360,9 @@ export class AgentRunEngine {
         resolveAudience(input.request),
         finalOutcome.status,
       ),
-      ...(finalOutcome.status === "needs_clarification" && input.routeDecision.clarificationOptions?.length
-        ? { clarificationOptions: input.routeDecision.clarificationOptions }
+      ...(finalOutcome.status === "needs_clarification"
+        && (finalResult.clarificationOptions?.length || input.routeDecision.clarificationOptions?.length)
+        ? { clarificationOptions: finalResult.clarificationOptions ?? input.routeDecision.clarificationOptions }
         : {}),
       repairAttempts: finalResult.repairAttempts ?? repairAttempts,
       escalationAttempts,

@@ -7521,6 +7521,21 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
         dimensions: [],
         timeDimension: { name: "metric_time", granularity: "day" },
       },
+      trace: {
+        version: 1 as const,
+        adapter: "dbt-cloud" as const,
+        status: "compiled" as const,
+        authoringRequest: { metrics: ["revenue_ratio"], dimensions: [] },
+        runtimeRequest: { metrics: ["revenue_ratio"], dimensions: [] },
+        bindings: [],
+        warnings: [],
+        steps: [
+          { id: "resolve_members" as const, label: "Resolve members", status: "completed" as const, detail: "Resolved." },
+          { id: "bind_entity_paths" as const, label: "Bind paths", status: "completed" as const, detail: "No path required." },
+          { id: "compile_semantic_query" as const, label: "Compile", status: "completed" as const, detail: "Compiled." },
+          { id: "execute_query" as const, label: "Execute", status: "not_started" as const, detail: "Not started." },
+        ],
+      },
     }));
 
     const result = await answer({
@@ -7545,6 +7560,11 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.dqlArtifact?.source).toContain('granularity = "day"');
     expect(result.evidence?.toolCalls?.some((call) =>
       call.name === "compile_semantic_query" && call.outputSummary?.includes("dbt-cloud"))).toBe(true);
+    expect(result.semanticExecutionTrace?.adapter).toBe("dbt-cloud");
+    expect(result.semanticExecutionTrace?.steps.at(-1)).toMatchObject({
+      id: "execute_query",
+      status: "completed",
+    });
   });
 
   it("AGT-005 does not re-plan or fall into exploratory SQL after an exact governed metric compiler failure", async () => {
@@ -7581,6 +7601,80 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.kind).toBe("no_answer");
     expect(result.refusalDetails?.code).toBe("semantic_runtime_required");
     expect(result.exploratoryCandidate).toBeUndefined();
+  });
+
+  it("AGT-014/API-007 returns runtime path ambiguity as a stable clarification instead of SQL fallback", async () => {
+    kg.rebuild([revenueMetric("revenue_ratio", "Revenue ratio")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: "revenue_ratio",
+        label: "Revenue Ratio",
+        description: "Revenue divided by target revenue.",
+        domain: "finance",
+        sql: "revenue_ratio",
+        type: "custom",
+        table: "",
+        metricType: "ratio",
+      }],
+      dimensions: [],
+    });
+    const candidate = {
+      id: "semantic-path:report_date:bcm_ccu_pc",
+      label: "Use Report Date via bcm_ccu_pc",
+      description: "Bind the governed member to bcm_ccu_pc__bcm_dtl__report_as_of_dt.",
+      authoringReference: "detail.report_date",
+      runtimeReference: "bcm_ccu_pc__bcm_dtl__report_as_of_dt",
+      entityPath: ["bcm_ccu_pc"],
+      selectionReference: "detail.report_date@via(bcm_ccu_pc)",
+    };
+    const trace = {
+      version: 1 as const,
+      adapter: "dbt-cloud" as const,
+      status: "ambiguous" as const,
+      authoringRequest: { metrics: ["revenue_ratio"], dimensions: ["detail.report_date"] },
+      runtimeRequest: { metrics: ["revenue_ratio"], dimensions: ["bcm_dtl__report_as_of_dt"] },
+      bindings: [],
+      warnings: [],
+      steps: [
+        { id: "resolve_members" as const, label: "Resolve members", status: "completed" as const, detail: "Resolved." },
+        { id: "bind_entity_paths" as const, label: "Bind paths", status: "failed" as const, detail: "Ambiguous." },
+        { id: "compile_semantic_query" as const, label: "Compile", status: "not_started" as const, detail: "Gated." },
+        { id: "execute_query" as const, label: "Execute", status: "not_started" as const, detail: "Nothing executed." },
+      ],
+      failure: {
+        code: "SEMANTIC_PATH_AMBIGUOUS",
+        phase: "path_binding",
+        message: "Choose a path.",
+        candidates: [candidate],
+      },
+    };
+    const compiler = vi.fn(async () => {
+      throw Object.assign(new Error("Choose the governed path for detail.report_date."), {
+        code: "SEMANTIC_PATH_AMBIGUOUS",
+        details: { candidates: [candidate], semanticTrace: trace },
+        semanticTrace: trace,
+      });
+    });
+    const executeGeneratedSql = vi.fn();
+
+    const result = await answer({
+      question: "what is the revenue ratio",
+      provider: new StubProvider([]),
+      kg,
+      semanticLayer,
+      semanticQueryCompiler: compiler,
+      executeGeneratedSql,
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.refusalCode).toBe("ambiguous");
+    expect(result.refusalDetails?.code).toBe("semantic_path_ambiguous");
+    expect(result.clarificationOptions).toEqual([expect.objectContaining({
+      id: candidate.id,
+      question: "what is the revenue ratio",
+    })]);
+    expect(result.semanticExecutionTrace).toEqual(trace);
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
   });
 
   it("stamps a certified-metric answer as 'reviewed' (verified), never 'certified'", async () => {

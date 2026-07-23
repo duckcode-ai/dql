@@ -34,6 +34,7 @@ import {
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
 import type { AgentProvider, AgentMessage, AgentToolDefinition } from './providers/types.js';
+import type { AgentRunClarificationOption } from './agent-run-engine.js';
 import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillMetricHints, buildSkillsPrompt, expandQuestionWithSkillVocabulary, selectRelevantSkills } from './skills/loader.js';
@@ -172,12 +173,139 @@ export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'sema
 export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
 export type AnalysisDepth = CascadeAnalysisDepth;
 
+export interface SemanticExecutionTrace {
+  version: 1;
+  adapter: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  status: 'compiled' | 'ambiguous' | 'failed';
+  authoringRequest: {
+    metrics: string[];
+    dimensions: string[];
+    filters?: Array<{ dimension?: string; operator?: string; values?: string[]; expression?: string }>;
+    timeDimension?: { name: string; granularity: string };
+    orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+    limit?: number;
+    savedQuery?: string;
+    engine?: string;
+  };
+  runtimeRequest?: {
+    metrics: string[];
+    dimensions: string[];
+    filters?: Array<{ dimension?: string; operator?: string; values?: string[]; expression?: string }>;
+    timeDimension?: { name: string; granularity: string };
+    orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;
+    limit?: number;
+    savedQuery?: string;
+    engine?: string;
+  };
+  bindings: Array<{
+    role: string;
+    authoringReference: string;
+    runtimeReference: string;
+    entityPath: string[];
+    status: 'resolved' | 'ambiguous';
+  }>;
+  warnings: string[];
+  steps: Array<{
+    id: string;
+    label: string;
+    status: 'completed' | 'failed' | 'not_started';
+    detail: string;
+  }>;
+  failure?: {
+    code: string;
+    phase: string;
+    message: string;
+    candidates?: Array<{
+      id: string;
+      label: string;
+      description?: string;
+      authoringReference: string;
+      runtimeReference: string;
+      entityPath: string[];
+      selectionReference: string;
+    }>;
+  };
+}
+
 export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Promise<{
   sql: string;
   engine: 'native' | 'metricflow-cli' | 'dbt-cloud';
   /** The compiler may add deterministic requirements such as metric_time. */
   selection?: SemanticMemberSelection;
+  /** Authoring identity, exact runtime binding, adapter, and compiler phases. */
+  trace?: SemanticExecutionTrace;
 }>;
+
+interface SemanticCompilerFailure {
+  message: string;
+  code?: string;
+  trace?: SemanticExecutionTrace;
+  candidates?: AgentRunClarificationOption[];
+}
+
+function semanticCompilerFailure(error: unknown): SemanticCompilerFailure {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const details = record?.details && typeof record.details === 'object'
+    ? record.details as Record<string, unknown>
+    : undefined;
+  const trace = record?.semanticTrace && typeof record.semanticTrace === 'object'
+    ? record.semanticTrace as SemanticExecutionTrace
+    : details?.semanticTrace && typeof details.semanticTrace === 'object'
+      ? details.semanticTrace as SemanticExecutionTrace
+      : undefined;
+  const rawCandidates = Array.isArray(details?.candidates)
+    ? details.candidates
+    : Array.isArray(trace?.failure?.candidates)
+      ? trace.failure.candidates
+      : [];
+  const candidates = rawCandidates.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const value = candidate as Record<string, unknown>;
+    if (typeof value.id !== 'string' || typeof value.label !== 'string') return [];
+    return [{
+      id: value.id,
+      label: value.label,
+      ...(typeof value.description === 'string' ? { description: value.description } : {}),
+      kind: 'semantic_entity_path',
+    }];
+  });
+  return {
+    message,
+    ...(typeof record?.code === 'string' ? { code: record.code } : {}),
+    ...(trace ? { trace } : {}),
+    ...(candidates.length > 0 ? { candidates } : {}),
+  };
+}
+
+function semanticTraceAfterExecution(
+  trace: SemanticExecutionTrace | undefined,
+  input: { executed: boolean; error?: string },
+): SemanticExecutionTrace | undefined {
+  if (!trace) return undefined;
+  const executionStatus = input.error ? 'failed' : input.executed ? 'completed' : 'not_started';
+  const executionDetail = input.error
+    ? `Warehouse execution failed: ${input.error}`
+    : input.executed
+      ? 'The authorized warehouse query executed and returned a result.'
+      : 'The compiler produced SQL, but execution was not requested.';
+  return {
+    ...trace,
+    status: input.error ? 'failed' : trace.status,
+    steps: trace.steps.map((step) => step.id === 'execute_query'
+      ? { ...step, status: executionStatus, detail: executionDetail }
+      : step),
+    ...(input.error
+      ? {
+          failure: {
+            code: 'EXECUTION_FAILED',
+            phase: 'execution',
+            message: input.error,
+          },
+        }
+      : {}),
+  };
+}
 
 /**
  * A generated query that was grounded in dbt metadata but cannot be executed as
@@ -224,6 +352,7 @@ export interface AgentRefusalDetails {
     | Extract<GovernedAnalyticalGraphCompileResult, { status: 'blocked' }>['code']
     | 'COMPILATION_FAILED'
     | 'EXECUTION_FAILED'
+    | 'semantic_path_ambiguous'
     | 'semantic_runtime_required';
   message: string;
   offending?: SqlContextValidationOffending;
@@ -706,6 +835,10 @@ export interface AgentAnswer {
   analyticalFreshnessObservation?: AnalyticalFreshnessObservationV1;
   /** Stable redacted diagnostics for the immutable failed analytical run. */
   analyticalFailure?: AnalyticalFailureV1;
+  /** Semantic member/path/compiler trace surfaced in How it was answered. */
+  semanticExecutionTrace?: SemanticExecutionTrace;
+  /** Runtime ambiguity choices discovered after the initial route decision. */
+  clarificationOptions?: AgentRunClarificationOption[];
   /** Compiler/result receipt for the authoritative governed relational lane. */
   governedCompilationReceipt?: GovernedCompilationReceipt;
   /** Multi-statement compilation receipt for a governed relational graph. */
@@ -2435,7 +2568,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let governedMetricAnswer = false;
   const semanticBridgeToolCalls: AgentEvidenceToolCall[] = [];
   let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
-  let semanticRuntimeFailure: string | undefined;
+  let semanticRuntimeFailure: SemanticCompilerFailure | undefined;
+  let semanticExecutionTrace: SemanticExecutionTrace | undefined;
   let semanticRuntimeCompiledAnswer = false;
   if (authoritativeSemanticBinding && input.semanticLayer) {
     const selection = authoritativeSemanticBinding.selection;
@@ -2449,6 +2583,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     if (!semanticBridgeAnswer && input.semanticQueryCompiler) {
       try {
         const compiled = await input.semanticQueryCompiler(selection);
+        semanticExecutionTrace = compiled.trace;
         semanticBridgeAnswer = composeSemanticQueryFromCompiledMembers({
           semanticLayer: input.semanticLayer,
           question,
@@ -2457,7 +2592,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         });
         semanticRuntimeCompiledAnswer = Boolean(semanticBridgeAnswer && compiled.engine !== 'native');
       } catch (error) {
-        semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
+        semanticRuntimeFailure = semanticCompilerFailure(error);
+        semanticExecutionTrace = semanticRuntimeFailure.trace;
       }
     }
     if (semanticBridgeAnswer) {
@@ -2469,7 +2605,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         order: 1,
       });
     } else if (!semanticRuntimeFailure) {
-      semanticRuntimeFailure = `The exact plan ${authoritativeSemanticBinding.planId} is not composable by the pinned semantic runtime.`;
+      semanticRuntimeFailure = {
+        message: `The exact plan ${authoritativeSemanticBinding.planId} is not composable by the pinned semantic runtime.`,
+      };
     }
   }
   if (!authoritativeSemanticBinding && input.semanticLayer && semanticMetricMatch) {
@@ -2500,6 +2638,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         const selection: SemanticMemberSelection = { metrics: [matchedName], dimensions: [] };
         try {
           const compiled = await input.semanticQueryCompiler(selection);
+          semanticExecutionTrace = compiled.trace;
           semanticBridgeAnswer = composeSemanticQueryFromCompiledMembers({
             semanticLayer: input.semanticLayer,
             question,
@@ -2517,7 +2656,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             });
           }
         } catch (error) {
-          semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
+          semanticRuntimeFailure = semanticCompilerFailure(error);
+          semanticExecutionTrace = semanticRuntimeFailure.trace;
         }
       }
     }
@@ -2551,6 +2691,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         if (!composed && input.semanticQueryCompiler) {
           try {
             const compiled = await input.semanticQueryCompiler(selection);
+            semanticExecutionTrace = compiled.trace;
             composed = composeSemanticQueryFromCompiledMembers({
               semanticLayer: bridgeLayer,
               question,
@@ -2568,7 +2709,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               });
             }
           } catch (error) {
-            semanticRuntimeFailure = error instanceof Error ? error.message : String(error);
+            semanticRuntimeFailure = semanticCompilerFailure(error);
+            semanticExecutionTrace = semanticRuntimeFailure.trace;
           }
         }
         return composed;
@@ -2624,7 +2766,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
   if (!semanticBridgeAnswer && semanticRuntimeFailure) {
-    const text = `The governed semantic metric was found, but its semantic runtime could not compile the request: ${compactSemanticRuntimeFailure(semanticRuntimeFailure)}`;
+    const isPathAmbiguity = semanticRuntimeFailure.code === 'SEMANTIC_PATH_AMBIGUOUS'
+      || semanticRuntimeFailure.trace?.failure?.code === 'SEMANTIC_PATH_AMBIGUOUS';
+    const text = isPathAmbiguity
+      ? semanticRuntimeFailure.message
+      : `The governed semantic metric was found, but its semantic runtime could not compile the request: ${compactSemanticRuntimeFailure(semanticRuntimeFailure.message)}`;
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -2633,10 +2779,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       confidence: 0,
       text,
       answer: text,
-      refusalCode: 'modeling_gap',
+      refusalCode: isPathAmbiguity ? 'ambiguous' : 'modeling_gap',
       // The answer shows the compact business-readable failure; the FULL compiler
       // output stays here for Inspect/debugging.
-      refusalDetails: { code: 'semantic_runtime_required', message: semanticRuntimeFailure },
+      refusalDetails: {
+        code: isPathAmbiguity ? 'semantic_path_ambiguous' : 'semantic_runtime_required',
+        message: semanticRuntimeFailure.message,
+      },
+      ...(semanticExecutionTrace ? { semanticExecutionTrace } : {}),
+      ...(semanticRuntimeFailure.candidates?.length
+        ? { clarificationOptions: semanticRuntimeFailure.candidates.map((candidate) => ({ ...candidate, question })) }
+        : {}),
       citations: [],
       memoryContext: input.memoryContext,
       evidence: buildNoAnswerEvidence({
@@ -3756,6 +3909,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
     const governedMetricExecutionFailure = governedMetricAnswer && Boolean(executionError);
+    const finalSemanticExecutionTrace = semanticTraceAfterExecution(semanticExecutionTrace, {
+      executed: Boolean(result),
+      ...(executionError ? { error: executionError } : {}),
+    });
     return {
       kind: governedMetricExecutionFailure ? 'no_answer' : 'uncertified',
       sourceTier: governedMetricExecutionFailure ? 'no_answer' : governedMetricAnswer ? 'semantic_layer' : activeTier,
@@ -3769,6 +3926,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       sql: parsed.sql,
       result,
       executionError,
+      ...(finalSemanticExecutionTrace ? { semanticExecutionTrace: finalSemanticExecutionTrace } : {}),
       ...(governedMetricExecutionFailure ? { refusalCode: 'grounding_gap' as const } : {}),
       suggestedViz: parsed.viz ?? 'table',
       dqlArtifact: answerDqlArtifact,
@@ -3982,6 +4140,7 @@ async function executeSemanticAnalyticalGraph(input: {
   const sourceResults: Record<string, AnalyticalSourceResult> = {};
   const compiledSql: string[] = [];
   const artifacts: DqlArtifactReference[] = [];
+  let semanticExecutionTrace: SemanticExecutionTrace | undefined;
   for (const invocation of input.binding.invocations) {
     let composed = composeSemanticQueryFromMembers({
       semanticLayer: layer,
@@ -3993,6 +4152,7 @@ async function executeSemanticAnalyticalGraph(input: {
     if (!composed && input.input.semanticQueryCompiler) {
       try {
         const compiled = await input.input.semanticQueryCompiler(invocation.selection);
+        semanticExecutionTrace = compiled.trace;
         composed = composeSemanticQueryFromCompiledMembers({
           semanticLayer: layer,
           question: input.input.question,
@@ -4000,6 +4160,30 @@ async function executeSemanticAnalyticalGraph(input: {
           sql: compiled.sql,
         });
       } catch (error) {
+        const failure = semanticCompilerFailure(error);
+        if (failure.candidates?.length) {
+          return {
+            kind: 'no_answer',
+            sourceTier: 'no_answer',
+            certification: 'analyst_review_required',
+            reviewStatus: 'none',
+            confidence: 0,
+            text: failure.message,
+            answer: failure.message,
+            refusalCode: 'ambiguous',
+            refusalDetails: { code: 'semantic_path_ambiguous', message: failure.message },
+            ...(failure.trace ? { semanticExecutionTrace: failure.trace } : {}),
+            clarificationOptions: failure.candidates.map((candidate) => ({
+              ...candidate,
+              question: input.input.question,
+            })),
+            analyticalExecutionGraph: input.graph,
+            citations: contextPackCitations(input.input.contextPack, 8),
+            considered: input.considered,
+            contextPack: input.input.contextPack,
+            providerUsed: input.providerName,
+          };
+        }
         return analyticalGraphFailureAnswer(
           input,
           'COMPILATION_FAILED',
@@ -4007,6 +4191,7 @@ async function executeSemanticAnalyticalGraph(input: {
           {
             phase: 'compilation',
             ...(compiledSql.length ? { compiledSql: renderAnalyticalStatements(compiledSql) } : {}),
+            ...(failure.trace ? { semanticExecutionTrace: failure.trace } : {}),
           },
         );
       }
@@ -4035,11 +4220,17 @@ async function executeSemanticAnalyticalGraph(input: {
     try {
       result = await executor();
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       return analyticalGraphFailureAnswer(
         input,
         'EXECUTION_FAILED',
-        error instanceof Error ? error.message : String(error),
-        { phase: 'execution', dqlArtifact: composed.dqlArtifact, compiledSql: composed.sql },
+        message,
+        {
+          phase: 'execution',
+          dqlArtifact: composed.dqlArtifact,
+          compiledSql: composed.sql,
+          semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: false, error: message }),
+        },
       );
     }
     const normalized = normalizeAnalyticalSourceResult({
@@ -4075,6 +4266,9 @@ async function executeSemanticAnalyticalGraph(input: {
       sql,
       ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
       analyticalExecutionGraph: input.graph,
+      ...(semanticExecutionTrace
+        ? { semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: false }) }
+        : {}),
       citations: contextPackCitations(input.input.contextPack, 8),
       considered: input.considered,
       contextPack: input.input.contextPack,
@@ -4117,6 +4311,9 @@ async function executeSemanticAnalyticalGraph(input: {
     analyticalExecutionReceipt: executed.receipt,
     analyticalFacts: story.factSet,
     analyticalNarrative: story.narrative,
+    ...(semanticExecutionTrace
+      ? { semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: true }) }
+      : {}),
     citations: contextPackCitations(input.input.contextPack, 8),
     considered: input.considered,
     contextPack: input.input.contextPack,
@@ -4347,6 +4544,7 @@ function analyticalGraphFailureAnswer(
     dqlArtifact?: DqlArtifactReference;
     compiledSql?: string;
     failedBindings?: AnalyticalFailedBindingInput[];
+    semanticExecutionTrace?: SemanticExecutionTrace;
   } = {},
 ): AgentAnswer {
   const analyticalFailure = analyticalFailureForInput(input.input, {
@@ -4374,6 +4572,7 @@ function analyticalGraphFailureAnswer(
     analyticalExecutionGraph: input.graph,
     ...(artifacts.compiledSql ? { proposedSql: artifacts.compiledSql, sql: artifacts.compiledSql } : {}),
     ...(artifacts.dqlArtifact ? { dqlArtifact: artifacts.dqlArtifact } : {}),
+    ...(artifacts.semanticExecutionTrace ? { semanticExecutionTrace: artifacts.semanticExecutionTrace } : {}),
     citations: contextPackCitations(input.input.contextPack, 8),
     considered: input.considered,
     contextPack: input.input.contextPack,

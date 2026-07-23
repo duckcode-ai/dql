@@ -272,7 +272,14 @@ to hand-written generated SQL or a guessed backing measure (`AGT-001`, `API-004`
 Repeated physical member names are not treated as globally interchangeable. A
 dimension such as `report_date` is resolved from the selected metric's owning
 semantic model (or an explicit model-scoped identity), and compiled SQL qualifies
-the corresponding relation alias. Generated SQL validation uses the active
+the corresponding relation alias. When the selected MetricFlow member has more
+than one valid metric-relative entity path, the selected semantic route stops
+before compilation and returns stable path choices. The chosen path is rebound
+to the same authoring identity on retry; it is not a new dimension match and it
+does not broaden to generated SQL. The semantic execution trace records the
+authoring request, exact runtime request, member/path bindings, selected adapter,
+compilation status, and execution status for Trust & Steps (`AGT-013`,
+`AGT-014`, `API-006`, `API-007`, `UI-012`, `UI-013`). Generated SQL validation uses the active
 warehouse dialect before any repair or refusal, so valid Snowflake/Databricks
 syntax is not rejected by a DuckDB/PostgreSQL parser (`AGT-001`, `AGT-012`).
 
