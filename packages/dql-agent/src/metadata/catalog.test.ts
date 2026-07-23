@@ -123,9 +123,9 @@ describe('local metadata catalog', () => {
       ?.payload?.analyticalCapability;
     expect(capability).toMatchObject({
       metricId: 'semantic:sales:revenue',
-      defaultResultGrainId: 'semantic:sales:entity:order',
+      defaultResultGrainId: 'semantic:sales:entity:orders.order',
       dimensions: [{
-        dimensionId: 'semantic:sales:dimension:customer_name',
+        dimensionId: 'semantic:sales:dimension:orders.customer_name',
         supportedRoles: ['group_by', 'filter', 'display'],
       }],
       supportedOutputKinds: ['dimension', 'metric_value'],

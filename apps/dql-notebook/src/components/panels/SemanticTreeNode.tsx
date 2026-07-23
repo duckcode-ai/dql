@@ -3,6 +3,7 @@ import type { Theme } from '../../themes/notebook-theme';
 
 interface SemanticTreeNodeProps {
   label: string;
+  secondaryLabel?: string;
   depth?: number;
   badge?: string;
   badgeColor?: string;
@@ -22,6 +23,7 @@ interface SemanticTreeNodeProps {
 
 export function SemanticTreeNode({
   label,
+  secondaryLabel,
   depth = 0,
   badge,
   badgeColor,
@@ -84,7 +86,14 @@ export function SemanticTreeNode({
       ) : (
         <span style={{ width: 10, flexShrink: 0 }} />
       )}
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {label}
+        {secondaryLabel && secondaryLabel !== label ? (
+          <span style={{ marginLeft: 5, color: t.textMuted, fontSize: 9.5, fontFamily: t.fontMono }}>
+            {secondaryLabel}
+          </span>
+        ) : null}
+      </span>
       {badge && (
         <span
           style={{

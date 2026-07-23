@@ -9,6 +9,7 @@ export {
   parseBlockCompanionDefinition,
   parseCubeDefinition,
   parseSemanticDisplayFormat,
+  semanticDimensionReference,
 } from './semantic-layer.js';
 export type {
   SemanticSourceMetadata,

@@ -6,6 +6,47 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.2 - 2026-07-23
+
+### Enterprise semantic identity and runtime authority
+
+This patch makes dbt semantic execution preserve the distinction between
+business labels, DQL's stable model-scoped identities, MetricFlow group-by
+names, and physical warehouse expressions.
+
+### Fixed
+
+- **Model-scoped semantic identity.** Repeated local dimension names remain
+  distinct across semantic models. DQL persists references such as
+  `customers.customer_name` and resolves a bare alias only when the selected
+  metric supplies an unambiguous model context.
+- **Adapter-bound qualification.** MetricFlow group-by names such as
+  `customer__customer_name` are derived only at the runtime boundary. Business
+  labels and physical SQL expressions are never substituted as semantic IDs.
+- **Runtime-first compilation.** A tested dbt Cloud or local MetricFlow adapter
+  produces the authoritative SQL for semantic notebook, Block Studio, preview,
+  and Ask execution. Once selected, adapter failures remain visible and never
+  silently downgrade to native SQL.
+- **Derived-metric execution.** Derived and other complex metrics route through
+  the selected full semantic runtime instead of failing in DQL's native
+  composer before that runtime is called.
+- **Transparent technical names.** The built semantic explorer displays both
+  the business label and exact dbt technical metric or group-by identifier,
+  while generated DQL retains the provider-neutral model-scoped reference.
+- **Stable failures and retrieval identity.** Import, compatibility, catalog,
+  knowledge-graph, and semantic-bridge paths now carry the same canonical
+  identity and preserve stable runtime error codes without invented fallback
+  objects.
+
+### Release exceptions
+
+- The semantic identity/runtime acceptance set is implementer-validated pending
+  independent verification. The maintainer approved this `v1.10.2` release
+  with that condition disclosed.
+- The existing tracked `PERF-001` latency exception remains unchanged:
+  enterprise-scale correctness passes, but this release makes no GA latency
+  claim.
+
 ## v1.10.1 - 2026-07-22
 
 ### Analytical composition and transparent repair

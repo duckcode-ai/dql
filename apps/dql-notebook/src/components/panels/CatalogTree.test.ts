@@ -3,11 +3,18 @@ import type { SemanticTreeNode } from '../../store/types';
 import type * as CatalogTreeModule from './CatalogTree';
 
 let dedupeSiblings: typeof CatalogTreeModule.dedupeSiblings;
+let semanticNodeIdentity: typeof CatalogTreeModule.semanticNodeIdentity;
+let semanticNodeRef: typeof CatalogTreeModule.semanticNodeRef;
+let semanticNodeTechnicalLabel: typeof CatalogTreeModule.semanticNodeTechnicalLabel;
 
 describe('dedupeSiblings', () => {
   beforeAll(async () => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
-    dedupeSiblings = (await import('./CatalogTree')).dedupeSiblings;
+    const module = await import('./CatalogTree');
+    dedupeSiblings = module.dedupeSiblings;
+    semanticNodeIdentity = module.semanticNodeIdentity;
+    semanticNodeRef = module.semanticNodeRef;
+    semanticNodeTechnicalLabel = module.semanticNodeTechnicalLabel;
   });
 
   it('merges same-label groups and drops leaves that insert the same reference', () => {
@@ -43,5 +50,39 @@ describe('dedupeSiblings', () => {
     };
     const [out] = dedupeSiblings([group]);
     expect(out.children).toHaveLength(2);
+  });
+
+  it('keeps repeated local dimensions distinct and exposes the dbt technical identifier', () => {
+    const group: SemanticTreeNode = {
+      id: 'g', label: 'Dimensions', kind: 'group',
+      children: [
+        {
+          id: 'dimension:orders.customer_name',
+          label: 'Customer',
+          kind: 'dimension',
+          meta: {
+            localName: 'customer_name',
+            reference: 'orders.customer_name',
+            qualifiedName: 'order__customer_name',
+          },
+        },
+        {
+          id: 'dimension:customers.customer_name',
+          label: 'Customer',
+          kind: 'dimension',
+          meta: {
+            localName: 'customer_name',
+            reference: 'customers.customer_name',
+            qualifiedName: 'customer__customer_name',
+          },
+        },
+      ],
+    };
+
+    const [out] = dedupeSiblings([group]);
+    expect(out.children).toHaveLength(2);
+    expect(semanticNodeIdentity(out.children![0])).toBe('orders.customer_name');
+    expect(semanticNodeRef(out.children![0])).toBe('@dim(orders.customer_name)');
+    expect(semanticNodeTechnicalLabel(out.children![0])).toBe('order__customer_name');
   });
 });

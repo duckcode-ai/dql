@@ -48,7 +48,9 @@ function selectedTimeGrains(
   if (!timeDimensionName) return ALL_TIME_GRAINS;
   const fromCompat = compatibleDimByName.get(timeDimensionName)?.granularities;
   if (fromCompat && fromCompat.length > 0) return fromCompat;
-  const fromCatalog = timeDimensions.find((d) => d.name === timeDimensionName)?.granularities;
+  const fromCatalog = timeDimensions.find((d) =>
+    (d.reference ?? d.name) === timeDimensionName || d.name === timeDimensionName
+  )?.granularities;
   if (fromCatalog && fromCatalog.length > 0) return fromCatalog;
   return ALL_TIME_GRAINS;
 }
@@ -685,7 +687,7 @@ export function BlockStudio() {
       if (isSemanticBlock) {
         handleDraftChange(upsertSemanticSelection(state.blockStudioDraft, {
           kind: item.kind === 'metric' ? 'metric' : 'dimension',
-          name: item.name,
+          name: item.kind === 'dimension' ? item.reference ?? item.name : item.name,
         }));
         setSemanticInsertChoice(null);
       } else {
@@ -2409,14 +2411,28 @@ function SemanticBlockBuilder({
     });
     return () => { cancelled = true; };
   }, [semanticLayer.dimensions, values.metrics.join('|'), compatibilityReloadKey]);
-  const compatibleNames = new Set(compatibleDimensions.map((dimension) => dimension.name));
+  const compatibleNames = new Set(compatibleDimensions.flatMap((dimension) => [
+    dimension.reference ?? dimension.name,
+    dimension.name,
+  ]));
   // A failed compatibility check must not read as "everything is incompatible":
   // when we have no fresh answer, treat all dimensions as selectable.
   const compatibilityUnknown = Boolean(compatibilityError) || (values.metrics.length > 0 && !compatibility && !loadingCompatibility);
-  const qualifiedByName = new Map(compatibleDimensions.map((d) => [d.name, d.qualifiedName ?? undefined] as const));
+  const qualifiedByName = new Map(compatibleDimensions.flatMap((dimension) => [
+    [dimension.reference ?? dimension.name, dimension.qualifiedName ?? undefined] as const,
+    [dimension.name, dimension.qualifiedName ?? undefined] as const,
+  ]));
   const reasonByName = new Map((compatibility?.incompatible ?? []).map((item) => [item.name, describeIncompatibility(item.reason)] as const));
-  const compatibleDimByName = new Map(compatibleDimensions.map((d) => [d.name, d] as const));
-  const allDimensions = Array.from(new Map([...semanticLayer.dimensions, ...semanticLayer.timeDimensions].map((dimension) => [dimension.name, dimension])).values());
+  const compatibleDimByName = new Map(compatibleDimensions.flatMap((dimension) => [
+    [dimension.reference ?? dimension.name, dimension] as const,
+    [dimension.name, dimension] as const,
+  ]));
+  const allDimensions = Array.from(new Map(
+    [...semanticLayer.dimensions, ...semanticLayer.timeDimensions].map((dimension) => {
+      const reference = dimension.reference ?? dimension.name;
+      return [reference, { ...dimension, name: reference }] as const;
+    }),
+  ).values());
   const compactInput = compactBuilderInputStyle(t);
   const [metricSearch, setMetricSearch] = useState('');
   const [dimensionSearch, setDimensionSearch] = useState('');
@@ -2496,8 +2512,15 @@ function SemanticBlockBuilder({
             <FieldLabel label="Time dimension" t={t}>
               <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={compactInput}>
                 <option value="">None</option>
-                {semanticLayer.timeDimensions.filter((dimension) => values.metrics.length === 0 || compatibilityUnknown || compatibleNames.has(dimension.name)).map((dimension) => (
-                  <option key={dimension.name} value={dimension.name}>{dimension.label || dimension.name}</option>
+                {semanticLayer.timeDimensions.filter((dimension) =>
+                  values.metrics.length === 0
+                  || compatibilityUnknown
+                  || compatibleNames.has(dimension.reference ?? dimension.name)
+                  || compatibleNames.has(dimension.name)
+                ).map((dimension) => (
+                  <option key={dimension.reference ?? dimension.name} value={dimension.reference ?? dimension.name}>
+                    {dimension.label || dimension.name} · {dimension.name}
+                  </option>
                 ))}
               </select>
             </FieldLabel>
@@ -5369,9 +5392,20 @@ function SemanticRow({
     );
   }
 
+  const reference = typeof node.meta?.reference === 'string'
+    ? node.meta.reference
+    : refName;
+  const technicalName = typeof node.meta?.localName === 'string'
+    ? node.meta.localName
+    : reference;
+  const technicalLabel = typeof node.meta?.cube === 'string'
+    && (node.kind === 'dimension' || node.kind === 'time_dimension')
+    ? `${technicalName} · ${node.meta.cube}`
+    : technicalName;
   return (
     <TreeRow
       label={node.label}
+      secondaryLabel={technicalLabel}
       depth={depth}
       badge={node.kind}
       selected={selectedId === node.id}
@@ -5714,14 +5748,18 @@ function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode 
 
   for (const dimension of layer.dimensions) {
     const domain = dimension.domain || 'uncategorized';
+    const reference = dimension.reference ?? dimension.name;
     pushToDomain(domain, {
-      id: `dimension:${dimension.name}`,
+      id: `dimension:${reference}`,
       label: dimension.label || dimension.name,
       kind: 'dimension',
       meta: {
         provider,
         domain,
-        cube: dimension.table,
+        cube: dimension.cube ?? dimension.table,
+        reference,
+        localName: dimension.name,
+        qualifiedName: dimension.qualifiedName ?? null,
         owner: dimension.owner ?? '',
         tags: dimension.tags.join(','),
       },
@@ -5730,11 +5768,21 @@ function buildFallbackSemanticTree(layer: SemanticLayerState): SemanticTreeNode 
 
   for (const dimension of layer.timeDimensions) {
     const domain = dimension.domain || 'uncategorized';
+    const reference = dimension.reference ?? dimension.name;
     pushToDomain(domain, {
-      id: `time_dimension:${dimension.name}`,
+      id: `time_dimension:${reference}`,
       label: dimension.label || dimension.name,
       kind: 'time_dimension',
-      meta: { provider, domain, cube: dimension.cube ?? dimension.table, owner: dimension.owner ?? '', tags: dimension.tags.join(',') },
+      meta: {
+        provider,
+        domain,
+        cube: dimension.cube ?? dimension.table,
+        reference,
+        localName: dimension.name,
+        qualifiedName: dimension.qualifiedName ?? null,
+        owner: dimension.owner ?? '',
+        tags: dimension.tags.join(','),
+      },
     });
   }
 

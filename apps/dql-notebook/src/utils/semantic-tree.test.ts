@@ -47,4 +47,59 @@ describe('buildSemanticTreeFromLayer', () => {
   it('returns no tree while the canonical catalog is empty', () => {
     expect(buildSemanticTreeFromLayer(layerWithMetrics(0))).toBeNull();
   });
+
+  it('preserves model-scoped dimension identities and dbt adapter aliases', () => {
+    const layer = layerWithMetrics(1);
+    layer.metrics[0].label = 'Gross revenue';
+    layer.metrics[0].name = 'gross_revenue';
+    layer.dimensions = [
+      {
+        name: 'customer_name',
+        reference: 'orders.customer_name',
+        canonicalId: 'dbt:dimension:orders:customer_name',
+        qualifiedName: 'order__customer_name',
+        entityLink: 'order',
+        label: 'Customer',
+        description: '',
+        sql: 'customer_name',
+        type: 'categorical',
+        table: 'orders',
+        cube: 'orders',
+        tags: [],
+        owner: null,
+      },
+      {
+        name: 'customer_name',
+        reference: 'customers.customer_name',
+        canonicalId: 'dbt:dimension:customers:customer_name',
+        qualifiedName: 'customer__customer_name',
+        entityLink: 'customer',
+        label: 'Customer',
+        description: '',
+        sql: 'customer_name',
+        type: 'categorical',
+        table: 'customers',
+        cube: 'customers',
+        tags: [],
+        owner: null,
+      },
+    ];
+
+    const tree = buildSemanticTreeFromLayer(layer);
+    const dimensions = tree?.children?.[0]?.children
+      ?.flatMap((domain) => domain.children ?? [])
+      .find((group) => group.label === 'Dimensions')
+      ?.children ?? [];
+
+    expect(dimensions.map((node) => node.id)).toEqual([
+      'dimension:customers.customer_name',
+      'dimension:orders.customer_name',
+    ]);
+    expect(dimensions[0].meta).toMatchObject({
+      localName: 'customer_name',
+      reference: 'customers.customer_name',
+      qualifiedName: 'customer__customer_name',
+      canonicalId: 'dbt:dimension:customers:customer_name',
+    });
+  });
 });

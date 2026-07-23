@@ -538,6 +538,71 @@ describe('SemanticLayer', () => {
       .toBe('analytics.usage_daily');
   });
 
+  it('ID-001/E2E-008 preserves every model-owned dimension identity in discovery and exact lookup', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'usage_daily', label: 'Usage daily', description: '', domain: 'usage',
+      sql: 'SELECT * FROM analytics.usage_daily', table: 'analytics.usage_daily',
+      measures: [],
+      dimensions: [],
+      timeDimensions: [{
+        name: 'report_date', label: 'Reporting date', description: '', sql: 'report_as_of_dt',
+        type: 'date', table: 'analytics.usage_daily', cube: 'usage_daily',
+        isTimeDimension: true, qualifiedName: 'usage__report_date', entityLink: 'usage',
+        granularities: ['day'],
+      }],
+      joins: [], segments: [], preAggregations: [],
+    });
+    layer.addCube({
+      name: 'account_snapshot', label: 'Account snapshot', description: '', domain: 'usage',
+      sql: 'SELECT * FROM analytics.account_snapshot', table: 'analytics.account_snapshot',
+      measures: [],
+      dimensions: [],
+      timeDimensions: [{
+        name: 'report_date', label: 'Snapshot date', description: '', sql: 'report_as_of_dt',
+        type: 'date', table: 'analytics.account_snapshot', cube: 'account_snapshot',
+        isTimeDimension: true, qualifiedName: 'account__report_date', entityLink: 'account',
+        granularities: ['day'],
+      }],
+      joins: [], segments: [], preAggregations: [],
+    });
+
+    expect(layer.listDimensions(undefined, { includeVariants: true }).map((dimension) => dimension.cube))
+      .toEqual(['usage_daily', 'account_snapshot']);
+    expect(layer.getDimension('usage_daily.report_date')?.qualifiedName).toBe('usage__report_date');
+    expect(layer.getDimension('account_snapshot.report_date')?.qualifiedName).toBe('account__report_date');
+    expect(layer.validateReferences(['usage_daily.report_date', 'account__report_date'])).toEqual({
+      valid: ['usage_daily.report_date', 'account__report_date'],
+      unknown: [],
+    });
+  });
+
+  it('AGT-010 resolves a repeated bare dimension relative to the selected metric model', () => {
+    const layer = new SemanticLayer({
+      metrics: [{
+        name: 'eu_gb_months_bcm_qty', label: 'EU GB Months BCM Qty', description: '', domain: 'usage',
+        sql: 'bcm_qty', type: 'sum', table: 'analytics.usage_daily', cube: 'usage_daily',
+      }],
+      dimensions: [
+        {
+          name: 'report_date', label: 'Usage reporting date', description: '', domain: 'usage',
+          sql: 'report_as_of_dt', type: 'date', table: 'analytics.usage_daily', cube: 'usage_daily',
+          qualifiedName: 'usage__report_date', entityLink: 'usage', isTimeDimension: true,
+        },
+        {
+          name: 'report_date', label: 'Account snapshot date', description: '', domain: 'usage',
+          sql: 'report_as_of_dt', type: 'date', table: 'analytics.account_snapshot', cube: 'account_snapshot',
+          qualifiedName: 'account__report_date', entityLink: 'account', isTimeDimension: true,
+        },
+      ],
+    });
+
+    expect(layer.resolveDimension('report_date', ['eu_gb_months_bcm_qty'])?.cube).toBe('usage_daily');
+    const compiled = layer.generateMetricSQL('eu_gb_months_bcm_qty', ['report_date']);
+    expect(compiled).toContain('FROM analytics.usage_daily');
+    expect(compiled).not.toContain('analytics.account_snapshot');
+  });
+
   it('refuses to natively compose a dbt derived metric without a physical table', () => {
     const layer = new SemanticLayer({
       metrics: [{

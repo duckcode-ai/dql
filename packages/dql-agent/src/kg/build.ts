@@ -632,7 +632,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
   if (!layer) return { nodes, edges };
 
   const semanticMeasures = layer.listMeasures();
-  const semanticDimensions = layer.listDimensions();
+  const semanticDimensions = layer.listDimensions(undefined, { includeVariants: true });
   const semanticModels = layer.listSemanticModels();
   const measuresByName = new Map<string, (typeof semanticMeasures)[number][]>();
   for (const measure of semanticMeasures) {
@@ -657,11 +657,14 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
     ]));
     const qualifiedDimensions = modelDimensionNames.map((name) => {
       const dimension = availableDimensions.find((candidate) => candidate.name === name);
-      return stringValue(semanticIdentityPayload('dimension', dimension ?? {
+      const identity = semanticIdentityPayload('dimension', dimension ?? {
         name,
         domain: metric.domain ?? model?.domain,
         cube: metric.cube,
-      }).qualifiedId) ?? qualifiedSemanticName(metric.cube, name);
+      });
+      return stringValue(identity.registryQualifiedId)
+        ?? stringValue(identity.qualifiedId)
+        ?? qualifiedSemanticName(metric.cube, name);
     });
     const hasTimeDimension = (model?.timeDimensions.length ?? 0) > 0
       || availableDimensions.some((dimension) => dimension.isTimeDimension || dimension.type === 'date');
@@ -941,7 +944,7 @@ function buildSemanticMetricCapability(input: {
       ? layer.getCube(metric.cube)
       : undefined;
   const registryDimensions = layer
-    .listDimensions()
+    .listDimensions(undefined, { includeVariants: true })
     .filter((dimension) => dimension.cube === metric.cube);
   const cubeDimensions = cube
     ? [...cube.dimensions, ...cube.timeDimensions]
@@ -976,14 +979,12 @@ function buildSemanticMetricCapability(input: {
   if (primaryEntities.length > 1) return undefined;
   const primaryEntity = primaryEntities[0];
   const primaryEntityId = primaryEntity
-    ? stringValue(semanticIdentityPayload("entity", primaryEntity).qualifiedId)
+    ? registrySemanticIdentity(semanticIdentityPayload("entity", primaryEntity))
     : modelId;
   if (!primaryEntityId) return undefined;
   const entityIds = new Map(
     scopedEntities.flatMap((entity) => {
-      const id = stringValue(
-        semanticIdentityPayload("entity", entity).qualifiedId,
-      );
+      const id = registrySemanticIdentity(semanticIdentityPayload("entity", entity));
       return id ? [[entity.name, id] as const] : [];
     }),
   );
@@ -1006,8 +1007,8 @@ function buildSemanticMetricCapability(input: {
 
   for (const name of declaredDimensionNames) {
     const dimension = dimensionsByName.get(name)!;
-    const dimensionId = stringValue(
-      semanticIdentityPayload("dimension", dimension).qualifiedId,
+    const dimensionId = registrySemanticIdentity(
+      semanticIdentityPayload("dimension", dimension),
     );
     if (!dimensionId) return undefined;
     const entityId: string | undefined = dimension.entityLink
@@ -1050,16 +1051,14 @@ function buildSemanticMetricCapability(input: {
     const dimension = dimensionsByName.get(raw);
     const id =
       dimension &&
-      stringValue(semanticIdentityPayload("dimension", dimension).qualifiedId);
+      registrySemanticIdentity(semanticIdentityPayload("dimension", dimension));
     return id ? [id] : [];
   });
   const aggregation = metric.aggregation ?? metric.type ?? metric.metricType;
   if (!aggregation) return undefined;
   const completenessPolicy = authoredCompletenessPolicy(metric);
   const measureIds = backingMeasures.flatMap((measure) => {
-    const id = stringValue(
-      semanticIdentityPayload("measure", measure).qualifiedId,
-    );
+    const id = registrySemanticIdentity(semanticIdentityPayload("measure", measure));
     return id ? [id] : [];
   });
   const additive = ["sum", "count"].includes(aggregation.toLowerCase());
@@ -1213,24 +1212,39 @@ function semanticIdentityPayload(
     ?? stringValue(dqlMeta.concept_id)
     ?? stringValue(dqlMeta.conceptId);
   const domain = normalizeSemanticIdentityPart(item.domain ?? item.cube ?? 'uncategorized');
+  const registryReference = item.cube
+    ? qualifiedSemanticName(item.cube, item.name)
+    : item.name;
   const localName = normalizeSemanticIdentityPart(item.name);
   const qualifiedId = authoredConceptId
     ?? (kind === 'metric'
       ? `semantic:${domain}:${localName}`
       : `semantic:${domain}:${kind}:${localName}`);
   const sourceNativeId = stringValue(item.source?.objectId);
+  const registryQualifiedId = kind === 'metric' || kind === 'saved_query' || kind === 'model'
+    ? qualifiedId
+    : `semantic:${domain}:${kind}:${normalizeSemanticIdentityPart(registryReference)}`;
   const aliases = Array.from(new Set([
     item.name,
     item.label,
     item.cube ? qualifiedSemanticName(item.cube, item.name) : undefined,
     sourceNativeId,
+    // Upgrade bridge: prior snapshots persisted this domain-scoped identity.
+    // It remains an exact alias, but only resolves when it is unique.
+    registryQualifiedId !== qualifiedId ? qualifiedId : undefined,
   ].filter((value): value is string => Boolean(value?.trim()))));
   return {
     qualifiedId,
+    registryQualifiedId,
     localId: item.name,
+    registryReference,
     sourceNativeId,
     aliases,
   };
+}
+
+function registrySemanticIdentity(identity: Record<string, unknown>): string | undefined {
+  return stringValue(identity.registryQualifiedId) ?? stringValue(identity.qualifiedId);
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

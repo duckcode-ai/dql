@@ -1,10 +1,11 @@
-import type {
-  BlockParameterDefinition,
-  ComposeQueryResult,
-  DimensionDefinition,
-  DqlArtifactReference,
-  MetricDefinition,
-  SemanticLayer,
+import {
+  semanticDimensionReference,
+  type BlockParameterDefinition,
+  type ComposeQueryResult,
+  type DimensionDefinition,
+  type DqlArtifactReference,
+  type MetricDefinition,
+  type SemanticLayer,
 } from '@duckcodeailabs/dql-core';
 import type { KGNode } from '../kg/types.js';
 import type { AnalysisQuestionPlan } from '../metadata/analysis-planner.js';
@@ -92,7 +93,7 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   if (!primaryMetric) return undefined;
 
   const timeDimension = selectTimeDimension(input.semanticLayer, input.question, input.questionPlan);
-  const allDimensions = input.semanticLayer.listDimensions();
+  const allDimensions = input.semanticLayer.listDimensions(undefined, { includeVariants: true });
   const dimensionSelection = selectDimensions(allDimensions, input.questionPlan, timeDimension?.name);
   const dimensions = dimensionSelection.dimensions;
   const relativeComparison = entityRelativeComparisonSpec(input, allDimensions, dimensions);
@@ -260,15 +261,45 @@ function resolveSemanticMemberSelection(
     .filter((metric): metric is NonNullable<typeof metric> => Boolean(metric));
   if (metrics.length === 0) return undefined;
 
-  const dimensionNames = new Set(semanticLayer.listDimensions().map((dimension) => dimension.name.toLowerCase()));
+  const selectedMetricNames = metrics.map((metric) => metric.name);
   const dimensions = uniqueStrings(selection.dimensions ?? [])
-    .map((name) => semanticLayer.listDimensions().find((dimension) => dimension.name.toLowerCase() === name.toLowerCase())?.name)
-    .filter((name): name is string => Boolean(name));
+    .map((name) => resolveSelectedDimension(semanticLayer, name, selectedMetricNames))
+    .filter((dimension): dimension is DimensionDefinition => Boolean(dimension))
+    .map(semanticDimensionReference);
+  const dimensionNames = new Set(
+    semanticLayer.listDimensions(undefined, { includeVariants: true }).flatMap((dimension) => [
+      dimension.name.toLowerCase(),
+      semanticDimensionReference(dimension).toLowerCase(),
+      dimension.qualifiedName?.toLowerCase(),
+    ].filter((value): value is string => Boolean(value))),
+  );
   // A hallucinated dimension is a hard miss — refuse rather than silently drop it.
   if ((selection.dimensions ?? []).some((name) => !dimensionNames.has(name.toLowerCase()))) return undefined;
-  const filters = (selection.filters ?? []).filter((filter) => dimensionNames.has(filter.dimension.toLowerCase()));
+  const filters = (selection.filters ?? []).flatMap((filter) => {
+    const dimension = resolveSelectedDimension(semanticLayer, filter.dimension, selectedMetricNames);
+    return dimension ? [{ ...filter, dimension: semanticDimensionReference(dimension) }] : [];
+  });
   if ((selection.filters ?? []).length > 0 && filters.length === 0) return undefined;
   return { metrics, dimensions, filters };
+}
+
+function resolveSelectedDimension(
+  semanticLayer: SemanticLayer,
+  reference: string,
+  metrics: string[],
+): DimensionDefinition | undefined {
+  if (typeof semanticLayer.resolveDimension === 'function') {
+    return semanticLayer.resolveDimension(reference, metrics);
+  }
+  // Compatibility for test/dry-run adapters implementing the older minimal
+  // SemanticLayer surface. Production layers always use the metric-aware core
+  // resolver above.
+  const normalized = reference.toLowerCase();
+  return semanticLayer.listDimensions().find((dimension) =>
+    dimension.name.toLowerCase() === normalized
+    || semanticDimensionReference(dimension).toLowerCase() === normalized
+    || dimension.qualifiedName?.toLowerCase() === normalized,
+  );
 }
 
 function requiresEntityRelativeMeasureComparison(question: string): boolean {

@@ -23,6 +23,12 @@ export interface NotebookExecutionPlan {
 
 export interface BuildExecutionPlanOptions {
   semanticLayer?: SemanticLayer;
+  /**
+   * SQL compiled by the already-selected semantic adapter. When present it is
+   * authoritative; notebook planning only adds chart, parameter, variable, and
+   * test metadata and must not try a second native semantic compilation.
+   */
+  semanticSql?: string;
   /** Driver name for SQL dialect selection (e.g. 'snowflake', 'bigquery'). */
   driver?: string;
   /** Maps semantic table names to actual database table names, e.g. order_items -> dev.order_items. */
@@ -73,7 +79,14 @@ export function buildExecutionPlan(
 
   // Semantic blocks: compose SQL from the semantic layer
   if (block.blockType === 'semantic') {
-    return buildSemanticPlan(block, options?.semanticLayer, options?.driver, options?.tableMapping, options?.parameters);
+    return buildSemanticPlan(
+      block,
+      options?.semanticLayer,
+      options?.driver,
+      options?.tableMapping,
+      options?.parameters,
+      options?.semanticSql,
+    );
   }
 
   if (block.blockType !== 'custom') {
@@ -173,6 +186,7 @@ function buildSemanticPlan(
   driver?: string,
   tableMapping?: Record<string, string>,
   parameters?: Record<string, unknown>,
+  semanticSql?: string,
 ): NotebookExecutionPlan {
   if (!semanticLayer) {
     throw new Error(
@@ -213,19 +227,21 @@ function buildSemanticPlan(
   }
 
   const runtimeBindings = blockSemanticRuntimeBindings(block, parameters);
-  const composed = semanticLayer.composeQuery({
-    metrics,
-    dimensions,
-    ...(block.timeDimension && block.granularity
-      ? { timeDimension: { name: block.timeDimension, granularity: block.granularity } }
-      : {}),
-    ...(runtimeBindings.filters.length > 0 ? { filters: runtimeBindings.filters } : {}),
-    ...((runtimeBindings.limit ?? block.limit) !== undefined
-      ? { limit: runtimeBindings.limit ?? block.limit }
-      : {}),
-    driver,
-    tableMapping,
-  });
+  const composed = semanticSql
+    ? { sql: semanticSql }
+    : semanticLayer.composeQuery({
+        metrics,
+        dimensions,
+        ...(block.timeDimension && block.granularity
+          ? { timeDimension: { name: block.timeDimension, granularity: block.granularity } }
+          : {}),
+        ...(runtimeBindings.filters.length > 0 ? { filters: runtimeBindings.filters } : {}),
+        ...((runtimeBindings.limit ?? block.limit) !== undefined
+          ? { limit: runtimeBindings.limit ?? block.limit }
+          : {}),
+        driver,
+        tableMapping,
+      });
   if (!composed) {
     // Distinguish the three real causes instead of sending users to check
     // definitions that are usually fine: (a) the metric genuinely is not

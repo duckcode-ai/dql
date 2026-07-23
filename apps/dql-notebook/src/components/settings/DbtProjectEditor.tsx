@@ -396,7 +396,7 @@ export function DbtProjectEditor({
         <div>
           <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Semantic execution adapters</div>
           <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5 }}>
-            Adapter code is included with DQL. Auto uses dbt Cloud when tested, then local MetricFlow, and safely falls back to the native compiler for simple metrics.
+            Adapter code is included with DQL. Auto selects one ready adapter in priority order: dbt Cloud, local MetricFlow, then native for simple metrics. Once selected, an adapter failure is shown directly and never silently downgraded.
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
             <label style={{ fontSize: 11, fontWeight: 700, color: t.textSecondary }}>Preferred runtime</label>

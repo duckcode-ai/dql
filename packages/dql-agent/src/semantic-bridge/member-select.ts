@@ -7,7 +7,7 @@
  * on any parse/shape failure so the caller falls through to metric-first /
  * generation.
  */
-import type { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { semanticDimensionReference, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import type { ReasoningEffort } from '../providers/reasoning-effort.js';
 import type { SemanticBridgeFilter, SemanticMemberSelection } from './compose.js';
@@ -33,8 +33,12 @@ export async function selectSemanticMembersViaLlm(input: {
     ? rankedRealMetrics
     : rankMembersForQuestion(input.semanticLayer.listMetrics(), input.question);
   if (metrics.length === 0) return undefined;
-  const dimensions = rankMembersForQuestion(input.semanticLayer.listDimensions(), input.question);
-  const rawTimeDimensions = input.semanticLayer.listTimeDimensions?.() ?? dimensions.filter((dimension) => dimension.isTimeDimension);
+  const dimensions = rankMembersForQuestion(
+    input.semanticLayer.listDimensions(undefined, { includeVariants: true }),
+    input.question,
+  );
+  const rawTimeDimensions = input.semanticLayer.listTimeDimensions?.(undefined, { includeVariants: true })
+    ?? dimensions.filter((dimension) => dimension.isTimeDimension);
   const timeDimensions = rankMembersForQuestion(rawTimeDimensions, input.question);
   const visibleMetrics = metrics.slice(0, 60);
 
@@ -50,18 +54,19 @@ export async function selectSemanticMembersViaLlm(input: {
   for (const metricName of candidateMetricNames) {
     try {
       for (const dim of input.semanticLayer.explainCompatibleDimensions([metricName]).compatible) {
-        if (!compatibleByName.has(dim.name)) compatibleByName.set(dim.name, dim.qualifiedName);
+        const reference = semanticDimensionReference(dim);
+        if (!compatibleByName.has(reference)) compatibleByName.set(reference, dim.qualifiedName);
       }
     } catch { /* compatibility is best-effort; fall back to the full list below */ }
   }
   const restrictToCompatible = compatibleByName.size > 0;
   const keepDimension = (name: string): boolean => !restrictToCompatible || compatibleByName.has(name);
-  const visibleDimensions = dimensions.filter((dimension) => keepDimension(dimension.name)).slice(0, 80);
-  const visibleTimeDimensions = timeDimensions.filter((dimension) => keepDimension(dimension.name)).slice(0, 20);
+  const visibleDimensions = dimensions.filter((dimension) => keepDimension(semanticDimensionReference(dimension))).slice(0, 80);
+  const visibleTimeDimensions = timeDimensions.filter((dimension) => keepDimension(semanticDimensionReference(dimension))).slice(0, 20);
   // Real per-column grains so the model picks a grain the column actually
   // supports (a month-grain column cannot be sliced by day).
   const grainsFor = (dimension: typeof visibleTimeDimensions[number]): string[] =>
-    input.semanticLayer.getTimeDimension?.(dimension.name)?.granularities ?? [];
+    input.semanticLayer.getTimeDimension?.(semanticDimensionReference(dimension))?.granularities ?? [];
 
   const catalog = [
     'METRICS:',
@@ -69,14 +74,22 @@ export async function selectSemanticMembersViaLlm(input: {
     restrictToCompatible
       ? 'DIMENSIONS (only those groupable by the metrics above — do not use any other):'
       : 'DIMENSIONS:',
-    ...visibleDimensions.map((dimension) => `- ${dimension.name}${dimension.label && dimension.label !== dimension.name ? ` (${dimension.label})` : ''}`),
+    ...visibleDimensions.map((dimension) => {
+      const reference = semanticDimensionReference(dimension);
+      return `- ${reference}${dimension.label && dimension.label !== dimension.name ? ` (${dimension.label}; local: ${dimension.name})` : ` (local: ${dimension.name})`}`;
+    }),
     ...(visibleTimeDimensions.length > 0 ? ['TIME DIMENSIONS (use for grain):', ...visibleTimeDimensions.map((dimension) => {
       const grains = grainsFor(dimension);
-      return `- ${dimension.name}${grains.length > 0 ? ` [grains: ${grains.join(', ')}]` : ''}`;
+      return `- ${semanticDimensionReference(dimension)}${grains.length > 0 ? ` [grains: ${grains.join(', ')}]` : ''}`;
     })] : []),
   ].join('\n');
 
-  const requiredDims = (input.requireDimensions ?? []).filter((name) => keepDimension(name));
+  const requiredDims = (input.requireDimensions ?? [])
+    .map((name) => {
+      const resolved = input.semanticLayer.resolveDimension(name, candidateMetricNames);
+      return resolved ? semanticDimensionReference(resolved) : name;
+    })
+    .filter((name) => keepDimension(name));
   const messages: AgentMessage[] = [
     {
       role: 'system',
@@ -106,8 +119,8 @@ export async function selectSemanticMembersViaLlm(input: {
   // complete catalog. A real-but-unseen member is still an invented selection
   // for this call and must be rejected at the resolver boundary.
   const metricNames = new Set(visibleMetrics.map((metric) => metric.name));
-  const dimensionNames = new Set(visibleDimensions.map((dimension) => dimension.name));
-  const timeDimensionNames = new Set(visibleTimeDimensions.map((dimension) => dimension.name));
+  const dimensionNames = new Set(visibleDimensions.map(semanticDimensionReference));
+  const timeDimensionNames = new Set(visibleTimeDimensions.map(semanticDimensionReference));
   const selectedMetrics = Array.isArray(record.metrics)
     ? record.metrics.filter((value): value is string => typeof value === 'string' && metricNames.has(value))
     : [];

@@ -1666,6 +1666,32 @@ export function buildMetadataSnapshot(
 function addCertifiedBlockAnalyticalCapabilities(
   objects: Map<string, MetadataObject>,
 ): void {
+  // Existing certified blocks can carry the pre-ID-001 domain-scoped member
+  // identities. Canonicalize those aliases only when exactly one semantic
+  // object owns them; repeated leaf aliases intentionally fail closed.
+  const semanticIdentityTargets = new Map<string, Set<string>>();
+  for (const object of objects.values()) {
+    if (!object.objectType.startsWith('semantic_')) continue;
+    const payload = object.payload ?? {};
+    const canonicalIdentity = object.fullName ?? object.name;
+    for (const identity of uniqueNonBlank([
+      canonicalIdentity,
+      stringValue(payload.qualifiedId),
+      stringValue(payload.registryQualifiedId),
+      stringValue(payload.sourceNativeId),
+      ...metadataStringArray(payload.aliases),
+    ])) {
+      const targets = semanticIdentityTargets.get(identity) ?? new Set<string>();
+      targets.add(canonicalIdentity);
+      semanticIdentityTargets.set(identity, targets);
+    }
+  }
+  const canonicalizeSemanticRef = (identity: string): string | undefined => {
+    const targets = semanticIdentityTargets.get(identity);
+    if (!targets) return identity;
+    return targets.size === 1 ? [...targets][0] : undefined;
+  };
+
   const semanticCapabilities = [...objects.values()].flatMap((object) => {
     if (object.objectType !== "semantic_metric") return [];
     const capability = normalizeMetricCapabilityContract(
@@ -1703,17 +1729,23 @@ function addCertifiedBlockAnalyticalCapabilities(
     );
     if (metrics.length !== 1) continue;
     const semantic = metrics[0]!;
-    const grain = stringValue(payload.grain);
+    const authoredGrain = stringValue(payload.grain);
+    const grain = authoredGrain ? canonicalizeSemanticRef(authoredGrain) : undefined;
     if (!grain || !semantic.capability.resultGrainIds.includes(grain)) continue;
 
-    const groupedRefs = uniqueNonBlank([
+    const authoredGroupedRefs = uniqueNonBlank([
       ...metadataStringArray(payload.dimensions),
       ...metadataStringArray(payload.dimensionsRef),
     ]);
-    const filterRefs = uniqueNonBlank(
+    const authoredFilterRefs = uniqueNonBlank(
       metadataStringArray(payload.allowedFilters),
     );
-    const declaredRefs = new Set([...groupedRefs, ...filterRefs]);
+    const groupedRefs = authoredGroupedRefs.map(canonicalizeSemanticRef);
+    const filterRefs = authoredFilterRefs.map(canonicalizeSemanticRef);
+    if (groupedRefs.some((ref) => !ref) || filterRefs.some((ref) => !ref)) continue;
+    const canonicalGroupedRefs = groupedRefs.filter((ref): ref is string => Boolean(ref));
+    const canonicalFilterRefs = filterRefs.filter((ref): ref is string => Boolean(ref));
+    const declaredRefs = new Set([...canonicalGroupedRefs, ...canonicalFilterRefs]);
     const capabilityDimensionIds = new Set(
       semantic.capability.dimensions.map((item) => item.dimensionId),
     );
@@ -1732,14 +1764,14 @@ function addCertifiedBlockAnalyticalCapabilities(
         if (!declaredRefs.has(dimension.dimensionId)) return [];
         const roles = dimension.supportedRoles.filter(
           (role) =>
-            (role === "filter" && filterRefs.includes(dimension.dimensionId)) ||
+            (role === "filter" && canonicalFilterRefs.includes(dimension.dimensionId)) ||
             (role === "group_by" &&
-              groupedRefs.includes(dimension.dimensionId)) ||
+              canonicalGroupedRefs.includes(dimension.dimensionId)) ||
             (role === "display" &&
-              groupedRefs.includes(dimension.dimensionId)) ||
+              canonicalGroupedRefs.includes(dimension.dimensionId)) ||
             (role === "rank_entity" &&
               payload.pattern === "ranking" &&
-              groupedRefs.includes(dimension.dimensionId)),
+              canonicalGroupedRefs.includes(dimension.dimensionId)),
         );
         return roles.length > 0
           ? [{ ...dimension, supportedRoles: roles }]
@@ -1765,8 +1797,8 @@ function addCertifiedBlockAnalyticalCapabilities(
     )
       continue;
     const operations: MetricCapabilityContract["operations"] = [];
-    if (filterRefs.length > 0) operations.push("filter");
-    if (groupedRefs.some((id) => capabilityDimensionIds.has(id)))
+    if (canonicalFilterRefs.length > 0) operations.push("filter");
+    if (canonicalGroupedRefs.some((id) => capabilityDimensionIds.has(id)))
       operations.push("group");
     if (payload.pattern === "trend") operations.push("trend");
     if (payload.pattern === "ranking" && outputs.kinds.includes("rank"))
@@ -1784,8 +1816,8 @@ function addCertifiedBlockAnalyticalCapabilities(
           blockId,
           metricRefs,
           grain,
-          groupedRefs,
-          filterRefs,
+          groupedRefs: canonicalGroupedRefs,
+          filterRefs: canonicalFilterRefs,
           outputs,
         }),
       );
@@ -3610,6 +3642,8 @@ function isQualifiedDqlModelingNode(node: KGNode): boolean {
 
 function qualifiedIdentityFromKGNode(node: KGNode): string | undefined {
   const payload = node.payload ?? {};
+  const registryIdentity = stringValue(payload.registryQualifiedId);
+  if (registryIdentity) return registryIdentity;
   const explicit = stringValue(payload.qualifiedId);
   if (explicit) return explicit;
   if (!isQualifiedDqlModelingNode(node)) return undefined;

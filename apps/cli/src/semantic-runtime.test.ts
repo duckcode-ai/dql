@@ -8,6 +8,7 @@ import {
   compileSemanticRuntimeQuery,
   getSemanticRuntimeStatus,
   normalizeSemanticRuntimeQueryRequest,
+  selectSemanticRuntimeAdapters,
 } from './semantic-runtime.js';
 import { managedMetricFlowBin } from './metricflow.js';
 
@@ -50,6 +51,26 @@ function layer(): SemanticLayer {
 }
 
 describe('shared semantic runtime selector', () => {
+  it('AGT-013/SEC-004 locks automatic execution to the selected adapter', () => {
+    expect(selectSemanticRuntimeAdapters(undefined, 'dbt-cloud')).toEqual(['dbt-cloud']);
+    expect(selectSemanticRuntimeAdapters(undefined, 'metricflow-cli')).toEqual(['metricflow-cli']);
+    expect(selectSemanticRuntimeAdapters(undefined, 'native')).toEqual(['native']);
+    expect(selectSemanticRuntimeAdapters('native', 'dbt-cloud')).toEqual(['native']);
+  });
+
+  it('AGT-014 keeps an unavailable explicit adapter selected instead of silently downgrading', async () => {
+    const { saveSemanticRuntimePreference } = await import('./semantic-runtime-settings.js');
+    saveSemanticRuntimePreference(root, 'metricflow-cli');
+    const status = await getSemanticRuntimeStatus(root);
+    expect(status.active).toBe('metricflow-cli');
+    expect(status.adapters.find((adapter) => adapter.id === 'metricflow-cli')?.ready).toBe(false);
+    await expect(compileSemanticRuntimeQuery({ metrics: ['revenue'], dimensions: [] }, {
+      projectRoot: root,
+      projectConfig: {},
+      semanticLayer: layer(),
+    })).rejects.toMatchObject({ code: 'SEMANTIC_RUNTIME_REQUIRED' });
+  });
+
   it('API-004/AGT-001 adds metric_time at the offset grain without overriding an explicit time selection', () => {
     expect(normalizeSemanticRuntimeQueryRequest({
       metrics: ['previous_day_revenue'],
@@ -96,6 +117,33 @@ describe('shared semantic runtime selector', () => {
       semanticLayer: layer(),
     });
     expect(result).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
+  });
+
+  it('API-007 preserves a selected runtime compiler failure as a stable error', async () => {
+    mkdirSync(join(root, 'target'), { recursive: true });
+    writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
+    const bin = join(root, 'mf');
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then printf "%s\\n" "0.13.0"; exit 0; fi',
+      'printf "%s\\n" "Unknown metric eu_gb_months_bcm_qty" >&2',
+      'exit 1',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+
+    await expect(compileSemanticRuntimeQuery({
+      metrics: ['eu_gb_months_bcm_qty'],
+      dimensions: [],
+    }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.' } },
+      detectedProvider: 'dbt',
+      semanticLayer: layer(),
+    })).rejects.toMatchObject({
+      code: 'SEMANTIC_COMPILATION_FAILED',
+      adapter: 'metricflow-cli',
+    });
   });
 
   it('API-004/E2E-008 passes the inferred metric_time group-by to MetricFlow for an offset metric', async () => {
@@ -237,6 +285,24 @@ describe('qualifyForMetricFlow (Phase 3 boundary)', () => {
     }, bcmLayer());
     expect(request.dimensions).toEqual(['not_a_dim', 'bcm_hdr__customer_name']);
     expect(request.timeDimension?.name).toBe('metric_time');
+  });
+
+  it('AGT-010/E2E-008 maps a model-scoped identity to the owning MetricFlow group-by', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: 'total_bcm', label: 'Total BCM', description: '', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr', objectKind: 'metric' },
+      ],
+      dimensions: [
+        { name: 'report_date', label: 'Header report date', description: '', sql: 'report_as_of_dt', type: 'date', table: 'bcm_hdr', cube: 'bcm_hdr', qualifiedName: 'bcm_hdr__report_date', entityLink: 'bcm_hdr', isTimeDimension: true },
+        { name: 'report_date', label: 'Line report date', description: '', sql: 'report_as_of_dt', type: 'date', table: 'bcm_line', cube: 'bcm_line', qualifiedName: 'bcm_line__report_date', entityLink: 'bcm_line', isTimeDimension: true },
+      ],
+    });
+    const { qualifyForMetricFlow } = await import('./semantic-runtime.js');
+    const { request } = qualifyForMetricFlow({
+      metrics: ['total_bcm'],
+      dimensions: ['bcm_hdr.report_date'],
+    }, semanticLayer);
+    expect(request.dimensions).toEqual(['bcm_hdr__report_date']);
   });
 });
 

@@ -745,6 +745,10 @@ export interface SemanticMeasure {
 
 export interface SemanticDimension {
   name: string;
+  /** Provider-neutral model-scoped identity persisted in DQL. */
+  reference?: string;
+  /** Stable snapshot/search identity. */
+  canonicalId?: string;
   label: string;
   description: string;
   domain?: string;
@@ -757,6 +761,8 @@ export interface SemanticDimension {
   isTimeDimension?: boolean;
   /** MetricFlow-qualified group-by name (`<entity>__<name>`), when known. */
   qualifiedName?: string | null;
+  /** Owning MetricFlow entity, used to explain adapter qualification. */
+  entityLink?: string | null;
   /** Real queryable grains for a time dimension. */
   granularities?: string[] | null;
   typeParams?: Record<string, unknown> | null;
@@ -842,6 +848,9 @@ export interface SemanticObjectDetail {
   table?: string;
   sql?: string;
   type?: string;
+  reference?: string;
+  qualifiedName?: string;
+  entityLink?: string;
   tags: string[];
   owner: string | null;
   source: {

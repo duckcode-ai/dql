@@ -163,6 +163,29 @@ describe('semantic block compose failures (honest reasons)', () => {
     }, { semanticLayer })).toThrow(/derived metric DQL cannot compose natively.*MetricFlow/);
   });
 
+  it('API-006/E2E-008 accepts authoritative SQL from the selected semantic runtime', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'previous_day_bcm', label: 'Previous Day BCM', description: '', domain: 'usage',
+        sql: 'previous_day_bcm', type: 'custom', table: '', metricType: 'derived',
+        typeParams: { metrics: [{ name: 'bcm' }] },
+      }],
+      dimensions: [],
+    });
+
+    const plan = buildExecutionPlan({
+      id: 'cell-derived-runtime',
+      type: 'dql',
+      title: 'Previous Day BCM',
+      source: semanticBlockSource('previous_day_bcm'),
+    }, {
+      semanticLayer,
+      semanticSql: 'SELECT previous_day_bcm FROM metricflow_compiled',
+    });
+
+    expect(plan?.sql).toBe('SELECT previous_day_bcm FROM metricflow_compiled');
+  });
+
   it('says the metric is undefined when it really is missing', () => {
     const semanticLayer = new SemanticLayer({ metrics: [], dimensions: [] });
     expect(() => buildExecutionPlan({

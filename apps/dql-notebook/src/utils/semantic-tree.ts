@@ -39,13 +39,22 @@ export function buildSemanticTreeFromLayer(layer: SemanticLayerState): SemanticT
       const domain = String(item.domain || 'uncategorized');
       const domainGroups = domains.get(domain) ?? new Map<string, SemanticTreeNode[]>();
       const entries = domainGroups.get(group.label) ?? [];
+      const localName = String(item.name);
+      const reference = group.kind === 'dimension' || group.kind === 'time_dimension'
+        ? String(item.reference || item.name)
+        : localName;
       entries.push({
-        id: `${group.kind}:${item.name}`,
+        id: `${group.kind}:${reference}`,
         label: String(item.label || item.name),
         kind: group.kind,
         meta: {
           provider,
           domain,
+          localName,
+          reference,
+          ...(item.canonicalId ? { canonicalId: String(item.canonicalId) } : {}),
+          ...(item.qualifiedName ? { qualifiedName: String(item.qualifiedName) } : {}),
+          ...(item.entityLink ? { entityLink: String(item.entityLink) } : {}),
           ...(item.table ? { table: String(item.table) } : {}),
           ...(item.cube ? { cube: String(item.cube) } : {}),
           ...(item.owner ? { owner: String(item.owner) } : {}),
@@ -76,7 +85,8 @@ export function buildSemanticTreeFromLayer(layer: SemanticLayerState): SemanticT
           kind: 'group' as const,
           count: items.length,
           meta: { provider, domain, objectKind: group.kind },
-          children: items.sort((left, right) => left.label.localeCompare(right.label)),
+          children: items.sort((left, right) =>
+            left.label.localeCompare(right.label) || left.id.localeCompare(right.id)),
         }];
       }),
     }));

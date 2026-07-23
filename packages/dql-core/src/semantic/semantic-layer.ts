@@ -72,11 +72,11 @@ export interface DimensionDefinition {
   expr?: string;
   isTimeDimension?: boolean;
   /**
-   * Canonical MetricFlow group-by identity for this dimension, single-hop:
+   * MetricFlow adapter group-by reference for this dimension, single-hop:
    * `<primaryEntity>__<name>` (e.g. `bcm_hdr__customer_name`). Additive — the
-   * bare `name` remains the identity key everywhere. Multi-hop qualified names
-   * (grouping a metric on a joined model's dimension) are computed per-request
-   * by the compatibility service, not stored here.
+   * provider-neutral registry identity remains `<semanticModel>.<name>`.
+   * Multi-hop MetricFlow references (grouping a metric on a joined model's
+   * dimension) are computed per-request by the compatibility service.
    */
   qualifiedName?: string;
   /** Primary-entity name of the owning semantic model (source of qualifiedName). */
@@ -1208,7 +1208,7 @@ export class SemanticLayer {
   }
 
   getDimension(name: string): DimensionDefinition | undefined {
-    return this.dimensions.get(name);
+    return this.dimensions.get(name) ?? this.resolveGroupBy(name);
   }
 
   getHierarchy(name: string): HierarchyDefinition | undefined {
@@ -1254,6 +1254,15 @@ export class SemanticLayer {
    */
   resolveGroupBy(name: string): DimensionDefinition | undefined {
     if (!name) return undefined;
+    // A model-scoped registry reference or exact provider-qualified reference
+    // is an identity, so resolve it before consulting the lossy bare-name map.
+    if (name.includes('.') || name.includes('__')) {
+      const exact = Array.from(this.dimensionVariants.values()).flat().find((dimension) =>
+        dimension.qualifiedName === name
+        || semanticDimensionReferences(dimension).includes(name),
+      );
+      if (exact) return exact;
+    }
     // Exact bare-name hit first.
     const direct = this.dimensions.get(name);
     if (direct) return direct;
@@ -1276,8 +1285,10 @@ export class SemanticLayer {
     return variants?.[0];
   }
 
-  listDimensions(domain?: string): DimensionDefinition[] {
-    const all = Array.from(this.dimensions.values());
+  listDimensions(domain?: string, options?: { includeVariants?: boolean }): DimensionDefinition[] {
+    const all = options?.includeVariants
+      ? Array.from(this.dimensionVariants.values()).flat()
+      : Array.from(this.dimensions.values());
     return domain ? all.filter((d) => d.domain === domain) : all;
   }
 
@@ -1296,17 +1307,40 @@ export class SemanticLayer {
     return domain ? all.filter((e) => e.domain === domain) : all;
   }
 
-  listTimeDimensions(domain?: string): TimeDimensionDefinition[] {
-    return this.listDimensions(domain).filter((d): d is TimeDimensionDefinition => Boolean(d.isTimeDimension || d.source?.objectType === 'time_dimension'));
+  listTimeDimensions(domain?: string, options?: { includeVariants?: boolean }): TimeDimensionDefinition[] {
+    return this.listDimensions(domain, options).filter((d): d is TimeDimensionDefinition => Boolean(d.isTimeDimension || d.source?.objectType === 'time_dimension'));
   }
 
   /** The time-dimension record for a name, including its real `granularities`. */
   getTimeDimension(name: string): TimeDimensionDefinition | undefined {
-    const dim = this.dimensions.get(name);
+    const dim = this.getDimension(name);
     if (dim && (dim.isTimeDimension || dim.source?.objectType === 'time_dimension')) {
       return dim as TimeDimensionDefinition;
     }
-    return this.listTimeDimensions().find((d) => d.name === name);
+    return this.listTimeDimensions(undefined, { includeVariants: true }).find((d) => d.name === name);
+  }
+
+  /**
+   * Provider-neutral identity persisted in DQL artifacts and APIs. A business
+   * label and a MetricFlow adapter spelling are aliases, never replacements for
+   * this model-owned registry reference.
+   */
+  dimensionReference(dimension: DimensionDefinition): string {
+    return semanticDimensionReference(dimension);
+  }
+
+  /**
+   * Resolve a dimension relative to the exact selected metric set. This is the
+   * public boundary used by semantic adapters so repeated leaf names never bind
+   * according to catalog load order.
+   */
+  resolveDimension(reference: string, metricNames: string[] = []): DimensionDefinition | undefined {
+    const metrics = metricNames
+      .map((name) => this.resolveComposableMetric(name) ?? this.metrics.get(name))
+      .filter((metric): metric is MetricDefinition => Boolean(metric));
+    return metrics.length > 0
+      ? this.resolveDimensionForMetrics(reference, metrics)
+      : this.resolveGroupBy(reference);
   }
 
   listSemanticModels(domain?: string): SemanticModelDefinition[] {
@@ -1419,9 +1453,11 @@ export class SemanticLayer {
           m.description.toLowerCase().includes(q) ||
           (m.tags ?? []).some((t) => t.toLowerCase().includes(q)),
       ),
-      dimensions: Array.from(this.dimensions.values()).filter(
+      dimensions: this.listDimensions(undefined, { includeVariants: true }).filter(
         (d) =>
           d.name.toLowerCase().includes(q) ||
+          semanticDimensionReference(d).toLowerCase().includes(q) ||
+          (d.qualifiedName ?? '').toLowerCase().includes(q) ||
           d.label.toLowerCase().includes(q) ||
           d.description.toLowerCase().includes(q),
       ),
@@ -1451,8 +1487,17 @@ export class SemanticLayer {
           )
         : [],
       dimensions: wantsType('dimension')
-        ? Array.from(this.dimensions.values()).filter((dimension) =>
-            matchesQuery([dimension.name, dimension.label, dimension.description, dimension.table, dimension.domain, ...(dimension.tags ?? [])]) &&
+        ? this.listDimensions(undefined, { includeVariants: true }).filter((dimension) =>
+            matchesQuery([
+              dimension.name,
+              semanticDimensionReference(dimension),
+              dimension.qualifiedName,
+              dimension.label,
+              dimension.description,
+              dimension.table,
+              dimension.domain,
+              ...(dimension.tags ?? []),
+            ]) &&
             matchesDomain(dimension.domain) &&
             matchesTags(dimension.tags),
           )
@@ -1722,7 +1767,7 @@ export class SemanticLayer {
       );
       if (
         this.metrics.has(ref) ||
-        this.dimensions.has(ref) ||
+        Boolean(this.resolveGroupBy(ref)) ||
         this.hierarchies.has(ref) ||
         this.measures.has(ref) ||
         this.entities.has(ref) ||
@@ -1754,7 +1799,7 @@ export class SemanticLayer {
 
     // Fallback: simple single-table SQL (original behavior, no cubes loaded)
     const dims = (groupBy ?? [])
-      .map((d) => this.dimensions.get(d))
+      .map((d) => this.resolveDimensionForMetrics(d, [metric]))
       .filter(Boolean) as DimensionDefinition[];
 
     const selectParts = [
@@ -2036,12 +2081,20 @@ function semanticDimensionIdentity(dimension: DimensionDefinition): string {
   ].join('|').toLowerCase();
 }
 
+/** Stable provider-neutral registry reference for a model-owned dimension. */
+export function semanticDimensionReference(dimension: Pick<DimensionDefinition, 'name' | 'cube' | 'source'>): string {
+  if (dimension.cube) return `${dimension.cube}.${dimension.name}`;
+  const sourceObjectId = dimension.source?.objectId;
+  return sourceObjectId && sourceObjectId.includes('.') ? sourceObjectId : dimension.name;
+}
+
 function semanticDimensionReferences(dimension: DimensionDefinition): string[] {
-  const references = new Set<string>([dimension.name]);
+  const references = new Set<string>([dimension.name, semanticDimensionReference(dimension)]);
   if (dimension.cube) {
     references.add(`${dimension.cube}.${dimension.name}`);
     references.add(`${dimension.cube}__${dimension.name}`);
   }
+  if (dimension.qualifiedName) references.add(dimension.qualifiedName);
   if (dimension.source?.objectId) references.add(dimension.source.objectId);
   return Array.from(references);
 }

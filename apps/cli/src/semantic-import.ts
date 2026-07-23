@@ -19,6 +19,7 @@ import {
   type SemanticSourceMetadata,
   type SnowflakeQueryExecutor,
   resolveRepoSource,
+  semanticDimensionReference,
 } from '@duckcodeailabs/dql-core';
 
 export interface SemanticImportManifestObject {
@@ -28,6 +29,7 @@ export interface SemanticImportManifestObject {
   label: string;
   domain: string;
   cube?: string;
+  reference?: string;
   filePath: string;
   source?: SemanticSourceMetadata;
 }
@@ -89,6 +91,11 @@ export interface SemanticObjectDetail {
   table?: string;
   sql?: string;
   type?: string;
+  /** Provider-neutral model-scoped identity persisted in DQL artifacts. */
+  reference?: string;
+  /** Adapter-specific MetricFlow group-by spelling, diagnostic only. */
+  qualifiedName?: string;
+  entityLink?: string;
   tags: string[];
   owner: string | null;
   source: SemanticSourceMetadata | null;
@@ -140,7 +147,10 @@ export async function performSemanticImport(opts: {
 
   for (const object of objects) {
     const normalizedDomain = normalizeDomain(object.domain);
-    const filePath = buildSemanticFilePath(object.kind, normalizedDomain, object.name);
+    const registryReference = object.kind === 'dimension' || object.kind === 'time_dimension'
+      ? semanticDimensionReference(object)
+      : object.name;
+    const filePath = buildSemanticFilePath(object.kind, normalizedDomain, registryReference);
     const absPath = join(targetProjectRoot, filePath);
     if (existsSync(absPath) && !previousManaged.has(filePath)) {
       throw new Error(`Import conflict: ${filePath} already exists and is not managed by semantic import.`);
@@ -149,12 +159,13 @@ export async function performSemanticImport(opts: {
     writeFileSync(absPath, serializeSemanticObject(object), 'utf-8');
     generatedFiles.push(filePath);
     manifestObjects.push({
-      id: objectId(object.kind, object.name),
+      id: objectId(object.kind, registryReference),
       kind: object.kind,
       name: object.name,
       label: object.label,
       domain: normalizedDomain,
       cube: 'cube' in object ? object.cube : undefined,
+      reference: registryReference,
       filePath,
       source: object.source,
     });
@@ -230,8 +241,8 @@ export function buildSemanticTree(
   const cubes = layer.listCubes();
   const metrics = layer.listMetrics();
   const measures = layer.listMeasures();
-  const dimensions = layer.listDimensions();
-  const timeDimensions = layer.listTimeDimensions();
+  const dimensions = layer.listDimensions(undefined, { includeVariants: true });
+  const timeDimensions = layer.listTimeDimensions(undefined, { includeVariants: true });
   const entities = layer.listEntities();
   const hierarchies = layer.listHierarchies();
   const segments = layer.listSegments();
@@ -299,18 +310,26 @@ export function buildSemanticTree(
           tags: (metric.tags ?? []).join(','),
           table: metric.table,
         }))),
-        buildGroupNode(`cube:${cube.name}`, 'dimension', 'Dimensions', cube.dimensions.map((dimension) => toLeaf('dimension', dimension.name, dimension.label, {
+        buildGroupNode(`cube:${cube.name}`, 'dimension', 'Dimensions', cube.dimensions.map((dimension) => toLeaf('dimension', semanticDimensionReference(dimension), dimension.label, {
           provider: dimension.source?.provider ?? providerName,
           domain: normalizeDomain(dimension.domain),
           cube: dimension.cube ?? cube.name,
+          reference: semanticDimensionReference(dimension),
+          localName: dimension.name,
+          qualifiedName: dimension.qualifiedName ?? null,
+          entityLink: dimension.entityLink ?? null,
           owner: dimension.owner ?? cube.owner ?? null,
           tags: (dimension.tags ?? []).join(','),
           table: dimension.table,
         }))),
-        buildGroupNode(`cube:${cube.name}`, 'time_dimension', 'Time Dimensions', cube.timeDimensions.map((dimension) => toLeaf('time_dimension', dimension.name, dimension.label, {
+        buildGroupNode(`cube:${cube.name}`, 'time_dimension', 'Time Dimensions', cube.timeDimensions.map((dimension) => toLeaf('time_dimension', semanticDimensionReference(dimension), dimension.label, {
           provider: dimension.source?.provider ?? providerName,
           domain: normalizeDomain(dimension.domain),
           cube: dimension.cube ?? cube.name,
+          reference: semanticDimensionReference(dimension),
+          localName: dimension.name,
+          qualifiedName: dimension.qualifiedName ?? null,
+          entityLink: dimension.entityLink ?? null,
           owner: dimension.owner ?? cube.owner ?? null,
           tags: (dimension.tags ?? []).join(','),
           table: dimension.table,
@@ -359,18 +378,26 @@ export function buildSemanticTree(
         tags: (measure.tags ?? []).join(','),
         table: measure.table,
       }))),
-      buildGroupNode(`domain:${domain}`, 'dimension', 'Dimensions', looseDimensions.map((dimension) => toLeaf('dimension', dimension.name, dimension.label, {
+      buildGroupNode(`domain:${domain}`, 'dimension', 'Dimensions', looseDimensions.map((dimension) => toLeaf('dimension', semanticDimensionReference(dimension), dimension.label, {
         provider: dimension.source?.provider ?? providerName,
         domain: normalizeDomain(dimension.domain),
         cube: dimension.cube ?? null,
+        reference: semanticDimensionReference(dimension),
+        localName: dimension.name,
+        qualifiedName: dimension.qualifiedName ?? null,
+        entityLink: dimension.entityLink ?? null,
         owner: dimension.owner ?? null,
         tags: (dimension.tags ?? []).join(','),
         table: dimension.table,
       }))),
-      buildGroupNode(`domain:${domain}`, 'time_dimension', 'Time Dimensions', timeDimensions.filter((dimension) => sameSemanticDomain(dimension.domain, domain) && !dimension.cube).map((dimension) => toLeaf('time_dimension', dimension.name, dimension.label, {
+      buildGroupNode(`domain:${domain}`, 'time_dimension', 'Time Dimensions', timeDimensions.filter((dimension) => sameSemanticDomain(dimension.domain, domain) && !dimension.cube).map((dimension) => toLeaf('time_dimension', semanticDimensionReference(dimension), dimension.label, {
         provider: dimension.source?.provider ?? providerName,
         domain: normalizeDomain(dimension.domain),
         cube: dimension.cube ?? null,
+        reference: semanticDimensionReference(dimension),
+        localName: dimension.name,
+        qualifiedName: dimension.qualifiedName ?? null,
+        entityLink: dimension.entityLink ?? null,
         owner: dimension.owner ?? null,
         tags: (dimension.tags ?? []).join(','),
         table: dimension.table,
@@ -546,6 +573,9 @@ export function buildSemanticObjectDetail(
       table: dimension.table,
       sql: dimension.sql,
       type: dimension.type,
+      reference: semanticDimensionReference(dimension),
+      qualifiedName: dimension.qualifiedName,
+      entityLink: dimension.entityLink,
       tags: dimension.tags ?? [],
       owner: dimension.owner ?? null,
       source: dimension.source ?? manifestObject?.source ?? null,
@@ -568,6 +598,9 @@ export function buildSemanticObjectDetail(
       table: dimension.table,
       sql: dimension.sql,
       type: dimension.type,
+      reference: semanticDimensionReference(dimension),
+      qualifiedName: dimension.qualifiedName,
+      entityLink: dimension.entityLink,
       typeParams: dimension.typeParams,
       tags: dimension.tags ?? [],
       owner: dimension.owner ?? null,
@@ -776,7 +809,7 @@ export async function computeSyncDiff(opts: {
   const newObjects = collectObjects(layer);
 
   const newById = new Map(
-    newObjects.map((obj) => [objectId(obj.kind, obj.name), obj]),
+    newObjects.map((obj) => [objectId(obj.kind, semanticObjectRegistryReference(obj)), obj]),
   );
   const oldById = new Map(
     manifest.objects.map((obj) => [obj.id, obj]),
@@ -872,13 +905,16 @@ function collectObjects(layer: SemanticLayer): Array<
   | (SemanticModelDefinition & { kind: 'semantic_model' })
   | (SavedQueryDefinition & { kind: 'saved_query' })
 > {
-  const timeDimensionNames = new Set(layer.listTimeDimensions().map((dimension) => dimension.name));
+  const timeDimensionRefs = new Set(
+    layer.listTimeDimensions(undefined, { includeVariants: true }).map(semanticDimensionReference),
+  );
+  const dimensions = layer.listDimensions(undefined, { includeVariants: true });
   return [
     ...layer.listCubes().map((cube) => ({ ...cube, kind: 'cube' as const })),
     ...layer.listMetrics().map((metric) => ({ ...metric, kind: 'metric' as const })),
     ...layer.listMeasures().map((measure) => ({ ...measure, kind: 'measure' as const })),
-    ...layer.listDimensions().filter((dimension) => !timeDimensionNames.has(dimension.name)).map((dimension) => ({ ...dimension, kind: 'dimension' as const })),
-    ...layer.listTimeDimensions().map((dimension) => ({ ...dimension, kind: 'time_dimension' as const })),
+    ...dimensions.filter((dimension) => !timeDimensionRefs.has(semanticDimensionReference(dimension))).map((dimension) => ({ ...dimension, kind: 'dimension' as const })),
+    ...layer.listTimeDimensions(undefined, { includeVariants: true }).map((dimension) => ({ ...dimension, kind: 'time_dimension' as const })),
     ...layer.listEntities().map((entity) => ({ ...entity, kind: 'entity' as const })),
     ...layer.listHierarchies().map((hierarchy) => ({ ...hierarchy, kind: 'hierarchy' as const })),
     ...layer.listSegments().map((segment) => ({ ...segment, kind: 'segment' as const })),
@@ -1146,6 +1182,17 @@ function slugifyPathSegment(value: string): string {
 
 function objectId(kind: SemanticImportManifestObject['kind'], name: string): string {
   return `${kind}:${name}`;
+}
+
+function semanticObjectRegistryReference(object: {
+  kind: SemanticImportManifestObject['kind'];
+  name: string;
+  cube?: string;
+  source?: SemanticSourceMetadata;
+}): string {
+  return object.kind === 'dimension' || object.kind === 'time_dimension'
+    ? semanticDimensionReference(object)
+    : object.name;
 }
 
 function yamlScalar(value: string): string {

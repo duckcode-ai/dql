@@ -16,21 +16,36 @@ import { themes } from '../../themes/notebook-theme';
 
 const INSERTABLE = new Set(['metric', 'measure', 'dimension', 'time_dimension']);
 
-function nodeName(node: SemanticTreeNode): string {
+export function semanticNodeIdentity(node: SemanticTreeNode): string {
+  if (typeof node.meta?.reference === 'string' && node.meta.reference.trim()) {
+    return node.meta.reference;
+  }
   const prefix = `${node.kind}:`;
   if (node.id.startsWith(prefix)) return node.id.slice(prefix.length);
   const idx = node.id.lastIndexOf(':');
   return idx >= 0 ? node.id.slice(idx + 1) : node.id;
 }
 
-function nodeRef(node: SemanticTreeNode): string {
-  const name = nodeName(node);
+export function semanticNodeRef(node: SemanticTreeNode): string {
+  const name = semanticNodeIdentity(node);
   return node.kind === 'metric' || node.kind === 'measure' ? `@metric(${name})` : `@dim(${name})`;
+}
+
+export function semanticNodeTechnicalLabel(node: SemanticTreeNode): string {
+  const qualifiedName = typeof node.meta?.qualifiedName === 'string' ? node.meta.qualifiedName.trim() : '';
+  if (qualifiedName) return qualifiedName;
+  const localName = typeof node.meta?.localName === 'string' ? node.meta.localName.trim() : '';
+  return localName || semanticNodeIdentity(node);
 }
 
 function matchesTree(node: SemanticTreeNode, q: string): boolean {
   if (!q) return true;
-  if (node.label.toLowerCase().includes(q) || node.id.toLowerCase().includes(q)) return true;
+  if (
+    node.label.toLowerCase().includes(q)
+    || node.id.toLowerCase().includes(q)
+    || semanticNodeIdentity(node).toLowerCase().includes(q)
+    || semanticNodeTechnicalLabel(node).toLowerCase().includes(q)
+  ) return true;
   return (node.children ?? []).some((child) => matchesTree(child, q));
 }
 
@@ -46,7 +61,7 @@ export function dedupeSiblings(nodes: SemanticTreeNode[]): SemanticTreeNode[] {
   const index = new Map<string, SemanticTreeNode>();
   for (const node of nodes) {
     const isGroup = (node.children?.length ?? 0) > 0;
-    const key = isGroup ? `group:${node.label.toLowerCase()}` : `leaf:${nodeRef(node).toLowerCase()}`;
+    const key = isGroup ? `group:${node.label.toLowerCase()}` : `leaf:${semanticNodeRef(node).toLowerCase()}`;
     const existing = index.get(key);
     if (existing) {
       // Same-label group seen again → merge its children into the first.
@@ -145,7 +160,9 @@ function TreeNodeRow({ node, t, q, onInsert, depth, selectionMode, selected, onT
     : node.kind === 'dimension' || node.kind === 'time_dimension'
       ? 'dimension'
       : null;
-  const name = nodeName(node);
+  const name = semanticNodeIdentity(node);
+  const technicalLabel = semanticNodeTechnicalLabel(node);
+  const identityDetail = name !== technicalLabel ? ` · DQL ${name}` : '';
   const selectionKey = selectionKind ? `${selectionKind}:${name}` : '';
   const selection = selectionKind ? canSelect(selectionKind, name) : { allowed: false as const };
 
@@ -156,12 +173,14 @@ function TreeNodeRow({ node, t, q, onInsert, depth, selectionMode, selected, onT
           type="button"
           onClick={() => {
             if (selectionMode && selectionKind && selection.allowed) onToggleSelection?.(selectionKind, name);
-            else if (!selectionMode && insertable) onInsert(nodeRef(node));
+            else if (!selectionMode && insertable) onInsert(semanticNodeRef(node));
           }}
           disabled={selectionMode && Boolean(selectionKind) && !selection.allowed}
           title={selectionMode && selectionKind
-            ? selection.allowed ? `Select ${node.label}` : selection.reason || 'Not compatible with the current selection'
-            : insertable ? `Insert ${nodeRef(node)}` : node.label}
+            ? selection.allowed
+              ? `Select ${node.label} · dbt ${technicalLabel}${identityDetail}`
+              : selection.reason || 'Not compatible with the current selection'
+            : insertable ? `Insert ${semanticNodeRef(node)} · dbt ${technicalLabel}${identityDetail}` : node.label}
           style={{
             display: 'flex', alignItems: 'center', gap: 7, flex: 1, minWidth: 0, boxSizing: 'border-box',
             padding: `5px 6px 5px ${pad + 15}px`, border: 'none', background: 'transparent',
@@ -174,7 +193,16 @@ function TreeNodeRow({ node, t, q, onInsert, depth, selectionMode, selected, onT
             <input type="checkbox" readOnly checked={selected.has(selectionKey)} disabled={!selection.allowed} style={{ accentColor: t.accent, margin: 0, flexShrink: 0 }} />
           )}
           {Icon && <Icon size={13} color={icon.tone(t)} style={{ flexShrink: 0 }} />}
-          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono }}>{node.label}</span>
+          <span style={{ flex: 1, minWidth: 0, display: 'grid', gap: 1, overflow: 'hidden' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5 }}>
+              {node.label}
+            </span>
+            {technicalLabel !== node.label ? (
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 9.5, fontFamily: t.fontMono, color: t.textMuted }}>
+                {technicalLabel}
+              </span>
+            ) : null}
+          </span>
         </button>
       </div>
     );

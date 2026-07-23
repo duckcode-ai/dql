@@ -21,4 +21,16 @@ describe('buildNotebookSemanticBlock', () => {
     expect(source).toContain('metrics = ["revenue"]');
     expect(source).toContain('dimensions = ["month"]');
   });
+
+  it('ID-001/UI-009 persists the technical metric and model-scoped dimension identities', () => {
+    const source = buildNotebookSemanticBlock(
+      ['eu_gb_months_bcm_qty'],
+      ['bcm_hdr.effective_customer_account_name', 'bcm_ccu_pc.report_as_of_dt'],
+    );
+    expect(source).toContain('metrics = ["eu_gb_months_bcm_qty"]');
+    expect(source).toContain(
+      'dimensions = ["bcm_hdr.effective_customer_account_name", "bcm_ccu_pc.report_as_of_dt"]',
+    );
+    expect(source).not.toContain('Effective Customer Account Name');
+  });
 });

@@ -1,4 +1,9 @@
-import type { ComposeQueryResult, MetricDefinition, SemanticLayer } from '@duckcodeailabs/dql-core';
+import {
+  semanticDimensionReference,
+  type ComposeQueryResult,
+  type MetricDefinition,
+  type SemanticLayer,
+} from '@duckcodeailabs/dql-core';
 import {
   compileDbtCloudSemanticQuery,
   listDbtCloudCompatibleDimensions,
@@ -69,10 +74,10 @@ export interface SemanticRuntimeCompileContext {
 export interface SemanticRuntimeCompileResult extends ComposeQueryResult {
   engine: SemanticRuntimeAdapterId;
   /**
-   * The governed request as the USER expressed it (bare dimension names), after
-   * deterministic normalization. Echoed to callers and back into `.dql` sources
-   * — it must never carry MetricFlow-qualified names, or saved blocks would
-   * silently rewrite to `entity__dim` spellings.
+   * The governed request as the USER expressed it (preferably model-scoped
+   * dimension identities), after deterministic normalization. Echoed to callers
+   * and back into `.dql` sources — it must never be replaced by adapter-specific
+   * MetricFlow spellings such as `entity__dim`.
    */
   effectiveRequest: SemanticRuntimeQueryRequest;
   /**
@@ -91,6 +96,20 @@ export class SemanticRuntimeRequiredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'SemanticRuntimeRequiredError';
+  }
+}
+
+export class SemanticRuntimeCompilationError extends Error {
+  readonly code = 'SEMANTIC_COMPILATION_FAILED';
+  readonly adapter: Exclude<SemanticRuntimeAdapterId, 'native'>;
+
+  constructor(adapter: Exclude<SemanticRuntimeAdapterId, 'native'>, error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    super(`${adapter} semantic compilation failed: ${message}`, {
+      cause: error instanceof Error ? error : undefined,
+    });
+    this.name = 'SemanticRuntimeCompilationError';
+    this.adapter = adapter;
   }
 }
 
@@ -417,14 +436,25 @@ export function qualifyForMetricFlow(
 ): { request: SemanticRuntimeQueryRequest; warnings: string[] } {
   const warnings: string[] = [];
   const { compatible } = semanticLayer.explainCompatibleDimensions(request.metrics);
-  const qualifiedByName = new Map<string, string>();
+  const qualifiedByReference = new Map<string, string>();
   for (const dim of compatible) {
-    if (dim.qualifiedName) qualifiedByName.set(dim.name.toLowerCase(), dim.qualifiedName);
+    if (!dim.qualifiedName) continue;
+    for (const reference of [
+      dim.name,
+      semanticDimensionReference(dim),
+      dim.source?.objectId,
+      dim.qualifiedName,
+    ]) {
+      if (reference) qualifiedByReference.set(reference.toLowerCase(), dim.qualifiedName);
+    }
   }
   const qualify = (name: string | undefined): string | undefined => {
     if (!name) return name;
     if (name === 'metric_time' || name.includes('__')) return name; // already qualified / reserved
-    return qualifiedByName.get(name.toLowerCase()) ?? name;
+    const exact = semanticLayer.resolveDimension(name, request.metrics);
+    return qualifiedByReference.get(name.toLowerCase())
+      ?? exact?.qualifiedName
+      ?? name;
   };
 
   const timeDimension = request.timeDimension
@@ -461,17 +491,8 @@ export async function compileSemanticRuntimeQuery(
   const status = await getSemanticRuntimeStatus(context.projectRoot, { probeConfiguredCloud: true });
   const explicit = effectiveRequest.engine;
   const fullRuntimeRequested = explicit === 'metricflow' || explicit === 'metricflow-cli' || explicit === 'dbt-cloud';
-  const candidates: SemanticRuntimeAdapterId[] = explicit === 'native'
-    ? ['native']
-    : explicit === 'dbt-cloud'
-      ? ['dbt-cloud']
-      : explicit === 'metricflow-cli'
-        ? ['metricflow-cli']
-        : status.active === 'dbt-cloud'
-          ? ['dbt-cloud', 'metricflow-cli', 'native']
-          : status.active === 'metricflow-cli'
-            ? ['metricflow-cli', 'dbt-cloud', 'native']
-            : ['native'];
+  const candidates = selectSemanticRuntimeAdapters(explicit, status.active);
+  const routeLockedToFullRuntime = candidates.length === 1 && candidates[0] !== 'native';
 
   // Qualify dimension references to MetricFlow entity-qualified names ONCE, at
   // this boundary, for the full-runtime engines. Native keeps the bare request.
@@ -490,8 +511,8 @@ export async function compileSemanticRuntimeQuery(
         return { sql: result.sql, joins: [], tables: [], engine: 'dbt-cloud', effectiveRequest, runtimeRequest, warnings: qualifyWarnings };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
-        if (explicit === 'dbt-cloud') throw lastRuntimeError;
-        continue;
+        if (isSemanticRuntimeError(error)) throw error;
+        throw new SemanticRuntimeCompilationError('dbt-cloud', error);
       }
     }
     if (adapter === 'metricflow-cli') {
@@ -515,8 +536,8 @@ export async function compileSemanticRuntimeQuery(
         return { sql: compiled.sql, joins: [], tables: [], engine: 'metricflow-cli', effectiveRequest, runtimeRequest, warnings: qualifyWarnings };
       } catch (error) {
         lastRuntimeError = error instanceof Error ? error : new Error(String(error));
-        if (explicit === 'metricflow-cli' || explicit === 'metricflow') throw lastRuntimeError;
-        continue;
+        if (isSemanticRuntimeError(error)) throw error;
+        throw new SemanticRuntimeCompilationError('metricflow-cli', error);
       }
     }
     const composed = context.semanticLayer.composeQuery({
@@ -532,13 +553,27 @@ export async function compileSemanticRuntimeQuery(
     if (composed) return { ...composed, engine: 'native', effectiveRequest };
   }
 
-  if (fullRuntimeRequested) {
+  if (fullRuntimeRequested || routeLockedToFullRuntime) {
     throw lastRuntimeError ?? new SemanticRuntimeRequiredError(status.setup ?? 'The requested semantic runtime is unavailable.');
   }
   if (lastRuntimeError && !context.semanticLayer.canComposeMetric(effectiveRequest.metrics[0] ?? '')) {
     throw new SemanticRuntimeRequiredError(lastRuntimeError.message);
   }
   return null;
+}
+
+/**
+ * AGT-013/AGT-014/SEC-004: planning selects one adapter. Compilation may not
+ * silently downgrade to another semantic engine or native SQL after selection.
+ */
+export function selectSemanticRuntimeAdapters(
+  requested: SemanticRuntimeQueryRequest['engine'],
+  active: SemanticRuntimeAdapterId,
+): SemanticRuntimeAdapterId[] {
+  if (requested === 'native') return ['native'];
+  if (requested === 'dbt-cloud') return ['dbt-cloud'];
+  if (requested === 'metricflow' || requested === 'metricflow-cli') return ['metricflow-cli'];
+  return [active];
 }
 
 /** A compatible dimension enriched with its MetricFlow-qualified name and, for
@@ -553,16 +588,14 @@ export interface RuntimeCompatibilityResult {
   engine: SemanticRuntimeAdapterId;
   dimensions: RuntimeCompatibleDimension[];
   incompatible: Array<{ name: string; qualifiedName?: string; reason: string }>;
-  /** Set when a preferred runtime failed and we fell back (e.g. mf → native). */
+  /** Retained for wire compatibility; selected-adapter failures no longer downgrade. */
   degraded?: string;
 }
 
 /**
- * The authoritative per-metric dimension-compatibility answer, resolved through
- * the SAME cascade that executes the query, so the builder can never offer a
- * dimension the runtime would reject:
- *   dbt Cloud (already qualified + real grains) → `mf list dimensions` → native.
- * mf failures fall through to native with a `degraded` note (never throw).
+ * The authoritative per-metric dimension-compatibility answer from the exact
+ * adapter selected for execution. A selected adapter failure is preserved; it
+ * never becomes a native compatibility answer.
  */
 export async function describeRuntimeCompatibility(
   projectRoot: string,
@@ -587,9 +620,8 @@ export async function describeRuntimeCompatibility(
   if (status.active === 'dbt-cloud') {
     try {
       const cloud = await listDbtCloudCompatibleDimensions(getEffectiveDbtCloudSemanticSettings(projectRoot), metrics);
-      const localByName = new Map(semanticLayer.listDimensions().map((d) => [d.name.toLowerCase(), d]));
       const dimensions: RuntimeCompatibleDimension[] = cloud.map((dimension) => {
-        const local = localByName.get(dimension.name.toLowerCase());
+        const local = semanticLayer.resolveDimension(dimension.name, metrics);
         const isTime = dimension.type?.toLowerCase() === 'time';
         return {
           ...(local ?? {
@@ -609,8 +641,9 @@ export async function describeRuntimeCompatibility(
       });
       return { engine: 'dbt-cloud', dimensions, incompatible: [] };
     } catch (error) {
-      const native = nativeExplain();
-      return { ...native, degraded: `dbt Cloud dimension listing failed (${error instanceof Error ? error.message : String(error)}); showing native compatibility.` };
+      throw new SemanticRuntimeRequiredError(
+        `dbt Cloud dimension listing failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -622,10 +655,10 @@ export async function describeRuntimeCompatibility(
       : projectConfig?.dbt?.projectDir;
     const mfDims = listMetricFlowDimensions({ projectRoot, dbtProjectPath, profilesDir: projectConfig?.dbt?.profilesDir, metrics });
     if (mfDims.length > 0) {
-      const localByTail = new Map(semanticLayer.listDimensions().map((d) => [d.name.toLowerCase(), d]));
       const dimensions: RuntimeCompatibleDimension[] = mfDims.map((mf) => {
         const tail = mf.qualifiedName.split('__').pop()!.toLowerCase();
-        const local = localByTail.get(tail);
+        const local = semanticLayer.resolveDimension(mf.qualifiedName, metrics)
+          ?? semanticLayer.resolveDimension(tail, metrics);
         const isTime = Boolean(mf.granularities?.length) || Boolean(local?.isTimeDimension);
         return {
           ...(local ?? {
@@ -645,7 +678,7 @@ export async function describeRuntimeCompatibility(
       });
       return { engine: 'metricflow-cli', dimensions, incompatible: [] };
     }
-    return { ...nativeExplain(), degraded: '`mf list dimensions` returned nothing; showing native compatibility.' };
+    throw new SemanticRuntimeRequiredError('Local MetricFlow returned no compatible dimensions for the selected metrics.');
   }
 
   return nativeExplain();
@@ -741,8 +774,12 @@ function selectActiveAdapter(
   cloudReady: boolean,
   cliReady: boolean,
 ): SemanticRuntimeAdapterId {
-  if (preference === 'dbt-cloud') return cloudReady ? 'dbt-cloud' : cliReady ? 'metricflow-cli' : 'native';
-  if (preference === 'metricflow-cli') return cliReady ? 'metricflow-cli' : cloudReady ? 'dbt-cloud' : 'native';
+  // An explicit preference is a route lock, including while setup is broken.
+  // Reporting the preferred adapter as active lets every surface return the
+  // original readiness/compiler failure instead of silently selecting a
+  // different engine with different semantic behavior.
+  if (preference === 'dbt-cloud') return 'dbt-cloud';
+  if (preference === 'metricflow-cli') return 'metricflow-cli';
   if (preference === 'native') return 'native';
   if (cloudReady) return 'dbt-cloud';
   if (cliReady) return 'metricflow-cli';
@@ -750,5 +787,17 @@ function selectActiveAdapter(
 }
 
 export function isSemanticRuntimeError(error: unknown): boolean {
-  return error instanceof SemanticRuntimeRequiredError || error instanceof MetricFlowUnavailableError;
+  return error instanceof SemanticRuntimeRequiredError
+    || error instanceof SemanticRuntimeCompilationError
+    || error instanceof MetricFlowUnavailableError;
+}
+
+export function semanticRuntimeErrorCode(
+  error: unknown,
+): 'SEMANTIC_RUNTIME_REQUIRED' | 'SEMANTIC_COMPILATION_FAILED' | undefined {
+  if (error instanceof SemanticRuntimeCompilationError) return error.code;
+  if (error instanceof SemanticRuntimeRequiredError || error instanceof MetricFlowUnavailableError) {
+    return 'SEMANTIC_RUNTIME_REQUIRED';
+  }
+  return undefined;
 }

@@ -135,4 +135,53 @@ describe('buildSemanticTree', () => {
     expect(groupIds.some((id) => id.includes('cube:customers'))).toBe(true);
     expect(groupIds.some((id) => id.includes('cube:orders'))).toBe(true);
   });
+
+  it('ID-001/UI-009 gives repeated dimension leaves model-scoped ids and aliases', () => {
+    const layer = new SemanticLayer();
+    for (const [cube, entity] of [['usage_daily', 'usage'], ['account_snapshot', 'account']] as const) {
+      layer.addCube({
+        name: cube,
+        label: cube,
+        description: '',
+        domain: 'usage',
+        table: `analytics.${cube}`,
+        sql: `SELECT * FROM analytics.${cube}`,
+        measures: [],
+        dimensions: [],
+        timeDimensions: [{
+          name: 'report_date',
+          label: cube === 'usage_daily' ? 'Reporting date' : 'Snapshot date',
+          description: '',
+          sql: 'report_as_of_dt',
+          type: 'date',
+          table: `analytics.${cube}`,
+          cube,
+          qualifiedName: `${entity}__report_date`,
+          entityLink: entity,
+          isTimeDimension: true,
+          granularities: ['day'],
+        }],
+        joins: [],
+        segments: [],
+        preAggregations: [],
+      });
+    }
+
+    const tree = buildSemanticTree(layer, null);
+    const leaves: Array<{ id: string; meta?: Record<string, unknown> }> = [];
+    const visit = (node: { id: string; kind: string; meta?: Record<string, unknown>; children?: any[] }) => {
+      if (node.kind === 'time_dimension') leaves.push(node);
+      for (const child of node.children ?? []) visit(child);
+    };
+    visit(tree);
+
+    expect(leaves.map((leaf) => leaf.id).sort()).toEqual([
+      'time_dimension:account_snapshot.report_date',
+      'time_dimension:usage_daily.report_date',
+    ]);
+    expect(leaves.map((leaf) => leaf.meta?.qualifiedName).sort()).toEqual([
+      'account__report_date',
+      'usage__report_date',
+    ]);
+  });
 });

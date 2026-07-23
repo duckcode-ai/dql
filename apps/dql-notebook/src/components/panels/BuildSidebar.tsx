@@ -264,7 +264,7 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
     setCompatibleDimensions(null);
     void api.getCompatibleDimensions(Array.from(selectedMetrics)).then((dimensions) => {
       if (!active) return;
-      const names = new Set(dimensions.map((dimension) => dimension.name));
+      const names = new Set(dimensions.map((dimension) => dimension.reference ?? dimension.name));
       setCompatibleDimensions(names);
       setSelectedDimensions((current) => new Set(Array.from(current).filter((name) => names.has(name))));
     });

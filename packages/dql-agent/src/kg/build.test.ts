@@ -291,6 +291,34 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+  it('ID-001/AGT-010 indexes repeated dimension leaves as distinct model-owned evidence', () => {
+    const layer = new SemanticLayer({
+      metrics: [],
+      dimensions: [
+        {
+          name: 'report_date', label: 'Usage reporting date', description: '', domain: 'usage',
+          sql: 'report_as_of_dt', type: 'date', table: 'analytics.usage_daily', cube: 'usage_daily',
+          qualifiedName: 'usage__report_date', entityLink: 'usage', isTimeDimension: true,
+        },
+        {
+          name: 'report_date', label: 'Account snapshot date', description: '', domain: 'usage',
+          sql: 'report_as_of_dt', type: 'date', table: 'analytics.account_snapshot', cube: 'account_snapshot',
+          qualifiedName: 'account__report_date', entityLink: 'account', isTimeDimension: true,
+        },
+      ],
+    });
+
+    const dimensions = buildKGFromSemanticLayer(layer).nodes.filter((node) => node.kind === 'dimension');
+    expect(dimensions.map((node) => node.nodeId).sort()).toEqual([
+      'dimension:account_snapshot.report_date',
+      'dimension:usage_daily.report_date',
+    ]);
+    expect(dimensions.map((node) => node.payload?.registryQualifiedId).sort()).toEqual([
+      'semantic:usage:dimension:account_snapshot.report_date',
+      'semantic:usage:dimension:usage_daily.report_date',
+    ]);
+  });
+
   it('AGT-005 retains non-additive semantic measure contracts for retrieval and SQL guards', () => {
     const layer = new SemanticLayer({
       dimensions: [],
@@ -364,9 +392,9 @@ describe('buildKGFromManifest', () => {
         nodeId: 'metric:consumption_balance.rollover_balance_amount',
         payload: expect.objectContaining({
           dimensions: [
-            'semantic:consumption:dimension:customer',
-            'semantic:consumption:dimension:region',
-            'semantic:consumption:dimension:metric_date',
+            'semantic:consumption:dimension:consumption_balance.customer',
+            'semantic:consumption:dimension:consumption_balance.region',
+            'semantic:consumption:dimension:consumption_balance.metric_date',
           ],
           timeGrains: ['day', 'week', 'month', 'quarter', 'year'],
         }),
@@ -422,16 +450,16 @@ describe('buildKGFromManifest', () => {
     expect(metric?.payload?.analyticalCapability).toMatchObject({
       metricId: 'semantic:sales:revenue',
       semanticModelId: 'semantic:sales:model:orders',
-      primaryEntityId: 'semantic:sales:entity:order',
-      defaultResultGrainId: 'semantic:sales:entity:order',
+      primaryEntityId: 'semantic:sales:entity:orders.order',
+      defaultResultGrainId: 'semantic:sales:entity:orders.order',
       aggregation: 'sum',
       dimensions: [{
-        dimensionId: 'semantic:sales:dimension:customer_name',
-        entityId: 'semantic:sales:entity:order',
+        dimensionId: 'semantic:sales:dimension:orders.customer_name',
+        entityId: 'semantic:sales:entity:orders.order',
         supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
       }],
       timeDimensions: [{
-        dimensionId: 'semantic:sales:dimension:ordered_at',
+        dimensionId: 'semantic:sales:dimension:orders.ordered_at',
         role: 'order_event_time',
         defaultFor: ['scalar', 'trend', 'comparison'],
       }],

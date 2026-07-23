@@ -365,7 +365,10 @@ export function SemanticPanel() {
 
   const favoritesSet = useMemo(() => new Set(sl.favorites), [sl.favorites]);
   const metricsByName = useMemo(() => new Map(sl.metrics.map((metric) => [metric.name, metric])), [sl.metrics]);
-  const dimensionsByName = useMemo(() => new Map(sl.dimensions.map((dimension) => [dimension.name, dimension])), [sl.dimensions]);
+  const dimensionsByReference = useMemo(() => new Map(sl.dimensions.flatMap((dimension) => [
+    [dimension.reference ?? dimension.name, dimension] as const,
+    [dimension.name, dimension] as const,
+  ])), [sl.dimensions]);
   const providerOptions = useMemo(() => collectFacetValues(tree, 'provider'), [tree]);
   const cubeOptions = useMemo(() => collectFacetValues(tree, 'cube'), [tree]);
   const ownerOptions = useMemo(() => collectFacetValues(tree, 'owner'), [tree]);
@@ -391,7 +394,12 @@ export function SemanticPanel() {
       return;
     }
     void api.getCompatibleDimensions(Array.from(selectedMetrics)).then((dimensions) => {
-      if (!cancelled) setCompatibleDimensionNames(new Set(dimensions.map((dimension) => dimension.name)));
+      if (!cancelled) {
+        setCompatibleDimensionNames(new Set(dimensions.flatMap((dimension) => [
+          dimension.reference ?? dimension.name,
+          dimension.name,
+        ])));
+      }
     });
     return () => { cancelled = true; };
   }, [Array.from(selectedMetrics).sort().join('|')]);
@@ -428,16 +436,29 @@ export function SemanticPanel() {
       dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.name });
       return;
     }
-    const reference = `@dim(${item.name})`;
+    const reference = `@dim(${item.reference ?? item.name})`;
     if (!insertSemanticReference(reference)) {
       dispatch({ type: 'ADD_CELL', cell: makeCell('sql', reference) });
     }
-    dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.name });
+    dispatch({ type: 'ADD_SEMANTIC_RECENT', name: item.reference ?? item.name });
   };
 
   const renderLeaf = (node: SemanticTreeNode, depth: number) => {
-    const refKind = node.kind === 'metric' || node.kind === 'dimension' ? node.kind : null;
-    const refName = node.id.split(':').slice(1).join(':');
+    const refKind = node.kind === 'metric'
+      ? 'metric'
+      : node.kind === 'dimension' || node.kind === 'time_dimension'
+        ? 'dimension'
+        : null;
+    const refName = typeof node.meta?.reference === 'string'
+      ? node.meta.reference
+      : node.id.split(':').slice(1).join(':');
+    const technicalName = typeof node.meta?.localName === 'string'
+      ? node.meta.localName
+      : refName;
+    const technicalLabel = typeof node.meta?.cube === 'string'
+      && (node.kind === 'dimension' || node.kind === 'time_dimension')
+      ? `${technicalName} · ${node.meta.cube}`
+      : technicalName;
     const isChecked = refKind === 'metric' ? selectedMetrics.has(refName) : refKind === 'dimension' ? selectedDimensions.has(refName) : false;
     const metricCapability = refKind === 'metric' ? metricsByName.get(refName)?.execution : undefined;
     const metricBlocked = Boolean(metricCapability && metricCapability.status !== 'ready');
@@ -460,15 +481,16 @@ export function SemanticPanel() {
         )}
       <TreeRow
         label={node.label}
+        secondaryLabel={technicalLabel}
         depth={selectMode && refKind ? 0 : depth}
         badge={node.kind === 'metric' || node.kind === 'dimension' || node.kind === 'segment' || node.kind === 'pre_aggregation' ? node.kind : undefined}
         selected={selectedId === node.id}
         onClick={() => { if (selectMode && refKind && !selectionBlocked) { toggleSelection(refKind, refName); } else { setSelectedId(node.id); } }}
         onDoubleClick={() => {
-          if (node.kind === 'metric' || node.kind === 'dimension') {
+          if (node.kind === 'metric' || node.kind === 'dimension' || node.kind === 'time_dimension') {
             const object = node.kind === 'metric'
               ? metricsByName.get(node.id.slice('metric:'.length))
-              : dimensionsByName.get(node.id.slice('dimension:'.length));
+              : dimensionsByReference.get(refName);
             if (object) {
               if (node.kind === 'metric') {
                 const metric = metricsByName.get(object.name);
@@ -479,7 +501,9 @@ export function SemanticPanel() {
                   setComposeError(metric.execution.reason || 'This metric is not executable with the current semantic runtime.');
                 }
               } else {
-                const ref = `@dim(${object.name})`;
+                const dimension = dimensionsByReference.get(refName);
+                if (!dimension) return;
+                const ref = `@dim(${dimension.reference ?? dimension.name})`;
                 if (!insertSemanticReference(ref)) dispatch({ type: 'ADD_CELL', cell: makeCell('sql', ref) });
               }
             }
