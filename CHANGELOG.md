@@ -6,6 +6,38 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.1 - 2026-07-22
+
+### Analytical composition and transparent repair
+
+This patch completes the plan-first answer engine by connecting governed metrics
+to compatible entity, dimension, member, time, comparison, ranking, and output
+roles before execution, then retaining a safe repair path when execution fails.
+
+### Added
+
+- **Analytical composition.** Metric questions now bind entity grain,
+  dimension roles, canonical members, governed time/freshness, aligned periods,
+  comparisons, ranking/ties, and requested outputs before route execution.
+- **Receipt-backed stories.** Analytical numbers, comparisons, ranks,
+  freshness statements, and material caveats are generated only from validated
+  result facts bound to an execution receipt.
+- **Transparent repair.** The built notebook exposes Plan, DQL, Compiled SQL,
+  Lineage, Trust & evidence, Actual steps, and Failure & repair for both success
+  and failure. Stable redacted errors retain immutable fingerprints and derive
+  repairs without widening permissions or mutating the source run.
+- **Authorized latest-complete lookup.** Relative periods perform at most one
+  route-locked semantic freshness query; warehouse relation and permission
+  failures retain their precise stable class.
+
+### Release exceptions
+
+- RFC 0005 acceptance remains implementer-validated pending independent
+  verification. The maintainer explicitly approved this `v1.10.1` release.
+- The tracked `PERF-001` latency budgets remain above target on the release
+  workstation. Correctness and route-parity gates pass; this is a disclosed OSS
+  exception, not a GA performance claim.
+
 ## v1.10.0 - 2026-07-22
 
 ### Plan-first governed analytics answer engine

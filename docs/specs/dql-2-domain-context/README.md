@@ -3,7 +3,8 @@
 Status: **accepted for implementation**
 RFCs: [RFC 0002](../../rfcs/0002-dbt-first-domain-modeling.md),
 [RFC 0003](../../rfcs/0003-domain-context-and-shared-products.md), and
-[RFC 0004](../../rfcs/0004-plan-first-governed-answer-engine.md)
+[RFC 0004](../../rfcs/0004-plan-first-governed-answer-engine.md), amended by
+[RFC 0005](../../rfcs/0005-analytical-composition-and-transparent-repair.md)
 Integration branch: `codex/dql-2-dbt-first-modeling`
 
 This directory is the implementation truth for the unified DQL 2.0 domain
@@ -24,8 +25,9 @@ through review before continuing.
 8. [Runtime, CLI, MCP, and snapshots](07-runtime-cli-mcp-and-snapshots.md)
 9. [Migration, compatibility, scale, and security](08-migration-compatibility-scale-security.md)
 10. [Fixtures, evaluations, and release gates](09-fixtures-evals-and-release-gates.md)
-11. [Acceptance matrix](acceptance-matrix.md)
-12. [Execution tracker](execution-tracker.md)
+11. [Analytical composition and transparent repair](10-analytical-composition-and-repair.md)
+12. [Acceptance matrix](acceptance-matrix.md)
+13. [Execution tracker](execution-tracker.md)
 
 ## Stable requirement IDs
 
@@ -49,10 +51,10 @@ isolation.
 | [W01](workstreams/W01-core-contracts-and-identity.md) | core contracts and qualified identity | spec freeze |
 | [W02](workstreams/W02-project-snapshot-and-scale.md) | immutable snapshot service and scale | W01 |
 | [W03](workstreams/W03-onboarding-and-discovery.md) | dbt onboarding and domain discovery | W01, W02 |
-| [W04](workstreams/W04-agent-context-and-governance.md) | Ask, skills, retrieval, join safety, MCP | W01, W02 |
-| [W05](workstreams/W05-domain-studio-and-products.md) | Domain Studio and shared products | W01–W04 APIs |
-| [W06](workstreams/W06-migration-and-security.md) | migration and runtime security | W01–W03 |
-| [W07](workstreams/W07-integration-evals-and-performance.md) | fixtures, E2E, evals, performance | W01–W06 |
+| [W04](workstreams/W04-agent-context-and-governance.md) | Ask, skills, retrieval, analytical composition, repair APIs, join safety, MCP | W01, W02 |
+| [W05](workstreams/W05-domain-studio-and-products.md) | Domain Studio, shared products, and How it answered | W01–W04 APIs |
+| [W06](workstreams/W06-migration-and-security.md) | migration, runtime security, and repair redaction | W01–W03; W04 repair contract |
+| [W07](workstreams/W07-integration-evals-and-performance.md) | fixtures, analytical/repair E2E, evals, performance | W01–W06 |
 | [W08](workstreams/W08-oss-release-and-docs.md) | compatibility, docs, release evidence | W07 |
 
 Use [the handoff template](agent-handoff-template.md) for every assignment.

@@ -37,6 +37,7 @@ import {
   QueryExecutor,
   type ConnectionConfig,
   type DatabaseConnector,
+  type QueryResult,
   type SQLParamSpec,
 } from "@duckcodeailabs/dql-connectors";
 import {
@@ -111,6 +112,7 @@ import {
   type DbtSourceAuthoringInput,
   type RelationshipAuthoringInput,
   type ManifestRelationshipValidationEvidence,
+  normalizeAnalyticalFailureV1,
   relationshipValidationProofFingerprint,
   discoverDbtDomains,
   renderDomainDeclaration,
@@ -193,6 +195,10 @@ import {
   writeSkill,
   deleteSkill,
   deriveGeneratedDraftSlug,
+  deriveAnalyticalRepair,
+  type AnalyticalFreshnessRequestV1,
+  type AnalyticalFailedRunV1,
+  type AnalyticalRepairRequestV1,
   type Skill,
   type WriteSkillInput,
   type AgentAnswer,
@@ -743,6 +749,52 @@ export function agentAnswerHasExecutionFailure(
 ): boolean {
   return typeof governedAnswer.executionError === 'string'
     && governedAnswer.executionError.trim().length > 0;
+}
+
+/** Rebuild the immutable failed-run input from the artifact retained by API-007. */
+export function analyticalFailedRunFromAgentRun(run: AgentRun): AnalyticalFailedRunV1 | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = agentRunRecord(artifact.payload);
+    if (!payload) continue;
+    const failure = normalizeAnalyticalFailureV1(payload.analyticalFailure);
+    const plan = agentRunRecord(payload.resolvedAnalyticalPlan);
+    const planFingerprint = agentRunString(plan?.fingerprint) ?? failure?.planFingerprint;
+    if (!failure || !planFingerprint) continue;
+    const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
+    const dqlSource = dqlArtifact?.source;
+    const compiledSql = agentRunString(payload.sql)
+      ?? agentRunString(payload.proposedSql)
+      ?? dqlArtifact?.compiledSql;
+    const graph = agentRunRecord(payload.analyticalExecutionGraph);
+    const rawRoute = agentRunString(graph?.route) ?? agentRunString(plan?.recommendedRoute);
+    const route: AnalyticalFailedRunV1['route'] = rawRoute === 'certified'
+      ? 'certified'
+      : rawRoute === 'semantic'
+        ? 'semantic'
+        : rawRoute === 'governed_sql'
+          ? 'governed_sql'
+          : 'generated_sql';
+    const rawTrust = dqlArtifact?.trustState ?? agentRunString(payload.reviewStatus) ?? artifact.trustState;
+    const trustState: AnalyticalFailedRunV1['trustState'] = rawTrust === 'certified'
+      ? 'certified'
+      : rawTrust === 'governed'
+        ? 'governed'
+        : 'review_required';
+    return {
+      version: 1,
+      runId: failure.runId,
+      snapshotId: failure.snapshotId,
+      route,
+      trustState,
+      planFingerprint,
+      ...(dqlSource ? { dqlSource } : {}),
+      ...(failure.dqlFingerprint ? { dqlFingerprint: failure.dqlFingerprint } : {}),
+      ...(compiledSql ? { compiledSql } : {}),
+      ...(failure.sqlFingerprint ? { sqlFingerprint: failure.sqlFingerprint } : {}),
+      failure,
+    };
+  }
+  return undefined;
 }
 
 function businessNarrativeGaps(warnings: string[] | undefined): string[] | undefined {
@@ -1791,6 +1843,67 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         },
         ...(semanticDriver ? { semanticDriver } : {}),
         ...(semanticTableMapping ? { semanticTableMapping } : {}),
+        ...(semanticLayer && semanticConnection ? {
+          resolveAnalyticalFreshness: async (freshnessRequest: AnalyticalFreshnessRequestV1) => {
+            const binding = freshnessRequest.authorizedAdapterRequest;
+            if (!binding || binding.route !== 'semantic') {
+              throw Object.assign(new Error('The analytical freshness request is not bound to an authorized semantic route.'), {
+                code: 'FRESHNESS_BINDING_REQUIRED',
+              });
+            }
+            if (freshnessRequest.snapshotId !== routeDecision?.resolvedAnalyticalPlan?.snapshotId) {
+              throw Object.assign(new Error('The analytical freshness request does not match the routed metadata snapshot.'), {
+                code: 'SNAPSHOT_DRIFT',
+              });
+            }
+            projectSnapshot();
+            projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
+            const compiled = await compileSemanticRuntimeQuery({
+              metrics: [binding.metric],
+              dimensions: [],
+              timeDimension: {
+                name: binding.timeDimension,
+                granularity: binding.granularity,
+              },
+              orderBy: [{ name: binding.outputField, direction: 'desc' }],
+              limit: 1,
+            }, {
+              projectRoot,
+              projectConfig,
+              detectedProvider: semanticDetectedProvider,
+              semanticLayer: semanticLayer!,
+              driver: semanticDriver,
+              tableMapping: semanticTableMapping,
+            });
+            if (!compiled) {
+              throw Object.assign(new Error('The authorized semantic freshness query could not be compiled.'), {
+                code: 'COMPILATION_FAILED',
+              });
+            }
+            const prepared = prepareLocalExecution(
+              compiled.sql,
+              semanticConnection!,
+              projectRoot,
+              projectConfig,
+            );
+            const result = await executor.executeQuery(
+              prepared.sql,
+              [],
+              runtimeVariables({}),
+              prepared.connection,
+            );
+            projectSnapshot();
+            projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
+            return {
+              version: 1 as const,
+              snapshotId: freshnessRequest.snapshotId,
+              metricId: freshnessRequest.metricId,
+              timeDimensionId: freshnessRequest.timeDimensionId,
+              observedThrough: analyticalFreshnessObservedThrough(result, freshnessRequest),
+              observedAt: new Date().toISOString(),
+            };
+          },
+        } : {}),
         ...(semanticLayer ? {
           semanticQueryCompiler: async (selection) => {
             const compiled = await compileSemanticRuntimeQuery({
@@ -1833,6 +1946,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(routeDecision?.resolvedAnalyticalPlan
           ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
           : {}),
+        analyticalReferenceInstant: new Date().toISOString(),
         executeCertifiedBlock: executeCertifiedBlockForAgent,
         executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(request.question, sql, artifact),
         executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(artifact, request.question),
@@ -2220,6 +2334,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       && (governedAnswer.refusalCode === 'grounding_gap' || governedAnswer.refusalCode === 'modeling_gap')
       && !isExploratory;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
+    const isAnalyticalFailure = Boolean(governedAnswer.analyticalFailure);
+    const isTerminalFailure = isProviderError || isExecutionFailure || isAnalyticalFailure;
     // AGT-004: a rejected attribution/export/proof policy is a deliberate
     // governance boundary, not an ambiguous user question and not a repairable
     // retrieval miss. Keep the precise policy detail visible, but never burn two
@@ -2286,14 +2402,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         synthesizedAnswer = undefined;
       }
     }
-    const status: AgentRunStatus = isProviderError || isExecutionFailure
+    const status: AgentRunStatus = isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
         : isCertified || isSemantic
           ? 'completed'
           : 'needs_review';
-    const trustState: AgentRunTrustState = isProviderError || isExecutionFailure
+    const trustState: AgentRunTrustState = isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'not_applicable'
@@ -2302,7 +2418,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : isSemantic
               ? 'governed'
               : 'review_required';
-    const stopReason: AgentRunStopReason = isProviderError || isExecutionFailure
+    const stopReason: AgentRunStopReason = isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
@@ -2311,10 +2427,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : isSemantic
               ? 'governed_semantic_answer'
               : 'human_review_required';
+    const terminalFailureActions: AgentRunNextAction[] = governedAnswer.analyticalFailure
+      ? governedAnswer.analyticalFailure.code === 'PERMISSION_DENIED'
+        ? [{ id: 'repair-access', label: 'Change connection or request access', route: 'blocked' }]
+        : governedAnswer.analyticalFailure.code === 'TIMEOUT'
+          ? [{ id: 'retry-same-plan', label: 'Retry the same bounded plan', route: 'generated_answer' }]
+          : governedAnswer.analyticalFailure.code === 'SNAPSHOT_DRIFT'
+            || governedAnswer.analyticalFailure.code === 'COLUMN_NOT_FOUND'
+            || governedAnswer.analyticalFailure.code === 'RELATION_NOT_FOUND'
+            ? [{ id: 'refresh-snapshot', label: 'Refresh the governed snapshot before retrying', route: 'blocked' }]
+            : [{ id: 'review-analytical-failure', label: 'Review the plan, DQL, SQL, and safe repair actions', route: 'blocked' }]
+      : isProviderError
+        ? [{ id: 'retry-after-provider', label: 'Retry after fixing the AI provider', route: 'generated_answer' }]
+        : [{ id: 'retry-after-connection', label: 'Retry after fixing the database connection', route: 'generated_answer' }];
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
-      : isExecutionFailure
-        ? [{ id: 'retry-after-connection', label: 'Retry after fixing the database connection', route: 'generated_answer' }]
+      : isTerminalFailure
+        ? terminalFailureActions
       : isGroundingGap
         ? [{ id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' }]
       : [
@@ -2331,15 +2460,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       resolvedRoute,
       answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
-      summary: isExecutionFailure
+      summary: isTerminalFailure
         ? 'The governed query could not be executed.'
         : governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       status,
       trustState,
       stopReason,
-      artifacts: isExecutionFailure
-        ? []
+      artifacts: isTerminalFailure
+        ? [agentRunArtifact(
+            'answer',
+            'Failed governed analytical run',
+            governedAnswer,
+            governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
+            'blocked',
+          )]
         : governedAnswer.kind === 'no_answer'
         // A refusal still keeps the DQL draft the answer loop produced (when any),
         // so the "Review DQL draft" next-action isn't a dead link and the user can
@@ -3151,6 +3286,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       snapshotId: pack.knowledgeLens.snapshotId,
       sourceFingerprint: pack.freshness.fingerprint ?? undefined,
       knowledgeLens: pack.knowledgeLens,
+      analyticalPolicies: pack.skills.flatMap((skill) => skill.analyticalPolicy ? [skill.analyticalPolicy] : []),
+      contextObjects: pack.objects,
       durationMs: Date.now() - startedAt,
       truncated: pack.retrievalDiagnostics.topRejected.length > 0,
     });
@@ -5779,6 +5916,51 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         .slice(0, limit);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ runs, total: agentRunStore.list().length, limit }));
+      return;
+    }
+
+    if (req.method === 'POST' && /^\/api\/agent-runs\/[^/]+\/analytical-repair$/.test(path)) {
+      const match = path.match(/^\/api\/agent-runs\/([^/]+)\/analytical-repair$/);
+      const id = decodeURIComponent(match?.[1] ?? '');
+      const run = await agentRunStore.get(id);
+      if (!run) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Agent run not found.' }));
+        return;
+      }
+      const source = analyticalFailedRunFromAgentRun(run);
+      if (!source) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'This run has no retained analytical failure artifact.' }));
+        return;
+      }
+      const body = await readJSON(req).catch(() => null);
+      const record = agentRunRecord(body);
+      const repair = (agentRunRecord(record?.repair) ?? record) as unknown as AnalyticalRepairRequestV1 | undefined;
+      if (!repair) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'A v1 analytical repair request is required.' }));
+        return;
+      }
+      // API-007: snapshot refresh is resolved by the runtime, not trusted from
+      // browser input. projectSnapshot() recompiles when governed sources have
+      // changed and gives the immutable identity used by the derivation.
+      const repairWithRuntimeContext: AnalyticalRepairRequestV1 = repair.action === 'refresh_snapshot'
+        ? { ...repair, refreshedSnapshotId: projectSnapshot().snapshotId }
+        : repair;
+      const result = deriveAnalyticalRepair(source, repairWithRuntimeContext);
+      if (result.status === 'blocked') {
+        const status = result.code === 'SOURCE_FINGERPRINT_MISMATCH'
+          ? 409
+          : result.code === 'PERMISSION_FAILURE_TERMINAL' || result.code === 'ACTION_NOT_ALLOWED'
+            ? 403
+            : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+        return;
+      }
+      res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(result));
       return;
     }
 
@@ -12893,6 +13075,52 @@ export function serializeJSON(value: unknown): string {
     }
     return current;
   });
+}
+
+/**
+ * Extract the single time value returned by an authorized semantic freshness
+ * lookup. Adapter aliases may differ by warehouse, so typed date metadata is
+ * the only fallback; arbitrary string columns are never treated as freshness.
+ * Acceptance: AGT-019, SEC-004.
+ */
+export function analyticalFreshnessObservedThrough(
+  result: QueryResult,
+  request: AnalyticalFreshnessRequestV1,
+): string {
+  const binding = request.authorizedAdapterRequest;
+  if (!binding || binding.route !== 'semantic') {
+    throw Object.assign(new Error('The freshness lookup has no authorized semantic adapter binding.'), {
+      code: 'FRESHNESS_BINDING_REQUIRED',
+    });
+  }
+  const row = result.rows[0];
+  if (!row) {
+    throw Object.assign(new Error('The authorized freshness lookup returned no rows.'), {
+      code: 'FRESHNESS_OBSERVATION_MISSING',
+    });
+  }
+  const normalize = (value: string) => value.replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase();
+  const target = normalize(binding.outputField);
+  const exact = result.columns.find((column) => normalize(column.name) === target);
+  const typedDates = result.columns.filter((column) => column.type === 'date' || column.type === 'datetime');
+  const column = exact ?? (typedDates.length === 1 ? typedDates[0] : undefined);
+  if (!column) {
+    throw Object.assign(new Error('The authorized freshness lookup did not return one identifiable time field.'), {
+      code: 'FRESHNESS_OBSERVATION_INVALID',
+    });
+  }
+  const value = row[column.name];
+  const instant = value instanceof Date
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? new Date(value)
+      : undefined;
+  if (!instant || Number.isNaN(instant.getTime())) {
+    throw Object.assign(new Error('The authorized freshness value is not a valid instant.'), {
+      code: 'FRESHNESS_OBSERVATION_INVALID',
+    });
+  }
+  return instant.toISOString();
 }
 
 /** Serialize a Skill to the shared API contract shape (spec 16). */

@@ -15,14 +15,21 @@
  * full pipeline.
  */
 
+import { createHash } from 'node:crypto';
 import {
   describeDialectForPrompt,
+  normalizeMetricCapabilityContract,
   type SemanticLayer,
   type ResolvedTrustLabel,
   type TrustLabelId,
   type DqlArtifactReference,
   type DqlArtifactExecutionReceipt,
   type DQLManifest,
+  type AnalyticalFailureCode,
+  type AnalyticalFailurePhase,
+  type AnalyticalFailureV1,
+  type AnalyticalQuestionFrameV2,
+  type MetricCapabilityContract,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
@@ -91,19 +98,55 @@ import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
 import { stampTrustLabel } from './trust/stamp.js';
 import { deriveResolvedAnalyticalPlan, type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
 import {
+  adaptAnalyticalFreshnessRequest,
+  adaptAnalyticalSemanticGraph,
   adaptResolvedAnalyticalPlan,
   buildPlanExecutionRegistry,
   type PlanExecutionBinding,
   type PlanExecutionBlockedCode,
+  type PlanExecutionRegistryEntry,
+  type SemanticGraphExecutionBinding,
 } from './plan-execution-adapter.js';
 import {
   buildGovernedRelationalRegistry,
+  compileGovernedRelationalExecutionGraph,
   compileGovernedRelationalPlan,
   finalizeGovernedCompilationReceipt,
   renderGovernedRelationalDqlArtifact,
   type GovernedCompilationReceipt,
+  type GovernedAnalyticalGraphCompilationReceipt,
+  type GovernedAnalyticalGraphCompileResult,
   type GovernedRelationalCompileResult,
 } from './governed-relational-compiler.js';
+import {
+  buildAnalyticalExecutionGraph,
+  executeAnalyticalExecutionGraph,
+  type AnalyticalExecutionGraphBlockedCode,
+  type AnalyticalExecutionGraphV1,
+  type AnalyticalExecutionReceiptV1,
+  type AnalyticalExecutionRoute,
+  type AnalyticalGraphExecutionFailureCode,
+  type AnalyticalGraphSourceInvocationNode,
+  type AnalyticalSourceResult,
+} from './analytical-execution-graph.js';
+import {
+  buildAnalyticalResultFacts,
+  renderDeterministicAnalyticalNarrative,
+  validateAnalyticalNarrativeClaims,
+  type AnalyticalNarrativeV1,
+  type AnalyticalResultFactSetV1,
+} from './analytical-result-facts.js';
+import {
+  resolveAnalyticalPeriods,
+  type AnalyticalFreshnessObservationV1,
+  type AnalyticalFreshnessRequestV1,
+  type ResolveAnalyticalPeriodsResult,
+} from './analytical-period-resolution.js';
+import {
+  classifyAnalyticalFailure,
+  createAnalyticalFailure,
+  type AnalyticalFailedBindingInput,
+} from './analytical-failure-repair.js';
 import {
   QUICK_PROMPT_CONTEXT_BUDGET,
   canUseLaneRepair,
@@ -170,7 +213,18 @@ export interface AgentRefusalDetails {
    * grounding gaps, this preserves the exact validation code so repair loops can
    * re-ground the named identifier instead of parsing prose.
    */
-  code?: AnswerRefusalCode | SqlContextValidationCode | AnalyticalPolicyCode | PlanExecutionBlockedCode | 'semantic_runtime_required';
+  code?:
+    | AnswerRefusalCode
+    | SqlContextValidationCode
+    | AnalyticalPolicyCode
+    | PlanExecutionBlockedCode
+    | AnalyticalExecutionGraphBlockedCode
+    | AnalyticalGraphExecutionFailureCode
+    | Extract<ResolveAnalyticalPeriodsResult, { status: 'blocked' }>['code']
+    | Extract<GovernedAnalyticalGraphCompileResult, { status: 'blocked' }>['code']
+    | 'COMPILATION_FAILED'
+    | 'EXECUTION_FAILED'
+    | 'semantic_runtime_required';
   message: string;
   offending?: SqlContextValidationOffending;
 }
@@ -640,8 +694,22 @@ export interface AgentAnswer {
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
   /** Versioned identity-only executable projection of the resolved plan. */
   executablePlan?: PlanExecutionBinding;
+  /** Immutable multi-period graph compiled from the v2 plan. */
+  analyticalExecutionGraph?: AnalyticalExecutionGraphV1;
+  /** Terminal receipt binding every source execution and validated output. */
+  analyticalExecutionReceipt?: AnalyticalExecutionReceiptV1;
+  /** Deterministic facts copied from validated result columns and bound to the receipt. */
+  analyticalFacts?: AnalyticalResultFactSetV1;
+  /** Business narration whose every claim cites those facts. */
+  analyticalNarrative?: AnalyticalNarrativeV1;
+  /** Snapshot-bound freshness proof used to resolve relative periods. */
+  analyticalFreshnessObservation?: AnalyticalFreshnessObservationV1;
+  /** Stable redacted diagnostics for the immutable failed analytical run. */
+  analyticalFailure?: AnalyticalFailureV1;
   /** Compiler/result receipt for the authoritative governed relational lane. */
   governedCompilationReceipt?: GovernedCompilationReceipt;
+  /** Multi-statement compilation receipt for a governed relational graph. */
+  governedAnalyticalGraphCompilationReceipt?: GovernedAnalyticalGraphCompilationReceipt;
   /** Final answer text (NL summary). */
   text: string;
   /**
@@ -769,8 +837,32 @@ export interface AnswerLoopInput {
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
   /** Internal: the single adapter result prepared once at the answer boundary. */
   resolvedPlanExecutionBinding?: PlanExecutionBinding;
+  /** Internal: immutable route-neutral graph prepared once at the answer boundary. */
+  analyticalExecutionGraph?: AnalyticalExecutionGraphV1;
+  /** Internal: deterministic graph-build gap; never reopens routing. */
+  analyticalExecutionGraphFailure?: {
+    code: AnalyticalExecutionGraphBlockedCode;
+    reason: string;
+    field?: string;
+  };
+  /** Internal: governed relative-time binding gap; never reopens routing. */
+  analyticalPeriodResolutionFailure?: {
+    code: Extract<ResolveAnalyticalPeriodsResult, { status: 'blocked' }>['code'];
+    reason: string;
+    error?: unknown;
+  };
+  /** Internal: exact per-period semantic adapter selections. */
+  semanticGraphExecutionBinding?: SemanticGraphExecutionBinding;
   /** Internal: constrained AST/SQL compilation prepared at the answer boundary. */
   governedRelationalCompilation?: GovernedRelationalCompileResult;
+  /** Internal: per-period governed relational graph compilation. */
+  governedAnalyticalGraphCompilation?: GovernedAnalyticalGraphCompileResult;
+  /** Captured once by the host for deterministic relative-period resolution. */
+  analyticalReferenceInstant?: string;
+  /** Optional pre-fetched authorized freshness proof for this snapshot. */
+  analyticalFreshnessObservation?: AnalyticalFreshnessObservationV1;
+  /** At most one authorized freshness lookup; it cannot search or change route. */
+  resolveAnalyticalFreshness?: (request: AnalyticalFreshnessRequestV1) => Promise<AnalyticalFreshnessObservationV1>;
   /**
    * Current notebook/app context, such as upstream SQL or selected filters.
    * This is prompt context only. It is intentionally excluded from KG and
@@ -1195,25 +1287,167 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         input.followUp.resolvedAnalyticalPlanDelta,
       )
     : undefined;
-  const normalizedInput: AnswerLoopInput = inheritedPlan
+  let normalizedInput: AnswerLoopInput = inheritedPlan
     ? { ...input, resolvedAnalyticalPlan: inheritedPlan }
     : input;
+  // Cross-result computations are intentionally independent of the KG and
+  // warehouse. Preserve this earliest exit before building any execution
+  // registry so lightweight follow-up callers do not need runtime services.
+  const earlyCrossResult = tryCrossResultAnswer(normalizedInput);
+  if (earlyCrossResult) {
+    return {
+      ...earlyCrossResult,
+      resolvedAnalyticalPlan: normalizedInput.resolvedAnalyticalPlan,
+    };
+  }
+  const executionRegistry = buildPlanExecutionRegistry({
+    nodes: [
+      ...normalizedInput.kg.getNodesByKind('block', 100_000),
+      ...normalizedInput.kg.getNodesByKind('metric', 100_000),
+      ...normalizedInput.kg.getNodesByKind('dimension', 100_000),
+    ],
+    objects: normalizedInput.contextPack?.objects,
+  });
+  const unresolvedPlan = normalizedInput.resolvedAnalyticalPlan;
+  const unresolvedCapability = unresolvedPlan
+    ? analyticalCapabilityForPlan(unresolvedPlan, normalizedInput.contextPack, executionRegistry)
+    : undefined;
+  if (
+    unresolvedPlan?.schemaVersion === 2
+    && unresolvedPlan.analyticalFrame?.timeContext?.periods.some((period) => !period.start || !period.end)
+    && unresolvedCapability
+  ) {
+    let freshness = normalizedInput.analyticalFreshnessObservation;
+    let freshnessError: unknown;
+    if (
+      !freshness
+      && unresolvedPlan.analyticalFrame.timeContext.completenessPolicy !== 'partial_current'
+      && normalizedInput.resolveAnalyticalFreshness
+      && unresolvedPlan.analyticalFrame.timeContext.timeDimensionId
+    ) {
+      try {
+        const freshnessRequest: AnalyticalFreshnessRequestV1 = {
+          version: 1,
+          snapshotId: unresolvedPlan.snapshotId,
+          metricId: unresolvedCapability.metricId,
+          timeDimensionId: unresolvedPlan.analyticalFrame.timeContext.timeDimensionId,
+          ...(unresolvedCapability.freshness?.observedThroughFieldId
+            ? { observedThroughFieldId: unresolvedCapability.freshness.observedThroughFieldId }
+            : {}),
+        };
+        const adapterBinding = unresolvedPlan.capability === 'semantic_execution' && normalizedInput.semanticLayer
+          ? adaptAnalyticalFreshnessRequest({
+              plan: unresolvedPlan,
+              request: freshnessRequest,
+              registry: executionRegistry,
+              semanticLayer: normalizedInput.semanticLayer,
+              expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
+            })
+          : undefined;
+        if (adapterBinding?.status === 'blocked') {
+          throw { code: adapterBinding.code, message: adapterBinding.reason };
+        }
+        freshness = await normalizedInput.resolveAnalyticalFreshness({
+          ...freshnessRequest,
+          ...(adapterBinding?.status === 'ready'
+            ? { authorizedAdapterRequest: adapterBinding.request }
+            : {}),
+        });
+      } catch (error) {
+        freshnessError = error;
+      }
+    }
+    const periodResolution = freshnessError
+      ? {
+          status: 'blocked' as const,
+          code: 'FRESHNESS_REQUIRED' as const,
+          reason: 'The selected route could not obtain its authorized freshness observation.',
+        }
+      : resolveAnalyticalPeriods({
+          frame: unresolvedPlan.analyticalFrame,
+          snapshotId: unresolvedPlan.snapshotId,
+          referenceInstant: normalizedInput.analyticalReferenceInstant ?? new Date().toISOString(),
+          ...(freshness ? { freshnessObservation: freshness } : {}),
+        });
+    if (periodResolution.status === 'resolved') {
+      normalizedInput = {
+        ...normalizedInput,
+        resolvedAnalyticalPlan: deriveResolvedAnalyticalPlan(unresolvedPlan, {
+          question: unresolvedPlan.question,
+          analyticalFrame: periodResolution.frame,
+        }),
+        ...(periodResolution.freshnessObservation
+          ? { analyticalFreshnessObservation: periodResolution.freshnessObservation }
+          : {}),
+      };
+    } else {
+      normalizedInput = {
+        ...normalizedInput,
+        analyticalPeriodResolutionFailure: {
+          code: periodResolution.code,
+          reason: periodResolution.reason,
+          ...(freshnessError ? { error: freshnessError } : {}),
+        },
+      };
+    }
+  }
   const resolvedPlanExecutionBinding = normalizedInput.resolvedAnalyticalPlan
     ? adaptResolvedAnalyticalPlan({
         plan: normalizedInput.resolvedAnalyticalPlan,
-        registry: buildPlanExecutionRegistry({
-          nodes: [
-            ...normalizedInput.kg.getNodesByKind('block', 100_000),
-            ...normalizedInput.kg.getNodesByKind('metric', 100_000),
-            ...normalizedInput.kg.getNodesByKind('dimension', 100_000),
-          ],
-          objects: normalizedInput.contextPack?.objects,
-        }),
+        registry: executionRegistry,
         semanticLayer: normalizedInput.semanticLayer,
         expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
       })
     : undefined;
-  const planBoundInput: AnswerLoopInput = resolvedPlanExecutionBinding
+  const analyticalCapability = normalizedInput.resolvedAnalyticalPlan
+    ? analyticalCapabilityForPlan(normalizedInput.resolvedAnalyticalPlan, normalizedInput.contextPack, executionRegistry)
+    : undefined;
+  const analyticalRoute = normalizedInput.resolvedAnalyticalPlan
+    ? analyticalRouteForPlan(normalizedInput.resolvedAnalyticalPlan)
+    : undefined;
+  const analyticalAdapterId = analyticalCapability && analyticalRoute
+    ? analyticalCapability.executionCapabilities.find((candidate) => candidate.route === analyticalRoute)?.adapterId
+    : undefined;
+  const analyticalGraphBuild = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
+    && normalizedInput.resolvedAnalyticalPlan.analyticalFrame
+    && !normalizedInput.analyticalPeriodResolutionFailure
+    && analyticalCapability
+    && analyticalRoute
+    ? buildAnalyticalExecutionGraph({
+        plan: normalizedInput.resolvedAnalyticalPlan,
+        capability: analyticalCapability,
+        route: analyticalRoute,
+        ...(analyticalAdapterId ? { adapterId: analyticalAdapterId } : {}),
+      })
+    : undefined;
+  const analyticalExecutionGraph = analyticalGraphBuild?.status === 'ready'
+    ? analyticalGraphBuild.graph
+    : undefined;
+  const analyticalExecutionGraphFailure: AnswerLoopInput['analyticalExecutionGraphFailure'] = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
+    ? analyticalGraphBuild?.status === 'blocked'
+      ? {
+          code: analyticalGraphBuild.code,
+          reason: analyticalGraphBuild.reason,
+          ...(analyticalGraphBuild.field ? { field: analyticalGraphBuild.field } : {}),
+        }
+      : !analyticalCapability
+        ? { code: 'CAPABILITY_MISMATCH', reason: 'The selected v2 plan capability is not present in the immutable context pack.' }
+        : !analyticalRoute
+          ? { code: 'ROUTE_MISMATCH', reason: 'The selected v2 plan has no executable analytical route.' }
+          : undefined
+    : undefined;
+  const semanticGraphExecutionBinding = analyticalExecutionGraph?.route === 'semantic'
+    && normalizedInput.resolvedAnalyticalPlan
+    && normalizedInput.semanticLayer
+    ? adaptAnalyticalSemanticGraph({
+        graph: analyticalExecutionGraph,
+        plan: normalizedInput.resolvedAnalyticalPlan,
+        registry: executionRegistry,
+        semanticLayer: normalizedInput.semanticLayer,
+        expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
+      })
+    : undefined;
+  const planBoundInput: AnswerLoopInput = resolvedPlanExecutionBinding || analyticalExecutionGraph || analyticalExecutionGraphFailure
     ? { ...normalizedInput, resolvedPlanExecutionBinding }
     : normalizedInput;
   const relationalSchemaContext = planBoundInput.schemaContext?.length
@@ -1227,20 +1461,44 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
           description: column.description,
         })),
       }));
-  const governedRelationalCompilation = planBoundInput.resolvedAnalyticalPlan?.mode === 'authoritative'
-    && planBoundInput.resolvedAnalyticalPlan.capability === 'governed_relational'
-    ? compileGovernedRelationalPlan({
+  const relationalRegistry = planBoundInput.resolvedAnalyticalPlan?.capability === 'governed_relational'
+    ? buildGovernedRelationalRegistry({
+        snapshotId: planBoundInput.resolvedAnalyticalPlan.snapshotId,
+        schemaContext: relationalSchemaContext,
+        manifest: planBoundInput.manifest,
+      })
+    : undefined;
+  const governedAnalyticalGraphCompilation = analyticalExecutionGraph?.route === 'governed_sql'
+    && planBoundInput.resolvedAnalyticalPlan
+    && relationalRegistry
+    ? compileGovernedRelationalExecutionGraph({
+        graph: analyticalExecutionGraph,
         plan: planBoundInput.resolvedAnalyticalPlan,
-        registry: buildGovernedRelationalRegistry({
-          snapshotId: planBoundInput.resolvedAnalyticalPlan.snapshotId,
-          schemaContext: relationalSchemaContext,
-          manifest: planBoundInput.manifest,
-        }),
+        registry: relationalRegistry,
         driver: planBoundInput.semanticDriver,
       })
     : undefined;
-  const compiledInput: AnswerLoopInput = governedRelationalCompilation
-    ? { ...planBoundInput, governedRelationalCompilation }
+  const governedRelationalCompilation = !governedAnalyticalGraphCompilation
+    && planBoundInput.resolvedAnalyticalPlan?.mode === 'authoritative'
+    && planBoundInput.resolvedAnalyticalPlan.capability === 'governed_relational'
+    ? compileGovernedRelationalPlan({
+        plan: planBoundInput.resolvedAnalyticalPlan,
+        registry: relationalRegistry!,
+        driver: planBoundInput.semanticDriver,
+      })
+    : undefined;
+  const compiledInput: AnswerLoopInput = governedRelationalCompilation || governedAnalyticalGraphCompilation || semanticGraphExecutionBinding || analyticalExecutionGraph || analyticalExecutionGraphFailure || normalizedInput.analyticalPeriodResolutionFailure
+    ? {
+        ...planBoundInput,
+        ...(governedRelationalCompilation ? { governedRelationalCompilation } : {}),
+        ...(governedAnalyticalGraphCompilation ? { governedAnalyticalGraphCompilation } : {}),
+        ...(semanticGraphExecutionBinding ? { semanticGraphExecutionBinding } : {}),
+        ...(analyticalExecutionGraph ? { analyticalExecutionGraph } : {}),
+        ...(analyticalExecutionGraphFailure ? { analyticalExecutionGraphFailure } : {}),
+        ...(normalizedInput.analyticalPeriodResolutionFailure
+          ? { analyticalPeriodResolutionFailure: normalizedInput.analyticalPeriodResolutionFailure }
+          : {}),
+      }
     : planBoundInput;
   const executionInput = compiledInput.contextPack
     ? {
@@ -1249,17 +1507,14 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         skillsSelectionLocked: true,
       }
     : compiledInput;
-  // Cross-result follow-up ("of these, the average") — computed from the prior
-  // rows, before the cascade, so it never re-queries or times out.
-  const crossResult = tryCrossResultAnswer(executionInput);
-  if (crossResult) {
-    return {
-      ...crossResult,
-      resolvedAnalyticalPlan: executionInput.resolvedAnalyticalPlan,
-      executablePlan: executionInput.resolvedPlanExecutionBinding,
-    };
-  }
-  const result = applyHollowAnswerGate(await runAnswerLoop(executionInput));
+  const loopResult = await runAnswerLoop(executionInput);
+  const result = applyHollowAnswerGate(
+    validateCertifiedAnalyticalGraphAnswer(
+      loopResult,
+      executionInput.analyticalExecutionGraph,
+      executionInput.resolvedAnalyticalPlan?.analyticalFrame,
+    ),
+  );
   // Attach the canonical trust label once, at the single exit point, so every
   // return site inside runAnswerLoop stays untouched and backward compatible.
   // Freshness-aware trust: for a certified answer, fold the source block's data
@@ -1290,6 +1545,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     intentDecision,
     resolvedAnalyticalPlan: executionInput.resolvedAnalyticalPlan,
     executablePlan: executionInput.resolvedPlanExecutionBinding,
+    analyticalFreshnessObservation: executionInput.analyticalFreshnessObservation,
     trustLabelInfo,
     provenanceFooter: buildProvenanceFooter(result, trustLabelInfo),
     cascade: publicResult.cascade ?? createCascadeAnswerResult({
@@ -1470,9 +1726,147 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const authoritativePlanBinding = input.resolvedAnalyticalPlan?.mode === 'authoritative'
     ? input.resolvedPlanExecutionBinding
     : undefined;
+  if (input.analyticalPeriodResolutionFailure) {
+    const failure = input.analyticalPeriodResolutionFailure;
+    const structuredFailureCode = failure.error && typeof failure.error === 'object'
+      && typeof (failure.error as { code?: unknown }).code === 'string'
+      && /^[A-Z0-9_]+$/.test((failure.error as { code: string }).code)
+      ? (failure.error as { code: string }).code
+      : undefined;
+    const analyticalFailure = analyticalFailureForInput(input, {
+      error: failure.error ?? { code: failure.code, message: failure.reason },
+      ...(failure.code === 'FRESHNESS_MISMATCH' ? { code: 'SNAPSHOT_DRIFT' as const } : {}),
+      phase: 'planning',
+      failedBindings: input.resolvedAnalyticalPlan?.analyticalFrame?.timeContext?.timeDimensionId
+        ? [{
+            qualifiedId: input.resolvedAnalyticalPlan.analyticalFrame.timeContext.timeDimensionId,
+            role: 'time_axis',
+            reasonCode: structuredFailureCode ?? failure.code,
+          }]
+        : undefined,
+    });
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text: analyticalFailure.message,
+      answer: analyticalFailure.message,
+      refusalCode: analyticalFailure.code === 'PERMISSION_DENIED' ? 'policy_blocked' : 'grounding_gap',
+      refusalDetails: { code: failure.code, message: analyticalFailure.message },
+      analyticalFailure,
+      citations: contextPackCitations(input.contextPack, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
+  if (input.analyticalExecutionGraphFailure) {
+    const failure = input.analyticalExecutionGraphFailure;
+    const analyticalFailure = analyticalFailureForInput(input, {
+      error: { code: failure.code, message: failure.reason },
+      phase: 'compilation',
+      ...(failure.field ? { failedBindings: [{ role: failure.field, reasonCode: failure.code }] } : {}),
+    });
+    const text = analyticalFailure.message;
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: 'modeling_gap',
+      refusalDetails: { code: failure.code, message: analyticalFailure.message },
+      analyticalFailure,
+      citations: contextPackCitations(input.contextPack, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
+  if (input.semanticGraphExecutionBinding?.status === 'blocked') {
+    const failure = input.semanticGraphExecutionBinding;
+    const analyticalFailure = analyticalFailureForInput(input, {
+      error: { code: failure.code, message: failure.reason },
+      phase: 'validation',
+      failedBindings: failure.candidateIds?.map((qualifiedId) => ({ qualifiedId, reasonCode: failure.code })),
+    });
+    const text = analyticalFailure.message;
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: 'grounding_gap',
+      refusalDetails: { code: failure.code, message: analyticalFailure.message },
+      analyticalFailure,
+      citations: contextPackCitations(input.contextPack, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
+  if (input.semanticGraphExecutionBinding?.status === 'ready' && input.analyticalExecutionGraph) {
+    return executeSemanticAnalyticalGraph({
+      input,
+      binding: input.semanticGraphExecutionBinding,
+      graph: input.analyticalExecutionGraph,
+      considered,
+      providerName: provider.name,
+    });
+  }
+  if (input.governedAnalyticalGraphCompilation?.status === 'blocked') {
+    const failure = input.governedAnalyticalGraphCompilation;
+    const analyticalFailure = analyticalFailureForInput(input, {
+      error: { code: failure.code, message: failure.reason },
+      phase: 'compilation',
+      failedBindings: failure.candidateIds?.map((qualifiedId) => ({ qualifiedId, reasonCode: failure.code })),
+    });
+    const text = analyticalFailure.message;
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: failure.code.startsWith('RELATIONSHIP_') ? 'modeling_gap' : 'grounding_gap',
+      refusalDetails: { code: failure.code, message: analyticalFailure.message },
+      analyticalFailure,
+      citations: contextPackCitations(input.contextPack, 8),
+      considered,
+      contextPack: input.contextPack,
+      providerUsed: provider.name,
+    };
+  }
+  if (input.governedAnalyticalGraphCompilation?.status === 'compiled' && input.analyticalExecutionGraph) {
+    return executeGovernedRelationalAnalyticalGraph({
+      input,
+      compilation: input.governedAnalyticalGraphCompilation,
+      graph: input.analyticalExecutionGraph,
+      considered,
+      providerName: provider.name,
+      schemaContext,
+    });
+  }
   const governedRelationalCompilation = input.governedRelationalCompilation;
   if (governedRelationalCompilation?.status === 'blocked') {
-    const text = `The governed relational plan cannot compile safely: ${governedRelationalCompilation.reason}`;
+    const analyticalFailure = analyticalFailureForInput(input, {
+      error: { code: governedRelationalCompilation.code, message: governedRelationalCompilation.reason },
+      phase: 'compilation',
+      failedBindings: governedRelationalCompilation.candidateIds?.map((qualifiedId) => ({
+        qualifiedId,
+        reasonCode: governedRelationalCompilation.code,
+      })),
+    });
+    const text = analyticalFailure.message;
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -1482,7 +1876,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       text,
       answer: text,
       refusalCode: governedRelationalCompilation.code.startsWith('RELATIONSHIP_') ? 'modeling_gap' : 'grounding_gap',
-      refusalDetails: { code: 'grounding_gap', message: `${governedRelationalCompilation.code}: ${governedRelationalCompilation.reason}` },
+      refusalDetails: { code: 'grounding_gap', message: analyticalFailure.message },
+      analyticalFailure,
       citations: contextPackCitations(input.contextPack, 8),
       considered,
       contextPack: input.contextPack,
@@ -1493,13 +1888,20 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const dqlArtifact = renderGovernedRelationalDqlArtifact(governedRelationalCompilation);
     let result: AgentResultPayload | undefined;
     let executionError: string | undefined;
+    let analyticalFailure: AnalyticalFailureV1 | undefined;
     let receipt = governedRelationalCompilation.receipt;
     if (input.executeDqlArtifact) {
       try {
         result = await input.executeDqlArtifact(dqlArtifact);
         receipt = finalizeGovernedCompilationReceipt(receipt, result);
       } catch (error) {
-        executionError = error instanceof Error ? error.message : String(error);
+        analyticalFailure = analyticalFailureForInput(input, {
+          error,
+          phase: 'execution',
+          dqlArtifact,
+          compiledSql: governedRelationalCompilation.sql,
+        });
+        executionError = analyticalFailure.message;
       }
     }
     const text = executionError
@@ -1516,6 +1918,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       text,
       answer: text,
       ...(executionError ? { executionError, refusalCode: 'grounding_gap' as const } : {}),
+      ...(analyticalFailure ? { analyticalFailure } : {}),
       proposedSql: governedRelationalCompilation.sql,
       sql: governedRelationalCompilation.sql,
       dqlArtifact,
@@ -3436,6 +3839,629 @@ function resultColumnNames(result?: AgentResultPayload): string[] | undefined {
     })
     .filter(Boolean);
   return columns?.length ? columns : undefined;
+}
+
+function analyticalCapabilityForPlan(
+  plan: ResolvedAnalyticalPlan,
+  contextPack?: LocalContextPack,
+  registry: PlanExecutionRegistryEntry[] = [],
+): MetricCapabilityContract | undefined {
+  const candidates = contextPack?.retrievalDiagnostics.meaningEvidence?.candidates ?? [];
+  const exactExecution = candidates.filter((candidate) =>
+    candidate.objectKey === plan.executionId || candidate.qualifiedId === plan.executionId);
+  const metricId = plan.analyticalFrame?.metricConceptIds[0];
+  const pool = exactExecution.length > 0
+    ? exactExecution
+    : candidates.filter((candidate) => candidate.analyticalCapability?.metricId === metricId);
+  const normalized = pool.flatMap((candidate) => {
+    const capability = normalizeMetricCapabilityContract(candidate.analyticalCapability);
+    return capability ? [capability] : [];
+  });
+  for (const entry of registry) {
+    if (
+      (plan.executionId && entry.identities.includes(plan.executionId)) ||
+      entry.node.payload?.qualifiedId === plan.analyticalFrame?.metricConceptIds[0]
+    ) {
+      const capability = normalizeMetricCapabilityContract(entry.node.payload?.analyticalCapability);
+      if (capability) normalized.push(capability);
+    }
+  }
+  const byFingerprint = new Map(normalized.map((capability) => [capability.sourceFingerprint, capability]));
+  return byFingerprint.size === 1 ? [...byFingerprint.values()][0] : undefined;
+}
+
+function analyticalRouteForPlan(plan: ResolvedAnalyticalPlan): AnalyticalExecutionRoute | undefined {
+  if (plan.capability === 'certified_execution' && plan.recommendedRoute === 'certified') return 'certified';
+  if (plan.capability === 'semantic_execution' && plan.recommendedRoute === 'semantic') return 'semantic';
+  if (plan.capability === 'governed_relational' && plan.recommendedRoute === 'governed_sql') return 'governed_sql';
+  if (plan.capability === 'bounded_exploration' && plan.recommendedRoute === 'exploratory') return 'exploratory';
+  return undefined;
+}
+
+function validateCertifiedAnalyticalGraphAnswer(
+  answer: AgentAnswer,
+  graph?: AnalyticalExecutionGraphV1,
+  frame?: AnalyticalQuestionFrameV2,
+): AgentAnswer {
+  if (!graph || graph.route !== 'certified') return answer;
+  if (!frame) return certifiedGraphValidationFailure(answer, graph, 'The certified graph has no v2 analytical frame.');
+  if (!answer.result) return { ...answer, analyticalExecutionGraph: graph };
+  const source = graph.nodes.find(
+    (node): node is AnalyticalGraphSourceInvocationNode =>
+      node.kind === 'source_invocation' && node.strategy === 'complete_asset',
+  );
+  if (!source) {
+    return certifiedGraphValidationFailure(answer, graph, 'The certified graph has no complete-asset source node.');
+  }
+  const columns = resultColumnNames(answer.result) ?? [];
+  const expected = source.outputAliases.completeAssetOutputIds ?? [];
+  if (columns.length !== expected.length || expected.some((outputId) => !columns.includes(outputId))) {
+    return certifiedGraphValidationFailure(
+      answer,
+      graph,
+      `The certified result does not satisfy the requested outputs: ${expected.join(', ')}.`,
+    );
+  }
+  const rows = answer.result.rows.map((row) => {
+    if (Array.isArray(row)) return Object.fromEntries(columns.map((column, index) => [column, row[index]]));
+    return row && typeof row === 'object' ? row as Record<string, unknown> : {};
+  });
+  const executed = executeAnalyticalExecutionGraph({
+    graph,
+    sourceResults: {
+      [source.id]: {
+        columns,
+        rows,
+        receiptFingerprint:
+          answer.result.executionReceipt?.resultFingerprint
+          ?? hashAnalyticalValue({ columns, rows, rowCount: answer.result.rowCount }),
+      },
+    },
+  });
+  if (executed.status === 'failed') {
+    return certifiedGraphValidationFailure(answer, graph, executed.reason);
+  }
+  const story = buildValidatedAnalyticalStory(frame, graph, executed);
+  if ('failure' in story) return certifiedGraphValidationFailure(answer, graph, story.failure);
+  return {
+    ...answer,
+    text: story.narrative.text,
+    answer: story.narrative.text,
+    analyticalExecutionGraph: graph,
+    analyticalExecutionReceipt: executed.receipt,
+    analyticalFacts: story.factSet,
+    analyticalNarrative: story.narrative,
+    result: analyticalGraphResultPayload(executed),
+  };
+}
+
+function certifiedGraphValidationFailure(
+  answer: AgentAnswer,
+  graph: AnalyticalExecutionGraphV1,
+  reason: string,
+): AgentAnswer {
+  const analyticalFailure = createAnalyticalFailure({
+    code: 'RESULT_CONTRACT_MISMATCH',
+    phase: 'result_validation',
+    snapshotId: graph.snapshotId,
+    runId: graph.graphId,
+    planFingerprint: graph.planFingerprint,
+    dqlSource: answer.dqlArtifact?.source,
+    compiledSql: answer.sql ?? answer.proposedSql ?? answer.dqlArtifact?.compiledSql,
+  });
+  const text = analyticalFailure.message;
+  return {
+    ...answer,
+    kind: 'no_answer',
+    sourceTier: 'no_answer',
+    certification: 'analyst_review_required',
+    reviewStatus: 'none',
+    confidence: 0,
+    text,
+    answer: text,
+    result: undefined,
+    executionError: analyticalFailure.message,
+    refusalCode: 'grounding_gap',
+    refusalDetails: { code: 'RESULT_CONTRACT_MISMATCH', message: analyticalFailure.message },
+    analyticalFailure,
+    analyticalExecutionGraph: graph,
+  };
+}
+
+async function executeSemanticAnalyticalGraph(input: {
+  input: AnswerLoopInput;
+  binding: Extract<SemanticGraphExecutionBinding, { status: 'ready' }>;
+  graph: AnalyticalExecutionGraphV1;
+  considered: KGSearchHit[];
+  providerName: string;
+}): Promise<AgentAnswer> {
+  const layer = input.input.semanticLayer;
+  if (!layer) {
+    return analyticalGraphFailureAnswer(input, 'SEMANTIC_LAYER_REQUIRED', 'The pinned semantic layer is unavailable.');
+  }
+  const sourceResults: Record<string, AnalyticalSourceResult> = {};
+  const compiledSql: string[] = [];
+  const artifacts: DqlArtifactReference[] = [];
+  for (const invocation of input.binding.invocations) {
+    let composed = composeSemanticQueryFromMembers({
+      semanticLayer: layer,
+      question: input.input.question,
+      selection: invocation.selection,
+      ...(input.input.semanticDriver ? { driver: input.input.semanticDriver } : {}),
+      ...(input.input.semanticTableMapping ? { tableMapping: input.input.semanticTableMapping } : {}),
+    });
+    if (!composed && input.input.semanticQueryCompiler) {
+      try {
+        const compiled = await input.input.semanticQueryCompiler(invocation.selection);
+        composed = composeSemanticQueryFromCompiledMembers({
+          semanticLayer: layer,
+          question: input.input.question,
+          selection: compiled.selection ?? invocation.selection,
+          sql: compiled.sql,
+        });
+      } catch (error) {
+        return analyticalGraphFailureAnswer(
+          input,
+          'COMPILATION_FAILED',
+          error instanceof Error ? error.message : String(error),
+          {
+            phase: 'compilation',
+            ...(compiledSql.length ? { compiledSql: renderAnalyticalStatements(compiledSql) } : {}),
+          },
+        );
+      }
+    }
+    if (!composed) {
+      return analyticalGraphFailureAnswer(
+        input,
+        'COMPILATION_FAILED',
+        `The pinned semantic adapter could not compile ${invocation.nodeId}.`,
+        {
+          phase: 'compilation',
+          ...(compiledSql.length ? { compiledSql: renderAnalyticalStatements(compiledSql) } : {}),
+          failedBindings: [{ role: 'source_invocation', reasonCode: 'SEMANTIC_COMPILE_FAILED' }],
+        },
+      );
+    }
+    compiledSql.push(composed.sql);
+    artifacts.push(composed.dqlArtifact);
+    const executor = input.input.executeDqlArtifact
+      ? () => input.input.executeDqlArtifact!(composed!.dqlArtifact)
+      : input.input.executeGeneratedSql
+        ? () => input.input.executeGeneratedSql!(composed!.sql, composed!.dqlArtifact)
+        : undefined;
+    if (!executor) continue;
+    let result: AgentResultPayload;
+    try {
+      result = await executor();
+    } catch (error) {
+      return analyticalGraphFailureAnswer(
+        input,
+        'EXECUTION_FAILED',
+        error instanceof Error ? error.message : String(error),
+        { phase: 'execution', dqlArtifact: composed.dqlArtifact, compiledSql: composed.sql },
+      );
+    }
+    const normalized = normalizeAnalyticalSourceResult({
+      result,
+      outputAliases: invocation.outputAliases,
+      sourceNames: [
+        ...(invocation.selection.dimensions ?? []),
+        ...(invocation.selection.timeDimension ? [invocation.selection.timeDimension.name] : []),
+        invocation.selection.metrics[0]!,
+      ],
+      sql: composed.sql,
+    });
+    if ('failure' in normalized) {
+      return analyticalGraphFailureAnswer(input, 'RESULT_CONTRACT_MISMATCH', normalized.failure, {
+        phase: 'result_validation',
+        dqlArtifact: composed.dqlArtifact,
+        compiledSql: composed.sql,
+      });
+    }
+    sourceResults[invocation.nodeId] = normalized.source;
+  }
+  const sql = renderAnalyticalStatements(compiledSql);
+  if (Object.keys(sourceResults).length === 0) {
+    return {
+      kind: 'uncertified',
+      sourceTier: 'semantic_layer',
+      certification: 'governed',
+      reviewStatus: 'governed',
+      confidence: 0.9,
+      text: `Compiled ${compiledSql.length} snapshot-bound semantic period ${compiledSql.length === 1 ? 'query' : 'queries'}; execution was not requested.`,
+      answer: `Compiled ${compiledSql.length} snapshot-bound semantic period ${compiledSql.length === 1 ? 'query' : 'queries'}; execution was not requested.`,
+      proposedSql: sql,
+      sql,
+      ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
+      analyticalExecutionGraph: input.graph,
+      citations: contextPackCitations(input.input.contextPack, 8),
+      considered: input.considered,
+      contextPack: input.input.contextPack,
+      providerUsed: input.providerName,
+    };
+  }
+  const executed = executeAnalyticalExecutionGraph({ graph: input.graph, sourceResults });
+  if (executed.status === 'failed') {
+    return analyticalGraphFailureAnswer(input, executed.code, executed.reason, {
+      phase: 'result_validation',
+      compiledSql: sql,
+      ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
+      failedBindings: [{ role: executed.nodeId, reasonCode: executed.code }],
+    });
+  }
+  const frame = input.input.resolvedAnalyticalPlan?.analyticalFrame;
+  if (!frame) return analyticalGraphFailureAnswer(input, 'RESULT_CONTRACT_MISMATCH', 'The executed graph has no v2 analytical frame.', {
+    phase: 'result_validation',
+    compiledSql: sql,
+  });
+  const story = buildValidatedAnalyticalStory(frame, input.graph, executed);
+  if ('failure' in story) return analyticalGraphFailureAnswer(input, 'RESULT_CONTRACT_MISMATCH', story.failure, {
+    phase: 'result_validation',
+    compiledSql: sql,
+  });
+  const result = analyticalGraphResultPayload(executed);
+  return {
+    kind: 'uncertified',
+    sourceTier: 'semantic_layer',
+    certification: 'governed',
+    reviewStatus: 'governed',
+    confidence: 0.95,
+    text: story.narrative.text,
+    answer: story.narrative.text,
+    proposedSql: sql,
+    sql,
+    ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
+    result,
+    analyticalExecutionGraph: input.graph,
+    analyticalExecutionReceipt: executed.receipt,
+    analyticalFacts: story.factSet,
+    analyticalNarrative: story.narrative,
+    citations: contextPackCitations(input.input.contextPack, 8),
+    considered: input.considered,
+    contextPack: input.input.contextPack,
+    providerUsed: input.providerName,
+  };
+}
+
+async function executeGovernedRelationalAnalyticalGraph(input: {
+  input: AnswerLoopInput;
+  compilation: Extract<GovernedAnalyticalGraphCompileResult, { status: 'compiled' }>;
+  graph: AnalyticalExecutionGraphV1;
+  considered: KGSearchHit[];
+  providerName: string;
+  schemaContext: AgentSchemaTable[];
+}): Promise<AgentAnswer> {
+  const sourceResults: Record<string, AnalyticalSourceResult> = {};
+  const artifacts: DqlArtifactReference[] = [];
+  for (const statement of input.compilation.statements) {
+    const compiled: Extract<GovernedRelationalCompileResult, { status: 'compiled' }> = {
+      status: 'compiled',
+      ast: statement.ast,
+      sql: statement.sql,
+      parameterValues: statement.parameterValues,
+      receipt: statement.receipt,
+    };
+    const artifact = renderGovernedRelationalDqlArtifact(compiled);
+    artifacts.push(artifact);
+    if (!input.input.executeDqlArtifact) continue;
+    let result: AgentResultPayload;
+    try {
+      result = await input.input.executeDqlArtifact(artifact);
+    } catch (error) {
+      return analyticalGraphFailureAnswer(
+        input,
+        'EXECUTION_FAILED',
+        error instanceof Error ? error.message : String(error),
+        { phase: 'execution', dqlArtifact: artifact, compiledSql: statement.sql },
+      );
+    }
+    let receipt: GovernedCompilationReceipt;
+    try {
+      receipt = finalizeGovernedCompilationReceipt(statement.receipt, result);
+    } catch (error) {
+      return analyticalGraphFailureAnswer(
+        input,
+        'RESULT_CONTRACT_MISMATCH',
+        error instanceof Error ? error.message : String(error),
+        { phase: 'result_validation', dqlArtifact: artifact, compiledSql: statement.sql },
+      );
+    }
+    const normalized = normalizeAnalyticalSourceResult({
+      result,
+      outputAliases: statement.outputAliases,
+      sourceNames: [
+        ...statement.outputAliases.dimensions.map((dimension) => dimension.outputId),
+        statement.outputAliases.metric!.outputId,
+      ],
+      sql: statement.sql,
+      receiptFingerprint: receipt.result!.resultFingerprint,
+    });
+    if ('failure' in normalized) {
+      return analyticalGraphFailureAnswer(input, 'RESULT_CONTRACT_MISMATCH', normalized.failure, {
+        phase: 'result_validation',
+        dqlArtifact: artifact,
+        compiledSql: statement.sql,
+      });
+    }
+    sourceResults[statement.nodeId] = normalized.source;
+  }
+  const statements = input.compilation.statements.map((statement) => statement.sql);
+  const sql = renderAnalyticalStatements(statements);
+  if (Object.keys(sourceResults).length === 0) {
+    return {
+      kind: 'uncertified',
+      sourceTier: 'dbt_manifest',
+      certification: 'governed',
+      reviewStatus: 'governed',
+      confidence: 0.9,
+      text: `Compiled ${statements.length} governed relational period ${statements.length === 1 ? 'statement' : 'statements'}; execution was not requested.`,
+      answer: `Compiled ${statements.length} governed relational period ${statements.length === 1 ? 'statement' : 'statements'}; execution was not requested.`,
+      proposedSql: sql,
+      sql,
+      ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
+      analyticalExecutionGraph: input.graph,
+      governedAnalyticalGraphCompilationReceipt: input.compilation.receipt,
+      citations: schemaCitations(input.schemaContext, 8),
+      considered: input.considered,
+      contextPack: input.input.contextPack,
+      providerUsed: input.providerName,
+    };
+  }
+  const executed = executeAnalyticalExecutionGraph({ graph: input.graph, sourceResults });
+  if (executed.status === 'failed') {
+    return analyticalGraphFailureAnswer(input, executed.code, executed.reason, {
+      phase: 'result_validation',
+      compiledSql: sql,
+      ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
+      failedBindings: [{ role: executed.nodeId, reasonCode: executed.code }],
+    });
+  }
+  const frame = input.input.resolvedAnalyticalPlan?.analyticalFrame;
+  if (!frame) return analyticalGraphFailureAnswer(input, 'RESULT_CONTRACT_MISMATCH', 'The executed graph has no v2 analytical frame.', {
+    phase: 'result_validation',
+    compiledSql: sql,
+  });
+  const story = buildValidatedAnalyticalStory(frame, input.graph, executed);
+  if ('failure' in story) return analyticalGraphFailureAnswer(input, 'RESULT_CONTRACT_MISMATCH', story.failure, {
+    phase: 'result_validation',
+    compiledSql: sql,
+  });
+  const result = analyticalGraphResultPayload(executed);
+  return {
+    kind: 'uncertified',
+    sourceTier: 'dbt_manifest',
+    certification: 'governed',
+    reviewStatus: 'governed',
+    confidence: 0.95,
+    text: story.narrative.text,
+    answer: story.narrative.text,
+    proposedSql: sql,
+    sql,
+    ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
+    result,
+    analyticalExecutionGraph: input.graph,
+    analyticalExecutionReceipt: executed.receipt,
+    analyticalFacts: story.factSet,
+    analyticalNarrative: story.narrative,
+    governedAnalyticalGraphCompilationReceipt: input.compilation.receipt,
+    citations: schemaCitations(input.schemaContext, 8),
+    considered: input.considered,
+    contextPack: input.input.contextPack,
+    providerUsed: input.providerName,
+  };
+}
+
+function normalizeAnalyticalSourceResult(input: {
+  result: AgentResultPayload;
+  outputAliases: {
+    dimensions: Array<{ dimensionId: string; outputId: string }>;
+    metric?: { outputId: string };
+  };
+  sourceNames: string[];
+  sql: string;
+  receiptFingerprint?: string;
+}): { source: AnalyticalSourceResult } | { failure: string } {
+  const columns = resultColumnNames(input.result) ?? [];
+  const desired = [
+    ...input.outputAliases.dimensions.map((dimension) => dimension.outputId),
+    ...(input.outputAliases.metric ? [input.outputAliases.metric.outputId] : []),
+  ];
+  if (columns.length !== desired.length || input.sourceNames.length !== desired.length) {
+    return { failure: `Expected ${desired.length} source columns but the adapter returned ${columns.length}.` };
+  }
+  const used = new Set<string>();
+  const mapping = desired.map((outputId, index) => {
+    const candidates = [outputId, input.sourceNames[index]!].map(normalizeOutputIdentity);
+    const exact = columns.find((column) => !used.has(column) && candidates.includes(normalizeOutputIdentity(column)));
+    const selected = exact ?? columns[index];
+    if (selected) used.add(selected);
+    return { outputId, sourceColumn: selected };
+  });
+  if (mapping.some((item) => !item.sourceColumn) || new Set(mapping.map((item) => item.sourceColumn)).size !== mapping.length) {
+    return { failure: 'The adapter result columns cannot be mapped uniquely to the graph output aliases.' };
+  }
+  const rows = input.result.rows.map((row) => {
+    const source = Array.isArray(row)
+      ? Object.fromEntries(columns.map((column, index) => [column, row[index]]))
+      : row && typeof row === 'object'
+        ? row as Record<string, unknown>
+        : {};
+    return Object.fromEntries(mapping.map((item) => [item.outputId, source[item.sourceColumn!]]));
+  });
+  return {
+    source: {
+      columns: desired,
+      rows,
+      receiptFingerprint: input.receiptFingerprint
+        ?? input.result.executionReceipt?.resultFingerprint
+        ?? hashAnalyticalValue({ sql: input.sql, columns, rows, rowCount: input.result.rowCount }),
+    },
+  };
+}
+
+function buildValidatedAnalyticalStory(
+  frame: AnalyticalQuestionFrameV2,
+  graph: AnalyticalExecutionGraphV1,
+  result: Extract<ReturnType<typeof executeAnalyticalExecutionGraph>, { status: 'completed' }>,
+): { factSet: AnalyticalResultFactSetV1; narrative: AnalyticalNarrativeV1 } | { failure: string } {
+  const facts = buildAnalyticalResultFacts({
+    frame,
+    graph,
+    receipt: result.receipt,
+    columns: result.columns,
+    rows: result.rows,
+  });
+  if (facts.status === 'blocked') return { failure: facts.reason };
+  const narrative = renderDeterministicAnalyticalNarrative({ frame, factSet: facts.factSet });
+  const validation = validateAnalyticalNarrativeClaims({ factSet: facts.factSet, claims: narrative.claims });
+  if (validation.status === 'invalid') return { failure: validation.reason };
+  return { factSet: facts.factSet, narrative };
+}
+
+function analyticalGraphResultPayload(
+  result: Extract<ReturnType<typeof executeAnalyticalExecutionGraph>, { status: 'completed' }>,
+): AgentResultPayload {
+  return {
+    columns: result.columns,
+    rows: result.rows.map((row) => result.columns.map((column) => row[column])),
+    rowCount: result.rows.length,
+  };
+}
+
+function analyticalGraphFailureAnswer(
+  input: {
+    input: AnswerLoopInput;
+    graph: AnalyticalExecutionGraphV1;
+    considered: KGSearchHit[];
+    providerName: string;
+  },
+  code:
+    | AnalyticalGraphExecutionFailureCode
+    | PlanExecutionBlockedCode
+    | 'COMPILATION_FAILED'
+    | 'EXECUTION_FAILED',
+  reason: string,
+  artifacts: {
+    phase?: AnalyticalFailurePhase;
+    dqlArtifact?: DqlArtifactReference;
+    compiledSql?: string;
+    failedBindings?: AnalyticalFailedBindingInput[];
+  } = {},
+): AgentAnswer {
+  const analyticalFailure = analyticalFailureForInput(input.input, {
+    error: { code, message: reason },
+    code: stableFailureCodeForGraph(code, reason),
+    phase: artifacts.phase ?? analyticalFailurePhaseForGraphCode(code),
+    runId: input.graph.graphId,
+    dqlArtifact: artifacts.dqlArtifact,
+    compiledSql: artifacts.compiledSql,
+    failedBindings: artifacts.failedBindings,
+  });
+  const text = analyticalFailure.message;
+  return {
+    kind: 'no_answer',
+    sourceTier: 'no_answer',
+    certification: 'analyst_review_required',
+    reviewStatus: 'none',
+    confidence: 0,
+    text,
+    answer: text,
+    executionError: analyticalFailure.message,
+    refusalCode: 'grounding_gap',
+    refusalDetails: { code, message: analyticalFailure.message },
+    analyticalFailure,
+    analyticalExecutionGraph: input.graph,
+    ...(artifacts.compiledSql ? { proposedSql: artifacts.compiledSql, sql: artifacts.compiledSql } : {}),
+    ...(artifacts.dqlArtifact ? { dqlArtifact: artifacts.dqlArtifact } : {}),
+    citations: contextPackCitations(input.input.contextPack, 8),
+    considered: input.considered,
+    contextPack: input.input.contextPack,
+    providerUsed: input.providerName,
+  };
+}
+
+function analyticalFailureForInput(
+  input: AnswerLoopInput,
+  diagnostic: {
+    error?: unknown;
+    code?: AnalyticalFailureCode;
+    phase: AnalyticalFailurePhase;
+    runId?: string;
+    dqlArtifact?: DqlArtifactReference;
+    compiledSql?: string;
+    failedBindings?: AnalyticalFailedBindingInput[];
+  },
+): AnalyticalFailureV1 {
+  const plan = input.resolvedAnalyticalPlan;
+  return createAnalyticalFailure({
+    error: diagnostic.error,
+    code: diagnostic.code,
+    phase: diagnostic.phase,
+    snapshotId: plan?.snapshotId ?? input.contextPack?.knowledgeLens.snapshotId ?? 'snapshot-unavailable',
+    runId: diagnostic.runId ?? plan?.planId,
+    planFingerprint: plan?.fingerprint,
+    dqlSource: diagnostic.dqlArtifact?.source,
+    compiledSql: diagnostic.compiledSql ?? diagnostic.dqlArtifact?.compiledSql,
+    failedBindings: diagnostic.failedBindings,
+  });
+}
+
+function stableFailureCodeForGraph(
+  code: AnalyticalGraphExecutionFailureCode | PlanExecutionBlockedCode | 'COMPILATION_FAILED' | 'EXECUTION_FAILED',
+  reason: string,
+): AnalyticalFailureCode {
+  if (
+    code === 'SOURCE_RESULT_MISSING'
+    || code === 'SUB_RECEIPT_REQUIRED'
+    || code === 'RESULT_CONTRACT_MISMATCH'
+    || code === 'DECIMAL_VALUE_REQUIRED'
+    || code === 'ROW_BOUND_EXCEEDED'
+  ) return 'RESULT_CONTRACT_MISMATCH';
+  if (code === 'SNAPSHOT_MISMATCH') return 'SNAPSHOT_DRIFT';
+  return classifyAnalyticalFailure({ code, message: reason }, code === 'EXECUTION_FAILED' ? 'COMPILATION_FAILED' : 'COMPILATION_FAILED');
+}
+
+function analyticalFailurePhaseForGraphCode(
+  code: AnalyticalGraphExecutionFailureCode | PlanExecutionBlockedCode | 'COMPILATION_FAILED' | 'EXECUTION_FAILED',
+): AnalyticalFailurePhase {
+  if (
+    code === 'SOURCE_RESULT_MISSING'
+    || code === 'SUB_RECEIPT_REQUIRED'
+    || code === 'RESULT_CONTRACT_MISMATCH'
+    || code === 'DECIMAL_VALUE_REQUIRED'
+    || code === 'ROW_BOUND_EXCEEDED'
+  ) return 'result_validation';
+  if (code === 'EXECUTION_FAILED') return 'execution';
+  return 'compilation';
+}
+
+function renderAnalyticalStatements(statements: string[]): string {
+  if (statements.length <= 1) return statements[0] ?? '';
+  return statements.map((statement, index) => `-- analytical source ${index + 1}\n${statement}`).join('\n\n');
+}
+
+function normalizeOutputIdentity(value: string): string {
+  return value
+    .replace(/["`[\]]/g, '')
+    .split('.')
+    .at(-1)!
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function hashAnalyticalValue(value: unknown): string {
+  return createHash('sha256').update(stableAnalyticalValue(value)).digest('hex');
+}
+
+function stableAnalyticalValue(value: unknown): string {
+  if (value === undefined || value === null) return 'null';
+  if (typeof value === 'bigint') return JSON.stringify(value.toString());
+  if (typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableAnalyticalValue).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableAnalyticalValue(record[key])}`).join(',')}}`;
 }
 
 const SYSTEM_PROMPT = `You are the DQL Analytics Agent.

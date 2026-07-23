@@ -1,0 +1,10 @@
+name: dbt_first_commerce
+version: 1.0.0
+config-version: 2
+
+profile: dbt_first_commerce
+model-paths: ["models"]
+
+models:
+  dbt_first_commerce:
+    +materialized: view

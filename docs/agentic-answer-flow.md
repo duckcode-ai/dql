@@ -55,6 +55,54 @@ metric is aggregated at the requested grain in its own CTE and the results are
 joined only at that grain (or cross-joined for scalar results). This avoids a
 raw fact-to-fact join and the fanout errors it creates.
 
+### Analytical composition before execution
+
+For metric questions, DQL freezes one versioned analytical frame before it
+chooses an executable asset. The frame records the metric concept, entity
+grain, dimension roles, canonical member values, reporting-time role,
+calendar/timezone, completeness policy, comparison alignment, ranking basis,
+tie policy, and requested outputs. A deterministic compatibility solver checks
+that complete tuple against normalized metric/asset capabilities. It returns
+one compatible route, a focused clarification, or a modeling gap; neither the
+AI provider nor repository text can authorize a missing relationship or infer
+additivity from a column name.
+
+Examples:
+
+- **“What is revenue today?”** binds the governed revenue metric and its
+  authoritative reporting-time dimension. `latest_complete` performs one
+  route-locked, snapshot-bound freshness lookup before resolving concrete time
+  bounds; it never searches for another metric or table.
+- **“What is revenue from Zoom customer?”** binds `Zoom` as a canonical member
+  filter on the governed customer dimension. It does not add customer grouping,
+  and execution requires the metric-to-customer relationship proof.
+- **“Current and last-year revenue for the top five customers”** aggregates
+  both governed periods at customer grain, aligns them, calculates exact decimal
+  deltas and percent change, ranks on the declared current period, applies a
+  stable tie policy, and validates every requested output before narration.
+
+The selected plan is immutable. A compatible certified block is adopted as the
+complete implementation; otherwise the semantic or governed-relational adapter
+compiles that same plan. DQL does not rebuild the question from scratch after a
+route has been selected.
+
+### Receipts, explanation, and repair
+
+The execution graph produces a receipt before DQL creates business prose. Every
+number, comparison, rank, freshness statement, and material caveat in the
+deterministic narrative points to a result fact and that receipt. Unsupported
+numbers or causal claims fail closed.
+
+Successful and failed executable runs expose the same seven-part **How it
+answered** view: Plan, DQL, Compiled SQL, Lineage, Trust & evidence, Actual
+steps, and Failure & repair. A failed run retains immutable plan/DQL/SQL
+fingerprints and a redacted stable error such as `RELATION_NOT_FOUND`,
+`PERMISSION_DENIED`, or `RESULT_CONTRACT_MISMATCH`. Repair actions derive a new
+artifact: parameter-only reruns can preserve certified identity, DQL edits lose
+certification and re-enter validation, and SQL copies are exploratory notebook
+work. Permission failure never triggers another route or broader metadata
+search.
+
 ## Generation guardrails
 
 Generated SQL gets a small, explicit tool surface: contextual metadata search,

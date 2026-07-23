@@ -5,7 +5,7 @@
 Ship the unified vertical Domain Studio and connect global Apps/Notebooks/Ask to
 domain context without duplicating product storage.
 
-Acceptance IDs: `PRD-001`, `PRD-002`, `PRD-003`, `AGT-003`, `UI-001`, `UI-002`, `UI-006`, `UI-007`, `UI-008`.
+Acceptance IDs: `PRD-001`, `PRD-002`, `PRD-003`, `AGT-003`, `UI-001`, `UI-002`, `UI-006`, `UI-007`, `UI-008`, `UI-012`, `UI-013`.
 Dependencies: verified W01/W02 contracts and stable W03/W04 APIs.
 
 ## Required implementation
@@ -28,6 +28,14 @@ Dependencies: verified W01/W02 contracts and stable W03/W04 APIs.
 - Expose Domain Knowledge 360 from the compiled snapshot, including capsule
   fingerprints, qualified object counts, provenance, selected skill refs, and
   observed/authorized/blocked/stale routes; do not rebuild a UI-only graph.
+- Consolidate plan, DQL, SQL, lineage, trust/evidence, actual steps, and stable
+  failure details into the progressively disclosed How it answered inspector
+  for successful and failed runs.
+- Render metric/entity/dimension-role/member/time/comparison/ranking/output
+  interpretation and the exact failed phase without reconstructing it in the UI.
+- Capability-gate parameter rerun, DQL repair, SQL notebook copy, snapshot
+  refresh, connection/access, and draft-save actions; show the server-returned
+  trust/review transition and never mutate the source artifact.
 
 ## Suggested ownership
 
@@ -43,3 +51,6 @@ navigation/deep link, responsive sidebar, inspector close/resize, free move,
 node resize/auto-fit, uncut handles/icons, column drag, relationship inspector,
 dbt/DQL patch ownership, related products, limited Ask messaging, keyboard/a11y,
 all themes, and Cloud embed-contract test. Vite alone is not accepted.
+Also prove the complete How it answered and repair flows for success,
+column-not-found, permission-denied, snapshot-drift, and edited-artifact trust
+states in the built CLI.

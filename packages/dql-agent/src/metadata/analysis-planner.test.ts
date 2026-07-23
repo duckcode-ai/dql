@@ -224,6 +224,16 @@ describe('analysis planner', () => {
     expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['customer', 'product', 'tax']));
   });
 
+  it('AGT-012 keeps a named customer in a what-is metric question as a filter value', () => {
+    const plan = buildAnalysisQuestionPlan('What is revenue from Zoom customer?');
+
+    expect(plan.mode).not.toBe('definition');
+    expect(plan.needsGeneratedSql).toBe(true);
+    expect(plan.valueMentions).toEqual([
+      expect.objectContaining({ text: 'Zoom', syntacticRole: 'filter_value' }),
+    ]);
+  });
+
   it('keeps a single-concept what-is question on the definition path', () => {
     const plan = buildAnalysisQuestionPlan('what is customer lifetime value?');
 

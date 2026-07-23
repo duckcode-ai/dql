@@ -8,6 +8,10 @@
 
 import { createHash } from 'node:crypto';
 import { getDialect, type DQLManifest, type DqlArtifactReference } from '@duckcodeailabs/dql-core';
+import type {
+  AnalyticalExecutionGraphV1,
+  AnalyticalGraphSourceInvocationNode,
+} from './analytical-execution-graph.js';
 import type { ResolvedAnalyticalPlan, ResolvedPlanMemberBinding } from './resolved-analytical-plan.js';
 
 export interface GovernedRelationColumn {
@@ -97,6 +101,50 @@ export type GovernedRelationalCompileResult =
         | 'RELATIONSHIP_NOT_EXECUTABLE'
         | 'UNSUPPORTED_TIME_RANGE';
       reason: string;
+      candidateIds?: string[];
+    };
+
+export interface GovernedAnalyticalGraphCompilationReceipt {
+  schemaVersion: 1;
+  graphId: string;
+  graphFingerprint: string;
+  planId: string;
+  planFingerprint: string;
+  snapshotId: string;
+  registryFingerprint: string;
+  statementFingerprints: Array<{
+    nodeId: string;
+    astFingerprint: string;
+    sqlFingerprint: string;
+  }>;
+  fingerprint: string;
+}
+
+export type GovernedAnalyticalGraphCompileResult =
+  | {
+      status: 'compiled';
+      graph: AnalyticalExecutionGraphV1;
+      statements: Array<{
+        nodeId: string;
+        sql: string;
+        parameterValues: Record<string, unknown>;
+        ast: GovernedRelationalAst;
+        receipt: GovernedCompilationReceipt;
+        outputAliases: AnalyticalGraphSourceInvocationNode['outputAliases'];
+      }>;
+      receipt: GovernedAnalyticalGraphCompilationReceipt;
+    }
+  | {
+      status: 'blocked';
+      code:
+        | 'EXECUTION_GRAPH_MISMATCH'
+        | 'EXECUTION_GRAPH_ROUTE_MISMATCH'
+        | 'SNAPSHOT_MISMATCH'
+        | 'MEASURE_BINDING_REQUIRED'
+        | 'MULTI_VALUE_FILTER_UNSUPPORTED'
+        | Extract<GovernedRelationalCompileResult, { status: 'blocked' }>['code'];
+      reason: string;
+      nodeId?: string;
       candidateIds?: string[];
     };
 
@@ -243,7 +291,10 @@ export function compileGovernedRelationalPlan(input: {
     return blocked('UNSUPPORTED_TIME_RANGE', `Time range "${plan.query.timeRange}" has no typed bounds.`);
   }
   if (plan.query.timeBounds) {
-    const time = boundDimensions.find((binding) => binding.column.isTime);
+    const frameTimeId = plan.analyticalFrame?.timeContext?.timeDimensionId;
+    const exactFrameTime = frameTimeId ? bindQualifiedColumn(frameTimeId, registry) : undefined;
+    const time = boundDimensions.find((binding) => binding.column.isTime)
+      ?? (exactFrameTime?.status === 'resolved' && exactFrameTime.column.isTime ? exactFrameTime : undefined);
     if (!time) return blocked('MEMBER_UNRESOLVED', 'Typed time bounds require a qualified time dimension.');
     parameters.time_start = plan.query.timeBounds.startInclusive;
     parameters.time_end = plan.query.timeBounds.endExclusive;
@@ -280,6 +331,163 @@ export function compileGovernedRelationalPlan(input: {
     outputColumns,
   };
   return { status: 'compiled', ast, sql, parameterValues: parameters, receipt };
+}
+
+/**
+ * Compile every governed-relational source node independently. Alignment,
+ * arithmetic, and ranking remain typed graph operations and therefore happen
+ * only after each period has been safely aggregated at the declared grain.
+ *
+ * Acceptance: AGT-015, AGT-018, AGT-019.
+ */
+export function compileGovernedRelationalExecutionGraph(input: {
+  graph: AnalyticalExecutionGraphV1;
+  plan: ResolvedAnalyticalPlan;
+  registry: GovernedRelationalRegistry;
+  driver?: string;
+  maxRows?: number;
+}): GovernedAnalyticalGraphCompileResult {
+  const { graph, plan, registry } = input;
+  const graphBlocked = (
+    code: Extract<GovernedAnalyticalGraphCompileResult, { status: 'blocked' }>['code'],
+    reason: string,
+    nodeId?: string,
+    candidateIds?: string[],
+  ): GovernedAnalyticalGraphCompileResult => ({
+    status: 'blocked',
+    code,
+    reason,
+    ...(nodeId ? { nodeId } : {}),
+    ...(candidateIds?.length ? { candidateIds } : {}),
+  });
+  if (
+    graph.planId !== plan.planId ||
+    graph.planFingerprint !== plan.fingerprint ||
+    graph.snapshotId !== plan.snapshotId
+  ) {
+    return graphBlocked('EXECUTION_GRAPH_MISMATCH', 'The executable graph does not bind the supplied immutable plan.');
+  }
+  if (graph.route !== 'governed_sql') {
+    return graphBlocked('EXECUTION_GRAPH_ROUTE_MISMATCH', `Graph route ${graph.route} is not governed SQL.`);
+  }
+  if (graph.snapshotId !== registry.snapshotId) {
+    return graphBlocked(
+      'SNAPSHOT_MISMATCH',
+      `Graph snapshot ${graph.snapshotId} does not match relational registry ${registry.snapshotId}.`,
+    );
+  }
+  const measureBindings = plan.query.measures.filter(
+    (binding) => binding.status === 'resolved' && binding.qualifiedId,
+  );
+  if (measureBindings.length !== 1) {
+    return graphBlocked('MEASURE_BINDING_REQUIRED', 'The governed graph requires exactly one resolved physical measure binding.');
+  }
+  const measureBinding = measureBindings[0]!;
+  const statements: Extract<GovernedAnalyticalGraphCompileResult, { status: 'compiled' }>['statements'] = [];
+  const sources = graph.nodes.filter(
+    (node): node is AnalyticalGraphSourceInvocationNode => node.kind === 'source_invocation',
+  );
+  for (const source of sources) {
+    if (source.strategy !== 'period_aggregate' || !source.outputAliases.metric) {
+      return graphBlocked('EXECUTION_GRAPH_ROUTE_MISMATCH', 'Governed SQL requires period-aggregate source nodes.', source.id);
+    }
+    if (source.memberFilters.some((filter) => filter.canonicalValues.length !== 1)) {
+      return graphBlocked(
+        'MULTI_VALUE_FILTER_UNSUPPORTED',
+        'The current governed relational operator requires exactly one canonical value per filter.',
+        source.id,
+      );
+    }
+    const dimensions: ResolvedPlanMemberBinding[] = source.outputAliases.dimensions.map((dimension) => ({
+      requested: dimension.outputId,
+      qualifiedId: dimension.dimensionId,
+      status: 'resolved',
+      candidateIds: [dimension.dimensionId],
+    }));
+    const filters: ResolvedAnalyticalPlan['query']['filters'] = source.memberFilters.map((filter) => ({
+      field: filter.dimensionId,
+      value: String(filter.canonicalValues[0]),
+      binding: {
+        requested: filter.dimensionId,
+        qualifiedId: filter.dimensionId,
+        status: 'resolved',
+        candidateIds: [filter.dimensionId],
+      },
+    }));
+    const periodPlan: ResolvedAnalyticalPlan = {
+      ...plan,
+      capability: 'governed_relational',
+      query: {
+        measures: [{
+          ...measureBinding,
+          requested: source.outputAliases.metric.outputId,
+        }],
+        dimensions,
+        filters,
+        ...(source.period
+          ? {
+              timeBounds: {
+                expression: source.period.id,
+                startInclusive: source.period.startInclusive,
+                endExclusive: source.period.endExclusive,
+                timeZone: 'UTC' as const,
+              },
+            }
+          : {}),
+        limit: Math.min(Math.max(1, input.maxRows ?? 10_000), 100_000),
+      },
+      outputContract: {
+        measures: [source.outputAliases.metric.outputId],
+        dimensions: dimensions.map((dimension) => dimension.requested),
+        fields: [
+          ...source.outputAliases.dimensions.map((dimension) => dimension.outputId),
+          source.outputAliases.metric.outputId,
+        ],
+        ...(source.period ? { periodIds: [source.period.id] } : {}),
+      },
+    };
+    const compiled = compileGovernedRelationalPlan({
+      plan: periodPlan,
+      registry,
+      driver: input.driver,
+      maxRows: input.maxRows,
+    });
+    if (compiled.status === 'blocked') {
+      return graphBlocked(compiled.code, compiled.reason, source.id, compiled.candidateIds);
+    }
+    statements.push({
+      nodeId: source.id,
+      sql: compiled.sql,
+      parameterValues: compiled.parameterValues,
+      ast: compiled.ast,
+      receipt: compiled.receipt,
+      outputAliases: structuredClone(source.outputAliases),
+    });
+  }
+  const statementFingerprints = statements.map((statement) => ({
+    nodeId: statement.nodeId,
+    astFingerprint: statement.receipt.astFingerprint,
+    sqlFingerprint: statement.receipt.sqlFingerprint,
+  }));
+  const receiptPayload = {
+    schemaVersion: 1 as const,
+    graphId: graph.graphId,
+    graphFingerprint: graph.fingerprint,
+    planId: plan.planId,
+    planFingerprint: plan.fingerprint,
+    snapshotId: plan.snapshotId,
+    registryFingerprint: registry.fingerprint,
+    statementFingerprints,
+  };
+  return {
+    status: 'compiled',
+    graph,
+    statements,
+    receipt: {
+      ...receiptPayload,
+      fingerprint: hash(stableStringify(receiptPayload)),
+    },
+  };
 }
 
 export function renderGovernedRelationalAst(
@@ -395,6 +603,18 @@ function bindColumn(binding: ResolvedPlanMemberBinding, registry: GovernedRelati
     return { status: matches.length > 1 ? 'ambiguous' : 'missing', reason: `${binding.qualifiedId} resolves to ${matches.length} columns.`, candidateIds: matches.map((item) => item.column.qualifiedId) };
   }
   return { status: 'resolved', ...matches[0]! };
+}
+
+function bindQualifiedColumn(qualifiedId: string, registry: GovernedRelationalRegistry): ColumnBinding {
+  return bindColumn(
+    {
+      requested: qualifiedId,
+      qualifiedId,
+      status: 'resolved',
+      candidateIds: [qualifiedId],
+    },
+    registry,
+  );
 }
 
 function normalizeAggregate(value: string | undefined): RelationalAggregate | undefined {

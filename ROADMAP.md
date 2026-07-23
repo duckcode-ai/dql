@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.0)
+## Current State (v1.10.1)
 
 DQL OSS is ready for local-first use cases:
 
@@ -32,6 +32,10 @@ DQL OSS is ready for local-first use cases:
 - Resolve analytical questions into typed plans that bind semantic measures,
   dimensions, entities, time dimensions, joins, filters, domains, skills, and
   evidence before execution.
+- Compose governed metrics with compatible time, customer, comparison, ranking,
+  member-filter, and output roles without rebuilding certified meaning.
+- Inspect Plan, DQL, Compiled SQL, Lineage, Trust & evidence, Actual steps, and
+  Failure & repair, including safe same-plan repair actions for failed runs.
 - Use local hybrid retrieval across exact matches, BM25/lexical text,
   embeddings, graph relationships, and bounded dbt repository text without
   requiring an external vector database.
@@ -69,7 +73,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.0
+  cold-start and warm-context latency budgets remain above target. The v1.10.1
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

@@ -55,11 +55,28 @@ export interface Skill {
   examples?: string[];
   sourceRefs?: string[];
   vocabulary: Record<string, string>;
+  /**
+   * Structured analytical defaults. These fields may fill an omitted time or
+   * comparison policy only after normal Skill domain/area eligibility gates;
+   * they never authorize a metric, member, relationship, or execution route.
+   */
+  analyticalPolicy?: SkillAnalyticalPolicy;
   /** Markdown body (everything after the closing `---`). */
   body: string;
   sourcePath: string;
   /** True for the editable starter skills seeded by `seedDefaultSkills`. */
   isStarter?: boolean;
+}
+
+export interface SkillAnalyticalPolicy {
+  metricIds?: string[];
+  timeRole?: string;
+  calendarId?: string;
+  timezone?: string;
+  completenessPolicy?: "partial_current" | "latest_complete" | "closed_period";
+  comparisonAlignment?: "elapsed_period" | "calendar_period" | "fiscal_period";
+  defaultRankingPeriod?: "current" | "comparison";
+  narrativeGuidance?: string[];
 }
 
 export interface SkillLoadResult {
@@ -151,6 +168,9 @@ export function parseSkill(raw: string, path: string): Skill | null {
     examples: pickStringArray(meta.examples),
     sourceRefs: pickStringArray(meta.source_refs),
     vocabulary: pickStringMap(meta.vocabulary),
+    analyticalPolicy: parseSkillAnalyticalPolicy(
+      meta.analytical_policy ?? meta.analyticalPolicy,
+    ),
     body,
     sourcePath: path,
     isStarter: starter === true || starter === 'true' || starter === 'yes' ? true : undefined,
@@ -281,8 +301,32 @@ export function renderSkill(skill: Skill): string {
       lines.push(`  ${quoteIfNeeded(key)}: ${quoteIfNeeded(value)}`);
     }
   }
-  if (skill.isStarter) lines.push('starter: true');
-  lines.push('---');
+  if (skill.analyticalPolicy) {
+    const policy = skill.analyticalPolicy;
+    lines.push("analytical_policy:");
+    if ((policy.metricIds?.length ?? 0) > 0)
+      lines.push(
+        `  metric_ids: [${policy.metricIds!.map(quoteIfNeeded).join(", ")}]`,
+      );
+    if (policy.timeRole)
+      lines.push(`  time_role: ${quoteIfNeeded(policy.timeRole)}`);
+    if (policy.calendarId)
+      lines.push(`  calendar_id: ${quoteIfNeeded(policy.calendarId)}`);
+    if (policy.timezone)
+      lines.push(`  timezone: ${quoteIfNeeded(policy.timezone)}`);
+    if (policy.completenessPolicy)
+      lines.push(`  completeness_policy: ${policy.completenessPolicy}`);
+    if (policy.comparisonAlignment)
+      lines.push(`  comparison_alignment: ${policy.comparisonAlignment}`);
+    if (policy.defaultRankingPeriod)
+      lines.push(`  default_ranking_period: ${policy.defaultRankingPeriod}`);
+    if ((policy.narrativeGuidance?.length ?? 0) > 0)
+      lines.push(
+        `  narrative_guidance: [${policy.narrativeGuidance!.map(quoteIfNeeded).join(", ")}]`,
+      );
+  }
+  if (skill.isStarter) lines.push("starter: true");
+  lines.push("---");
   const body = skill.body.trim();
   return `${lines.join('\n')}\n${body ? `${body}\n` : ''}`;
 }
@@ -308,6 +352,7 @@ export interface WriteSkillInput {
   examples?: string[];
   sourceRefs?: string[];
   vocabulary?: Record<string, string>;
+  analyticalPolicy?: SkillAnalyticalPolicy;
   body?: string;
   isStarter?: boolean;
 }
@@ -338,8 +383,17 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
     examples: input.examples ?? [],
     sourceRefs: input.sourceRefs ?? [],
     vocabulary: input.vocabulary ?? {},
-    body: input.body ?? '',
-    sourcePath: skillPath(projectRoot, input.id, input.domains?.length ? input.domains : (input.domain ? [input.domain] : [])),
+    analyticalPolicy: input.analyticalPolicy,
+    body: input.body ?? "",
+    sourcePath: skillPath(
+      projectRoot,
+      input.id,
+      input.domains?.length
+        ? input.domains
+        : input.domain
+          ? [input.domain]
+          : [],
+    ),
     isStarter: input.isStarter,
   };
 }
@@ -426,6 +480,54 @@ function pickStringMap(v: unknown): Record<string, string> {
     if (typeof val === 'string') out[k] = val;
   }
   return out;
+}
+
+function parseSkillAnalyticalPolicy(
+  value: unknown,
+): SkillAnalyticalPolicy | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const completenessPolicy = pickString(
+    record.completeness_policy ?? record.completenessPolicy,
+  );
+  const comparisonAlignment = pickString(
+    record.comparison_alignment ?? record.comparisonAlignment,
+  );
+  const defaultRankingPeriod = pickString(
+    record.default_ranking_period ?? record.defaultRankingPeriod,
+  );
+  const policy: SkillAnalyticalPolicy = {
+    metricIds: pickStringArray(record.metric_ids ?? record.metricIds),
+    timeRole: pickString(record.time_role ?? record.timeRole),
+    calendarId: pickString(record.calendar_id ?? record.calendarId),
+    timezone: pickString(record.timezone),
+    completenessPolicy:
+      completenessPolicy === "partial_current" ||
+      completenessPolicy === "latest_complete" ||
+      completenessPolicy === "closed_period"
+        ? completenessPolicy
+        : undefined,
+    comparisonAlignment:
+      comparisonAlignment === "elapsed_period" ||
+      comparisonAlignment === "calendar_period" ||
+      comparisonAlignment === "fiscal_period"
+        ? comparisonAlignment
+        : undefined,
+    defaultRankingPeriod:
+      defaultRankingPeriod === "current" ||
+      defaultRankingPeriod === "comparison"
+        ? defaultRankingPeriod
+        : undefined,
+    narrativeGuidance: pickStringArray(
+      record.narrative_guidance ?? record.narrativeGuidance,
+    ),
+  };
+  return Object.values(policy).some((item) =>
+    Array.isArray(item) ? item.length > 0 : Boolean(item),
+  )
+    ? policy
+    : undefined;
 }
 
 /**

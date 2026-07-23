@@ -10,7 +10,12 @@ import type { SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { KGNode } from './kg/types.js';
 import type { MetadataObject } from './metadata/catalog.js';
 import type { SemanticMemberSelection } from './semantic-bridge/compose.js';
+import type {
+  AnalyticalExecutionGraphV1,
+  AnalyticalGraphSourceInvocationNode,
+} from './analytical-execution-graph.js';
 import type { ResolvedAnalyticalPlan, ResolvedPlanMemberBinding } from './resolved-analytical-plan.js';
+import type { AnalyticalFreshnessRequestV1 } from './analytical-period-resolution.js';
 
 export interface PlanExecutionRegistryEntry {
   node: KGNode;
@@ -28,7 +33,42 @@ export type PlanExecutionBlockedCode =
   | 'SEMANTIC_MEMBER_MISSING'
   | 'SEMANTIC_MEMBER_AMBIGUOUS'
   | 'TIME_DIMENSION_REQUIRED'
-  | 'TIME_RANGE_UNBOUND';
+  | 'TIME_RANGE_UNBOUND'
+  | 'EXECUTION_GRAPH_MISMATCH'
+  | 'EXECUTION_GRAPH_ROUTE_MISMATCH';
+
+export interface SemanticGraphInvocation {
+  nodeId: string;
+  adapterId?: string;
+  selection: SemanticMemberSelection;
+  outputAliases: AnalyticalGraphSourceInvocationNode['outputAliases'];
+  period?: AnalyticalGraphSourceInvocationNode['period'];
+}
+
+export type SemanticGraphExecutionBinding =
+  | {
+      schemaVersion: 1;
+      status: 'ready';
+      kind: 'semantic_graph';
+      graphId: string;
+      graphFingerprint: string;
+      planId: string;
+      planFingerprint: string;
+      metricNode: KGNode;
+      invocations: SemanticGraphInvocation[];
+    }
+  | {
+      schemaVersion: 1;
+      status: 'blocked';
+      kind: 'semantic_graph';
+      graphId: string;
+      graphFingerprint: string;
+      planId: string;
+      planFingerprint: string;
+      code: PlanExecutionBlockedCode;
+      reason: string;
+      candidateIds?: string[];
+    };
 
 export type PlanExecutionBinding =
   | {
@@ -61,6 +101,22 @@ export type PlanExecutionBinding =
       kind: 'blocked';
       planId: string;
       fingerprint: string;
+      code: PlanExecutionBlockedCode;
+      reason: string;
+      candidateIds?: string[];
+    };
+
+export type AnalyticalFreshnessAdapterBinding =
+  | {
+      schemaVersion: 1;
+      status: 'ready';
+      kind: 'semantic_freshness';
+      request: NonNullable<AnalyticalFreshnessRequestV1['authorizedAdapterRequest']>;
+    }
+  | {
+      schemaVersion: 1;
+      status: 'blocked';
+      kind: 'semantic_freshness';
       code: PlanExecutionBlockedCode;
       reason: string;
       candidateIds?: string[];
@@ -218,6 +274,251 @@ export function adaptResolvedAnalyticalPlan(
   };
 }
 
+/**
+ * Bind a freshness observation to the same exact semantic identities as the
+ * selected plan. This is intentionally not a search API: the request, plan,
+ * registry, and semantic layer must all agree before the host receives adapter
+ * member names. Acceptance: AGT-019, SEC-004.
+ */
+export function adaptAnalyticalFreshnessRequest(input: {
+  plan: ResolvedAnalyticalPlan;
+  request: AnalyticalFreshnessRequestV1;
+  registry: PlanExecutionRegistryEntry[];
+  semanticLayer: SemanticLayer;
+  expectedSnapshotId?: string;
+}): AnalyticalFreshnessAdapterBinding {
+  const block = (
+    code: PlanExecutionBlockedCode,
+    reason: string,
+    candidateIds?: string[],
+  ): AnalyticalFreshnessAdapterBinding => ({
+    schemaVersion: 1,
+    status: 'blocked',
+    kind: 'semantic_freshness',
+    code,
+    reason,
+    ...(candidateIds?.length ? { candidateIds: [...candidateIds].sort() } : {}),
+  });
+  const frame = input.plan.analyticalFrame;
+  const time = frame?.timeContext;
+  if (input.plan.schemaVersion !== 2 || input.plan.capability !== 'semantic_execution' || !frame || !time) {
+    return block('PLAN_BLOCKED', 'The selected plan does not define a semantic analytical freshness route.');
+  }
+  if (
+    input.request.snapshotId !== input.plan.snapshotId
+    || (input.expectedSnapshotId && input.request.snapshotId !== input.expectedSnapshotId)
+  ) {
+    return block('SNAPSHOT_MISMATCH', 'The freshness request does not match the pinned analytical snapshot.');
+  }
+  if (input.request.metricId !== frame.metricConceptIds[0]) {
+    return block('EXECUTION_ID_MISSING', 'The freshness metric does not match the immutable analytical frame.');
+  }
+  if (!time.timeDimensionId || input.request.timeDimensionId !== time.timeDimensionId) {
+    return block('TIME_DIMENSION_REQUIRED', 'The freshness time dimension does not match the immutable analytical frame.');
+  }
+  if (!input.plan.executionId) {
+    return block('EXECUTION_ID_MISSING', 'The semantic plan has no qualified execution identity.');
+  }
+  const executions = resolveRegistryIdentity(input.plan.executionId, input.registry);
+  if (executions.length !== 1) {
+    return block(
+      executions.length > 1 ? 'EXECUTION_ID_AMBIGUOUS' : 'EXECUTION_ID_MISSING',
+      `Qualified execution ID ${input.plan.executionId} resolves to ${executions.length} pinned registry objects.`,
+      executions.map((entry) => entry.node.nodeId),
+    );
+  }
+  const metricNode = executions[0]!.node;
+  if (metricNode.kind !== 'metric') {
+    return block('EXECUTION_KIND_MISMATCH', `${input.plan.executionId} is ${metricNode.kind}, not a semantic metric.`);
+  }
+  const metricNames = semanticMetricNames(metricNode, input.semanticLayer);
+  if (metricNames.length !== 1) {
+    return block(
+      metricNames.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
+      `${input.plan.executionId} maps to ${metricNames.length} semantic metrics.`,
+      metricNames,
+    );
+  }
+  const resolvedTime = resolveSemanticDimensionId(time.timeDimensionId, input.registry, input.semanticLayer);
+  if ('code' in resolvedTime) return block(resolvedTime.code, resolvedTime.reason, resolvedTime.candidateIds);
+  const resolvedTimeDefinition = resolvedTime.definition;
+  if (!resolvedTimeDefinition || !isTimeDimension(resolvedTimeDefinition)) {
+    return block('TIME_DIMENSION_REQUIRED', `${time.timeDimensionId} is not a semantic time dimension.`);
+  }
+  const timeDefinitions = input.semanticLayer.listTimeDimensions().filter((candidate) =>
+    candidate.name === resolvedTimeDefinition.name
+    && candidate.table === resolvedTimeDefinition.table);
+  if (timeDefinitions.length !== 1) {
+    return block(
+      timeDefinitions.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
+      `${time.timeDimensionId} maps to ${timeDefinitions.length} semantic time definitions.`,
+      timeDefinitions.map((candidate) => `${candidate.cube ?? candidate.table}.${candidate.name}`),
+    );
+  }
+  const timeDefinition = timeDefinitions[0]!;
+  const availableGrains = timeDefinition.granularities;
+  const requestedGrain = availableGrains.find((candidate) => candidate === time.grain);
+  const granularity = availableGrains.includes('day')
+    ? 'day'
+    : requestedGrain ?? availableGrains[0] ?? 'day';
+  const outputField = `${timeDefinition.name}_${granularity}`;
+  return {
+    schemaVersion: 1,
+    status: 'ready',
+    kind: 'semantic_freshness',
+    request: {
+      route: 'semantic',
+      metric: metricNames[0]!,
+      timeDimension: resolvedTime.name,
+      granularity,
+      outputField,
+    },
+  };
+}
+
+/**
+ * Convert semantic source nodes into exact adapter selections. Every metric,
+ * dimension, filter, and period comes from the frozen graph/plan; this adapter
+ * performs identity lookup only and never searches or rematches question text.
+ *
+ * Acceptance: AGT-014, AGT-018, AGT-019.
+ */
+export function adaptAnalyticalSemanticGraph(input: {
+  graph: AnalyticalExecutionGraphV1;
+  plan: ResolvedAnalyticalPlan;
+  registry: PlanExecutionRegistryEntry[];
+  semanticLayer: SemanticLayer;
+  expectedSnapshotId?: string;
+}): SemanticGraphExecutionBinding {
+  const { graph, plan } = input;
+  const block = (
+    code: PlanExecutionBlockedCode,
+    reason: string,
+    candidateIds?: string[],
+  ): SemanticGraphExecutionBinding => ({
+    schemaVersion: 1,
+    status: 'blocked',
+    kind: 'semantic_graph',
+    graphId: graph.graphId,
+    graphFingerprint: graph.fingerprint,
+    planId: plan.planId,
+    planFingerprint: plan.fingerprint,
+    code,
+    reason,
+    ...(candidateIds?.length ? { candidateIds: [...candidateIds].sort() } : {}),
+  });
+  if (
+    graph.planId !== plan.planId ||
+    graph.planFingerprint !== plan.fingerprint ||
+    graph.snapshotId !== plan.snapshotId
+  ) {
+    return block('EXECUTION_GRAPH_MISMATCH', 'The executable graph does not bind the supplied immutable plan.');
+  }
+  if (input.expectedSnapshotId && graph.snapshotId !== input.expectedSnapshotId) {
+    return block(
+      'SNAPSHOT_MISMATCH',
+      `Graph snapshot ${graph.snapshotId} does not match active snapshot ${input.expectedSnapshotId}.`,
+    );
+  }
+  if (graph.route !== 'semantic') {
+    return block('EXECUTION_GRAPH_ROUTE_MISMATCH', `Graph route ${graph.route} is not semantic.`);
+  }
+  if (!plan.executionId) return block('EXECUTION_ID_MISSING', 'The resolved plan has no qualified semantic execution ID.');
+  const execution = resolveRegistryIdentity(plan.executionId, input.registry);
+  if (execution.length !== 1) {
+    return block(
+      execution.length > 1 ? 'EXECUTION_ID_AMBIGUOUS' : 'EXECUTION_ID_MISSING',
+      `Qualified execution ID ${plan.executionId} resolves to ${execution.length} pinned registry objects.`,
+      execution.map((entry) => entry.node.nodeId),
+    );
+  }
+  const metricNode = execution[0]!.node;
+  if (metricNode.kind !== 'metric') {
+    return block('EXECUTION_KIND_MISMATCH', `${plan.executionId} is ${metricNode.kind}, not a semantic metric.`);
+  }
+  const metricNames = semanticMetricNames(metricNode, input.semanticLayer);
+  if (metricNames.length !== 1) {
+    return block(
+      metricNames.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
+      `${plan.executionId} maps to ${metricNames.length} semantic metrics.`,
+      metricNames,
+    );
+  }
+
+  const invocations: SemanticGraphInvocation[] = [];
+  for (const source of graph.nodes.filter(
+    (node): node is AnalyticalGraphSourceInvocationNode => node.kind === 'source_invocation',
+  )) {
+    if (source.strategy !== 'period_aggregate') {
+      return block('EXECUTION_GRAPH_ROUTE_MISMATCH', 'A semantic graph cannot invoke a complete certified asset.');
+    }
+    const dimensions: string[] = [];
+    let timeDimension: SemanticMemberSelection['timeDimension'];
+    for (const dimensionId of source.groupByDimensionIds) {
+      const resolved = resolveSemanticDimensionId(dimensionId, input.registry, input.semanticLayer);
+      if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
+      if (source.period?.timeDimensionId === dimensionId) {
+        timeDimension = { name: resolved.name, granularity: source.period.grain };
+      } else {
+        dimensions.push(resolved.name);
+      }
+    }
+    const filters: NonNullable<SemanticMemberSelection['filters']> = [];
+    for (const member of source.memberFilters) {
+      const resolved = resolveSemanticDimensionId(member.dimensionId, input.registry, input.semanticLayer);
+      if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
+      const values = member.canonicalValues.flatMap((value) => scalarFilterValue(value));
+      if (values.length !== member.canonicalValues.length) {
+        return block('SEMANTIC_MEMBER_MISSING', `Filter ${member.dimensionId} contains a non-scalar canonical value.`);
+      }
+      filters.push({ dimension: resolved.name, operator: 'equals', values });
+    }
+    if (source.period) {
+      const resolvedTime = resolveSemanticDimensionId(
+        source.period.timeDimensionId,
+        input.registry,
+        input.semanticLayer,
+      );
+      if ('code' in resolvedTime) return block(resolvedTime.code, resolvedTime.reason, resolvedTime.candidateIds);
+      filters.push(
+        {
+          dimension: resolvedTime.name,
+          operator: 'gte',
+          values: [source.period.startInclusive],
+        },
+        {
+          dimension: resolvedTime.name,
+          operator: 'lt',
+          values: [source.period.endExclusive],
+        },
+      );
+    }
+    invocations.push({
+      nodeId: source.id,
+      ...(source.adapterId ? { adapterId: source.adapterId } : {}),
+      selection: {
+        metrics: metricNames,
+        dimensions,
+        ...(timeDimension ? { timeDimension } : {}),
+        ...(filters.length ? { filters } : {}),
+      },
+      outputAliases: structuredClone(source.outputAliases),
+      ...(source.period ? { period: structuredClone(source.period) } : {}),
+    });
+  }
+  return {
+    schemaVersion: 1,
+    status: 'ready',
+    kind: 'semantic_graph',
+    graphId: graph.graphId,
+    graphFingerprint: graph.fingerprint,
+    planId: plan.planId,
+    planFingerprint: plan.fingerprint,
+    metricNode,
+    invocations,
+  };
+}
+
 function resolveRegistryIdentity(identity: string, registry: PlanExecutionRegistryEntry[]): PlanExecutionRegistryEntry[] {
   return registry.filter((entry) => entry.identities.includes(identity));
 }
@@ -263,6 +564,23 @@ function resolveSemanticDimension(
   return { name: candidates[0]!.qualifiedName ?? candidates[0]!.name, definition: candidates[0] };
 }
 
+function resolveSemanticDimensionId(
+  dimensionId: string,
+  registry: PlanExecutionRegistryEntry[],
+  layer: SemanticLayer,
+): ReturnType<typeof resolveSemanticDimension> {
+  return resolveSemanticDimension(
+    {
+      requested: dimensionId,
+      qualifiedId: dimensionId,
+      status: 'resolved',
+      candidateIds: [dimensionId],
+    },
+    registry,
+    layer,
+  );
+}
+
 function semanticMetricNames(node: KGNode, layer: SemanticLayer): string[] {
   const localId = stringValue(node.payload?.localId) ?? node.name;
   const exactIdentities = new Set([node.name, localId, ...stringArray(node.payload?.aliases)]);
@@ -305,6 +623,13 @@ function stringValue(value: unknown): string | undefined {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())) : [];
+}
+
+function scalarFilterValue(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number' && Number.isFinite(value)) return [String(value)];
+  if (typeof value === 'boolean' || typeof value === 'bigint') return [String(value)];
+  return [];
 }
 
 function uniqueDefinitions<T extends { name: string; cube?: string; table?: string }>(values: Array<T | undefined>): T[] {

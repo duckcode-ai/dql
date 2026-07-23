@@ -6,8 +6,9 @@
  * Acceptance: AGT-013, API-006.
  */
 
-import { createHash } from 'node:crypto';
-import type { KnowledgeLens } from './domain-context.js';
+import { createHash } from "node:crypto";
+import type { AnalyticalQuestionFrameV2 } from "@duckcodeailabs/dql-core";
+import type { KnowledgeLens } from "./domain-context.js";
 import type {
   AgentEvidenceCandidate,
   AgentRetrievalEvidence,
@@ -38,8 +39,8 @@ export interface ResolvedPlanCompatibilityProof {
 }
 
 export interface ResolvedAnalyticalPlan {
-  schemaVersion: 1;
-  mode: 'shadow' | 'authoritative';
+  schemaVersion: 1 | 2;
+  mode: "shadow" | "authoritative";
   planId: string;
   fingerprint: string;
   parentPlanId?: string;
@@ -82,12 +83,18 @@ export interface ResolvedAnalyticalPlan {
     measures: string[];
     dimensions: string[];
     timeGrain?: string;
+    fields?: string[];
+    periodIds?: string[];
   };
   evidenceIds: string[];
   rejectedCandidates: Array<{ id: string; reason: string }>;
   missingInformation: string[];
   clarification?: string;
   knowledgeLens?: KnowledgeLens;
+  /** Exact selected policy identities and source hashes used for defaults. */
+  analyticalPolicies?: Array<{ policyId: string; sourceHash: string }>;
+  /** Exact RFC 0005 meaning. Present iff schemaVersion is 2. */
+  analyticalFrame?: AnalyticalQuestionFrameV2;
 }
 
 export interface BuildResolvedAnalyticalPlanInput {
@@ -115,6 +122,7 @@ export interface ResolvedAnalyticalPlanDelta {
   order?: 'asc' | 'desc';
   limit?: number;
   referenceTime?: Date;
+  analyticalFrame?: AnalyticalQuestionFrameV2;
 }
 
 export function buildResolvedAnalyticalPlan(
@@ -162,8 +170,10 @@ export function buildResolvedAnalyticalPlan(
     ? resolvePlanTimeRange(input.resolution.queryIntent.timeRange, input.referenceTime ?? new Date())
     : undefined;
   const payload = {
-    schemaVersion: 1 as const,
-    mode: input.mode ?? 'shadow' as const,
+    schemaVersion: input.resolution.analyticalFrame
+      ? (2 as const)
+      : (1 as const),
+    mode: input.mode ?? ("shadow" as const),
     revision: 0,
     snapshotId: input.evidence.knowledgeLens?.snapshotId
       ?? input.evidence.snapshotId
@@ -188,14 +198,43 @@ export function buildResolvedAnalyticalPlan(
       ...(input.resolution.queryIntent.order ? { order: input.resolution.queryIntent.order } : {}),
       ...(input.resolution.queryIntent.limit !== undefined ? { limit: input.resolution.queryIntent.limit } : {}),
     },
-    entityGrain: executionCandidate?.primaryEntity,
-    sourceRelationIds: uniqueSorted(selectedCandidates.flatMap((candidate) => candidate.sourceObjects ?? [])),
-    relationshipPathIds: uniqueSorted(selectedCandidates.flatMap((candidate) => candidate.relationshipEvidence ?? [])),
+    entityGrain:
+      input.resolution.analyticalFrame?.entityGrainIds[0] ??
+      executionCandidate?.primaryEntity,
+    sourceRelationIds: uniqueSorted(
+      selectedCandidates.flatMap((candidate) => candidate.sourceObjects ?? []),
+    ),
+    relationshipPathIds: uniqueSorted(
+      selectedCandidates.flatMap(
+        (candidate) => candidate.relationshipEvidence ?? [],
+      ),
+    ),
     compatibilityProof,
     outputContract: {
-      measures: uniqueSorted(measures.flatMap((binding) => binding.qualifiedId ? [binding.qualifiedId] : [binding.requested])),
-      dimensions: uniqueSorted(dimensions.flatMap((binding) => binding.qualifiedId ? [binding.qualifiedId] : [binding.requested])),
-      ...(input.resolution.queryIntent.timeGrain ? { timeGrain: input.resolution.queryIntent.timeGrain } : {}),
+      measures: uniqueSorted(
+        measures.flatMap((binding) =>
+          binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
+        ),
+      ),
+      dimensions: uniqueSorted(
+        dimensions.flatMap((binding) =>
+          binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
+        ),
+      ),
+      ...(input.resolution.queryIntent.timeGrain
+        ? { timeGrain: input.resolution.queryIntent.timeGrain }
+        : {}),
+      ...(input.resolution.analyticalFrame
+        ? {
+            fields: input.resolution.analyticalFrame.requestedOutputs.map(
+              (output) => output.id,
+            ),
+            periodIds:
+              input.resolution.analyticalFrame.timeContext?.periods.map(
+                (period) => period.id,
+              ) ?? [],
+          }
+        : {}),
     },
     evidenceIds: uniqueSorted(input.candidates.map(canonicalId)),
     rejectedCandidates: input.resolution.rejectedCandidates.map((candidate) => {
@@ -205,6 +244,23 @@ export function buildResolvedAnalyticalPlan(
     missingInformation: [...input.resolution.missingInformation],
     clarification: input.resolution.clarifyingQuestion,
     knowledgeLens: input.evidence.knowledgeLens,
+    ...((input.resolution.analyticalPolicyIds?.length ?? 0) > 0
+      ? {
+          analyticalPolicies: input.resolution
+            .analyticalPolicyIds!.flatMap((policyId) => {
+              const policy = input.evidence.analyticalPolicies?.find(
+                (candidate) => candidate.policyId === policyId,
+              );
+              return policy
+                ? [{ policyId, sourceHash: policy.sourceHash }]
+                : [];
+            })
+            .sort((left, right) => left.policyId.localeCompare(right.policyId)),
+        }
+      : {}),
+    ...(input.resolution.analyticalFrame
+      ? { analyticalFrame: structuredClone(input.resolution.analyticalFrame) }
+      : {}),
   };
   const fingerprint = sha256(stableStringify(payload));
   return deepFreeze({
@@ -263,13 +319,48 @@ export function deriveResolvedAnalyticalPlan(
       ...(delta.limit !== undefined || parent.query.limit !== undefined ? { limit: delta.limit ?? parent.query.limit } : {}),
     },
     outputContract: {
-      measures: uniqueSorted(measures.flatMap((binding) => binding.qualifiedId ? [binding.qualifiedId] : [binding.requested])),
-      dimensions: uniqueSorted(dimensions.flatMap((binding) => binding.qualifiedId ? [binding.qualifiedId] : [binding.requested])),
-      ...((delta.timeGrain ?? parent.query.timeGrain) ? { timeGrain: delta.timeGrain ?? parent.query.timeGrain } : {}),
+      measures: uniqueSorted(
+        measures.flatMap((binding) =>
+          binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
+        ),
+      ),
+      dimensions: uniqueSorted(
+        dimensions.flatMap((binding) =>
+          binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
+        ),
+      ),
+      ...((delta.timeGrain ?? parent.query.timeGrain)
+        ? { timeGrain: delta.timeGrain ?? parent.query.timeGrain }
+        : {}),
+      ...((delta.analyticalFrame ?? parent.analyticalFrame)
+        ? {
+            fields: (delta.analyticalFrame ??
+              parent.analyticalFrame)!.requestedOutputs.map(
+              (output) => output.id,
+            ),
+            periodIds:
+              (delta.analyticalFrame ??
+                parent.analyticalFrame)!.timeContext?.periods.map(
+                (period) => period.id,
+              ) ?? [],
+          }
+        : {}),
     },
-    missingInformation: unresolved.length > 0
-      ? uniqueSorted([...parent.missingInformation, ...unresolved.map((binding) => `${binding.requested} is ${binding.status}.`)])
-      : [...parent.missingInformation],
+    missingInformation:
+      unresolved.length > 0
+        ? uniqueSorted([
+            ...parent.missingInformation,
+            ...unresolved.map(
+              (binding) => `${binding.requested} is ${binding.status}.`,
+            ),
+          ])
+        : [...parent.missingInformation],
+    ...(delta.analyticalFrame
+      ? {
+          schemaVersion: 2 as const,
+          analyticalFrame: structuredClone(delta.analyticalFrame),
+        }
+      : {}),
   };
   const { planId: _oldPlanId, fingerprint: _oldFingerprint, ...fingerprintPayload } = payload;
   const fingerprint = sha256(stableStringify(fingerprintPayload));
@@ -363,15 +454,35 @@ function resolveCapability(
   dimensions: ResolvedPlanMemberBinding[],
   filters: ResolvedAnalyticalPlan['query']['filters'],
 ): ResolvedPlanCapability {
-  if (resolution.confidence === 'low' || resolution.recommendedRoute === 'clarify' || !execution) return 'blocked';
-  if (((measures.some((binding) => binding.status !== 'resolved') && resolution.queryIntent.measures.length > 0)
-    || (dimensions.some((binding) => binding.status !== 'resolved') && resolution.queryIntent.dimensions.length > 0))
-    && (resolution.recommendedRoute === 'certified' || resolution.recommendedRoute === 'semantic')) return 'blocked';
-  if (filters.some((filter) => filter.binding.status !== 'resolved')
-    && (resolution.recommendedRoute === 'certified' || resolution.recommendedRoute === 'semantic')) return 'blocked';
-  if (execution.compatibility === 'incompatible') return 'blocked';
-  if (resolution.recommendedRoute === 'certified' && execution.kind === 'certified_block' && execution.compatibility === 'compatible') {
-    return 'certified_execution';
+  if (
+    resolution.confidence === "low" ||
+    resolution.recommendedRoute === "clarify" ||
+    !execution ||
+    Boolean(resolution.analyticalFrame?.ambiguity.length)
+  )
+    return "blocked";
+  if (
+    ((measures.some((binding) => binding.status !== "resolved") &&
+      resolution.queryIntent.measures.length > 0) ||
+      (dimensions.some((binding) => binding.status !== "resolved") &&
+        resolution.queryIntent.dimensions.length > 0)) &&
+    (resolution.recommendedRoute === "certified" ||
+      resolution.recommendedRoute === "semantic")
+  )
+    return "blocked";
+  if (
+    filters.some((filter) => filter.binding.status !== "resolved") &&
+    (resolution.recommendedRoute === "certified" ||
+      resolution.recommendedRoute === "semantic")
+  )
+    return "blocked";
+  if (execution.compatibility === "incompatible") return "blocked";
+  if (
+    resolution.recommendedRoute === "certified" &&
+    execution.kind === "certified_block" &&
+    execution.compatibility === "compatible"
+  ) {
+    return "certified_execution";
   }
   if (resolution.recommendedRoute === 'semantic'
     && (execution.kind === 'semantic_metric' || execution.kind === 'semantic_member')

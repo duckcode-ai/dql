@@ -4,7 +4,7 @@
     "model.dbt_first_commerce.fct_orders": {
       "resource_type": "model", "name": "fct_orders", "alias": "fct_orders", "database": "analytics", "schema": "commerce", "original_file_path": "models/commerce/fct_orders.sql", "description": "One row per completed order.",
       "meta": { "dql": { "grain": "order_id", "keys": ["customer_id"] } },
-      "columns": { "order_id": { "name": "order_id", "description": "dbt-owned order identifier", "tests": ["unique", "not_null"] }, "customer_id": { "name": "customer_id", "tests": ["not_null"] }, "order_total": { "name": "order_total" } }, "depends_on": { "nodes": [] }
+      "columns": { "order_id": { "name": "order_id", "description": "dbt-owned order identifier", "tests": ["unique", "not_null"] }, "customer_id": { "name": "customer_id", "tests": ["not_null"] }, "report_date": { "name": "report_date", "description": "Authoritative commerce reporting date" }, "order_total": { "name": "order_total" } }, "depends_on": { "nodes": [] }
     },
     "model.dbt_first_commerce.dim_customers": {
       "resource_type": "model", "name": "dim_customers", "alias": "dim_customers", "database": "analytics", "schema": "commerce", "original_file_path": "models/commerce/dim_customers.sql", "description": "One row per customer.",
@@ -23,9 +23,37 @@
     }
   },
   "sources": {},
+  "semantic_models": {
+    "semantic_model.dbt_first_commerce.orders": {
+      "name": "orders",
+      "model": "ref('fct_orders')",
+      "defaults": { "agg_time_dimension": "report_date" },
+      "entities": [
+        { "name": "order", "type": "primary", "expr": "order_id" },
+        { "name": "customer", "type": "foreign", "expr": "customer_id" }
+      ],
+      "measures": [
+        { "name": "gross_revenue_measure", "agg": "sum", "expr": "order_total", "agg_time_dimension": "report_date" }
+      ],
+      "dimensions": [
+        { "name": "report_date", "type": "time", "type_params": { "time_granularity": "day" } }
+      ]
+    },
+    "semantic_model.dbt_first_commerce.customers": {
+      "name": "customers",
+      "model": "ref('dim_customers')",
+      "entities": [
+        { "name": "customer", "type": "primary", "expr": "customer_id" }
+      ],
+      "measures": [],
+      "dimensions": [
+        { "name": "customer_name", "type": "categorical" }
+      ]
+    }
+  },
   "metrics": {
     "metric.dbt_first_commerce.gross_revenue": {
-      "name": "gross_revenue", "original_file_path": "models/commerce/metrics.yml", "type_params": { "semantic_model": "orders", "expression": "SUM(order_total)" }
+      "name": "gross_revenue", "label": "Gross revenue", "description": "Completed-order revenue reported in the Commerce business timezone.", "type": "simple", "original_file_path": "models/commerce/metrics.yml", "type_params": { "measure": "gross_revenue_measure" }
     }
   }
 }

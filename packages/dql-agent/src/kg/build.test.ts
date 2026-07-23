@@ -374,6 +374,74 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+  it('CONTRACT-002 normalizes explicit semantic metric capability without name inference', () => {
+    const layer = new SemanticLayer();
+    const source = {
+      provider: 'dbt', objectType: 'metric', objectId: 'metric.sales.revenue',
+      extra: { raw: { meta: { dql: { completeness_policy: 'latest_complete' } } } },
+    };
+    layer.addCube({
+      name: 'orders', label: 'Orders', description: '', domain: 'sales',
+      sql: 'select * from analytics.orders', table: 'analytics.orders',
+      measures: [],
+      dimensions: [{
+        name: 'customer_name', label: 'Customer', description: '', sql: 'customer_name',
+        type: 'string', table: 'analytics.orders', cube: 'orders', entityLink: 'order',
+      }],
+      timeDimensions: [{
+        name: 'ordered_at', label: 'Ordered at', description: '', sql: 'ordered_at',
+        type: 'date', table: 'analytics.orders', cube: 'orders', isTimeDimension: true,
+        granularities: ['day', 'week', 'month', 'quarter', 'year'], primaryTime: true,
+        source: {
+          provider: 'dbt', objectType: 'time_dimension', objectId: 'dimension.orders.ordered_at',
+          extra: { raw: { meta: { dql: { time_role: 'order_event_time' } } } },
+        },
+      }],
+      joins: [], segments: [], preAggregations: [], defaultTimeDimension: 'ordered_at',
+    });
+    layer.addEntity({
+      name: 'order', label: 'Order', description: '', type: 'primary', expr: 'order_id',
+      table: 'analytics.orders', cube: 'orders', domain: 'sales',
+    });
+    layer.addMeasure({
+      name: 'revenue', label: 'Revenue', description: '', agg: 'sum', expr: 'revenue_amount',
+      table: 'analytics.orders', cube: 'orders', domain: 'sales', aggTimeDimension: 'ordered_at',
+    });
+    layer.addSemanticModel({
+      name: 'orders', label: 'Orders', description: '', domain: 'sales', table: 'analytics.orders',
+      entities: ['order'], measures: ['revenue'], dimensions: ['customer_name'], timeDimensions: ['ordered_at'],
+    });
+    layer.addMetric({
+      name: 'revenue', label: 'Revenue', description: 'Recognized revenue.', domain: 'sales',
+      sql: 'revenue', type: 'custom', metricType: 'simple', aggregation: 'sum', table: '',
+      cube: 'orders', aggTimeDimension: 'ordered_at', typeParams: { measure: { name: 'revenue' } },
+      source,
+    });
+
+    const metric = buildKGFromSemanticLayer(layer).nodes.find((node) => node.nodeId === 'metric:orders.revenue');
+    expect(metric?.payload?.analyticalCapability).toMatchObject({
+      metricId: 'semantic:sales:revenue',
+      semanticModelId: 'semantic:sales:model:orders',
+      primaryEntityId: 'semantic:sales:entity:order',
+      defaultResultGrainId: 'semantic:sales:entity:order',
+      aggregation: 'sum',
+      dimensions: [{
+        dimensionId: 'semantic:sales:dimension:customer_name',
+        entityId: 'semantic:sales:entity:order',
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+      }],
+      timeDimensions: [{
+        dimensionId: 'semantic:sales:dimension:ordered_at',
+        role: 'order_event_time',
+        defaultFor: ['scalar', 'trend', 'comparison'],
+      }],
+      freshness: { defaultCompletenessPolicy: 'latest_complete' },
+      operations: ['filter', 'group', 'trend', 'rank'],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+      sourceFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    });
+  });
+
   it('keeps synthetic physical dimensions model-scoped above the PERF-001 threshold', () => {
     const dimensions = Array.from({ length: 50_001 }, (_, index) => ({
       name: `column_${index}`,

@@ -130,6 +130,19 @@ translated into a second artifact after its result has already been produced,
 and a transient artifact's supplied source is not silently replaced by a draft
 file at its optional source path (`AGT-010`, `API-003`, `UI-011`).
 
+Successful and failed executable runs retain the inspectable plan, DQL artifact,
+compiled SQL when available, lineage/trust evidence, actual phase steps, and
+receipt/failure fingerprints. Failures use the versioned contract in spec 10,
+including stable code, failed phase/bindings, recoverability, and safe actions.
+Equivalent Browser Ask, Notebook, CLI, MCP, and Chat requests expose the same
+failure identity and trust transition (`API-007`).
+
+Repair never mutates the source run. A parameter-only rerun, derived DQL edit,
+SQL Notebook copy, snapshot refresh, or authorized connection change creates a
+new run and receipt according to the trust-transition matrix in spec 10.
+Permission/policy failure is terminal for the selected route and cannot trigger
+an alternate-source probe (`SEC-004`).
+
 ## Domain/modeling APIs
 
 | Method | Path | Contract |

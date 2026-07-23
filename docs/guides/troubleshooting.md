@@ -248,6 +248,45 @@ const HARD_NEGATIVE_RATIO     = 0.5;    // lower to 0.3 to disqualify on fewer d
 
 Rebuild and reindex.
 
+### Ask found the right metric but says the governed query failed
+
+Open **How it was answered** on the failed answer. The inspector keeps the exact
+plan and, when compilation reached them, the DQL and SQL that were attempted.
+Its final section shows a stable failure code and only the repairs allowed for
+that failure.
+
+- `RELATION_NOT_FOUND` or `COLUMN_NOT_FOUND`: make the active connection point
+  at the warehouse containing the dbt-built relations, run `dbt build` when
+  appropriate, then use **Refresh snapshot and prepare retry**. Do not replace
+  the governed relation with a similarly named table.
+- `PERMISSION_DENIED`: change to an explicitly authorized connection or request
+  access. DQL will not retry another source automatically.
+- `DIALECT_ERROR` or `AMBIGUOUS_COLUMN`: open the retained DQL/SQL in Notebook,
+  edit the derived copy, and rerun through the normal guards. The source run and
+  its receipt remain unchanged.
+- `TIMEOUT`: retry the same bounded plan. Research is not started implicitly.
+- `RESULT_CONTRACT_MISMATCH`: the query did not return every field promised by
+  the plan, so the result cannot be narrated or saved as a complete answer.
+
+For “today” and other relative periods, `latest_complete` also needs a governed
+reporting-time dimension and an authorized freshness observation. DQL performs
+one bounded lookup using the already selected semantic metric/time members. A
+missing table or permission during that lookup is reported with the same stable
+warehouse failure code.
+
+### Ask cannot connect a metric to a customer or time dimension
+
+Check the semantic model rather than adding a broad repository search. The
+metric capability must declare its primary entity, additivity, supported
+customer/time dimensions and roles, relationship path, time grains, freshness
+policy, operations, outputs, and adapter. Domain Skills may choose defaults such
+as timezone, completeness, comparison alignment, or ranking period, but they
+cannot invent a member, authorize a join, or override an incompatible metric.
+
+Repository text search remains discovery evidence for dbt models and columns
+when governed coverage is absent. It can help build a review-required SQL plan;
+it never upgrades a grep match into semantic relationship proof.
+
 ### Slack bot returns 401 "Bad signature"
 
 In order of likelihood:

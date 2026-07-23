@@ -18,6 +18,9 @@ let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryF
 let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor;
 let clarificationSelectionInput: typeof UnifiedAgentRunPanelModule.clarificationSelectionInput;
 let isAgentRunPinnable: typeof UnifiedAgentRunPanelModule.isAgentRunPinnable;
+let hasAnalyticalInspectorContract: typeof UnifiedAgentRunPanelModule.hasAnalyticalInspectorContract;
+let analyticalInspectorSections: typeof UnifiedAgentRunPanelModule.analyticalInspectorSections;
+let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRepairActionLabels;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -38,6 +41,40 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     liveAgentActivityFor = module.liveAgentActivityFor;
     clarificationSelectionInput = module.clarificationSelectionInput;
     isAgentRunPinnable = module.isAgentRunPinnable;
+    hasAnalyticalInspectorContract = module.hasAnalyticalInspectorContract;
+    analyticalInspectorSections = module.analyticalInspectorSections;
+    analyticalRepairActionLabels = module.analyticalRepairActionLabels;
+  });
+
+  it('UI-012 exposes the complete seven-section analytical inspector for success and failure payloads', () => {
+    expect(hasAnalyticalInspectorContract({
+      resolvedAnalyticalPlan: { planId: 'plan-1' },
+      analyticalExecutionGraph: { graphId: 'graph-1' },
+    })).toBe(true);
+    expect(hasAnalyticalInspectorContract({
+      analyticalFailure: { code: 'PERMISSION_DENIED', phase: 'execution' },
+    })).toBe(true);
+    expect(analyticalInspectorSections()).toEqual([
+      'Plan',
+      'DQL',
+      'Compiled SQL',
+      'Lineage',
+      'Trust & evidence',
+      'Actual steps',
+      'Failure & repair',
+    ]);
+  });
+
+  it('UI-013 capability-gates repair actions without offering a permission bypass', () => {
+    expect(analyticalRepairActionLabels(['refresh_snapshot', 'edit_dql', 'open_sql_notebook'])).toEqual([
+      'Refresh snapshot and prepare retry',
+      'Open DQL to repair',
+      'Open SQL in Notebook',
+    ]);
+    expect(analyticalRepairActionLabels(['request_access', 'change_authorized_connection'])).toEqual([
+      'Change connection or request access',
+    ]);
+    expect(analyticalRepairActionLabels(['request_access', 'change_authorized_connection'])).not.toContain('Open SQL in Notebook');
   });
 
   it('UI-011 restores applied certified-block inputs in the inline Ask result', () => {

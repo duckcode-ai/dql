@@ -35,7 +35,16 @@ import {
   type MeaningExecutionRoute,
   type MeaningResolution,
 } from "./meaning-resolution.js";
-import { buildResolvedAnalyticalPlan, type ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
+import { normalizeAnalyticalQuestionFrameV2 } from "@duckcodeailabs/dql-core";
+import {
+  buildResolvedAnalyticalPlan,
+  type ResolvedAnalyticalPlan,
+} from "./resolved-analytical-plan.js";
+import {
+  normalizeEvidenceAnalyticalCapability,
+  solveAnalyticalCompatibility,
+} from "./analytical-compatibility.js";
+import { buildDeterministicAnalyticalFrame } from "./analytical-frame.js";
 
 /** The router's fine-grained classification of a turn. */
 export interface RouterClassification {
@@ -264,7 +273,8 @@ function buildMeaningSystemPrompt(): string {
     "You may reference ONLY candidate IDs supplied below. Never invent an ID, table, column, metric, relationship, or filter value.",
     "Use low confidence and recommend clarify when material business meanings remain unresolved.",
     "Respond with ONLY one JSON object matching this shape:",
-    '{"interpretedQuestion":string,"questionType":"definition"|"value"|"ranking"|"trend"|"comparison"|"diagnosis"|"research","selectedConceptIds":string[],"recommendedExecutionId"?:string,"queryIntent":{"measures":string[],"dimensions":string[],"filters":[{"field":string,"value":string}],"timeRange"?:string,"timeGrain"?:string,"order"?:"asc"|"desc","limit"?:number},"rejectedCandidates":[{"id":string,"reason":string}],"confidence":"high"|"medium"|"low","missingInformation":string[],"recommendedRoute":"certified"|"semantic"|"governed_sql"|"exploratory"|"clarify","clarifyingQuestion"?:string}',
+    '{"interpretedQuestion":string,"questionType":"definition"|"value"|"ranking"|"trend"|"comparison"|"diagnosis"|"research","selectedConceptIds":string[],"recommendedExecutionId"?:string,"queryIntent":{"measures":string[],"dimensions":string[],"filters":[{"field":string,"value":string}],"timeRange"?:string,"timeGrain"?:string,"order"?:"asc"|"desc","limit"?:number},"analyticalFrame"?:AnalyticalQuestionFrameV2,"rejectedCandidates":[{"id":string,"reason":string}],"confidence":"high"|"medium"|"low","missingInformation":string[],"recommendedRoute":"certified"|"semantic"|"governed_sql"|"exploratory"|"clarify","clarifyingQuestion"?:string}',
+    "AnalyticalQuestionFrameV2 uses version 2 and exact supplied IDs for metricConceptIds, entityGrainIds, dimensions with roles group_by/filter/display/rank_entity/time_axis, memberBindings, timeContext with bounded periods, comparison, ranking, requestedOutputs, and ambiguity. Include it for value/ranking/trend/comparison requests when the supplied capability facts are sufficient; otherwise report missingInformation.",
   ].join("\n");
 }
 
@@ -294,6 +304,7 @@ function buildMeaningUserPrompt(
     matchReasons: compactArray(candidate.matchReasons, 8, 240),
     compatibility: candidate.compatibility,
     compatibilityFacts: compactArray(candidate.compatibilityFacts, 8, 240),
+    analyticalCapability: candidate.analyticalCapability,
   }));
   const lines = [
     `Question: ${compactText(request.question, 2_000)}`,
@@ -370,13 +381,23 @@ function parseMeaningResolution(raw: string): MeaningResolution | undefined {
       ? [{ id: item.id, reason: item.reason }]
       : [];
   });
-  if (rejectedCandidates.length !== record.rejectedCandidates.length) return undefined;
-  const recommendedExecutionId = typeof record.recommendedExecutionId === "string"
-    ? record.recommendedExecutionId
-    : undefined;
-  const clarifyingQuestion = typeof record.clarifyingQuestion === "string" && record.clarifyingQuestion.trim()
-    ? record.clarifyingQuestion.trim()
-    : undefined;
+  if (rejectedCandidates.length !== record.rejectedCandidates.length)
+    return undefined;
+  const recommendedExecutionId =
+    typeof record.recommendedExecutionId === "string"
+      ? record.recommendedExecutionId
+      : undefined;
+  const clarifyingQuestion =
+    typeof record.clarifyingQuestion === "string" &&
+    record.clarifyingQuestion.trim()
+      ? record.clarifyingQuestion.trim()
+      : undefined;
+  const analyticalFrame =
+    record.analyticalFrame === undefined
+      ? undefined
+      : normalizeAnalyticalQuestionFrameV2(record.analyticalFrame);
+  if (record.analyticalFrame !== undefined && !analyticalFrame)
+    return undefined;
   return {
     interpretedQuestion: record.interpretedQuestion.trim(),
     questionType: record.questionType as MeaningResolution["questionType"],
@@ -398,6 +419,7 @@ function parseMeaningResolution(raw: string): MeaningResolution | undefined {
     missingInformation,
     recommendedRoute: record.recommendedRoute as MeaningResolution["recommendedRoute"],
     ...(clarifyingQuestion ? { clarifyingQuestion } : {}),
+    ...(analyticalFrame ? { analyticalFrame } : {}),
   };
 }
 
@@ -442,41 +464,133 @@ function routeDecisionForResolution(
   question = resolution.interpretedQuestion,
   mode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
 ): IntentDecision {
-  const needsClarification = resolution.confidence === "low" || resolution.recommendedRoute === "clarify";
-  const analytical = resolution.questionType === "diagnosis" || resolution.questionType === "research";
+  const routedResolution = enforceAnalyticalCompatibility(
+    resolution,
+    evidence,
+    candidates,
+  );
+  const needsClarification =
+    routedResolution.confidence === "low" ||
+    routedResolution.recommendedRoute === "clarify";
+  const analytical =
+    routedResolution.questionType === "diagnosis" ||
+    routedResolution.questionType === "research";
   const reason = needsClarification
-    ? `The retrieved evidence supports multiple business meanings: ${resolution.interpretedQuestion}`
-    : `Resolved the question against ${resolution.selectedConceptIds.join(", ")}: ${resolution.interpretedQuestion}`;
+    ? `The retrieved evidence does not prove one complete analytical tuple: ${routedResolution.missingInformation.join(" ") || routedResolution.interpretedQuestion}`
+    : `Resolved the question against ${routedResolution.selectedConceptIds.join(", ")}: ${routedResolution.interpretedQuestion}`;
   const resolvedAnalyticalPlan = buildResolvedAnalyticalPlan({
     question,
-    resolution,
+    resolution: routedResolution,
     evidence,
     candidates,
     mode,
   });
   return {
     ...base,
-    action: needsClarification ? "clarify" : analytical ? "investigate" : "answer",
-    confidence: resolution.confidence === "high" ? 0.9 : resolution.confidence === "medium" ? 0.72 : 0.45,
+    action: needsClarification
+      ? "clarify"
+      : analytical
+        ? "investigate"
+        : "answer",
+    confidence:
+      routedResolution.confidence === "high"
+        ? 0.9
+        : routedResolution.confidence === "medium"
+          ? 0.72
+          : 0.45,
     reason,
     source,
     category: analytical ? "data_analysis" : needsClarification ? "unclear" : "data_lookup",
     depth: analytical ? "deep" : "quick",
-    meaningResolution: resolution,
+    meaningResolution: routedResolution,
     resolvedAnalyticalPlan,
     retrievalEvidence: retrievalTrace(evidence, candidates),
     requiresClarification: needsClarification,
-    ...(needsClarification ? { clarificationOptions: buildClarificationOptions(candidates) } : {}),
     ...(needsClarification
-      ? { clarifyingQuestion: resolution.clarifyingQuestion ?? buildEvidenceClarification(candidates, resolution.missingInformation) }
+      ? { clarificationOptions: buildClarificationOptions(candidates) }
+      : {}),
+    ...(needsClarification
+      ? {
+          clarifyingQuestion:
+            routedResolution.clarifyingQuestion ??
+            buildEvidenceClarification(
+              candidates,
+              routedResolution.missingInformation,
+            ),
+        }
       : {}),
   };
 }
 
-function buildClarificationOptions(candidates: AgentEvidenceCandidate[]): NonNullable<IntentDecision["clarificationOptions"]> {
-  const governed = candidates.filter((candidate) =>
-    candidate.compatibility !== "incompatible"
-    && (candidate.kind === "certified_block" || candidate.kind === "semantic_metric" || candidate.kind === "semantic_member")
+function enforceAnalyticalCompatibility(
+  resolution: MeaningResolution,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+): MeaningResolution {
+  if (!resolution.analyticalFrame) return resolution;
+  const capabilityCandidates = candidates.flatMap((candidate) => {
+    const normalized = normalizeEvidenceAnalyticalCapability(candidate);
+    return normalized.status === "complete" && normalized.capability
+      ? [
+          {
+            candidateId: candidate.id,
+            capability: normalized.capability,
+            fitClass:
+              candidate.kind === "certified_block"
+                ? (candidate.analyticalFitClass ?? ("parameterized" as const))
+                : ("exact" as const),
+          },
+        ]
+      : [];
+  });
+  const result = solveAnalyticalCompatibility({
+    frame: resolution.analyticalFrame,
+    candidates: capabilityCandidates,
+    policies: evidence.analyticalPolicies,
+  });
+  if (result.status === "ready") {
+    const metricEvidence = candidates.find(
+      (candidate) =>
+        candidate.kind === "semantic_metric" &&
+        candidate.analyticalCapability?.metricId === result.capability.metricId,
+    );
+    return {
+      ...resolution,
+      analyticalFrame: result.frame,
+      analyticalPolicyIds: result.policyIds,
+      ...(metricEvidence ? { selectedConceptIds: [metricEvidence.id] } : {}),
+      recommendedExecutionId: result.candidateId,
+      recommendedRoute: result.route,
+      missingInformation: [],
+    };
+  }
+  const failures = result.failures.map((failure) => failure.message);
+  return {
+    ...resolution,
+    analyticalFrame: result.frame,
+    analyticalPolicyIds: result.policyIds,
+    confidence: result.status === "clarify" ? "low" : resolution.confidence,
+    recommendedRoute: "clarify",
+    missingInformation: [
+      ...new Set([...resolution.missingInformation, ...failures]),
+    ],
+    clarifyingQuestion:
+      result.status === "clarify"
+        ? result.failure.message
+        : (failures[0] ??
+          "The requested analytical tuple is not executable from the current governed model."),
+  };
+}
+
+function buildClarificationOptions(
+  candidates: AgentEvidenceCandidate[],
+): NonNullable<IntentDecision["clarificationOptions"]> {
+  const governed = candidates.filter(
+    (candidate) =>
+      candidate.compatibility !== "incompatible" &&
+      (candidate.kind === "certified_block" ||
+        candidate.kind === "semantic_metric" ||
+        candidate.kind === "semantic_member"),
   );
   const pool = governed.length > 1
     ? governed
@@ -510,7 +624,14 @@ function directResolution(
   request: AgentRunRequest,
   evidence: AgentRetrievalEvidence,
   candidate: AgentEvidenceCandidate,
+  candidates: AgentEvidenceCandidate[],
 ): MeaningResolution {
+  const analyticalFrame = buildDeterministicAnalyticalFrame({
+    question: request.question,
+    evidence,
+    metricCandidate: candidate,
+    candidates,
+  });
   return {
     interpretedQuestion: request.question,
     questionType: questionTypeFromText(request.question),
@@ -521,6 +642,7 @@ function directResolution(
     confidence: "high",
     missingInformation: [],
     recommendedRoute: routeForEvidenceCandidate(candidate),
+    ...(analyticalFrame ? { analyticalFrame } : {}),
   };
 }
 
@@ -531,9 +653,35 @@ function routeWithoutMeaningModel(
   candidates: AgentEvidenceCandidate[],
   planMode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
 ): IntentDecision {
-  const exactCompatible = candidates.filter((candidate) => candidate.exactMatch && candidate.compatibility !== "incompatible");
-  if (exactCompatible.length === 1 && !hasMateriallyRelatedCompetitor(exactCompatible[0], candidates)) {
-    return routeDecisionForResolution(base, evidence, candidates, directResolution(request, evidence, exactCompatible[0]), "heuristic", request.question, planMode);
+  const exactCompatible = candidates.filter(
+    (candidate) =>
+      candidate.exactMatch && candidate.compatibility !== "incompatible",
+  );
+  if (
+    exactCompatible.length === 1 &&
+    !hasMateriallyRelatedCompetitor(exactCompatible[0], candidates)
+  ) {
+    return routeDecisionForResolution(
+      base,
+      evidence,
+      candidates,
+      directResolution(request, evidence, exactCompatible[0], candidates),
+      "heuristic",
+      request.question,
+      planMode,
+    );
+  }
+  const semanticMetric = uniqueExecutableSemanticMetric(evidence, candidates);
+  if (semanticMetric) {
+    return routeDecisionForResolution(
+      base,
+      evidence,
+      candidates,
+      directResolution(request, evidence, semanticMetric, candidates),
+      "heuristic",
+      request.question,
+      planMode,
+    );
   }
   if (base.action === "investigate") {
     return {
@@ -550,6 +698,61 @@ function routeWithoutMeaningModel(
     category: "data_lookup",
     retrievalEvidence: retrievalTrace(evidence, candidates),
   };
+}
+
+/**
+ * AGT-017 / AGT-018 / PERF-002 — provider failure must not send an otherwise
+ * unambiguous semantic question back through the legacy answer cascade. A dbt
+ * semantic snapshot can expose one authored metric alongside three technical
+ * representations of the same calculation: its backing measure, a
+ * measure-derived metric execution shim, and a canonical registry alias. Only
+ * complete authored metric capabilities count as business meanings here.
+ *
+ * This is a fallback, not a general lexical winner: all surviving authored
+ * metrics must normalize to one stable metric identity, be compatible with the
+ * requested tuple, and match the planner's requested measure terms. Two real
+ * metrics therefore remain ambiguous and continue to clarification/resolution.
+ */
+function uniqueExecutableSemanticMetric(
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  const requestedTokens = metricTokens(evidence.parsedIntent?.measures ?? []);
+  if (requestedTokens.size === 0) return undefined;
+  const byMetricId = new Map<string, AgentEvidenceCandidate>();
+  for (const candidate of candidates) {
+    if (candidate.kind !== "semantic_metric" || candidate.compatibility !== "compatible") continue;
+    if (/\bdbt\s+measure\b/i.test(candidate.provenance ?? "")) continue;
+    const normalized = normalizeEvidenceAnalyticalCapability(candidate);
+    if (normalized.status !== "complete" || !normalized.capability) continue;
+    const candidateTokens = metricTokens([
+      candidate.name,
+      ...(candidate.aliases ?? []),
+      normalized.capability.metricId,
+    ]);
+    if (![...requestedTokens].some((token) => candidateTokens.has(token))) continue;
+    const current = byMetricId.get(normalized.capability.metricId);
+    if (!current || candidate.relevanceScore > current.relevanceScore) {
+      byMetricId.set(normalized.capability.metricId, candidate);
+    }
+  }
+  return byMetricId.size === 1 ? [...byMetricId.values()][0] : undefined;
+}
+
+function metricTokens(values: string[]): Set<string> {
+  const ignored = new Set([
+    "a", "an", "and", "as", "at", "by", "current", "for", "from", "is",
+    "last", "measure", "metric", "of", "on", "show", "the", "this", "today",
+    "top", "total", "value", "what", "year",
+  ]);
+  return new Set(
+    values
+      .join(" ")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 2 && !ignored.has(token)),
+  );
 }
 
 function hasMateriallyRelatedCompetitor(
@@ -706,7 +909,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               base,
               evidence,
               candidates,
-              directResolution(request, evidence, explicit),
+              directResolution(request, evidence, explicit, candidates),
               "heuristic",
               request.question,
               options.resolvedPlanMode ?? 'authoritative',
@@ -721,7 +924,12 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               base,
               evidence,
               candidates,
-              directResolution(request, evidence, exactCompatible[0]),
+              directResolution(
+                request,
+                evidence,
+                exactCompatible[0],
+                candidates,
+              ),
               "heuristic",
               request.question,
               options.resolvedPlanMode ?? 'authoritative',
@@ -734,7 +942,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               base,
               evidence,
               candidates,
-              directResolution(request, evidence, dominant),
+              directResolution(request, evidence, dominant, candidates),
               "heuristic",
               request.question,
               options.resolvedPlanMode ?? 'authoritative',

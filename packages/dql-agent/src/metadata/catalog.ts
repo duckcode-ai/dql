@@ -40,11 +40,21 @@ import {
   composeEffectiveTrust,
   type DqlArtifactReference,
   type ResolvedTrustLabel,
-} from '@duckcodeailabs/dql-core';
-import { buildKGFromManifest, buildKGFromSemanticLayer } from '../kg/build.js';
-import type { KGEdge, KGNode } from '../kg/types.js';
-import { domainContextSearchDomains, type DomainContextEnvelope, type KnowledgeLens } from '../domain-context.js';
-import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
+  type AnalyticalPolicyContract,
+  normalizeMetricCapabilityContract,
+  type MetricCapabilityContract,
+} from "@duckcodeailabs/dql-core";
+import { buildKGFromManifest, buildKGFromSemanticLayer } from "../kg/build.js";
+import type { KGEdge, KGNode } from "../kg/types.js";
+import {
+  domainContextSearchDomains,
+  type DomainContextEnvelope,
+  type KnowledgeLens,
+} from "../domain-context.js";
+import {
+  buildBlockBusinessFingerprint,
+  buildBlockSqlFingerprints,
+} from "./block-fingerprints.js";
 import {
   buildAnalysisQuestionPlan,
   certifiedApplicabilityForObject,
@@ -506,6 +516,8 @@ export interface LocalContextSkill {
   requiredFilters: string[];
   clarifyWhen: string[];
   vocabulary: Record<string, string>;
+  /** Eligible structured defaults, bound to this exact Skill fingerprint. */
+  analyticalPolicy?: AnalyticalPolicyContract;
   /** Bounded prompt-safe guidance; the full source remains fingerprinted in the catalog. */
   guidance: string;
   guidanceTruncated: boolean;
@@ -1594,6 +1606,7 @@ export function buildMetadataSnapshot(
   addRawDbtManifestCatalogObjects(projectRoot, manifest, objects, edges, diagnostics);
   addBlockDependencyEdges(manifest, edges);
   addBlockOutputLineageObjects(manifest, objects, edges);
+  addCertifiedBlockAnalyticalCapabilities(objects);
   // Manifest v3 is the unified DQL runtime. DataLex is migration input only;
   // retaining it here would reintroduce a second analytical source of truth.
   if (manifest.manifestVersion !== 3) {
@@ -1640,6 +1653,209 @@ export function buildMetadataSnapshot(
   };
   snapshot.fingerprint = fingerprintSnapshot(snapshot);
   return snapshot;
+}
+
+/**
+ * Upgrade only fully declared certified blocks into RFC 0005 capabilities.
+ * Local/display-name matching is intentionally insufficient: every reusable
+ * metric, grain, dimension/filter, and output role must bind exactly to the
+ * already-normalized semantic capability in this immutable snapshot.
+ *
+ * Acceptance: CONTRACT-002, AGT-018.
+ */
+function addCertifiedBlockAnalyticalCapabilities(
+  objects: Map<string, MetadataObject>,
+): void {
+  const semanticCapabilities = [...objects.values()].flatMap((object) => {
+    if (object.objectType !== "semantic_metric") return [];
+    const capability = normalizeMetricCapabilityContract(
+      object.payload?.analyticalCapability,
+    );
+    if (!capability) return [];
+    const payload = object.payload ?? {};
+    return [
+      {
+        object,
+        capability,
+        exactRefs: new Set(
+          uniqueNonBlank([
+            capability.metricId,
+            object.objectKey,
+            object.fullName,
+            stringValue(payload.qualifiedId),
+            stringValue(payload.sourceNativeId),
+            ...metadataStringArray(payload.aliases),
+          ]),
+        ),
+      },
+    ];
+  });
+  for (const block of objects.values()) {
+    if (block.objectType !== "dql_block" || block.status !== "certified")
+      continue;
+    const payload = block.payload ?? {};
+    const metricRefs = uniqueNonBlank([
+      ...metadataStringArray(payload.metricRefs),
+    ]);
+    if (metricRefs.length !== 1) continue;
+    const metrics = semanticCapabilities.filter((candidate) =>
+      candidate.exactRefs.has(metricRefs[0]!),
+    );
+    if (metrics.length !== 1) continue;
+    const semantic = metrics[0]!;
+    const grain = stringValue(payload.grain);
+    if (!grain || !semantic.capability.resultGrainIds.includes(grain)) continue;
+
+    const groupedRefs = uniqueNonBlank([
+      ...metadataStringArray(payload.dimensions),
+      ...metadataStringArray(payload.dimensionsRef),
+    ]);
+    const filterRefs = uniqueNonBlank(
+      metadataStringArray(payload.allowedFilters),
+    );
+    const declaredRefs = new Set([...groupedRefs, ...filterRefs]);
+    const capabilityDimensionIds = new Set(
+      semantic.capability.dimensions.map((item) => item.dimensionId),
+    );
+    const capabilityTimeIds = new Set(
+      semantic.capability.timeDimensions.map((item) => item.dimensionId),
+    );
+    if (
+      [...declaredRefs].some(
+        (id) => !capabilityDimensionIds.has(id) && !capabilityTimeIds.has(id),
+      )
+    )
+      continue;
+
+    const dimensions: MetricCapabilityContract["dimensions"] =
+      semantic.capability.dimensions.flatMap((dimension) => {
+        if (!declaredRefs.has(dimension.dimensionId)) return [];
+        const roles = dimension.supportedRoles.filter(
+          (role) =>
+            (role === "filter" && filterRefs.includes(dimension.dimensionId)) ||
+            (role === "group_by" &&
+              groupedRefs.includes(dimension.dimensionId)) ||
+            (role === "display" &&
+              groupedRefs.includes(dimension.dimensionId)) ||
+            (role === "rank_entity" &&
+              payload.pattern === "ranking" &&
+              groupedRefs.includes(dimension.dimensionId)),
+        );
+        return roles.length > 0
+          ? [{ ...dimension, supportedRoles: roles }]
+          : [];
+      });
+    if (
+      [...declaredRefs].some(
+        (id) =>
+          capabilityDimensionIds.has(id) &&
+          !dimensions.some((dimension) => dimension.dimensionId === id),
+      )
+    )
+      continue;
+
+    const timeDimensions = semantic.capability.timeDimensions.filter(
+      (dimension) => declaredRefs.has(dimension.dimensionId),
+    );
+    const outputs = analyticalBlockOutputs(payload.outputContract);
+    if (
+      !outputs ||
+      outputs.ids.length === 0 ||
+      !outputs.kinds.includes("metric_value")
+    )
+      continue;
+    const operations: MetricCapabilityContract["operations"] = [];
+    if (filterRefs.length > 0) operations.push("filter");
+    if (groupedRefs.some((id) => capabilityDimensionIds.has(id)))
+      operations.push("group");
+    if (payload.pattern === "trend") operations.push("trend");
+    if (payload.pattern === "ranking" && outputs.kinds.includes("rank"))
+      operations.push("rank");
+    if (
+      outputs.kinds.includes("delta") ||
+      outputs.kinds.includes("percent_delta")
+    )
+      operations.push("compare");
+    const blockId = stringValue(payload.qualifiedId) ?? block.objectKey;
+    const fingerprint =
+      stringValue(recordPayload(payload.businessFingerprint)?.hash) ??
+      sha256(
+        stableStringify({
+          blockId,
+          metricRefs,
+          grain,
+          groupedRefs,
+          filterRefs,
+          outputs,
+        }),
+      );
+    const capability: MetricCapabilityContract = {
+      ...semantic.capability,
+      defaultResultGrainId: grain,
+      resultGrainIds: uniqueNonBlank([
+        grain,
+        ...dimensions.map((dimension) => dimension.entityId),
+      ]),
+      dimensions,
+      timeDimensions,
+      operations: [...new Set(operations)],
+      supportedOutputKinds: outputs.kinds,
+      declaredOutputIds: outputs.ids,
+      executionCapabilities: [
+        { route: "certified", adapterId: block.objectKey },
+      ],
+      sourceFingerprint: fingerprint.startsWith("sha256:")
+        ? fingerprint
+        : `sha256:${fingerprint}`,
+    };
+    const normalized = normalizeMetricCapabilityContract(capability);
+    if (!normalized) continue;
+    objects.set(block.objectKey, {
+      ...block,
+      payload: { ...payload, analyticalCapability: normalized },
+    });
+  }
+}
+
+function analyticalBlockOutputs(value: unknown):
+  | {
+      ids: string[];
+      kinds: MetricCapabilityContract["supportedOutputKinds"];
+    }
+  | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const ids: string[] = [];
+  const kinds: MetricCapabilityContract["supportedOutputKinds"] = [];
+  for (const item of value) {
+    const output = recordPayload(item);
+    const id = stringValue(output?.name);
+    const role = stringValue(output?.role)?.toLowerCase();
+    if (!id || !role) return undefined;
+    const kind:
+      | MetricCapabilityContract["supportedOutputKinds"][number]
+      | undefined =
+      role === "metric" || role === "measure" || role === "value"
+        ? "metric_value"
+        : role === "dimension" || role === "grain"
+          ? "dimension"
+          : role === "rank"
+            ? "rank"
+            : role === "delta"
+              ? "delta"
+              : role === "percent_delta"
+                ? "percent_delta"
+                : undefined;
+    if (!kind) return undefined;
+    ids.push(id);
+    kinds.push(kind);
+  }
+  return { ids: uniqueNonBlank(ids), kinds: [...new Set(kinds)] };
+}
+
+function recordPayload(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 /**
@@ -1750,8 +1966,28 @@ function addManifestKnowledgeGraph(
       sourceSystem: 'DQL compiled cross-domain policy',
       payload: compactObject(route as unknown as Record<string, unknown>),
     });
-    addMetadataEdge(edges, 'cross_domain_route', keyByGraphId.get(`domain::${route.providerDomainId}`) ?? `domain:${route.providerDomainId}`, objectKey, { state: route.state, reasonCodes: route.reasonCodes });
-    addMetadataEdge(edges, 'cross_domain_route', objectKey, keyByGraphId.get(`domain::${route.consumerDomainId}`) ?? `domain:${route.consumerDomainId}`, { state: route.state, reasonCodes: route.reasonCodes });
+    addMetadataEdge(
+      edges,
+      "cross_domain_route",
+      keyByGraphId.get(`domain::${route.providerDomainId}`) ??
+        `domain:${route.providerDomainId}`,
+      objectKey,
+      {
+        state: route.state,
+        reasonCodes: route.reasonCodes,
+      },
+    );
+    addMetadataEdge(
+      edges,
+      "cross_domain_route",
+      objectKey,
+      keyByGraphId.get(`domain::${route.consumerDomainId}`) ??
+        `domain:${route.consumerDomainId}`,
+      {
+        state: route.state,
+        reasonCodes: route.reasonCodes,
+      },
+    );
   }
 
   for (const edge of graph.edges ?? []) {
@@ -3425,14 +3661,17 @@ function addSkillObjects(
   for (const skill of skills) {
     const identity = skill.qualifiedId ?? skill.id;
     const bodyHash = sha256(skill.body);
-    const sourceFingerprint = sha256(stableStringify({
-      identity,
-      domain: skill.domain,
-      domains: skill.domains ?? [],
-      modelAreaRefs: skill.modelAreaRefs ?? [],
-      status: skill.status ?? 'active',
-      bodyHash,
-    }));
+    const sourceFingerprint = sha256(
+      stableStringify({
+        identity,
+        domain: skill.domain,
+        domains: skill.domains ?? [],
+        modelAreaRefs: skill.modelAreaRefs ?? [],
+        status: skill.status ?? "active",
+        analyticalPolicy: skill.analyticalPolicy,
+        bodyHash,
+      }),
+    );
     const objectKey = `skill:${identity}`;
     const domains = uniqueNonBlank([skill.domain, ...(skill.domains ?? [])]);
     const object: MetadataObject = {
@@ -3465,6 +3704,7 @@ function addSkillObjects(
         examples: skill.examples ?? [],
         sourceRefs: skill.sourceRefs ?? [],
         vocabulary: skill.vocabulary,
+        analyticalPolicy: skill.analyticalPolicy,
         bodyHash,
         sourceFingerprint,
         isStarter: skill.isStarter,
@@ -7471,14 +7711,24 @@ function skillFromMetadataObject(object: MetadataObject): Skill | null {
     examples: stringArrayPayload(payload.examples),
     sourceRefs: stringArrayPayload(payload.sourceRefs),
     vocabulary: stringRecordPayload(payload.vocabulary),
-    body: '',
-    sourcePath: object.sourcePath ?? '',
+    analyticalPolicy: skillAnalyticalPolicyPayload(payload.analyticalPolicy),
+    body: "",
+    sourcePath: object.sourcePath ?? "",
     isStarter: payload.isStarter === true,
   };
 }
 
 function localContextSkillFromParsed(skill: Skill, object: MetadataObject): LocalContextSkill {
   const guidance = skill.body.slice(0, 4_000);
+  const sourceHash = stringPayload(object.payload?.sourceFingerprint);
+  const policy =
+    skill.analyticalPolicy && sourceHash
+      ? ({
+          policyId: `${skill.qualifiedId ?? skill.id}#analytical`,
+          sourceHash,
+          ...skill.analyticalPolicy,
+        } satisfies AnalyticalPolicyContract)
+      : undefined;
   return {
     objectKey: object.objectKey,
     id: skill.id,
@@ -7498,12 +7748,53 @@ function localContextSkillFromParsed(skill: Skill, object: MetadataObject): Loca
     requiredFilters: [...(skill.requiredFilters ?? [])],
     clarifyWhen: [...(skill.clarifyWhen ?? [])],
     vocabulary: { ...skill.vocabulary },
+    ...(policy ? { analyticalPolicy: policy } : {}),
     guidance,
     guidanceTruncated: guidance.length < skill.body.length,
     sourceRefs: [...(skill.sourceRefs ?? [])],
     provenance: stringPayload(object.payload?.provenance) ?? object.sourceSystem ?? 'DQL domain skill',
     sourcePath: object.sourcePath,
   };
+}
+
+function skillAnalyticalPolicyPayload(
+  value: unknown,
+): Skill["analyticalPolicy"] {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const completenessPolicy = stringPayload(record.completenessPolicy);
+  const comparisonAlignment = stringPayload(record.comparisonAlignment);
+  const defaultRankingPeriod = stringPayload(record.defaultRankingPeriod);
+  const policy: NonNullable<Skill["analyticalPolicy"]> = {
+    metricIds: stringArrayPayload(record.metricIds),
+    timeRole: stringPayload(record.timeRole),
+    calendarId: stringPayload(record.calendarId),
+    timezone: stringPayload(record.timezone),
+    completenessPolicy:
+      completenessPolicy === "partial_current" ||
+      completenessPolicy === "latest_complete" ||
+      completenessPolicy === "closed_period"
+        ? completenessPolicy
+        : undefined,
+    comparisonAlignment:
+      comparisonAlignment === "elapsed_period" ||
+      comparisonAlignment === "calendar_period" ||
+      comparisonAlignment === "fiscal_period"
+        ? comparisonAlignment
+        : undefined,
+    defaultRankingPeriod:
+      defaultRankingPeriod === "current" ||
+      defaultRankingPeriod === "comparison"
+        ? defaultRankingPeriod
+        : undefined,
+    narrativeGuidance: stringArrayPayload(record.narrativeGuidance),
+  };
+  return Object.values(policy).some((item) =>
+    Array.isArray(item) ? item.length > 0 : Boolean(item),
+  )
+    ? policy
+    : undefined;
 }
 
 function stringPayload(value: unknown): string | undefined {

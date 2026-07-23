@@ -9,7 +9,9 @@ Acceptance IDs: `REL-001`, `REL-002`, `CONTRACT-001`, `SKILL-001`, `SKILL-002`,
 `CTX-001`, `CTX-002`, `CTX-004`, `AGT-001`, `AGT-002`, `AGT-003`.
 Also owns `CTX-005`, `AGT-009`, `AGT-010`, `API-003`, `PERF-002`, and
 `SEC-003`, `CTX-006`, `REL-003`, `SKILL-003`, `AGT-013` through `AGT-016`,
-and `API-006` for the Ask/Research path.
+and `API-006` for the Ask/Research path. Analytical composition and repair add
+`CONTRACT-002`, `SKILL-004`, `AGT-017` through `AGT-020`, `API-007`, and
+`SEC-004` according to spec 10.
 Dependencies: verified W01/W02; W03 discovery contracts available.
 
 ## Required implementation
@@ -37,6 +39,19 @@ Dependencies: verified W01/W02; W03 discovery contracts available.
   `KnowledgeLens`. Domain affinity alone must not select an unrelated skill.
 - Compile governed SQL from constrained relational operators over qualified IDs
   and make Research consume typed deltas to the same plan and receipts.
+- Normalize metric/asset capability for entity/result grain, additivity,
+  dimension roles, time roles/grains, freshness, operations, relationships,
+  outputs, and adapters; missing capability remains a modeling gap.
+- Bind a versioned analytical frame with dimension/member roles, governed time
+  policy and periods, comparison, ranking, ties, and output fields, then solve
+  the complete tuple deterministically before route selection.
+- Compile multi-period comparisons and rank-after-aggregation as one typed
+  executable graph with decimal-safe deltas and a complete result contract.
+- Compute receipt-backed result facts for narration and reject unsupported
+  numeric, causal, grain, filter, freshness, or partial-period claims.
+- Emit the shared stable failure/repair contract, retain immutable failed
+  artifacts/fingerprints, derive edits with explicit trust transitions, and
+  preserve permission/policy failures without route broadening.
 
 ## Suggested ownership
 
@@ -54,3 +69,8 @@ Add similar-name metric/block cases, a relevant semantic metric versus an
 irrelevant certified block, low-confidence clarification, invented-ID rejection,
 explicit-reference zero-resolver behavior, call budgets, cancellation, and
 specific non-recoverable error preservation.
+Add exact-plan cases for revenue-today, named-customer filtering, aligned
+current/prior top-customer ranking, ambiguous time/member meaning,
+non-additivity, missing relationship proof, and certified capability mismatch.
+Add repair cases for missing column/relation, permission, dialect, drift,
+timeout, result-contract mismatch, immutable derivation, and trust transitions.

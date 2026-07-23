@@ -55,6 +55,38 @@ Body content.`;
     expect(skill?.body).toBe('Body content.');
   });
 
+  it('SKILL-004 round-trips structured analytical defaults', () => {
+    const raw = `---
+id: revenue-reporting
+domain: sales
+kind: metric_policy
+preferred_metrics: [semantic:sales:revenue]
+analytical_policy:
+  metric_ids: [semantic:sales:revenue]
+  time_role: order_event_time
+  calendar_id: calendar:gregorian
+  timezone: America/Chicago
+  completeness_policy: latest_complete
+  comparison_alignment: calendar_period
+  default_ranking_period: current
+  narrative_guidance: [State the covered period, Explain the largest driver]
+---
+Use the governed revenue reporting policy.`;
+    const skill = parseSkill(raw, '/skills/revenue.skill.md');
+    expect(skill?.analyticalPolicy).toEqual({
+      metricIds: ['semantic:sales:revenue'],
+      timeRole: 'order_event_time',
+      calendarId: 'calendar:gregorian',
+      timezone: 'America/Chicago',
+      completenessPolicy: 'latest_complete',
+      comparisonAlignment: 'calendar_period',
+      defaultRankingPeriod: 'current',
+      narrativeGuidance: ['State the covered period', 'Explain the largest driver'],
+    });
+    expect(parseSkill(renderSkill(skill!), '/skills/revenue.skill.md')?.analyticalPolicy)
+      .toEqual(skill?.analyticalPolicy);
+  });
+
   it('returns null for files without frontmatter', () => {
     expect(parseSkill('Just a plain markdown.', '/foo.md')).toBeNull();
   });

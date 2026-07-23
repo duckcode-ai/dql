@@ -20,6 +20,7 @@ import {
   Loader2,
   MoreHorizontal,
   Plus,
+  RefreshCw,
   Route,
   Send,
   ShieldAlert,
@@ -754,6 +755,8 @@ export function UnifiedAgentRunPanel({
             onChangeTab={(tab) => setInspector((prev) => (prev ? { ...prev, tab } : prev))}
             onClose={() => setInspector(null)}
             onSaveBlock={() => handleNextAction(activeInspector.run, { id: 'save-dql-block', label: 'Save as block', route: 'dql_block_draft' })}
+            onInsertSql={onInsertSql}
+            onInsertDql={onInsertDql}
           />
         ) : null}
 
@@ -1554,7 +1557,7 @@ function RunCard({
 // api call and handoff keeps working.
 // ══════════════════════════════════════════════════════════════════════════
 
-export type AskInspectorTab = 'dql' | 'sql' | 'lineage' | 'trust';
+export type AskInspectorTab = 'how' | 'dql' | 'sql' | 'lineage' | 'trust';
 
 const ASK_KEYFRAMES = `
   @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
@@ -1663,6 +1666,7 @@ function lineageEntriesFromRun(run: AgentRun): AskLineageEntry[] {
 
 export function preferredAskInspectorTab(run: AgentRun, artifact: AgentRunArtifact): AskInspectorTab {
   const payload = payloadOf(artifact);
+  if (hasAnalyticalInspectorContract(payload)) return 'how';
   if ((answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload))?.source) return 'dql';
   if (answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined)) return 'sql';
   if (lineageEntriesFromRun(run).length > 0) return 'lineage';
@@ -1930,7 +1934,7 @@ function AskRunCard({
             </button>
           ) : null}
           {primaryArtifact ? (
-            <button type="button" className="dql-ask-ghost" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={askGhostBtnStyle(t)}>
+            <button type="button" className="dql-ask-ghost" onClick={() => openArtifact(primaryArtifact.id, hasAnalyticalInspectorContract(payloadOf(primaryArtifact)) ? 'how' : 'trust')} style={askGhostBtnStyle(t)}>
               <ListTree size={12} /> How it was answered
             </button>
           ) : null}
@@ -1969,6 +1973,331 @@ function ClarificationChoiceList({
   );
 }
 
+interface AnalyticalInspectorContract {
+  plan?: Record<string, unknown>;
+  frame?: Record<string, unknown>;
+  graph?: Record<string, unknown>;
+  receipt?: Record<string, unknown>;
+  facts?: Record<string, unknown>;
+  narrative?: Record<string, unknown>;
+  freshness?: Record<string, unknown>;
+  failure?: Record<string, unknown>;
+}
+
+export function hasAnalyticalInspectorContract(payload: Record<string, unknown>): boolean {
+  return Boolean(
+    recordOf(payload.resolvedAnalyticalPlan)
+    || recordOf(payload.analyticalExecutionGraph)
+    || recordOf(payload.analyticalExecutionReceipt)
+    || recordOf(payload.analyticalFailure),
+  );
+}
+
+function analyticalInspectorContract(payload: Record<string, unknown>): AnalyticalInspectorContract | undefined {
+  if (!hasAnalyticalInspectorContract(payload)) return undefined;
+  const plan = recordOf(payload.resolvedAnalyticalPlan);
+  return {
+    plan,
+    frame: recordOf(plan?.analyticalFrame),
+    graph: recordOf(payload.analyticalExecutionGraph),
+    receipt: recordOf(payload.analyticalExecutionReceipt),
+    facts: recordOf(payload.analyticalFacts),
+    narrative: recordOf(payload.analyticalNarrative),
+    freshness: recordOf(payload.analyticalFreshnessObservation),
+    failure: recordOf(payload.analyticalFailure),
+  };
+}
+
+export function analyticalInspectorSections(): string[] {
+  return ['Plan', 'DQL', 'Compiled SQL', 'Lineage', 'Trust & evidence', 'Actual steps', 'Failure & repair'];
+}
+
+export function analyticalRepairActionLabels(safeActions: string[]): string[] {
+  return [
+    safeActions.includes('retry_same_plan') ? 'Retry same plan' : undefined,
+    safeActions.includes('refresh_snapshot') ? 'Refresh snapshot and prepare retry' : undefined,
+    safeActions.includes('request_access') || safeActions.includes('change_authorized_connection')
+      ? 'Change connection or request access'
+      : undefined,
+    safeActions.includes('edit_dql') ? 'Open DQL to repair' : undefined,
+    safeActions.includes('open_sql_notebook') ? 'Open SQL in Notebook' : undefined,
+  ].filter((label): label is string => Boolean(label));
+}
+
+function AnalyticalHowAnswered({
+  run,
+  contract,
+  dqlArtifact,
+  sql,
+  lineage,
+  t,
+  onInsertSql,
+  onInsertDql,
+  onSaveBlock,
+}: {
+  run: AgentRun;
+  contract: AnalyticalInspectorContract;
+  dqlArtifact?: AgentConversationDqlArtifact;
+  sql?: string;
+  lineage: AskLineageEntry[];
+  t: Theme;
+  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertDql?: (payload: InsertDqlPayload) => void;
+  onSaveBlock: () => void;
+}) {
+  const { dispatch } = useNotebook();
+  const plan = contract.plan;
+  const frame = contract.frame;
+  const graph = contract.graph;
+  const receipt = contract.receipt;
+  const failure = contract.failure;
+  const timeContext = recordOf(frame?.timeContext);
+  const comparison = recordOf(frame?.comparison);
+  const ranking = recordOf(frame?.ranking);
+  const dimensions = recordList(frame?.dimensions);
+  const members = recordList(frame?.memberBindings);
+  const periods = recordList(timeContext?.periods);
+  const outputs = recordList(frame?.requestedOutputs);
+  const graphNodes = recordList(graph?.nodes);
+  const safeActions = stringList(failure?.safeActions);
+  const failedBindings = recordList(failure?.failedBindings);
+  const result = run.artifacts.map((artifact) => extractResult(payloadOf(artifact))).find(Boolean);
+  const sourceTitle = dqlArtifact?.name ?? run.question;
+  const [repairMessage, setRepairMessage] = useState<string | null>(null);
+  const repairResultMessage = (
+    label: string,
+    response: Awaited<ReturnType<typeof api.deriveAnalyticalRepair>>,
+  ) => {
+    const transition = response.derivation.trustTransition;
+    return `${label} as immutable derivation ${response.derivation.derivationId}. Trust: ${transition.previous} → ${transition.next}${transition.requiresReview ? ' (review required)' : ''}.`;
+  };
+  const openDqlRepair = async () => {
+    if (!dqlArtifact?.source || !onInsertDql) return;
+    try {
+      const response = await api.deriveAnalyticalRepair(run.id, { version: 1, action: 'edit_dql', dqlSource: dqlArtifact.source });
+      onInsertDql({ sql, dqlArtifact, result, title: sourceTitle });
+      setRepairMessage(repairResultMessage('Opened DQL in Notebook', response));
+    } catch (error) {
+      setRepairMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const openSqlRepair = async () => {
+    if (!sql || !onInsertSql) return;
+    try {
+      const response = await api.deriveAnalyticalRepair(run.id, { version: 1, action: 'open_sql_notebook', sqlText: sql });
+      onInsertSql(sql, `${sourceTitle} repair`);
+      setRepairMessage(repairResultMessage('Opened SQL in Notebook', response));
+    } catch (error) {
+      setRepairMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const deriveSimpleRepair = async (action: 'retry_same_plan' | 'refresh_snapshot') => {
+    try {
+      const response = await api.deriveAnalyticalRepair(run.id, { version: 1, action });
+      const label = action === 'retry_same_plan'
+        ? 'Prepared the same bounded plan for retry'
+        : 'Refreshed the governed snapshot and prepared the same plan for retry';
+      setRepairMessage(repairResultMessage(label, response));
+    } catch (error) {
+      setRepairMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const openAccessRepair = async () => {
+    try {
+      const response = await api.deriveAnalyticalRepair(run.id, { version: 1, action: 'request_access' });
+      setRepairMessage(repairResultMessage('Recorded the access/connection repair and opened Database settings', response));
+      dispatch({ type: 'SET_SETTINGS_TAB', tab: 'database' });
+      dispatch({ type: 'SET_MAIN_VIEW', view: 'settings' });
+    } catch (error) {
+      setRepairMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  return (
+    <div style={{ display: 'grid', gap: 9 }} aria-label="How it answered">
+      <AnalyticalInspectorSection index={1} label="Plan" t={t} open>
+        <InspectorRows rows={[
+          ['Question type', displayValue(frame?.questionType ?? plan?.questionType)],
+          ['Selected route', displayValue(graph?.route ?? plan?.recommendedRoute)],
+          ['Metric', stringList(frame?.metricConceptIds).join(', ')],
+          ['Entity grain', stringList(frame?.entityGrainIds).join(', ')],
+          ['Dimensions', dimensions.map((item) => `${displayValue(item.dimensionId)} (${displayValue(item.role)})`).join(', ')],
+          ['Member filters', members.map((item) => `${displayValue(item.dimensionId)}: ${Array.isArray(item.canonicalValues) ? item.canonicalValues.length : 0} bound value(s)`).join(', ')],
+          ['Time policy', [timeContext?.timeRole, timeContext?.grain, timeContext?.timezone, timeContext?.completenessPolicy].map(displayValue).filter(Boolean).join(' · ')],
+          ['Periods', periods.map((item) => `${displayValue(item.id)}: ${displayValue(item.start)} → ${displayValue(item.end)}`).join('\n')],
+          ['Comparison', comparison ? `${displayValue(comparison.basePeriodId)} vs ${stringList(comparison.comparisonPeriodIds).join(', ')} · ${displayValue(comparison.alignment)}` : 'Not requested'],
+          ['Ranking', ranking ? `${displayValue(ranking.direction)} · top ${displayValue(ranking.limit)} · ${displayValue(ranking.tiePolicy)}` : 'Not requested'],
+          ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
+        ]} t={t} />
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={2} label="DQL" t={t} open={Boolean(failure)}>
+        {dqlArtifact?.source ? (
+          <>
+            <pre style={codeStyle(t)}>{dqlArtifact.source}</pre>
+            {safeActions.includes('edit_dql') && onInsertDql ? (
+              <button type="button" onClick={() => void openDqlRepair()} style={smallButtonStyle(t)}>
+                <Wrench size={12} /> Open DQL to repair
+              </button>
+            ) : null}
+          </>
+        ) : <InspectorEmpty t={t}>No DQL source was produced before this phase.</InspectorEmpty>}
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={3} label="Compiled SQL" t={t} open={Boolean(failure)}>
+        {sql ? (
+          <>
+            <pre style={codeStyle(t)}>{sql}</pre>
+            {safeActions.includes('open_sql_notebook') && onInsertSql ? (
+              <button type="button" onClick={() => void openSqlRepair()} style={smallButtonStyle(t)}>
+                <Code2 size={12} /> Open SQL in Notebook
+              </button>
+            ) : null}
+          </>
+        ) : <InspectorEmpty t={t}>Compilation did not produce SQL.</InspectorEmpty>}
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={4} label="Lineage" t={t}>
+        {lineage.length > 0 ? lineage.map((entry) => (
+          <div key={`${entry.kind ?? 'asset'}:${entry.name}`} style={{ padding: '7px 8px', border: '1px solid var(--border-subtle)', borderRadius: 7, background: 'var(--bg-1)' }}>
+            <div style={{ fontSize: 11.5, fontWeight: 650, color: t.textPrimary }}>{entry.name}</div>
+            <div style={{ fontSize: 10.5, color: t.textMuted }}>{[entry.kind, entry.detail].filter(Boolean).join(' · ')}</div>
+          </div>
+        )) : <InspectorEmpty t={t}>No additional lineage nodes were returned.</InspectorEmpty>}
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={5} label="Trust & evidence" t={t}>
+        <InspectorRows rows={[
+          ['Trust state', run.trustState],
+          ['Snapshot', displayValue(plan?.snapshotId ?? graph?.snapshotId)],
+          ['Plan fingerprint', displayValue(plan?.fingerprint ?? graph?.planFingerprint)],
+          ['Graph fingerprint', displayValue(graph?.fingerprint)],
+          ['Receipt', displayValue(receipt?.receiptId)],
+          ['Result fingerprint', displayValue(receipt?.resultFingerprint)],
+          ['Freshness observed through', displayValue(contract.freshness?.observedThrough)],
+          ['Fact set', displayValue(contract.facts?.fingerprint)],
+        ]} t={t} mono />
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={6} label="Actual steps" t={t}>
+        <div style={{ display: 'grid', gap: 6 }}>
+          {run.steps.map((step) => (
+            <div key={step.id} style={{ fontSize: 11.5, color: t.textSecondary }}>
+              <strong style={{ color: t.textPrimary }}>{step.index + 1}. {step.goal}</strong> — {step.status}, {step.attempts} attempt{step.attempts === 1 ? '' : 's'}
+            </div>
+          ))}
+          {graphNodes.map((node, index) => (
+            <div key={displayValue(node.id) || index} style={{ fontSize: 11.5, color: t.textSecondary }}>
+              <span style={{ color: t.accent, fontFamily: t.fontMono }}>{index + 1}. {displayValue(node.kind)}</span>
+              {' '}· {displayValue(node.id)}
+            </div>
+          ))}
+          {run.steps.length === 0 && graphNodes.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
+        </div>
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={7} label="Failure & repair" t={t} open={Boolean(failure)}>
+        {failure ? (
+          <div style={{ display: 'grid', gap: 9 }}>
+            <div style={{ padding: '9px 10px', borderRadius: 8, border: '1px solid var(--status-error-border)', background: 'var(--status-error-bg)', color: t.textSecondary, fontSize: 11.5, lineHeight: 1.5 }}>
+              <strong style={{ color: 'var(--status-error)' }}>{displayValue(failure.code)}</strong>
+              {' '}during {displayValue(failure.phase)} — {displayValue(failure.message)}
+            </div>
+            <InspectorRows rows={[
+              ['Failure ID', displayValue(failure.failureId)],
+              ['Recoverability', displayValue(failure.recoverability)],
+              ['Failed bindings', failedBindings.map((item) => `${displayValue(item.qualifiedId ?? item.role)} (${displayValue(item.reasonCode)})`).join(', ')],
+              ['Safe actions', safeActions.join(', ')],
+              ['DQL fingerprint', displayValue(failure.dqlFingerprint)],
+              ['SQL fingerprint', displayValue(failure.sqlFingerprint)],
+            ]} t={t} mono />
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} aria-label="Safe repair actions">
+              {safeActions.includes('retry_same_plan') ? (
+                <button type="button" onClick={() => void deriveSimpleRepair('retry_same_plan')} style={smallButtonStyle(t)}>
+                  <RefreshCw size={12} /> Retry same plan
+                </button>
+              ) : null}
+              {safeActions.includes('refresh_snapshot') ? (
+                <button type="button" onClick={() => void deriveSimpleRepair('refresh_snapshot')} style={smallButtonStyle(t)}>
+                  <RefreshCw size={12} /> Refresh snapshot and prepare retry
+                </button>
+              ) : null}
+              {safeActions.includes('request_access') || safeActions.includes('change_authorized_connection') ? (
+                <button type="button" onClick={() => void openAccessRepair()} style={smallButtonStyle(t)}>
+                  <ShieldAlert size={12} /> Change connection or request access
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <InspectorEmpty t={t}>No failure was recorded for this run.</InspectorEmpty>
+            {dqlArtifact?.sourcePath ? null : dqlArtifact?.source ? (
+              <button type="button" onClick={onSaveBlock} style={smallButtonStyle(t)}><Save size={12} /> Save as draft block</button>
+            ) : null}
+          </div>
+        )}
+      </AnalyticalInspectorSection>
+      {repairMessage ? <div role="status" style={{ fontSize: 10.5, color: repairMessage.toLowerCase().includes('created') ? 'var(--status-success)' : 'var(--status-error)' }}>{repairMessage}</div> : null}
+    </div>
+  );
+}
+
+function AnalyticalInspectorSection({
+  index,
+  label,
+  t,
+  open = false,
+  children,
+}: {
+  index: number;
+  label: string;
+  t: Theme;
+  open?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <details open={open} style={{ border: '1px solid var(--border-subtle)', borderRadius: 8, background: 'var(--bg-1)', overflow: 'hidden' }}>
+      <summary style={{ cursor: 'pointer', listStyle: 'none', padding: '8px 10px', display: 'flex', gap: 7, alignItems: 'center', fontSize: 11.5, fontWeight: 700, color: t.textPrimary }}>
+        <span style={{ width: 18, height: 18, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-dim)', color: 'var(--accent)', fontSize: 10 }}>{index}</span>
+        {label}
+      </summary>
+      <div style={{ display: 'grid', gap: 8, padding: '0 10px 10px' }}>{children}</div>
+    </details>
+  );
+}
+
+function InspectorRows({ rows, t, mono = false }: { rows: Array<[string, string]>; t: Theme; mono?: boolean }) {
+  return (
+    <div style={{ display: 'grid', gap: 6 }}>
+      {rows.filter(([, value]) => value).map(([label, value]) => (
+        <div key={label} style={{ display: 'grid', gridTemplateColumns: '112px minmax(0, 1fr)', gap: 8, alignItems: 'start' }}>
+          <span style={{ fontSize: 10.5, color: t.textMuted }}>{label}</span>
+          <span style={{ fontSize: 10.5, color: t.textSecondary, fontFamily: mono ? t.fontMono : t.font, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function InspectorEmpty({ t, children }: { t: Theme; children: React.ReactNode }) {
+  return <div style={{ fontSize: 11, color: t.textMuted }}>{children}</div>;
+}
+
+function recordList(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.flatMap((item) => recordOf(item) ? [recordOf(item)!] : []) : [];
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function displayValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
 export function clarificationSelectionInput(option: AgentRunClarificationOption): {
   question: string;
   selectedEvidenceId: string;
@@ -1996,6 +2325,8 @@ function AskInspector({
   onChangeTab,
   onClose,
   onSaveBlock,
+  onInsertSql,
+  onInsertDql,
 }: {
   run: AgentRun;
   artifact: AgentRunArtifact;
@@ -2006,6 +2337,8 @@ function AskInspector({
   onChangeTab: (tab: AskInspectorTab) => void;
   onClose: () => void;
   onSaveBlock: () => void;
+  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertDql?: (payload: InsertDqlPayload) => void;
 }) {
   const payload = payloadOf(artifact);
   const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
@@ -2014,8 +2347,10 @@ function AskInspector({
   const lineage = lineageEntriesFromRun(run);
   const trustNote = trustExplainer(run);
   const certified = artifact.trustState === 'certified';
+  const analytical = analyticalInspectorContract(payload);
 
   const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
+  if (analytical) tabs.push({ id: 'how', label: 'How it answered' });
   if (dqlArtifact?.source) tabs.push({ id: 'dql', label: 'DQL' });
   if (sql) tabs.push({ id: 'sql', label: 'SQL' });
   if (lineage.length > 0) tabs.push({ id: 'lineage', label: 'Lineage' });
@@ -2046,9 +2381,11 @@ function AskInspector({
       {/* Action row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
         <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} />
-        <button type="button" className="dql-hover" onClick={onSaveBlock} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 13px', borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textSecondary, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: t.font }}>
-          <Blocks size={13} /> Save as block
-        </button>
+        {isAgentRunPinnable(run) ? (
+          <button type="button" className="dql-hover" onClick={onSaveBlock} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 13px', borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textSecondary, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: t.font }}>
+            <Blocks size={13} /> Save as block
+          </button>
+        ) : null}
         <div style={{ flex: 1 }} />
         <button type="button" title="More" className="dql-hover" style={{ width: 28, height: 28, borderRadius: 7, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
           <MoreHorizontal size={14} />
@@ -2064,6 +2401,19 @@ function AskInspector({
 
       {/* Body */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '14px 16px 20px' }}>
+        {activeTab === 'how' && analytical ? (
+          <AnalyticalHowAnswered
+            run={run}
+            contract={analytical}
+            dqlArtifact={dqlArtifact}
+            sql={sql}
+            lineage={lineage}
+            t={t}
+            onInsertSql={onInsertSql}
+            onInsertDql={onInsertDql}
+            onSaveBlock={onSaveBlock}
+          />
+        ) : null}
         {activeTab === 'dql' && dqlArtifact?.source ? (
           <>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>

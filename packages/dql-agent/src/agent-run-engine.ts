@@ -1402,8 +1402,13 @@ function computeStepOutcome(
   }
   const status = result.status ?? statusFromEvaluations(route, evaluations, fallback.status);
   const trustState = result.trustState ?? trustStateFromEvaluations(route, evaluations, fallback.trustState);
+  // API-007 / AGT-019: a blocked analytical run may carry an intentionally
+  // redacted failure envelope needed for inspection and immutable repair. Keep
+  // only artifacts that the executor explicitly marked blocked; never retain a
+  // governed/reviewable artifact merely because it happened to accompany a
+  // terminal failure.
   const artifacts = status === "blocked"
-    ? []
+    ? (result.artifacts ?? []).filter((artifact) => artifact.trustState === "blocked")
     : result.artifacts ?? defaultArtifacts(route, result, request);
   const stopReason = result.stopReason ?? stopReasonFor(route, status, trustState, artifacts);
   return {

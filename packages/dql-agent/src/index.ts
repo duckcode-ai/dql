@@ -79,6 +79,27 @@ export type {
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
 export { answer, parseProposal, compactSemanticRuntimeFailure, materializeKnowledgeLensSkills } from "./answer-loop.js";
+export {
+  classifyAnalyticalFailure,
+  createAnalyticalFailure,
+  deriveAnalyticalRepair,
+  redactAnalyticalDiagnostic,
+} from './analytical-failure-repair.js';
+export { resolveAnalyticalPeriods } from './analytical-period-resolution.js';
+export type {
+  AnalyticalFreshnessObservationV1,
+  AnalyticalFreshnessRequestV1,
+  ResolveAnalyticalPeriodsResult,
+} from './analytical-period-resolution.js';
+export type {
+  AnalyticalFailedBindingInput,
+  AnalyticalFailedRunV1,
+  AnalyticalRepairAction,
+  AnalyticalRepairDerivationResult,
+  AnalyticalRepairDerivationV1,
+  AnalyticalRepairRequestV1,
+  CreateAnalyticalFailureInput,
+} from './analytical-failure-repair.js';
 export { detectResultSetOperation, computeResultSetOperation } from "./conversation/result-ops.js";
 export type { ResultSetOperation, PriorResultData, ResultSetComputation } from "./conversation/result-ops.js";
 export type { SemanticQueryCompiler } from "./answer-loop.js";
@@ -278,11 +299,66 @@ export type {
   ResolvedPlanMemberBinding,
 } from './resolved-analytical-plan.js';
 export {
+  adaptAnalyticalFreshnessRequest,
+  adaptAnalyticalSemanticGraph,
   adaptResolvedAnalyticalPlan,
   buildPlanExecutionRegistry,
 } from './plan-execution-adapter.js';
+export type { AnalyticalFreshnessAdapterBinding } from './plan-execution-adapter.js';
+export {
+  normalizeEvidenceAnalyticalCapability,
+  solveAnalyticalCompatibility,
+  type AnalyticalCapabilityCandidate,
+  type AnalyticalCapabilityNormalizationResult,
+  type AnalyticalCompatibilityCode,
+  type AnalyticalCompatibilityFailure,
+  type AnalyticalCompatibilityResult,
+  type AnalyticalFitClass,
+} from './analytical-compatibility.js';
+export { buildDeterministicAnalyticalFrame } from './analytical-frame.js';
+export {
+  buildAnalyticalCapabilityReadiness,
+  type AnalyticalCapabilityReadiness,
+  type AnalyticalReadinessQuestion,
+} from './analytical-readiness.js';
+export {
+  buildAnalyticalExecutionGraph,
+  executeAnalyticalExecutionGraph,
+} from './analytical-execution-graph.js';
+export type {
+  AnalyticalExecutionGraphV1,
+  AnalyticalExecutionGraphNode,
+  AnalyticalExecutionGraphBlockedCode,
+  AnalyticalExecutionReceiptV1,
+  AnalyticalExecutionRoute,
+  AnalyticalGraphAlignNode,
+  AnalyticalGraphCalculateNode,
+  AnalyticalGraphExecutionFailureCode,
+  AnalyticalGraphExecutionResult,
+  AnalyticalGraphMemberFilter,
+  AnalyticalGraphRankNode,
+  AnalyticalGraphSourceInvocationNode,
+  AnalyticalGraphValidateNode,
+  AnalyticalSourceResult,
+  BuildAnalyticalExecutionGraphResult,
+} from './analytical-execution-graph.js';
+export {
+  buildAnalyticalResultFacts,
+  renderDeterministicAnalyticalNarrative,
+  validateAnalyticalNarrativeClaims,
+} from './analytical-result-facts.js';
+export type {
+  AnalyticalNarrativeClaimV1,
+  AnalyticalNarrativeV1,
+  AnalyticalNarrativeValidationResult,
+  AnalyticalResultFactKind,
+  AnalyticalResultFactSetV1,
+  AnalyticalResultFactV1,
+  BuildAnalyticalResultFactsResult,
+} from './analytical-result-facts.js';
 export {
   buildGovernedRelationalRegistry,
+  compileGovernedRelationalExecutionGraph,
   compileGovernedRelationalPlan,
   finalizeGovernedCompilationReceipt,
   renderGovernedRelationalAst,
@@ -303,6 +379,8 @@ export type {
 } from './research-governance.js';
 export type {
   GovernedCompilationReceipt,
+  GovernedAnalyticalGraphCompilationReceipt,
+  GovernedAnalyticalGraphCompileResult,
   GovernedRelation,
   GovernedRelationColumn,
   GovernedRelationship,
@@ -316,6 +394,8 @@ export type {
   PlanExecutionBinding,
   PlanExecutionBlockedCode,
   PlanExecutionRegistryEntry,
+  SemanticGraphExecutionBinding,
+  SemanticGraphInvocation,
 } from './plan-execution-adapter.js';
 export { matchSemanticMetric } from "./metadata/metric-match.js";
 export {

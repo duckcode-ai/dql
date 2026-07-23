@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import type { AnalyticalQuestionFrameV2, MetricCapabilityContract } from '@duckcodeailabs/dql-core';
+import { buildAnalyticalExecutionGraph } from './analytical-execution-graph.js';
 import { buildResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 import {
+  compileGovernedRelationalExecutionGraph,
   compileGovernedRelationalPlan,
   finalizeGovernedCompilationReceipt,
   type GovernedRelationalRegistry,
@@ -67,6 +70,12 @@ function registry(): GovernedRelationalRegistry {
         qualifiedId: 'dbt:column:orders.amount',
         name: 'amount',
         identities: ['dbt:column:orders.amount'],
+      }, {
+        qualifiedId: 'dbt:column:orders.order_date',
+        name: 'order_date',
+        type: 'date',
+        isTime: true,
+        identities: ['dbt:column:orders.order_date'],
       }, {
         qualifiedId: 'dbt:column:orders.customer_id',
         name: 'customer_id',
@@ -148,5 +157,135 @@ describe('governed relational compiler (AGT-015 / API-006)', () => {
     expect(() => finalizeGovernedCompilationReceipt(compiled.receipt, {
       columns: ['customer'], rows: [], rowCount: 0,
     })).toThrow('Result contract is missing: revenue');
+  });
+
+  it('compiles one safely aggregated statement per period before graph alignment and ranking', () => {
+    const metricId = 'commerce::metric::net_revenue';
+    const customerId = 'dbt:column:customers.customer_name';
+    const dateId = 'dbt:column:orders.order_date';
+    const frame: AnalyticalQuestionFrameV2 = {
+      version: 2,
+      interpretedQuestion: 'Current and prior revenue for top customers.',
+      questionType: 'ranking',
+      metricConceptIds: [metricId],
+      entityGrainIds: ['commerce::entity::customer'],
+      dimensions: [
+        { dimensionId: customerId, role: 'group_by' },
+        { dimensionId: customerId, role: 'rank_entity' },
+        { dimensionId: dateId, role: 'time_axis' },
+      ],
+      memberBindings: [],
+      timeContext: {
+        timeDimensionId: dateId,
+        timeRole: 'order_event_time',
+        calendarId: 'calendar:gregorian',
+        timezone: 'UTC',
+        grain: 'day',
+        completenessPolicy: 'closed_period',
+        periods: [
+          { id: 'current', kind: 'absolute', start: '2026-01-01T00:00:00.000Z', end: '2026-07-01T00:00:00.000Z' },
+          { id: 'previous_year', kind: 'previous_year', start: '2025-01-01T00:00:00.000Z', end: '2025-07-01T00:00:00.000Z', alignToPeriodId: 'current' },
+        ],
+      },
+      comparison: {
+        basePeriodId: 'current',
+        comparisonPeriodIds: ['previous_year'],
+        alignment: 'elapsed_period',
+        outputs: ['value', 'absolute_delta', 'percent_delta'],
+        zeroDenominatorPolicy: 'null',
+      },
+      ranking: {
+        entityDimensionId: customerId,
+        byMetricId: metricId,
+        byPeriodId: 'current',
+        direction: 'desc',
+        limit: 5,
+        tiePolicy: 'stable_secondary_key',
+      },
+      requestedOutputs: [
+        { id: 'customer', kind: 'dimension' },
+        { id: 'current_revenue', kind: 'metric_value', metricId, periodId: 'current' },
+        { id: 'prior_revenue', kind: 'metric_value', metricId, periodId: 'previous_year' },
+        { id: 'revenue_delta', kind: 'delta', metricId },
+        { id: 'revenue_percent_delta', kind: 'percent_delta', metricId },
+      ],
+      ambiguity: [],
+    };
+    const capability: MetricCapabilityContract = {
+      metricId,
+      measureIds: ['dbt:column:orders.amount'],
+      primaryEntityId: 'commerce::entity::order',
+      defaultResultGrainId: 'commerce::grain::scalar',
+      resultGrainIds: ['commerce::grain::scalar', 'commerce::entity::customer'],
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: [{
+        dimensionId: customerId,
+        entityId: 'commerce::entity::customer',
+        supportedRoles: ['group_by', 'rank_entity'],
+        relationshipPathIds: ['commerce::relationship::orders_to_customers'],
+      }],
+      timeDimensions: [{
+        dimensionId: dateId,
+        role: 'order_event_time',
+        supportedGrains: ['day', 'month', 'year'],
+      }],
+      operations: ['group', 'compare', 'rank'],
+      supportedOutputKinds: ['dimension', 'metric_value', 'delta', 'percent_delta'],
+      executionCapabilities: [{ route: 'governed_sql', adapterId: 'relational-v1' }],
+      sourceFingerprint: 'relational-capability-v1',
+    };
+    const analyticalPlan = buildResolvedAnalyticalPlan({
+      question: frame.interpretedQuestion,
+      resolution: { ...resolution, analyticalFrame: frame },
+      evidence: { snapshotId: 'snapshot-relational', candidates: [amount, customer] },
+      candidates: [amount, customer],
+      mode: 'authoritative',
+    });
+    const built = buildAnalyticalExecutionGraph({
+      plan: analyticalPlan,
+      capability,
+      route: 'governed_sql',
+      adapterId: 'relational-v1',
+    });
+    if (built.status !== 'ready') throw new Error(built.reason);
+    const compiled = compileGovernedRelationalExecutionGraph({
+      graph: built.graph,
+      plan: analyticalPlan,
+      registry: registry(),
+      driver: 'duckdb',
+    });
+    expect(compiled.status).toBe('compiled');
+    if (compiled.status !== 'compiled') return;
+    expect(compiled.statements).toHaveLength(2);
+    expect(compiled.statements[0]).toMatchObject({
+      nodeId: 'source:current',
+      parameterValues: {
+        time_start: '2026-01-01T00:00:00.000Z',
+        time_end: '2026-07-01T00:00:00.000Z',
+      },
+      receipt: { outputColumns: ['customer', 'current_revenue'] },
+    });
+    expect(compiled.statements[0]!.sql).toContain('SUM(r0."amount") AS "current_revenue"');
+    expect(compiled.statements[0]!.sql).toContain('r0."order_date" >= :time_start');
+    expect(compiled.statements[0]!.sql).toContain('GROUP BY r1."customer_name"');
+    expect(compiled.statements[0]!.sql).not.toContain('ORDER BY');
+    expect(compiled.statements[1]).toMatchObject({
+      nodeId: 'source:previous_year',
+      parameterValues: {
+        time_start: '2025-01-01T00:00:00.000Z',
+        time_end: '2025-07-01T00:00:00.000Z',
+      },
+      receipt: { outputColumns: ['customer', 'prior_revenue'] },
+    });
+    expect(compiled.receipt).toMatchObject({
+      graphFingerprint: built.graph.fingerprint,
+      planFingerprint: analyticalPlan.fingerprint,
+      statementFingerprints: [
+        { nodeId: 'source:current' },
+        { nodeId: 'source:previous_year' },
+      ],
+    });
+    expect(compiled.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 });

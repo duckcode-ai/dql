@@ -92,6 +92,24 @@ create your first block from a dbt model (the
 [authoring tutorial](tutorials/02-authoring-blocks.md) walks through a full
 certified block).
 
+Before asking composed metric questions, confirm the dbt semantic model exposes
+the measure/metric, its primary entity, compatible dimensions, relationship
+paths, and an authoritative time dimension. If your business uses a specific
+timezone, completeness rule, comparison alignment, or ranking period, declare
+those defaults in a versioned Domain Skill. Skills guide the plan but cannot
+make an incompatible metric executable.
+
+In **Ask**, try these progressively richer checks:
+
+1. `What is revenue today?`
+2. `What is revenue from Zoom customer?`
+3. `Show current revenue and last-year revenue for the top 5 customers.`
+
+Open **How it was answered** after each run. A complete setup shows the selected
+metric/entity/dimension roles and governed time policy. A failed run keeps the
+plan plus any compiled DQL/SQL and offers only safe derived repair actions; it
+is not eligible for **Save as block** until it produces a reviewable result.
+
 ## 5. Compile the manifest and view lineage
 
 ```bash

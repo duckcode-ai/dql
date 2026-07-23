@@ -43,7 +43,7 @@ describe('dbt-first commerce end-to-end fixture', () => {
     expect(knowledge).toMatchObject({
       schemaVersion: 2,
       storageMode: 'indexed',
-      counts: { skills: 1, routes: 2 },
+      counts: { skills: 2, routes: 2 },
       index: { schemaVersion: 4 },
     });
     expect(knowledge?.objects).toBeUndefined();

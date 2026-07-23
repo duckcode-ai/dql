@@ -6,6 +6,8 @@ import {
   exploratoryProbeContradiction,
   probeableExploratoryJoins,
   agentAnswerHasExecutionFailure,
+  analyticalFreshnessObservedThrough,
+  analyticalFailedRunFromAgentRun,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
@@ -75,7 +77,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import type { Server } from 'node:http';
 import { loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
-import { recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
+import { createAnalyticalFailure, recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 
 const tempDirs: string[] = [];
@@ -324,6 +326,47 @@ describe('serializeJSON', () => {
   it('serializes unsafe bigint values as strings', () => {
     const value = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     expect(serializeJSON({ revenue: value })).toBe(`{"revenue":"${value.toString()}"}`);
+  });
+});
+
+describe('authorized analytical freshness observation (AGT-019, SEC-004)', () => {
+  const request = {
+    version: 1 as const,
+    snapshotId: 'snapshot-1',
+    metricId: 'semantic:orders:gross_revenue',
+    timeDimensionId: 'semantic:orders:dimension:report_date',
+    authorizedAdapterRequest: {
+      route: 'semantic' as const,
+      metric: 'gross_revenue',
+      timeDimension: 'orders__report_date',
+      granularity: 'day',
+      outputField: 'report_date_day',
+    },
+  };
+
+  it('extracts the compiler-declared time output without inspecting unrelated strings', () => {
+    expect(analyticalFreshnessObservedThrough({
+      columns: [
+        { name: 'report_date_day', type: 'date', driverType: 'DATE' },
+        { name: 'gross_revenue', type: 'number', driverType: 'DECIMAL' },
+      ],
+      rows: [{ report_date_day: '2026-07-21', gross_revenue: 42 }],
+      rowCount: 1,
+      executionTimeMs: 2,
+    }, request)).toBe('2026-07-21T00:00:00.000Z');
+  });
+
+  it('fails closed when no authorized binding or identifiable time output exists', () => {
+    const result: QueryResult = {
+      columns: [{ name: 'label', type: 'string', driverType: 'VARCHAR' }],
+      rows: [{ label: '2026-07-21' }],
+      rowCount: 1,
+      executionTimeMs: 1,
+    };
+    expect(() => analyticalFreshnessObservedThrough(result, { ...request, authorizedAdapterRequest: undefined }))
+      .toThrow(/authorized semantic adapter binding/i);
+    expect(() => analyticalFreshnessObservedThrough(result, request))
+      .toThrow(/identifiable time field/i);
   });
 });
 
@@ -1471,6 +1514,47 @@ describe('agent run runtime API', () => {
     expect(agentAnswerHasExecutionFailure({})).toBe(false);
   });
 
+  it('API-007 retains failed analytical plan, DQL, SQL, and stable diagnostics for repair', () => {
+    const dqlSource = 'block "revenue" { metric = "revenue" }';
+    const sql = 'select sum(revenue) as revenue from analytics.orders';
+    const failure = createAnalyticalFailure({
+      code: 'PERMISSION_DENIED',
+      phase: 'execution',
+      snapshotId: 'snapshot-1',
+      runId: 'analytical-run-1',
+      planFingerprint: 'a'.repeat(64),
+      dqlSource,
+      compiledSql: sql,
+    });
+    const retained = analyticalFailedRunFromAgentRun({
+      id: 'agent-run-1',
+      trustState: 'blocked',
+      artifacts: [{
+        id: 'answer-1',
+        kind: 'answer',
+        title: 'Failed governed analytical run',
+        trustState: 'blocked',
+        payload: {
+          resolvedAnalyticalPlan: { fingerprint: 'a'.repeat(64), recommendedRoute: 'semantic' },
+          analyticalExecutionGraph: { route: 'semantic' },
+          analyticalFailure: failure,
+          dqlArtifact: { kind: 'semantic_block', source: dqlSource, trustState: 'governed' },
+          sql,
+        },
+      }],
+    } as Parameters<typeof analyticalFailedRunFromAgentRun>[0]);
+    expect(retained).toMatchObject({
+      runId: 'analytical-run-1',
+      snapshotId: 'snapshot-1',
+      route: 'semantic',
+      trustState: 'governed',
+      planFingerprint: 'a'.repeat(64),
+      dqlSource,
+      compiledSql: sql,
+      failure: { code: 'PERMISSION_DENIED' },
+    });
+  });
+
   it('preserves conversation context when parsing governed agent run requests', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'who are the top 5 customers for these categories?',
@@ -1621,6 +1705,119 @@ describe('agent run runtime API', () => {
         executionStatus: 'not_executed',
       },
     })).toBe(true);
+  });
+
+  it('API-007 derives repairs through the HTTP API while permission denial stays terminal', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-analytical-repair-api-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    const dqlSource = 'block "revenue" { metric = "revenue" }';
+    const sql = 'select sum(revenue) as revenue from analytics.orders';
+    const failure = createAnalyticalFailure({
+      code: 'PERMISSION_DENIED',
+      phase: 'execution',
+      snapshotId: 'snapshot-1',
+      runId: 'analytical-run-1',
+      planFingerprint: 'a'.repeat(64),
+      dqlSource,
+      compiledSql: sql,
+    });
+    const refreshFailure = createAnalyticalFailure({
+      code: 'COLUMN_NOT_FOUND',
+      phase: 'execution',
+      snapshotId: 'stale-snapshot',
+      runId: 'analytical-run-refresh',
+      planFingerprint: 'c'.repeat(64),
+      dqlSource,
+      compiledSql: sql,
+    });
+    try {
+      const failedAnswerExecutor = (context: { request: { question: string } }) => {
+        const selectedFailure = context.request.question.includes('stale column') ? refreshFailure : failure;
+        return ({
+        summary: 'The selected route was denied.',
+        answer: selectedFailure.message,
+        status: 'blocked' as const,
+        trustState: 'blocked' as const,
+        stopReason: 'blocked' as const,
+        artifacts: [{
+          id: 'answer:failed',
+          kind: 'answer' as const,
+          title: 'Failed governed analytical run',
+          trustState: 'blocked' as const,
+          payload: {
+            kind: 'no_answer',
+            resolvedAnalyticalPlan: { fingerprint: selectedFailure.planFingerprint, recommendedRoute: 'semantic' },
+            analyticalExecutionGraph: { route: 'semantic' },
+            analyticalFailure: selectedFailure,
+            dqlArtifact: { kind: 'semantic_block', source: dqlSource, trustState: 'governed' },
+            sql,
+          },
+        }],
+        evaluations: [],
+        nextActions: [],
+      });
+      };
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+        agentRunExecutors: {
+          conversation: failedAnswerExecutor,
+          certified_answer: failedAnswerExecutor,
+          semantic_answer: failedAnswerExecutor,
+          generated_answer: failedAnswerExecutor,
+          research: failedAnswerExecutor,
+          clarify: failedAnswerExecutor,
+          blocked: failedAnswerExecutor,
+        },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const createdResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'Revenue today?', requestedMode: 'ask' }),
+      });
+      expect(createdResponse.status).toBe(201);
+      const created = await createdResponse.json() as { run: Parameters<typeof analyticalFailedRunFromAgentRun>[0] };
+      expect(analyticalFailedRunFromAgentRun(created.run)).toBeDefined();
+
+      const forbidden = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/analytical-repair`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repair: { version: 1, action: 'edit_dql', dqlSource } }),
+      });
+      expect(forbidden.status).toBe(403);
+
+      const authorized = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/analytical-repair`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repair: { version: 1, action: 'change_authorized_connection', authorizedConnectionFingerprint: 'b'.repeat(64) } }),
+      });
+      expect(authorized.status).toBe(201);
+      await expect(authorized.json()).resolves.toMatchObject({
+        status: 'ready',
+        derivation: { action: 'change_authorized_connection', routeLocked: true, permissionsExpanded: false },
+      });
+
+      const refreshRunResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: 'Repair the stale column', requestedMode: 'ask' }),
+      });
+      const refreshRun = await refreshRunResponse.json() as { run: Parameters<typeof analyticalFailedRunFromAgentRun>[0] };
+      expect(analyticalFailedRunFromAgentRun(refreshRun.run)?.failure.code).toBe('COLUMN_NOT_FOUND');
+      const refreshed = await fetch(`${base}/api/agent-runs/${encodeURIComponent(refreshRun.run.id)}/analytical-repair`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repair: { version: 1, action: 'refresh_snapshot' } }),
+      });
+      expect(refreshed.status).toBe(201);
+      await expect(refreshed.json()).resolves.toMatchObject({
+        status: 'ready',
+        derivation: {
+          action: 'refresh_snapshot',
+          snapshotId: expect.stringMatching(/^[a-f0-9]{64}$/),
+          routeLocked: true,
+          permissionsExpanded: false,
+          requiresRecompile: true,
+        },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
   });
 
   it('threads conversation context through the HTTP agent-run endpoint into the route executor', async () => {

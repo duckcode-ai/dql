@@ -391,6 +391,31 @@ describe("AgentRunEngine", () => {
     expect(run.artifacts).toHaveLength(0);
   });
 
+  it("API-007 retains only explicitly blocked diagnostic artifacts on terminal runs", async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-blocked-diagnostic",
+      now: fixedClock(),
+      executors: {
+        generated_answer: () => ({
+          status: "blocked",
+          trustState: "blocked",
+          stopReason: "blocked",
+          artifacts: [
+            { id: "failure", kind: "answer", title: "Failed analytical run", trustState: "blocked", payload: { code: "PERMISSION_DENIED" } },
+            { id: "unsafe", kind: "sql_cell", title: "Untrusted SQL", trustState: "review_required", payload: { sql: "select 1" } },
+          ],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: "revenue today", requestedMode: "ask" });
+
+    expect(run.status).toBe("blocked");
+    expect(run.artifacts).toEqual([
+      expect.objectContaining({ id: "failure", trustState: "blocked" }),
+    ]);
+  });
+
   it("returns a blocked run instead of throwing when an executor fails", async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-error",

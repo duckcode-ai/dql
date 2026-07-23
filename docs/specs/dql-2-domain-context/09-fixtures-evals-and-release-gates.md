@@ -248,6 +248,38 @@ Required cross-surface scenarios (`E2E-011`):
    statement-internal; exploratory validation probes only their physical source
    relations and never queries the alias as a warehouse object.
 
+## Analytical composition and transparent repair fixtures
+
+The functional Commerce fixture also declares one governed revenue metric with
+customer entity compatibility, an authoritative reporting-time dimension,
+business timezone/calendar, latest-complete policy, current/prior-year data,
+and exact comparison/ranking outputs. Negative variants include two plausible
+time roles, duplicate `Zoom` customer members, a customer column without join
+proof, a non-additive metric, incomplete current-day data, and a related but
+capability-incomplete certified block.
+
+Required composition scenarios (`E2E-013`) are the twelve cases in spec 10:
+revenue today, revenue filtered to Zoom, current/prior top-five customers,
+ambiguous time/member clarification, incomplete-period disclosure, missing
+relationship refusal, non-additive rejection, certified-fit honesty, route
+equivalence, receipt-backed story, and cross-surface identity parity. Assertions
+compare exact roles, qualified IDs, periods, ranking basis/ties, requested
+outputs, result contracts, trust, and receipts rather than keywords or prose.
+
+The repair fixture deterministically triggers missing column/relation,
+permission, ambiguous column, dialect, snapshot drift, timeout, compilation,
+and result-contract failures. Required repair scenarios (`E2E-014`) are the
+twelve cases in spec 10. They prove immutable source artifacts, stable errors,
+zero permission route-broadening, DQL/SQL derivation, parameter-only trust
+retention, edit trust downgrade, draft-only promotion, redaction, and Browser
+Ask/Notebook/CLI/MCP/Chat parity. UI evidence comes from the built CLI and shows
+the full How it answered inspector.
+
+Release thresholds are 1.0 for the three canonical revenue plans and every
+permission/trust-transition case, zero ambiguous executions, zero wrong
+certified answers, zero unsupported numeric story claims, and zero alternate-
+source attempts after permission denial.
+
 ## Scale fixture
 
 Generate deterministic artifacts representing 10,000 dbt models, 30 columns

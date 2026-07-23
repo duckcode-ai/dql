@@ -186,6 +186,145 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(resolveMeaning).toHaveBeenCalledTimes(1);
   });
 
+  it("AGT-017/AGT-018 keeps one authored semantic metric on the v2 route when meaning resolution is unavailable", async () => {
+    const semanticCapability = {
+      metricId: "semantic:orders:gross_revenue",
+      semanticModelId: "semantic:model:orders",
+      measureIds: ["semantic:measure:gross_revenue_measure"],
+      primaryEntityId: "semantic:entity:order",
+      defaultResultGrainId: "semantic:grain:scalar",
+      resultGrainIds: ["semantic:grain:scalar"],
+      aggregation: "sum" as const,
+      additivity: { entities: "additive" as const, time: "additive" as const },
+      dimensions: [],
+      timeDimensions: [{
+        dimensionId: "semantic:dimension:report_date",
+        role: "report_as_of",
+        supportedGrains: ["day"],
+        defaultFor: ["scalar" as const],
+      }],
+      operations: ["filter" as const, "trend" as const],
+      supportedOutputKinds: ["metric_value" as const],
+      executionCapabilities: [{ route: "semantic" as const, adapterId: "metricflow" }],
+      sourceFingerprint: "metric-capability-v1",
+    };
+    const authoredMetric = candidate({
+      id: "semantic:metric:orders.gross_revenue",
+      name: "orders.gross_revenue",
+      aliases: ["gross_revenue", "revenue"],
+      provenance: "dbt metric",
+      analyticalCapability: semanticCapability,
+      relevanceScore: 0.56,
+    });
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: "snapshot-semantic-fallback",
+        parsedIntent: { measures: ["revenue"], dimensions: [], filters: [] },
+        analyticalPolicies: [{
+          policyId: "commerce::skill::revenue_reporting#analytical",
+          sourceHash: "commerce-revenue-policy-v1",
+          metricIds: [semanticCapability.metricId],
+          timeRole: "report_as_of",
+          calendarId: "calendar:gregorian",
+          timezone: "America/Chicago",
+          completenessPolicy: "latest_complete",
+        }],
+        candidates: [
+          candidate({
+            id: "dql:block:revenue_by_channel",
+            kind: "certified_block",
+            trustTier: "certified",
+            name: "Revenue by channel",
+            compatibility: "compatible",
+            relevanceScore: 1,
+          }),
+          authoredMetric,
+          candidate({
+            id: "semantic:measure:orders.gross_revenue_measure",
+            kind: "semantic_member",
+            name: "orders.gross_revenue_measure",
+            compatibility: "unknown",
+            relevanceScore: 0.55,
+          }),
+          candidate({
+            id: "semantic:metric:orders.gross_revenue_measure",
+            name: "orders.gross_revenue_measure",
+            aliases: ["gross_revenue_measure"],
+            provenance: "dbt measure",
+            analyticalCapability: {
+              ...semanticCapability,
+              metricId: "semantic:metric:gross_revenue_measure",
+              sourceFingerprint: "measure-shim-v1",
+            },
+            relevanceScore: 0.54,
+          }),
+          candidate({
+            id: "semantic:metric:gross_revenue",
+            name: "gross_revenue",
+            analyticalCapability: undefined,
+            relevanceScore: 0.53,
+          }),
+        ],
+      }),
+      resolveMeaning: async () => {
+        throw new Error("meaning provider deadline exceeded");
+      },
+    });
+
+    const decision = await router.decide(request("What is revenue today?"));
+
+    expect(decision.source).toBe("heuristic");
+    expect(decision.meaningResolution?.recommendedExecutionId).toBe(authoredMetric.id);
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      schemaVersion: 2,
+      executionId: authoredMetric.id,
+      capability: "semantic_execution",
+    });
+    expect(selectRoute(request("What is revenue today?"), decision)).toBe("semantic_answer");
+  });
+
+  it("AGT-017 keeps two authored semantic metrics ambiguous when the resolver is unavailable", async () => {
+    const executableMetric = (id: string, name: string): AgentEvidenceCandidate => candidate({
+      id,
+      name,
+      aliases: ["revenue"],
+      provenance: "dbt metric",
+      analyticalCapability: {
+        metricId: id.replace("semantic:metric:", "semantic:"),
+        semanticModelId: `semantic:model:${name}`,
+        measureIds: [`semantic:measure:${name}`],
+        primaryEntityId: "semantic:entity:order",
+        defaultResultGrainId: "semantic:grain:scalar",
+        resultGrainIds: ["semantic:grain:scalar"],
+        aggregation: "sum",
+        additivity: { entities: "additive", time: "additive" },
+        dimensions: [],
+        timeDimensions: [],
+        operations: ["filter"],
+        supportedOutputKinds: ["metric_value"],
+        executionCapabilities: [{ route: "semantic", adapterId: "metricflow" }],
+        sourceFingerprint: `${name}-v1`,
+      },
+    });
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        ...evidence([
+          executableMetric("semantic:metric:finance.booked_revenue", "booked_revenue"),
+          executableMetric("semantic:metric:billing.billed_revenue", "billed_revenue"),
+        ]),
+        parsedIntent: { measures: ["revenue"], dimensions: [], filters: [] },
+      }),
+      resolveMeaning: async () => {
+        throw new Error("meaning provider unavailable");
+      },
+    });
+
+    const decision = await router.decide(request("What is revenue today?"));
+
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+    expect(decision.meaningResolution).toBeUndefined();
+  });
+
   it("AGT-010 avoids a duplicate meaning call for typed compositional follow-ups", async () => {
     const resolveMeaning = vi.fn(async () => resolved());
     const router = createHybridRouter({

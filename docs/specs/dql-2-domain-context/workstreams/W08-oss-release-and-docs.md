@@ -14,12 +14,17 @@ verification of all matrix rows. Dependency: verified W07.
 - Update README, install/quickstart, configuration, project layout, CLI, MCP,
   modeling, skills, agent safety, migration, and contribution documentation to
   match shipped behavior.
+- Document analytical capability modeling, dimension roles, member filtering,
+  governed time/completeness, comparison/ranking semantics, How it answered,
+  stable failures, repair actions, and the trust effects of DQL/SQL edits.
 - Remove or clearly label stale statements that place new Apps/Notebooks inside
   domains, imply copied semantic imports, or misstate which OSS surfaces exist.
 - Document the honest OSS/Cloud boundary: one primary dbt project in OSS;
   federation, real centralized RBAC, hosted approvals/operations in Cloud.
 - Complete the acceptance matrix and execution tracker with commit-scoped,
   independently verified evidence.
+- Include `E2E-013` and `E2E-014` in the final built-CLI, cross-surface,
+  security, npm-upgrade/reapply, and Cloud-contract release evidence.
 - Run all final gates, inspect staged diff for generated/private material, and
   prepare release-note/PR text. No npm publish/version bump is implied.
 

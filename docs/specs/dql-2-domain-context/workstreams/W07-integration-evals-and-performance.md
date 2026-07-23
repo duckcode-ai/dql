@@ -7,6 +7,7 @@ repair integration defects without weakening safety contracts.
 
 Acceptance IDs: every functional ID, with primary ownership of `PERF-001`,
 `PERF-002`, `E2E-001`, `E2E-005`, `E2E-006`, `E2E-007`, and `E2E-012`.
+It also owns independent verification of `E2E-013` and `E2E-014`.
 Dependencies: verified W01–W06.
 
 ## Required implementation
@@ -33,6 +34,15 @@ Dependencies: verified W01–W06.
   identical interpretation, selected qualified IDs, route, trust, and error.
 - Execute the plan-first stage harness through compilation and bounded fixture
   execution; assert identical plan/result receipts rather than only router labels.
+- Extend the functional fixture with explicit revenue/customer/reporting-time
+  capability, two aligned comparison periods, duplicate/ambiguous member and
+  time cases, incomplete-current-period data, and non-additive/missing-join
+  negative cases.
+- Run the exact analytical-composition and transparent-repair matrices from
+  spec 10 through browser Ask, Notebook, CLI, MCP, and Chat, comparing frames,
+  qualified bindings, routes, trust transitions, stable errors, and receipts.
+- Prove the built-CLI How it answered inspector and editable derivation flow;
+  Vite-only evidence and prose-only assertions do not satisfy acceptance.
 
 ## Suggested ownership
 

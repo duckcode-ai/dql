@@ -5,7 +5,7 @@
 Provide safe explicit adoption for existing DQL/DataLex projects and fail-closed
 serving outside loopback.
 
-Acceptance IDs: `CFG-002`, `MIG-001`, `MIG-002`, `SEC-001`, `SEC-003`.
+Acceptance IDs: `CFG-002`, `MIG-001`, `MIG-002`, `SEC-001`, `SEC-003`, `SEC-004`.
 Dependencies: verified W01–W03 source/config/snapshot contracts.
 
 ## Required implementation
@@ -23,6 +23,12 @@ Dependencies: verified W01–W03 source/config/snapshot contracts.
 - Constrain repair search, runtime-value grounding, evidence packaging, traces,
   and optional embeddings to the allowlist/redaction/persistence rules in spec
   08; remove legacy plaintext derived-value caches on index-version upgrade.
+- Apply the same redaction, metadata-visibility, path, connector, mutation,
+  statement-count, row-bound, dialect, timeout, and cancellation guards to the
+  failure inspector and every derived DQL/SQL repair.
+- Make permission and policy failures terminal for the selected route; no
+  repair may probe alternate relations, roles, connections, or routes to evade
+  access control.
 
 ## Suggested ownership
 
@@ -40,3 +46,5 @@ path traversal/symlink escape rejection; `.dql`/provider/credential repair-searc
 exclusion; secret/PII field-name rejection; no plaintext sampled-value
 persistence; ambient provider keys do not activate embeddings; secrets absent
 from cards, traces, logs, and responses.
+Add permission-terminal, unauthorized-metadata, SQL-derivation, parameter-
+redaction, and cross-surface failure-payload cases from `E2E-014`.

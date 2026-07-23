@@ -8,6 +8,7 @@
 | **Targets**        | DQL `>= 2.0`                           |
 | **Implementation** | Dependency-ordered DQL 2.0 workstreams |
 | **Amends**         | RFC 0001, RFC 0002, and RFC 0003       |
+| **Amended by**     | RFC 0005                               |
 
 ## Summary
 

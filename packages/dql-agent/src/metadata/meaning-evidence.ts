@@ -1,8 +1,13 @@
 import {
   scoreMetadataObjectWithAnalysisPlan,
   type AnalysisQuestionPlan,
-} from './analysis-planner.js';
-import type { LocalContextPack, MetadataObject } from './catalog.js';
+} from "./analysis-planner.js";
+import {
+  normalizeMetricCapabilityContract,
+  type AnalyticalPolicyContract,
+  type MetricCapabilityContract,
+} from "@duckcodeailabs/dql-core";
+import type { LocalContextPack, MetadataObject } from "./catalog.js";
 import type {
   AgentEvidenceCandidate,
   AgentEvidenceKind,
@@ -41,6 +46,8 @@ export interface MetadataMeaningCandidate {
     outputs: string[];
     sourceRelations: string[];
   };
+  /** Snapshot-normalized execution truth; absent means capability is incomplete. */
+  analyticalCapability?: MetricCapabilityContract;
   provenance?: string;
   ambiguityPeerIds: string[];
 }
@@ -57,6 +64,10 @@ export interface AgentRetrievalEvidenceAdapterOptions {
   durationMs?: number;
   truncated?: boolean;
   knowledgeLens?: KnowledgeLens;
+  /** Exact policies compiled from the already-selected, fingerprinted Skills. */
+  analyticalPolicies?: AnalyticalPolicyContract[];
+  /** Same immutable context-pack objects used to prove member/value bindings. */
+  contextObjects?: MetadataObject[];
 }
 
 export interface MeaningEvidenceInputCandidate {
@@ -180,43 +191,60 @@ export function toAgentRetrievalEvidence(
   questionPlan: AnalysisQuestionPlan,
   options: AgentRetrievalEvidenceAdapterOptions = {},
 ): AgentRetrievalEvidence {
-  const maxRelevance = Math.max(1, ...evidence.candidates.map((candidate) => candidate.relevanceScore));
-  const candidates: AgentEvidenceCandidate[] = evidence.candidates.map((candidate) => ({
-    id: candidate.objectKey,
-    qualifiedId: candidate.qualifiedId,
-    kind: agentEvidenceKind(candidate),
-    trustTier: candidate.trustTier,
-    name: candidate.name,
-    aliases: candidate.aliases,
-    definition: candidate.definition,
-    formula: candidate.formula,
-    aggregation: candidate.businessShape.aggregation,
-    domain: candidate.domain,
-    semanticModel: candidate.semanticModel,
-    primaryEntity: candidate.businessShape.entities[0],
-    dimensions: candidate.businessShape.dimensions,
-    timeGrains: candidate.businessShape.timeGrains,
-    requiredParameters: candidate.businessShape.parameters,
-    sourceObjects: candidate.businessShape.sourceRelations,
-    relevanceScore: Number((candidate.relevanceScore / maxRelevance).toFixed(6)),
-    matchReasons: candidate.relevanceReasons,
-    // Fit validation remains host-owned. Metadata only reports facts here and
-    // must not claim executable compatibility prematurely.
-    compatibility: 'unknown',
-    compatibilityFacts: candidate.compatibilityFacts,
-    eligible: true,
-    exactMatch: candidate.relevanceReasons.includes('exact name or alias'),
-  }));
+  const maxRelevance = Math.max(
+    1,
+    ...evidence.candidates.map((candidate) => candidate.relevanceScore),
+  );
+  const candidates: AgentEvidenceCandidate[] = evidence.candidates.map(
+    (candidate) => ({
+      id: candidate.objectKey,
+      qualifiedId: candidate.qualifiedId,
+      kind: agentEvidenceKind(candidate),
+      trustTier: candidate.trustTier,
+      name: candidate.name,
+      aliases: candidate.aliases,
+      definition: candidate.definition,
+      formula: candidate.formula,
+      aggregation: candidate.businessShape.aggregation,
+      provenance: candidate.provenance,
+      domain: candidate.domain,
+      semanticModel: candidate.semanticModel,
+      primaryEntity: candidate.businessShape.entities[0],
+      dimensions: candidate.businessShape.dimensions,
+      timeGrains: candidate.businessShape.timeGrains,
+      requiredParameters: candidate.businessShape.parameters,
+      sourceObjects: candidate.businessShape.sourceRelations,
+      relevanceScore: Number(
+        (candidate.relevanceScore / maxRelevance).toFixed(6),
+      ),
+      matchReasons: candidate.relevanceReasons,
+      // Fit validation remains host-owned. Metadata only reports facts here and
+      // must not claim executable compatibility prematurely.
+      compatibility: "unknown",
+      compatibilityFacts: candidate.compatibilityFacts,
+      analyticalCapability: candidate.analyticalCapability,
+      eligible: true,
+      exactMatch: candidate.relevanceReasons.includes("exact name or alias"),
+    }),
+  );
+  const groundedFilters = groundedMemberFilters(
+    questionPlan,
+    candidates,
+    options.contextObjects ?? [],
+  );
   return {
     snapshotId: options.snapshotId,
     sourceFingerprint: options.sourceFingerprint,
     knowledgeLens: options.knowledgeLens,
+    analyticalPolicies: options.analyticalPolicies,
     candidates,
     parsedIntent: {
       measures: questionPlan.requestedShape.measures,
       dimensions: questionPlan.requestedShape.dimensions,
-      filters: [],
-      ...(analysisTimeGrain(questionPlan) ? { timeGrain: analysisTimeGrain(questionPlan) } : {}),
+      filters: groundedFilters,
+      ...(analysisTimeGrain(questionPlan)
+        ? { timeGrain: analysisTimeGrain(questionPlan) }
+        : {}),
       ...(questionPlan.requestedShape.rankingDirection
         ? { order: questionPlan.requestedShape.rankingDirection === 'top' ? 'desc' as const : 'asc' as const }
         : {}),
@@ -228,6 +256,122 @@ export function toAgentRetrievalEvidence(
       truncated: options.truncated ?? false,
     },
   };
+}
+
+/**
+ * Bind current-turn values only when an authorized runtime-value observation
+ * and a semantic dimension's exact physical table/column identity agree. Text
+ * such as "Zoom customer" can nominate the value and dimension, but cannot by
+ * itself create an executable member binding.
+ *
+ * Acceptance: AGT-012, AGT-017.
+ */
+function groundedMemberFilters(
+  plan: AnalysisQuestionPlan,
+  candidates: AgentEvidenceCandidate[],
+  objects: MetadataObject[],
+): Array<{ field: string; value: string }> {
+  const mentions = plan.valueMentions.filter(
+    (mention) => mention.syntacticRole === "filter_value",
+  );
+  if (mentions.length === 0) return [];
+  const filterDimensions = new Set(
+    candidates.flatMap((candidate) => {
+      const capability = normalizeMetricCapabilityContract(
+        candidate.analyticalCapability,
+      );
+      return (
+        capability?.dimensions
+          .filter((dimension) => dimension.supportedRoles.includes("filter"))
+          .map((dimension) => dimension.dimensionId) ?? []
+      );
+    }),
+  );
+  if (filterDimensions.size === 0) return [];
+  const dimensions = objects.flatMap((object) => {
+    if (object.objectType !== "semantic_dimension") return [];
+    const dimensionId = firstString(
+      object.payload?.qualifiedId,
+      object.fullName,
+    );
+    const table = firstString(object.payload?.table);
+    const expression = simpleColumnName(
+      firstString(object.payload?.expression),
+    );
+    if (
+      !dimensionId ||
+      !filterDimensions.has(dimensionId) ||
+      !table ||
+      !expression
+    )
+      return [];
+    return [{ dimensionId, table, column: expression }];
+  });
+  const values = objects.flatMap((object) => {
+    if (object.objectType !== "runtime_value") return [];
+    const relation = firstString(object.payload?.relation);
+    const column = firstString(object.payload?.column);
+    const value = firstString(object.payload?.value);
+    const normalizedValue =
+      firstString(object.payload?.normalizedValue) ??
+      (value ? normalizeText(value) : undefined);
+    if (!relation || !column || !value || !normalizedValue) return [];
+    return [{ relation, column, value, normalizedValue }];
+  });
+  return mentions.flatMap((mention) => {
+    const observed = values.filter(
+      (value) =>
+        normalizeText(value.normalizedValue) ===
+        normalizeText(mention.normalizedText),
+    );
+    const bindings = new Map<string, string>();
+    for (const value of observed) {
+      for (const dimension of dimensions) {
+        if (
+          !sameRelation(dimension.table, value.relation) ||
+          normalizeIdentifier(dimension.column) !==
+            normalizeIdentifier(value.column)
+        )
+          continue;
+        bindings.set(dimension.dimensionId, value.value);
+      }
+    }
+    return bindings.size === 1
+      ? [{ field: [...bindings.keys()][0]!, value: [...bindings.values()][0]! }]
+      : [];
+  });
+}
+
+function simpleColumnName(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/["`\[\]]/g, "").trim();
+  return /^[a-zA-Z_][a-zA-Z0-9_$.]*$/.test(normalized)
+    ? normalized.split(".").at(-1)
+    : undefined;
+}
+
+function sameRelation(left: string, right: string): boolean {
+  const a = normalizeRelation(left);
+  const b = normalizeRelation(right);
+  return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+}
+
+function normalizeRelation(value: string): string {
+  return value
+    .replace(/["`\[\]]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeIdentifier(value: string): string {
+  return (
+    value
+      .replace(/["`\[\]]/g, "")
+      .split(".")
+      .at(-1)
+      ?.trim()
+      .toLowerCase() ?? value.toLowerCase()
+  );
 }
 
 /**
@@ -323,8 +467,16 @@ function candidateCard(
   ambiguityPeerIds: string[],
 ): MetadataMeaningCandidate {
   const payload = object.payload ?? {};
-  const qualifiedId = firstString(payload.qualifiedId, payload.uniqueId, object.fullName, object.objectKey)
-    ?? object.objectKey;
+  const analyticalCapability = normalizeMetricCapabilityContract(
+    payload.analyticalCapability,
+  );
+  const qualifiedId =
+    firstString(
+      payload.qualifiedId,
+      payload.uniqueId,
+      object.fullName,
+      object.objectKey,
+    ) ?? object.objectKey;
   const parameters = arrayNames(payload.parameters ?? payload.parameterPolicy);
   const outputs = uniqueStrings([
     ...stringArray(payload.declaredOutputs),
@@ -375,6 +527,7 @@ function candidateCard(
         ...stringArray(payload.sourceSystems),
       ]).slice(0, 12),
     },
+    ...(analyticalCapability ? { analyticalCapability } : {}),
     provenance: firstString(payload.provenance, object.sourceSystem),
     ambiguityPeerIds,
   };

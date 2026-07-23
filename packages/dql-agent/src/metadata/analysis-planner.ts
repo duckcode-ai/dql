@@ -710,10 +710,12 @@ function inferQuestionMode(input: {
 
 function definitionPhraseCarriesAnalyticalShape(input: {
   lower: string;
+  entities: AnalysisEntityMention[];
   metricTerms: string[];
   dimensionTerms: string[];
 }): boolean {
   if (input.metricTerms.length === 0) return false;
+  if (input.entities.length > 0) return true;
   if (input.dimensionTerms.length >= 2) return true;
   return input.dimensionTerms.length > 0
     && /\b(top|bottom|highest|lowest|most|least|by|per|each|every|group(?:ed)? by|split by|break(?:down| down)|info for|details for|got|bought|purchased)\b/i.test(input.lower);
@@ -781,7 +783,7 @@ function extractEntities(question: string): AnalysisEntityMention[] {
   for (const match of question.matchAll(/\b(?:id|account id|customer id|user id|sku)\s*[:=]?\s*([A-Za-z0-9_.-]{3,80})\b/gi)) {
     entities.push({ text: match[1].trim(), source: 'id' });
   }
-  for (const match of question.matchAll(/\b(?:for|where|only|specific|named|called|profile\s+for|research\s+on|reserach\s+on)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,5})/g)) {
+  for (const match of question.matchAll(/\b(?:for|from|where|only|specific|named|called|profile\s+for|research\s+on|reserach\s+on)\s+([A-Z][A-Za-z0-9&.'-]+(?:\s+[A-Z][A-Za-z0-9&.'-]+){0,5})/g)) {
     entities.push({ text: cleanEntityText(match[1]), source: 'explicit_filter' });
   }
   // A one-token person/account reference after a comparator ("less than

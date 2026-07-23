@@ -141,6 +141,15 @@ interface MeaningResolution {
 }
 ```
 
+This shape remains the v1 compatibility projection for stored conversations and
+simple callers. New value, ranking, trend, comparison, diagnosis, and research
+planning uses the versioned `AnalyticalQuestionFrameV2` from spec 10. The frame
+adds dimension roles, typed member bindings, time role/calendar/timezone/
+completeness, bounded periods, comparison, ranking basis/ties, and requested
+outputs. A downstream adapter may consume a v1 projection for compatibility,
+but it cannot infer missing v2 semantics from prose, names, or generated SQL
+(`AGT-017`).
+
 Every returned ID must exist in the server-owned evidence package. Unknown IDs,
 changed definitions, or a mismatched snapshot invalidate the resolution. High
 confidence proceeds to deterministic validation. Medium confidence proceeds
@@ -166,10 +175,24 @@ result contract; budgets; and a deterministic content fingerprint. Compiler-
 required members such as `metric_time` are explicit technical bindings and may
 coexist with the user time axis without changing the requested output contract.
 
+For analytical composition, each metric/asset first normalizes to the
+capability contract in spec 10. The deterministic resolver proves the complete
+metric/entity/dimension-role/member/time/period/comparison/ranking/output tuple;
+individually compatible members are insufficient. Multi-period comparisons and
+top/bottom-N compile as typed executable graphs that aggregate at the declared
+grain before alignment, arithmetic, and ranking (`CONTRACT-002`, `AGT-018`,
+`AGT-019`).
+
 Once the plan exists, no downstream component may re-search or reinterpret
 business meaning. It may only prove capability, compile, execute, validate the
 result contract, or return a stable error. A selected metric cannot be replaced
 because another metric is easier to join or compile (`AGT-014`).
+
+After successful result-contract validation, server-computed facts bind values,
+comparisons, contributors, freshness, and caveats to exact result fields and
+receipts. Business narration may verbalize only those facts and cannot hide
+partial-period state or introduce unsupported numeric/causal claims
+(`AGT-020`).
 
 Clarification is a structured continuation, not another natural-language search.
 Each rendered choice contains a stable candidate ID, business label, definition,

@@ -941,6 +941,47 @@ export interface AgentRun {
   repairAttempts: number;
 }
 
+export interface AnalyticalRepairRequest {
+  version: 1;
+  action:
+    | 'retry_same_plan'
+    | 'parameter_rerun'
+    | 'refresh_snapshot'
+    | 'edit_dql'
+    | 'open_sql_notebook'
+    | 'change_authorized_connection'
+    | 'request_access'
+    | 'save_draft_block';
+  parameterValues?: Record<string, unknown>;
+  dqlSource?: string;
+  sqlText?: string;
+  refreshedSnapshotId?: string;
+  authorizedConnectionFingerprint?: string;
+  governedValidationPassed?: boolean;
+}
+
+export interface AnalyticalRepairDerivationResponse {
+  status: 'ready';
+  derivation: {
+    version: 1;
+    derivationId: string;
+    sourceRunId: string;
+    derivedRunId: string;
+    action: AnalyticalRepairRequest['action'];
+    snapshotId: string;
+    planFingerprint: string;
+    routeLocked: true;
+    permissionsExpanded: false;
+    trustTransition: {
+      previous: 'certified' | 'governed' | 'review_required';
+      next: 'certified' | 'governed' | 'review_required';
+      requiresNewReceipt: boolean;
+      requiresReview: boolean;
+      preservesCertifiedAssetIdentity: boolean;
+    };
+  };
+}
+
 export interface CertifiedBlockInvocationResponse {
   result: QueryResult & {
     sql?: string;
@@ -2623,6 +2664,13 @@ export const api = {
   async getAgentRun(id: string): Promise<AgentRun> {
     const raw = await request<{ run: AgentRun }>(`/api/agent-runs/${encodeURIComponent(id)}`);
     return raw.run;
+  },
+
+  async deriveAnalyticalRepair(id: string, repair: AnalyticalRepairRequest): Promise<AnalyticalRepairDerivationResponse> {
+    return request<AnalyticalRepairDerivationResponse>(`/api/agent-runs/${encodeURIComponent(id)}/analytical-repair`, {
+      method: 'POST',
+      body: JSON.stringify({ repair }),
+    });
   },
 
   async cancelAgentRun(id: string): Promise<{ ok: boolean; id?: string }> {

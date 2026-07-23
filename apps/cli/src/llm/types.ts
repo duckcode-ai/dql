@@ -5,10 +5,13 @@ import type {
   CertifiedBlockInvocationInput,
   AgentSchemaTable,
   AnalysisDepth,
+  AnalyticalFreshnessObservationV1,
+  AnalyticalFreshnessRequestV1,
   ConversationSnapshot,
   KGNode,
   LocalContextPack,
   ReasoningEffort,
+  ResolvedAnalyticalPlan,
   SemanticQueryCompiler,
   DomainContextEnvelope,
 } from '@duckcodeailabs/dql-agent';
@@ -155,6 +158,12 @@ export interface AgentRunRequest {
    */
   preferredEvidenceIds?: string[];
   preferredExecutionId?: string;
+  /** Router-owned immutable v2 plan. Provider adapters must pass it through unchanged. */
+  resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Server-captured instant used to bind relative periods deterministically. */
+  analyticalReferenceInstant?: string;
+  /** Route-locked, snapshot-bound freshness lookup prepared by the execution host. */
+  resolveAnalyticalFreshness?: (request: AnalyticalFreshnessRequestV1) => Promise<AnalyticalFreshnessObservationV1>;
   /**
    * Request-scoped ranked evidence prepared before routing. Hosts pass this to
    * prevent the provider adapter from rebuilding and re-searching the same

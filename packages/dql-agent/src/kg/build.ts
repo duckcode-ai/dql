@@ -9,16 +9,27 @@
  * The output is intentionally flat — caller passes it to `KGStore.rebuild()`.
  */
 
+import { createHash } from "node:crypto";
+
 import type {
+  DimensionDefinition,
   DQLManifest,
   ManifestBusinessView,
   ManifestSource,
   ManifestTerm,
+  MeasureDefinition,
+  MetricCapabilityContract,
+  MetricDefinition,
   SemanticLayer,
-} from '@duckcodeailabs/dql-core';
-import { trustLabelIdForStatus } from '@duckcodeailabs/dql-core';
-import type { KGNode, KGEdge, KGNodeKind, KGCertification } from './types.js';
-import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from '../metadata/block-fingerprints.js';
+  SemanticModelDefinition,
+  TimeDimensionDefinition,
+} from "@duckcodeailabs/dql-core";
+import { trustLabelIdForStatus } from "@duckcodeailabs/dql-core";
+import type { KGNode, KGEdge, KGNodeKind, KGCertification } from "./types.js";
+import {
+  buildBlockBusinessFingerprint,
+  buildBlockSqlFingerprints,
+} from "../metadata/block-fingerprints.js";
 
 export function buildKGFromManifest(manifest: DQLManifest): {
   nodes: KGNode[];
@@ -105,6 +116,14 @@ export function buildKGFromManifest(manifest: DQLManifest): {
         qualifiedId: `${block.domain ?? 'global'}::block::${block.name}`,
         localId: block.name,
         aliases: [block.name],
+        metricRefs: [
+          ...new Set([
+            ...(block.metricRef ? [block.metricRef] : []),
+            ...(block.metricsRef ?? []),
+            ...(block.metricRefs ?? []),
+          ]),
+        ],
+        dimensionsRef: block.dimensionsRef ?? [],
       },
       datalexContract: block.datalexContract,
       businessRules: block.businessRules ?? block.invariants,
@@ -664,6 +683,12 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
     const nonAdditiveDimensions = backingMeasures
       .map((measure) => measure.nonAdditiveDimension)
       .filter((value): value is Record<string, unknown> => Boolean(value));
+    const analyticalCapability = buildSemanticMetricCapability({
+      layer,
+      metric,
+      model,
+      backingMeasures,
+    });
     const nodeId = `metric:${qualifiedSemanticName(metric.cube, metric.name)}`;
     nodes.push({
       nodeId,
@@ -695,7 +720,10 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         nonAdditiveDimensions,
         dimensions: qualifiedDimensions,
         entities: model?.entities ?? [],
-        timeGrains: hasTimeDimension ? ['day', 'week', 'month', 'quarter', 'year'] : [],
+        timeGrains: hasTimeDimension
+          ? ["day", "week", "month", "quarter", "year"]
+          : [],
+        analyticalCapability,
       },
       sourceTier: 'semantic_layer',
       certification: certificationFromStatus(metric.status),
@@ -724,14 +752,32 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       description: dimension.description,
       tags: dimension.tags ?? [],
       ...businessMetadataFromRaw(dimension.source?.extra?.raw),
-      llmContext: [
-        dimension.label ? `label: ${dimension.label}` : '',
-        dimension.type ? `type: ${dimension.type}` : '',
-        dimension.table ? `table: ${dimension.table}` : '',
-        dimension.sql ? `sql: ${dimension.sql}` : '',
-      ].filter(Boolean).join('\n') || undefined,
-      payload: semanticIdentityPayload('dimension', dimension),
-      sourceTier: 'semantic_layer',
+      llmContext:
+        [
+          dimension.label ? `label: ${dimension.label}` : "",
+          dimension.type ? `type: ${dimension.type}` : "",
+          dimension.table ? `table: ${dimension.table}` : "",
+          dimension.sql ? `sql: ${dimension.sql}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n") || undefined,
+      payload: {
+        ...semanticIdentityPayload("dimension", dimension),
+        table: dimension.table,
+        expression: dimension.expr ?? dimension.sql,
+        dimensionType: dimension.type,
+        entityLink: dimension.entityLink,
+        qualifiedName: dimension.qualifiedName,
+        isTimeDimension: dimension.isTimeDimension,
+        ...(isTimeDimension(dimension)
+          ? {
+              granularities: dimension.granularities,
+              primaryTime: dimension.primaryTime,
+              timeRole: authoredTimeRole(dimension),
+            }
+          : {}),
+      },
+      sourceTier: "semantic_layer",
       certification: certificationFromStatus(dimension.status),
       provenance: dimension.source?.provider === 'dbt'
         ? `dbt ${dimension.source.objectType}`
@@ -872,6 +918,250 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
   }
 
   return { nodes, edges };
+}
+
+/**
+ * Project one semantic metric into the execution-neutral capability contract.
+ * Every admitted fact comes from the semantic registry itself. An incomplete
+ * model is intentionally left without a capability instead of being completed
+ * from names or descriptions.
+ *
+ * Acceptance: CONTRACT-002, AGT-018.
+ */
+function buildSemanticMetricCapability(input: {
+  layer: SemanticLayer;
+  metric: MetricDefinition;
+  model?: SemanticModelDefinition;
+  backingMeasures: MeasureDefinition[];
+}): MetricCapabilityContract | undefined {
+  const { layer, metric, model, backingMeasures } = input;
+  if (!model || !metric.cube || model.name !== metric.cube) return undefined;
+  const cube =
+    typeof (layer as { getCube?: unknown }).getCube === "function"
+      ? layer.getCube(metric.cube)
+      : undefined;
+  const registryDimensions = layer
+    .listDimensions()
+    .filter((dimension) => dimension.cube === metric.cube);
+  const cubeDimensions = cube
+    ? [...cube.dimensions, ...cube.timeDimensions]
+    : [];
+  const dimensionsByName = new Map<string, DimensionDefinition>();
+  for (const dimension of [...registryDimensions, ...cubeDimensions]) {
+    if (!dimensionsByName.has(dimension.name))
+      dimensionsByName.set(dimension.name, dimension);
+  }
+  const declaredDimensionNames = [
+    ...new Set([...model.dimensions, ...model.timeDimensions]),
+  ];
+  if (declaredDimensionNames.some((name) => !dimensionsByName.has(name)))
+    return undefined;
+
+  const metricIdentity = semanticIdentityPayload("metric", metric);
+  const metricId = stringValue(metricIdentity.qualifiedId);
+  const modelId = stringValue(
+    semanticIdentityPayload("model", model).qualifiedId,
+  );
+  if (!metricId || !modelId) return undefined;
+
+  const scopedEntities = layer
+    .listEntities()
+    .filter(
+      (entity) =>
+        entity.cube === metric.cube && model.entities.includes(entity.name),
+    );
+  const primaryEntities = scopedEntities.filter(
+    (entity) => entity.type === "primary",
+  );
+  if (primaryEntities.length > 1) return undefined;
+  const primaryEntity = primaryEntities[0];
+  const primaryEntityId = primaryEntity
+    ? stringValue(semanticIdentityPayload("entity", primaryEntity).qualifiedId)
+    : modelId;
+  if (!primaryEntityId) return undefined;
+  const entityIds = new Map(
+    scopedEntities.flatMap((entity) => {
+      const id = stringValue(
+        semanticIdentityPayload("entity", entity).qualifiedId,
+      );
+      return id ? [[entity.name, id] as const] : [];
+    }),
+  );
+
+  const timeNameSet = new Set(model.timeDimensions);
+  const normalDimensions: MetricCapabilityContract["dimensions"] = [];
+  const timeDimensions: MetricCapabilityContract["timeDimensions"] = [];
+  const explicitDefaultNames = new Set(
+    [
+      metric.aggTimeDimension,
+      cube?.defaultTimeDimension,
+      ...backingMeasures.map((measure) => measure.aggTimeDimension),
+      ...[...dimensionsByName.values()]
+        .filter(
+          (dimension) => isTimeDimension(dimension) && dimension.primaryTime,
+        )
+        .map((dimension) => dimension.name),
+    ].filter((value): value is string => Boolean(value?.trim())),
+  );
+
+  for (const name of declaredDimensionNames) {
+    const dimension = dimensionsByName.get(name)!;
+    const dimensionId = stringValue(
+      semanticIdentityPayload("dimension", dimension).qualifiedId,
+    );
+    if (!dimensionId) return undefined;
+    const entityId: string | undefined = dimension.entityLink
+      ? entityIds.get(dimension.entityLink)
+      : primaryEntityId;
+    if (!entityId) return undefined;
+    const timeDimension = timeNameSet.has(name) || isTimeDimension(dimension);
+    if (timeDimension) {
+      const supportedGrains = isTimeDimension(dimension)
+        ? [...new Set(dimension.granularities ?? [])]
+        : [];
+      if (supportedGrains.length === 0) return undefined;
+      const defaultFor =
+        explicitDefaultNames.has(name) ||
+        (explicitDefaultNames.size === 0 && model.timeDimensions.length === 1)
+          ? (["scalar", "trend", "comparison"] as const)
+          : undefined;
+      timeDimensions.push({
+        dimensionId,
+        role: authoredTimeRole(dimension) ?? dimensionId,
+        supportedGrains,
+        ...(defaultFor ? { defaultFor: [...defaultFor] } : {}),
+      });
+      continue;
+    }
+    // Dimensions declared on the metric's own semantic model remain at the
+    // model's primary grain. Cross-model dimensions require a separately
+    // normalized, governed relationship path and are not admitted here.
+    if (entityId !== primaryEntityId) return undefined;
+    normalDimensions.push({
+      dimensionId,
+      entityId,
+      supportedRoles: ["group_by", "filter", "display", "rank_entity"],
+    });
+  }
+
+  const nonAdditiveDimensionIds = backingMeasures.flatMap((measure) => {
+    const raw = measure.nonAdditiveDimension?.name;
+    if (typeof raw !== "string") return [];
+    const dimension = dimensionsByName.get(raw);
+    const id =
+      dimension &&
+      stringValue(semanticIdentityPayload("dimension", dimension).qualifiedId);
+    return id ? [id] : [];
+  });
+  const aggregation = metric.aggregation ?? metric.type ?? metric.metricType;
+  if (!aggregation) return undefined;
+  const completenessPolicy = authoredCompletenessPolicy(metric);
+  const measureIds = backingMeasures.flatMap((measure) => {
+    const id = stringValue(
+      semanticIdentityPayload("measure", measure).qualifiedId,
+    );
+    return id ? [id] : [];
+  });
+  const additive = ["sum", "count"].includes(aggregation.toLowerCase());
+  const capabilityWithoutFingerprint: Omit<
+    MetricCapabilityContract,
+    "sourceFingerprint"
+  > = {
+    metricId,
+    semanticModelId: modelId,
+    measureIds: measureIds.length > 0 ? [...new Set(measureIds)] : [metricId],
+    primaryEntityId,
+    defaultResultGrainId: primaryEntityId,
+    resultGrainIds: [
+      ...new Set([
+        primaryEntityId,
+        ...normalDimensions.map((dimension) => dimension.entityId),
+      ]),
+    ],
+    aggregation,
+    additivity: {
+      entities: additive ? "additive" : "non_additive",
+      time:
+        nonAdditiveDimensionIds.length > 0
+          ? "semi_additive"
+          : additive
+            ? "additive"
+            : "non_additive",
+      ...(nonAdditiveDimensionIds.length > 0
+        ? { nonAdditiveDimensionIds: [...new Set(nonAdditiveDimensionIds)] }
+        : {}),
+    },
+    dimensions: normalDimensions,
+    timeDimensions,
+    ...(completenessPolicy
+      ? { freshness: { defaultCompletenessPolicy: completenessPolicy } }
+      : {}),
+    // The current native semantic adapter supports filtering, grouping,
+    // time-series grouping, ordering, and limiting. Multi-period arithmetic is
+    // withheld until the AC3 executable graph ships.
+    operations: ["filter", "group", "trend", "rank"],
+    supportedOutputKinds: ["dimension", "metric_value", "rank"],
+    executionCapabilities: [
+      {
+        route: "semantic",
+        adapterId:
+          metric.source?.provider === "dbt" ? "metricflow" : "semantic-native",
+      },
+    ],
+  };
+  return {
+    ...capabilityWithoutFingerprint,
+    sourceFingerprint: `sha256:${createHash("sha256").update(stableJson(capabilityWithoutFingerprint)).digest("hex")}`,
+  };
+}
+
+function isTimeDimension(
+  dimension: DimensionDefinition,
+): dimension is TimeDimensionDefinition {
+  return Boolean(
+    dimension.isTimeDimension ||
+    dimension.source?.objectType === "time_dimension",
+  );
+}
+
+function authoredTimeRole(dimension: DimensionDefinition): string | undefined {
+  const raw = recordValue(dimension.source?.extra?.raw);
+  const meta = recordValue(raw.meta);
+  const dql = recordValue(meta.dql);
+  return (
+    stringValue(dql.time_role) ??
+    stringValue(dql.timeRole) ??
+    stringValue(meta.time_role) ??
+    stringValue(meta.timeRole)
+  );
+}
+
+function authoredCompletenessPolicy(
+  metric: MetricDefinition,
+): "partial_current" | "latest_complete" | "closed_period" | undefined {
+  const raw = recordValue(metric.source?.extra?.raw);
+  const meta = recordValue(raw.meta);
+  const dql = recordValue(meta.dql);
+  const value =
+    stringValue(dql.completeness_policy) ??
+    stringValue(dql.completenessPolicy) ??
+    stringValue(meta.completeness_policy) ??
+    stringValue(meta.completenessPolicy);
+  return value === "partial_current" ||
+    value === "latest_complete" ||
+    value === "closed_period"
+    ? value
+    : undefined;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
 }
 
 function semanticMetricBackingMeasureNames(metric: {

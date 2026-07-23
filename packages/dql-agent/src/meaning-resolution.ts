@@ -6,6 +6,11 @@
  * the host after it validates the selected candidates and route.
  */
 
+import type {
+  AnalyticalPolicyContract,
+  AnalyticalQuestionFrameV2,
+  MetricCapabilityContract,
+} from '@duckcodeailabs/dql-core';
 import type { KnowledgeLens } from './domain-context.js';
 
 export type AgentEvidenceKind =
@@ -33,6 +38,8 @@ export interface AgentEvidenceCandidate {
   definition?: string;
   formula?: string;
   aggregation?: string;
+  /** Source provenance retained so routing can distinguish authored metrics from measure-derived execution shims. */
+  provenance?: string;
   domain?: string;
   semanticModel?: string;
   primaryEntity?: string;
@@ -46,6 +53,10 @@ export interface AgentEvidenceCandidate {
   matchReasons: string[];
   compatibility: AgentEvidenceCompatibility;
   compatibilityFacts?: string[];
+  /** Normalized executable capability. Names alone never supply missing facts. */
+  analyticalCapability?: MetricCapabilityContract;
+  /** Deterministic certified-asset fit; ignored for non-certified evidence. */
+  analyticalFitClass?: 'exact' | 'parameterized' | 'adaptable';
   /** False means the object must not be shown to the resolver. */
   eligible?: boolean;
   /** True only for an exact qualified/name/approved-alias match. */
@@ -58,6 +69,8 @@ export interface AgentRetrievalEvidence {
   knowledgeLens?: KnowledgeLens;
   candidates: AgentEvidenceCandidate[];
   parsedIntent?: Partial<MeaningQueryIntent>;
+  /** Snapshot-compiled policy only; Skill prose never enters route authority. */
+  analyticalPolicies?: AnalyticalPolicyContract[];
   diagnostics?: {
     searchedKinds?: AgentEvidenceKind[];
     durationMs?: number;
@@ -98,6 +111,10 @@ export interface MeaningResolution {
   missingInformation: string[];
   recommendedRoute: MeaningExecutionRoute;
   clarifyingQuestion?: string;
+  /** RFC 0005 exact analytical meaning; absent for stored/simple v1 requests. */
+  analyticalFrame?: AnalyticalQuestionFrameV2;
+  /** Exact eligible structured policies applied by the deterministic solver. */
+  analyticalPolicyIds?: string[];
 }
 
 export interface MeaningResolutionInput {
@@ -232,12 +249,72 @@ export function validateMeaningResolution(
       return { ok: false, reason: "A semantic route requires deterministic measure, grain, and dimension compatibility." };
     }
   }
+  if (value.analyticalFrame) {
+    const invalidFrameReference = firstInvalidAnalyticalFrameReference(value.analyticalFrame, candidates);
+    if (invalidFrameReference) {
+      return { ok: false, reason: `The analytical frame referenced evidence that was not retrieved: ${invalidFrameReference}` };
+    }
+  }
   return {
     ok: true,
     resolution: selectedConceptIds === value.selectedConceptIds
       ? value
       : { ...value, selectedConceptIds },
   };
+}
+
+function firstInvalidAnalyticalFrameReference(
+  frame: AnalyticalQuestionFrameV2,
+  candidates: AgentEvidenceCandidate[],
+): string | undefined {
+  const metricIds = new Set<string>();
+  const dimensionIds = new Set<string>();
+  const entityIds = new Set<string>();
+  const evidenceIds = new Set<string>();
+  for (const candidate of candidates) {
+    evidenceIds.add(candidate.id);
+    if (candidate.qualifiedId) evidenceIds.add(candidate.qualifiedId);
+    if (candidate.kind === 'semantic_metric') {
+      metricIds.add(candidate.id);
+      if (candidate.qualifiedId) metricIds.add(candidate.qualifiedId);
+    }
+    if (candidate.kind === 'semantic_member') {
+      dimensionIds.add(candidate.id);
+      if (candidate.qualifiedId) dimensionIds.add(candidate.qualifiedId);
+    }
+    if (candidate.primaryEntity) entityIds.add(candidate.primaryEntity);
+    for (const dimension of candidate.dimensions ?? []) dimensionIds.add(dimension);
+    const capability = candidate.analyticalCapability;
+    if (!capability) continue;
+    metricIds.add(capability.metricId);
+    entityIds.add(capability.primaryEntityId);
+    for (const grain of capability.resultGrainIds) entityIds.add(grain);
+    for (const dimension of capability.dimensions) dimensionIds.add(dimension.dimensionId);
+    for (const dimension of capability.timeDimensions) dimensionIds.add(dimension.dimensionId);
+  }
+  const checks: Array<[string, Iterable<string>, Set<string>]> = [
+    ['metric', frame.metricConceptIds, metricIds],
+    ['entity grain', frame.entityGrainIds, entityIds],
+    ['dimension', frame.dimensions.map((dimension) => dimension.dimensionId), dimensionIds],
+    ['member dimension', frame.memberBindings.map((binding) => binding.dimensionId), dimensionIds],
+    ['output metric', frame.requestedOutputs.flatMap((output) => output.metricId ? [output.metricId] : []), metricIds],
+  ];
+  if (frame.timeContext?.timeDimensionId) {
+    checks.push(['time dimension', [frame.timeContext.timeDimensionId], dimensionIds]);
+  }
+  if (frame.ranking) {
+    checks.push(
+      ['ranking dimension', [frame.ranking.entityDimensionId], dimensionIds],
+      ['ranking metric', [frame.ranking.byMetricId], metricIds],
+    );
+  }
+  for (const [kind, ids, allowed] of checks) {
+    for (const id of ids) if (!allowed.has(id)) return `${kind} ${id}`;
+  }
+  for (const ambiguity of frame.ambiguity) {
+    for (const id of ambiguity.candidateIds) if (!evidenceIds.has(id)) return `ambiguity candidate ${id}`;
+  }
+  return undefined;
 }
 
 export function routeForEvidenceCandidate(candidate: AgentEvidenceCandidate): MeaningExecutionRoute {
@@ -259,6 +336,8 @@ export function questionTypeFromText(question: string): MeaningQuestionType {
   // execution-shape checks for glossary/certified descriptions.
   if (/\b(total|sum|count|number of|average|avg|minimum|maximum|across all|overall)\b/i.test(question)
     && /\b(what (?:is|was|were|are)|how (?:much|many)|show|report|calculate|give|tell)\b/i.test(question)) return "value";
+  if (/^\s*what (?:is|was|were|are)\b/i.test(question)
+    && /\b(today|current|yesterday|last|this|from|for|by|top|bottom|during|between|through)\b/i.test(question)) return "value";
   if (/^\s*(what (?:is|are|does)|define|definition|meaning of)\b/i.test(question)) return "definition";
   return "value";
 }

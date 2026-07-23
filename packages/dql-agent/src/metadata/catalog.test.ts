@@ -23,7 +23,7 @@ import {
 } from './catalog.js';
 import { buildAnalysisQuestionPlan } from './analysis-planner.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
-import { resolveSemanticLayerWithDiagnostics, type DQLManifest } from '@duckcodeailabs/dql-core';
+import { resolveSemanticLayerWithDiagnostics, SemanticLayer, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { recordCorrectionTrace, reviewHint } from '../hints/git-store.js';
 import { defaultKgPath, reindexProject } from '../index.js';
 import { KGStore } from '../kg/sqlite-fts.js';
@@ -63,6 +63,172 @@ describe('local metadata catalog', () => {
     expect(query).not.toContain('Melissa Lopez');
     expect(query).not.toContain('secret_relation');
     expect(query).not.toContain('SELECT');
+  });
+
+  it('CONTRACT-002 admits only exactly bound certified block capability', () => {
+    const manifest = {
+      manifestVersion: 2,
+      dqlVersion: 'test',
+      generatedAt: '2026-07-22T00:00:00.000Z',
+      project: 'capability-test',
+      projectRoot,
+      domains: {}, businessViews: {}, terms: {}, notebooks: {}, metrics: {}, dimensions: {}, sources: {}, apps: {}, dashboards: {},
+      blocks: {
+        revenue_by_customer: {
+          name: 'revenue_by_customer', filePath: 'blocks/revenue_by_customer.dql', domain: 'sales', status: 'certified',
+          sql: 'select customer_name, sum(revenue_amount) as revenue from orders group by 1',
+          rawTableRefs: ['orders'], tableDependencies: ['orders'], refDependencies: [], allDependencies: ['orders'], tests: [],
+          metricRef: 'semantic:sales:revenue',
+          grain: 'semantic:sales:entity:order',
+          entities: ['semantic:sales:entity:order'],
+          dimensions: ['semantic:sales:dimension:customer_name'],
+          allowedFilters: ['semantic:sales:dimension:customer_name'],
+          declaredOutputs: ['customer_name', 'revenue'],
+          outputContract: [
+            { name: 'customer_name', role: 'dimension' },
+            { name: 'revenue', role: 'metric' },
+          ],
+        },
+      },
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+    } as DQLManifest;
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'orders', label: 'Orders', description: '', domain: 'sales', sql: 'select * from orders', table: 'orders',
+      measures: [],
+      dimensions: [{
+        name: 'customer_name', label: 'Customer', description: '', sql: 'customer_name', type: 'string',
+        table: 'orders', cube: 'orders', entityLink: 'order',
+      }],
+      timeDimensions: [], joins: [], segments: [], preAggregations: [],
+    });
+    layer.addEntity({
+      name: 'order', label: 'Order', description: '', type: 'primary', table: 'orders', cube: 'orders', domain: 'sales',
+    });
+    layer.addMeasure({
+      name: 'revenue', label: 'Revenue', description: '', agg: 'sum', expr: 'revenue_amount',
+      table: 'orders', cube: 'orders', domain: 'sales',
+    });
+    layer.addSemanticModel({
+      name: 'orders', label: 'Orders', description: '', domain: 'sales', table: 'orders', entities: ['order'],
+      measures: ['revenue'], dimensions: ['customer_name'], timeDimensions: [],
+    });
+    layer.addMetric({
+      name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'revenue', type: 'custom',
+      metricType: 'simple', aggregation: 'sum', table: '', cube: 'orders', typeParams: { measure: { name: 'revenue' } },
+    });
+
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest, layer, []);
+    const capability = snapshot.objects.find((object) => object.objectKey === 'dql:block:revenue_by_customer')
+      ?.payload?.analyticalCapability;
+    expect(capability).toMatchObject({
+      metricId: 'semantic:sales:revenue',
+      defaultResultGrainId: 'semantic:sales:entity:order',
+      dimensions: [{
+        dimensionId: 'semantic:sales:dimension:customer_name',
+        supportedRoles: ['group_by', 'filter', 'display'],
+      }],
+      supportedOutputKinds: ['dimension', 'metric_value'],
+      declaredOutputIds: ['customer_name', 'revenue'],
+      executionCapabilities: [{ route: 'certified', adapterId: 'dql:block:revenue_by_customer' }],
+    });
+  });
+
+  it('AGT-012 binds a named member only through exact runtime value and semantic column evidence', () => {
+    const metricId = 'semantic:sales:revenue';
+    const dimensionId = 'semantic:sales:dimension:customer_name';
+    const capability = {
+      metricId,
+      semanticModelId: 'semantic:sales:model:orders',
+      measureIds: ['semantic:sales:measure:revenue'],
+      primaryEntityId: 'semantic:sales:entity:order',
+      defaultResultGrainId: 'semantic:sales:entity:order',
+      resultGrainIds: ['semantic:sales:entity:order'],
+      aggregation: 'sum',
+      additivity: { entities: 'additive' as const, time: 'additive' as const },
+      dimensions: [{
+        dimensionId,
+        entityId: 'semantic:sales:entity:order',
+        supportedRoles: ['filter' as const, 'group_by' as const],
+      }],
+      timeDimensions: [],
+      operations: ['filter' as const, 'group' as const],
+      supportedOutputKinds: ['metric_value' as const, 'dimension' as const],
+      executionCapabilities: [{ route: 'semantic' as const, adapterId: 'metricflow' }],
+      sourceFingerprint: 'sha256:metric',
+    };
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'semantic:metric:orders.revenue',
+        qualifiedId: metricId,
+        evidenceClass: 'semantic',
+        trustTier: 'semantic',
+        classRank: 1,
+        relevanceScore: 100,
+        name: 'Revenue', aliases: ['revenue'], objectType: 'semantic_metric',
+        relevanceReasons: ['exact name or alias'], compatibilityFacts: [],
+        businessShape: {
+          entities: [], dimensions: [dimensionId], timeGrains: [], parameters: [], filters: [], outputs: [], sourceRelations: [],
+        },
+        analyticalCapability: capability,
+        ambiguityPeerIds: [],
+      }],
+      byEvidenceClass: { certified: [], semantic: [], sql: [] },
+      ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan('What is revenue from Zoom customer?'), {
+      contextObjects: [
+        {
+          objectKey: 'semantic:dimension:orders.customer_name', objectType: 'semantic_dimension', name: 'customer_name',
+          fullName: dimensionId, payload: { qualifiedId: dimensionId, table: 'analytics.orders', expression: 'customer_name' },
+        },
+        {
+          objectKey: 'runtime:value:zoom', objectType: 'runtime_value', name: 'customer_name = Zoom',
+          payload: { relation: 'analytics.orders', column: 'customer_name', value: 'Zoom', normalizedValue: 'zoom' },
+        },
+      ],
+    });
+    expect(evidence.parsedIntent?.filters).toEqual([{ field: dimensionId, value: 'Zoom' }]);
+
+    const ambiguous = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'semantic:metric:orders.revenue', qualifiedId: metricId, evidenceClass: 'semantic', trustTier: 'semantic',
+        classRank: 1, relevanceScore: 100, name: 'Revenue', aliases: ['revenue'], objectType: 'semantic_metric',
+        relevanceReasons: [], compatibilityFacts: [], businessShape: {
+          entities: [], dimensions: [dimensionId], timeGrains: [], parameters: [], filters: [], outputs: [], sourceRelations: [],
+        }, analyticalCapability: {
+          ...capability,
+          dimensions: [
+            ...capability.dimensions,
+            {
+              dimensionId: 'semantic:sales:dimension:account_customer_name',
+              entityId: 'semantic:sales:entity:order',
+              supportedRoles: ['filter' as const],
+            },
+          ],
+        }, ambiguityPeerIds: [],
+      }], byEvidenceClass: { certified: [], semantic: [], sql: [] }, ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan('What is revenue from Zoom customer?'), {
+      contextObjects: [
+        {
+          objectKey: 'semantic:dimension:orders.customer_name', objectType: 'semantic_dimension', name: 'customer_name',
+          fullName: dimensionId, payload: { qualifiedId: dimensionId, table: 'analytics.orders', expression: 'customer_name' },
+        },
+        {
+          objectKey: 'semantic:dimension:accounts.customer_name', objectType: 'semantic_dimension', name: 'customer_name',
+          fullName: 'semantic:sales:dimension:account_customer_name',
+          payload: { qualifiedId: 'semantic:sales:dimension:account_customer_name', table: 'analytics.accounts', expression: 'customer_name' },
+        },
+        {
+          objectKey: 'runtime:value:zoom:orders', objectType: 'runtime_value', name: 'customer_name = Zoom',
+          payload: { relation: 'analytics.orders', column: 'customer_name', value: 'Zoom', normalizedValue: 'zoom' },
+        },
+        {
+          objectKey: 'runtime:value:zoom:accounts', objectType: 'runtime_value', name: 'customer_name = Zoom',
+          payload: { relation: 'analytics.accounts', column: 'customer_name', value: 'Zoom', normalizedValue: 'zoom' },
+        },
+      ],
+    });
+    expect(ambiguous.parsedIntent?.filters).toEqual([]);
   });
 
   it('builds a SQLite catalog with DQL, dbt, FTS, diagnostics, and query-run evidence', async () => {
@@ -449,6 +615,12 @@ description: Rank players by total points.
 triggers: [points, scorer]
 preferred_metrics: [total_points]
 vocabulary: { scorer: metric:total_points }
+analytical_policy:
+  metric_ids: [semantic:nba:total_points]
+  timezone: America/Chicago
+  calendar_id: calendar:gregorian
+  completeness_policy: latest_complete
+  default_ranking_period: current
 ---
 Use player scoring facts and explain the ranking grain.
 `, 'utf-8');
@@ -480,6 +652,11 @@ This must not leak into the NBA domain.
           modelAreaRefs: ['scoring'],
           preferredMetrics: ['total_points'],
           vocabulary: { scorer: 'metric:total_points' },
+          analyticalPolicy: expect.objectContaining({
+            metricIds: ['semantic:nba:total_points'],
+            timezone: 'America/Chicago',
+            completenessPolicy: 'latest_complete',
+          }),
           bodyHash: expect.any(String),
         }),
       });
@@ -507,6 +684,16 @@ This must not leak into the NBA domain.
       objectKey: 'skill:nba::skill::nba-ranking',
       provenance: 'DQL domain skill',
       guidance: expect.stringContaining('ranking grain'),
+      analyticalPolicy: {
+        policyId: 'nba::skill::nba-ranking#analytical',
+        sourceHash: pack.knowledgeLens.skillFingerprints?.['nba::skill::nba-ranking'],
+        metricIds: ['semantic:nba:total_points'],
+        calendarId: 'calendar:gregorian',
+        timezone: 'America/Chicago',
+        completenessPolicy: 'latest_complete',
+        defaultRankingPeriod: 'current',
+        narrativeGuidance: [],
+      },
     });
     expect(pack.objects.map((object) => object.objectKey)).toContain('skill:nba::skill::nba-ranking');
     expect(pack.objects.map((object) => object.objectKey)).not.toContain('skill:nba::skill::nba-finance');

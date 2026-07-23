@@ -452,6 +452,15 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           };
           const result = await answer({
             question,
+            ...(req.resolvedAnalyticalPlan
+              ? { resolvedAnalyticalPlan: req.resolvedAnalyticalPlan }
+              : {}),
+            ...(req.analyticalReferenceInstant
+              ? { analyticalReferenceInstant: req.analyticalReferenceInstant }
+              : {}),
+            ...(req.resolveAnalyticalFreshness
+              ? { resolveAnalyticalFreshness: req.resolveAnalyticalFreshness }
+              : {}),
             extraContext,
             provider,
             kg,
