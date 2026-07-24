@@ -27,6 +27,12 @@ export interface MetricDefinition {
   tags?: string[];
   owner?: string;
   cube?: string;
+  /**
+   * Semantic models that own the metric's input measures. A single-model
+   * derived metric also carries `cube`; cross-model metrics intentionally do
+   * not, but retain every owner here for discovery and runtime qualification.
+   */
+  semanticModelIds?: string[];
   aggregation?: string;
   metricType?: string;
   typeParams?: Record<string, unknown>;
@@ -1600,9 +1606,9 @@ export class SemanticLayer {
     // numerator / denominator) rather than carrying measures directly. Some dbt
     // versions omit transitive input_measures, which left the reachable-table
     // set empty and the semantic panel graying EVERY dimension (including the
-    // time dimension) for those metrics. Walk the referenced-metric graph
-    // (bounded) so dimension compatibility reflects the metric's real models
-    // even when the metric itself executes through a MetricFlow runtime.
+    // time dimension) for those metrics. Walk the complete referenced-metric
+    // graph with cycle protection so compatibility reflects the metric's real
+    // models even when it executes through a MetricFlow runtime.
     const referencedMetricNames = (metric: MetricDefinition): string[] => {
       const names = new Set<string>();
       const visit = (value: unknown): void => {
@@ -1634,8 +1640,8 @@ export class SemanticLayer {
       const measureNames = new Set<string>();
       collectMeasureNames(metric, measureNames);
       const visited = new Set<string>([metric.name]);
-      let frontier = referencedMetricNames(metric);
-      for (let depth = 0; depth < 3 && frontier.length > 0; depth += 1) {
+      const frontier = referencedMetricNames(metric);
+      while (frontier.length > 0) {
         const next: string[] = [];
         for (const name of frontier) {
           if (visited.has(name)) continue;
@@ -1646,9 +1652,15 @@ export class SemanticLayer {
           if (referenced.table) reachableTables.add(referenced.table);
           next.push(...referencedMetricNames(referenced));
         }
-        frontier = next;
+        frontier.splice(0, frontier.length, ...next);
       }
       if (metric.table) reachableTables.add(metric.table);
+      for (const modelName of metric.semanticModelIds ?? []) {
+        const model = this.semanticModels.get(modelName);
+        if (model?.table) reachableTables.add(model.table);
+        const cube = this.cubes.get(modelName);
+        if (cube?.table) reachableTables.add(cube.table);
+      }
       for (const measureName of measureNames) {
         const definition = this.measures.get(measureName);
         if (definition?.table) reachableTables.add(definition.table);
@@ -1735,11 +1747,15 @@ export class SemanticLayer {
     const incompatible: Array<{ name: string; qualifiedName?: string; reason: 'no_join_path' | 'not_shared_across_metrics' | 'metric_unresolved' }> = [];
     for (const name of unresolved) incompatible.push({ name, reason: 'metric_unresolved' });
 
-    const seenNames = new Set<string>();
+    const seenReferences = new Set<string>();
     for (const dimension of Array.from(this.dimensionVariants.values()).flat()) {
-      if (seenNames.has(dimension.name)) continue;
-      seenNames.add(dimension.name);
-      const resolved = this.resolveDimensionForMetrics(dimension.name, resolvedMetrics) ?? dimension;
+      const reference = semanticDimensionReference(dimension);
+      if (seenReferences.has(reference)) continue;
+      seenReferences.add(reference);
+      // Preserve the exact model-owned variant. Re-resolving by bare name here
+      // collapses repeated names such as report_date and reintroduces the same
+      // ambiguity the compatibility contract is intended to eliminate.
+      const resolved = dimension;
       const qualifiedName = qualifiedNameFor(resolved);
       if (sharedTables.has(resolved.table)) {
         const cube = resolved.cube ?? resolveCubeNameForTable(resolved.table);

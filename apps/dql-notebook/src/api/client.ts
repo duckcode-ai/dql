@@ -21,6 +21,7 @@ import type {
 import type { AgentAnswerCascade, AgentConversationContext, AgentConversationDqlArtifact } from '../llm/types';
 import type {
   Cell,
+  ExecutionTarget,
   NotebookFile,
   QueryResult,
   RunSnapshot,
@@ -1257,6 +1258,7 @@ export interface NotebookExecutionContext {
   cellName?: string;
   researchRunId?: string;
   source?: string;
+  runId?: string;
 }
 
 export interface DashboardDocumentResponse {
@@ -2405,12 +2407,29 @@ function normalizeNotebookDqlPromotion(raw: NotebookResearchDqlPromotion | undef
 
 export interface NotebookCellExecutionResponse {
   cellType: string;
+  cellId?: string;
+  runId?: string;
   title?: string;
   blockName?: string;
   blockPath?: string;
   chartConfig?: Record<string, unknown>;
   tests?: Array<{ field: string; operator: string; expected: unknown }>;
   result: QueryResult | null;
+  executionTarget?: ExecutionTarget;
+  engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  semanticTrace?: SemanticRuntimeTrace;
+  compiledSql?: string;
+  executedSql?: string;
+  targetBinding?: Record<string, unknown>;
+  executionReceipt?: Record<string, unknown>;
+}
+
+export interface NotebookQueryExecutionResult extends QueryResult {
+  executionTarget?: ExecutionTarget;
+  compiledSql?: string;
+  executedSql?: string;
+  targetBinding?: Record<string, unknown>;
+  executionReceipt?: Record<string, unknown>;
 }
 
 export interface DatasetColumn {
@@ -3380,13 +3399,41 @@ export const api = {
     signal?: AbortSignal,
     executionContext?: NotebookExecutionContext,
     executionTarget?: Cell["executionTarget"],
-  ): Promise<QueryResult> {
+  ): Promise<NotebookQueryExecutionResult> {
     const raw = await request<any>("/api/query", {
       method: "POST",
       body: JSON.stringify({ sql, executionContext, executionTarget }),
       signal,
     });
-    return normalizeQueryResultPayload(raw);
+    if (
+      executionContext?.runId
+      && typeof raw?.executionContext?.runId === 'string'
+      && raw.executionContext.runId !== executionContext.runId
+    ) {
+      throw new DqlApiError({
+        message: 'The notebook server returned a result for a different cell run. The stale result was rejected.',
+        status: 409,
+        code: 'STALE_CELL_EXECUTION',
+        details: { expected: executionContext, received: raw.executionContext },
+      });
+    }
+    return {
+      ...normalizeQueryResultPayload(raw),
+      executionTarget: raw?.executionTarget?.target === 'local'
+        ? { target: 'local' }
+        : raw?.executionTarget?.target === 'connection'
+          ? {
+              target: 'connection',
+              ...(typeof raw.executionTarget.connectionName === 'string'
+                ? { connectionName: raw.executionTarget.connectionName }
+                : {}),
+            }
+          : undefined,
+      compiledSql: typeof raw?.compiledSql === 'string' ? raw.compiledSql : undefined,
+      executedSql: typeof raw?.executedSql === 'string' ? raw.executedSql : undefined,
+      targetBinding: raw?.targetBinding && typeof raw.targetBinding === 'object' ? raw.targetBinding : undefined,
+      executionReceipt: raw?.executionReceipt && typeof raw.executionReceipt === 'object' ? raw.executionReceipt : undefined,
+    };
   },
 
   async previewGeneratedSql(sql: string, signal?: AbortSignal): Promise<{ ok: true; result: QueryResult } | { ok: false; error: string }> {
@@ -3421,14 +3468,48 @@ export const api = {
       }),
       signal,
     });
+    if (
+      executionContext?.runId
+      && typeof raw?.executionContext?.runId === 'string'
+      && raw.executionContext.runId !== executionContext.runId
+    ) {
+      throw new DqlApiError({
+        message: 'The notebook server returned a result for a different semantic cell run. The stale result was rejected.',
+        status: 409,
+        code: 'STALE_CELL_EXECUTION',
+        details: { expected: executionContext, received: raw.executionContext },
+      });
+    }
     return {
       cellType: String(raw?.cellType ?? cell.type),
+      cellId: typeof raw?.executionContext?.cellId === 'string' ? raw.executionContext.cellId : undefined,
+      runId: typeof raw?.executionContext?.runId === 'string' ? raw.executionContext.runId : undefined,
       title: typeof raw?.title === 'string' ? raw.title : undefined,
       blockName: typeof raw?.blockName === 'string' ? raw.blockName : undefined,
       blockPath: typeof raw?.blockPath === 'string' ? raw.blockPath : undefined,
       chartConfig: raw?.chartConfig && typeof raw.chartConfig === 'object' ? raw.chartConfig : undefined,
       tests: Array.isArray(raw?.tests) ? raw.tests : undefined,
       result: raw?.result ? normalizeQueryResultPayload(raw.result) : null,
+      executionTarget: raw?.executionTarget?.target === 'local'
+        ? { target: 'local' }
+        : raw?.executionTarget?.target === 'connection'
+          ? {
+              target: 'connection',
+              ...(typeof raw.executionTarget.connectionName === 'string'
+                ? { connectionName: raw.executionTarget.connectionName }
+                : {}),
+            }
+          : undefined,
+      engine: raw?.engine === 'native' || raw?.engine === 'metricflow-cli' || raw?.engine === 'dbt-cloud'
+        ? raw.engine
+        : undefined,
+      semanticTrace: raw?.semanticTrace && typeof raw.semanticTrace === 'object'
+        ? raw.semanticTrace as SemanticRuntimeTrace
+        : undefined,
+      compiledSql: typeof raw?.compiledSql === 'string' ? raw.compiledSql : undefined,
+      executedSql: typeof raw?.executedSql === 'string' ? raw.executedSql : undefined,
+      targetBinding: raw?.targetBinding && typeof raw.targetBinding === 'object' ? raw.targetBinding : undefined,
+      executionReceipt: raw?.executionReceipt && typeof raw.executionReceipt === 'object' ? raw.executionReceipt : undefined,
     };
   },
 
@@ -4251,6 +4332,7 @@ export const api = {
   async previewSemanticBuilder(payload: {
     metrics: string[];
     dimensions: string[];
+    executionTarget?: ExecutionTarget;
     filters?: Array<{ dimension: string; operator: string; values: string[] }>;
     timeDimension?: { name: string; granularity: string };
     orderBy?: Array<{ name: string; direction: 'asc' | 'desc' }>;

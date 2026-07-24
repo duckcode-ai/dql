@@ -643,13 +643,21 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
     }
   }
 
-  for (const metric of layer.listMetrics()) {
+  for (const metric of layer.listMetrics(undefined, { includeMeasures: false })) {
     const model = semanticModels.find((candidate) => candidate.name === metric.cube);
-    const availableDimensions = semanticDimensions.filter((dimension) => !metric.cube || dimension.cube === metric.cube);
-    // MetricFlow may deduplicate same-named domain dimensions in its flattened
-    // registry. The semantic model retains the authoritative per-model shape,
-    // so use it to recover dimensions/time even when listDimensions() only
-    // exposes another model's copy of the shared concept.
+    // CONTRACT-002 / AGT-014: the agent sees the same model-qualified
+    // compatibility projection as the UI. An unowned metric must never fall
+    // back to every global dimension.
+    const availableDimensions = (() => {
+      try {
+        return layer.explainCompatibleDimensions([metric.name]).compatible;
+      } catch {
+        return [];
+      }
+    })();
+    // Preserve model-declared members when an adapter supplied a bounded model
+    // contract but flattened dimension records are unavailable. This is still
+    // model-scoped; an unowned metric never receives global dimensions.
     const modelDimensionNames = Array.from(new Set([
       ...(model?.dimensions ?? []),
       ...(model?.timeDimensions ?? []),
@@ -707,6 +715,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         metric.label ? `label: ${metric.label}` : '',
         metric.metricType ? `metric type: ${metric.metricType}` : '',
         metric.aggregation ? `aggregation: ${metric.aggregation}` : '',
+        metric.semanticModelIds?.length ? `semantic models: ${metric.semanticModelIds.join(', ')}` : '',
         metric.table ? `table: ${metric.table}` : '',
         metric.sql ? `sql: ${metric.sql}` : '',
         nonAdditiveDimensions.length > 0 ? 'non-additive: semantic runtime required' : '',
@@ -718,6 +727,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         table: metric.table,
         formula: metric.sql,
         aggTimeDimension: metric.aggTimeDimension,
+        semanticModelIds: metric.semanticModelIds ?? (metric.cube ? [metric.cube] : []),
         backingMeasureNames: backingMeasures.map((measure) => measure.name),
         nonAdditiveMeasures,
         nonAdditiveDimensions,
@@ -735,7 +745,9 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
         : metric.source?.provider ?? 'semantic layer',
       sourcePath: semanticSourcePath(metric.source?.extra),
     });
-    if (metric.cube) edges.push({ src: nodeId, dst: `semantic_model:${metric.cube}`, kind: 'depends_on' });
+    for (const modelId of metric.semanticModelIds ?? (metric.cube ? [metric.cube] : [])) {
+      edges.push({ src: nodeId, dst: `semantic_model:${modelId}`, kind: 'depends_on' });
+    }
   }
 
   // PERF-001: dbt fallback semantics may expose every physical column as a

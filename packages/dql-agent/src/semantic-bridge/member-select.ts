@@ -51,16 +51,23 @@ export async function selectSemanticMembersViaLlm(input: {
   // and keep the qualified name to hand the runtime the exact group-by it wants.
   const candidateMetricNames = visibleMetrics.slice(0, 5).map((metric) => metric.name);
   const compatibleByName = new Map<string, string | undefined>();
+  const compatibleByMetric = new Map<string, string[]>();
   for (const metricName of candidateMetricNames) {
     try {
+      const references: string[] = [];
       for (const dim of input.semanticLayer.explainCompatibleDimensions([metricName]).compatible) {
         const reference = semanticDimensionReference(dim);
         if (!compatibleByName.has(reference)) compatibleByName.set(reference, dim.qualifiedName);
+        references.push(reference);
       }
-    } catch { /* compatibility is best-effort; fall back to the full list below */ }
+      compatibleByMetric.set(metricName, references);
+    } catch {
+      // No compatibility proof means no dimension card for this metric. Never
+      // replace a failed governed check with the complete global catalog.
+      compatibleByMetric.set(metricName, []);
+    }
   }
-  const restrictToCompatible = compatibleByName.size > 0;
-  const keepDimension = (name: string): boolean => !restrictToCompatible || compatibleByName.has(name);
+  const keepDimension = (name: string): boolean => compatibleByName.has(name);
   const visibleDimensions = dimensions.filter((dimension) => keepDimension(semanticDimensionReference(dimension))).slice(0, 80);
   const visibleTimeDimensions = timeDimensions.filter((dimension) => keepDimension(semanticDimensionReference(dimension))).slice(0, 20);
   // Real per-column grains so the model picks a grain the column actually
@@ -70,10 +77,14 @@ export async function selectSemanticMembersViaLlm(input: {
 
   const catalog = [
     'METRICS:',
-    ...visibleMetrics.map((metric) => `- ${metric.name}${metric.label && metric.label !== metric.name ? ` (${metric.label})` : ''}${metric.description ? `: ${metric.description}` : ''}`),
-    restrictToCompatible
-      ? 'DIMENSIONS (only those groupable by the metrics above — do not use any other):'
-      : 'DIMENSIONS:',
+    ...visibleMetrics.map((metric) => {
+      const compatible = compatibleByMetric.get(metric.name) ?? [];
+      const compatibility = candidateMetricNames.includes(metric.name)
+        ? ` [compatible dimensions: ${compatible.length > 0 ? compatible.slice(0, 25).join(', ') : 'none'}]`
+        : '';
+      return `- ${metric.name}${metric.label && metric.label !== metric.name ? ` (${metric.label})` : ''}${metric.description ? `: ${metric.description}` : ''}${compatibility}`;
+    }),
+    'DIMENSIONS (only those groupable by the metrics above; obey each metric card):',
     ...visibleDimensions.map((dimension) => {
       const reference = semanticDimensionReference(dimension);
       return `- ${reference}${dimension.label && dimension.label !== dimension.name ? ` (${dimension.label}; local: ${dimension.name})` : ` (local: ${dimension.name})`}`;
@@ -125,21 +136,40 @@ export async function selectSemanticMembersViaLlm(input: {
     ? record.metrics.filter((value): value is string => typeof value === 'string' && metricNames.has(value))
     : [];
   if (selectedMetrics.length === 0) return undefined;
+  let compatibleForSelection: Set<string>;
+  try {
+    compatibleForSelection = new Set(
+      input.semanticLayer.explainCompatibleDimensions(selectedMetrics).compatible.map(semanticDimensionReference),
+    );
+  } catch {
+    return undefined;
+  }
   const selection: SemanticMemberSelection = { metrics: selectedMetrics };
   if (Array.isArray(record.dimensions)) {
-    selection.dimensions = record.dimensions.filter((value): value is string => typeof value === 'string' && dimensionNames.has(value));
+    const requested = record.dimensions.filter((value): value is string => typeof value === 'string');
+    if (requested.some((value) => !dimensionNames.has(value) || !compatibleForSelection.has(value))) return undefined;
+    selection.dimensions = requested;
   }
   const timeDim = record.timeDimension;
-  if (timeDim && typeof timeDim === 'object'
-    && typeof (timeDim as Record<string, unknown>).name === 'string'
-    && timeDimensionNames.has((timeDim as { name: string }).name)
-    && typeof (timeDim as Record<string, unknown>).granularity === 'string') {
-    selection.timeDimension = { name: (timeDim as { name: string }).name, granularity: (timeDim as { granularity: string }).granularity };
+  if (timeDim && typeof timeDim === 'object') {
+    const name = (timeDim as Record<string, unknown>).name;
+    const granularity = (timeDim as Record<string, unknown>).granularity;
+    if (typeof name !== 'string'
+      || typeof granularity !== 'string'
+      || !timeDimensionNames.has(name)
+      || !compatibleForSelection.has(name)) return undefined;
+    selection.timeDimension = { name, granularity };
   }
   if (Array.isArray(record.filters)) {
+    const requestedFilters = record.filters.map((entry) => entry as Record<string, unknown>);
+    if (requestedFilters.some((entry) =>
+      !entry
+      || typeof entry.dimension !== 'string'
+      || !dimensionNames.has(entry.dimension)
+      || !compatibleForSelection.has(entry.dimension)
+      || !Array.isArray(entry.values))) return undefined;
     const filters = record.filters
       .map((entry) => entry as Record<string, unknown>)
-      .filter((entry) => entry && typeof entry.dimension === 'string' && dimensionNames.has(entry.dimension) && Array.isArray(entry.values))
       .map((entry) => ({
         dimension: entry.dimension as string,
         operator: (entry.operator === 'in' ? 'in' : 'equals') as SemanticBridgeFilter['operator'],

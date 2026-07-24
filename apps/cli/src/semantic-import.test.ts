@@ -134,6 +134,10 @@ describe('buildSemanticTree', () => {
     expect(new Set(groupIds).size).toBe(groupIds.length);
     expect(groupIds.some((id) => id.includes('cube:customers'))).toBe(true);
     expect(groupIds.some((id) => id.includes('cube:orders'))).toBe(true);
+    const serialized = JSON.stringify(tree);
+    expect(serialized.match(/"kind":"measure"/g)).toHaveLength(2);
+    expect(serialized.match(/"kind":"metric"/g) ?? []).toHaveLength(0);
+    expect(serialized).toContain('Underlying measures');
   });
 
   it('ID-001/UI-009 gives repeated dimension leaves model-scoped ids and aliases', () => {

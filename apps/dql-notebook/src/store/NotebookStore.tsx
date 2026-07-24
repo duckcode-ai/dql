@@ -125,6 +125,20 @@ const initialState: NotebookState = {
   globalAi: { open: false, audience: 'stakeholder', context: {} },
 };
 
+export function ensureUniqueCellIds(cells: Cell[]): Cell[] {
+  const used = new Set<string>();
+  return cells.map((cell) => {
+    let id = cell.id?.trim();
+    if (!id || used.has(id)) {
+      do {
+        id = makeCellId();
+      } while (used.has(id));
+    }
+    used.add(id);
+    return id === cell.id ? cell : { ...cell, id };
+  });
+}
+
 /**
  * Pure reducer — identical semantics to the previous useReducer version.
  * Kept as a free function so the action surface stays declarative and the
@@ -281,7 +295,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return {
         ...state,
         activeFile: action.file,
-        cells: action.cells,
+        cells: ensureUniqueCellIds(action.cells),
         notebookTitle: action.title,
         notebookMetadata: action.metadata ?? {},
         notebookDirty: false,
@@ -317,7 +331,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       };
 
     case 'SET_CELLS':
-      return { ...state, cells: action.cells, notebookDirty: true };
+      return { ...state, cells: ensureUniqueCellIds(action.cells), notebookDirty: true };
 
     case 'UPDATE_NOTEBOOK_METADATA': {
       const current = state.notebookMetadata;
@@ -337,15 +351,18 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     }
 
     case 'ADD_CELL': {
+      const cell = state.cells.some((candidate) => candidate.id === action.cell.id)
+        ? { ...action.cell, id: makeCellId() }
+        : action.cell;
       if (!action.afterId) {
-        return { ...state, cells: [...state.cells, action.cell], notebookDirty: true };
+        return { ...state, cells: [...state.cells, cell], notebookDirty: true };
       }
       const idx = state.cells.findIndex((c) => c.id === action.afterId);
       if (idx === -1) {
-        return { ...state, cells: [...state.cells, action.cell], notebookDirty: true };
+        return { ...state, cells: [...state.cells, cell], notebookDirty: true };
       }
       const newCells = [...state.cells];
-      newCells.splice(idx + 1, 0, action.cell);
+      newCells.splice(idx + 1, 0, cell);
       return { ...state, cells: newCells, notebookDirty: true };
     }
 

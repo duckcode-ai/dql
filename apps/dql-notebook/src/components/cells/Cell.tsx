@@ -874,6 +874,186 @@ function researchStateColor(state: CellResearchState, t: Theme): string {
   }
 }
 
+function evidenceJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function ExecutionTrustPanel({ cell, t }: { cell: Cell; t: Theme }) {
+  const execution = cell.execution;
+  if (!execution) return null;
+
+  const statusColor = execution.status === "success"
+    ? t.success
+    : execution.status === "cancelled" || execution.status === "blocked"
+      ? t.warning
+      : t.error;
+  const dqlSource = cell.dqlArtifact?.source ?? (cell.type === "dql" ? cell.content : undefined);
+  const targetLabel = execution.executionTarget?.target === "local"
+    ? "Local DuckDB"
+    : execution.executionTarget?.connectionName
+      ? `Connection: ${execution.executionTarget.connectionName}`
+      : "No target recorded";
+  const semanticSteps = execution.semanticTrace?.steps ?? [];
+  const semanticBindings = execution.semanticTrace?.bindings ?? [];
+  const codeBlockStyle: React.CSSProperties = {
+    margin: "5px 0 0",
+    padding: "7px 8px",
+    maxHeight: 190,
+    overflow: "auto",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+    border: `1px solid ${t.cellBorder}`,
+    borderRadius: 6,
+    background: t.editorBg,
+    color: t.textSecondary,
+    fontFamily: t.fontMono,
+    fontSize: 10.5,
+    lineHeight: 1.45,
+  };
+  const sectionLabelStyle: React.CSSProperties = {
+    color: t.textMuted,
+    fontSize: 9.5,
+    fontWeight: 800,
+    letterSpacing: ".045em",
+    textTransform: "uppercase",
+  };
+
+  return (
+    <details
+      style={{
+        borderTop: `1px solid ${t.cellBorder}`,
+        padding: "7px 12px",
+        background: `${t.tableHeaderBg}28`,
+      }}
+    >
+      <summary
+        style={{
+          cursor: "pointer",
+          listStyle: "none",
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          color: t.textSecondary,
+          fontSize: 11,
+          fontWeight: 750,
+        }}
+      >
+        <ShieldCheck size={12} color={statusColor} />
+        Trust &amp; Steps
+        <span style={{ color: statusColor, textTransform: "capitalize" }}>{execution.status}</span>
+        <span style={{ color: t.textMuted, fontWeight: 500 }}>
+          {execution.engine ?? (cell.type === "dql" ? "DQL compiler" : "warehouse SQL")}
+          {" · "}{execution.durationMs} ms
+        </span>
+        <span
+          title={execution.runId}
+          style={{
+            marginLeft: "auto",
+            maxWidth: 190,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: t.textMuted,
+            fontFamily: t.fontMono,
+            fontSize: 9.5,
+            fontWeight: 500,
+          }}
+        >
+          {execution.runId}
+        </span>
+      </summary>
+
+      <div style={{ display: "grid", gap: 10, paddingTop: 9, fontFamily: t.font }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))",
+            gap: 6,
+          }}
+        >
+          {[
+            ["Cell", execution.cellId],
+            ["Route", execution.route],
+            ["Target", targetLabel],
+            ["Started", execution.startedAt],
+          ].map(([label, value]) => (
+            <div key={label} style={{ minWidth: 0, border: `1px solid ${t.cellBorder}`, borderRadius: 6, padding: "6px 7px", background: t.cellBg }}>
+              <div style={sectionLabelStyle}>{label}</div>
+              <div title={value} style={{ marginTop: 2, color: t.textSecondary, fontFamily: label === "Started" ? t.font : t.fontMono, fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {dqlSource && (
+          <div>
+            <div style={sectionLabelStyle}>1 · Governed DQL request</div>
+            <pre style={codeBlockStyle}>{dqlSource}</pre>
+          </div>
+        )}
+
+        {execution.compiledSql && (
+          <div>
+            <div style={sectionLabelStyle}>{dqlSource ? "2" : "1"} · Compiled SQL</div>
+            <pre style={codeBlockStyle}>{execution.compiledSql}</pre>
+          </div>
+        )}
+
+        {execution.executedSql && execution.executedSql !== execution.compiledSql && (
+          <div>
+            <div style={sectionLabelStyle}>Executed SQL</div>
+            <pre style={codeBlockStyle}>{execution.executedSql}</pre>
+          </div>
+        )}
+
+        {(semanticSteps.length > 0 || semanticBindings.length > 0) && (
+          <div>
+            <div style={sectionLabelStyle}>Semantic compiler trace</div>
+            {semanticSteps.length > 0 && (
+              <ol style={{ margin: "6px 0 0", paddingLeft: 20, color: t.textSecondary, fontSize: 10.5, lineHeight: 1.55 }}>
+                {semanticSteps.map((step, stepIndex) => (
+                  <li key={step.id ?? `${stepIndex}:${step.label ?? "step"}`}>
+                    <strong>{step.label ?? step.id ?? `Step ${stepIndex + 1}`}</strong>
+                    {step.status ? ` · ${step.status}` : ""}
+                    {step.detail ? ` — ${step.detail}` : ""}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {semanticBindings.length > 0 && <pre style={codeBlockStyle}>{evidenceJson(semanticBindings)}</pre>}
+          </div>
+        )}
+
+        {(execution.targetBinding || execution.executionReceipt) && (
+          <div>
+            <div style={sectionLabelStyle}>Target binding &amp; execution receipt</div>
+            <pre style={codeBlockStyle}>{evidenceJson({
+              targetBinding: execution.targetBinding,
+              executionReceipt: execution.executionReceipt,
+            })}</pre>
+          </div>
+        )}
+
+        {execution.error && (
+          <div style={{ border: `1px solid ${t.error}55`, borderRadius: 6, padding: "7px 8px", background: `${t.error}0d` }}>
+            <div style={{ ...sectionLabelStyle, color: t.error }}>
+              Failure · {execution.error.code ?? "EXECUTION_FAILED"}
+              {execution.error.phase ? ` · ${execution.error.phase}` : ""}
+            </div>
+            <div style={{ marginTop: 4, color: t.textPrimary, fontSize: 11, lineHeight: 1.45 }}>{execution.error.message}</div>
+            {execution.error.details !== undefined && <pre style={codeBlockStyle}>{evidenceJson(execution.error.details)}</pre>}
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export function CellComponent({ cell, index, onStartResearch, researchState }: CellProps) {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
@@ -1759,6 +1939,8 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
             <pre style={{ margin: '6px 0 0', fontFamily: t.fontMono, fontSize: 11, whiteSpace: 'pre-wrap', color: t.textSecondary, maxHeight: 200, overflow: 'auto' }}>{cell.dqlArtifact.source}</pre>
           </details>
         )}
+
+        <ExecutionTrustPanel cell={cell} t={t} />
 
         {notesOpen && (
           <CellNotes

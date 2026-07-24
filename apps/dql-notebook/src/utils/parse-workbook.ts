@@ -17,7 +17,7 @@ import type {
   CellAnnotation,
   CellKernelMetadata,
 } from "../store/types";
-import { makeCellId } from "../store/NotebookStore";
+import { ensureUniqueCellIds, makeCellId } from "../store/NotebookStore";
 
 export interface ParsedWorkbook {
   title: string;
@@ -178,7 +178,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
   try {
     const data = JSON.parse(content) as DqlNotebookFile;
     const title = data.title || data.metadata?.title || "Untitled";
-    const cells: Cell[] = (data.cells || []).map((c) => {
+    const cells: Cell[] = ensureUniqueCellIds((data.cells || []).map((c) => {
       const preservedFields = Object.fromEntries(
         Object.entries(c).filter(([key]) => !KNOWN_CELL_FIELDS.has(key)),
       );
@@ -210,7 +210,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
         ...(c.kernel ? { kernel: c.kernel } : {}),
         ...(Object.keys(preservedFields).length > 0 ? { preservedFields } : {}),
       };
-    });
+    }));
     const { title: _metaTitle, ...restMeta } = data.metadata ?? {};
     return { title, cells, metadata: restMeta };
   } catch (err) {

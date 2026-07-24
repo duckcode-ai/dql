@@ -291,6 +291,48 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+  it('CONTRACT-002 indexes technical measures separately without duplicating them as business metrics', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'orders',
+      label: 'Orders',
+      description: '',
+      domain: 'commerce',
+      table: 'orders',
+      sql: 'select * from orders',
+      measures: [{
+        name: 'gross_revenue',
+        label: 'Gross revenue',
+        description: '',
+        domain: 'commerce',
+        sql: 'revenue_amount',
+        type: 'sum',
+        table: 'orders',
+      }],
+      dimensions: [],
+      timeDimensions: [],
+      joins: [],
+      segments: [],
+      preAggregations: [],
+    });
+    layer.addMeasure({
+      name: 'gross_revenue',
+      label: 'Gross revenue',
+      description: '',
+      domain: 'commerce',
+      agg: 'sum',
+      expr: 'revenue_amount',
+      table: 'orders',
+      cube: 'orders',
+    });
+
+    const graph = buildKGFromSemanticLayer(layer);
+    expect(graph.nodes.filter((node) => node.kind === 'metric')).toHaveLength(0);
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 'measure:orders.gross_revenue' }),
+    ]));
+  });
+
   it('ID-001/AGT-010 indexes repeated dimension leaves as distinct model-owned evidence', () => {
     const layer = new SemanticLayer({
       metrics: [],

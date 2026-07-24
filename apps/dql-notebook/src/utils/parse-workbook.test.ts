@@ -94,4 +94,19 @@ describe(".dqlnb v2 persistence", () => {
     );
     expect(parsed.cells.map((cell) => cell.type)).toEqual(types);
   });
+
+  it("repairs duplicate cell IDs so one cell run cannot update another cell", () => {
+    const parsed = parseDqlNotebook(JSON.stringify({
+      version: 1,
+      title: "Duplicate IDs",
+      cells: [
+        { id: "shared", type: "sql", content: "select 1" },
+        { id: "shared", type: "sql", content: "select 2" },
+      ],
+    }));
+
+    expect(parsed.cells[0].id).toBe("shared");
+    expect(parsed.cells[1].id).not.toBe("shared");
+    expect(new Set(parsed.cells.map((cell) => cell.id)).size).toBe(2);
+  });
 });

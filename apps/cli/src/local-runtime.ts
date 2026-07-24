@@ -156,6 +156,7 @@ import {
   readIndexedDomainKnowledge,
   readIndexedKnowledge360,
   compactSemanticRuntimeFailure,
+  classifyAnalyticalFailure,
   propose,
   proposePlan,
   recordCorrectionTrace,
@@ -1352,6 +1353,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return requireActiveConnection(
       isConnectionConfig(body.connection) ? body.connection : connection,
     );
+  };
+  const executionTargetDescriptor = (
+    body: Record<string, unknown>,
+  ): { target: 'local' } | { target: 'connection'; connectionName?: string } => {
+    const target =
+      body.executionTarget && typeof body.executionTarget === 'object'
+        ? body.executionTarget as Record<string, unknown>
+        : null;
+    if (target?.target === 'local') return { target: 'local' };
+    const storedConnections = getStoredConnections(
+      projectConfig as unknown as Record<string, unknown>,
+    );
+    const connectionName = target?.target === 'connection' && typeof target.connectionName === 'string'
+      ? target.connectionName
+      : projectConfig.defaultConnectionName
+        ?? resolveDefaultConnectionKey(
+          projectConfig as unknown as Record<string, unknown>,
+          storedConnections,
+        );
+    return {
+      target: 'connection',
+      ...(connectionName ? { connectionName } : {}),
+    };
   };
   const requireActiveConnection = (
     candidate: ConnectionConfig | null | undefined = connection,
@@ -6665,7 +6689,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit') ?? 30) || 30));
         const matches = (value: string) => !query || value.toLowerCase().includes(query);
         const metrics = semanticLayer
-          ? semanticLayer.listMetrics().map((m) => m.name).filter(matches).sort().slice(0, limit)
+          ? semanticLayer.listMetrics(undefined, { includeMeasures: false }).map((m) => m.name).filter(matches).sort().slice(0, limit)
           : [];
         const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
         const blocks = Object.values(manifest.blocks)
@@ -10734,11 +10758,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ? hasDbtSemanticManifest(projectRoot, semanticConfig?.projectPath)
         : false;
       const semanticRuntime = await getSemanticRuntimeStatus(projectRoot, { probeConfiguredCloud: true });
-      const metrics = semanticLayer.listMetrics().map((m) => ({
+      // The public catalog exposes business metrics only. Measures remain
+      // available in the dedicated technical collection for model inspection
+      // and native composition, but no longer appear as duplicate metrics.
+      const metrics = semanticLayer.listMetrics(undefined, { includeMeasures: false }).map((m) => ({
         name: m.name,
         label: m.label,
         description: m.description,
         domain: m.domain,
+        cube: m.cube ?? null,
+        semanticModelIds: m.semanticModelIds ?? (m.cube ? [m.cube] : []),
+        canonicalId: `semantic:${m.domain || 'uncategorized'}:metric:${m.name}`,
         sql: m.sql,
         type: m.type,
         table: m.table,
@@ -11345,7 +11375,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         score?: number;
       }> = [];
       if (semanticLayer && (kind === "all" || kind === "metric")) {
-        for (const metric of semanticLayer.listMetrics())
+        for (const metric of semanticLayer.listMetrics(undefined, { includeMeasures: false }))
           candidates.push({
             type: "metric",
             name: metric.name,
@@ -11548,7 +11578,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         tags: string[];
       }> = [];
       if (semanticLayer) {
-        for (const m of semanticLayer.listMetrics()) {
+        for (const m of semanticLayer.listMetrics(undefined, { includeMeasures: false })) {
           completions.push({
             type: 'metric',
             name: m.name,
@@ -11722,7 +11752,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         execContext = notebookExecutionContext(body.executionContext);
         if (typeof body.sql !== 'string' || body.sql.trim().length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ columns: [], rows: [], error: 'Missing SQL in request body.' }));
+          res.end(serializeJSON({
+            columns: [],
+            rows: [],
+            error: 'Missing SQL in request body.',
+            code: 'COMPILATION_FAILED',
+            details: {
+              phase: 'compilation',
+              executionContext: notebookExecutionIdentity(execContext),
+              executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+            },
+          }));
           return;
         }
         const executionConnection = await resolveExecutionConnection(
@@ -11740,6 +11780,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             error: `Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`,
             code: 'semantic_ref',
             unresolvedRefs: semantic.unresolvedRefs,
+            details: {
+              phase: 'compilation',
+              executionContext: notebookExecutionIdentity(execContext),
+              executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+            },
           }));
           return;
         }
@@ -11759,7 +11804,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           prepared.connection,
         );
         const normalized = normalizeQueryResult(result, semantic.semanticRefs);
-        if (execContext) {
+        if (execContext?.notebookPath) {
           recordNotebookQueryRun(projectRoot, {
             notebookPath: execContext.notebookPath!,
             cellId: execContext.cellId,
@@ -11777,7 +11822,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             sql: body.sql,
           });
         }
-        const payload = serializeJSON(normalized);
+        const payload = serializeJSON({
+          ...normalized,
+          executionContext: notebookExecutionIdentity(execContext),
+          executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+          compiledSql: semantic.sql,
+          executedSql: prepared.sql,
+        });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(payload);
       } catch (error) {
@@ -11792,10 +11843,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             rows: [],
             error: error.message,
             code: 'unauthorized',
+            details: {
+              phase: 'execution',
+              executionContext: notebookExecutionIdentity(execContext),
+              executionTarget: executionTargetDescriptor(
+                body && typeof body === 'object' ? body as Record<string, unknown> : {},
+              ),
+            },
           }));
           return;
         }
-        if (execContext) {
+        if (execContext?.notebookPath) {
           recordNotebookQueryRun(projectRoot, {
             notebookPath: execContext.notebookPath!,
             cellId: execContext.cellId,
@@ -11818,6 +11876,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           columns: [],
           rows: [],
           error: error instanceof Error ? error.message : String(error),
+          code: classifyAnalyticalFailure(error),
+          details: {
+            phase: 'execution',
+            executionContext: notebookExecutionIdentity(execContext),
+            executionTarget: executionTargetDescriptor(
+              body && typeof body === 'object' ? body as Record<string, unknown> : {},
+            ),
+          },
         }));
       }
       return;
@@ -11843,7 +11909,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           engine?: SemanticRuntimeQueryRequest['engine'];
         };
         // Resolve which connection to use — request can override default
-        const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
+        const targetConnection = await resolveExecutionConnection(body as Record<string, unknown>);
         const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, engine);
         const metricFlow = plannedAdapter === 'metricflow-cli'
           ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
@@ -11955,7 +12021,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           savedQuery?: string;
           engine?: SemanticRuntimeQueryRequest['engine'];
         };
-        const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
+        const targetConnection = await resolveExecutionConnection(body as Record<string, unknown>);
         const plannedAdapter = await resolvePlannedSemanticAdapter(projectRoot, engine);
         const metricFlow = plannedAdapter === 'metricflow-cli'
           ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
@@ -12088,7 +12154,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sendDbtOwnedSemanticAuthoringError(res);
           return;
         }
-        const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
+        const targetConnection = await resolveExecutionConnection(body as Record<string, unknown>);
         const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
         const composed = await composeRuntimeSemanticQuery({
           metrics,
@@ -12668,7 +12734,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           columns: normalized.columns,
           rows: normalized.rows,
         });
-        if (execContext) {
+        if (execContext?.notebookPath) {
           recordNotebookQueryRun(projectRoot, {
             notebookPath: execContext.notebookPath!,
             cellId: execContext.cellId ?? cell.id,
@@ -12690,12 +12756,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           cellType: cell.type,
+          executionContext: notebookExecutionIdentity(execContext, cell.id),
           title: plan?.title,
           blockName: resolved.blockName,
           blockPath: resolved.blockPath,
           chartConfig: plan?.chartConfig,
           tests: plan?.tests,
           result: normalized,
+          executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+          compiledSql: semanticCompose?.compiled?.sql ?? executableSql,
+          engine: semanticCompose?.compiled?.engine,
           ...(semanticExecution ? {
             semanticTrace: semanticExecution.semanticTrace,
             targetBinding: semanticExecution.targetBinding,
@@ -12717,7 +12787,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : {}),
         }));
       } catch (error) {
-        if (execContext) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            error: error.message,
+            code: 'unauthorized',
+            details: {
+              phase: 'execution',
+              executionContext: notebookExecutionIdentity(execContext, body?.cell?.id),
+              executionTarget: executionTargetDescriptor(
+                body && typeof body === 'object' ? body as Record<string, unknown> : {},
+              ),
+            },
+          }));
+          return;
+        }
+        if (execContext?.notebookPath) {
           recordNotebookQueryRun(projectRoot, {
             notebookPath: execContext.notebookPath!,
             cellId: execContext.cellId,
@@ -12733,12 +12818,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             error: error instanceof Error ? error.message : String(error),
           });
         }
-        const code = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
-        res.writeHead(code === 'EXECUTION_TARGET_MISMATCH' ? 409 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        const semanticCode = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
+        const code = semanticCode ?? classifyAnalyticalFailure(error);
+        const semanticDetails = semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error);
+        const details = semanticDetails && typeof semanticDetails === 'object' && !Array.isArray(semanticDetails)
+          ? semanticDetails as Record<string, unknown>
+          : {};
+        const status = code === 'EXECUTION_TARGET_MISMATCH' || code === 'SEMANTIC_SOURCE_DRIFT'
+          ? 409
+          : semanticCode
+            ? 400
+            : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           error: error instanceof Error ? error.message : String(error),
           code,
-          details: semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error),
+          details: {
+            ...details,
+            phase: typeof details.phase === 'string' ? details.phase : semanticCode ? 'compilation' : 'execution',
+            executionContext: notebookExecutionIdentity(execContext, body?.cell?.id),
+            executionTarget: executionTargetDescriptor(
+              body && typeof body === 'object' ? body as Record<string, unknown> : {},
+            ),
+          },
         }));
       }
       return;
@@ -21594,7 +21696,7 @@ function semanticLayerCounts(layer: SemanticLayer | undefined) {
   return layer
     ? {
         domains: layer.listDomains().length,
-        metrics: layer.listMetrics().length,
+        metrics: layer.listMetrics(undefined, { includeMeasures: false }).length,
         measures: layer.listMeasures().length,
         dimensions: layer.listDimensions().length,
         timeDimensions: layer.listTimeDimensions().length,
@@ -21619,7 +21721,7 @@ function semanticLayerCounts(layer: SemanticLayer | undefined) {
 function countUncategorizedSemanticObjects(layer: SemanticLayer | undefined): number {
   if (!layer) return 0;
   return [
-    ...layer.listMetrics(),
+    ...layer.listMetrics(undefined, { includeMeasures: false }),
     ...layer.listMeasures(),
     ...layer.listDimensions(),
     ...layer.listTimeDimensions(),
@@ -23131,20 +23233,33 @@ type NotebookExecutionContextInput = {
   cellName?: string;
   researchRunId?: string;
   source?: string;
+  runId?: string;
 };
 
 function notebookExecutionContext(value: unknown): NotebookExecutionContextInput | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
   const notebookPath = notebookResearchString(raw.notebookPath);
-  if (!notebookPath) return null;
+  const cellId = notebookResearchString(raw.cellId);
+  const runId = notebookResearchString(raw.runId);
+  if (!notebookPath && !cellId && !runId) return null;
   return {
     notebookPath,
-    cellId: notebookResearchString(raw.cellId),
+    cellId,
     cellName: notebookResearchString(raw.cellName),
     researchRunId: notebookResearchString(raw.researchRunId),
     source: notebookResearchString(raw.source),
+    runId,
   };
+}
+
+function notebookExecutionIdentity(
+  context: NotebookExecutionContextInput | null,
+  fallbackCellId?: string,
+): { cellId?: string; runId?: string } | undefined {
+  const cellId = context?.cellId ?? fallbackCellId;
+  const runId = context?.runId;
+  return cellId || runId ? { cellId, runId } : undefined;
 }
 
 function notebookResearchSelectedContext(run: NotebookResearchRun, context: unknown): Record<string, unknown> {

@@ -233,13 +233,41 @@ export function loadSemanticImportManifest(projectRoot: string): SemanticImportM
   }
 }
 
+function technicalMeasuresForCube(
+  cube: CubeDefinition,
+  measures: MeasureDefinition[],
+): MeasureDefinition[] {
+  const byName = new Map(
+    measures
+      .filter((measure) => measure.cube === cube.name)
+      .map((measure) => [measure.name, measure]),
+  );
+  for (const projected of cube.measures) {
+    if (byName.has(projected.name)) continue;
+    byName.set(projected.name, {
+      name: projected.name,
+      label: projected.label,
+      description: projected.description,
+      domain: projected.domain,
+      agg: projected.aggregation ?? projected.type,
+      expr: projected.sql,
+      table: projected.table,
+      cube: projected.cube ?? cube.name,
+      tags: projected.tags,
+      owner: projected.owner,
+      source: projected.source,
+    });
+  }
+  return Array.from(byName.values());
+}
+
 export function buildSemanticTree(
   layer: SemanticLayer,
   manifest: SemanticImportManifest | null,
 ): SemanticTreeNode {
   const providerName = manifest?.provider ?? 'dql';
   const cubes = layer.listCubes();
-  const metrics = layer.listMetrics();
+  const metrics = layer.listMetrics(undefined, { includeMeasures: false });
   const measures = layer.listMeasures();
   const dimensions = layer.listDimensions(undefined, { includeVariants: true });
   const timeDimensions = layer.listTimeDimensions(undefined, { includeVariants: true });
@@ -266,12 +294,21 @@ export function buildSemanticTree(
 
   const domainNodes = domains.map((domain) => {
     const domainCubes = cubes.filter((cube) => sameSemanticDomain(cube.domain, domain));
-    const looseMetrics = metrics.filter((metric) => sameSemanticDomain(metric.domain, domain) && !metric.cube);
+    const crossModelMetrics = metrics.filter((metric) =>
+      sameSemanticDomain(metric.domain, domain)
+      && !metric.cube
+      && (metric.semanticModelIds?.length ?? 0) > 1);
+    const looseMetrics = metrics.filter((metric) =>
+      sameSemanticDomain(metric.domain, domain)
+      && !metric.cube
+      && (metric.semanticModelIds?.length ?? 0) <= 1);
     const looseDimensions = dimensions.filter((dimension) => sameSemanticDomain(dimension.domain, domain) && !dimension.cube);
     const looseMeasures = measures.filter((measure) => sameSemanticDomain(measure.domain, domain) && !measure.cube);
     const looseEntities = entities.filter((entity) => sameSemanticDomain(entity.domain, domain) && !entity.cube);
     const domainHierarchies = hierarchies.filter((hierarchy) => sameSemanticDomain(hierarchy.domain, domain));
-    const domainSemanticModels = semanticModels.filter((model) => sameSemanticDomain(model.domain, domain));
+    const domainCubeNames = new Set(domainCubes.map((cube) => cube.name));
+    const domainSemanticModels = semanticModels.filter((model) =>
+      sameSemanticDomain(model.domain, domain) && !domainCubeNames.has(model.name));
     const domainSavedQueries = savedQueries.filter((query) => sameSemanticDomain(query.domain, domain));
 
     const cubeNodes = domainCubes.map((cube) => ({
@@ -279,6 +316,7 @@ export function buildSemanticTree(
       label: cube.label,
       kind: 'cube' as const,
       count:
+        metrics.filter((metric) => metric.cube === cube.name).length +
         cube.measures.length +
         cube.dimensions.length +
         cube.timeDimensions.length +
@@ -293,7 +331,16 @@ export function buildSemanticTree(
         table: cube.table,
       },
       children: [
-        buildGroupNode(`cube:${cube.name}`, 'measure', 'Measures', measures.filter((measure) => measure.cube === cube.name).map((measure) => toLeaf('measure', measure.name, measure.label, {
+        buildGroupNode(`cube:${cube.name}`, 'metric', 'Metrics', metrics.filter((metric) => metric.cube === cube.name).map((metric) => toLeaf('metric', metric.name, metric.label, {
+          provider: metric.source?.provider ?? providerName,
+          domain: normalizeDomain(metric.domain),
+          cube: metric.cube ?? cube.name,
+          owner: metric.owner ?? cube.owner ?? null,
+          tags: (metric.tags ?? []).join(','),
+          table: metric.table,
+          semanticModelIds: (metric.semanticModelIds ?? [cube.name]).join(','),
+        }))),
+        buildGroupNode(`cube:${cube.name}`, 'measure', 'Underlying measures', technicalMeasuresForCube(cube, measures).map((measure) => toLeaf('measure', measure.name, measure.label, {
           provider: measure.source?.provider ?? providerName,
           domain: normalizeDomain(measure.domain),
           cube: measure.cube ?? cube.name,
@@ -301,14 +348,6 @@ export function buildSemanticTree(
           tags: (measure.tags ?? []).join(','),
           table: measure.table,
           agg: measure.agg,
-        }))),
-        buildGroupNode(`cube:${cube.name}`, 'metric', 'Measures', cube.measures.map((metric) => toLeaf('metric', metric.name, metric.label, {
-          provider: metric.source?.provider ?? providerName,
-          domain: normalizeDomain(metric.domain),
-          cube: metric.cube ?? cube.name,
-          owner: metric.owner ?? cube.owner ?? null,
-          tags: (metric.tags ?? []).join(','),
-          table: metric.table,
         }))),
         buildGroupNode(`cube:${cube.name}`, 'dimension', 'Dimensions', cube.dimensions.map((dimension) => toLeaf('dimension', semanticDimensionReference(dimension), dimension.label, {
           provider: dimension.source?.provider ?? providerName,
@@ -362,7 +401,16 @@ export function buildSemanticTree(
 
     const children: SemanticTreeNode[] = [...cubeNodes];
     const looseNodes = [
-      buildGroupNode(`domain:${domain}`, 'metric', 'Metrics', looseMetrics.map((metric) => toLeaf('metric', metric.name, metric.label, {
+      buildGroupNode(`domain:${domain}`, 'metric', 'Cross-model metrics', crossModelMetrics.map((metric) => toLeaf('metric', metric.name, metric.label, {
+        provider: metric.source?.provider ?? providerName,
+        domain: normalizeDomain(metric.domain),
+        cube: metric.cube ?? null,
+        semanticModelIds: (metric.semanticModelIds ?? []).join(','),
+        owner: metric.owner ?? null,
+        tags: (metric.tags ?? []).join(','),
+        table: metric.table,
+      }))),
+      buildGroupNode(`domain:${domain}`, 'metric', 'Unassigned metrics', looseMetrics.map((metric) => toLeaf('metric', metric.name, metric.label, {
         provider: metric.source?.provider ?? providerName,
         domain: normalizeDomain(metric.domain),
         cube: metric.cube ?? null,
@@ -370,7 +418,7 @@ export function buildSemanticTree(
         tags: (metric.tags ?? []).join(','),
         table: metric.table,
       }))),
-      buildGroupNode(`domain:${domain}`, 'measure', 'Measures', looseMeasures.map((measure) => toLeaf('measure', measure.name, measure.label, {
+      buildGroupNode(`domain:${domain}`, 'measure', 'Underlying measures', looseMeasures.map((measure) => toLeaf('measure', measure.name, measure.label, {
         provider: measure.source?.provider ?? providerName,
         domain: normalizeDomain(measure.domain),
         cube: measure.cube ?? null,

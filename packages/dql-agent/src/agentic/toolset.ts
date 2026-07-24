@@ -16,7 +16,7 @@
  *   - `search_semantic_layer` / `scan_manifest` are read-only discovery.
  */
 
-import type { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { semanticDimensionReference, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { AgentToolDefinition } from '../providers/types.js';
 import type { KGStore } from '../kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind } from '../kg/types.js';
@@ -85,16 +85,51 @@ function searchSemanticLayerTool(layer: SemanticLayer): AgentToolDefinition {
       const terms = tokenizeQuery(typeof query === 'string' ? query : '');
       const max = typeof limit === 'number' && limit > 0 ? Math.min(limit, 25) : 8;
       const metrics = rankSemanticMembers(
-        layer.listMetrics().map((m) => ({ name: m.name, label: m.label, description: m.description, table: m.table, tags: m.tags })),
+        layer.listMetrics(undefined, { includeMeasures: false }).map((m) => ({
+          name: m.name,
+          label: m.label,
+          description: m.description,
+          table: m.table,
+          tags: m.tags,
+          semanticModelIds: m.semanticModelIds ?? (m.cube ? [m.cube] : []),
+        })),
         terms,
       ).slice(0, max);
+      const compatibilityByMetric = new Map<string, string[]>();
+      const compatibleDimensionReferences = new Set<string>();
+      for (const metric of metrics) {
+        const compatible = layer.explainCompatibleDimensions([metric.name]).compatible
+          .map(semanticDimensionReference);
+        compatibilityByMetric.set(metric.name, compatible);
+        for (const reference of compatible) compatibleDimensionReferences.add(reference);
+      }
+      const metricCards = metrics.map((metric) => ({
+        ...metric,
+        compatibleDimensions: compatibilityByMetric.get(metric.name) ?? [],
+      }));
       const dimensions = rankSemanticMembers(
-        layer.listDimensions().map((d) => ({ name: d.name, label: d.label, description: d.description, table: d.table, tags: d.tags })),
+        layer.listDimensions(undefined, { includeVariants: true })
+          .filter((dimension) => compatibleDimensionReferences.has(semanticDimensionReference(dimension)))
+          .map((d) => ({
+            name: semanticDimensionReference(d),
+            label: d.label,
+            description: d.description,
+            table: d.table,
+            tags: d.tags,
+            semanticModelId: d.cube,
+            qualifiedName: d.qualifiedName,
+          })),
         terms,
       ).slice(0, max);
-      const timeDimensions = layer.listTimeDimensions().map((d) => ({ name: d.name, label: d.label, granularities: (d as { granularities?: string[] }).granularities }));
+      const timeDimensions = layer.listTimeDimensions(undefined, { includeVariants: true })
+        .filter((dimension) => compatibleDimensionReferences.has(semanticDimensionReference(dimension)))
+        .map((d) => ({
+          name: semanticDimensionReference(d),
+          label: d.label,
+          granularities: (d as { granularities?: string[] }).granularities,
+        }));
       return {
-        metrics,
+        metrics: metricCards,
         dimensions,
         timeDimensions,
         note: metrics.length === 0 && dimensions.length === 0
@@ -297,9 +332,9 @@ interface RankableMember {
   tags?: string[];
 }
 
-function rankSemanticMembers(members: RankableMember[], terms: string[]): Array<{ name: string; label?: string; description?: string; table?: string }> {
+function rankSemanticMembers<T extends RankableMember>(members: T[], terms: string[]): T[] {
   if (terms.length === 0) {
-    return members.slice(0, 25).map((m) => ({ name: m.name, label: m.label, description: m.description, table: m.table }));
+    return members.slice(0, 25);
   }
   return members
     .map((member) => {
@@ -314,7 +349,7 @@ function rankSemanticMembers(members: RankableMember[], terms: string[]): Array<
     })
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score || a.member.name.localeCompare(b.member.name))
-    .map((entry) => ({ name: entry.member.name, label: entry.member.label, description: entry.member.description, table: entry.member.table }));
+    .map((entry) => entry.member);
 }
 
 function tokenizeQuery(text: string): string[] {

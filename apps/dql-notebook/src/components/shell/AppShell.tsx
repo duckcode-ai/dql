@@ -113,6 +113,7 @@ export function AppShell() {
               result: entry.result ?? c.result,
               error: entry.error ?? c.error,
               executionCount: entry.executionCount ?? c.executionCount,
+              execution: entry.execution ?? c.execution,
               fromSnapshot: entry.result != null,
             };
           });

@@ -3,7 +3,7 @@ import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, H
 import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
-import type { NotebookFile, SchemaTable } from '../../store/types';
+import type { ExecutionTarget, NotebookFile, SchemaTable } from '../../store/types';
 import { DataSourceIcon, describeSchemaObject } from './DataSourceIcon';
 import type { Theme } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
@@ -12,7 +12,11 @@ import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
 import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
-import { buildSemanticTreeFromLayer } from '../../utils/semantic-tree';
+import {
+  buildSemanticTreeFromLayer,
+  scopeSemanticTreeForComposition,
+  type SemanticCompositionScopeState,
+} from '../../utils/semantic-tree';
 
 export type BuildTab = 'notebooks' | 'semantic' | 'database' | 'blocks';
 
@@ -243,9 +247,17 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
   const [selectedMetrics, setSelectedMetrics] = useState<Set<string>>(new Set());
   const [selectedDimensions, setSelectedDimensions] = useState<Set<string>>(new Set());
   const [compatibleDimensions, setCompatibleDimensions] = useState<Set<string> | null>(null);
+  const [compatibilityState, setCompatibilityState] = useState<SemanticCompositionScopeState>('idle');
+  const [compatibilityEngine, setCompatibilityEngine] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
-  const [preview, setPreview] = useState<{ sql: string; rows: number } | null>(null);
+  const [preview, setPreview] = useState<{
+    sql: string;
+    rows: number;
+    executionTarget?: ExecutionTarget;
+    engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [executionTarget, setExecutionTarget] = useState<ExecutionTarget | undefined>();
   const metricsByName = new Map(state.semanticLayer.metrics.map((metric) => [metric.name, metric]));
   const openSemanticRuntimeSettings = () => {
     dispatch({ type: 'SET_SETTINGS_TAB', tab: 'project' });
@@ -254,22 +266,43 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
 
   useEffect(() => {
     let active = true;
+    void api.getConnections().then((connections) => {
+      if (!active) return;
+      setExecutionTarget(connections.default
+        ? { target: 'connection', connectionName: connections.default }
+        : undefined);
+    }).catch(() => {
+      if (active) setExecutionTarget(undefined);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     setPreview(null);
     setError(null);
     if (selectedMetrics.size === 0) {
       setCompatibleDimensions(null);
+      setCompatibilityState('idle');
+      setCompatibilityEngine(null);
       setSelectedDimensions(new Set());
       return;
     }
     setCompatibleDimensions(null);
+    setCompatibilityState('loading');
+    setCompatibilityEngine(null);
     void api.getCompatibility(Array.from(selectedMetrics)).then((compatibility) => {
       if (!active) return;
       const names = new Set(compatibility.dimensions.map((dimension) => dimension.reference ?? dimension.name));
       setCompatibleDimensions(names);
+      setCompatibilityState('ready');
+      setCompatibilityEngine(compatibility.engine);
       setSelectedDimensions((current) => new Set(Array.from(current).filter((name) => names.has(name))));
     }).catch((compatibilityError) => {
       if (!active) return;
       setCompatibleDimensions(new Set());
+      setCompatibilityState('error');
+      setCompatibilityEngine(null);
       setSelectedDimensions(new Set());
       setError(compatibilityError instanceof DqlApiError
         ? `${compatibilityError.code ? `${compatibilityError.code}: ` : ''}${compatibilityError.message}`
@@ -280,7 +313,19 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
     return () => { active = false; };
   }, [Array.from(selectedMetrics).sort().join('|')]);
 
+  const visibleTree = useMemo(() => {
+    if (!tree || !notebookMode) return tree;
+    return scopeSemanticTreeForComposition(
+      tree,
+      selectedMetrics.size,
+      compatibleDimensions,
+      compatibilityState,
+    );
+  }, [tree, notebookMode, selectedMetrics.size, compatibleDimensions, compatibilityState]);
+
   const toggleSelection = (kind: 'metric' | 'dimension', name: string) => {
+    setPreview(null);
+    setError(null);
     const update = kind === 'metric' ? setSelectedMetrics : setSelectedDimensions;
     update((current) => {
       const next = new Set(current);
@@ -316,6 +361,7 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
       const result = await api.previewSemanticBuilder({
         metrics: Array.from(selectedMetrics),
         dimensions: Array.from(selectedDimensions),
+        executionTarget,
         limit: 50,
       });
       if ('error' in result) {
@@ -323,15 +369,49 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
         setError(result.error);
         return;
       }
-      setPreview({ sql: result.sql, rows: result.result.rowCount ?? result.result.rows.length });
+      setPreview({
+        sql: result.sql,
+        rows: result.result.rowCount ?? result.result.rows.length,
+        executionTarget,
+        engine: result.engine,
+      });
+    } catch (previewError) {
+      setPreview(null);
+      setError(previewError instanceof DqlApiError
+        ? `${previewError.code ? `${previewError.code}: ` : ''}${previewError.message}`
+        : previewError instanceof Error
+          ? previewError.message
+          : 'The governed semantic preview could not run.');
     } finally {
       setPreviewing(false);
     }
   };
 
   const addSemanticCell = () => {
-    if (selectedMetrics.size === 0) return;
-    dispatch({ type: 'ADD_CELL', cell: makeCell('dql', buildNotebookSemanticBlock(Array.from(selectedMetrics), Array.from(selectedDimensions))) });
+    if (selectedMetrics.size === 0 || !preview) return;
+    const metrics = Array.from(selectedMetrics);
+    const dimensions = Array.from(selectedDimensions);
+    const source = buildNotebookSemanticBlock(metrics, dimensions);
+    const cell = makeCell('dql', source);
+    cell.executionTarget = preview.executionTarget;
+    cell.dqlArtifact = {
+      source,
+      sql: preview.sql,
+      compiledSql: preview.sql,
+      kind: 'semantic_block',
+      metrics,
+      dimensions,
+      persistence: 'transient',
+      trustState: 'governed',
+      reviewState: 'draft',
+      routeEvidence: [{
+        route: 'semantic',
+        engine: preview.engine,
+        executionTarget: preview.executionTarget,
+        previewRows: preview.rows,
+      }],
+    };
+    dispatch({ type: 'ADD_CELL', cell });
     setSelectedMetrics(new Set());
     setSelectedDimensions(new Set());
     setPreview(null);
@@ -339,20 +419,24 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
   };
 
   if (loading && !tree) return <EmptyNote text="Loading semantic layer…" t={t} />;
-  if (!tree || (tree.children?.length ?? 0) === 0) return <EmptyNote text="No semantic layer imported yet." t={t} />;
+  if (!tree || !visibleTree || (tree.children?.length ?? 0) === 0) return <EmptyNote text="No semantic layer imported yet." t={t} />;
   return <div>
     {notebookMode && (
       <div style={{ display: 'grid', gap: 7, padding: 8, borderBottom: `1px solid ${t.headerBorder}`, background: 'var(--bg-1)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ flex: 1, fontSize: 10.5, color: t.textMuted }}>
-            {selectedMetrics.size > 0
-              ? `${selectedMetrics.size} metric${selectedMetrics.size === 1 ? '' : 's'} · ${selectedDimensions.size} dimension${selectedDimensions.size === 1 ? '' : 's'}`
-              : 'Select metrics, then compatible dimensions'}
+            {selectedMetrics.size === 0
+              ? 'Choose a business metric. Related dimensions appear next.'
+              : compatibilityState === 'loading'
+                ? 'Checking governed dimensions…'
+                : compatibilityState === 'ready'
+                  ? `${selectedMetrics.size > 1 ? 'Common governed dimensions' : 'Governed dimensions'} · ${compatibleDimensions?.size ?? 0} available${compatibilityEngine ? ` · ${compatibilityEngine}` : ''}`
+                  : `${selectedMetrics.size} metric${selectedMetrics.size === 1 ? '' : 's'} selected`}
           </span>
           <button type="button" onClick={() => void runPreview()} disabled={previewing || selectedMetrics.size === 0} style={{ border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.textSecondary, borderRadius: 5, padding: '4px 7px', fontSize: 10, cursor: selectedMetrics.size ? 'pointer' : 'not-allowed', opacity: selectedMetrics.size ? 1 : .5 }}>
             {previewing ? 'Running…' : 'Preview & run'}
           </button>
-          <button type="button" onClick={addSemanticCell} disabled={selectedMetrics.size === 0} style={{ border: 'none', background: t.accent, color: '#fff', borderRadius: 5, padding: '5px 7px', fontSize: 10, fontWeight: 700, cursor: selectedMetrics.size ? 'pointer' : 'not-allowed', opacity: selectedMetrics.size ? 1 : .5 }}>
+          <button type="button" onClick={addSemanticCell} disabled={!preview || previewing} title={preview ? 'Add the validated semantic query to the notebook' : 'Preview and run successfully before adding this cell'} style={{ border: 'none', background: t.accent, color: '#fff', borderRadius: 5, padding: '5px 7px', fontSize: 10, fontWeight: 700, cursor: preview && !previewing ? 'pointer' : 'not-allowed', opacity: preview && !previewing ? 1 : .5 }}>
             Add cell
           </button>
         </div>
@@ -369,7 +453,7 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
       </div>
     )}
     <SemanticTreeView
-      tree={tree}
+      tree={visibleTree}
       themeMode={state.themeMode}
       search={search}
       onInsert={onInsert}

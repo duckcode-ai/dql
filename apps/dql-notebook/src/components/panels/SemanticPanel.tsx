@@ -9,6 +9,7 @@ import {
 import { insertSemanticReference, serializeSemanticDragRef } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type {
+  ExecutionTarget,
   QueryResult,
   SemanticLayerDiagnostics,
   SemanticObjectDetail,
@@ -315,14 +316,31 @@ export function SemanticPanel() {
   const [composePreview, setComposePreview] = useState<{
     sql: string;
     result: QueryResult;
+    executionTarget?: ExecutionTarget;
     engine?: 'native' | 'metricflow-cli' | 'dbt-cloud';
     semanticTrace?: SemanticRuntimeTrace;
+    targetBinding?: Record<string, unknown>;
+    executionReceipt?: Record<string, unknown>;
   } | null>(null);
+  const [executionTarget, setExecutionTarget] = useState<ExecutionTarget | undefined>();
   const [compatibleDimensionNames, setCompatibleDimensionNames] = useState<Set<string> | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const [diagnostics, setDiagnostics] = useState<SemanticLayerDiagnostics | null>(null);
   const treeContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void api.getConnections().then((connections) => {
+      if (!active) return;
+      setExecutionTarget(connections.default
+        ? { target: 'connection', connectionName: connections.default }
+        : undefined);
+    }).catch(() => {
+      if (active) setExecutionTarget(undefined);
+    });
+    return () => { active = false; };
+  }, []);
 
   const handleRefresh = async () => {
     dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
@@ -376,10 +394,10 @@ export function SemanticPanel() {
 
   const favoritesSet = useMemo(() => new Set(sl.favorites), [sl.favorites]);
   const metricsByName = useMemo(() => new Map(sl.metrics.map((metric) => [metric.name, metric])), [sl.metrics]);
-  const dimensionsByReference = useMemo(() => new Map(sl.dimensions.flatMap((dimension) => [
-    [dimension.reference ?? dimension.name, dimension] as const,
-    [dimension.name, dimension] as const,
-  ])), [sl.dimensions]);
+  const dimensionsByReference = useMemo(() => new Map(sl.dimensions.map((dimension) => [
+    dimension.reference ?? dimension.name,
+    dimension,
+  ] as const)), [sl.dimensions]);
   const providerOptions = useMemo(() => collectFacetValues(tree, 'provider'), [tree]);
   const cubeOptions = useMemo(() => collectFacetValues(tree, 'cube'), [tree]);
   const ownerOptions = useMemo(() => collectFacetValues(tree, 'owner'), [tree]);
@@ -407,10 +425,8 @@ export function SemanticPanel() {
     }
     void api.getCompatibility(Array.from(selectedMetrics)).then((compatibility) => {
       if (!cancelled) {
-        setCompatibleDimensionNames(new Set(compatibility.dimensions.flatMap((dimension) => [
-          dimension.reference ?? dimension.name,
-          dimension.name,
-        ])));
+        setCompatibleDimensionNames(new Set(compatibility.dimensions.map((dimension) =>
+          dimension.reference ?? dimension.name)));
       }
     }).catch((compatibilityError) => {
       if (cancelled) return;
@@ -606,6 +622,7 @@ export function SemanticPanel() {
       const result = await api.previewSemanticBuilder({
         metrics: Array.from(selectedMetrics),
         dimensions,
+        executionTarget,
         limit: 50,
       });
       if ('error' in result) {
@@ -617,8 +634,11 @@ export function SemanticPanel() {
       setComposePreview({
         sql: result.sql,
         result: result.result,
+        executionTarget,
         engine: result.engine,
         semanticTrace: result.semanticTrace,
+        targetBinding: result.targetBinding,
+        executionReceipt: result.executionReceipt,
       });
     } finally {
       setComposing(false);
@@ -649,9 +669,33 @@ export function SemanticPanel() {
 
   const handleInsertSemanticQuery = () => {
     if (selectedMetrics.size === 0 || !composePreview) return;
+    const metrics = Array.from(selectedMetrics);
+    const dimensions = Array.from(selectedDimensions);
+    const source = buildNotebookSemanticBlock(metrics, dimensions);
+    const cell = makeCell('dql', source);
+    cell.executionTarget = composePreview.executionTarget;
+    cell.dqlArtifact = {
+      source,
+      sql: composePreview.sql,
+      compiledSql: composePreview.sql,
+      kind: 'semantic_block',
+      metrics,
+      dimensions,
+      persistence: 'transient',
+      trustState: 'governed',
+      reviewState: 'draft',
+      routeEvidence: [{
+        route: 'semantic',
+        engine: composePreview.engine,
+        executionTarget: composePreview.executionTarget,
+        targetBinding: composePreview.targetBinding,
+        executionReceipt: composePreview.executionReceipt,
+        previewRows: composePreview.result.rowCount ?? composePreview.result.rows.length,
+      }],
+    };
     dispatch({
       type: 'ADD_CELL',
-      cell: makeCell('dql', buildNotebookSemanticBlock(Array.from(selectedMetrics), Array.from(selectedDimensions))),
+      cell,
     });
     for (const metric of selectedMetrics) dispatch({ type: 'ADD_SEMANTIC_RECENT', name: metric });
     setSelectMode(false);

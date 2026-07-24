@@ -14,7 +14,8 @@ function buildSnapshot(path: string, cells: Cell[]): RunSnapshot {
       result: c.result,
       error: c.error,
       executionCount: c.executionCount,
-      executedAt: new Date().toISOString(),
+      executedAt: c.execution?.completedAt ?? new Date().toISOString(),
+      execution: c.execution,
     }));
   return {
     version: 1,
@@ -28,7 +29,7 @@ function snapshotSignature(cells: Cell[]): string {
   // Cheap change-detector — hash of (cellId, executionCount, rowCount, errorLen).
   // Avoids saving when nothing materially changed (e.g. pure UI edits).
   return cells
-    .map((c) => `${c.id}:${c.executionCount ?? 0}:${c.result?.rowCount ?? -1}:${(c.error ?? '').length}`)
+    .map((c) => `${c.id}:${c.execution?.runId ?? ''}:${c.executionCount ?? 0}:${c.result?.rowCount ?? -1}:${c.error ?? ''}`)
     .join('|');
 }
 

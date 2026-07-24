@@ -663,6 +663,15 @@ describe('DbtProvider — semantic catalog foundation (Phase 1)', () => {
         expect(layer.canComposeMetric('percent_mom_bcm')).toBe(false);
       });
 
+      it('ID-001 infers a same-model derived metric owner without changing its runtime semantics', () => {
+        const layer = loadBcm();
+        const metric = layer.getMetric('percent_mom_bcm');
+        expect(metric?.cube).toBe('bcm_hdr');
+        expect(metric?.semanticModelIds).toEqual(['bcm_hdr']);
+        expect(metric?.domain).not.toBe('uncategorized');
+        expect(layer.canComposeMetric('percent_mom_bcm')).toBe(false);
+      });
+
       it('records the foreign-entity name on the derived join', () => {
         const layer = loadBcm();
         const dtl = layer.getCube('bcm_dtl');
@@ -724,6 +733,17 @@ saved_queries:
       const customer = compatible.find((d) => d.name === 'customer_name');
       expect(customer).toBeTruthy();
       expect(customer?.qualifiedName).toBe('bcm_hdr__customer_name');
+    });
+
+    it('CONTRACT-002 gives a derived metric the same governed dimensions as its referenced base metric', () => {
+      const layer = bcmLayer();
+      const base = layer.explainCompatibleDimensions(['total_bcm']).compatible
+        .map((dimension) => `${dimension.cube}.${dimension.name}`)
+        .sort();
+      const derived = layer.explainCompatibleDimensions(['percent_mom_bcm']).compatible
+        .map((dimension) => `${dimension.cube}.${dimension.name}`)
+        .sort();
+      expect(derived).toEqual(base);
     });
 
     it('flags a disjoint-model dimension as no_join_path', () => {

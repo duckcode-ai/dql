@@ -121,6 +121,14 @@ interface DbtMetric {
   unique_id?: string;
 }
 
+type DbtMeasureLookup = Map<string, {
+  sql: string;
+  agg: string;
+  modelName: string;
+  table: string;
+  measure: NonNullable<DbtSemanticModel['measures']>[number];
+}>;
+
 interface DbtSavedQuery {
   name: string;
   label?: string;
@@ -229,7 +237,7 @@ export class DbtProvider implements SemanticLayerProvider {
     }
 
     // Build a measure lookup: measure_name -> { sql, agg, model_name }
-    const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>();
+    const measureLookup: DbtMeasureLookup = new Map();
 
     for (const model of allModels) {
       const tableName = resolveTableName(model);
@@ -251,13 +259,9 @@ export class DbtProvider implements SemanticLayerProvider {
       registerSemanticModel(layer, model, 'yaml', entityIndex);
     }
 
-    // Convert dbt metrics (resolve measure references)
-    for (const dbtMetric of allDbtMetrics) {
-      const metric = convertDbtMetric(dbtMetric, measureLookup);
-      if (metric) {
-        layer.addMetric(metric);
-      }
-    }
+    // Convert dbt metrics together so derived/ratio/cumulative metrics inherit
+    // ownership from their referenced measures and metrics.
+    for (const metric of convertDbtMetrics(allDbtMetrics, measureLookup)) layer.addMetric(metric);
 
     for (const savedQuery of allSavedQueries) {
       layer.addSavedQuery(convertSavedQuery(savedQuery));
@@ -331,7 +335,7 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
   const layer = new SemanticLayer();
 
   // Build measure lookup first (identical logic to the YAML path).
-  const measureLookup = new Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>();
+  const measureLookup: DbtMeasureLookup = new Map();
   for (const model of models) {
     const tableName = resolveTableName(model);
     for (const measure of model.measures ?? []) {
@@ -349,10 +353,7 @@ function loadFromManifestJson(manifestPath: string, artifactKind: 'manifest' | '
   for (const model of models) {
     registerSemanticModel(layer, model, artifactKind, entityIndex);
   }
-  for (const dbtMetric of dbtMetrics) {
-    const metric = convertDbtMetric(dbtMetric, measureLookup);
-    if (metric) layer.addMetric(metric);
-  }
+  for (const metric of convertDbtMetrics(dbtMetrics, measureLookup)) layer.addMetric(metric);
   for (const savedQuery of savedQueries) {
     layer.addSavedQuery(convertSavedQuery(savedQuery));
   }
@@ -941,7 +942,7 @@ function buildAggSql(agg: string, expr: string): string {
 /** Convert a dbt metric definition to a DQL MetricDefinition. */
 function convertDbtMetric(
   dbtMetric: DbtMetric,
-  measureLookup: Map<string, { sql: string; agg: string; modelName: string; table: string; measure: NonNullable<DbtSemanticModel['measures']>[number] }>,
+  measureLookup: DbtMeasureLookup,
 ): MetricDefinition | null {
   const isSimple = dbtMetric.type.toLowerCase() === 'simple';
   const measureName = firstSemanticRefName(
@@ -966,6 +967,7 @@ function convertDbtMetric(
     type: nativeMetricType ?? 'custom',
     table: nativeMetricType ? resolvedMeasure?.table ?? '' : '',
     cube: resolvedMeasure?.modelName,
+    semanticModelIds: resolvedMeasure?.modelName ? [resolvedMeasure.modelName] : [],
     aggregation: dbtMetric.type,
     metricType: dbtMetric.type,
     // A real dbt metric node — always a metric, never a measure, even when it is
@@ -977,6 +979,109 @@ function convertDbtMetric(
     aggTimeDimension: resolvedMeasure?.measure.agg_time_dimension,
     source: dbtSource('metric', dbtMetric.unique_id ?? dbtMetric.name, dbtMetric.name, dbtMetric as unknown as Record<string, unknown>),
   };
+}
+
+/**
+ * ID-001 / CONTRACT-002: attach canonical semantic-model ownership after all
+ * dbt metrics are known. dbt derived metrics frequently omit a direct measure
+ * and reference other metrics instead, so converting them one at a time leaves
+ * them incorrectly unowned and exposes the entire global dimension catalog.
+ */
+function convertDbtMetrics(
+  dbtMetrics: DbtMetric[],
+  measureLookup: DbtMeasureLookup,
+): MetricDefinition[] {
+  const rawByName = new Map(dbtMetrics.map((metric) => [metric.name, metric]));
+  const converted = dbtMetrics
+    .map((metric) => convertDbtMetric(metric, measureLookup))
+    .filter((metric): metric is MetricDefinition => Boolean(metric));
+  const convertedByName = new Map(converted.map((metric) => [metric.name, metric]));
+  const ownershipCache = new Map<string, Set<string>>();
+
+  const collectReferenceNames = (value: unknown, output: Set<string>): void => {
+    if (typeof value === 'string') {
+      if (value.trim()) output.add(value.trim());
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collectReferenceNames(item, output);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const raw = value as Record<string, unknown>;
+    for (const key of ['name', 'metric', 'metric_name', 'measure', 'measure_name']) {
+      if (raw[key] !== undefined) collectReferenceNames(raw[key], output);
+    }
+  };
+
+  const collectNamesForKeys = (value: unknown, keys: Set<string>, output: Set<string>): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) collectNamesForKeys(item, keys, output);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (keys.has(key)) collectReferenceNames(nested, output);
+      collectNamesForKeys(nested, keys, output);
+    }
+  };
+
+  const measureKeys = new Set([
+    'measure',
+    'measure_name',
+    'input_measures',
+    'base_measure',
+    'conversion_measure',
+  ]);
+  const metricKeys = new Set([
+    'metrics',
+    'metric',
+    'metric_name',
+    'numerator',
+    'denominator',
+    'base_metric',
+    'conversion_metric',
+  ]);
+
+  const inferOwnership = (metricName: string, visiting = new Set<string>()): Set<string> => {
+    const cached = ownershipCache.get(metricName);
+    if (cached) return new Set(cached);
+    if (visiting.has(metricName)) return new Set();
+    const nextVisiting = new Set(visiting).add(metricName);
+    const raw = rawByName.get(metricName);
+    const definition = convertedByName.get(metricName);
+    const owners = new Set<string>(definition?.cube ? [definition.cube] : []);
+    if (!raw) return owners;
+
+    const measureNames = new Set<string>();
+    collectNamesForKeys(raw.type_params, measureKeys, measureNames);
+    for (const name of measureNames) {
+      const modelName = measureLookup.get(name)?.modelName;
+      if (modelName) owners.add(modelName);
+    }
+
+    const referencedMetrics = new Set<string>();
+    collectNamesForKeys(raw.type_params, metricKeys, referencedMetrics);
+    for (const referenced of referencedMetrics) {
+      if (referenced === metricName || !convertedByName.has(referenced)) continue;
+      for (const owner of inferOwnership(referenced, nextVisiting)) owners.add(owner);
+    }
+
+    ownershipCache.set(metricName, new Set(owners));
+    return owners;
+  };
+
+  return converted.map((metric) => {
+    const semanticModelIds = Array.from(inferOwnership(metric.name)).sort((a, b) => a.localeCompare(b));
+    const cube = semanticModelIds.length === 1 ? semanticModelIds[0] : undefined;
+    const raw = rawByName.get(metric.name);
+    return {
+      ...metric,
+      cube,
+      semanticModelIds,
+      domain: raw ? deriveDbtMetricDomain(raw, cube) : metric.domain,
+    };
+  });
 }
 
 function firstSemanticRefName(...values: unknown[]): string | undefined {

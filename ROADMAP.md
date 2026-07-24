@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.6)
+## Current State (v1.10.7)
 
 DQL OSS is ready for local-first use cases:
 
@@ -52,6 +52,11 @@ DQL OSS is ready for local-first use cases:
 - Preserve failing physical identifiers, bounded SQL context, target proof, and
   safe reapply actions in Trust & Steps while keeping the local Notebook server
   alive after rejected semantic runtime requests.
+- Scope the semantic composer to exact model-owned, runtime-compatible
+  dimensions and use the same compatibility evidence for agent planning.
+- Isolate notebook execution by stable cell and run identity, keep independent
+  Run-all branches moving after a failure, and retain DQL, SQL, target, receipt,
+  and structured failure proof inside each cell's Trust & Steps inspector.
 - Search the physical warehouse catalog only through question-scoped,
   paginated discovery when governed dbt context is insufficient, instead of
   eagerly loading every table and column.
@@ -100,7 +105,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.6
+  cold-start and warm-context latency budgets remain above target. The v1.10.7
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

@@ -51,6 +51,88 @@ function formatParamLiteral(value: string, paramType: ParamType): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+export interface NotebookVariableSubstitution {
+  sql: string;
+  substituted: string[];
+  unresolved: string[];
+  ambiguous: string[];
+}
+
+/**
+ * Pure substitution contract used by single-cell runs and Run all.
+ * A completed result remains usable after the UI status returns to `idle`;
+ * failed/stale results are never injected. Cell IDs are stable handles, while
+ * duplicate display names fail closed instead of silently selecting one cell.
+ */
+export function substituteNotebookVariables(
+  sql: string,
+  cells: Cell[],
+): NotebookVariableSubstitution {
+  const matches = [...sql.matchAll(HANDLE_RE)];
+  if (matches.length === 0) {
+    return { sql, substituted: [], unresolved: [], ambiguous: [] };
+  }
+
+  const handles = new Map<string, Cell[]>();
+  for (const cell of cells) {
+    const candidates = [cell.id, cell.name?.trim()].filter((value): value is string => Boolean(value));
+    for (const candidate of candidates) {
+      handles.set(candidate, [...(handles.get(candidate) ?? []), cell]);
+    }
+  }
+
+  const substituted: string[] = [];
+  const unresolved: string[] = [];
+  const ambiguous: string[] = [];
+  const cteFragments: string[] = [];
+  let rewritten = sql;
+
+  for (const match of matches) {
+    const handle = match[1];
+    const candidates = handles.get(handle) ?? [];
+    if (candidates.length === 0) {
+      unresolved.push(handle);
+      continue;
+    }
+    if (candidates.length > 1) {
+      ambiguous.push(handle);
+      continue;
+    }
+    const cell = candidates[0];
+    if (cell.type === 'param') {
+      const cfg = cell.paramConfig;
+      const rawValue = cell.paramValue ?? cfg?.defaultValue ?? '';
+      const paramType: ParamType = cfg?.paramType ?? 'text';
+      rewritten = rewritten.replace(match[0], formatParamLiteral(rawValue, paramType));
+      substituted.push(handle);
+      continue;
+    }
+    if (!cell.result || cell.error || cell.stale) {
+      unresolved.push(handle);
+      continue;
+    }
+    cteFragments.push(buildCTE(handle, cell.result));
+    rewritten = rewritten.replace(match[0], `"${handle}"`);
+    substituted.push(handle);
+  }
+
+  if (cteFragments.length > 0) {
+    const trimmed = rewritten.trimStart();
+    if (/^WITH\s+/i.test(trimmed)) {
+      rewritten = rewritten.replace(/^(\s*WITH\s+)/i, `$1${cteFragments.join(',\n')},\n`);
+    } else {
+      rewritten = `WITH ${cteFragments.join(',\n')}\n${rewritten}`;
+    }
+  }
+
+  return {
+    sql: rewritten,
+    substituted: Array.from(new Set(substituted)),
+    unresolved: Array.from(new Set(unresolved)),
+    ambiguous: Array.from(new Set(ambiguous)),
+  };
+}
+
 /**
  * Returns a function that rewrites SQL by substituting {{cell_name}}
  * references.  For param cells the value is injected as a SQL literal.
@@ -60,65 +142,7 @@ export function useVariableSubstitution() {
   const { state } = useNotebook();
 
   const substituteVariables = useCallback(
-    (sql: string): { sql: string; substituted: string[] } => {
-      const matches = [...sql.matchAll(HANDLE_RE)];
-
-      if (matches.length === 0) return { sql, substituted: [] };
-
-      const substituted: string[] = [];
-      const cteFragments: string[] = [];
-      let rewritten = sql;
-
-      // Build maps: param cells and query-result cells
-      const paramCells = new Map<string, Cell>();
-      const namedResults = new Map<string, QueryResult>();
-      for (const cell of state.cells) {
-        const name = cell.name?.trim();
-        if (!name) continue;
-        if (cell.type === 'param') {
-          paramCells.set(name, cell);
-        } else if (cell.status === 'success' && cell.result) {
-          namedResults.set(name, cell.result);
-        }
-      }
-
-      for (const match of matches) {
-        const varName = match[1];
-
-        if (paramCells.has(varName)) {
-          // Inject literal value directly
-          const paramCell = paramCells.get(varName)!;
-          const cfg = paramCell.paramConfig;
-          const rawValue = paramCell.paramValue ?? cfg?.defaultValue ?? '';
-          const paramType: ParamType = cfg?.paramType ?? 'text';
-          const literal = formatParamLiteral(rawValue, paramType);
-          rewritten = rewritten.replace(match[0], literal);
-          substituted.push(varName);
-        } else if (namedResults.has(varName)) {
-          cteFragments.push(buildCTE(varName, namedResults.get(varName)!));
-          // Replace {{cell_name}} with just the name (it'll be resolved via CTE)
-          rewritten = rewritten.replace(match[0], `"${varName}"`);
-          substituted.push(varName);
-        }
-      }
-
-      if (cteFragments.length === 0 && substituted.length === 0) {
-        return { sql, substituted: [] };
-      }
-
-      if (cteFragments.length > 0) {
-        // Prepend WITH clause, handling existing WITH
-        const trimmed = rewritten.trimStart();
-        const hasExistingWith = /^WITH\s+/i.test(trimmed);
-        if (hasExistingWith) {
-          rewritten = rewritten.replace(/^(\s*WITH\s+)/i, `$1${cteFragments.join(',\n')},\n`);
-        } else {
-          rewritten = `WITH ${cteFragments.join(',\n')}\n${rewritten}`;
-        }
-      }
-
-      return { sql: rewritten, substituted };
-    },
+    (sql: string): NotebookVariableSubstitution => substituteNotebookVariables(sql, state.cells),
     [state.cells],
   );
 

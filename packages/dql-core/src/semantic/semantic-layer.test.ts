@@ -536,6 +536,10 @@ describe('SemanticLayer', () => {
     expect(composed?.sql).not.toContain('account_snapshot.report_date AS report_date');
     expect(layer.listCompatibleDimensions(['total_bcm']).find((dimension) => dimension.name === 'report_date')?.table)
       .toBe('analytics.usage_daily');
+    expect(layer.listCompatibleDimensions(['total_bcm'])
+      .filter((dimension) => dimension.name === 'report_date')
+      .map((dimension) => dimension.cube))
+      .toEqual(['usage_daily', 'account_snapshot']);
   });
 
   it('ID-001/E2E-008 preserves every model-owned dimension identity in discovery and exact lookup', () => {

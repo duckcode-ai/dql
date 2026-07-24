@@ -190,4 +190,23 @@ describe('selectSemanticMembersViaLlm — compatible-dimension restriction', () 
     // impossible "you MUST group by campaign_channel" instruction is emitted.
     expect(prompt).not.toContain('You MUST include these dimensions as group-bys');
   });
-})
+
+  it('AGT-014 rejects a dimension that belongs to a different candidate metric instead of silently substituting it', async () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [
+        { name: 'total_bcm', label: 'Total BCM', description: '', domain: 'bcm', sql: 'SUM(bcm)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr' },
+        { name: 'ad_spend', label: 'Ad spend', description: '', domain: 'marketing', sql: 'SUM(spend)', type: 'sum', table: 'campaigns', cube: 'campaigns' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', domain: 'bcm', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr' },
+        { name: 'campaign_channel', label: 'Channel', description: '', domain: 'marketing', sql: 'channel', type: 'string', table: 'campaigns', cube: 'campaigns' },
+      ],
+    });
+    const selection = await selectSemanticMembersViaLlm({
+      provider: providerReturning('{"metrics":["total_bcm"],"dimensions":["campaigns.campaign_channel"]}'),
+      semanticLayer,
+      question: 'bcm by campaign channel',
+    });
+    expect(selection).toBeUndefined();
+  });
+});

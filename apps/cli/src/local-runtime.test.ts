@@ -2791,6 +2791,135 @@ describe('semantic compatibility server survival (API-004, API-007, E2E-014)', (
   });
 });
 
+describe('notebook cell execution isolation (API-006, API-007, UI-009, E2E-014)', () => {
+  it('binds every response to its cell run and does not leak a failed cell into the next execution', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-notebook-cell-isolation-'));
+    tempDirs.push(projectRoot);
+    const databasePath = join(projectRoot, 'notebook.duckdb');
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'notebook-cell-isolation',
+      connections: {
+        default: { driver: 'file', filepath: databasePath },
+      },
+      defaultConnectionName: 'default',
+    }));
+
+    const executeQuery = vi.fn(async (sql: string): Promise<QueryResult> => {
+      if (sql.includes('FAIL_FIRST')) {
+        throw new Error("SQL compilation error: invalid identifier 'FAIL_FIRST'");
+      }
+      return {
+        columns: [{ name: 'value', type: 'number', driverType: 'INTEGER' }],
+        rows: [{ value: 2 }],
+        rowCount: 1,
+        executionTimeMs: 1,
+      };
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file', filepath: databasePath },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const executeCell = (cellId: string, runId: string, sql: string) => fetch(`${base}/api/notebook/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cell: {
+            id: cellId,
+            type: 'dql',
+            source: `block "${cellId}" {
+  type = "custom"
+  query = """${sql}"""
+}`,
+          },
+          executionContext: {
+            notebookPath: 'notebooks/isolation.dqlnb',
+            cellId,
+            runId,
+            source: 'notebook_dql_cell',
+          },
+          executionTarget: { target: 'connection', connectionName: 'default' },
+        }),
+      });
+
+      const failedResponse = await executeCell('cell_failed', 'run_failed', 'SELECT FAIL_FIRST');
+      expect(failedResponse.status).toBe(500);
+      await expect(failedResponse.json()).resolves.toMatchObject({
+        code: 'COLUMN_NOT_FOUND',
+        details: {
+          phase: 'execution',
+          executionTarget: {
+            target: 'connection',
+            connectionName: 'default',
+          },
+          executionContext: {
+            cellId: 'cell_failed',
+            runId: 'run_failed',
+          },
+        },
+      });
+
+      const successfulResponse = await executeCell('cell_success', 'run_success', 'SELECT 2 AS value');
+      expect(successfulResponse.status).toBe(200);
+      await expect(successfulResponse.json()).resolves.toMatchObject({
+        cellType: 'dql',
+        executionContext: {
+          cellId: 'cell_success',
+          runId: 'run_success',
+        },
+        executionTarget: {
+          target: 'connection',
+          connectionName: 'default',
+        },
+        result: {
+          rows: [{ value: 2 }],
+          rowCount: 1,
+        },
+        compiledSql: expect.stringContaining('SELECT 2 AS value'),
+      });
+
+      const sqlResponse = await fetch(`${base}/api/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sql: 'SELECT 2 AS value',
+          executionContext: {
+            notebookPath: 'notebooks/isolation.dqlnb',
+            cellId: 'cell_sql',
+            runId: 'run_sql',
+            source: 'notebook_sql_cell',
+          },
+        }),
+      });
+      expect(sqlResponse.status).toBe(200);
+      await expect(sqlResponse.json()).resolves.toMatchObject({
+        executionContext: {
+          cellId: 'cell_sql',
+          runId: 'run_sql',
+        },
+        executionTarget: {
+          target: 'connection',
+          connectionName: 'default',
+        },
+        compiledSql: 'SELECT 2 AS value',
+        executedSql: 'SELECT 2 AS value',
+      });
+      expect(executeQuery).toHaveBeenCalledTimes(3);
+
+      const health = await fetch(`${base}/api/health`);
+      expect(health.status).toBe(200);
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+});
+
 describe('loadProjectConfig', () => {
   it('uses the configured named Snowflake connection for execution', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-config-default-name-'));

@@ -6,6 +6,52 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.7 - 2026-07-23
+
+### Semantic-model composition and isolated notebook execution
+
+This patch makes dbt semantic composition model-aware from catalog discovery
+through runtime execution, and prevents one notebook cell failure or stale
+response from contaminating another cell.
+
+### Fixed
+
+- **Model-scoped semantic catalog.** Business metrics retain direct and derived
+  semantic-model ownership, projected measures no longer appear as duplicate
+  business metrics, and model-qualified dimension variants stay distinct.
+- **Compatibility-first composition.** Selecting a metric exposes only
+  dimensions with a governed runtime path to every selected metric. The same
+  compatibility evidence now guides the Notebook composer and agent member
+  selection.
+- **Pinned preview and execution target.** Semantic previews and inserted DQL
+  cells carry the same named execution target, compiler trace, compiled SQL,
+  target binding, and execution receipt.
+- **Cell-isolated execution.** Notebook cells receive unique IDs and per-run
+  correlation IDs. Older aborted responses cannot overwrite newer runs, and a
+  failed dependency branch no longer prevents independent branches from
+  running.
+- **Stable upstream results.** A completed upstream result remains available
+  after the transient success indicator returns to idle, while stale, failed,
+  missing, or ambiguous dependencies fail closed with structured codes.
+- **Trust & Steps for every cell.** SQL and DQL cells expose the governed
+  request, compiled/executed SQL, semantic bindings, effective warehouse
+  target, execution receipt, duration, and stable failure details.
+- **Server survival and target truth.** Raw SQL and semantic execution responses
+  echo the effective cell/run identity and actual default or selected target;
+  one failed request does not poison the next request or terminate the
+  Notebook server.
+
+### Release exceptions
+
+- Acceptance IDs `ID-001`, `CONTRACT-002`, `AGT-014`, `API-004`, `API-006`,
+  `API-007`, `UI-009`, `UI-012`, `E2E-008`, and `E2E-014` are
+  implementer-validated. Independent replay against the enterprise Snowflake,
+  dbt Cloud, and local MetricFlow fixture remains required before they can be
+  marked verified.
+- The tracked `PERF-001` latency exception remains unchanged. This patch
+  improves semantic identity and notebook execution correctness rather than
+  claiming GA-scale latency.
+
 ## v1.10.6 - 2026-07-23
 
 ### Canonical Snowflake semantic target identity

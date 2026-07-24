@@ -549,6 +549,40 @@ export interface QueryResult {
   };
 }
 
+export interface NotebookCellExecutionEvidence {
+  version: 1;
+  runId: string;
+  cellId: string;
+  route: "notebook_sql_cell" | "notebook_dql_cell";
+  status: "success" | "error" | "cancelled" | "blocked";
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  executionTarget?: ExecutionTarget;
+  engine?: "native" | "metricflow-cli" | "dbt-cloud";
+  compiledSql?: string;
+  executedSql?: string;
+  semanticTrace?: {
+    version?: number;
+    adapter?: string;
+    status?: string;
+    authoringRequest?: Record<string, unknown>;
+    runtimeRequest?: Record<string, unknown>;
+    bindings?: Array<Record<string, unknown>>;
+    warnings?: string[];
+    steps?: Array<{ id?: string; label?: string; status?: string; detail?: string }>;
+    failure?: Record<string, unknown>;
+  };
+  targetBinding?: Record<string, unknown>;
+  executionReceipt?: Record<string, unknown>;
+  error?: {
+    code?: string;
+    phase?: string;
+    message: string;
+    details?: unknown;
+  };
+}
+
 export interface RunSnapshotCell {
   cellId: string;
   status: CellStatus;
@@ -556,6 +590,7 @@ export interface RunSnapshotCell {
   error?: string;
   executionCount?: number;
   executedAt?: string;
+  execution?: NotebookCellExecutionEvidence;
 }
 
 export interface RunSnapshot {
@@ -649,6 +684,7 @@ export interface Cell {
   status: CellStatus;
   result?: QueryResult;
   error?: string;
+  execution?: NotebookCellExecutionEvidence; // Per-cell run identity, compiler/target proof, and stable failure evidence
   executionCount?: number;
   paramConfig?: ParamConfig;
   paramValue?: string;
@@ -718,6 +754,11 @@ export interface SemanticMetric {
   table: string;
   tags: string[];
   owner: string | null;
+  /** Owning semantic model when the metric resolves to exactly one model. */
+  cube?: string | null;
+  /** Exact owners for derived and cross-model metrics. */
+  semanticModelIds?: string[];
+  canonicalId?: string;
   metricType?: string | null;
   typeParams?: Record<string, unknown> | null;
   filter?: unknown;
