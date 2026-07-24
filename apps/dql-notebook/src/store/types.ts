@@ -1399,6 +1399,7 @@ export type NotebookAction =
   | { type: 'SET_NOTEBOOK_DIRTY'; dirty: boolean }
   | { type: 'SET_SAVING'; saving: boolean }
   | { type: 'FILE_ADDED'; file: NotebookFile }
+  | { type: 'FILE_REMOVED'; path: string }
   | { type: 'SET_TABLE_COLUMNS'; tableName: string; columns: SchemaColumn[] }
   | { type: 'SET_PARAM_VALUE'; id: string; value: string }
   | { type: 'SET_SEMANTIC_LAYER'; layer: Omit<SemanticLayerState, 'loading'> }

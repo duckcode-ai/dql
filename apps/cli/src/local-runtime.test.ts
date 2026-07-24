@@ -31,6 +31,7 @@ import {
   createDqlArtifactGenerationSessionForProject,
   createDqlGenerationSessionForProject,
   createSemanticBuilderBlock,
+  deleteBlockStudioArtifacts,
   discoverDbtProfileConnections,
   resolveDbtProfileRuntimeConnection,
   evaluateBlockInvariants,
@@ -3980,6 +3981,38 @@ describe('semantic block save artifacts', () => {
     expect(readFileSync(join(projectRoot, blockPath), 'utf-8')).toContain('status = "review"');
     expect(readFileSync(join(projectRoot, 'semantic-layer', 'blocks', 'finance', 'revenue-summary.yaml'), 'utf-8')).toContain('reviewStatus: review');
     expect(openBlockStudioDocument(projectRoot, blockPath).metadata.reviewStatus).toBe('review');
+  });
+
+  it('deletes only the requested block and its semantic companion', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-delete-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    const blockPath = saveBlockStudioArtifacts(projectRoot, {
+      name: 'Revenue Summary',
+      domain: 'finance',
+      description: 'Finance revenue summary',
+      owner: 'analytics',
+      source: 'block "Revenue Summary" {\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 1\n  """\n}\n',
+    });
+    const keepPath = saveBlockStudioArtifacts(projectRoot, {
+      name: 'Margin Summary',
+      domain: 'finance',
+      description: 'Finance margin summary',
+      owner: 'analytics',
+      source: 'block "Margin Summary" {\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 2\n  """\n}\n',
+    });
+    const deleted = deleteBlockStudioArtifacts(projectRoot, blockPath);
+
+    expect(deleted).toEqual({
+      path: blockPath,
+      companionPath: 'semantic-layer/blocks/finance/revenue-summary.yaml',
+    });
+    expect(existsSync(join(projectRoot, blockPath))).toBe(false);
+    expect(existsSync(join(projectRoot, deleted.companionPath!))).toBe(false);
+    expect(existsSync(join(projectRoot, keepPath))).toBe(true);
+    expect(() => deleteBlockStudioArtifacts(projectRoot, '../../outside.dql')).toThrow('Invalid block path');
+    expect(() => deleteBlockStudioArtifacts(projectRoot, blockPath)).toThrow(`File not found: ${blockPath}`);
   });
 
   it('writes both the block file and semantic companion metadata for save-from-cell flows', () => {

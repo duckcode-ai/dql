@@ -10132,6 +10132,41 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'DELETE' && path === '/api/block-studio/block') {
+      try {
+        const blockPath = url.searchParams.get('path');
+        const deleted = deleteBlockStudioArtifacts(projectRoot, blockPath ?? '');
+        let compiledManifest: DQLManifest | undefined;
+        let lineageRefresh: {
+          status: 'ready' | 'failed';
+          compiledAt?: string;
+          message?: string;
+        };
+        try {
+          compiledManifest = compileBlockStudioManifest(projectRoot, projectConfig);
+          lineageRefresh = { status: 'ready', compiledAt: new Date().toISOString() };
+        } catch (error) {
+          lineageRefresh = {
+            status: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+          };
+        }
+        await refreshLocalMetadataCatalog(projectRoot, compiledManifest, semanticLayer);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, ...deleted, lineageRefresh }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = message.startsWith('File not found:')
+          ? 404
+          : message === 'Invalid block path'
+            ? 400
+            : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: message }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/connections') {
       const cfg = loadProjectConfig(projectRoot);
       const connections = getProjectConnectionsForApi(cfg);
@@ -18167,6 +18202,42 @@ export function saveBlockStudioArtifacts(
   }
 
   return targetRelativePath;
+}
+
+/**
+ * Delete one exact Block Studio artifact and its generated semantic companion.
+ * Path validation is intentionally strict so the UI cannot turn this endpoint
+ * into a broad project-file deletion primitive.
+ */
+export function deleteBlockStudioArtifacts(
+  projectRoot: string,
+  relativePath: string,
+): { path: string; companionPath: string | null } {
+  const normalizedPath = normalize(relativePath).replace(/^\/+/, '').replaceAll('\\', '/');
+  if (!isBlockStudioBlockPath(normalizedPath) || !normalizedPath.endsWith('.dql')) {
+    throw new Error('Invalid block path');
+  }
+  const rootPath = resolve(projectRoot);
+  const absolutePath = resolve(rootPath, normalizedPath);
+  const projectRelative = relative(rootPath, absolutePath).replaceAll('\\', '/');
+  if (!projectRelative || projectRelative.startsWith('../') || projectRelative === '..') {
+    throw new Error('Invalid block path');
+  }
+  if (!existsSync(absolutePath)) {
+    throw new Error(`File not found: ${normalizedPath}`);
+  }
+
+  const companionPath = blockCompanionRelativePath(normalizedPath);
+  rmSync(absolutePath, { force: true });
+  if (companionPath) {
+    const absoluteCompanionPath = resolve(rootPath, companionPath);
+    const companionRelative = relative(rootPath, absoluteCompanionPath).replaceAll('\\', '/');
+    if (companionRelative && !companionRelative.startsWith('../') && companionRelative !== '..') {
+      rmSync(absoluteCompanionPath, { force: true });
+    }
+  }
+
+  return { path: normalizedPath, companionPath };
 }
 
 export function saveBlockStudioDraftArtifacts(

@@ -370,6 +370,30 @@ export function setSemanticScalar(content: string, key: string, value: string): 
   return field.test(content) ? content.replace(field, `$1"${escaped}"`) : insertVisualField(content, `  ${key} = "${escaped}"`);
 }
 
+/**
+ * Remove semantic members that are no longer approved by the current
+ * multi-metric compatibility answer. This keeps source mode, visual mode, and
+ * runtime filter bindings on the same fail-closed selection contract.
+ */
+export function reconcileSemanticCompatibility(content: string, compatibleNames: string[]): string {
+  const allowed = new Set(compatibleNames.filter(Boolean));
+  const current = parseSemanticVisualFields(content);
+  let next = setSemanticArray(
+    content,
+    'dimensions',
+    current.dimensions.filter((dimension) => allowed.has(dimension)),
+  );
+  next = setSemanticRuntimeFilters(
+    next,
+    current.requestedFilters.filter((dimension) => allowed.has(dimension)),
+  );
+  if (current.timeDimension && !allowed.has(current.timeDimension)) {
+    next = setSemanticScalar(next, 'time_dimension', '');
+    next = setSemanticScalar(next, 'granularity', '');
+  }
+  return next;
+}
+
 function escapeDqlValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -561,25 +585,21 @@ export function upsertSemanticSelection(content: string, selection: SemanticSele
   const parsed = parseBlockDocument(content);
   if (!parsed || parsed.blockType !== 'semantic') return content;
 
-  const next: ParsedBlockDocument = {
-    ...parsed,
-    metrics: [...parsed.metrics],
-    dimensions: [...parsed.dimensions],
-  };
-
   if (selection.kind === 'metric') {
     const allMetrics = new Set<string>();
-    if (next.metric) allMetrics.add(next.metric);
-    for (const metric of next.metrics) allMetrics.add(metric);
+    if (parsed.metric) allMetrics.add(parsed.metric);
+    for (const metric of parsed.metrics) allMetrics.add(metric);
     allMetrics.add(selection.name);
-    const orderedMetrics = Array.from(allMetrics);
-    next.metric = orderedMetrics.length === 1 ? orderedMetrics[0] : '';
-    next.metrics = orderedMetrics.length > 1 ? orderedMetrics : [];
-  } else if (!next.dimensions.includes(selection.name)) {
-    next.dimensions = [...next.dimensions, selection.name];
+    return setSemanticMetrics(content, Array.from(allMetrics));
   }
 
-  return normalizeBlockDocument(next);
+  return setSemanticArray(
+    content,
+    'dimensions',
+    parsed.dimensions.includes(selection.name)
+      ? parsed.dimensions
+      : [...parsed.dimensions, selection.name],
+  );
 }
 
 export function appendSemanticRefToQuery(content: string, reference: string): string {
@@ -589,17 +609,23 @@ export function appendSemanticRefToQuery(content: string, reference: string): st
   }
   const query = parsed.query.trimEnd();
   const nextQuery = query ? `${query}\n${reference}` : reference;
-  return normalizeBlockDocument({ ...parsed, query: nextQuery });
+  return setBlockQuery(content, nextQuery);
 }
 
 /**
- * Set the raw SQL body of a custom (raw-SQL) block. Round-trips through the
- * canonical block document so the `query = """…"""` field is created if absent.
+ * Set the raw SQL body of a custom (raw-SQL) block without normalizing the
+ * document. A targeted edit is important here: visual query edits must preserve
+ * params, parameterPolicy, filterBindings, tests, and future/unknown clauses.
  */
 export function setBlockQuery(content: string, sql: string): string {
   const parsed = parseBlockDocument(content);
   if (!parsed) return content;
-  return normalizeBlockDocument({ ...parsed, blockType: 'custom', query: sql });
+  const next = setBlockStringField(content, 'type', 'custom');
+  const rendered = `  query = """\n${sql.trimEnd()}\n  """`;
+  const queryField = /\n\s*query\s*=\s*"""[\s\S]*?"""/i;
+  return queryField.test(next)
+    ? next.replace(queryField, `\n${rendered}`)
+    : insertBlockField(next, rendered, true);
 }
 
 export function extractSemanticReferences(content: string): {

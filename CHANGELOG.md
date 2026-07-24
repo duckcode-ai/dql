@@ -6,6 +6,50 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.8 - 2026-07-23
+
+### Governed semantic authoring parity and safe block deletion
+
+This patch makes the metric-first semantic composer consistent across Notebook
+and Block Studio, restores missing Raw SQL visual-authoring controls, and adds
+an exact, confirmed deletion path for saved blocks.
+
+### Fixed
+
+- **Notebook insertion without a mandatory preview.** After metric
+  compatibility resolves successfully, users can add the governed semantic
+  selection to a notebook cell immediately. Preview remains available as an
+  optional execution check rather than an unrelated enablement gate.
+- **One semantic composer across authoring surfaces.** Block Studio reuses the
+  Notebook metric-first picker and applies the chosen metrics and dimensions to
+  the visual block. A metric selection exposes only fresh, runtime-compatible
+  dimensions that share a governed path with every selected metric.
+- **Fail-closed selection reconciliation.** Loading, failed, or stale
+  compatibility plans do not expose unrelated dimensions. Metric changes also
+  remove dimensions, time grains, and filters that are no longer approved by
+  the current compatibility result.
+- **Raw SQL visual parity.** SQL blocks now retain runtime parameters,
+  parameter policies, filter bindings, chart series/color configuration, and a
+  generated DQL preview while users edit the visual builder.
+- **Targeted DQL source edits.** Visual changes update the intended query or
+  semantic clauses without normalizing away unknown metadata, tests,
+  visualization settings, parameters, policies, or bindings.
+- **Guarded saved-block deletion.** Block Studio can delete one exact saved
+  `.dql` block and its matching semantic companion after explicit
+  confirmation. Traversal, broad deletion, missing targets, and unrelated
+  blocks remain protected.
+
+### Release exceptions
+
+- Acceptance IDs `API-006`, `UI-001`, `UI-009`, and `E2E-008` are
+  implementer-validated through full package suites, production builds, and a
+  built-CLI browser replay. Independent enterprise Snowflake, dbt Cloud, and
+  local MetricFlow verification remains required before they can be marked
+  verified.
+- The tracked `PERF-001` latency exception remains unchanged. This patch
+  improves authoring correctness and UI/runtime wiring rather than claiming
+  GA-scale latency.
+
 ## v1.10.7 - 2026-07-23
 
 ### Semantic-model composition and isolated notebook execution

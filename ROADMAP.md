@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.7)
+## Current State (v1.10.8)
 
 DQL OSS is ready for local-first use cases:
 
@@ -19,6 +19,12 @@ DQL OSS is ready for local-first use cases:
   connectors.
 - Use Block Studio to create SQL blocks, semantic blocks, imported SQL drafts,
   and locally certified blocks.
+- Use the same metric-first governed composer in Notebook and Block Studio:
+  insertion is available after compatibility planning, only common approved
+  dimensions are selectable, and preview remains an optional execution check.
+- Edit Raw SQL blocks visually without losing runtime parameters, parameter
+  policies, filter bindings, chart series/color, tests, or unknown DQL
+  metadata; remove one exact saved block through a confirmed guarded action.
 - Compile `dql-manifest.json`, the dbt-like project artifact for blocks,
   notebooks, Apps, dashboards, metrics, dimensions, sources, dbt imports, and
   lineage.
@@ -105,7 +111,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.7
+  cold-start and warm-context latency budgets remain above target. The v1.10.8
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

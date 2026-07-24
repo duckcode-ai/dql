@@ -491,6 +491,9 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       if (state.files.some((f) => f.path === action.file.path)) return state;
       return { ...state, files: [...state.files, action.file] };
 
+    case 'FILE_REMOVED':
+      return { ...state, files: state.files.filter((file) => file.path !== action.path) };
+
     case 'SET_TABLE_COLUMNS':
       return {
         ...state,

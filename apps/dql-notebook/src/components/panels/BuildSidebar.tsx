@@ -40,13 +40,15 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, blockDomain = '', onBlockDomainChange, onNewBlock, footer, footerStatus = 'ready', onCollapse }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSemanticCompose, blockDomain = '', onBlockDomainChange, onNewBlock, footer, footerStatus = 'ready', onCollapse }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
   tabs?: BuildTab[];
   /** Override the insert action (e.g. Block Studio appends to the block draft). */
   onInsertText?: (text: string) => void;
+  /** Apply one governed metric/dimension selection to a Block Studio draft. */
+  onSemanticCompose?: (metrics: string[], dimensions: string[]) => void;
   /** Domain scope for the Blocks tab. An empty value selects the first available domain. */
   blockDomain?: string;
   onBlockDomainChange?: (domain: string) => void;
@@ -142,7 +144,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, block
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
-        {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText} />}
+        {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText || Boolean(onSemanticCompose)} onSemanticCompose={onSemanticCompose} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} />}
       </div>
@@ -230,7 +232,7 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
   );
 }
 
-function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search: string; onInsert: (text: string) => void; notebookMode: boolean }) {
+function SemanticList({ t, search, onInsert, notebookMode, onSemanticCompose }: { t: Theme; search: string; onInsert: (text: string) => void; notebookMode: boolean; onSemanticCompose?: (metrics: string[], dimensions: string[]) => void }) {
   const { state, dispatch } = useNotebook();
   const tree = useMemo(() => buildSemanticTreeFromLayer(state.semanticLayer), [
     state.semanticLayer.provider,
@@ -352,6 +354,9 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
     ...Array.from(selectedMetrics).map((name) => `metric:${name}`),
     ...Array.from(selectedDimensions).map((name) => `dimension:${name}`),
   ]);
+  const canAddSemanticCell = selectedMetrics.size > 0
+    && compatibilityState === 'ready'
+    && !previewing;
 
   const runPreview = async () => {
     if (selectedMetrics.size === 0) return;
@@ -388,16 +393,22 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
   };
 
   const addSemanticCell = () => {
-    if (selectedMetrics.size === 0 || !preview) return;
+    if (!canAddSemanticCell) return;
     const metrics = Array.from(selectedMetrics);
     const dimensions = Array.from(selectedDimensions);
+    if (onSemanticCompose) {
+      onSemanticCompose(metrics, dimensions);
+      setSelectedMetrics(new Set());
+      setSelectedDimensions(new Set());
+      setPreview(null);
+      setError(null);
+      return;
+    }
     const source = buildNotebookSemanticBlock(metrics, dimensions);
     const cell = makeCell('dql', source);
-    cell.executionTarget = preview.executionTarget;
+    cell.executionTarget = preview?.executionTarget ?? executionTarget;
     cell.dqlArtifact = {
       source,
-      sql: preview.sql,
-      compiledSql: preview.sql,
       kind: 'semantic_block',
       metrics,
       dimensions,
@@ -406,10 +417,16 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
       reviewState: 'draft',
       routeEvidence: [{
         route: 'semantic',
-        engine: preview.engine,
-        executionTarget: preview.executionTarget,
-        previewRows: preview.rows,
+        authoringState: preview ? 'previewed' : 'selected',
+        compatibilityState,
+        ...(compatibilityEngine ? { compatibilityEngine } : {}),
+        ...(preview ? {
+          engine: preview.engine,
+          executionTarget: preview.executionTarget,
+          previewRows: preview.rows,
+        } : {}),
       }],
+      ...(preview ? { sql: preview.sql, compiledSql: preview.sql } : {}),
     };
     dispatch({ type: 'ADD_CELL', cell });
     setSelectedMetrics(new Set());
@@ -436,8 +453,8 @@ function SemanticList({ t, search, onInsert, notebookMode }: { t: Theme; search:
           <button type="button" onClick={() => void runPreview()} disabled={previewing || selectedMetrics.size === 0} style={{ border: `1px solid ${t.btnBorder}`, background: t.btnBg, color: t.textSecondary, borderRadius: 5, padding: '4px 7px', fontSize: 10, cursor: selectedMetrics.size ? 'pointer' : 'not-allowed', opacity: selectedMetrics.size ? 1 : .5 }}>
             {previewing ? 'Running…' : 'Preview & run'}
           </button>
-          <button type="button" onClick={addSemanticCell} disabled={!preview || previewing} title={preview ? 'Add the validated semantic query to the notebook' : 'Preview and run successfully before adding this cell'} style={{ border: 'none', background: t.accent, color: '#fff', borderRadius: 5, padding: '5px 7px', fontSize: 10, fontWeight: 700, cursor: preview && !previewing ? 'pointer' : 'not-allowed', opacity: preview && !previewing ? 1 : .5 }}>
-            Add cell
+          <button type="button" onClick={addSemanticCell} disabled={!canAddSemanticCell} title={canAddSemanticCell ? (onSemanticCompose ? 'Apply this governed selection to the Block Studio visual builder' : preview ? 'Add the previewed semantic query to the notebook' : 'Add the governed semantic selection now; preview is optional') : 'Select an executable metric and wait for governed compatibility'} style={{ border: 'none', background: t.accent, color: '#fff', borderRadius: 5, padding: '5px 7px', fontSize: 10, fontWeight: 700, cursor: canAddSemanticCell ? 'pointer' : 'not-allowed', opacity: canAddSemanticCell ? 1 : .5 }}>
+            {onSemanticCompose ? 'Apply to block' : 'Add to cell'}
           </button>
         </div>
         {preview && (

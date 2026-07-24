@@ -324,6 +324,7 @@ export function SemanticPanel() {
   } | null>(null);
   const [executionTarget, setExecutionTarget] = useState<ExecutionTarget | undefined>();
   const [compatibleDimensionNames, setCompatibleDimensionNames] = useState<Set<string> | null>(null);
+  const [composeCompatibilityState, setComposeCompatibilityState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const [diagnostics, setDiagnostics] = useState<SemanticLayerDiagnostics | null>(null);
@@ -421,17 +422,25 @@ export function SemanticPanel() {
     setComposeCandidates([]);
     if (selectedMetrics.size === 0) {
       setCompatibleDimensionNames(null);
+      setComposeCompatibilityState('idle');
+      setSelectedDimensions(new Set());
       return;
     }
+    setCompatibleDimensionNames(null);
+    setComposeCompatibilityState('loading');
     void api.getCompatibility(Array.from(selectedMetrics)).then((compatibility) => {
       if (!cancelled) {
-        setCompatibleDimensionNames(new Set(compatibility.dimensions.map((dimension) =>
-          dimension.reference ?? dimension.name)));
+        const names = new Set(compatibility.dimensions.map((dimension) =>
+          dimension.reference ?? dimension.name));
+        setCompatibleDimensionNames(names);
+        setSelectedDimensions((current) => new Set(Array.from(current).filter((name) => names.has(name))));
+        setComposeCompatibilityState('ready');
       }
     }).catch((compatibilityError) => {
       if (cancelled) return;
       setCompatibleDimensionNames(new Set());
       setSelectedDimensions(new Set());
+      setComposeCompatibilityState('error');
       setComposeError(compatibilityError instanceof DqlApiError
         ? `${compatibilityError.code ? `${compatibilityError.code}: ` : ''}${compatibilityError.message}`
         : compatibilityError instanceof Error
@@ -668,16 +677,14 @@ export function SemanticPanel() {
   };
 
   const handleInsertSemanticQuery = () => {
-    if (selectedMetrics.size === 0 || !composePreview) return;
+    if (selectedMetrics.size === 0 || composeCompatibilityState !== 'ready' || composing) return;
     const metrics = Array.from(selectedMetrics);
     const dimensions = Array.from(selectedDimensions);
     const source = buildNotebookSemanticBlock(metrics, dimensions);
     const cell = makeCell('dql', source);
-    cell.executionTarget = composePreview.executionTarget;
+    cell.executionTarget = composePreview?.executionTarget ?? executionTarget;
     cell.dqlArtifact = {
       source,
-      sql: composePreview.sql,
-      compiledSql: composePreview.sql,
       kind: 'semantic_block',
       metrics,
       dimensions,
@@ -686,12 +693,17 @@ export function SemanticPanel() {
       reviewState: 'draft',
       routeEvidence: [{
         route: 'semantic',
-        engine: composePreview.engine,
-        executionTarget: composePreview.executionTarget,
-        targetBinding: composePreview.targetBinding,
-        executionReceipt: composePreview.executionReceipt,
-        previewRows: composePreview.result.rowCount ?? composePreview.result.rows.length,
+        authoringState: composePreview ? 'previewed' : 'selected',
+        compatibilityState: composeCompatibilityState,
+        ...(composePreview ? {
+          engine: composePreview.engine,
+          executionTarget: composePreview.executionTarget,
+          targetBinding: composePreview.targetBinding,
+          executionReceipt: composePreview.executionReceipt,
+          previewRows: composePreview.result.rowCount ?? composePreview.result.rows.length,
+        } : {}),
       }],
+      ...(composePreview ? { sql: composePreview.sql, compiledSql: composePreview.sql } : {}),
     };
     dispatch({
       type: 'ADD_CELL',
@@ -913,15 +925,17 @@ export function SemanticPanel() {
             </button>
             <button
               onClick={handleInsertSemanticQuery}
-              disabled={selectedMetrics.size === 0 || !composePreview || composing}
-              title={!composePreview ? 'Preview must compile and run successfully before adding the semantic cell.' : undefined}
+              disabled={selectedMetrics.size === 0 || composeCompatibilityState !== 'ready' || composing}
+              title={composeCompatibilityState === 'ready'
+                ? (composePreview ? 'Add the previewed semantic query to the notebook.' : 'Add the governed semantic selection now; preview is optional.')
+                : 'Select an executable metric and wait for governed compatibility.'}
               style={{
-                background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: composePreview && !composing ? 'pointer' : 'not-allowed',
+                background: t.accent, border: 'none', borderRadius: 6, color: '#fff', cursor: composeCompatibilityState === 'ready' && !composing ? 'pointer' : 'not-allowed',
                 fontSize: 11, fontWeight: 600, fontFamily: t.font, padding: '6px 10px',
-                opacity: selectedMetrics.size === 0 || !composePreview || composing ? 0.5 : 1,
+                opacity: selectedMetrics.size === 0 || composeCompatibilityState !== 'ready' || composing ? 0.5 : 1,
               }}
             >
-              Add semantic cell
+              Add to cell
             </button>
           </div>
           {composeError && (

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, X, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, Trash2, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type {
@@ -79,6 +79,7 @@ import {
   parseBlockFields,
   parseVisualBlockParameters,
   getDqlSectionBody,
+  reconcileSemanticCompatibility,
   removeVisualBlockParameter,
   parseSemanticVisualFields,
   setSemanticArray,
@@ -153,6 +154,9 @@ export function BlockStudio() {
   const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletingBlock, setDeletingBlock] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [saveIdentityOpen, setSaveIdentityOpen] = useState(false);
   const [dirtyGuardOpen, setDirtyGuardOpen] = useState(false);
   const saveAfterIdentityRef = useRef(false);
@@ -423,6 +427,26 @@ export function BlockStudio() {
     setEditorMode('visual');
   };
 
+  const applySemanticComposition = (metrics: string[], dimensions: string[]) => {
+    const meta = state.blockStudioMetadata;
+    let next = isSemanticBlock
+      ? state.blockStudioDraft
+      : buildSemanticSkeleton(meta?.name || 'new_semantic_block');
+    if (!isSemanticBlock && meta) {
+      next = setBlockStringField(next, 'domain', meta.domain || 'uncategorized');
+      next = setBlockStringField(next, 'description', meta.description ?? '');
+      next = setBlockStringField(next, 'owner', meta.owner ?? '');
+      next = setBlockTags(next, meta.tags ?? []);
+    }
+    next = setSemanticMetrics(next, metrics);
+    next = setSemanticArray(next, 'dimensions', dimensions);
+    handleDraftChange(next);
+    setSemanticInsertChoice(null);
+    setDatabaseInsertWarning(null);
+    setWorkspaceMode('manual');
+    setEditorMode('visual');
+  };
+
   // "New block" opens the builder form directly (defaulting to a semantic
   // draft — the Query section toggles to Raw SQL) rather than the start page.
   const resetNewWorkspace = () => {
@@ -559,6 +583,30 @@ export function BlockStudio() {
       return false;
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDeleteBlock = async () => {
+    const blockPath = state.activeBlockPath;
+    if (!blockPath) return;
+    setDeletingBlock(true);
+    setDeleteError(null);
+    try {
+      const deleted = await api.deleteBlockStudio(blockPath);
+      dispatch({ type: 'FILE_REMOVED', path: deleted.path });
+      dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
+      setDraftSessionId(makeBlockStudioDraftId());
+      setImportSession(null);
+      setWorkspaceMode('start');
+      setEditorMode('visual');
+      setDeleteDialogOpen(false);
+      if (deleted.lineageRefresh?.status === 'failed') {
+        setCatalogError(`Block deleted, but lineage refresh failed: ${deleted.lineageRefresh.message ?? 'compile failed'}`);
+      }
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeletingBlock(false);
     }
   };
 
@@ -933,6 +981,7 @@ export function BlockStudio() {
             blockDomain={domainFilter}
             onBlockDomainChange={setDomainFilter}
             onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
+            onSemanticCompose={applySemanticComposition}
             onNewBlock={beginNewWorkspace}
             onCollapse={() => setLeftPaneCollapsed(true)}
             footer={state.semanticLayer.loading
@@ -994,6 +1043,16 @@ export function BlockStudio() {
             />
           )}
           <div style={{ flex: 1 }} />
+          {state.activeBlockPath && (
+            <button
+              type="button"
+              onClick={() => { setDeleteError(null); setDeleteDialogOpen(true); }}
+              title="Delete this saved block"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 28, padding: '0 9px', borderRadius: 7, border: `1px solid ${t.error}55`, background: `${t.error}0d`, color: t.error, fontSize: 11.5, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap' }}
+            >
+              <Trash2 size={13} strokeWidth={2} /> Delete
+            </button>
+          )}
           <TemplateButton label="New block" Icon={Plus} onClick={beginNewWorkspace} />
           {hasActiveDraft && (
             <>
@@ -1446,6 +1505,21 @@ export function BlockStudio() {
           t={t}
         />
       )}
+      {deleteDialogOpen && state.activeBlockPath && (
+        <DeleteBlockDialog
+          blockName={state.blockStudioMetadata?.name || activeBlockName || state.activeBlockPath}
+          blockPath={state.activeBlockPath}
+          deleting={deletingBlock}
+          error={deleteError}
+          onCancel={() => {
+            if (deletingBlock) return;
+            setDeleteDialogOpen(false);
+            setDeleteError(null);
+          }}
+          onConfirm={() => void handleDeleteBlock()}
+          t={t}
+        />
+      )}
     </div>
   );
 }
@@ -1680,6 +1754,48 @@ function DirtyWorkDialog({
           <button type="button" onClick={onCancel} disabled={saving} style={secondaryImportButtonStyle(t)}>Cancel</button>
           <button type="button" onClick={onDiscard} disabled={saving} style={{ ...secondaryImportButtonStyle(t), color: t.error }}>Discard</button>
           <button type="button" onClick={() => void onSave()} disabled={saving} style={primaryImportButtonStyle(t)}>{saving ? 'Saving…' : 'Save block'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteBlockDialog({
+  blockName,
+  blockPath,
+  deleting,
+  error,
+  onCancel,
+  onConfirm,
+  t,
+}: {
+  blockName: string;
+  blockPath: string;
+  deleting: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  t: Theme;
+}) {
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Delete block" style={{ position: 'fixed', inset: 0, zIndex: 95, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0, 0, 0, 0.42)' }}>
+      <div style={{ width: 'min(460px, 100%)', border: `1px solid ${t.error}55`, borderRadius: 12, background: t.cellBg, padding: 18, display: 'grid', gap: 14, boxShadow: '0 20px 60px rgba(0, 0, 0, 0.26)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <span style={{ width: 30, height: 30, display: 'grid', placeItems: 'center', borderRadius: 8, background: `${t.error}12` }}><Trash2 size={16} color={t.error} /></span>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Delete “{blockName}”?</div>
+            <div style={{ marginTop: 3, fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{blockPath}</div>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, lineHeight: 1.5, color: t.textSecondary, fontFamily: t.font }}>
+          This removes the saved <code>.dql</code> block and its generated semantic companion. Unsaved editor changes are discarded. Git can recover committed versions.
+        </div>
+        {error && <div role="alert" style={{ padding: '8px 10px', borderRadius: 7, border: `1px solid ${t.error}45`, background: `${t.error}0d`, color: t.error, fontSize: 11, lineHeight: 1.4 }}>{error}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" onClick={onCancel} disabled={deleting} style={secondaryImportButtonStyle(t)}>Cancel</button>
+          <button type="button" onClick={onConfirm} disabled={deleting} style={{ ...primaryImportButtonStyle(t), background: t.error, borderColor: t.error, opacity: deleting ? 0.65 : 1 }}>
+            {deleting ? <><Loader2 size={13} className="dql-spin" /> Deleting…</> : <><Trash2 size={13} /> Delete block</>}
+          </button>
         </div>
       </div>
     </div>
@@ -2379,7 +2495,7 @@ function SemanticBlockBuilder({
 }) {
   const parsedValues = parseSemanticVisualFields(source);
   const values = { ...parsedValues, filters: parsedValues.requestedFilters };
-  const [compatibleDimensions, setCompatibleDimensions] = useState(semanticLayer.dimensions);
+  const [compatibleDimensions, setCompatibleDimensions] = useState<SemanticDimension[]>([]);
   const [loadingCompatibility, setLoadingCompatibility] = useState(false);
   // The FULL compatibility answer so the builder can show which engine will run,
   // per-dimension incompatibility reasons, and — crucially — an explicit error
@@ -2390,11 +2506,14 @@ function SemanticBlockBuilder({
   useEffect(() => {
     let cancelled = false;
     if (values.metrics.length === 0) {
-      setCompatibleDimensions(semanticLayer.dimensions);
+      setCompatibleDimensions([]);
       setCompatibility(null);
       setCompatibilityError(null);
+      setLoadingCompatibility(false);
       return;
     }
+    setCompatibleDimensions([]);
+    setCompatibility(null);
     setLoadingCompatibility(true);
     setCompatibilityError(null);
     void api.getCompatibility(values.metrics).then((result) => {
@@ -2403,8 +2522,7 @@ function SemanticBlockBuilder({
       setCompatibleDimensions(result.dimensions);
     }).catch((error: unknown) => {
       if (cancelled) return;
-      // Do NOT gray every dimension on failure — keep the last-known list and
-      // surface the error so the user knows compatibility could not be checked.
+      setCompatibleDimensions([]);
       setCompatibilityError(error instanceof Error ? error.message : String(error));
     }).finally(() => {
       if (!cancelled) setLoadingCompatibility(false);
@@ -2415,9 +2533,6 @@ function SemanticBlockBuilder({
     dimension.reference ?? dimension.name,
     dimension.name,
   ]));
-  // A failed compatibility check must not read as "everything is incompatible":
-  // when we have no fresh answer, treat all dimensions as selectable.
-  const compatibilityUnknown = Boolean(compatibilityError) || (values.metrics.length > 0 && !compatibility && !loadingCompatibility);
   const qualifiedByName = new Map(compatibleDimensions.flatMap((dimension) => [
     [dimension.reference ?? dimension.name, dimension.qualifiedName ?? undefined] as const,
     [dimension.name, dimension.qualifiedName ?? undefined] as const,
@@ -2433,13 +2548,28 @@ function SemanticBlockBuilder({
       return [reference, { ...dimension, name: reference }] as const;
     }),
   ).values());
+  const allDimensionByName = new Map(allDimensions.flatMap((dimension) => [
+    [dimension.name, dimension] as const,
+    [dimension.reference ?? dimension.name, dimension] as const,
+  ]));
+  const eligibleDimensions = compatibleDimensions.map((dimension) => {
+    const reference = dimension.reference ?? dimension.name;
+    const catalogDimension = allDimensionByName.get(reference) ?? allDimensionByName.get(dimension.name);
+    return { ...catalogDimension, ...dimension, name: reference };
+  });
+  const eligibleTimeDimensions = eligibleDimensions.filter((dimension) => dimension.isTimeDimension || dimension.type === 'time');
   const compactInput = compactBuilderInputStyle(t);
   const [metricSearch, setMetricSearch] = useState('');
   const [dimensionSearch, setDimensionSearch] = useState('');
   const metricByName = useMemo(() => new Map(semanticLayer.metrics.map((metric) => [metric.name, metric])), [semanticLayer.metrics]);
-  const dimensionByName = useMemo(() => new Map(allDimensions.map((dimension) => [dimension.name, dimension])), [allDimensions]);
+  const dimensionByName = useMemo(() => new Map(
+    [...allDimensions, ...eligibleDimensions].flatMap((dimension) => [
+      [dimension.name, dimension] as const,
+      [dimension.reference ?? dimension.name, dimension] as const,
+    ]),
+  ), [allDimensions, eligibleDimensions]);
   const metricMatches = useMemo(() => findSemanticFieldMatches(semanticLayer.metrics, metricSearch), [semanticLayer.metrics, metricSearch]);
-  const dimensionMatches = useMemo(() => findSemanticFieldMatches(allDimensions, dimensionSearch), [allDimensions, dimensionSearch]);
+  const dimensionMatches = useMemo(() => findSemanticFieldMatches(eligibleDimensions, dimensionSearch), [eligibleDimensions, dimensionSearch]);
   const testsBody = getDqlSectionBody(source, 'tests');
   const outputFields = Array.from(new Set([...values.dimensions, ...(values.timeDimension ? [values.timeDimension] : []), ...values.metrics]));
   const updateText = (field: 'name' | 'domain' | 'description' | 'owner', value: string) => {
@@ -2459,6 +2589,11 @@ function SemanticBlockBuilder({
       : [...values.dimensions, dimension];
     setDimensions(next);
   };
+  useEffect(() => {
+    if (!compatibility || values.metrics.length === 0) return;
+    const next = reconcileSemanticCompatibility(source, Array.from(compatibleNames));
+    if (next !== source) onChange(next);
+  }, [compatibility, source]);
   return (
     <div style={{ height: '100%', overflow: 'auto', background: t.appBg }}>
     <div style={{ width: 'min(820px, 100% - 48px)', margin: '0 auto', padding: '24px 0 40px', display: 'flex', flexDirection: 'column', animation: 'dql-agent-fadein 0.25s ease-out' }}>
@@ -2504,20 +2639,15 @@ function SemanticBlockBuilder({
           {compatibilityError && (
             <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--status-warning)', lineHeight: 1.4, marginTop: 4 }}>
               <AlertTriangle size={14} style={{ flexShrink: 0 }} />
-              <span style={{ flex: 1 }}>Could not check dimension compatibility: {compatibilityError}. Showing the last-known list.</span>
+              <span style={{ flex: 1 }}>Could not verify governed dimensions: {compatibilityError}. Dimension selection is paused so an unapproved join cannot be saved.</span>
               <button type="button" onClick={() => setCompatibilityReloadKey((k) => k + 1)} style={secondaryImportButtonStyle(t)}>Retry</button>
             </div>
           )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 150px', gap: 8 }}>
             <FieldLabel label="Time dimension" t={t}>
-              <select value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={compactInput}>
+              <select disabled={values.metrics.length === 0 || loadingCompatibility || Boolean(compatibilityError)} value={values.timeDimension} onChange={(event) => onChange(setSemanticScalar(source, 'time_dimension', event.target.value))} style={{ ...compactInput, opacity: values.metrics.length === 0 || loadingCompatibility || compatibilityError ? 0.6 : 1 }}>
                 <option value="">None</option>
-                {semanticLayer.timeDimensions.filter((dimension) =>
-                  values.metrics.length === 0
-                  || compatibilityUnknown
-                  || compatibleNames.has(dimension.reference ?? dimension.name)
-                  || compatibleNames.has(dimension.name)
-                ).map((dimension) => (
+                {eligibleTimeDimensions.map((dimension) => (
                   <option key={dimension.reference ?? dimension.name} value={dimension.reference ?? dimension.name}>
                     {dimension.label || dimension.name} · {dimension.name}
                   </option>
@@ -2547,7 +2677,7 @@ function SemanticBlockBuilder({
               </div>
             )
           )}
-          {values.metrics.length > 1 && compatibleDimensions.length === 0 && (
+          {values.metrics.length > 1 && compatibility && compatibleDimensions.length === 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#d29922', fontSize: 11, lineHeight: 1.4 }}>
               <AlertTriangle size={14} /> These metrics do not expose a common dimension or join path.
               <button type="button" onClick={onOpenAi} style={secondaryImportButtonStyle(t)}>Resolve with AI</button>
@@ -2556,7 +2686,7 @@ function SemanticBlockBuilder({
         </PanelBox>
 
         <PanelBox title="Chart intent" hint="How apps and answers render this block by default." t={t}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
             <FieldLabel label="Type" t={t}>
               <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={compactInput}>
                 <option value="table">Table</option>
@@ -2565,6 +2695,7 @@ function SemanticBlockBuilder({
             </FieldLabel>
             <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={compactInput}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
             <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={compactInput}><option value="">Auto</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
+            <FieldLabel label="Series / color" t={t}><select value={chartConfig.color ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, color: event.target.value }))} style={compactInput}><option value="">None</option>{outputFields.map((field) => <option key={field} value={field}>{businessLabel(field)}</option>)}</select></FieldLabel>
           </div>
           <FieldLabel label="Title" t={t}>
             <input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} placeholder="Chart title" style={compactInput} />
@@ -2572,24 +2703,30 @@ function SemanticBlockBuilder({
         </PanelBox>
 
       <PanelBox title="Dimensions" hint="Governed group-bys checked against the metric's join path." t={t}>
-        {allDimensions.length === 0 ? (
+        {values.metrics.length === 0 ? (
+          <div style={{ fontSize: 12, color: t.textMuted }}>Choose one or more governed metrics first. Only their connected, approved dimensions will appear.</div>
+        ) : loadingCompatibility ? (
+          <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: t.textMuted }}><Loader2 size={14} className="dql-spin" />Checking common governed dimensions…</div>
+        ) : compatibilityError ? (
+          <div style={{ fontSize: 12, color: 'var(--status-warning)' }}>Dimension selection is unavailable until compatibility succeeds.</div>
+        ) : eligibleDimensions.length === 0 ? (
           <div style={{ fontSize: 12, color: t.textMuted }}>No dimensions are loaded yet.</div>
         ) : (
           <EnterpriseSemanticPicker
             kind="dimension"
-            total={allDimensions.length}
+            total={eligibleDimensions.length}
             search={dimensionSearch}
             onSearchChange={setDimensionSearch}
             matches={dimensionMatches}
-            pool={allDimensions}
+            pool={eligibleDimensions}
             selected={values.dimensions}
             resolveLabel={(name) => dimensionByName.get(name)?.label || name}
             resolveMachineName={(name) => qualifiedByName.get(name) ?? dimensionByName.get(name)?.name ?? name}
             reasonFor={(name) => reasonByName.get(name)}
             onToggle={toggleDimension}
-            compatible={(name) => values.metrics.length === 0 || compatibilityUnknown || compatibleNames.has(name)}
-            disabled={values.metrics.length === 0}
-            emptyHint="Choose a metric first; dimensions are checked against its governed join path."
+            compatible={(name) => compatibleNames.has(name)}
+            disabled={values.metrics.length === 0 || loadingCompatibility || Boolean(compatibilityError)}
+            emptyHint={loadingCompatibility ? 'Checking common governed dimensions…' : compatibilityError ? 'Retry compatibility before selecting dimensions.' : 'Choose a metric first; dimensions are checked against its governed join path.'}
             t={t}
           />
         )}
@@ -2918,7 +3055,7 @@ function SqlBlockVisualBuilder({
         </div>
       </PanelBox>
       <PanelBox title="Chart intent" hint="How apps and answers render this block by default." t={t}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
           <FieldLabel label="Type" t={t}>
             <select value={chartConfig.chart ?? 'table'} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, chart: event.target.value }))} style={input}>
               <option value="table">Table</option>
@@ -2927,6 +3064,7 @@ function SqlBlockVisualBuilder({
           </FieldLabel>
           <FieldLabel label="X axis" t={t}><select value={chartConfig.x ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, x: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
           <FieldLabel label="Y axis" t={t}><select value={chartConfig.y ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, y: event.target.value }))} style={input}><option value="">Auto</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
+          <FieldLabel label="Series / color" t={t}><select value={chartConfig.color ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, color: event.target.value }))} style={input}><option value="">None</option>{outputs.map((output) => <option key={output} value={output}>{businessLabel(output)}</option>)}</select></FieldLabel>
         </div>
         <FieldLabel label="Title" t={t}><input value={chartConfig.title ?? ''} onChange={(event) => onChange(upsertVisualizationConfig(source, { ...chartConfig, title: event.target.value }))} style={input} /></FieldLabel>
       </PanelBox>
@@ -2939,6 +3077,10 @@ function SqlBlockVisualBuilder({
       <PanelBox title="Tests" hint="Assertions checked on every run and required for certification." t={t}>
         <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
       </PanelBox>
+      <details style={{ padding: '14px 0', color: t.textSecondary, fontFamily: t.font }}>
+        <summary style={{ cursor: 'pointer', fontSize: 11, fontWeight: 750 }}>Generated DQL preview</summary>
+        <pre style={{ maxHeight: 240, overflow: 'auto', margin: '10px 0 0', whiteSpace: 'pre-wrap', color: t.textSecondary, fontSize: 11, lineHeight: 1.45, fontFamily: t.fontMono, border: '1px solid var(--border-subtle)', background: 'var(--bg-2)', borderRadius: 9, padding: '12px 14px' }}>{source}</pre>
+      </details>
     </div>
     </div>
   );

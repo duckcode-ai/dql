@@ -3108,6 +3108,17 @@ export const api = {
     });
   },
 
+  async deleteBlockStudio(path: string): Promise<{
+    ok: boolean;
+    path: string;
+    companionPath: string | null;
+    lineageRefresh?: { status: 'ready' | 'failed'; compiledAt?: string; message?: string };
+  }> {
+    return request(`/api/block-studio/block?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+    });
+  },
+
   async previewBlockStudioImport(payload: {
     path: string;
     sourceKind?: 'raw-sql' | BlockStudioImportCandidate['sourceKind'];
