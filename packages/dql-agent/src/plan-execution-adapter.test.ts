@@ -116,6 +116,61 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
     });
   });
 
+  it('AGT-017 binds every resolved metric instead of collapsing to the execution metric', () => {
+    const basePlan = semanticPlan();
+    const plan = {
+      ...basePlan,
+      query: {
+        ...basePlan.query,
+        measures: [
+          ...basePlan.query.measures,
+          {
+            requested: 'refunds',
+            qualifiedId: 'semantic:consumption:refunds',
+            status: 'resolved' as const,
+            candidateIds: ['semantic:consumption:refunds'],
+          },
+        ],
+      },
+    };
+    const nodes = [
+      ...semanticNodes(),
+      {
+        nodeId: 'metric:usage.refunds',
+        kind: 'metric' as const,
+        name: 'refunds',
+        domain: 'consumption',
+        payload: {
+          qualifiedId: 'semantic:consumption:refunds',
+          localId: 'refunds',
+        },
+      },
+    ];
+    const layer = new SemanticLayer({
+      metrics: [
+        { name: 'rollover_balance', label: 'Rollover', description: '', domain: 'consumption', sql: 'balance', type: 'sum', table: 'usage' },
+        { name: 'refunds', label: 'Refunds', description: '', domain: 'consumption', sql: 'refunds', type: 'sum', table: 'usage' },
+      ],
+      dimensions: [{ name: 'customer_name', label: 'Customer', description: '', domain: 'consumption', sql: 'customer_name', type: 'string', table: 'usage' }],
+    });
+
+    const binding = adaptResolvedAnalyticalPlan({
+      plan,
+      registry: buildPlanExecutionRegistry({ nodes }),
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-1',
+    });
+
+    expect(binding).toMatchObject({
+      status: 'ready',
+      kind: 'semantic',
+      selection: {
+        metrics: ['rollover_balance', 'refunds'],
+        dimensions: ['customer_name'],
+      },
+    });
+  });
+
   it('fails closed on a stale snapshot and an ambiguous canonical registry ID', () => {
     const registry = buildPlanExecutionRegistry({ nodes: semanticNodes() });
     expect(adaptResolvedAnalyticalPlan({

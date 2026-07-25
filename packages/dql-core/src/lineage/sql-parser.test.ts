@@ -240,12 +240,37 @@ describe('analyzeSqlReferences', () => {
     expect(result.tables).not.toContain('enterprise');
     expect(result.ctes).toContain('enterprise');
     expect(result.aliasToRelation.o).toBe('analytics.fct_orders');
+    expect(result.scopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: expect.stringContaining('cte:enterprise'),
+        aliasToRelation: expect.objectContaining({
+          o: 'analytics.fct_orders',
+          c: 'analytics.dim_customers',
+        }),
+      }),
+    ]));
     expect(result.columns).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ relation: 'analytics.fct_orders', column: 'amount' }),
         expect.objectContaining({ relation: 'analytics.dim_customers', column: 'segment' }),
       ]),
     );
+  });
+
+  it('distinguishes an ambiguous source reference from a legal output-alias reference', () => {
+    const result = analyzeSqlReferences(`
+      SELECT report_as_of_dt AS report_as_of_dt, SUM(o.amount) AS revenue
+      FROM analytics.fct_orders o
+      JOIN analytics.dim_customers c ON o.customer_id = c.customer_id
+      GROUP BY report_as_of_dt
+      ORDER BY revenue DESC
+    `, 'snowflake');
+    const scope = result.scopes.find((candidate) => candidate.aliasToRelation.o);
+
+    expect(scope?.columns.find((column) => column.column === 'report_as_of_dt')?.outputAliasReference).toBeUndefined();
+    expect(scope?.columns).toEqual(expect.arrayContaining([
+      expect.objectContaining({ column: 'revenue', outputAliasReference: true }),
+    ]));
   });
 
   it('extracts equality join conditions with aliases resolved to relations', () => {

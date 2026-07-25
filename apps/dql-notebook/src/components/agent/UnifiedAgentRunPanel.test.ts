@@ -459,6 +459,26 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     })).toMatchObject({ chart: undefined, decisionSource: 'agent' });
   });
 
+  it('UI-012 keeps a multi-metric table so no requested measure is hidden', () => {
+    expect(inlineAskChartConfig({
+      result: {
+        chartConfig: {
+          chart: 'table',
+          decisionSource: 'data',
+          metrics: ['revenue', 'refunds', 'gross_margin'],
+        },
+      },
+    }, {
+      columns: ['customer_name', 'revenue', 'refunds', 'gross_margin'],
+      rows: [{ customer_name: 'Zoom', revenue: 1200, refunds: 100, gross_margin: 0.42 }],
+      rowCount: 1,
+    })).toMatchObject({
+      chart: 'table',
+      decisionSource: 'data',
+      metrics: ['revenue', 'refunds', 'gross_margin'],
+    });
+  });
+
   it('sends the actual clarification question in client fallback history', () => {
     expect(agentRunHistoryFromItems([
       { kind: 'user', id: 'q1', text: 'Who are the top beverage customers?' },

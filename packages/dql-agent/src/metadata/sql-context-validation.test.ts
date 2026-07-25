@@ -160,6 +160,44 @@ describe('validateSqlAgainstLocalContext', () => {
     }
   });
 
+  it('AGT-015 rejects an ambiguous column inside a CTE before warehouse execution', () => {
+    const context = pack();
+    context.allowedSqlContext.relations = [
+      {
+        relation: 'analytics.fct_orders',
+        name: 'fct_orders',
+        source: 'runtime schema context',
+        columns: [{ name: 'customer_id' }, { name: 'report_as_of_dt' }, { name: 'amount' }],
+      },
+      {
+        relation: 'analytics.dim_customers',
+        name: 'dim_customers',
+        source: 'runtime schema context',
+        columns: [{ name: 'customer_id' }, { name: 'report_as_of_dt' }, { name: 'segment' }],
+      },
+    ];
+
+    const result = validateSqlAgainstLocalContext(`
+      WITH customer_revenue AS (
+        SELECT report_as_of_dt AS report_as_of_dt, c.segment, SUM(o.amount) AS revenue
+        FROM analytics.fct_orders AS o
+        JOIN analytics.dim_customers AS c ON o.customer_id = c.customer_id
+        GROUP BY report_as_of_dt, c.segment
+      )
+      SELECT report_as_of_dt, segment, revenue FROM customer_revenue
+    `, context, { dialect: 'snowflake' });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'unknown_column',
+      offending: { column: 'report_as_of_dt' },
+    });
+    if (!result.ok) {
+      expect(result.error).toContain('o (analytics.fct_orders)');
+      expect(result.error).toContain('c (analytics.dim_customers)');
+    }
+  });
+
   it('accepts shared columns when the intended relation alias is explicit', () => {
     const context = pack();
     context.allowedSqlContext.relations[1]!.columns.push({ name: 'amount' });

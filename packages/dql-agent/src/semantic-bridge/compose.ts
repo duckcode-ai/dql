@@ -525,8 +525,16 @@ function finalizeSemanticBridgeResult(input: {
 function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryInput): MetricDefinition[] {
   if (metrics.length === 0) return [];
   const selected: MetricDefinition[] = [];
+  // AGT-017 / E2E-012: preserve every metric the user names explicitly. The
+  // catalog resolver may nominate one primary metric for routing, but that hint
+  // must not collapse "revenue and refunds" into a one-metric answer.
+  for (const metric of explicitlyNamedMetrics(metrics, input.question)) {
+    selected.push(metric);
+  }
   const qualified = qualifiedMetricForQuestion(metrics, input.questionPlan);
-  if (qualified) return [qualified];
+  if (qualified && !selected.some((metric) => metric.name === qualified.name)) {
+    selected.push(qualified);
+  }
   const hintedNames = input.matchedMetric
     ? [input.matchedMetric.name, leafName(input.matchedMetric.name)]
     : [];
@@ -558,6 +566,47 @@ function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryI
     .sort((a, b) => b.score - a.score || a.metric.name.localeCompare(b.metric.name))
     .slice(0, 1)
     .map((candidate) => candidate.metric);
+}
+
+/**
+ * Resolve metric names/labels that appear verbatim in the question. A phrase is
+ * accepted only when it identifies one catalog metric; shared labels such as
+ * "Revenue" remain ambiguous and are left to the identifier-bound resolver.
+ */
+function explicitlyNamedMetrics(metrics: MetricDefinition[], question: string): MetricDefinition[] {
+  const normalizedQuestion = ` ${normalizeMetricPhrase(question)} `;
+  const byPhrase = new Map<string, MetricDefinition[]>();
+  for (const metric of metrics) {
+    const phrases = new Set([
+      normalizeMetricPhrase(metric.name),
+      normalizeMetricPhrase(leafName(metric.name)),
+      normalizeMetricPhrase(metric.label ?? ''),
+    ].filter((phrase) => phrase.length > 0));
+    for (const phrase of phrases) {
+      if (!normalizedQuestion.includes(` ${phrase} `)) continue;
+      const candidates = byPhrase.get(phrase) ?? [];
+      candidates.push(metric);
+      byPhrase.set(phrase, candidates);
+    }
+  }
+
+  const resolved = [...byPhrase.entries()]
+    .filter(([, candidates]) => new Set(candidates.map((metric) => metric.name)).size === 1)
+    .sort(([left], [right]) =>
+      normalizedQuestion.indexOf(` ${left} `) - normalizedQuestion.indexOf(` ${right} `)
+      || right.split(' ').length - left.split(' ').length)
+    .map(([, candidates]) => candidates[0]!)
+    .filter((metric, index, all) => all.findIndex((candidate) => candidate.name === metric.name) === index);
+  return resolved.slice(0, 4);
+}
+
+function normalizeMetricPhrase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_./-]+/g, ' ')
+    .replace(/[^a-z0-9% ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**

@@ -54,6 +54,8 @@ export interface CellChartConfig {
   rationale?: string;
   x?: string;       // X-axis column
   y?: string;       // Y-axis column
+  /** Ordered measures retained by a multi-metric table/result contract. */
+  metrics?: string[];
   color?: string;   // Color-by column; target/destination column for Sankey
   facet?: string;   // Faceting column (horizontal/vertical split)
   size?: string;    // Size-by column (scatter/bubble)
@@ -1009,6 +1011,8 @@ export interface BlockStudioMetadata {
   name: string;
   path: string | null;
   domain: string;
+  /** Optional nested location below the domain's blocks root. */
+  folderPath?: string;
   description: string;
   owner: string;
   tags: string[];

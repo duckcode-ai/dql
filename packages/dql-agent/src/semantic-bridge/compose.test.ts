@@ -237,6 +237,31 @@ describe('composeSemanticQueryForQuestion — grain-aware metric disambiguation'
     expect(result?.composeResult.strategy).toBe('aggregate_islands');
     expect(result?.sql).toContain('CROSS JOIN metric_2_refunds');
   });
+
+  it('AGT-017 preserves multiple metrics named in a natural-language question', () => {
+    const l = new SemanticLayer({
+      metrics: [
+        { name: 'revenue', label: 'Revenue', description: '', domain: 'finance', sql: 'amount', type: 'sum', table: 'orders' },
+        { name: 'refunds', label: 'Refunds', description: '', domain: 'finance', sql: 'refund_amount', type: 'sum', table: 'orders' },
+        { name: 'gross_margin', label: 'Gross Margin', description: '', domain: 'finance', sql: 'margin_amount', type: 'sum', table: 'orders' },
+      ],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', domain: 'finance', sql: 'customer_name', type: 'string', table: 'orders' },
+      ],
+    });
+    const question = 'Show revenue, refunds, and gross margin by customer';
+    const result = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    });
+
+    expect(result?.metrics).toEqual(['revenue', 'refunds', 'gross_margin']);
+    expect(result?.dimensions).toEqual(['customer_name']);
+    expect(result?.sql).toContain('AS revenue');
+    expect(result?.sql).toContain('AS refunds');
+    expect(result?.sql).toContain('AS gross_margin');
+  });
 });
 
 describe('metric/measure de-conflation (Phase 5)', () => {

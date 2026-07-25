@@ -155,8 +155,10 @@ export function BlockStudio() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [pendingDeleteBlock, setPendingDeleteBlock] = useState<{ path: string; name: string } | null>(null);
   const [deletingBlock, setDeletingBlock] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [blockLibraryRefreshKey, setBlockLibraryRefreshKey] = useState(0);
   const [saveIdentityOpen, setSaveIdentityOpen] = useState(false);
   const [dirtyGuardOpen, setDirtyGuardOpen] = useState(false);
   const saveAfterIdentityRef = useRef(false);
@@ -404,6 +406,28 @@ export function BlockStudio() {
   const handleDraftChange = (draft: string) => {
     setRunError(null);
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
+    const parsed = parseBlockFields(draft);
+    const current = state.blockStudioMetadata;
+    if (!parsed || !current) return;
+    const next = {
+      ...current,
+      name: parsed.name || current.name,
+      domain: parsed.domain || current.domain,
+      description: parsed.description,
+      owner: parsed.owner,
+      tags: parsed.tags,
+      reviewStatus: parsed.status || current.reviewStatus,
+    };
+    if (
+      next.name !== current.name
+      || next.domain !== current.domain
+      || next.description !== current.description
+      || next.owner !== current.owner
+      || next.reviewStatus !== current.reviewStatus
+      || next.tags.join('\u0000') !== current.tags.join('\u0000')
+    ) {
+      dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: next });
+    }
   };
 
   // Query-mode toggle: rebuild the draft as a semantic or raw-SQL (custom)
@@ -476,6 +500,7 @@ export function BlockStudio() {
         name,
         path: null,
         domain: draftDomain,
+        folderPath: '',
         description: '',
         owner: '',
         tags: [],
@@ -486,7 +511,7 @@ export function BlockStudio() {
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: null });
     dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation: null });
     setWorkspaceMode('manual');
-    setEditorMode(type === 'semantic' ? 'visual' : 'source');
+    setEditorMode('visual');
   };
 
   const handleRun = async () => {
@@ -519,6 +544,7 @@ export function BlockStudio() {
       metadata: {
         name: state.blockStudioMetadata.name,
         domain: state.blockStudioMetadata.domain,
+        folderPath: state.blockStudioMetadata.folderPath,
         description: state.blockStudioMetadata.description,
         owner: state.blockStudioMetadata.owner,
         tags: state.blockStudioMetadata.tags,
@@ -529,6 +555,7 @@ export function BlockStudio() {
         lineage: state.blockStudioMetadata.lineage,
       },
     });
+    setBlockLibraryRefreshKey((current) => current + 1);
     dispatch({
       type: 'OPEN_BLOCK_STUDIO',
       file: {
@@ -586,20 +613,30 @@ export function BlockStudio() {
     }
   };
 
+  const requestDeleteBlock = (path: string, name: string) => {
+    setDeleteError(null);
+    setPendingDeleteBlock({ path, name });
+    setDeleteDialogOpen(true);
+  };
+
   const handleDeleteBlock = async () => {
-    const blockPath = state.activeBlockPath;
+    const blockPath = pendingDeleteBlock?.path;
     if (!blockPath) return;
     setDeletingBlock(true);
     setDeleteError(null);
     try {
       const deleted = await api.deleteBlockStudio(blockPath);
       dispatch({ type: 'FILE_REMOVED', path: deleted.path });
-      dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
-      setDraftSessionId(makeBlockStudioDraftId());
-      setImportSession(null);
-      setWorkspaceMode('start');
-      setEditorMode('visual');
+      if (state.activeBlockPath === deleted.path) {
+        dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
+        setDraftSessionId(makeBlockStudioDraftId());
+        setImportSession(null);
+        setWorkspaceMode('start');
+        setEditorMode('visual');
+      }
       setDeleteDialogOpen(false);
+      setPendingDeleteBlock(null);
+      setBlockLibraryRefreshKey((current) => current + 1);
       if (deleted.lineageRefresh?.status === 'failed') {
         setCatalogError(`Block deleted, but lineage refresh failed: ${deleted.lineageRefresh.message ?? 'compile failed'}`);
       }
@@ -706,7 +743,7 @@ export function BlockStudio() {
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: candidate.preview });
     setResultTab('results');
     setWorkspaceMode('manual');
-    setEditorMode(parseBlockFields(candidate.dqlSource)?.blockType === 'semantic' ? 'visual' : 'source');
+    setEditorMode('visual');
   };
 
   const handleImportCandidateSaved = (candidate: BlockStudioImportCandidate, block: BlockStudioOpenPayload) => {
@@ -983,6 +1020,8 @@ export function BlockStudio() {
             onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
             onSemanticCompose={applySemanticComposition}
             onNewBlock={beginNewWorkspace}
+            onDeleteBlock={(block) => requestDeleteBlock(block.path, block.name)}
+            blockLibraryRefreshKey={blockLibraryRefreshKey}
             onCollapse={() => setLeftPaneCollapsed(true)}
             footer={state.semanticLayer.loading
               ? `Loading ${(state.blockStudioDbtStatus?.counts.metrics ?? 0).toLocaleString()} semantic metrics…`
@@ -1046,7 +1085,7 @@ export function BlockStudio() {
           {state.activeBlockPath && (
             <button
               type="button"
-              onClick={() => { setDeleteError(null); setDeleteDialogOpen(true); }}
+              onClick={() => requestDeleteBlock(state.activeBlockPath!, state.blockStudioMetadata?.name || activeBlockName || state.activeBlockPath!)}
               title="Delete this saved block"
               style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 28, padding: '0 9px', borderRadius: 7, border: `1px solid ${t.error}55`, background: `${t.error}0d`, color: t.error, fontSize: 11.5, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap' }}
             >
@@ -1137,6 +1176,7 @@ export function BlockStudio() {
               running={running}
               onOpenBuilder={() => setEditorMode('visual')}
               onOpenSource={() => setEditorMode('source')}
+              onDelete={() => state.activeBlockPath && requestDeleteBlock(state.activeBlockPath, state.blockStudioMetadata?.name || activeBlockName || state.activeBlockPath)}
               onRun={() => void handleRun()}
               onOpenHistory={() => {
                 setResultTab('history');
@@ -1204,7 +1244,7 @@ export function BlockStudio() {
               {/* Prototype IDE chrome: file path bar + editor + 208px right rail. */}
               <div style={{ height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10, padding: '0 14px', borderBottom: '1px solid var(--border-subtle)', background: t.appBg }}>
                 <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {state.activeBlockPath ?? `blocks/${state.blockStudioMetadata?.domain || 'draft'}/${state.blockStudioMetadata?.name || 'new_block'}.dql`}
+                  {state.activeBlockPath ?? blockStudioPathPreview(state.blockStudioMetadata)}
                 </span>
                 <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-warning)', flexShrink: 0 }} title="Unsaved changes" />
                 <div style={{ flex: 1 }} />
@@ -1505,15 +1545,16 @@ export function BlockStudio() {
           t={t}
         />
       )}
-      {deleteDialogOpen && state.activeBlockPath && (
+      {deleteDialogOpen && pendingDeleteBlock && (
         <DeleteBlockDialog
-          blockName={state.blockStudioMetadata?.name || activeBlockName || state.activeBlockPath}
-          blockPath={state.activeBlockPath}
+          blockName={pendingDeleteBlock.name}
+          blockPath={pendingDeleteBlock.path}
           deleting={deletingBlock}
           error={deleteError}
           onCancel={() => {
             if (deletingBlock) return;
             setDeleteDialogOpen(false);
+            setPendingDeleteBlock(null);
             setDeleteError(null);
           }}
           onConfirm={() => void handleDeleteBlock()}
@@ -2305,6 +2346,7 @@ function BlockDetailView({
   running,
   onOpenBuilder,
   onOpenSource,
+  onDelete,
   onRun,
   onOpenHistory,
   t,
@@ -2318,6 +2360,7 @@ function BlockDetailView({
   running: boolean;
   onOpenBuilder: () => void;
   onOpenSource: () => void;
+  onDelete: () => void;
   onRun: () => void;
   onOpenHistory: () => void;
   t: Theme;
@@ -2360,7 +2403,7 @@ function BlockDetailView({
               {metadata?.reviewStatus ? <BlockStatusBadge status={metadata.reviewStatus} t={t} /> : null}
             </div>
             <div style={{ fontSize: 12, color: t.textMuted, marginTop: 4 }}>
-              {[metadata?.domain, metadata?.owner, ...(metadata?.tags?.length ? [metadata.tags.join(', ')] : [])].filter(Boolean).join(' · ') || 'Unsaved draft'}
+              {[metadata?.domain, metadata?.folderPath ? `folder: ${metadata.folderPath}` : null, metadata?.owner, ...(metadata?.tags?.length ? [metadata.tags.join(', ')] : [])].filter(Boolean).join(' · ') || 'Unsaved draft'}
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
@@ -2369,6 +2412,9 @@ function BlockDetailView({
             </button>
             <button type="button" onClick={onRun} disabled={running} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 32, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: t.font, opacity: running ? 0.7 : 1 }}>
               {running ? <Loader2 size={12} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Play size={11} fill="currentColor" />} Run
+            </button>
+            <button type="button" aria-label={`Delete ${name}`} title="Delete block" onClick={onDelete} style={{ width: 32, height: 32, borderRadius: 8, border: `1px solid ${t.error}55`, background: `${t.error}0d`, color: t.error, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+              <Trash2 size={14} />
             </button>
             <button type="button" title="History and metadata" onClick={onOpenHistory} style={{ width: 32, height: 32, borderRadius: 8, border: `1px solid ${t.headerBorder}`, background: t.cellBg, color: t.textMuted, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
               <MoreHorizontal size={15} />
@@ -2601,6 +2647,7 @@ function SemanticBlockBuilder({
         metadata={metadata}
         domains={domainOptions}
         onTextChange={updateText}
+        onFolderChange={(folderPath) => onMetadataChange({ folderPath })}
         onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
         t={t}
       />
@@ -2770,12 +2817,14 @@ function CompactBlockIdentity({
   metadata,
   domains,
   onTextChange,
+  onFolderChange,
   onTagsChange,
   t,
 }: {
   metadata: BlockStudioOpenPayload['metadata'] | null;
   domains: string[];
   onTextChange: (field: 'name' | 'domain' | 'description' | 'owner', value: string) => void;
+  onFolderChange: (folderPath: string) => void;
   onTagsChange: (tags: string[]) => void;
   t: Theme;
 }) {
@@ -2793,6 +2842,20 @@ function CompactBlockIdentity({
         </FieldLabel>
         <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => onTextChange('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
         <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => onTagsChange(event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="finance, emea" style={input} /></FieldLabel>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <FieldLabel label="Folder (optional)" t={t}>
+            <input
+              aria-label="Block folder"
+              value={metadata?.folderPath ?? ''}
+              onChange={(event) => onFolderChange(event.target.value)}
+              placeholder="executive/monthly"
+              style={{ ...input, fontFamily: t.fontMono }}
+            />
+          </FieldLabel>
+          <div style={{ marginTop: 5, fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>
+            {blockStudioPathPreview(metadata)}
+          </div>
+        </div>
         <div style={{ gridColumn: '1 / -1' }}>
           <FieldLabel label="Description" t={t}><input value={metadata?.description ?? ''} onChange={(event) => onTextChange('description', event.target.value)} placeholder="What business question does this answer?" style={input} /></FieldLabel>
         </div>
@@ -3028,6 +3091,7 @@ function SqlBlockVisualBuilder({
         metadata={metadata}
         domains={domainOptions}
         onTextChange={updateText}
+        onFolderChange={(folderPath) => onMetadataChange({ folderPath })}
         onTagsChange={(tags) => { onMetadataChange({ tags }); onChange(setBlockTags(source, tags)); }}
         t={t}
       />
@@ -4896,9 +4960,9 @@ function SavePanel({
   onChange,
   t,
 }: {
-  metadata: { name: string; domain: string; description: string; owner: string; tags: string[] } | null;
+  metadata: { name: string; domain: string; folderPath?: string; description: string; owner: string; tags: string[] } | null;
   draftMetadata: ReturnType<typeof parseBlockFields> | null;
-  onChange: (next: Partial<{ name: string; domain: string; description: string; owner: string; tags: string[] }>) => void;
+  onChange: (next: Partial<{ name: string; domain: string; folderPath?: string; description: string; owner: string; tags: string[] }>) => void;
   t: Theme;
 }) {
   const inputStyle: React.CSSProperties = {
@@ -4916,6 +4980,7 @@ function SavePanel({
   const values = {
     name: draftMetadata?.name || metadata?.name || '',
     domain: draftMetadata?.domain || metadata?.domain || 'uncategorized',
+    folderPath: metadata?.folderPath || '',
     description: draftMetadata?.description || metadata?.description || '',
     owner: draftMetadata?.owner || metadata?.owner || '',
     tags: draftMetadata?.tags || metadata?.tags || [],
@@ -4925,6 +4990,7 @@ function SavePanel({
     <div style={{ display: 'grid', gap: 10, padding: 12 }}>
       <input value={values.name} onChange={(event) => onChange({ name: event.target.value })} placeholder="Block name" style={inputStyle} />
       <input value={values.domain} onChange={(event) => onChange({ domain: event.target.value })} placeholder="Domain" style={inputStyle} />
+      <input value={values.folderPath} onChange={(event) => onChange({ folderPath: event.target.value })} placeholder="Folder (optional), e.g. executive/monthly" style={{ ...inputStyle, fontFamily: t.fontMono }} />
       <input value={values.owner} onChange={(event) => onChange({ owner: event.target.value })} placeholder="Owner" style={inputStyle} />
       <input value={values.description} onChange={(event) => onChange({ description: event.target.value })} placeholder="Description" style={inputStyle} />
       <input value={values.tags.join(', ')} onChange={(event) => onChange({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) })} placeholder="Tags" style={inputStyle} />
@@ -5660,6 +5726,13 @@ function readBlockStudioNumber(key: string, fallback: number, min: number, max: 
 
 function hasBlockStudioWorkspaceContent(state: { blockStudioDraft: string; blockStudioMetadata: unknown; activeBlockPath: string | null }): boolean {
   return Boolean(state.blockStudioDraft.trim() || state.blockStudioMetadata || state.activeBlockPath);
+}
+
+function blockStudioPathPreview(metadata: Pick<BlockStudioOpenPayload['metadata'], 'name' | 'domain' | 'folderPath'> | null): string {
+  const domain = metadata?.domain?.trim() || 'uncategorized';
+  const folder = metadata?.folderPath?.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  const slug = (metadata?.name || 'new_block').toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'new-block';
+  return `blocks/${domain}/${folder ? `${folder}/` : ''}${slug}.dql`;
 }
 
 function extractSelectAliases(sql: string): string[] {

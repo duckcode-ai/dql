@@ -14,6 +14,7 @@ import {
   notebookResearchSourceCellOption,
   notebookResearchSourceSyncStatus,
 } from '../../utils/notebook-research';
+import { NOTEBOOK_CELL_FOCUS_EVENT } from '../../utils/notebook-cell-focus';
 
 interface CellListProps {
   registerCellRef: (id: string, el: HTMLDivElement | null) => void;
@@ -43,6 +44,21 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
 
   const handleGutterClick = useCallback((cellId: string) => {
     setFocusedCellId(cellId);
+  }, []);
+
+  useEffect(() => {
+    const focusInsertedCell = (event: Event) => {
+      const cellId = (event as CustomEvent<{ cellId?: string }>).detail?.cellId;
+      if (!cellId) return;
+      setFocusedCellId(cellId);
+      window.requestAnimationFrame(() => {
+        const target = Array.from(document.querySelectorAll<HTMLElement>('[data-cell-id]'))
+          .find((element) => element.dataset.cellId === cellId);
+        target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    };
+    window.addEventListener(NOTEBOOK_CELL_FOCUS_EVENT, focusInsertedCell);
+    return () => window.removeEventListener(NOTEBOOK_CELL_FOCUS_EVENT, focusInsertedCell);
   }, []);
 
   useEffect(() => {

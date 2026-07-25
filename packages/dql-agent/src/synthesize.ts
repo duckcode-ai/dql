@@ -325,21 +325,40 @@ function businessRowLabel(
     .join(" — ");
 }
 
-function measureColumn(input: SynthesizeInput): string | undefined {
+function measureColumns(input: SynthesizeInput): string[] {
   const preview = input.resultPreview;
-  if (!preview?.rows.length) return undefined;
+  if (!preview?.rows.length) return [];
   const numeric = preview.columns.filter((column) => preview.rows.some((row) => numericCell(row[column]) !== undefined) && !isTechnicalColumn(column));
-  if (numeric.length === 0) return undefined;
-  const questionTerms = new Set(input.question.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2));
+  if (numeric.length === 0) return [];
+  const normalizedQuestion = input.question.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const questionTerms = new Set(normalizedQuestion.split(/\s+/).filter((term) => term.length > 2));
   const scored = numeric.map((column, index) => {
     const terms = column.toLowerCase().split(/[_-]+/);
+    const phrase = terms.join(" ");
+    const explicitPosition = normalizedQuestion.indexOf(phrase);
     const overlap = terms.filter((term) => questionTerms.has(term)).length;
     const businessMeasure = /revenue|sales|spend|amount|value|profit|margin|cost|price|tax|orders?|count|rate|score|total/i.test(column) ? 1 : 0;
     const lifetime = /lifetime/i.test(column) && /revenue|spend|value|sales/i.test(input.question) ? 1 : 0;
-    return { column, score: overlap * 10 + businessMeasure * 3 + lifetime * 4 - index / 100 };
+    return { column, explicitPosition, score: overlap * 10 + businessMeasure * 3 + lifetime * 4 - index / 100 };
   });
-  scored.sort((left, right) => right.score - left.score);
-  return scored[0]?.column;
+  scored.sort((left, right) => {
+    if (left.explicitPosition >= 0 && right.explicitPosition >= 0) return left.explicitPosition - right.explicitPosition;
+    if (left.explicitPosition >= 0) return -1;
+    if (right.explicitPosition >= 0) return 1;
+    return right.score - left.score;
+  });
+  return scored.map(({ column }) => column);
+}
+
+function renderMeasureSummary(
+  row: Record<string, unknown>,
+  measures: string[],
+  formats?: Record<string, SemanticDisplayFormat>,
+): string {
+  return measures
+    .filter((column) => numericCell(row[column]) !== undefined)
+    .map((column) => `**${humanizeColumn(column)}:** ${formatBusinessValue(column, row[column], formats?.[column])}`)
+    .join(" · ");
 }
 
 function visibleProfileFields(preview: SynthesizeResultPreview, identityColumn?: string): string[] {
@@ -362,7 +381,8 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
   if (preview.rows.length === 0) return "No matching records were found for this question.";
 
   const identityColumn = labelColumn(preview, input.question);
-  const measure = measureColumn(input);
+  const measures = measureColumns(input);
+  const measure = measures[0];
   if (preview.rows.length === 1) {
     const row = preview.rows[0];
     const identityValue = identityColumn ? formatBusinessValue(identityColumn, row[identityColumn], formats?.[identityColumn]) : undefined;
@@ -391,10 +411,14 @@ function deterministicBusinessNarrative(input: SynthesizeInput, format: Synthesi
       const topLabel = businessRowLabel(preview, top.row, identityColumn, formats);
       const scope = preview.rowCount > preview.rows.length ? "Among the displayed results, " : "";
       const directionLabel = rankingDirection === 'bottom' ? 'lowest' : 'highest';
-      const headline = `${scope}**${topLabel}** has the ${directionLabel} ${humanizeColumn(measure).toLowerCase()} at **${formatBusinessValue(measure, top.value, formats?.[measure])}**.`;
+      const additionalMeasures = renderMeasureSummary(top.row, measures.slice(1), formats);
+      const headline = `${scope}**${topLabel}** has the ${directionLabel} ${humanizeColumn(measure).toLowerCase()} at **${formatBusinessValue(measure, top.value, formats?.[measure])}**.${additionalMeasures ? ` ${additionalMeasures}.` : ""}`;
       const next = ranked.slice(1, 3).map((entry) => {
         const label = identityColumn ? businessRowLabel(preview, entry.row, identityColumn, formats) : "Another result";
-        return `- **${label}:** ${formatBusinessValue(measure, entry.value, formats?.[measure])}`;
+        const summary = measures.length === 1
+          ? formatBusinessValue(measure, entry.value, formats?.[measure])
+          : renderMeasureSummary(entry.row, measures, formats);
+        return `- **${label}:** ${summary || formatBusinessValue(measure, entry.value, formats?.[measure])}`;
       });
       const causationCaveat = format === "research"
         ? "\nThis result shows the pattern, but it does not by itself establish the underlying cause."

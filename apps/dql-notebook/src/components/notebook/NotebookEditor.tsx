@@ -26,6 +26,7 @@ import {
 import { emitNotebookResearchChanged } from "../../utils/notebook-research";
 import type { Cell, NotebookDocMetadata, NotebookFile } from "../../store/types";
 import { DatasetImportPanel } from "./DatasetImportPanel";
+import { focusInsertedNotebookCell } from "../../utils/notebook-cell-focus";
 
 interface NotebookEditorProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -214,6 +215,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         cell,
         afterId: aiSourceCellId ?? undefined,
       });
+      focusInsertedNotebookCell(cell.id);
       setAiSourceCellId(cell.id);
       setAiOpen(true);
     },
@@ -260,6 +262,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         }];
         dispatch({ type: "ADD_CELL", cell: contextCell, afterId: aiSourceCellId ?? undefined });
         dispatch({ type: "ADD_CELL", cell: extractionCell, afterId: contextCell.id });
+        focusInsertedNotebookCell(extractionCell.id);
         setAiSourceCellId(extractionCell.id);
         setAiOpen(true);
         return;
@@ -315,6 +318,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         cell,
         afterId: aiSourceCellId ?? undefined,
       });
+      focusInsertedNotebookCell(cell.id);
       setAiSourceCellId(cell.id);
       setAiOpen(true);
     },

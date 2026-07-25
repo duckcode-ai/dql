@@ -2421,6 +2421,8 @@ function AskInspector({
   const payload = payloadOf(artifact);
   const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
   const sql = answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined);
+  const resultData = extractResult(payload);
+  const insertTitle = resultCardTitle(run, artifact);
   const evidence = evidenceFromRun(run);
   const lineage = lineageEntriesFromRun(run);
   const trustNote = trustExplainer(run);
@@ -2496,7 +2498,24 @@ function AskInspector({
           <>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: t.textMuted }}>Reusable governed artifact — save it as a block to certify.</span>
-              <CopyButton text={dqlArtifact.source} t={t} title="Copy DQL" />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {onInsertDql ? (
+                  <button
+                    type="button"
+                    onClick={() => onInsertDql({
+                      sql,
+                      dqlArtifact,
+                      result: resultData,
+                      chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
+                      title: insertTitle,
+                    })}
+                    style={smallButtonStyle(t)}
+                  >
+                    Open DQL in notebook
+                  </button>
+                ) : null}
+                <CopyButton text={dqlArtifact.source} t={t} title="Copy DQL" />
+              </div>
             </div>
             <pre style={codeStyle(t)}>{dqlArtifact.source}</pre>
           </>
@@ -2505,7 +2524,14 @@ function AskInspector({
           <>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <span style={{ fontSize: 11, color: t.textMuted }}>Compiled SQL preview — grounded against your dbt schema.</span>
-              <CopyButton text={sql} t={t} title="Copy SQL" />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {onInsertSql ? (
+                  <button type="button" onClick={() => onInsertSql(sql, insertTitle)} style={smallButtonStyle(t)}>
+                    Open SQL in notebook
+                  </button>
+                ) : null}
+                <CopyButton text={sql} t={t} title="Copy SQL" />
+              </div>
             </div>
             <pre style={codeStyle(t)}>{sql}</pre>
           </>
@@ -3613,12 +3639,16 @@ function extractChartConfig(payload: Record<string, unknown>, result: QueryResul
   const columns = result.columns;
   const pick = (key: string): string | undefined =>
     typeof raw[key] === 'string' && columns.includes(raw[key] as string) ? raw[key] as string : undefined;
+  const metrics = Array.isArray(raw.metrics)
+    ? raw.metrics.filter((value): value is string => typeof value === 'string' && columns.includes(value))
+    : [];
   const config: CellChartConfig = {
     ...(chart ? { chart } : {}),
     ...(chart ? { decisionSource: storedDecisionSource ?? 'agent' as const } : {}),
     ...(typeof raw.rationale === 'string' ? { rationale: raw.rationale } : {}),
     ...(pick('x') ? { x: pick('x') } : {}),
     ...(pick('y') ? { y: pick('y') } : {}),
+    ...(metrics.length > 0 ? { metrics } : {}),
     ...(pick('color') ? { color: pick('color') } : {}),
     ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
     ...(typeof raw.colorPalette === 'string' ? { colorPalette: raw.colorPalette as CellChartConfig['colorPalette'] } : {}),
@@ -3633,6 +3663,7 @@ export function inlineAskChartConfig(payload: Record<string, unknown>, result: Q
   // the transcript when the returned data is chartable. Authored/user table
   // choices stay authoritative; agent/default choices remain suggestions.
   return resolved?.chart === 'table'
+    && (resolved.metrics?.length ?? 0) <= 1
     && resolved.decisionSource !== 'authored'
     && resolved.decisionSource !== 'user'
     ? { ...resolved, chart: undefined }

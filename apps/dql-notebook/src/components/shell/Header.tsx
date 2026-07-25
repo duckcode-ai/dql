@@ -138,6 +138,7 @@ export function Header() {
           metadata: {
             name: state.blockStudioMetadata.name,
             domain: state.blockStudioMetadata.domain,
+            folderPath: state.blockStudioMetadata.folderPath,
             description: state.blockStudioMetadata.description,
             owner: state.blockStudioMetadata.owner,
             tags: state.blockStudioMetadata.tags,

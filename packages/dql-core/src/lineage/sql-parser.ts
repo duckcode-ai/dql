@@ -29,6 +29,8 @@ export interface SqlColumnReference {
   tableAlias?: string;
   relation?: string;
   unqualified: boolean;
+  /** True when this is a legal reference to a select-list alias. */
+  outputAliasReference?: boolean;
 }
 
 /** An equality join condition `left.col = right.col`, aliases resolved to relations. */
@@ -48,6 +50,18 @@ export interface SqlAggregateReference {
   relation?: string;
 }
 
+/**
+ * References owned by one SELECT scope. Keeping aliases scoped prevents an
+ * inner CTE alias from being treated as a peer of an outer alias during
+ * ambiguity validation.
+ */
+export interface SqlReferenceScope {
+  id: string;
+  columns: SqlColumnReference[];
+  aliasToRelation: Record<string, string>;
+  outputAliases: string[];
+}
+
 export interface SqlReferenceAnalysis {
   parsed: boolean;
   statementTypes: string[];
@@ -61,6 +75,7 @@ export interface SqlReferenceAnalysis {
   /** Aggregate function references in the SELECT list. Empty when unparsed. */
   aggregates: SqlAggregateReference[];
   aliasToRelation: Record<string, string>;
+  scopes: SqlReferenceScope[];
   error?: string;
 }
 
@@ -171,6 +186,7 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
       joins: [],
       aggregates: [],
       aliasToRelation: {},
+      scopes: [],
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -211,6 +227,9 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
     collectSqlJoins(statement, { ctes, aliasToRelation, joins });
     collectSqlAggregates(statement, { ctes, derivedRelations, aliasToRelation, singleRelation, aggregates });
   }
+  const scopes = statements.flatMap((statement, index) =>
+    collectSqlReferenceScopes(statement, `statement_${index + 1}`),
+  );
 
   return {
     parsed: true,
@@ -222,7 +241,172 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
     joins,
     aggregates,
     aliasToRelation: Object.fromEntries(aliasToRelation),
+    scopes,
   };
+}
+
+function collectSqlReferenceScopes(node: unknown, id: string): SqlReferenceScope[] {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return [];
+  const statement = node as Record<string, unknown>;
+  const scopes: SqlReferenceScope[] = [];
+
+  const withItems = Array.isArray(statement.with) ? statement.with : [];
+  for (const [index, item] of withItems.entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const cteName = cteNameFromNode(record) ?? `cte_${index + 1}`;
+    const stmt = record.stmt;
+    const stmtRecord = stmt && typeof stmt === 'object' && !Array.isArray(stmt)
+      ? stmt as Record<string, unknown>
+      : undefined;
+    // node-sql-parser returns the SELECT directly for PostgreSQL/DuckDB and
+    // wraps it in `{ ast }` for Snowflake.
+    const ast = stmtRecord?.ast ?? stmtRecord;
+    scopes.push(...collectSqlReferenceScopes(ast, `${id}:cte:${cteName}`));
+  }
+
+  if (readStatementType(statement) === 'select') {
+    const aliasToRelation = directScopeAliases(statement);
+    const physicalRelations = Array.from(new Set(aliasToRelation.values()));
+    const outputAliases = directSelectOutputAliases(statement);
+    const columns: SqlColumnReference[] = [];
+    collectCurrentScopeColumns(statement, {
+      aliasToRelation,
+      singleRelation: physicalRelations.length === 1 ? physicalRelations[0] : undefined,
+      outputAliases: new Set(outputAliases),
+      columns,
+    });
+    scopes.push({
+      id,
+      columns: dedupeColumnReferences(columns),
+      aliasToRelation: Object.fromEntries(aliasToRelation),
+      outputAliases,
+    });
+  }
+
+  collectNestedSelectScopes(statement, id, scopes);
+  return dedupeReferenceScopes(scopes);
+}
+
+function cteNameFromNode(node: Record<string, unknown>): string | undefined {
+  const raw = node.name;
+  if (typeof raw === 'string') return normalizeSqlIdentifier(raw);
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const value = stringField(raw as Record<string, unknown>, 'value');
+    if (value) return normalizeSqlIdentifier(value);
+  }
+  return undefined;
+}
+
+function directScopeAliases(statement: Record<string, unknown>): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const from = Array.isArray(statement.from) ? statement.from : [];
+  for (const item of from) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if (derivedRelationAlias(record)) continue;
+    const relation = relationFromTableNode(record);
+    if (!relation || isSqlFunctionRelation(relation)) continue;
+    const alias = stringField(record, 'as')
+      ?? stringField(record, 'alias')
+      ?? relation.split('.').at(-1);
+    if (alias) aliases.set(normalizeSqlIdentifier(alias), relation);
+  }
+  return aliases;
+}
+
+function collectCurrentScopeColumns(
+  node: unknown,
+  state: {
+    aliasToRelation: Map<string, string>;
+    singleRelation?: string;
+    outputAliases: Set<string>;
+    columns: SqlColumnReference[];
+  },
+  root = true,
+  clause?: string,
+): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectCurrentScopeColumns(item, state, false, clause);
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  if (!root && readStatementType(record) === 'select') return;
+  if (record.type === 'column_ref') {
+    const column = readColumnRefName(record);
+    if (!column || column === '*') return;
+    const rawTable = stringField(record, 'table');
+    const tableAlias = rawTable ? normalizeSqlIdentifier(rawTable) : undefined;
+    const normalizedClause = clause?.toLowerCase();
+    const outputAliasReference = !rawTable
+      && state.outputAliases.has(normalizeSqlIdentifier(column))
+      && (normalizedClause === 'orderby'
+        || normalizedClause === 'order_by'
+        || normalizedClause === 'groupby'
+        || normalizedClause === 'group_by'
+        || normalizedClause === 'having'
+        || normalizedClause === 'qualify');
+    state.columns.push({
+      column,
+      tableAlias: rawTable,
+      relation: tableAlias
+        ? state.aliasToRelation.get(tableAlias) ?? rawTable
+        : state.singleRelation,
+      unqualified: !rawTable,
+      ...(outputAliasReference ? { outputAliasReference: true } : {}),
+    });
+    return;
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'with') continue;
+    collectCurrentScopeColumns(value, state, false, root ? key : clause);
+  }
+}
+
+function directSelectOutputAliases(statement: Record<string, unknown>): string[] {
+  const aliases: string[] = [];
+  const columns = Array.isArray(statement.columns) ? statement.columns : [];
+  for (const column of columns) {
+    if (!column || typeof column !== 'object' || Array.isArray(column)) continue;
+    const alias = stringField(column as Record<string, unknown>, 'as');
+    if (alias) aliases.push(normalizeSqlIdentifier(alias));
+  }
+  return Array.from(new Set(aliases));
+}
+
+function collectNestedSelectScopes(
+  node: unknown,
+  parentId: string,
+  scopes: SqlReferenceScope[],
+  counter = { value: 0 },
+): void {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectNestedSelectScopes(item, parentId, scopes, counter);
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  for (const [key, value] of Object.entries(record)) {
+    if (key === 'with') continue;
+    if (value && typeof value === 'object' && !Array.isArray(value)
+      && readStatementType(value as Record<string, unknown>) === 'select') {
+      counter.value += 1;
+      scopes.push(...collectSqlReferenceScopes(value, `${parentId}:subquery:${counter.value}`));
+      continue;
+    }
+    collectNestedSelectScopes(value, parentId, scopes, counter);
+  }
+}
+
+function dedupeReferenceScopes(scopes: SqlReferenceScope[]): SqlReferenceScope[] {
+  const seen = new Set<string>();
+  return scopes.filter((scope) => {
+    const signature = `${scope.id}|${JSON.stringify(scope.aliasToRelation)}|${scope.columns.map((column) => `${column.tableAlias ?? ''}.${column.column}`).join(',')}`;
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
 }
 
 /** Resolve a column_ref node's `table` alias to a relation (or undefined). */

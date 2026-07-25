@@ -209,9 +209,20 @@ export function adaptResolvedAnalyticalPlan(
     return block('EXECUTION_KIND_MISMATCH', `${plan.executionId} is ${entry.node.kind}, not a semantic metric.`);
   }
   if (!input.semanticLayer) return block('SEMANTIC_LAYER_REQUIRED', 'The pinned semantic layer is unavailable.');
-  const metricNames = semanticMetricNames(entry.node, input.semanticLayer);
-  if (metricNames.length === 0) return block('SEMANTIC_MEMBER_MISSING', `${plan.executionId} is not present in the pinned semantic layer.`);
-  if (metricNames.length > 1) return block('SEMANTIC_MEMBER_AMBIGUOUS', `${plan.executionId} maps to multiple semantic metrics.`, metricNames);
+  const metricNames: string[] = [];
+  const metricBindings = plan.query.measures.length > 0
+    ? plan.query.measures
+    : [{
+        requested: entry.node.name,
+        qualifiedId: plan.executionId,
+        status: 'resolved' as const,
+        candidateIds: [plan.executionId],
+      }];
+  for (const binding of metricBindings) {
+    const resolved = resolveSemanticMetric(binding, input.registry, input.semanticLayer);
+    if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
+    if (!metricNames.includes(resolved.name)) metricNames.push(resolved.name);
+  }
 
   const dimensions: string[] = [];
   let timeDimension: SemanticMemberSelection['timeDimension'];
@@ -238,11 +249,20 @@ export function adaptResolvedAnalyticalPlan(
   }
 
   if ((plan.query.timeGrain || plan.query.timeBounds) && !timeFilterDimensionName) {
-    const metric = input.semanticLayer.listMetrics().find((candidate) => candidate.name === metricNames[0]);
-    const defaultName = metric?.aggTimeDimension;
+    const defaultNames = Array.from(new Set(metricNames.map((metricName) =>
+      input.semanticLayer!.listMetrics().find((candidate) => candidate.name === metricName)?.aggTimeDimension,
+    ).filter((name): name is string => Boolean(name))));
+    if (defaultNames.length > 1) {
+      return block(
+        'TIME_DIMENSION_REQUIRED',
+        `Selected metrics do not share one default time dimension: ${metricNames.join(', ')}.`,
+        defaultNames,
+      );
+    }
+    const defaultName = defaultNames[0];
     const defaultDimension = defaultName ? input.semanticLayer.getTimeDimension(defaultName) : undefined;
     if (!defaultDimension) {
-      return block('TIME_DIMENSION_REQUIRED', `Metric ${metricNames[0]} has no unambiguous default time dimension for the requested time scope.`);
+      return block('TIME_DIMENSION_REQUIRED', `Metrics ${metricNames.join(', ')} have no shared default time dimension for the requested time scope.`);
     }
     timeFilterDimensionName = defaultDimension.name;
     if (plan.query.timeGrain) timeDimension = { name: defaultDimension.name, granularity: plan.query.timeGrain };
@@ -521,6 +541,41 @@ export function adaptAnalyticalSemanticGraph(input: {
 
 function resolveRegistryIdentity(identity: string, registry: PlanExecutionRegistryEntry[]): PlanExecutionRegistryEntry[] {
   return registry.filter((entry) => entry.identities.includes(identity));
+}
+
+function resolveSemanticMetric(
+  binding: ResolvedPlanMemberBinding,
+  registry: PlanExecutionRegistryEntry[],
+  layer: SemanticLayer,
+): { name: string; node: KGNode } | {
+  code: 'SEMANTIC_MEMBER_MISSING' | 'SEMANTIC_MEMBER_AMBIGUOUS';
+  reason: string;
+  candidateIds?: string[];
+} {
+  if (binding.status !== 'resolved' || !binding.qualifiedId) {
+    return {
+      code: binding.status === 'ambiguous' ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
+      reason: `Metric ${binding.requested} is ${binding.status} in the resolved plan.`,
+      candidateIds: binding.candidateIds,
+    };
+  }
+  const matches = resolveRegistryIdentity(binding.qualifiedId, registry).filter((candidate) => candidate.node.kind === 'metric');
+  if (matches.length !== 1) {
+    return {
+      code: matches.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
+      reason: `Qualified metric ${binding.qualifiedId} resolves to ${matches.length} pinned registry objects.`,
+      candidateIds: matches.map((candidate) => candidate.node.nodeId),
+    };
+  }
+  const names = semanticMetricNames(matches[0]!.node, layer);
+  if (names.length !== 1) {
+    return {
+      code: names.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
+      reason: `Qualified metric ${binding.qualifiedId} maps to ${names.length} semantic definitions.`,
+      candidateIds: names,
+    };
+  }
+  return { name: names[0]!, node: matches[0]!.node };
 }
 
 function resolveSemanticDimension(

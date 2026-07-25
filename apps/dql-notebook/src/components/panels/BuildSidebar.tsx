@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Hash, KeyRound, Layers, Link2, Plus, Search, Type } from 'lucide-react';
+import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Hash, KeyRound, Layers, Link2, Plus, Search, Trash2, Type } from 'lucide-react';
 import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
@@ -12,6 +12,7 @@ import { BlockStatusBadge } from '../blocks/BlockStatusBadge';
 import { SemanticTreeView } from './CatalogTree';
 import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
+import { buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-library-tree';
 import {
   buildSemanticTreeFromLayer,
   scopeSemanticTreeForComposition,
@@ -40,7 +41,7 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSemanticCompose, blockDomain = '', onBlockDomainChange, onNewBlock, footer, footerStatus = 'ready', onCollapse }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSemanticCompose, blockDomain = '', onBlockDomainChange, onNewBlock, onDeleteBlock, blockLibraryRefreshKey = 0, footer, footerStatus = 'ready', onCollapse }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
@@ -54,6 +55,10 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
   onBlockDomainChange?: (domain: string) => void;
   /** Shows a "+" new-block button beside the search input (Block Studio). */
   onNewBlock?: () => void;
+  /** Requests the guarded delete flow for one exact saved block. */
+  onDeleteBlock?: (block: BlockEntry) => void;
+  /** Explicit refresh signal after a save, move, or delete changes disk layout. */
+  blockLibraryRefreshKey?: number;
   /** Optional status footer line (e.g. "dbt synced · 42 models · 5 metrics"). */
   footer?: React.ReactNode;
   footerStatus?: 'ready' | 'loading' | 'warning';
@@ -146,7 +151,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
         {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText || Boolean(onSemanticCompose)} onSemanticCompose={onSemanticCompose} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
-        {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} />}
+        {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} onDeleteBlock={onDeleteBlock} refreshKey={blockLibraryRefreshKey} />}
       </div>
 
       {footer ? (
@@ -553,10 +558,11 @@ function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onIns
   );
 }
 
-function BlocksList({ t, search, domain, onDomainChange }: { t: Theme; search: string; domain: string; onDomainChange?: (domain: string) => void }) {
+function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshKey }: { t: Theme; search: string; domain: string; onDomainChange?: (domain: string) => void; onDeleteBlock?: (block: BlockEntry) => void; refreshKey: number }) {
   const { state, dispatch } = useNotebook();
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const blockFileKey = state.files.filter((f) => f.type === 'block').map((f) => f.path).sort().join('|');
 
   useEffect(() => {
@@ -566,12 +572,13 @@ function BlocksList({ t, search, domain, onDomainChange }: { t: Theme; search: s
       .then((r) => { if (active) setBlocks(r.blocks); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [blockFileKey]);
+  }, [blockFileKey, refreshKey]);
 
   const domains = blockDomains(blocks);
   const selectedDomain = domain || domains[0] || '';
   const domainOptions = selectedDomain && !domains.includes(selectedDomain) ? [selectedDomain, ...domains] : domains;
   const filtered = filterBlocksForDomain(blocks, selectedDomain, search);
+  const tree = useMemo(() => buildBlockLibraryTree(filtered, selectedDomain), [filtered, selectedDomain]);
 
   useEffect(() => {
     if (!domain && domains[0]) onDomainChange?.(domains[0]);
@@ -601,32 +608,101 @@ function BlocksList({ t, search, domain, onDomainChange }: { t: Theme; search: s
     </div>
     {filtered.length === 0
       ? <EmptyNote text={search ? `No ${selectedDomain} blocks match this search.` : `No blocks in ${selectedDomain} yet.`} t={t} />
-      : filtered.map((block) => <BlockRow key={block.path} block={block} t={t} onOpen={() => open(block)} />)}
+      : <BlockTree
+          nodes={tree}
+          depth={0}
+          expandAll={Boolean(search.trim())}
+          expandedFolders={expandedFolders}
+          onToggleFolder={(path) => setExpandedFolders((current) => {
+            const next = new Set(current);
+            if (next.has(path)) next.delete(path);
+            else next.add(path);
+            return next;
+          })}
+          onOpen={open}
+          onDelete={onDeleteBlock}
+          t={t}
+        />}
   </div>;
+}
+
+function BlockTree({
+  nodes,
+  depth,
+  expandAll,
+  expandedFolders,
+  onToggleFolder,
+  onOpen,
+  onDelete,
+  t,
+}: {
+  nodes: BlockLibraryTreeNode[];
+  depth: number;
+  expandAll: boolean;
+  expandedFolders: Set<string>;
+  onToggleFolder: (path: string) => void;
+  onOpen: (block: BlockEntry) => void;
+  onDelete?: (block: BlockEntry) => void;
+  t: Theme;
+}) {
+  return (
+    <>
+      {nodes.map((node) => {
+        if (node.kind === 'block') {
+          return <BlockRow key={node.block.path} block={node.block} depth={depth} t={t} onOpen={() => onOpen(node.block)} onDelete={onDelete ? () => onDelete(node.block) : undefined} />;
+        }
+        const expanded = expandAll || expandedFolders.has(node.path);
+        return (
+          <React.Fragment key={`folder:${node.path}`}>
+            <button
+              type="button"
+              onClick={() => onToggleFolder(node.path)}
+              title={node.path}
+              style={{ ...rowStyle(t), paddingLeft: 10 + (depth * 16), borderBottom: 'none', fontWeight: 650 }}
+            >
+              {expanded ? <ChevronDown size={13} color={t.textMuted} /> : <ChevronRight size={13} color={t.textMuted} />}
+              {expanded ? <FolderOpen size={14} color={t.accent} /> : <Folder size={14} color={t.textMuted} />}
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{node.name}</span>
+              <span style={{ fontSize: 10, color: t.textMuted }}>{countTreeBlocks(node.children)}</span>
+            </button>
+            {expanded ? <BlockTree nodes={node.children} depth={depth + 1} expandAll={expandAll} expandedFolders={expandedFolders} onToggleFolder={onToggleFolder} onOpen={onOpen} onDelete={onDelete} t={t} /> : null}
+          </React.Fragment>
+        );
+      })}
+    </>
+  );
+}
+
+function countTreeBlocks(nodes: BlockLibraryTreeNode[]): number {
+  return nodes.reduce((total, node) => total + (node.kind === 'block' ? 1 : countTreeBlocks(node.children)), 0);
 }
 
 // Prototype block row: blocks glyph · mono name over a meta line · status dot.
 // A single click opens the block's detail overview (description lives there).
-function BlockRow({ block, t, onOpen }: { block: BlockEntry; t: Theme; onOpen: () => void }) {
+function BlockRow({ block, depth = 0, t, onOpen, onDelete }: { block: BlockEntry; depth?: number; t: Theme; onOpen: () => void; onDelete?: () => void }) {
   const status = String(block.status ?? 'draft');
   const dot = STATUS_COLOR[status] ?? t.warning;
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title={block.description || `${block.name} — open`}
+    <div
       style={{
         display: 'flex', alignItems: 'center', gap: 8, width: '100%', boxSizing: 'border-box',
-        padding: '7px 10px', border: 'none', borderRadius: 7, margin: '1px 0',
+        padding: `7px 8px 7px ${10 + (depth * 16)}px`, border: 'none', borderRadius: 7, margin: '1px 0',
         background: 'transparent', cursor: 'pointer', textAlign: 'left', fontFamily: t.font,
       }}
     >
-      <Blocks size={14} color={t.textMuted} strokeWidth={1.75} style={{ flexShrink: 0 }} />
-      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
-        <span style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[block.domain, status].filter(Boolean).join(' · ')}</span>
-      </span>
+      <button type="button" onClick={onOpen} title={block.description || `${block.name} — open`} style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', textAlign: 'left', fontFamily: t.font }}>
+        <Blocks size={14} color={t.textMuted} strokeWidth={1.75} style={{ flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: t.textPrimary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
+          <span style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[block.domain, status].filter(Boolean).join(' · ')}</span>
+        </span>
+      </button>
       <span title={status} style={{ flexShrink: 0, width: 7, height: 7, borderRadius: 999, background: dot }} />
-    </button>
+      {onDelete ? (
+        <button type="button" aria-label={`Delete ${block.name}`} title={`Delete ${block.name}`} onClick={onDelete} style={{ width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: 'none', borderRadius: 6, background: 'transparent', color: t.error, cursor: 'pointer' }}>
+          <Trash2 size={13} />
+        </button>
+      ) : null}
+    </div>
   );
 }

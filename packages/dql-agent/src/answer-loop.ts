@@ -3466,6 +3466,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         'For every required grouping alias, select the best matching inspected business column, project it with that exact alias, and include the same expression in GROUP BY.',
         'When the warehouse uses a different physical name (for example a location field for a requested region), keep the inspected physical column and alias it to the requested business name. Do not silently drop the grouping.',
         'Preserve every requested dimension and measure that was already correct; change only what the validation error requires.',
+        'Qualify every source column in every SELECT and CTE scope when more than one in-scope relation owns that column name. A select-list alias may remain unqualified only where the SQL dialect permits that output alias.',
+        'Never infer an ambiguous column owner from FROM/JOIN order. Use the inspected relation-column ownership and join path; if ownership is still not unique, do not guess.',
         'For amount calculations, preserve DECIMAL/NUMERIC inputs, aggregate at the proven native grain, apply COALESCE to the aggregate, and ROUND only the outer final result. Never repair by rounding rows before SUM/AVG or casting money to FLOAT/DOUBLE/REAL.',
         'Correct it using ONLY the relations and columns from the inspected context above.',
         'If a needed column lives on a different relation, JOIN that relation using the suggested join paths.',
@@ -7188,6 +7190,8 @@ async function requestSqlRepair(input: {
         'The SQL preview for the review-required DQL artifact failed during bounded preview execution.',
         `Question: ${input.question}`,
         `Execution error: ${input.executionError}`,
+        'Qualify every source column independently inside each SELECT/CTE scope. Do not repair an ambiguous column by choosing the first FROM relation; use the runtime schema to identify its unique owner, or leave the query unresolved when no unique owner is proven.',
+        'Preserve every requested output measure and dimension while repairing the failing reference.',
         'Return one corrected read-only SQL query using only the runtime schema below, as a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
         schema,
       ].join('\n\n'),
@@ -7665,11 +7669,10 @@ function buildModelingGapRefusal(input: {
 }
 
 function repairGeneratedSqlLocally(sql: string, error: string, schemaContext: AgentSchemaTable[]): string | undefined {
-  // Ambiguous column: a bare column exists in more than one joined table (e.g. a
-  // conformed `report_as_of_dt` on both the fact and a joined dimension), and the
-  // generated SQL referenced it unqualified. Qualify every UNQUALIFIED occurrence
-  // with the DRIVING table (first FROM) when it owns the column — the fact grain
-  // is the intended one, and it's exactly what the semantic compiler would emit.
+  // Ambiguous-column repair is intentionally conservative. It is allowed only
+  // when the inspected schema proves one owner; otherwise the validation repair
+  // must use the resolved plan instead of guessing that the first FROM relation
+  // owns the user's requested time/entity role.
   const ambiguousRepair = repairAmbiguousColumn(sql, error, schemaContext);
   if (ambiguousRepair) return ambiguousRepair;
 
@@ -7691,7 +7694,7 @@ function repairGeneratedSqlLocally(sql: string, error: string, schemaContext: Ag
 
 /**
  * Qualify an ambiguous bare column (Snowflake/DuckDB "ambiguous column name X")
- * with the driving table's alias. Conservative: only touches occurrences that
+ * with the uniquely proven owner alias. Conservative: only touches occurrences that
  * are NOT already qualified (`alias.X`) and NOT an output alias (`AS X`), and
  * only when a joined table actually owns the column. Returns undefined when it
  * can't safely repair, so the LLM repair path still runs.
@@ -7703,10 +7706,10 @@ export function repairAmbiguousColumn(sql: string, error: string, schemaContext:
 
   const aliasToRelation = extractSqlAliases(sql);
   const owners = aliasesWithColumn(aliasToRelation, schemaContext, column);
-  // Prefer the first FROM table's alias when it owns the column (the fact grain).
-  const firstFrom = /\bfrom\s+[A-Za-z_][\w.]*(?:\s+as)?\s+([A-Za-z_]\w*)/i.exec(sql)?.[1];
-  const target = firstFrom && owners.includes(firstFrom) ? firstFrom : owners[0];
-  if (!target) return undefined;
+  // More than one owner is the ambiguity itself. Never infer semantic ownership
+  // from FROM order: relationship order is not time/entity-role proof.
+  if (owners.length !== 1) return undefined;
+  const target = owners[0]!;
 
   const bare = new RegExp(`(?<![\\w.])${escapeRegex(column)}\\b`, 'gi');
   let changed = false;

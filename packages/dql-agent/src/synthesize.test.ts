@@ -77,6 +77,27 @@ describe("synthesizeAnswer", () => {
     expect(result.text).not.toContain("| region | revenue |");
   });
 
+  it("AGT-017 narrates every requested metric in a multi-metric comparison", async () => {
+    const result = await synthesizeAnswer({
+      question: "Show revenue, refunds, and gross margin by customer",
+      resultPreview: preview([
+        { customer_name: "Zoom", revenue: 1200, refunds: 100, gross_margin: 0.42 },
+        { customer_name: "Acme", revenue: 900, refunds: 25, gross_margin: 0.35 },
+      ], ["customer_name", "revenue", "refunds", "gross_margin"]),
+      columnFormats: {
+        revenue: { kind: "currency", currency: "USD" },
+        refunds: { kind: "currency", currency: "USD" },
+        gross_margin: { kind: "percent" },
+      },
+    });
+
+    expect(result.text).toContain("**Zoom** has the highest revenue at **$1,200.00**");
+    expect(result.text).toContain("**Refunds:** $100.00");
+    expect(result.text).toContain("**Gross Margin:** 42%");
+    expect(result.text).toContain("**Acme:** **Revenue:** $900.00");
+    expect(result.text).not.toContain("| customer_name |");
+  });
+
   it("grounds lowest-ranking prose in the requested direction", async () => {
     const result = await synthesizeAnswer({
       question: "Which customers have the least revenue?",

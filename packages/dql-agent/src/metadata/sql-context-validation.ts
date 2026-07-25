@@ -218,17 +218,13 @@ export function validateSqlAgainstLocalContext(
     };
   }
 
-  // The parser flattens aliases across CTE scopes, so only enforce this when
-  // every relation lives in one SELECT scope. DuckDB will still validate CTEs
-  // at execution, while this avoids treating an inner and outer alias as peers.
-  const ambiguousColumn = analysis.ctes.length === 0
-    ? findAmbiguousUnqualifiedColumn(
-        analysis.columns,
-        analysis.aliasToRelation,
-        allowed,
-        outputAliases,
-      )
-    : undefined;
+  // AGT-015 / E2E-014: validate ambiguity inside every SELECT/CTE scope before
+  // the warehouse binder sees it. Scope-local aliases prevent false positives
+  // between an inner CTE and its outer consumer.
+  const ambiguousColumn = findScopeAwareAmbiguousColumn(
+    analysis.scopes ?? [],
+    allowed,
+  );
   if (ambiguousColumn) {
     return {
       ok: false,
@@ -464,13 +460,12 @@ function findUnknownColumn(
 }
 
 function findAmbiguousUnqualifiedColumn(
-  columns: Array<{ column: string; relation?: string; unqualified: boolean }>,
+  columns: Array<{ column: string; relation?: string; unqualified: boolean; outputAliasReference?: boolean }>,
   aliasToRelation: Record<string, string>,
   allowed: Map<string, MetadataAllowedSqlRelation>,
-  outputAliases: Set<string>,
 ): { column: string; owners: string[] } | undefined {
   for (const column of columns) {
-    if (!column.unqualified || column.column === '*' || outputAliases.has(normalizeColumnName(column.column))) continue;
+    if (!column.unqualified || column.outputAliasReference || column.column === '*') continue;
     const owners = Object.entries(aliasToRelation)
       .filter(([, relationName]) => {
         const relation = findAllowedRelation(allowed, relationName);
@@ -484,6 +479,26 @@ function findAmbiguousUnqualifiedColumn(
       .map(([alias, relationName]) => `${alias} (${relationName})`)
       .filter((owner, index, values) => values.indexOf(owner) === index);
     if (owners.length > 1) return { column: column.column, owners };
+  }
+  return undefined;
+}
+
+function findScopeAwareAmbiguousColumn(
+  scopes: Array<{
+    columns: Array<{ column: string; relation?: string; unqualified: boolean; outputAliasReference?: boolean }>;
+    aliasToRelation: Record<string, string>;
+    outputAliases: string[];
+  }>,
+  allowed: Map<string, MetadataAllowedSqlRelation>,
+): { column: string; owners: string[] } | undefined {
+  if (scopes.length === 0) return undefined;
+  for (const scope of scopes) {
+    const ambiguous = findAmbiguousUnqualifiedColumn(
+      scope.columns,
+      scope.aliasToRelation,
+      allowed,
+    );
+    if (ambiguous) return ambiguous;
   }
   return undefined;
 }

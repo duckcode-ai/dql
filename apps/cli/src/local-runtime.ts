@@ -2102,6 +2102,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : (rows.length > 0 ? Object.keys(rows[0]) : []);
     if (rows.length === 0 || columns.length === 0) return;
     const existing = agentRunRecord(result.chartConfig) ?? {};
+    const resultRecord = agentRunRecord(result) ?? {};
+    const semanticRefs = agentRunRecord(resultRecord.semanticRefs);
+    const plannedMeasures = governedAnswer.resolvedAnalyticalPlan?.outputContract.measures ?? [];
+    const semanticMeasures = Array.isArray(semanticRefs?.metrics)
+      ? semanticRefs.metrics.filter((value): value is string => typeof value === 'string')
+      : [];
+    const requestedMeasureNames = Array.from(new Set([...plannedMeasures, ...semanticMeasures]));
+    const normalizedQuestion = question.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+    const numericMeasureColumns = columns.filter((column) => {
+      if (/(?:^|_)(?:id|key|code|rank|position)$/i.test(column)) return false;
+      const hasNumericValue = rows.some((row) => typeof row[column] === 'number' && Number.isFinite(row[column] as number));
+      if (!hasNumericValue) return false;
+      const phrase = column.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      return requestedMeasureNames.length > 1
+        || (phrase.length > 0 && normalizedQuestion.includes(phrase));
+    });
+    const multiMeasureColumns = numericMeasureColumns.length > 1
+      ? numericMeasureColumns
+      : [];
     // A declared chart on the execution result came from authored DQL and is a
     // governed display contract. Preserve its type/bindings, but still enrich a
     // missing display format from the result semantics; otherwise an authored
@@ -2131,7 +2150,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
     if (!recommendation.ok) return;
     const fieldHints = recommendation.display.fieldHints ?? {};
-    const chart = hasAuthoredChart
+    // AGT-017 / UI-012: until the notebook chart runtime supports a true
+    // multi-Y contract, a comparison table is the only representation that
+    // cannot silently hide requested measures. Authored charts remain intact.
+    const chart = !hasAuthoredChart && multiMeasureColumns.length > 1
+      ? 'table'
+      : hasAuthoredChart
       ? String(existing.chart).replace(/_/g, '-')
       : recommendation.display.defaultVisualization.replace(/_/g, '-');
     const agentChoice = typeof governedAnswer.suggestedViz === 'string'
@@ -2143,7 +2167,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       decisionSource: hasAuthoredChart ? 'authored' : agentChoice === chart ? 'agent' : 'data',
       rationale: hasAuthoredChart
         ? agentRunString(existing.rationale) ?? 'Authored DQL visualization enriched with result-aware display semantics.'
+        : multiMeasureColumns.length > 1
+          ? `Comparison table preserves all requested measures: ${multiMeasureColumns.join(', ')}.`
         : recommendation.display.rationale,
+      ...(multiMeasureColumns.length > 1 ? { metrics: multiMeasureColumns } : {}),
       ...(typeof existing.x !== 'string' && typeof fieldHints.x === 'string' ? { x: fieldHints.x } : {}),
       ...(typeof existing.y !== 'string' && typeof fieldHints.y === 'string' ? { y: fieldHints.y } : {}),
       ...(typeof existing.color !== 'string' && typeof fieldHints.color === 'string' ? { color: fieldHints.color } : {}),
@@ -10050,6 +10077,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? body.metadata as {
             name?: string;
             domain?: string;
+            folderPath?: string;
             description?: string;
             owner?: string;
             tags?: string[];
@@ -10076,6 +10104,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           source,
           name: metadata.name,
           domain: metadata.domain,
+          folderPath: metadata.folderPath,
           description: metadata.description,
           owner: metadata.owner,
           tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
@@ -17058,6 +17087,7 @@ export function openBlockStudioDocument(
     name: string;
     path: string | null;
     domain: string;
+    folderPath?: string;
     description: string;
     owner: string;
     tags: string[];
@@ -17083,6 +17113,7 @@ export function openBlockStudioDocument(
     name: parsedMetadata.name || companion?.name || fileName,
     path: normalizedPath,
     domain: parsedMetadata.domain || companion?.domain || inferBlockStudioPathDomain(normalizedPath) || 'uncategorized',
+    folderPath: inferBlockStudioFolderPath(normalizedPath),
     description: parsedMetadata.description || companion?.description || '',
     owner: parsedMetadata.owner || companion?.owner || '',
     tags: parsedMetadata.tags.length > 0 ? parsedMetadata.tags : companion?.tags ?? [],
@@ -18150,6 +18181,7 @@ export function saveBlockStudioArtifacts(
     source: string;
     name: string;
     domain?: string;
+    folderPath?: string;
     description?: string;
     owner?: string;
     tags?: string[];
@@ -18168,8 +18200,9 @@ export function saveBlockStudioArtifacts(
     .toLowerCase()
     .replace(/[^a-z0-9/_-]+/g, '-')
     .replace(/^\/+|\/+$/g, '') || 'uncategorized';
+  const safeFolderPath = normalizeBlockStudioFolderPath(options.folderPath);
   const previousPath = options.currentPath ? normalize(options.currentPath).replace(/^\/+/, '') : null;
-  const targetRelativePath = canonicalBlockRelativePath(projectRoot, safeDomain, slug, previousPath);
+  const targetRelativePath = canonicalBlockRelativePath(projectRoot, safeDomain, safeFolderPath, slug, previousPath);
   const targetPath = join(projectRoot, targetRelativePath);
 
   if (existsSync(targetPath) && previousPath !== targetRelativePath) {
@@ -18182,6 +18215,7 @@ export function saveBlockStudioArtifacts(
     slug,
     name: options.name,
     domain: safeDomain,
+    folderPath: safeFolderPath,
     description: options.description,
     owner: options.owner,
     tags: options.tags,
@@ -18310,17 +18344,29 @@ export function saveBlockStudioDraftArtifacts(
 function canonicalBlockRelativePath(
   projectRoot: string,
   safeDomain: string,
+  safeFolderPath: string,
   slug: string,
   previousPath: string | null,
 ): string {
-  const previousDomainFirst = previousPath?.match(/^domains\/([^/]+)\/blocks\/(?:_drafts\/)?[^/]+\.dql$/);
-  if (previousDomainFirst) {
-    return `domains/${previousDomainFirst[1]}/blocks/${slug}.dql`;
+  const folder = safeFolderPath ? `${safeFolderPath}/` : '';
+  const previousDomainFirst = Boolean(previousPath?.match(/^domains\/[^/]+\/blocks\//));
+  if (previousDomainFirst || existsSync(join(projectRoot, 'domains', safeDomain))) {
+    return `domains/${safeDomain}/blocks/${folder}${slug}.dql`;
   }
-  if (existsSync(join(projectRoot, 'domains', safeDomain))) {
-    return `domains/${safeDomain}/blocks/${slug}.dql`;
+  return `blocks/${safeDomain}/${folder}${slug}.dql`;
+}
+
+function normalizeBlockStudioFolderPath(value: string | null | undefined): string {
+  if (!value?.trim()) return '';
+  const normalized = value.trim().replaceAll('\\', '/').replace(/^\/+|\/+$/g, '');
+  const segments = normalized.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..' || segment.startsWith('.'))) {
+    throw new Error('Invalid block folder');
   }
-  return `blocks/${safeDomain}/${slug}.dql`;
+  return segments
+    .map((segment) => segment.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, ''))
+    .filter(Boolean)
+    .join('/');
 }
 
 function isDraftBlockPath(value: string | null | undefined): boolean {
@@ -18338,7 +18384,7 @@ function isBlockStudioBlockPath(value: string | null | undefined): boolean {
 function inferBlockStudioPathDomain(blockPath: string): string {
   const normalized = normalize(blockPath).replace(/^\/+/, '');
   if (normalized.startsWith('blocks/')) {
-    return normalized.split('/').slice(1, -1).join('/');
+    return normalized.split('/')[1] ?? '';
   }
   const domainFirst = normalized.match(/^domains\/([^/]+)\/blocks\/(.+)$/);
   if (!domainFirst) return '';
@@ -18346,6 +18392,15 @@ function inferBlockStudioPathDomain(blockPath: string): string {
   const blockSubpath = domainFirst[2];
   if (blockSubpath.startsWith('_drafts/')) return `_drafts/${domain}`;
   return domain;
+}
+
+function inferBlockStudioFolderPath(blockPath: string): string {
+  const normalized = normalize(blockPath).replace(/^\/+/, '').replaceAll('\\', '/');
+  const domainFirst = normalized.match(/^domains\/[^/]+\/blocks\/(.+)$/);
+  if (domainFirst) return domainFirst[1].split('/').slice(0, -1).join('/');
+  const legacy = normalized.match(/^blocks\/[^/]+\/(.+)$/);
+  if (legacy) return legacy[1].split('/').slice(0, -1).join('/');
+  return '';
 }
 
 function blockCompanionRelativePath(blockPath: string): string | null {
@@ -20492,6 +20547,12 @@ function buildVisualizationBlock(
 ): string[] | null {
   const x = timeDimension ? `${timeDimension.name}_${timeDimension.granularity}` : dimensions[0];
   const y = metrics[0];
+  // UI-012 / E2E-012: the current notebook chart contract has one Y binding.
+  // Persist a table for multi-metric blocks so reopening the artifact cannot
+  // silently reduce a governed metric set to metrics[0].
+  if (metrics.length > 1) {
+    return ['    visualization {', '        chart = "table"', '    }'];
+  }
   if (!x && chart !== 'kpi' && chart !== 'table') return null;
   if (chart === 'table') {
     return ['    visualization {', '        chart = "table"', '    }'];
@@ -20514,6 +20575,7 @@ function writeBlockCompanionFile(
     slug: string;
     name: string;
     domain: string;
+    folderPath?: string;
     description?: string;
     owner?: string;
     tags?: string[];
@@ -20535,7 +20597,7 @@ function writeBlockCompanionFile(
   const extractedRefs = extractSemanticReferenceNames(options.content);
   const semanticMetrics = Array.from(new Set([...(options.semanticMetrics ?? []), ...extractedRefs.metrics]));
   const semanticDimensions = Array.from(new Set([...(options.semanticDimensions ?? []), ...extractedRefs.dimensions]));
-  const companionDir = join(projectRoot, 'semantic-layer', 'blocks', options.domain);
+  const companionDir = join(projectRoot, 'semantic-layer', 'blocks', options.domain, options.folderPath ?? '');
   mkdirSync(companionDir, { recursive: true });
   const companionPath = join(companionDir, `${options.slug}.yaml`);
   const lines = [

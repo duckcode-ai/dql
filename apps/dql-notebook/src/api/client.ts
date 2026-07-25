@@ -3092,6 +3092,7 @@ export const api = {
     metadata: {
       name: string;
       domain: string;
+      folderPath?: string;
       description: string;
       owner: string;
       tags: string[];

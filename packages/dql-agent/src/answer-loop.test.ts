@@ -8490,12 +8490,10 @@ describe("repairAmbiguousColumn (generated SQL)", () => {
     { name: "bcm_dtl", relation: "dev.bcm_dtl", columns: [{ name: "report_as_of_dt" }, { name: "value_amt" }] },
   ] as unknown as Parameters<typeof repairAmbiguousColumn>[2];
 
-  it("qualifies the ambiguous column to the driving (first FROM) table", () => {
+  it("does not guess ambiguous-column ownership from the first FROM table", () => {
     const sql = "SELECT report_as_of_dt, SUM(h.split_qty) FROM dev.bcm_hdr h JOIN dev.bcm_dtl d ON h.customer_id = d.customer_id GROUP BY report_as_of_dt";
     const out = repairAmbiguousColumn(sql, "SQL compilation error: ambiguous column name 'REPORT_AS_OF_DT'", schema);
-    expect(out).toContain("h.report_as_of_dt");
-    expect(out).toContain("GROUP BY h.report_as_of_dt");
-    expect(out).toContain("h.split_qty");
+    expect(out).toBeUndefined();
   });
 
   it("never rewrites an already-qualified reference or an AS output alias", () => {

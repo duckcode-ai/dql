@@ -3983,6 +3983,51 @@ describe('semantic block save artifacts', () => {
     expect(openBlockStudioDocument(projectRoot, blockPath).metadata.reviewStatus).toBe('review');
   });
 
+  it('saves and moves blocks through nested domain folders without leaving stale companions', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-folder-move-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'domains', 'finance'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    const firstPath = saveBlockStudioArtifacts(projectRoot, {
+      name: 'Revenue Summary',
+      domain: 'finance',
+      folderPath: 'executive/monthly',
+      owner: 'analytics',
+      source: 'block "Revenue Summary" {\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 1\n  """\n}\n',
+    });
+    expect(firstPath).toBe('domains/finance/blocks/executive/monthly/revenue-summary.dql');
+    expect(openBlockStudioDocument(projectRoot, firstPath).metadata.folderPath).toBe('executive/monthly');
+    const firstCompanion = 'semantic-layer/blocks/finance/executive/monthly/revenue-summary.yaml';
+    expect(existsSync(join(projectRoot, firstCompanion))).toBe(true);
+
+    const movedPath = saveBlockStudioArtifacts(projectRoot, {
+      currentPath: firstPath,
+      name: 'Revenue Summary',
+      domain: 'finance',
+      folderPath: 'leadership',
+      owner: 'analytics',
+      source: 'block "Revenue Summary" {\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 2\n  """\n}\n',
+    });
+    expect(movedPath).toBe('domains/finance/blocks/leadership/revenue-summary.dql');
+    expect(existsSync(join(projectRoot, firstPath))).toBe(false);
+    expect(existsSync(join(projectRoot, firstCompanion))).toBe(false);
+    expect(existsSync(join(projectRoot, 'semantic-layer/blocks/finance/leadership/revenue-summary.yaml'))).toBe(true);
+  });
+
+  it('rejects unsafe nested block folders', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-invalid-folder-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    expect(() => saveBlockStudioArtifacts(projectRoot, {
+      name: 'Revenue Summary',
+      domain: 'finance',
+      folderPath: '../outside',
+      source: 'block "Revenue Summary" {\n  domain = "finance"\n  type = "custom"\n  query = """\nselect 1\n  """\n}\n',
+    })).toThrow('Invalid block folder');
+  });
+
   it('deletes only the requested block and its semantic companion', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-delete-'));
     tempDirs.push(projectRoot);
@@ -4096,6 +4141,28 @@ describe('semantic block save artifacts', () => {
     expect(companion).toContain('semanticDimensions:');
     expect(companion).toContain('  - sales_channel');
     expect(companion).toContain('  - order_date');
+  });
+
+  it('UI-012 preserves every selected metric with a multi-metric table contract', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-multi-metric-builder-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+
+    const created = createSemanticBuilderBlock(projectRoot, {
+      name: 'Customer Unit Economics',
+      domain: 'finance',
+      metrics: ['revenue', 'refunds', 'gross_margin'],
+      dimensions: ['customer_name'],
+      chart: 'bar',
+      blockType: 'semantic',
+      sql: 'SELECT 1',
+      tables: ['analytics.customers'],
+      provider: 'dbt',
+    });
+
+    expect(created.content).toContain('metrics = ["revenue", "refunds", "gross_margin"]');
+    expect(created.content).toContain('chart = "table"');
+    expect(created.content).not.toContain('y = revenue');
   });
 
   it('writes semantic builder blocks under the domain-first block folder when the domain exists', () => {
