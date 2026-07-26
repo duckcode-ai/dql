@@ -152,9 +152,9 @@ export function deriveBlockFilters(
   };
 }
 
-/** One metric-bound (semantic) block: the governed metric + its pre-compiled query. */
+/** One governed metric binding plus compiler input used by proposal analysis. */
 export interface MetricWrapperBlock {
-  /** Governed metric name to bind via `metric = "<name>"`. */
+  /** Governed metric name emitted through canonical `metrics = ["<name>"]`. */
   metricName: string;
   /** Output column the aggregate is aliased to. */
   alias: string;
@@ -167,11 +167,9 @@ export interface MetricWrapperBlock {
 }
 
 /**
- * Build ONE semantic block per governed metric a model backs. Each block binds the
- * metric (`metric = "<name>"`) and carries the metric's own aggregate as a
- * pre-compiled `query`, so it references the semantic layer AND runs offline. This
- * is what makes proposed metric_wrapper blocks actually use the governed metrics
- * instead of an unbound hand-rolled aggregation.
+ * Build ONE proposal input per governed metric a model backs. The aggregate SQL
+ * is compiler evidence for analysis/preview; the semantic DQL writer emits only
+ * canonical metric and dimension identities.
  */
 export function buildMetricWrapperBlocks(model: DbtModelNode, artifacts: DbtArtifacts): MetricWrapperBlock[] {
   const metrics = artifacts.semanticMetrics.filter(

@@ -6,6 +6,51 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.11.2 - 2026-07-26
+
+### Complete unified AI orchestration and explicit Block AI commit
+
+This patch closes the remaining gaps between Ask AI, Notebook AI, Block AI,
+manual authoring, and runtime execution. All surfaces now share one canonical
+semantic artifact contract while preserving complete repair evidence.
+
+### Fixed
+
+- **Complete multi-metric output.** Exact metric identifiers remain metrics
+  through planning and semantic member selection, including requests with five
+  measures, instead of collapsing to a single metric plus inferred dimension.
+- **One canonical DQL shape.** Semantic drafts use the shared
+  `metrics = [...]` and `dimensions = [...]` renderer throughout proposal,
+  formatting, Notebook, Block Studio, CLI, import, and execution paths.
+- **Explicit Block AI routing.** New Block Studio chats request the governed
+  block route directly, including projects whose catalog domain is
+  `uncategorized`, rather than entering the generic answer route.
+- **Consent-bound block writes.** Block AI generation returns a transient,
+  ownerless review artifact and does not create block or domain files. Only the
+  user-selected Add to Block Studio action writes the draft and opens it in the
+  visual builder.
+- **Unified Notebook and Block execution.** Cold Block AI and carried Ask
+  artifacts reuse the same durable answer executor and evidence model used by
+  Ask and Notebook AI.
+- **Repairable failed responses.** Compilation and execution failures keep the
+  attempted canonical DQL, attempted or explicitly unavailable SQL, lineage,
+  trust evidence, actual steps, diagnostics, and safe Notebook repair actions.
+- **Navigation-safe async runs.** Active work continues through navigation and
+  completed turns restore the same DQL, SQL, lineage, and Trust & Steps
+  evidence instead of reconnecting to or hydrating an incomplete response.
+
+### Acceptance and verification
+
+- Implemented acceptance IDs: `CONTRACT-002`, `AGT-017`, `AGT-021`, `API-007`,
+  `API-008`, `UI-012`, `UI-013`, `UI-014`, `UI-015`, `UI-016`, and `E2E-015`.
+- Core, agent, CLI, and Notebook suites pass with 534, 1,128, 571 plus 3
+  skipped, and 125 tests respectively; all affected production builds pass.
+- Built-CLI browser verification confirms explicit Block AI routing and the
+  canonical draft path. Provider-backed final Add-to-Block-Studio replay
+  remains pending independent verification because the fixture's configured
+  Claude subscription was unreachable.
+- The existing `PERF-001` latency exception remains unchanged.
+
 ## v1.11.1 - 2026-07-26
 
 ### Canonical semantic DQL and durable failed-query repair

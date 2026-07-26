@@ -170,7 +170,7 @@ ORDER BY @metric(total_revenue) DESC`,
     description = "Annual Recurring Revenue by subscription plan tier"
     tags        = ["arr", "revenue", "saas"]
 
-    metric     = "arr"
+    metrics    = ["arr"]
     dimensions = ["plan_tier"]
 
     visualization {

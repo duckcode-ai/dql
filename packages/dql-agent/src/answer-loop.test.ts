@@ -7940,6 +7940,77 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.text).toContain("governed semantic metrics");
   });
 
+  it("AGT-021 keeps five exact metric/measure identities through the LLM member fallback and DQL compiler", async () => {
+    const names = [
+      "percent_dod_eu_core_ccu_acm_qty",
+      "percent_dod_eu_core_ccu_bcm",
+      "percent_dod_eu_core_ccu_bcm_qty",
+      "percent_dod_legacy_acm_qty",
+      "percent_dod_legacy_bcm",
+    ];
+    kg.rebuild(names.map((name) => ({
+      nodeId: `metric:${name}`,
+      kind: "metric" as const,
+      name,
+      domain: "consumption",
+      description: name,
+      tags: ["consumption"],
+      llmContext: `sql: ${name}\ntable: consumption_daily`,
+      sourceTier: "semantic_layer" as const,
+      certification: "ai_generated" as const,
+      provenance: "semantic layer",
+    })), []);
+    const semanticLayer = new SemanticLayer({
+      metrics: names.map((name, index) => ({
+        name,
+        label: name,
+        description: "",
+        domain: "consumption",
+        sql: name,
+        type: "sum" as const,
+        table: "consumption_daily",
+        objectKind: index === 2 ? "metric" as const : "measure" as const,
+      })),
+      dimensions: [{
+        name: "customer_name",
+        label: "Customer",
+        description: "",
+        domain: "consumption",
+        sql: "customer_name",
+        type: "string",
+        table: "consumption_daily",
+      }],
+    });
+    // Reproduce the faulty provider behavior from the live screenshot: it picks
+    // only the one real dbt metric. The resolver must restore all exact names.
+    const provider = new StubProvider(JSON.stringify({
+      metrics: [names[2]],
+      filters: [{ dimension: "customer_name", operator: "equals", values: ["Capital One"] }],
+    }));
+    const result = await answer({
+      question: `what is ${names.map((name) => `"${name}"`).join(", ")} for Capital One?`,
+      provider,
+      kg,
+      semanticLayer,
+      executeGeneratedSql: async (sql) => ({
+        columns: names,
+        rows: [Object.fromEntries(names.map((name, index) => [name, index + 1]))],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(provider.calls).toHaveLength(1);
+    expect(result.route?.tier).toBe("semantic_metric");
+    expect(result.dqlArtifact?.metrics).toEqual(names);
+    expect(result.dqlArtifact?.dimensions).toEqual([]);
+    expect(result.dqlArtifact?.source).toContain(`metrics = [${names.map((name) => `"${name}"`).join(", ")}]`);
+    expect(result.dqlArtifact?.source).toContain("dimensions = []");
+    for (const name of names) {
+      expect(result.proposedSql).toContain(`AS ${name}`);
+    }
+  });
+
   it("falls through to generated DQL when the semantic layer cannot express the requested dimension", async () => {
     kg.rebuild(
       [

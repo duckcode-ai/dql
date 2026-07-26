@@ -794,7 +794,7 @@ describe('Slice 2 — business-block SQL generation', () => {
     return join(targetDir, 'manifest.json');
   }
 
-  it('metric-backed model yields a metric-bound SEMANTIC block (not SELECT *)', () => {
+  it('metric-backed model yields a canonical metric-bound semantic block', () => {
     const manifestPath = writeSemanticManifest();
     const summary = propose({ projectRoot, dbtManifestPath: manifestPath });
 
@@ -804,15 +804,13 @@ describe('Slice 2 — business-block SQL generation', () => {
     expect(summary.metricsFound).toBe(1);
 
     const source = readFileSync(join(projectRoot, orders.path!), 'utf-8');
-    // Metric-bound semantic block: binds the governed metric (provenance) AND carries
-    // a runnable aggregate grouped by the TIME dimension only — grouping a measure by
-    // its own entity grain (order_id) would be degenerate, so it's intentionally absent.
+    // The semantic block stores meaning only. The shared compiler owns SQL, so
+    // every surface sees the same metrics/dimensions form without an embedded query.
     expect(source).toMatch(/type\s*=\s*"semantic"/i);
-    expect(source).toMatch(/metric\s*=\s*"total_revenue"/i);
-    expect(source).toMatch(/SUM\(revenue\)\s+AS\s+revenue/i);
-    expect(source).toMatch(/GROUP BY/i);
-    expect(source).toContain('order_date'); // grouped by the declared time dimension
-    expect(source).not.toMatch(/SELECT \* FROM/i);
+    expect(source).toMatch(/metrics\s*=\s*\["total_revenue"\]/i);
+    expect(source).toMatch(/dimensions\s*=\s*\["order_date"\]/i);
+    expect(source).not.toMatch(/\bmetric\s*=/i);
+    expect(source).not.toMatch(/\bquery\s*=/i);
   });
 
   it('entity/dim mart yields a NARROWED projection (not SELECT *)', () => {

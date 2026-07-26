@@ -175,6 +175,8 @@ export interface InsertDqlPayload {
   chartConfig?: CellChartConfig;
   title?: string;
   mixedSourcePlan?: MixedSourceNotebookPlan;
+  /** Canonical run identity used for stable explicit draft commits. */
+  sourceRunId?: string;
 }
 
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
@@ -1500,6 +1502,7 @@ function RunCard({
               themeMode={themeMode}
               onInsertSql={onInsertSql}
               onInsertDql={onInsertDql}
+              sourceRunId={run.id}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
               onOpenApp={onOpenApp}
@@ -1975,6 +1978,8 @@ function AskRunCard({
               themeMode={themeMode}
               onInsertSql={onInsertSql}
               onInsertDql={onInsertDql}
+              insertDqlActionLabel={insertDqlActionLabel}
+              sourceRunId={run.id}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
               onOpenApp={onOpenApp}
@@ -2077,10 +2082,15 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
   );
 }
 
-function analyticalInspectorContract(payload: Record<string, unknown>): AnalyticalInspectorContract | undefined {
+export function analyticalInspectorContract(payload: Record<string, unknown>): AnalyticalInspectorContract | undefined {
   if (!hasAnalyticalInspectorContract(payload)) return undefined;
   const diagnostic = recordOf(payload.diagnosticReceipt);
-  const plan = recordOf(payload.resolvedAnalyticalPlan) ?? recordOf(diagnostic?.plan);
+  // `diagnostic.plan` is the orchestration step plan, not the analytical plan.
+  // Treating it as a ResolvedAnalyticalPlan made a pre-planning failure claim
+  // "Ranking: Not requested" even for "top customers". Only the explicit,
+  // snapshot-bound analytical contract may populate frame semantics.
+  const plan = recordOf(payload.resolvedAnalyticalPlan)
+    ?? recordOf(diagnostic?.resolvedAnalyticalPlan);
   return {
     plan,
     frame: recordOf(plan?.analyticalFrame),
@@ -2235,8 +2245,8 @@ function AnalyticalHowAnswered({
           ['Member filters', members.map((item) => `${displayValue(item.dimensionId)}: ${Array.isArray(item.canonicalValues) ? item.canonicalValues.length : 0} bound value(s)`).join(', ')],
           ['Time policy', [timeContext?.timeRole, timeContext?.grain, timeContext?.timezone, timeContext?.completenessPolicy].map(displayValue).filter(Boolean).join(' · ')],
           ['Periods', periods.map((item) => `${displayValue(item.id)}: ${displayValue(item.start)} → ${displayValue(item.end)}`).join('\n')],
-          ['Comparison', comparison ? `${displayValue(comparison.basePeriodId)} vs ${stringList(comparison.comparisonPeriodIds).join(', ')} · ${displayValue(comparison.alignment)}` : 'Not requested'],
-          ['Ranking', ranking ? `${displayValue(ranking.direction)} · top ${displayValue(ranking.limit)} · ${displayValue(ranking.tiePolicy)}` : 'Not requested'],
+          ['Comparison', comparison ? `${displayValue(comparison.basePeriodId)} vs ${stringList(comparison.comparisonPeriodIds).join(', ')} · ${displayValue(comparison.alignment)}` : frame ? 'Not requested' : 'Not available — analytical planning did not complete'],
+          ['Ranking', ranking ? `${displayValue(ranking.direction)} · top ${displayValue(ranking.limit)} · ${displayValue(ranking.tiePolicy)}` : frame ? 'Not requested' : 'Not available — analytical planning did not complete'],
           ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
           ['Semantic metrics', stringList(semanticAuthoringRequest?.metrics).join(', ')],
           ['Semantic dimensions', stringList(semanticAuthoringRequest?.dimensions).join(', ')],
@@ -2949,7 +2959,7 @@ function AddToAppButton({
  */
 export function trustExplainer(run: AgentRun): string | null {
   if (run.trustState === 'certified') return 'Answered from a certified block.';
-  if (run.route === 'dql_block_draft') return 'Saved as a draft block. Add an owner and DQL will certify it when checks pass.';
+  if (run.route === 'dql_block_draft') return 'Prepared an ownerless review draft. Add it to Block Studio when you are ready to save it.';
   if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
   if (run.trustState === 'grounded') return 'Ran cleanly against your data. Save it as a block when it is reusable.';
   if (isExploratoryDbtRun(run)) {
@@ -3235,6 +3245,8 @@ function ArtifactView({
   themeMode,
   onInsertSql,
   onInsertDql,
+  insertDqlActionLabel,
+  sourceRunId,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -3245,6 +3257,8 @@ function ArtifactView({
   themeMode: ThemeMode;
   onInsertSql?: (sql: string, title?: string) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
+  insertDqlActionLabel?: string;
+  sourceRunId?: string;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
@@ -3320,7 +3334,20 @@ function ArtifactView({
         actions={
           <>
             {sql && onInsertDql ? (
-              <button type="button" onClick={() => onInsertDql({ sql, dqlArtifact, result: resultData, chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined, title: name })} style={smallButtonStyle(t)}>Insert as DQL cell</button>
+              <button
+                type="button"
+                onClick={() => onInsertDql({
+                  sql,
+                  dqlArtifact,
+                  result: resultData,
+                  chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
+                  title: name,
+                  sourceRunId,
+                })}
+                style={smallButtonStyle(t)}
+              >
+                {insertDqlActionLabel ?? 'Insert as DQL cell'}
+              </button>
             ) : sql && onInsertSql ? (
               <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
             ) : null}
@@ -3941,7 +3968,10 @@ function answerDqlArtifactFromRun(run: AgentRun): AgentConversationDqlArtifact |
 }
 
 export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | undefined {
-  if (run.route === 'certified_answer' || !isAgentRunPinnable(run)) return undefined;
+  const canCommitBlockDraft = run.route === 'dql_block_draft'
+    && run.status !== 'blocked'
+    && run.status !== 'needs_clarification';
+  if (run.route === 'certified_answer' || (!isAgentRunPinnable(run) && !canCommitBlockDraft)) return undefined;
   const dqlArtifact = answerDqlArtifactFromRun(run);
   const sql = answerSqlFromRun(run);
   if ((!dqlArtifact?.source || dqlArtifact.sourcePath) && !sql) return undefined;
@@ -3957,6 +3987,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         chartConfig: extractChartConfig(payload, result),
         title: dqlArtifact?.name ?? artifact.title ?? run.question,
         mixedSourcePlan,
+        sourceRunId: run.id,
       };
     }
     if (mixedSourcePlan) {
@@ -3965,6 +3996,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         dqlArtifact,
         title: dqlArtifact?.name ?? artifact.title ?? run.question,
         mixedSourcePlan,
+        sourceRunId: run.id,
       };
     }
   }
@@ -3972,6 +4004,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
     sql,
     dqlArtifact,
     title: dqlArtifact?.name ?? run.question,
+    sourceRunId: run.id,
   };
 }
 

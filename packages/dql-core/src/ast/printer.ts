@@ -155,8 +155,8 @@ function printBlockDecl(node: BlockDeclNode, indent: number): string {
   if (node.allowedFilters) result += `${prefix}  allowedFilters = [${node.allowedFilters.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.sourceSystems) result += `${prefix}  sourceSystems = [${node.sourceSystems.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.replacementFor) result += `${prefix}  replacementFor = [${node.replacementFor.map(t => `"${t}"`).join(', ')}]\n`;
-  if (node.metricRef !== undefined) result += `${prefix}  metric = "${node.metricRef}"\n`;
-  if (node.metricsRef) result += `${prefix}  metrics = [${node.metricsRef.map(t => `"${t}"`).join(', ')}]\n`;
+  const metricRefs = node.metricsRef ?? (node.metricRef !== undefined ? [node.metricRef] : undefined);
+  if (metricRefs) result += `${prefix}  metrics = [${metricRefs.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.dimensionsRef) result += `${prefix}  dimensions = [${node.dimensionsRef.map(t => `"${t}"`).join(', ')}]\n`;
   if (node.query) result += `${prefix}  SQL: ${node.query.rawSQL.substring(0, 60)}...\n`;
   if (node.visualization) {

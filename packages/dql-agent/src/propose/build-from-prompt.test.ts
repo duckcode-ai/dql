@@ -6,6 +6,40 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AgentMessage, AgentProvider } from '../providers/types.js';
 import type { LocalContextPack } from '../metadata/catalog.js';
 import { buildFromPrompt, type BuildBlockResult, type BuildCellResult } from './build-from-prompt.js';
+import { renderProposedDraft } from './write-draft.js';
+
+describe('canonical semantic proposal DQL (CONTRACT-002 / UI-016)', () => {
+  it('renders metric arrays through the shared semantic writer without embedded SQL', () => {
+    const source = renderProposedDraft({
+      slug: 'customer_unit_economics',
+      domain: 'finance',
+      owner: '',
+      description: 'Revenue, refunds, and margin by customer.',
+      sql: 'SELECT legacy_sql_should_not_be_source_of_truth',
+      blockType: 'semantic',
+      metrics: ['revenue', 'refunds', 'gross_margin'],
+      metricRef: 'revenue',
+      dimensions: ['customer_name'],
+      pattern: 'metric_wrapper',
+      entities: [],
+      declaredOutputs: ['customer_name', 'revenue', 'refunds', 'gross_margin'],
+      invariants: [],
+      examples: [],
+      tags: ['ai-generated', 'review-required'],
+      sourceModel: 'semantic-layer',
+      sourceSystems: ['dbt'],
+      certification: { certified: false, errors: [], warnings: [] },
+    }, 'blocks/_drafts/customer_unit_economics.dql');
+
+    expect(source).toContain('type = "semantic"');
+    expect(source).toContain('metrics = ["revenue", "refunds", "gross_margin"]');
+    expect(source).toContain('dimensions = ["customer_name"]');
+    expect(source).not.toContain('metric = ');
+    expect(source).not.toContain('query =');
+    expect(source).not.toContain('owner =');
+    expect(() => parse(source)).not.toThrow();
+  });
+});
 
 /** A scripted provider that returns each queued response in order. */
 function scriptedProvider(responses: string[]): AgentProvider & { calls: AgentMessage[][] } {

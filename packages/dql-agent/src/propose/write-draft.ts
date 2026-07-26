@@ -17,6 +17,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core';
 
 export interface ProposedDraftRecord {
   slug: string;
@@ -26,11 +27,12 @@ export interface ProposedDraftRecord {
   /** Block body SQL (wraps the dbt model via `{{ ref('...') }}`). */
   sql: string;
   /**
-   * 'semantic' for a metric-bound block (import-adapter shape: `metric` + a
-   * pre-compiled `query` that runs offline), else 'custom'. Defaults to 'custom'.
+   * 'semantic' for a metric-bound block, else 'custom'. Defaults to 'custom'.
    */
   blockType?: 'custom' | 'semantic';
-  /** Governed metric this block wraps (semantic blocks). Satisfies metric_wrapper. */
+  /** Governed metrics this block wraps. New writers always use the array form. */
+  metrics?: string[];
+  /** Legacy single metric input. Read for compatibility and rendered as `metrics = [...]`. */
   metricRef?: string;
   /** Semantic dimensions the metric is grouped by (semantic blocks). */
   dimensions?: string[];
@@ -143,6 +145,23 @@ function stringArray(name: string, values: string[]): string {
 /** Render the full draft block as canonical DQL text. */
 export function renderProposedDraft(rec: ProposedDraftRecord, draftPath: string): string {
   const header = renderReviewHeader(rec, draftPath);
+  const blockType = rec.blockType ?? 'custom';
+  if (blockType === 'semantic') {
+    const metrics = Array.from(new Set([
+      ...(rec.metrics ?? []),
+      ...(rec.metricRef ? [rec.metricRef] : []),
+    ].map((metric) => metric.trim()).filter(Boolean)));
+    return `${header}${renderSemanticBlockSource({
+      name: rec.slug,
+      status: 'draft',
+      domain: rec.domain,
+      description: rec.description,
+      owner: rec.owner || undefined,
+      tags: rec.tags,
+      metrics,
+      dimensions: rec.dimensions ?? [],
+    })}`;
+  }
 
   const grainLine = rec.grain ? `\n  grain = "${escapeString(rec.grain)}"` : '';
   const entitiesLine = stringArray('entities', rec.entities);
@@ -159,12 +178,6 @@ export function renderProposedDraft(rec: ProposedDraftRecord, draftPath: string)
   const examplesBlock = renderExamples(rec.examples);
   const testsBlock = renderTests(rec.invariants);
   const ownerLine = rec.owner ? `\n  owner = "${escapeString(rec.owner)}"` : '';
-  // Semantic (metric-bound) block: declare the governed metric + dimensions. The
-  // pre-compiled `query` below keeps it runnable offline (import-adapter shape).
-  const blockType = rec.blockType ?? 'custom';
-  const metricLine = blockType === 'semantic' && rec.metricRef
-    ? `\n  metric = "${escapeString(rec.metricRef)}"`
-    : '';
   const dimensionsLine = stringArray('dimensions', rec.dimensions ?? []);
   // App-readiness: declare which business filters a dashboard may apply and map each
   // to its physical column. The runtime injects these as a safe, bound WHERE wrapper
@@ -177,7 +190,7 @@ ${header}block "${rec.slug}" {
   domain = "${escapeString(rec.domain)}"
   type = "${blockType}"
   status = "draft"
-  description = "${escapeString(rec.description)}"${ownerLine}${metricLine}
+  description = "${escapeString(rec.description)}"${ownerLine}
   pattern = "${escapeString(rec.pattern)}"${grainLine}${entitiesLine}${outputsLine}${dimensionsLine}${allowedFiltersLine}${sourceSystemsLine}${tagsLine}${llmContextLine}${reviewCadenceLine}${invariantsLine}${filterBindingsBlock}
 
   query = """

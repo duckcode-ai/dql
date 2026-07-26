@@ -252,6 +252,7 @@ import {
   type AgentRunStatus,
   type AgentRunStopReason,
   type AgentRunTrustState,
+  type AgentRouteExecutorResult,
   type AgentRouteExecutor,
   type AgentEvidenceCandidate,
   type AgentRetrievalEvidence,
@@ -2438,6 +2439,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         status: 'blocked',
         trustState: 'blocked',
         stopReason: 'blocked',
+        artifacts: [agentRunArtifact(
+          'answer',
+          'AI answer provider failed',
+          {
+            kind: 'no_answer',
+            refusalCode: 'provider_error',
+            text: message,
+            answer: message,
+            ...(routeDecision?.resolvedAnalyticalPlan
+              ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
+              : {}),
+            providerFailure: {
+              code: 'AI_PROVIDER_FAILURE',
+              message,
+              recoverable: true,
+            },
+          },
+          undefined,
+          'blocked',
+        )],
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.'),
           agentRunEvaluation(
@@ -2475,12 +2496,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       && !isExploratory;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
     const isAnalyticalFailure = Boolean(governedAnswer.analyticalFailure);
-    const isTerminalFailure = isProviderError || isExecutionFailure || isAnalyticalFailure;
     // AGT-004: a rejected attribution/export/proof policy is a deliberate
     // governance boundary, not an ambiguous user question and not a repairable
     // retrieval miss. Keep the precise policy detail visible, but never burn two
     // more provider calls retrying the same incompatible candidate.
     const isPolicyBlocked = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked';
+    const isTerminalFailure = isProviderError || isExecutionFailure || isAnalyticalFailure || isPolicyBlocked;
     // The model tried to compose a governed query and declined despite having usable
     // context (e.g. it wasn't confident about a multi-table join). The answer loop
     // has already spent its one evidence-aware repair. Keep this terminal and
@@ -2579,6 +2600,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : [{ id: 'review-analytical-failure', label: 'Review the plan, DQL, SQL, and safe repair actions', route: 'blocked' }]
       : isProviderError
         ? [{ id: 'retry-after-provider', label: 'Retry after fixing the AI provider', route: 'generated_answer' }]
+        : isPolicyBlocked
+          ? [
+              ...(governedAnswer.dqlArtifact
+                ? [{ id: 'edit_dql', label: 'Open DQL to repair', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }]
+                : []),
+              ...(sql
+                ? [{ id: 'open_sql_notebook', label: 'Open SQL in Notebook', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }]
+                : []),
+            ]
         : [{ id: 'retry-after-connection', label: 'Retry after fixing the database connection', route: 'generated_answer' }];
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
@@ -2601,7 +2631,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
       summary: isTerminalFailure
-        ? 'The governed query could not be executed.'
+        ? governedAnswer.analyticalFailure?.message
+          ?? governedAnswer.executionError
+          ?? governedAnswer.answer
+          ?? governedAnswer.text
+          ?? 'The governed query could not be executed.'
         : governedAnswer.route?.label ?? (isCertified ? 'Answered from certified DQL context.' : isExploratory ? 'Exploratory DBT-grounded analysis requires review.' : 'Answered with review-required generated analysis.'),
       answer: synthesizedAnswer ?? governedAnswer.answer ?? governedAnswer.text,
       ...(governedAnswer.clarificationOptions?.length
@@ -3136,111 +3170,123 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ],
       };
     },
-    dql_block_draft: async ({ request, routeDecision, attempt, repairHint }) => {
+    dql_block_draft: async ({
+      request,
+      routeDecision,
+      attempt,
+      repairHint,
+      emit,
+      runId,
+      maxRepairAttempts,
+    }) => {
       const contextRecord = agentRunRecord(request.conversationContext);
       const carriedDqlArtifact = normalizeDqlArtifactReference(contextRecord?.dqlArtifact)
         ?? normalizeDqlArtifactReference(request.workspaceContext?.dqlArtifact);
-      if (carriedDqlArtifact && (attempt ?? 0) === 0) {
-        const sourceQuestion = agentRunString(contextRecord?.sourceQuestion) ?? request.question;
-        const session = await createDqlArtifactGenerationSessionForProject(projectRoot, {
-          question: sourceQuestion,
-          dqlArtifact: carriedDqlArtifact,
-          inputMode: 'upload',
-          inputPath: carriedDqlArtifact.sourcePath,
-          domain: agentRunWorkspaceValue(request, 'domain'),
-          owner: agentRunWorkspaceValue(request, 'owner'),
-          tags: ['agent-run', 'review-required'],
-          contextPackId: agentRunString(contextRecord?.contextPackId),
-          routeIntent: agentRunString(contextRecord?.route),
-          sourceBlock: carriedDqlArtifact.sourcePath,
-        }, semanticLayer);
-        const candidate = session.candidates[0];
-        const validation = candidate?.validation && typeof candidate.validation === 'object'
-          ? candidate.validation as { valid?: boolean; diagnostics?: unknown[] }
-          : undefined;
-        const ready = validation?.valid !== false;
-        const payload = {
-          target: 'block',
-          name: candidate?.name ?? carriedDqlArtifact.name ?? 'DQL block draft',
-          path: candidate?.draftSave?.path ?? candidate?.savedPath,
-          importId: session.id,
-          candidateId: candidate?.id,
-          source: candidate?.dqlSource,
-          dqlSource: candidate?.dqlSource,
-          dqlArtifact: carriedDqlArtifact,
-          certifierVerdict: {
-            ready,
-            diagnostics: validation?.diagnostics ?? [],
-          },
-          generation: session.generation,
-        };
-        return {
-          summary: ready
-            ? 'Saved the generated DQL artifact as a review-required block draft.'
-            : 'Saved the generated DQL artifact as a block draft with review blockers or warnings.',
-          artifacts: [agentRunArtifact(
-            'dql_block_draft',
-            payload.name,
-            payload,
-            payload.path,
-          )],
-          evaluations: [
-            agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to DQL block draft generation.'),
-            agentRunEvaluation('dql-artifact-reuse', 'Used generated DQL artifact', true, 'info', 'Persisted the existing DQL artifact without regenerating it from SQL.', { importId: session.id, path: payload.path }),
-            agentRunEvaluation(
-              'certification-boundary',
-              'Certification boundary',
-              ready,
-              'warning',
-              ready
-                ? 'The draft has no automatic validation blockers, but certification still requires human review.'
-                : 'The draft has validation blockers that must be resolved before certification review.',
-              payload,
-            ),
-          ],
-          nextActions: [
-            { id: 'open-review', label: 'Open review checklist', artifactKind: 'dql_block_draft' },
-            { id: 'build-app', label: 'Build app from block', route: 'app_build', artifactKind: 'app_draft' },
-          ],
-        };
+      // UI-016 / E2E-015: a cold Block AI request uses the same governed answer
+      // pipeline as Ask and Notebook. Generation is write-free. The returned
+      // ownerless artifact is persisted only when the user explicitly chooses
+      // Add to Block Studio.
+      const governedResult: AgentRouteExecutorResult = carriedDqlArtifact && (attempt ?? 0) === 0
+        ? {
+            summary: 'Reused the governed answer artifact as a transient Block AI draft.',
+            answer: 'Prepared the existing governed DQL as an ownerless review draft. No file was changed.',
+            artifacts: [agentRunArtifact(
+              'answer',
+              carriedDqlArtifact.name ?? 'Governed DQL answer',
+              { dqlArtifact: carriedDqlArtifact },
+              undefined,
+              carriedDqlArtifact.trustState,
+            )],
+            evaluations: [
+              agentRunEvaluation(
+                'dql-artifact-reuse',
+                'Reused governed DQL artifact',
+                true,
+                'info',
+                'Reused the exact answer artifact without regenerating SQL or writing a block file.',
+              ),
+            ],
+          }
+        : await answerRunExecutor({
+            request,
+            route: 'generated_answer',
+            routeDecision,
+            attempt,
+            repairHint,
+            emit,
+            runId,
+            maxRepairAttempts,
+          });
+      if (governedResult.status === 'blocked' || governedResult.status === 'needs_clarification') {
+        return governedResult;
       }
-      // P4 (partial): a direct "build a block from a cold prompt" still uses the
-      // tool-less buildFromPrompt path. Unlike a SQL cell, a block needs SQL→DQL-block
-      // CONSTRUCTION (name, outputs, grain, certifier verdict, reflection), which
-      // buildFromPrompt owns — routing this through answer() cleanly requires driving
-      // that construction from the tool-rich pipeline (thread captureGeneratedDraft
-      // through the governed answer), a larger change deferred to its own session.
-      // NOTE: the two-step "ask a question → Create DQL draft" flow ALREADY routes
-      // block creation through the tool-rich governed pipeline via the carried-artifact
-      // branch above, so only this cold-start direct-build case remains tool-less.
-      const result = await buildAgentPromptArtifact(request, 'block', { attempt, repairHint });
-      const ready = result.target === 'block' ? result.certifierVerdict.ready : false;
+      const governedPayload = (governedResult.artifacts ?? [])
+        .map((artifact) => agentRunRecord(artifact.payload))
+        .find((payload) => Boolean(
+          normalizeDqlArtifactReference(payload?.dqlArtifact)
+          ?? normalizeDqlArtifactReference(payload),
+        ));
+      const directDqlArtifact = normalizeDqlArtifactReference(governedPayload);
+      const governedAnswer: Pick<AgentAnswer, 'dqlArtifact' | 'result' | 'proposedSql' | 'sql'> | undefined = governedPayload
+        ? directDqlArtifact
+          ? { dqlArtifact: directDqlArtifact }
+          : governedPayload as unknown as Pick<AgentAnswer, 'dqlArtifact' | 'result' | 'proposedSql' | 'sql'>
+        : undefined;
+      const dqlArtifact = governedAnswer
+        ? ownerlessReviewDqlArtifactFromAnswer(governedAnswer, request.question)
+        : undefined;
+      if (!dqlArtifact) {
+        return governedResult;
+      }
+      const sql = dqlArtifact.compiledSql
+        ?? agentRunString(governedPayload?.proposedSql)
+        ?? agentRunString(governedPayload?.sql);
+      const result = {
+        target: 'block' as const,
+        name: dqlArtifact.name ?? deriveGeneratedDraftSlug(request.question),
+        source: dqlArtifact.source,
+        dqlSource: dqlArtifact.source,
+        dqlArtifact,
+        ...(sql ? { sql, sqlPreview: sql } : {}),
+        ...(governedPayload?.result ? { result: governedPayload.result } : {}),
+        description: request.question,
+        dimensions: dqlArtifact.dimensions ?? [],
+        outputs: [...(dqlArtifact.dimensions ?? []), ...(dqlArtifact.metrics ?? [])],
+        certifierVerdict: {
+          ready: true,
+          blocking: [],
+          warnings: [
+            'Ownership is intentionally absent from the AI draft and is assigned by a human during promotion.',
+            'Review the generated DQL, compiled SQL, grain, and result before promotion.',
+          ],
+        },
+      };
       return {
-        summary: ready
-          ? 'Created a DQL block draft that is ready for human certification review.'
-          : 'Created a DQL block draft with review blockers or warnings.',
+        summary: 'Prepared an ownerless, review-required DQL block draft. No file was changed.',
+        answer: governedResult.answer,
+        status: 'needs_review',
+        trustState: 'review_required',
+        stopReason: 'human_review_required',
         artifacts: [agentRunArtifact(
           'dql_block_draft',
-          result.target === 'block' ? result.name : 'DQL block draft',
+          result.name,
           result,
-          result.target === 'block' ? result.path : undefined,
+          undefined,
+          'review_required',
         )],
         evaluations: [
-          agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to DQL block draft generation.'),
+          ...(governedResult.evaluations ?? []),
           agentRunEvaluation(
-            'certification-boundary',
-            'Certification boundary',
-            ready,
+            'block-commit-boundary',
+            'Explicit Block Studio commit',
+            true,
             'warning',
-            ready
-              ? 'The draft has no automatic certifier blockers, but certification still requires human review.'
-              : 'The draft has certifier blockers that must be resolved before certification review.',
+            'Generation produced an ownerless transient DQL artifact. Add to Block Studio is the only action that writes the review draft.',
             result,
           ),
         ],
         nextActions: [
-          { id: 'open-review', label: 'Open review checklist', artifactKind: 'dql_block_draft' },
-          { id: 'build-app', label: 'Build app from block', route: 'app_build', artifactKind: 'app_draft' },
+          { id: 'add-to-block-studio', label: 'Add to Block Studio', artifactKind: 'dql_block_draft' },
         ],
       };
     },
@@ -17430,7 +17476,7 @@ function composeSemanticBlockSql(
     diagnostics.push({
       severity: 'error',
       code: 'semantic_metric_missing',
-      message: 'Semantic block is missing a metric. Add metric = "metric_name" or metrics = ["metric_name"].',
+      message: 'Semantic block is missing a metric. Add metrics = ["metric_name"].',
     });
     return { sql: null, diagnostics, semanticRefs };
   }
@@ -17459,12 +17505,9 @@ function composeSemanticBlockSql(
     return { sql: null, diagnostics, semanticRefs };
   }
 
-  // Import-adapter shape: a semantic block may carry a pre-compiled `query` (the
-  // governed metric already expanded to runnable SQL). When present, RUN THAT —
-  // the `metric` field is provenance/governance, not something to recompile. This
-  // keeps metric-bound blocks runnable offline (the full MetricFlow engine may be
-  // unavailable). We still validated the metric exists above. Returning the query
-  // as the composed SQL lets the normal {{ ref() }} resolution + execution apply.
+  // Legacy import-adapter compatibility: older semantic blocks may carry a
+  // pre-compiled `query`. Current writers keep compiled SQL outside semantic DQL,
+  // but existing files remain executable while they are migrated by the formatter.
   const precompiledQuery = extractBlockStudioSql(source);
   if (precompiledQuery) {
     return { sql: precompiledQuery, diagnostics, semanticRefs };
@@ -18243,6 +18286,102 @@ function saveDqlGenerationDraftForProject(
 /** AI may propose block logic, but ownership is assigned by a human at promotion. */
 export function sanitizeAgentBlockDraftSource(source: string): string {
   return source.replace(/^\s*owner\s*=\s*.+(?:\r?\n|$)/gmi, '');
+}
+
+/**
+ * UI-016 / CONTRACT-002 / AGT-021 — derive the transient Block AI artifact
+ * from the exact governed answer artifact. Semantic drafts are re-rendered
+ * through the one canonical metrics/dimensions writer; custom SQL drafts retain
+ * their query body. Both become ownerless, review-required drafts and never
+ * inherit a saved/certified identity from their answer source.
+ */
+export function ownerlessReviewDqlArtifactFromAnswer(
+  answer: Pick<AgentAnswer, 'dqlArtifact' | 'result' | 'proposedSql' | 'sql'>,
+  question: string,
+): DqlArtifactReference | undefined {
+  const artifact = normalizeDqlArtifactReference(answer.result?.dqlArtifact)
+    ?? normalizeDqlArtifactReference(answer.dqlArtifact);
+  if (!artifact?.source) return undefined;
+  const parsed = parseSemanticBlockConfig(artifact.source);
+  const metrics = Array.from(new Set([
+    ...(artifact.metrics ?? []),
+    ...parsed.metrics,
+    ...(parsed.metric ? [parsed.metric] : []),
+  ].map((metric) => metric.trim()).filter(Boolean)));
+  const dimensions = Array.from(new Set([
+    ...(artifact.dimensions ?? []),
+    ...parsed.dimensions,
+  ].map((dimension) => dimension.trim()).filter(Boolean)));
+  const name = artifact.name
+    ?? artifact.source.match(/\bblock\s+"([^"]+)"/i)?.[1]
+    ?? deriveGeneratedDraftSlug(question);
+  const compiledSql = artifact.compiledSql
+    ?? answer.result?.sql
+    ?? answer.proposedSql
+    ?? answer.sql;
+
+  if (artifact.kind === 'semantic_block' || parsed.blockType === 'semantic' || metrics.length > 0) {
+    const source = renderSemanticBlockSource({
+      name,
+      status: 'draft',
+      domain: parseBlockStudioStringField(artifact.source, 'domain'),
+      description: question,
+      tags: ['ai-generated', 'review-required'],
+      metrics,
+      dimensions,
+      timeDimension: artifact.timeDimension ?? (
+        parsed.timeDimension && parsed.granularity
+          ? { name: parsed.timeDimension, granularity: parsed.granularity }
+          : undefined
+      ),
+      requestedFilters: (artifact.filters ?? parsed.filters).flatMap((filter) =>
+        filter.values.length > 0
+          ? filter.values.map((value) => `${filter.dimension}=${value}`)
+          : [filter.dimension]),
+      orderBy: artifact.orderBy,
+      limit: artifact.limit ?? parsed.limit,
+      parameters: artifact.parameters?.map((parameter) => ({
+        name: parameter.name,
+        type: parameter.type,
+        default: parameter.default,
+        policy: parameter.policy,
+        binding: parameter.binding?.kind === 'semantic_filter'
+          ? parameter.binding.field
+          : parameter.binding?.kind === 'limit'
+            ? 'limit'
+            : undefined,
+      })),
+      visualization: metrics.length > 1 ? { chart: 'table' } : undefined,
+    });
+    return {
+      ...artifact,
+      kind: 'semantic_block',
+      name,
+      source,
+      sourcePath: undefined,
+      metrics,
+      dimensions,
+      persistence: 'transient',
+      trustState: 'review_required',
+      ...(compiledSql ? { compiledSql } : {}),
+    };
+  }
+
+  let source = sanitizeAgentBlockDraftSource(artifact.source);
+  if (/\bstatus\s*=\s*"[^"]*"/i.test(source)) {
+    source = source.replace(/\bstatus\s*=\s*"[^"]*"/i, 'status = "draft"');
+  } else {
+    source = source.replace(/(\bblock\s+"[^"]+"\s*\{)/i, '$1\n  status = "draft"');
+  }
+  return {
+    ...artifact,
+    name,
+    source,
+    sourcePath: undefined,
+    persistence: 'transient',
+    trustState: 'review_required',
+    ...(compiledSql ? { compiledSql } : {}),
+  };
 }
 
 export function saveBlockStudioArtifacts(

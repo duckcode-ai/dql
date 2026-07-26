@@ -952,6 +952,7 @@ async function buildBlock(
     // Metric-bound (semantic) block when a governed metric drove this build, so it
     // references the semantic layer instead of re-deriving the formula in raw SQL.
     blockType: revised.blockType ?? blockType,
+    metrics: matchedMetric ? [matchedMetric.name] : undefined,
     metricRef: revised.metricRef,
     pattern: revised.pattern ?? pattern,
     grain: revised.grain,

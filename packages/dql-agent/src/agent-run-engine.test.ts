@@ -131,6 +131,50 @@ describe("AgentRunEngine", () => {
     expect(store.get("run-certified")?.route).toBe("certified_answer");
   });
 
+  it("API-007 records blocked outcomes as run.failed with the precise failure class", async () => {
+    const events: AgentRunEvent[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-provider-failed",
+      now: fixedClock(),
+      planner: fixedRoutePlanner("generated_answer"),
+      executors: {
+        generated_answer: () => ({
+          status: "blocked",
+          trustState: "blocked",
+          stopReason: "blocked",
+          summary: "The configured AI provider is unavailable.",
+          artifacts: [{
+            id: "provider-failure",
+            kind: "answer",
+            title: "AI answer provider failed",
+            trustState: "blocked",
+            payload: { providerFailure: { code: "AI_PROVIDER_FAILURE" } },
+          }],
+          evaluations: [{
+            id: "ai-provider",
+            label: "AI provider",
+            passed: false,
+            severity: "blocking",
+            message: "The configured AI provider is unavailable.",
+          }],
+          nextActions: [{ id: "retry-after-provider", label: "Retry", route: "generated_answer" }],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "Who are the top customers for BCM?",
+      intent: "ad_hoc_ranking",
+    }, (event) => events.push(event));
+
+    expect(run.lifecycle).toMatchObject({ state: "terminal", phase: "run.failed" });
+    expect(run.diagnosticReceipt?.failure).toMatchObject({
+      code: "AI_PROVIDER_FAILURE",
+      phase: "run.failed",
+    });
+    expect(events.at(-1)?.type).toBe("run.failed");
+  });
+
   it("treats a compiler-owned semantic answer as terminal governed output", async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-semantic-route",

@@ -193,6 +193,8 @@ export interface AgentRunDiagnosticReceiptV1 {
   runId: string;
   phase: string;
   route?: AgentRunRoute;
+  /** Snapshot-bound analytical plan; distinct from the orchestration step plan. */
+  resolvedAnalyticalPlan?: IntentDecision["resolvedAnalyticalPlan"];
   plan?: AgentRunPlan;
   steps: AgentRunStep[];
   artifacts: AgentRunArtifact[];
@@ -1376,15 +1378,22 @@ export class AgentRunEngine {
       });
       run.question = submittedQuestion;
       emit({
-        type: "run.completed",
-        message: `Agent run completed with status ${run.status}.`,
+        type: run.status === "blocked" ? "run.failed" : "run.completed",
+        message: run.status === "blocked"
+          ? "Agent run failed with a blocked outcome."
+          : `Agent run completed with status ${run.status}.`,
         route: run.route,
         status: run.status,
         trustState: run.trustState,
         payload: { budgetUsage: run.budgetUsage },
       });
       run.completedAt = this.timestamp();
-      run.lifecycle = terminalLifecycle(progress.lifecycle, "run.completed", run.completedAt, events.length);
+      run.lifecycle = terminalLifecycle(
+        progress.lifecycle,
+        run.status === "blocked" ? "run.failed" : "run.completed",
+        run.completedAt,
+        events.length,
+      );
       run.diagnosticReceipt = diagnosticReceiptForRun(run);
       run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt);
       await checkpointQueue;
@@ -1631,11 +1640,30 @@ function diagnosticFailureFromError(
 
 function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
   const failureEvaluation = run.evaluations.find((evaluation) => !evaluation.passed && evaluation.severity === "blocking");
+  const analyticalFailure = run.artifacts
+    .map((artifact) => artifact.payload)
+    .filter((payload): payload is Record<string, unknown> =>
+      Boolean(payload) && typeof payload === "object" && !Array.isArray(payload))
+    .map((payload) => payload.analyticalFailure)
+    .find((failure): failure is Record<string, unknown> =>
+      Boolean(failure) && typeof failure === "object" && !Array.isArray(failure));
+  const failureCode = typeof analyticalFailure?.code === "string"
+    ? analyticalFailure.code
+    : failureEvaluation?.id === "ai-provider"
+      ? "AI_PROVIDER_FAILURE"
+      : failureEvaluation?.id === "query-execution"
+        ? "QUERY_EXECUTION_FAILED"
+        : failureEvaluation?.id === "trust-boundary"
+          ? "POLICY_BLOCKED"
+          : "EXECUTION_BLOCKED";
   return {
     version: 1,
     runId: run.id,
     phase: run.lifecycle?.phase ?? (run.status === "blocked" ? "run.failed" : "run.completed"),
     route: run.route,
+    ...(run.routeDecision?.resolvedAnalyticalPlan
+      ? { resolvedAnalyticalPlan: run.routeDecision.resolvedAnalyticalPlan }
+      : {}),
     plan: run.plan,
     steps: run.steps,
     artifacts: run.artifacts,
@@ -1643,8 +1671,8 @@ function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
     ...(run.status === "blocked"
       ? {
           failure: {
-            code: "EXECUTION_BLOCKED",
-            phase: run.lifecycle?.phase ?? "run.completed",
+            code: failureCode,
+            phase: run.lifecycle?.phase ?? "run.failed",
             message: failureEvaluation?.message ?? run.summary,
             recoverable: Boolean(run.nextActions.length),
             safeActions: run.nextActions.map((action) => action.id),

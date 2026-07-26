@@ -25,13 +25,23 @@ export async function selectSemanticMembersViaLlm(input: {
    */
   requireDimensions?: string[];
 }): Promise<SemanticMemberSelection | undefined> {
+  const allMetrics = input.semanticLayer.listMetrics();
+  // AGT-021 / UI-012: exact user-authored semantic names are a hard output
+  // contract, including dbt measures projected into the metric catalog. The
+  // former real-metrics-first card set hid those measures whenever even one
+  // real metric was present, so a five-member request could only return the
+  // single real metric after the deterministic filter-binding lane handed off.
+  const explicitlyRequestedMetrics = exactNamedMembers(allMetrics, input.question);
   // Show REAL metrics, not dbt measures projected into the metrics map — the
   // model shouldn't pick a raw measure when a governed metric exists. If no real
   // metric matches, fall back to the full pool so measure-backed questions work.
+  // Exact names are the exception: the user selected those identities directly,
+  // so keep them at the front of the bounded cards regardless of object kind.
   const rankedRealMetrics = rankMembersForQuestion(input.semanticLayer.listMetrics(undefined, { includeMeasures: false }), input.question);
-  const metrics = rankedRealMetrics.length > 0
+  const rankedMetrics = rankedRealMetrics.length > 0
     ? rankedRealMetrics
-    : rankMembersForQuestion(input.semanticLayer.listMetrics(), input.question);
+    : rankMembersForQuestion(allMetrics, input.question);
+  const metrics = uniqueMembers([...explicitlyRequestedMetrics, ...rankedMetrics]);
   if (metrics.length === 0) return undefined;
   const dimensions = rankMembersForQuestion(
     input.semanticLayer.listDimensions(undefined, { includeVariants: true }),
@@ -132,9 +142,15 @@ export async function selectSemanticMembersViaLlm(input: {
   const metricNames = new Set(visibleMetrics.map((metric) => metric.name));
   const dimensionNames = new Set(visibleDimensions.map(semanticDimensionReference));
   const timeDimensionNames = new Set(visibleTimeDimensions.map(semanticDimensionReference));
-  const selectedMetrics = Array.isArray(record.metrics)
+  const modelSelectedMetrics = Array.isArray(record.metrics)
     ? record.metrics.filter((value): value is string => typeof value === 'string' && metricNames.has(value))
     : [];
+  // The model may add a compatible semantic member, but it cannot delete an
+  // exact metric/measure identity present in the user's question.
+  const selectedMetrics = Array.from(new Set([
+    ...explicitlyRequestedMetrics.map((metric) => metric.name),
+    ...modelSelectedMetrics,
+  ]));
   if (selectedMetrics.length === 0) return undefined;
   let compatibleForSelection: Set<string>;
   try {
@@ -182,6 +198,46 @@ export async function selectSemanticMembersViaLlm(input: {
     selection.limit = Math.floor(record.limit);
   }
   return selection;
+}
+
+function exactNamedMembers<T extends { name: string; label?: string }>(
+  members: T[],
+  question: string,
+): T[] {
+  const normalizedQuestion = ` ${normalizeMemberPhrase(question)} `;
+  const byPhrase = new Map<string, T[]>();
+  for (const member of members) {
+    const phrases = new Set([
+      normalizeMemberPhrase(member.name),
+      normalizeMemberPhrase(member.name.split('.').at(-1) ?? member.name),
+      normalizeMemberPhrase(member.label ?? ''),
+    ].filter(Boolean));
+    for (const phrase of phrases) {
+      if (!normalizedQuestion.includes(` ${phrase} `)) continue;
+      byPhrase.set(phrase, [...(byPhrase.get(phrase) ?? []), member]);
+    }
+  }
+  return [...byPhrase.entries()]
+    .filter(([, matches]) => new Set(matches.map((member) => member.name)).size === 1)
+    .sort(([left], [right]) =>
+      normalizedQuestion.indexOf(` ${left} `) - normalizedQuestion.indexOf(` ${right} `)
+      || right.length - left.length)
+    .map(([, matches]) => matches[0]!)
+    .filter((member, index, all) => all.findIndex((candidate) => candidate.name === member.name) === index);
+}
+
+function normalizeMemberPhrase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_./-]+/g, ' ')
+    .replace(/[^a-z0-9% ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function uniqueMembers<T extends { name: string }>(members: T[]): T[] {
+  return members.filter((member, index, all) =>
+    all.findIndex((candidate) => candidate.name === member.name) === index);
 }
 
 function rankMembersForQuestion<T extends { name: string; label?: string; description?: string }>(

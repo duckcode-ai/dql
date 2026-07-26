@@ -52,6 +52,62 @@ describe('selectSemanticMembersViaLlm', () => {
     expect(await selectSemanticMembersViaLlm({ provider, semanticLayer: layer(), question: 'q' })).toBeUndefined();
   });
 
+  it('AGT-021 preserves every explicitly named metric and measure when the model selects only one', async () => {
+    const names = [
+      'percent_dod_eu_core_ccu_acm_qty',
+      'percent_dod_eu_core_ccu_bcm',
+      'percent_dod_eu_core_ccu_bcm_qty',
+      'percent_dod_legacy_acm_qty',
+      'percent_dod_legacy_bcm',
+    ];
+    const semanticLayer = new SemanticLayer({
+      metrics: names.map((name, index) => ({
+        name,
+        label: name,
+        description: '',
+        domain: 'consumption',
+        sql: name,
+        type: 'sum' as const,
+        table: 'consumption_daily',
+        objectKind: index === 2 ? 'metric' as const : 'measure' as const,
+      })),
+      dimensions: [{
+        name: 'customer_name',
+        label: 'Customer',
+        description: '',
+        domain: 'consumption',
+        sql: 'customer_name',
+        type: 'string',
+        table: 'consumption_daily',
+      }],
+    });
+    const provider = {
+      name: 'claude',
+      available: async () => true,
+      generate: async (messages: AgentMessage[]) => {
+        const prompt = messages.map((message) => message.content).join('\n');
+        for (const name of names) expect(prompt).toContain(name);
+        return JSON.stringify({
+          metrics: [names[2]],
+          filters: [{ dimension: 'customer_name', operator: 'equals', values: ['Capital One'] }],
+        });
+      },
+    } as AgentProvider;
+
+    const selection = await selectSemanticMembersViaLlm({
+      provider,
+      semanticLayer,
+      question: `what is ${names.map((name) => `"${name}"`).join(', ')} for Capital One?`,
+    });
+
+    expect(selection?.metrics).toEqual(names);
+    expect(selection?.filters).toEqual([{
+      dimension: 'customer_name',
+      operator: 'equals',
+      values: ['Capital One'],
+    }]);
+  });
+
   it('rejects invented semantic member names at the resolver boundary', async () => {
     const selection = await selectSemanticMembersViaLlm({
       provider: providerReturning('{"metrics":["invented_revenue"],"dimensions":["invented_region"]}'),

@@ -388,19 +388,18 @@ export class SemanticAnalyzer {
     }
 
     if (node.blockType === 'semantic') {
-      // Semantic blocks carry provenance (metricRef / metricsRef) and optionally pre-compiled SQL
-      // produced by an import adapter (dbt YAML, schema introspection, MetricFlow).
-      // Having both metricRef and query is the canonical imported-block shape.
+      // Parse legacy singular metric references for compatibility, while all
+      // current writers and the formatter emit canonical metrics arrays.
       const hasMetricRef = Boolean(node.metricRef) || (node.metricsRef && node.metricsRef.length > 0);
       if (!hasMetricRef) {
         this.reporter.warning(
-          'A semantic block should declare the metric it references via metric = "metric_name" or metrics = ["metric1", "metric2"].',
+          'A semantic block should declare governed metrics via metrics = ["metric1", "metric2"].',
           node.span,
         );
       }
       if (node.query && !hasMetricRef) {
         this.reporter.error(
-          'A semantic block must not contain a query field. Semantic blocks route to the MetricFlow API at query time; only custom blocks execute raw SQL. Declare this block as type = "custom" or remove the query field and add metric = "metric_name".',
+          'A semantic block must not contain a query field. Semantic blocks route through the semantic compiler; only custom blocks execute raw SQL. Declare this block as type = "custom" or remove the query field and add metrics = ["metric_name"].',
           node.span,
         );
       }

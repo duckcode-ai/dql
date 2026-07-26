@@ -19,6 +19,7 @@ let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor
 let clarificationSelectionInput: typeof UnifiedAgentRunPanelModule.clarificationSelectionInput;
 let isAgentRunPinnable: typeof UnifiedAgentRunPanelModule.isAgentRunPinnable;
 let hasAnalyticalInspectorContract: typeof UnifiedAgentRunPanelModule.hasAnalyticalInspectorContract;
+let analyticalInspectorContract: typeof UnifiedAgentRunPanelModule.analyticalInspectorContract;
 let analyticalInspectorSections: typeof UnifiedAgentRunPanelModule.analyticalInspectorSections;
 let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRepairActionLabels;
 let askInspectorTabsForState: typeof UnifiedAgentRunPanelModule.askInspectorTabsForState;
@@ -43,6 +44,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     clarificationSelectionInput = module.clarificationSelectionInput;
     isAgentRunPinnable = module.isAgentRunPinnable;
     hasAnalyticalInspectorContract = module.hasAnalyticalInspectorContract;
+    analyticalInspectorContract = module.analyticalInspectorContract;
     analyticalInspectorSections = module.analyticalInspectorSections;
     analyticalRepairActionLabels = module.analyticalRepairActionLabels;
     askInspectorTabsForState = module.askInspectorTabsForState;
@@ -80,6 +82,38 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       'Actual steps',
       'Failure & repair',
     ]);
+  });
+
+  it('UI-012 never interprets the orchestration step plan as an analytical ranking plan', () => {
+    const contract = analyticalInspectorContract({
+      diagnosticReceipt: {
+        version: 1,
+        runId: 'run-failed-before-planning',
+        phase: 'run.failed',
+        plan: {
+          source: 'deterministic',
+          rationale: 'Top customer request.',
+          steps: [{ id: 'answer', route: 'generated_answer' }],
+        },
+        failure: { code: 'AI_PROVIDER_FAILURE' },
+      },
+    });
+    expect(contract?.plan).toBeUndefined();
+    expect(contract?.frame).toBeUndefined();
+
+    const resolved = analyticalInspectorContract({
+      diagnosticReceipt: {
+        version: 1,
+        runId: 'run-ranked',
+        phase: 'run.failed',
+        resolvedAnalyticalPlan: {
+          analyticalFrame: {
+            ranking: { direction: 'top', limit: 10, tiePolicy: 'include_ties' },
+          },
+        },
+      },
+    });
+    expect(resolved?.frame?.ranking).toMatchObject({ direction: 'top', limit: 10 });
   });
 
   it('UI-013 capability-gates repair actions without offering a permission bypass', () => {
@@ -460,6 +494,30 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       question: 'unmatched analysis',
       artifacts: [{ kind: 'answer', payload: { sql: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region' } }],
     } as any)).toMatchObject({ sql: expect.stringContaining('SELECT region') });
+
+    expect(artifactReadyPayloadFromRun({
+      id: 'block-run',
+      question: 'build revenue and margin by region',
+      status: 'needs_review',
+      route: 'dql_block_draft',
+      artifacts: [{
+        kind: 'dql_block_draft',
+        trustState: 'review_required',
+        payload: {
+          dqlArtifact: {
+            kind: 'semantic_block',
+            name: 'revenue_and_margin_by_region',
+            source: 'block "revenue_and_margin_by_region" {\n  type = "semantic"\n  metrics = ["revenue", "margin"]\n  dimensions = ["region"]\n}',
+          },
+          sql: 'SELECT region, revenue, margin FROM semantic_result',
+        },
+      }],
+    } as any)).toMatchObject({
+      sourceRunId: 'block-run',
+      dqlArtifact: {
+        name: 'revenue_and_margin_by_region',
+      },
+    });
 
     expect(artifactReadyPayloadFromRun({
       id: 'blocked',

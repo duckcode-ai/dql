@@ -626,10 +626,10 @@ export function propose(options: ProposeOptions): ProposeSummary {
       ? enriched.examples.map((question) => ({ question }))
       : undefined;
 
-    // Metric-backed model → emit ONE metric-bound (semantic) block per governed
-    // metric it backs, so proposed blocks actually reference the semantic layer
-    // (type=semantic + metric=<name> + a pre-compiled, runnable query). Falls back
-    // to the custom block below when a model backs no usable measures.
+    // Metric-backed model → emit ONE metric-bound semantic block per governed
+    // metric it backs. The source stores canonical metrics/dimensions meaning;
+    // compiled SQL remains separate execution evidence. Falls back to the custom
+    // block below when a model backs no usable measures.
     const metricBlocks = proposal.inference.pattern === 'metric_wrapper'
       ? buildMetricWrapperBlocks(model, scan.artifacts)
       : [];

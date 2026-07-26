@@ -222,7 +222,7 @@ function buildSemanticPlan(
   if (metrics.length === 0) {
     throw new Error(
       `Semantic block "${block.name}" has no metric references. ` +
-      'Add metric = "metric_name" or metrics = ["metric1", "metric2"] to your block declaration.',
+      'Add metrics = ["metric1", "metric2"] to your block declaration.',
     );
   }
 

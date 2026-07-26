@@ -452,8 +452,8 @@ export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate,
     '    type = "custom"',
     `    description = ${dqlString(candidate.description)}`,
     `    tags = [${tags}]`,
-    `    owner = ${dqlString(candidate.owner)}`,
   ];
+  if (candidate.owner.trim()) lines.push(`    owner = ${dqlString(candidate.owner)}`);
   if (pattern) lines.push(`    pattern = ${dqlString(pattern)}`);
   if (grain) lines.push(`    grain = ${dqlString(grain)}`);
   if (entities.length > 0) lines.push(`    entities = [${entities.map(dqlString).join(', ')}]`);

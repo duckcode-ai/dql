@@ -45,6 +45,7 @@ import {
   isAgentValueProbeColumn,
   normalizeProjectConnection,
   normalizeAgentRunDomain,
+  ownerlessReviewDqlArtifactFromAnswer,
   openBlockStudioDocument,
   parseBlockSourceMetadata,
   parseAgentRunRequestBody,
@@ -102,6 +103,79 @@ describe('Block AI domain normalization (UI-016 / E2E-015)', () => {
     expect(normalizeAgentRunDomain('_uncategorized')).toBeUndefined();
     expect(normalizeAgentRunDomain('  ')).toBeUndefined();
     expect(normalizeAgentRunDomain('finance')).toBe('finance');
+  });
+
+  it('UI-016 derives an ownerless canonical multi-metric draft from the governed answer artifact', () => {
+    const metrics = [
+      'percent_dod_eu_core_ccu_acm_qty',
+      'percent_dod_eu_core_ccu_bcm',
+      'percent_dod_eu_core_ccu_bcm_qty',
+      'percent_dod_legacy_acm_qty',
+      'percent_dod_legacy_bcm',
+    ];
+    const artifact = ownerlessReviewDqlArtifactFromAnswer({
+      dqlArtifact: {
+        kind: 'semantic_block',
+        name: 'capital_one_metrics',
+        sourcePath: 'blocks/certified/capital_one_metrics.dql',
+        source: `block "capital_one_metrics" {
+  type = "semantic"
+  status = "certified"
+  owner = "finance-analytics"
+  metric = "percent_dod_eu_core_ccu_acm_qty"
+  dimensions = ["customer_name"]
+  query = """
+    SELECT should_not_survive
+  """
+}`,
+        metrics,
+        dimensions: ['customer_name'],
+        persistence: 'saved',
+        trustState: 'certified',
+        compiledSql: `SELECT customer_name, ${metrics.join(', ')} FROM analytics.metrics`,
+      },
+    }, 'Show all five Capital One metrics by customer');
+
+    expect(artifact).toMatchObject({
+      kind: 'semantic_block',
+      name: 'capital_one_metrics',
+      metrics,
+      dimensions: ['customer_name'],
+      persistence: 'transient',
+      trustState: 'review_required',
+      sourcePath: undefined,
+    });
+    expect(artifact?.source).toContain(`metrics = [${metrics.map((metric) => `"${metric}"`).join(', ')}]`);
+    expect(artifact?.source).toContain('dimensions = ["customer_name"]');
+    expect(artifact?.source).toContain('status = "draft"');
+    expect(artifact?.source).toContain('chart = "table"');
+    expect(artifact?.source).not.toContain('metric = ');
+    expect(artifact?.source).not.toContain('owner = ');
+    expect(artifact?.source).not.toContain('query =');
+  });
+
+  it('UI-016 keeps custom SQL DQL intact while removing generated ownership and certification', () => {
+    const artifact = ownerlessReviewDqlArtifactFromAnswer({
+      dqlArtifact: {
+        kind: 'sql_block',
+        name: 'customer_ranking',
+        source: `block "customer_ranking" {
+  type = "custom"
+  status = "certified"
+  owner = "analytics"
+  query = """
+    SELECT customer_name, revenue FROM analytics.customers
+  """
+}`,
+      },
+      proposedSql: 'SELECT customer_name, revenue FROM analytics.customers',
+    }, 'Rank customers');
+
+    expect(artifact?.source).toContain('type = "custom"');
+    expect(artifact?.source).toContain('status = "draft"');
+    expect(artifact?.source).toContain('SELECT customer_name, revenue');
+    expect(artifact?.source).not.toContain('owner = ');
+    expect(artifact?.compiledSql).toContain('SELECT customer_name');
   });
 });
 
@@ -1682,6 +1756,72 @@ describe('agent run runtime API', () => {
     }
   });
 
+  it('UI-016 keeps answer-to-Block AI generation write-free until explicit commit', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-ai-write-free-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Turn the governed answer into a reusable block',
+          requestedMode: 'block',
+          conversationContext: {
+            dqlArtifact: {
+              kind: 'semantic_block',
+              name: 'revenue_and_orders',
+              sourcePath: 'domains/finance/blocks/revenue_and_orders.dql',
+              source: `block "revenue_and_orders" {
+  type = "semantic"
+  status = "certified"
+  owner = "finance"
+  metric = "revenue"
+  dimensions = ["region"]
+}`,
+              metrics: ['revenue', 'order_count'],
+              dimensions: ['region'],
+              persistence: 'saved',
+              trustState: 'certified',
+              compiledSql: 'select region, sum(revenue), count(*) from orders group by region',
+            },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const payload = await response.json() as { run: any };
+      expect(payload.run.route).toBe('dql_block_draft');
+      expect(payload.run.status).toBe('needs_review');
+      const draft = payload.run.artifacts.find((artifact: any) => artifact.kind === 'dql_block_draft');
+      expect(draft?.path).toBeUndefined();
+      expect(draft?.payload?.path).toBeUndefined();
+      expect(draft?.payload?.dqlArtifact).toMatchObject({
+        metrics: ['revenue', 'order_count'],
+        dimensions: ['region'],
+        persistence: 'transient',
+        trustState: 'review_required',
+      });
+      expect(draft?.payload?.dqlArtifact?.source).toContain('metrics = ["revenue", "order_count"]');
+      expect(draft?.payload?.dqlArtifact?.source).not.toContain('owner = ');
+      expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
+      expect(existsSync(join(projectRoot, 'domains'))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) return resolve();
+        server.close(() => resolve());
+      });
+    }
+  });
+
   it('synthesizes DQL-first answers when executed rows are available', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
@@ -2169,6 +2309,19 @@ describe('agent run runtime API', () => {
       expect(['blocked', 'needs_review', 'needs_clarification', 'completed']).toContain(ask.run.status);
       if (ask.run.status === 'blocked') {
         expect(ask.run.evaluations.some((evaluation: any) => evaluation.id === 'ai-provider')).toBe(true);
+        expect(ask.run.lifecycle).toMatchObject({ state: 'terminal', phase: 'run.failed' });
+        expect(ask.run.artifacts[0]).toMatchObject({
+          title: 'AI answer provider failed',
+          trustState: 'blocked',
+          payload: {
+            refusalCode: 'provider_error',
+            providerFailure: { code: 'AI_PROVIDER_FAILURE' },
+          },
+        });
+        expect(ask.run.diagnosticReceipt?.failure).toMatchObject({
+          code: 'AI_PROVIDER_FAILURE',
+          phase: 'run.failed',
+        });
       }
       expect(ask.run.summary).not.toContain('Could not locate the bindings file');
 

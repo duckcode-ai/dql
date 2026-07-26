@@ -872,6 +872,7 @@ export function BlockStudio() {
         domain: parsed?.domain || state.blockStudioMetadata?.domain || 'uncategorized',
         description: parsed?.description || `AI-generated draft for ${payload.title ?? name}`,
         tags: parsed?.tags?.length ? parsed.tags : ['ai-generated', 'review-required'],
+        runId: payload.sourceRunId,
       });
       dispatch({
         type: 'OPEN_BLOCK_STUDIO',
@@ -906,20 +907,16 @@ export function BlockStudio() {
     }
   };
 
-  // Open the governed Ask-AI overlay in a given mode. Only the explicit 'edit'
-  // (Modify this block) door uses the block-authoring route (requestedMode='block'
-  // + edit workspaceContext). 'ask' AND 'build' route through the governed ANSWER
-  // path (requestedMode='auto') so they EXECUTE and surface the same SQL preview +
-  // rows as Ask AI — the block-draft route emits a draft artifact without running
-  // the SQL, which is why Block Studio used to show an empty SQL preview. The
-  // executed answer still carries an insertable dqlArtifact, so "save as block"
-  // works from the answer (onInsertDql) — you see the data first, then promote.
+  // Block AI always requests the explicit block route. The server still runs the
+  // universal governed answer lifecycle to produce DQL, compiled SQL, preview
+  // evidence, and trust, but returns an ownerless transient artifact until the
+  // user explicitly chooses Add to Block Studio.
   const openAskAi = (opts?: { kind?: 'ask' | 'build' | 'edit'; initialInput?: string; autoRun?: string }) => {
     const kind = opts?.kind ?? 'ask';
     setResultTab('results');
     setAskAiKind(kind);
     setAskAiInitialInput(opts?.initialInput ?? '');
-    setAskAiSeed(opts?.autoRun ? { text: opts.autoRun, mode: kind === 'edit' ? 'block' : 'auto', nonce: Date.now() } : undefined);
+    setAskAiSeed(opts?.autoRun ? { text: opts.autoRun, mode: 'block', nonce: Date.now() } : undefined);
     setAiDockOpen(true);
   };
 
@@ -1523,7 +1520,7 @@ export function BlockStudio() {
                 importCandidateId: importSession?.candidates[0]?.id,
                 ...(askAiKind === 'edit' ? { mode: 'edit', blockPath: state.activeBlockPath } : {}),
               }}
-              initialMode={askAiKind === 'edit' ? 'block' : 'auto'}
+              initialMode="block"
               initialInput={askAiInitialInput}
               autoRun={askAiSeed}
               threadId={agentThread.threadId}
