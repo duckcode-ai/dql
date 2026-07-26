@@ -21,6 +21,7 @@ let isAgentRunPinnable: typeof UnifiedAgentRunPanelModule.isAgentRunPinnable;
 let hasAnalyticalInspectorContract: typeof UnifiedAgentRunPanelModule.hasAnalyticalInspectorContract;
 let analyticalInspectorSections: typeof UnifiedAgentRunPanelModule.analyticalInspectorSections;
 let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRepairActionLabels;
+let askInspectorTabsForState: typeof UnifiedAgentRunPanelModule.askInspectorTabsForState;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -44,6 +45,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     hasAnalyticalInspectorContract = module.hasAnalyticalInspectorContract;
     analyticalInspectorSections = module.analyticalInspectorSections;
     analyticalRepairActionLabels = module.analyticalRepairActionLabels;
+    askInspectorTabsForState = module.askInspectorTabsForState;
   });
 
   it('UI-012 exposes the complete seven-section analytical inspector for success and failure payloads', () => {
@@ -91,6 +93,24 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       'Change connection or request access',
     ]);
     expect(analyticalRepairActionLabels(['request_access', 'change_authorized_connection'])).not.toContain('Open SQL in Notebook');
+  });
+
+  it('UI-012/UI-013 keeps DQL, SQL, plan, and trust tabs visible after terminal compilation failure', () => {
+    expect(askInspectorTabsForState({
+      analytical: true,
+      blocked: true,
+      hasDql: true,
+      hasSql: true,
+      hasLineage: false,
+    }).map((tab) => tab.id)).toEqual(['how', 'dql', 'sql', 'trust']);
+
+    expect(askInspectorTabsForState({
+      analytical: true,
+      blocked: true,
+      hasDql: false,
+      hasSql: false,
+      hasLineage: false,
+    }).map((tab) => tab.id)).toEqual(['how', 'dql', 'sql', 'trust']);
   });
 
   it('UI-011 restores applied certified-block inputs in the inline Ask result', () => {

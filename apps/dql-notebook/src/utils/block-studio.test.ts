@@ -3,9 +3,11 @@ import {
   ensureNotebookDqlBlockSource,
   inferVisualParameterType,
   parseVisualBlockParameters,
+  parseSemanticVisualFields,
   reconcileSemanticCompatibility,
   removeVisualBlockParameter,
   setBlockQuery,
+  setSemanticMetrics,
   setSemanticRuntimeFilters,
   upsertSemanticSelection,
   upsertVisualBlockParameter,
@@ -76,6 +78,27 @@ describe('visual block parameters', () => {
     expect(result).toContain('product_category = "dynamic"');
     expect(result).toContain('product_category = "product_category"');
     expect(result).toContain('requested_filters = ["product_category"]');
+  });
+
+  it('uses the same metrics array contract for zero, one, and many manual selections', () => {
+    const source = `block "Revenue" {
+  type = "semantic"
+  metric = "legacy_revenue"
+  dimensions = []
+}`;
+
+    const oneMetric = setSemanticMetrics(source, ['revenue']);
+    expect(oneMetric).toContain('metrics = ["revenue"]');
+    expect(oneMetric).not.toMatch(/\bmetric\s*=/);
+    expect(parseSemanticVisualFields(oneMetric).metrics).toEqual(['revenue']);
+
+    const manyMetrics = setSemanticMetrics(oneMetric, ['revenue', 'gross_margin']);
+    expect(manyMetrics).toContain('metrics = ["revenue", "gross_margin"]');
+    expect(parseSemanticVisualFields(manyMetrics).metrics).toEqual(['revenue', 'gross_margin']);
+
+    const noMetrics = setSemanticMetrics(manyMetrics, []);
+    expect(noMetrics).toContain('metrics = []');
+    expect(parseSemanticVisualFields(noMetrics).metrics).toEqual([]);
   });
 
   it('preserves raw-SQL parameter and governance sections while editing the query', () => {

@@ -199,7 +199,9 @@ describe('runNew', () => {
       const metric = readFileSync(metricPath, 'utf-8');
 
       expect(block).toContain('type = "semantic"');
-      expect(block).toContain('metric = "arr_growth_metric"');
+      expect(block).toContain('metrics = ["arr_growth_metric"]');
+      expect(block).toContain('dimensions = []');
+      expect(block).not.toMatch(/\bmetric\s*=/);
       expect(metric).toContain('name: arr_growth_metric');
       expect(metric).toContain('domain: finance');
     } finally {

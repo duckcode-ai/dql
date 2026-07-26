@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot, loadProjectConfig } from '../local-runtime.js';
 
@@ -275,15 +276,16 @@ function buildSemanticBlockTemplate(opts: {
   owner: string;
   metricName: string;
 }): string {
-  return `block "${opts.title}" {
-    domain = "${opts.domain}"
-    type = "semantic"
-    description = "Starter semantic block for ${opts.title.toLowerCase()}"
-    owner = "${opts.owner}"
-    tags = ["starter", "semantic", "${opts.domain}"]
-    metric = "${opts.metricName}"
-}
-`;
+  return renderSemanticBlockSource({
+    name: opts.title,
+    status: 'draft',
+    domain: opts.domain,
+    description: `Starter semantic block for ${opts.title.toLowerCase()}`,
+    owner: opts.owner,
+    tags: ['starter', 'semantic', opts.domain],
+    metrics: [opts.metricName],
+    dimensions: [],
+  });
 }
 
 function buildDashboardTemplate(opts: {

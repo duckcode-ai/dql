@@ -1,5 +1,6 @@
 import {
   semanticDimensionReference,
+  renderSemanticBlockSource,
   type BlockParameterDefinition,
   type ComposeQueryResult,
   type DimensionDefinition,
@@ -86,8 +87,16 @@ export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput
   // customer" picks the ratio metric, while "total bcm_amount" can still bind
   // its backing measure. De-conflation without touching the store.
   const metrics = ((): MetricDefinition[] => {
+    const allMetrics = input.semanticLayer.listMetrics();
+    // Exact user-authored names are authoritative even when an imported semantic
+    // project represents some of them as measure projections. Choosing the
+    // metrics-only pool first used to retain one business metric and silently
+    // discard every explicitly named measure beside it.
+    if (explicitlyNamedMetrics(allMetrics, input.question).length > 0) {
+      return selectMetrics(allMetrics, input);
+    }
     const metricsOnly = selectMetrics(input.semanticLayer.listMetrics(undefined, { includeMeasures: false }), input);
-    return metricsOnly.length > 0 ? metricsOnly : selectMetrics(input.semanticLayer.listMetrics(), input);
+    return metricsOnly.length > 0 ? metricsOnly : selectMetrics(allMetrics, input);
   })();
   const primaryMetric = metrics[0];
   if (!primaryMetric) return undefined;
@@ -556,7 +565,7 @@ function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryI
     if (hit) selected.push(hit);
   }
 
-  if (selected.length > 0) return selected.slice(0, 4);
+  if (selected.length > 0) return selected;
 
   const fallbackTerms = new Set([...input.questionPlan.metricTerms, ...input.questionPlan.requestedShape.measures].flatMap(tokenize));
   if (fallbackTerms.size === 0) return [];
@@ -597,7 +606,7 @@ function explicitlyNamedMetrics(metrics: MetricDefinition[], question: string): 
       || right.split(' ').length - left.split(' ').length)
     .map(([, candidates]) => candidates[0]!)
     .filter((metric, index, all) => all.findIndex((candidate) => candidate.name === metric.name) === index);
-  return resolved.slice(0, 4);
+  return resolved;
 }
 
 function normalizeMetricPhrase(value: string): string {
@@ -1053,49 +1062,29 @@ function inferTimeGranularity(question: string, questionPlan: AnalysisQuestionPl
 
 export function renderSemanticDqlArtifact(input: SemanticDqlArtifactInput): string {
   const runtimeContract = semanticArtifactRuntimeContract({ filters: input.filters, limit: input.limit });
-  const lines = [
-    `block "${escapeDqlString(input.name ?? titleFromQuestion(input.question, input.titleFallback ?? input.metrics[0] ?? 'semantic_query'))}" {`,
-    '  status = "draft"',
-    `  domain = "${escapeDqlString(input.domain || 'uncategorized')}"`,
-    '  type = "semantic"',
-    `  description = "${escapeDqlString(input.question)}"`,
-    input.metrics.length === 1
-      ? `  metric = "${escapeDqlString(input.metrics[0] ?? '')}"`
-      : `  metrics = [${input.metrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`,
-    `  dimensions = [${input.dimensions.map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`,
-  ];
-  if (input.timeDimension) {
-    lines.push(`  time_dimension = "${escapeDqlString(input.timeDimension.name)}"`);
-    lines.push(`  granularity = "${escapeDqlString(input.timeDimension.granularity)}"`);
-  }
-  if (input.filters.length > 0) {
-    lines.push(`  requested_filters = [${input.filters.flatMap(filterToRequestedFilterStrings).map((filter) => `"${escapeDqlString(filter)}"`).join(', ')}]`);
-  }
-  if (input.orderBy?.length) {
-    lines.push(`  order_by = [${input.orderBy.map((order) => `"${escapeDqlString(`${order.name} ${order.direction}`)}"`).join(', ')}]`);
-  }
-  if (typeof input.limit === 'number' && Number.isFinite(input.limit) && input.limit > 0) {
-    lines.push(`  limit = ${Math.floor(input.limit)}`);
-  }
-  if (runtimeContract.parameters.length > 0) {
-    lines.push('  params {');
-    for (const parameter of runtimeContract.parameters) {
-      lines.push(`    ${parameter.name}: ${parameter.type} = ${renderDqlParameterValue(parameter.default)}`);
-    }
-    lines.push('  }');
-    lines.push('  parameterPolicy {');
-    for (const parameter of runtimeContract.parameters) lines.push(`    ${parameter.name} = "dynamic"`);
-    lines.push('  }');
-    lines.push('  filterBindings {');
-    for (const parameter of runtimeContract.parameters) {
-      const binding = parameter.binding;
-      if (binding?.kind === 'semantic_filter') lines.push(`    ${parameter.name} = "${escapeDqlString(binding.field)}"`);
-      else if (binding?.kind === 'limit') lines.push(`    ${parameter.name} = "limit"`);
-    }
-    lines.push('  }');
-  }
-  lines.push('}');
-  return `${lines.join('\n')}\n`;
+  return renderSemanticBlockSource({
+    name: input.name ?? titleFromQuestion(input.question, input.titleFallback ?? input.metrics[0] ?? 'semantic_query'),
+    status: 'draft',
+    domain: input.domain,
+    description: input.question,
+    metrics: input.metrics,
+    dimensions: input.dimensions,
+    timeDimension: input.timeDimension,
+    requestedFilters: input.filters.flatMap(filterToRequestedFilterStrings),
+    orderBy: input.orderBy,
+    limit: input.limit,
+    parameters: runtimeContract.parameters.map((parameter) => ({
+      name: parameter.name,
+      type: parameter.type,
+      default: parameter.default,
+      policy: parameter.policy,
+      binding: parameter.binding?.kind === 'semantic_filter'
+        ? parameter.binding.field
+        : parameter.binding?.kind === 'limit'
+          ? 'limit'
+          : undefined,
+    })),
+  });
 }
 
 function semanticArtifactRuntimeContract(input: {
@@ -1139,13 +1128,6 @@ function semanticArtifactRuntimeContract(input: {
     values[name] = value;
   }
   return { parameters, values };
-}
-
-function renderDqlParameterValue(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(renderDqlParameterValue).join(', ')}]`;
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  return `"${escapeDqlString(String(value ?? ''))}"`;
 }
 
 export function semanticDqlArtifactName(input: SemanticDqlArtifactInput): string {

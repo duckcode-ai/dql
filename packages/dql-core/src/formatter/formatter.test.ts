@@ -75,6 +75,18 @@ filter.dropdown(SELECT DISTINCT region FROM orders,label="Region",param="region"
     expect(formatted).toContain('assert segment IN ["Enterprise", "SMB"]');
   });
 
+  it('canonicalizes legacy singular semantic metrics to the universal array contract', () => {
+    const formatted = formatDQL(`block "revenue" {
+      type = "semantic"
+      metric = "total_revenue"
+    }`);
+
+    expect(formatted).toContain('metrics = ["total_revenue"]');
+    expect(formatted).toContain('dimensions = []');
+    expect(formatted).not.toMatch(/\bmetric\s*=/);
+    expect(formatDQL(formatted)).toBe(formatted);
+  });
+
   it('preserves block status and agent-facing metadata', () => {
     const source = `block "fraud_by_region" {
       domain = "cards"

@@ -1,8 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck } from 'lucide-react';
-import { useNotebook } from '../../store/NotebookStore';
+import { makeCell, useNotebook } from '../../store/NotebookStore';
+import type { Cell } from '../../store/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
-import { UnifiedAgentRunPanel, type ThreadItem } from '../agent/UnifiedAgentRunPanel';
+import { focusInsertedNotebookCell } from '../../utils/notebook-cell-focus';
+import {
+  UnifiedAgentRunPanel,
+  type InsertDqlPayload,
+  type ThreadItem,
+} from '../agent/UnifiedAgentRunPanel';
 
 /**
  * Analytics Home — the stakeholder ChatGPT-style entry. Text→SQL questions run
@@ -28,6 +34,50 @@ interface Conversation {
 const STORAGE_KEY = 'dql-ask-conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
 const MAX_CONVERSATIONS = 40;
+
+function askNotebookCellName(value: string | undefined): string {
+  const clean = (value ?? 'AI analysis')
+    .replace(/[^a-zA-Z0-9_ -]+/g, ' ')
+    .replace(/\s+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48);
+  return clean || 'ai_analysis';
+}
+
+/** Build the exact editable Notebook cell used by Ask failure-repair handoffs. */
+export function askNotebookCellFromPayload(payload: InsertDqlPayload): Cell | undefined {
+  const dqlSource = payload.dqlArtifact?.source?.trim();
+  const sql = payload.sql?.trim();
+  const content = dqlSource || sql;
+  if (!content) return undefined;
+  const cell = makeCell(dqlSource ? 'dql' : 'sql', content);
+  cell.name = askNotebookCellName(payload.title ?? payload.dqlArtifact?.name);
+  if (payload.result) {
+    cell.result = payload.result;
+    cell.status = 'success';
+    cell.executionCount = 1;
+  }
+  if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+  if (payload.dqlArtifact) {
+    cell.dqlArtifact = {
+      source: payload.dqlArtifact.source,
+      sql: payload.sql,
+      name: payload.dqlArtifact.name,
+      sourcePath: payload.dqlArtifact.sourcePath,
+      kind: payload.dqlArtifact.kind,
+      metrics: payload.dqlArtifact.metrics,
+      dimensions: payload.dqlArtifact.dimensions,
+      parameters: payload.dqlArtifact.parameters,
+      parameterValues: payload.dqlArtifact.parameterValues,
+      persistence: payload.dqlArtifact.persistence,
+      trustState: payload.dqlArtifact.trustState,
+      compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
+      reviewState: payload.dqlArtifact.trustState === 'certified' ? 'certified' : 'review_required',
+    };
+    cell.dqlParameterValues = payload.dqlArtifact.parameterValues;
+  }
+  return cell;
+}
 
 function consumePendingDomainContext(): { domain: string; purpose?: string; modelAreaId?: string } | undefined {
   if (typeof window === 'undefined') return undefined;
@@ -249,6 +299,14 @@ export function AnalyticsHome() {
     });
   };
 
+  const openEditableNotebookCell = useCallback((payload: InsertDqlPayload) => {
+    const cell = askNotebookCellFromPayload(payload);
+    if (!cell) return;
+    dispatch({ type: 'ADD_CELL', cell });
+    dispatch({ type: 'SET_MAIN_VIEW', view: 'notebook' });
+    focusInsertedNotebookCell(cell.id);
+  }, [dispatch]);
+
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', overflow: 'hidden', background: t.appBg }}>
       <ConversationSidebar
@@ -279,6 +337,9 @@ export function AnalyticsHome() {
           onRunningChange={setIsRunning}
           onOpenResearch={openResearch}
           onOpenApp={openApp}
+          onInsertSql={(sql, title) => openEditableNotebookCell({ sql, title })}
+          onInsertDql={openEditableNotebookCell}
+          insertDqlActionLabel="Open in notebook"
         />
       </div>
     </div>

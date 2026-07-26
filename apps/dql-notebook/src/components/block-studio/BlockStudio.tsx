@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core/blocks';
 import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, Trash2, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -5702,17 +5703,13 @@ function applyGeneratedSqlToBlockDraft(source: string, sql: string): string {
 }
 
 function buildSemanticSkeleton(name: string): string {
-  return `block "${name}" {
-  domain = "uncategorized"
-  type = "semantic"
-  description = ""
-  owner = ""
-  tags = []
-  visualization {
-    chart = "table"
-  }
-}
-`;
+  return renderSemanticBlockSource({
+    name,
+    status: 'draft',
+    metrics: [],
+    dimensions: [],
+    visualization: { chart: 'table' },
+  });
 }
 
 function buildCustomSkeleton(name: string): string {

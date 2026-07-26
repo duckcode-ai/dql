@@ -9,6 +9,7 @@ describe('buildNotebookSemanticBlock', () => {
     )).toBe([
       'block "customer_lifetime_spend_by_order_count_by_customer_name" {',
       '  type = "semantic"',
+      '  status = "draft"',
       '  metrics = ["customer_lifetime_spend", "order_count"]',
       '  dimensions = ["customer_name"]',
       '}',

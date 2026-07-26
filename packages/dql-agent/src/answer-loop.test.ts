@@ -7204,7 +7204,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.dqlArtifact?.name).toBe("monthly_revenue_by_channel");
     expect(result.dqlArtifact?.source).toContain('type = "semantic"');
     expect(result.dqlArtifact?.source).toContain('block "monthly_revenue_by_channel"');
-    expect(result.dqlArtifact?.source).toContain('metric = "total_revenue"');
+    expect(result.dqlArtifact?.source).toContain('metrics = ["total_revenue"]');
     expect(result.dqlArtifact?.source).toContain('dimensions = ["channel"]');
     expect(result.dqlArtifact?.source).toContain('time_dimension = "order_date"');
     expect(result.dqlArtifact?.source).toContain('granularity = "month"');
@@ -7654,6 +7654,101 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.kind).toBe("no_answer");
     expect(result.refusalDetails?.code).toBe("semantic_runtime_required");
     expect(result.exploratoryCandidate).toBeUndefined();
+    expect(result.dqlArtifact).toMatchObject({
+      kind: "semantic_block",
+      metrics: ["revenue_ratio"],
+      dimensions: [],
+      persistence: "transient",
+      trustState: "governed",
+    });
+    expect(result.dqlArtifact?.source).toContain('metrics = ["revenue_ratio"]');
+    expect(result.dqlArtifact?.source).toContain("dimensions = []");
+    expect(result.analyticalFailure).toMatchObject({
+      code: "COMPILATION_FAILED",
+      phase: "compilation",
+      safeActions: ["edit_dql", "open_sql_notebook"],
+    });
+    expect(result.executionError).toBeTruthy();
+  });
+
+  it("AGT-017/API-007 keeps attempted DQL, SQL, plan, trust, and repair actions after a SQL syntax failure", async () => {
+    kg.rebuild([revenueMetric("revenue_ratio", "Revenue ratio")], []);
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: "revenue_ratio",
+        label: "Revenue Ratio",
+        description: "Revenue divided by target revenue.",
+        domain: "finance",
+        sql: "revenue_ratio",
+        type: "custom",
+        table: "",
+        metricType: "ratio",
+      }],
+      dimensions: [],
+    });
+    const attemptedSql = "SELECT SUM(revenue) AS revenue_ratio FORM analytics.orders";
+    const resolvedAnalyticalPlan = {
+      version: 1 as const,
+      planId: "plan-syntax-failure",
+      snapshotId: "snapshot-syntax-failure",
+      fingerprint: "a".repeat(64),
+      questionType: "lookup" as const,
+      recommendedRoute: "semantic" as const,
+      analyticalFrame: {
+        version: 2 as const,
+        questionType: "lookup" as const,
+        metricConceptIds: ["revenue_ratio"],
+        entityGrainIds: [],
+        dimensions: [],
+        memberBindings: [],
+        timeContext: {
+          timeRole: "none" as const,
+          timezone: "UTC",
+          completenessPolicy: "include_partial" as const,
+          periods: [],
+        },
+        comparison: undefined,
+        ranking: undefined,
+        requestedOutputs: [],
+      },
+    };
+    const compiler = vi.fn(async () => {
+      throw Object.assign(new Error("SQL syntax error near FORM"), {
+        code: "SYNTAX_ERROR",
+        details: { compiledSql: attemptedSql },
+      });
+    });
+
+    const result = await answer({
+      question: "what is the revenue ratio",
+      provider: new StubProvider([]),
+      kg,
+      semanticLayer,
+      semanticQueryCompiler: compiler,
+      resolvedAnalyticalPlan,
+      executeGeneratedSql: vi.fn(),
+    });
+
+    expect(result.kind).toBe("no_answer");
+    expect(result.resolvedAnalyticalPlan).toEqual(resolvedAnalyticalPlan);
+    expect(result.dqlArtifact).toMatchObject({
+      kind: "semantic_block",
+      metrics: ["revenue_ratio"],
+      dimensions: [],
+      compiledSql: attemptedSql,
+      trustState: "governed",
+    });
+    expect(result.dqlArtifact?.source).toContain('metrics = ["revenue_ratio"]');
+    expect(result.dqlArtifact?.source).toContain("dimensions = []");
+    expect(result.proposedSql).toBe(attemptedSql);
+    expect(result.sql).toBe(attemptedSql);
+    expect(result.analyticalFailure).toMatchObject({
+      code: "DIALECT_ERROR",
+      phase: "compilation",
+      planFingerprint: resolvedAnalyticalPlan.fingerprint,
+      safeActions: ["edit_dql", "open_sql_notebook"],
+    });
+    expect(result.executionError).toBeTruthy();
   });
 
   it("AGT-014/API-007 returns runtime path ambiguity as a stable clarification instead of SQL fallback", async () => {

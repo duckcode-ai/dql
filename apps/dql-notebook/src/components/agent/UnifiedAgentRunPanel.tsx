@@ -1587,6 +1587,28 @@ function RunCard({
 
 export type AskInspectorTab = 'how' | 'dql' | 'sql' | 'lineage' | 'trust';
 
+/**
+ * Failed analytical runs keep the complete research scaffold visible even when
+ * compilation stopped before producing one of the text artifacts. This makes a
+ * remounted Ask/Notebook/Block run explain what is absent instead of silently
+ * removing its DQL or SQL section. Acceptance: UI-012, UI-013, E2E-015.
+ */
+export function askInspectorTabsForState(input: {
+  analytical: boolean;
+  blocked: boolean;
+  hasDql: boolean;
+  hasSql: boolean;
+  hasLineage: boolean;
+}): Array<{ id: AskInspectorTab; label: string }> {
+  const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
+  if (input.analytical) tabs.push({ id: 'how', label: 'How it answered' });
+  if (input.hasDql || (input.analytical && input.blocked)) tabs.push({ id: 'dql', label: 'DQL' });
+  if (input.hasSql || (input.analytical && input.blocked)) tabs.push({ id: 'sql', label: 'SQL' });
+  if (input.hasLineage) tabs.push({ id: 'lineage', label: 'Lineage' });
+  tabs.push({ id: 'trust', label: 'Trust & steps' });
+  return tabs;
+}
+
 const ASK_KEYFRAMES = `
   @keyframes dql-agent-run-spin { to { transform: rotate(360deg); } }
   @keyframes dql-agent-fadein { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
@@ -2493,12 +2515,13 @@ function AskInspector({
   const pinnable = isAgentRunPinnable(run);
   const analytical = analyticalInspectorContract(payload);
 
-  const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
-  if (analytical) tabs.push({ id: 'how', label: 'How it answered' });
-  if (dqlArtifact?.source) tabs.push({ id: 'dql', label: 'DQL' });
-  if (sql) tabs.push({ id: 'sql', label: 'SQL' });
-  if (lineage.length > 0) tabs.push({ id: 'lineage', label: 'Lineage' });
-  tabs.push({ id: 'trust', label: 'Trust & steps' });
+  const tabs = askInspectorTabsForState({
+    analytical: Boolean(analytical),
+    blocked,
+    hasDql: Boolean(dqlArtifact?.source),
+    hasSql: Boolean(sql),
+    hasLineage: lineage.length > 0,
+  });
   const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
   const badgeLabel = blocked ? 'Blocked' : certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
@@ -2558,47 +2581,55 @@ function AskInspector({
             onSaveBlock={onSaveBlock}
           />
         ) : null}
-        {activeTab === 'dql' && dqlArtifact?.source ? (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: t.textMuted }}>Reusable governed artifact — save it as a block to certify.</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                {onInsertDql ? (
-                  <button
-                    type="button"
-                    onClick={() => onInsertDql({
-                      sql,
-                      dqlArtifact,
-                      result: resultData,
-                      chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
-                      title: insertTitle,
-                    })}
-                    style={smallButtonStyle(t)}
-                  >
-                    Open DQL in notebook
-                  </button>
-                ) : null}
-                <CopyButton text={dqlArtifact.source} t={t} title="Copy DQL" />
+        {activeTab === 'dql' ? (
+          dqlArtifact?.source ? (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 11, color: t.textMuted }}>Reusable governed artifact — save it as a block to certify.</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {onInsertDql ? (
+                    <button
+                      type="button"
+                      onClick={() => onInsertDql({
+                        sql,
+                        dqlArtifact,
+                        result: resultData,
+                        chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
+                        title: insertTitle,
+                      })}
+                      style={smallButtonStyle(t)}
+                    >
+                      Open DQL in notebook
+                    </button>
+                  ) : null}
+                  <CopyButton text={dqlArtifact.source} t={t} title="Copy DQL" />
+                </div>
               </div>
-            </div>
-            <pre style={codeStyle(t)}>{dqlArtifact.source}</pre>
-          </>
+              <pre style={codeStyle(t)}>{dqlArtifact.source}</pre>
+            </>
+          ) : (
+            <InspectorEmpty t={t}>The selected plan failed before a DQL source could be materialized. Review the Plan and Failure & repair sections.</InspectorEmpty>
+          )
         ) : null}
-        {activeTab === 'sql' && sql ? (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <span style={{ fontSize: 11, color: t.textMuted }}>Compiled SQL preview — grounded against your dbt schema.</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                {onInsertSql ? (
-                  <button type="button" onClick={() => onInsertSql(sql, insertTitle)} style={smallButtonStyle(t)}>
-                    Open SQL in notebook
-                  </button>
-                ) : null}
-                <CopyButton text={sql} t={t} title="Copy SQL" />
+        {activeTab === 'sql' ? (
+          sql ? (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ fontSize: 11, color: t.textMuted }}>Attempted compiled SQL — open it in Notebook to inspect or repair.</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {onInsertSql ? (
+                    <button type="button" onClick={() => onInsertSql(sql, insertTitle)} style={smallButtonStyle(t)}>
+                      Open SQL in notebook
+                    </button>
+                  ) : null}
+                  <CopyButton text={sql} t={t} title="Copy SQL" />
+                </div>
               </div>
-            </div>
-            <pre style={codeStyle(t)}>{sql}</pre>
-          </>
+              <pre style={codeStyle(t)}>{sql}</pre>
+            </>
+          ) : (
+            <InspectorEmpty t={t}>Compilation stopped before SQL was produced. The DQL, plan, trust evidence, and failure steps are still retained.</InspectorEmpty>
+          )
         ) : null}
         {activeTab === 'lineage' ? (
           <div style={{ display: 'grid', gap: 8 }}>

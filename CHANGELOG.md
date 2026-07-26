@@ -6,6 +6,43 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.11.1 - 2026-07-26
+
+### Canonical semantic DQL and durable failed-query repair
+
+This patch aligns semantic authoring across Ask AI, Notebook AI, Block AI, the
+CLI, and manual Block Studio workflows while keeping failed analytical work
+fully inspectable and editable.
+
+### Fixed
+
+- **Canonical semantic blocks.** One shared renderer now emits
+  `metrics = [...]` and `dimensions = [...]` across AI generation, Notebook,
+  Block Studio, CLI scaffolding, formatting, and runtime artifacts. AI drafts
+  remain ownerless until a human saves or promotes them.
+- **Complete multi-metric selection.** Ask preserves every explicitly requested
+  metric, avoids treating technical metric identifiers as filters, retains
+  prior selections in follow-ups such as “other metrics,” and uses a lossless
+  result contract when multiple measures are returned.
+- **Block AI domain handling.** Catalog fallback labels such as
+  `uncategorized` no longer block Block AI before orchestration can resolve the
+  governed business context.
+- **Durable compilation failures.** SQL compilation and execution failures
+  retain the immutable plan, canonical DQL attempt, any attempted SQL, lineage,
+  trust evidence, actual steps, stable diagnostics, and safe repair actions.
+- **Editable Ask recovery.** Failed DQL or SQL can be opened directly from Ask
+  as an editable Notebook cell with its trust and compilation metadata intact.
+- **Navigation-safe evidence.** Conversation persistence retains the complete
+  bounded DQL artifact contract so DQL, SQL, lineage, and Trust & Steps remain
+  available after leaving and returning to the AI surface.
+
+### Release exceptions
+
+- Provider-backed multi-metric and failed-compilation browser replay remains
+  pending independent verification because the designated built-CLI fixture
+  did not have a reachable Claude subscription.
+- The existing `PERF-001` latency exception remains unchanged.
+
 ## v1.11.0 - 2026-07-26
 
 ### Unified AI orchestration for Ask, Notebook, and Block authoring

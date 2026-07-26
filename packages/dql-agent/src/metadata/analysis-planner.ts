@@ -187,7 +187,10 @@ export function buildAnalysisQuestionPlan(
   const valueMentions = extractValueMentions(entities);
   const metricTerms = resolveQuestionMetricTerms(
     lower,
-    extractMetricTerms(languageQuestion),
+    uniqueStrings([
+      ...extractQuotedAnalyticalIdentifiers(cleanQuestion),
+      ...extractMetricTerms(languageQuestion),
+    ]),
     extractFollowUpMetricTerms(followUp, lower),
   );
   const extractedDimensionTerms = extractDimensionTerms(languageQuestion);
@@ -822,6 +825,10 @@ function extractMetricTerms(question: string): string[] {
   // customer"); normalize it so the measure-word scan can see it.
   const lower = question.toLowerCase().replace(/%/g, ' percent ');
   const terms = new Set<string>();
+  for (const match of question.matchAll(/["']([^"']{2,120})["']/g)) {
+    const identifier = match[1].trim();
+    if (isQuotedAnalyticalIdentifier(identifier, question)) terms.add(identifier);
+  }
   if (/\b(scorer|scorers|scoring|scored)\b/i.test(lower)) {
     terms.add('score');
     terms.add('scoring');
@@ -961,10 +968,35 @@ function extractFilterTerms(question: string, entities: AnalysisEntityMention[])
   return uniqueStrings([
     // Stored member values are phrases, not metadata tokens. Search can still
     // tokenize them separately, but the executable filter contract must not.
-    ...entities.map((entity) => entity.text),
+    ...entities
+      .filter((entity) => entity.source !== 'quoted' || !isQuotedAnalyticalIdentifier(entity.text, question))
+      .map((entity) => entity.text),
     ...analyticalValues,
     ...Array.from(question.matchAll(/\b(?:last|this|next|previous|prior|current)\s+(day|week|month|quarter|year|season)\b/gi)).map((match) => match[0].toLowerCase()),
   ]).slice(0, 16);
+}
+
+/**
+ * Quoted snake_case names in analytical questions are commonly exact semantic
+ * member IDs, not warehouse filter values. Treating them as values made a
+ * multi-metric request fail semantic composition before the compiler ran.
+ */
+function isQuotedAnalyticalIdentifier(value: string, question: string): boolean {
+  if (!/^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$/.test(value)) return false;
+  const words = value.replace(/_/g, ' ');
+  if (METRIC_WORDS.some((word) => new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(words))) return true;
+  const quotedIdentifiers = [...question.matchAll(/["']([^"']{2,120})["']/g)]
+    .map((match) => match[1].trim())
+    .filter((item) => /^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$/.test(item));
+  return quotedIdentifiers.length > 1 && /\b(?:metrics?|measures?|kpis?|what is|what are|show|compare)\b/i.test(question);
+}
+
+function extractQuotedAnalyticalIdentifiers(question: string): string[] {
+  return uniqueStrings(
+    [...question.matchAll(/["']([^"']{2,120})["']/g)]
+      .map((match) => match[1].trim())
+      .filter((value) => isQuotedAnalyticalIdentifier(value, question)),
+  );
 }
 
 function cleanAnalyticalFilterValue(value: string | undefined): string {

@@ -94,7 +94,12 @@ describe('agentic analytics tools', () => {
     expect((out as { dqlArtifact: { name: string } }).dqlArtifact.name).toBe('monthly_revenue_by_order_channel');
     expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('block "monthly_revenue_by_order_channel"');
     expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('type = "semantic"');
-    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('metric = "total_revenue"');
+    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain(
+      'metrics = ["total_revenue"]',
+    );
+    expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain(
+      'dimensions = ["order_channel"]',
+    );
     expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('order_by = ["total_revenue desc"]');
     expect((out as { dqlArtifact: { source: string } }).dqlArtifact.source).toContain('limit = 10');
     expect((out as { draftBlock: { path: string; askedTimes: number } }).draftBlock).toMatchObject({

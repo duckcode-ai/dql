@@ -925,6 +925,7 @@ export function resolveAgentFollowUpContext(
       ? undefined
       : mergeStrings(
           activeTurnStringArray(activeTurn, 'requestedMeasures'),
+          priorDqlArtifact?.metrics,
           arrayValue(activeResult?.measureColumns),
           context.priorMeasures,
           inferredMeasuresFromAnswerContract(context.answerContract),
@@ -1520,6 +1521,9 @@ const GENERIC_FOLLOW_UP_WORDS = new Set([
 
 function isGenericFollowUp(question: string): boolean {
   const lower = question.toLowerCase();
+  if (/\b(?:what|how)\s+about\s+(?:the\s+)?(?:other|remaining|rest(?:\s+of\s+the)?)\s+(?:metrics?|measures?)\b/.test(lower)) {
+    return true;
+  }
   if (/\b(?:combine|merge|join|final|summari[sz]e)\b/.test(lower) && /\b(?:previous|prior|above|these|those|results?|outputs?|turns?)\b/.test(lower)) {
     return true;
   }

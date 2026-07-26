@@ -39,6 +39,7 @@ const MAX_DIMENSION_VALUES = 24;
 const MAX_ANSWER_TEXT = 4000;
 const MAX_SUMMARY = 1200;
 const MAX_DQL_SOURCE = 3000;
+const MAX_COMPILED_SQL = 12_000;
 
 export interface ConversationThread {
   id: string;
@@ -454,7 +455,54 @@ function capDqlArtifact(artifact: AgentDqlArtifactReference | undefined): AgentD
           granularity: artifact.timeDimension.granularity.slice(0, 80),
         }
       : undefined,
+    orderBy: artifact.orderBy?.slice(0, MAX_COLUMNS).map((order) => ({
+      name: order.name.slice(0, 180),
+      direction: order.direction,
+    })),
+    limit: artifact.limit,
+    parameters: artifact.parameters?.slice(0, MAX_COLUMNS).map((parameter) => ({
+      ...parameter,
+      name: parameter.name.slice(0, 180),
+      ...(parameter.default === undefined ? {} : { default: capArtifactValue(parameter.default) }),
+      ...(parameter.binding?.kind === 'semantic_filter'
+        ? {
+            binding: {
+              ...parameter.binding,
+              field: parameter.binding.field.slice(0, 180),
+            },
+          }
+        : {}),
+    })),
+    parameterValues: artifact.parameterValues
+      ? Object.fromEntries(
+          Object.entries(artifact.parameterValues)
+            .slice(0, MAX_COLUMNS)
+            .map(([key, value]) => [key.slice(0, 180), capArtifactValue(value)]),
+        )
+      : undefined,
+    persistence: artifact.persistence,
+    trustState: artifact.trustState,
+    compiledSql: artifact.compiledSql?.slice(0, MAX_COMPILED_SQL),
+    executionReceipt: artifact.executionReceipt ? { ...artifact.executionReceipt } : undefined,
   };
+}
+
+/** Keep persisted repair inputs JSON-safe and bounded without changing their scalar types. */
+function capArtifactValue(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.slice(0, 500);
+  if (depth >= 2) return undefined;
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_DIMENSION_VALUES).map((item) => capArtifactValue(item, depth + 1));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, MAX_DIMENSION_KEYS)
+        .map(([key, item]) => [key.slice(0, 180), capArtifactValue(item, depth + 1)]),
+    );
+  }
+  return undefined;
 }
 
 type ThreadRow = {

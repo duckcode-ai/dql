@@ -66,6 +66,26 @@ describe('ConversationStore', () => {
         source: 'block "food_vs_drink_revenue" {\n  type = "semantic"\n  metric = "revenue"\n}',
         metrics: ['revenue'],
         dimensions: ['category'],
+        orderBy: [{ name: 'revenue', direction: 'desc' }],
+        limit: 10,
+        parameters: [{
+          name: 'region',
+          type: 'string',
+          required: false,
+          default: 'North America',
+          policy: 'dynamic',
+          binding: { kind: 'semantic_filter', field: 'customer.region', operator: 'equals' },
+        }],
+        parameterValues: { region: 'North America' },
+        persistence: 'transient',
+        trustState: 'governed',
+        compiledSql: 'SELECT category, SUM(revenue) AS revenue FROM analytics.orders GROUP BY category',
+        executionReceipt: {
+          sourceFingerprint: 'a'.repeat(64),
+          compiledSqlFingerprint: 'b'.repeat(64),
+          parameterFingerprint: 'c'.repeat(64),
+          resultFingerprint: 'd'.repeat(64),
+        },
       },
       result: {
         columns: Array.from({ length: 40 }, (_, i) => `col_${i}`),
@@ -106,6 +126,22 @@ describe('ConversationStore', () => {
       metrics: ['revenue'],
       dimensions: ['category'],
       source: expect.stringContaining('metric = "revenue"'),
+      orderBy: [{ name: 'revenue', direction: 'desc' }],
+      limit: 10,
+      parameters: [expect.objectContaining({
+        name: 'region',
+        binding: { kind: 'semantic_filter', field: 'customer.region', operator: 'equals' },
+      })],
+      parameterValues: { region: 'North America' },
+      persistence: 'transient',
+      trustState: 'governed',
+      compiledSql: expect.stringContaining('SELECT category'),
+      executionReceipt: {
+        sourceFingerprint: 'a'.repeat(64),
+        compiledSqlFingerprint: 'b'.repeat(64),
+        parameterFingerprint: 'c'.repeat(64),
+        resultFingerprint: 'd'.repeat(64),
+      },
     });
   });
 

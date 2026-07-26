@@ -73,10 +73,10 @@ export function parseSemanticVisualFields(content: string): SemanticVisualFields
 export function setSemanticMetrics(content: string, metrics: string[]): string {
   let next = content.replace(/\n\s*metrics\s*=\s*\[[\s\S]*?\]/i, '').replace(/\n\s*metric\s*=\s*"[^"]*"/i, '');
   const unique = Array.from(new Set(metrics.filter(Boolean)));
-  if (unique.length === 0) return next;
-  return insertVisualField(next, unique.length === 1
-    ? `  metric = "${escapeDqlValue(unique[0])}"`
-    : `  metrics = [${unique.map((metricName) => `"${escapeDqlValue(metricName)}"`).join(', ')}]`);
+  return insertVisualField(
+    next,
+    `  metrics = [${unique.map((metricName) => `"${escapeDqlValue(metricName)}"`).join(', ')}]`,
+  );
 }
 
 export function setSemanticArray(content: string, key: string, values: string[]): string {
@@ -737,14 +737,8 @@ function normalizeBlockDocument(doc: ParsedBlockDocument): string {
       : doc.metric
         ? [doc.metric]
         : [];
-    if (semanticMetrics.length === 1) {
-      lines.push(`  metric = "${escapeDqlString(semanticMetrics[0])}"`);
-    } else if (semanticMetrics.length > 1) {
-      lines.push(`  metrics = [${semanticMetrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
-    }
-    if (doc.dimensions.length > 0) {
-      lines.push(`  dimensions = [${Array.from(new Set(doc.dimensions)).map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
-    }
+    lines.push(`  metrics = [${semanticMetrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
+    lines.push(`  dimensions = [${Array.from(new Set(doc.dimensions)).map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
     if (doc.timeDimension) {
       lines.push(`  time_dimension = "${escapeDqlString(doc.timeDimension)}"`);
     }

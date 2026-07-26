@@ -44,6 +44,7 @@ import {
   loadProjectConfig,
   isAgentValueProbeColumn,
   normalizeProjectConnection,
+  normalizeAgentRunDomain,
   openBlockStudioDocument,
   parseBlockSourceMetadata,
   parseAgentRunRequestBody,
@@ -93,6 +94,15 @@ afterEach(() => {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe('Block AI domain normalization (UI-016 / E2E-015)', () => {
+  it('treats semantic catalog fallback labels as absent domain context', () => {
+    expect(normalizeAgentRunDomain('uncategorized')).toBeUndefined();
+    expect(normalizeAgentRunDomain('_uncategorized')).toBeUndefined();
+    expect(normalizeAgentRunDomain('  ')).toBeUndefined();
+    expect(normalizeAgentRunDomain('finance')).toBe('finance');
+  });
 });
 
 describe('semantic runtime table mapping', () => {
@@ -1532,8 +1542,11 @@ describe('agent run runtime API', () => {
       dqlSource,
       compiledSql: sql,
     });
-    const retained = analyticalFailedRunFromAgentRun({
+    const failedAgentRun = {
       id: 'agent-run-1',
+      question: 'what is revenue?',
+      status: 'blocked',
+      route: 'semantic_answer',
       trustState: 'blocked',
       artifacts: [{
         id: 'answer-1',
@@ -1544,11 +1557,22 @@ describe('agent run runtime API', () => {
           resolvedAnalyticalPlan: { fingerprint: 'a'.repeat(64), recommendedRoute: 'semantic' },
           analyticalExecutionGraph: { route: 'semantic' },
           analyticalFailure: failure,
-          dqlArtifact: { kind: 'semantic_block', source: dqlSource, trustState: 'governed' },
+          dqlArtifact: {
+            kind: 'semantic_block',
+            source: dqlSource,
+            metrics: ['revenue'],
+            dimensions: [],
+            trustState: 'governed',
+            persistence: 'transient',
+            compiledSql: sql,
+          },
           sql,
         },
       }],
-    } as Parameters<typeof analyticalFailedRunFromAgentRun>[0]);
+      evaluations: [],
+      nextActions: [],
+    } as unknown as Parameters<typeof analyticalFailedRunFromAgentRun>[0];
+    const retained = analyticalFailedRunFromAgentRun(failedAgentRun);
     expect(retained).toMatchObject({
       runId: 'analytical-run-1',
       snapshotId: 'snapshot-1',
@@ -1558,6 +1582,22 @@ describe('agent run runtime API', () => {
       dqlSource,
       compiledSql: sql,
       failure: { code: 'PERMISSION_DENIED' },
+    });
+
+    const turn = conversationTurnInputFromRun(failedAgentRun as Parameters<typeof conversationTurnInputFromRun>[0]);
+    expect(turn).toMatchObject({
+      agentRunId: 'agent-run-1',
+      question: 'what is revenue?',
+      sql,
+      dqlArtifact: {
+        kind: 'semantic_block',
+        source: dqlSource,
+        metrics: ['revenue'],
+        dimensions: [],
+        trustState: 'governed',
+        persistence: 'transient',
+        compiledSql: sql,
+      },
     });
   });
 
@@ -2481,7 +2521,7 @@ LIMIT 5;
     }, semanticLayer);
 
     expect(session.candidates[0].dqlSource).toContain('type = "semantic"');
-    expect(session.candidates[0].dqlSource).toContain('metric = "total_revenue"');
+    expect(session.candidates[0].dqlSource).toContain('metrics = ["total_revenue"]');
     expect(session.candidates[0].dqlSource).toContain('dimensions = ["region"]');
     expect(session.candidates[0].sql).toContain('SUM(revenue)');
     expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
@@ -3924,7 +3964,7 @@ describe('semantic block save artifacts', () => {
   it('keeps AI-authored drafts ownerless until a human promotes them', () => {
     const source = 'block "Revenue Draft" {\n  owner = "invented-team"\n  query = """\nselect 1\n"""\n}';
     const sanitized = sanitizeAgentBlockDraftSource(source);
-    expect(sanitized).toContain('owner = ""');
+    expect(sanitized).not.toContain('owner =');
     expect(sanitized).not.toContain('invented-team');
   });
 
@@ -4139,7 +4179,7 @@ describe('semantic block save artifacts', () => {
 
     expect(created.path).toBe('blocks/finance/executive-revenue.dql');
     expect(created.content).toContain('type = "semantic"');
-    expect(created.content).toContain('metric = "total_revenue"');
+    expect(created.content).toContain('metrics = ["total_revenue"]');
 
     const companion = readFileSync(join(projectRoot, created.companionPath), 'utf-8');
     expect(companion).toContain('provider: dbt');
@@ -4198,7 +4238,7 @@ describe('semantic block save artifacts', () => {
 
     expect(created.path).toBe('domains/finance/blocks/executive-revenue.dql');
     expect(() => readFileSync(join(projectRoot, 'blocks', 'finance', 'executive-revenue.dql'), 'utf-8')).toThrow();
-    expect(readFileSync(join(projectRoot, created.path), 'utf-8')).toContain('metric = "total_revenue"');
+    expect(readFileSync(join(projectRoot, created.path), 'utf-8')).toContain('metrics = ["total_revenue"]');
     expect(readFileSync(join(projectRoot, created.companionPath), 'utf-8')).toContain('provider: dbt');
   });
 
@@ -4218,7 +4258,7 @@ describe('semantic block save artifacts', () => {
 
     expect(created.path).toBe('blocks/cards/approval-rate.dql');
     expect(created.content).toContain('type = "semantic"');
-    expect(created.content).toContain('metric = ""');
+    expect(created.content).toContain('metrics = []');
     expect(created.content).toContain('dimensions = []');
     expect(created.content).not.toContain('query = """');
   });

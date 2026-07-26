@@ -140,6 +140,45 @@ describe('governed answer formatting', () => {
 });
 
 describe('conversation context follow-up routing', () => {
+  it('AGT-021 carries every prior semantic metric for "other metrics" follow-ups', () => {
+    const metrics = [
+      'percent_dod_eu_core_ccu_acm_qty',
+      'percent_dod_eu_core_ccu_bcm',
+      'percent_dod_eu_core_ccu_bcm_qty',
+      'percent_dod_legacy_acm_qty',
+      'percent_dod_legacy_bcm',
+    ];
+    const question = 'what about other metrics?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_metrics',
+        turns: [{
+          id: 'turn_metrics',
+          question: 'show all five metrics for Capital One',
+          dqlArtifact: {
+            kind: 'semantic_block',
+            name: 'capital_one_metrics',
+            source: 'block "capital_one_metrics" { type = "semantic" metrics = [] dimensions = [] }',
+            metrics,
+            dimensions: [],
+          },
+          result: {
+            columns: ['metric_time__day', ...metrics],
+            measureColumns: metrics,
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp?.kind).toBe('generic');
+    expect(followUp?.priorMeasures).toEqual(metrics);
+    expect(followUp?.priorDqlArtifact?.metrics).toEqual(metrics);
+  });
+
   it('AGT-012 binds an explicitly named prior product as a typed drilldown member', () => {
     const question = 'who are the customer from flame impala';
     const followUp = __test__.followUpFromConversationContext({

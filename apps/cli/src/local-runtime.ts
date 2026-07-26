@@ -114,6 +114,7 @@ import {
   type ManifestRelationshipValidationEvidence,
   normalizeAnalyticalFailureV1,
   relationshipValidationProofFingerprint,
+  renderSemanticBlockSource,
   discoverDbtDomains,
   renderDomainDeclaration,
   ProjectSnapshotService,
@@ -567,6 +568,16 @@ function agentRunRecord(value: unknown): Record<string, unknown> | undefined {
 
 function agentRunString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** UI catalog fallback labels are not declared project domains. */
+export function normalizeAgentRunDomain(value: unknown): string | undefined {
+  const domain = agentRunString(value);
+  if (!domain) return undefined;
+  const normalized = domain.toLowerCase();
+  return normalized === 'uncategorized' || normalized === '_uncategorized'
+    ? undefined
+    : domain;
 }
 
 function parseAgentRunRequestedMode(value: unknown): AgentRunRequestedMode | undefined {
@@ -1650,12 +1661,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     selectedContext?: Record<string, unknown>;
   }) => {
     const snapshot = projectSnapshot();
+    const activeDomain = normalizeAgentRunDomain(input.domain);
     const domainContext = resolveDomainContextEnvelope({
       manifest: snapshot.manifest,
-      activeDomain: input.domain,
+      activeDomain,
       purpose: input.purpose,
       modelAreaId: input.modelAreaId,
-      source: input.domain ? 'explicit_ui' : 'inferred',
+      source: activeDomain ? 'explicit_ui' : 'inferred',
       snapshotId: snapshot.snapshotId,
     });
     const contextPack = await buildLocalContextPack(projectRoot, {
@@ -1664,7 +1676,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       surface: input.surface,
       selectedContext: {
         activeSurface: input.surface,
-        domain: input.domain,
+        domain: activeDomain,
         purpose: input.purpose,
         modelAreaId: input.modelAreaId,
         ...input.selectedContext,
@@ -1845,7 +1857,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const semanticTableMapping = semanticLayer && semanticConnection
       ? await resolveSemanticTableMapping(executor, semanticConnection, semanticLayer)
       : undefined;
-    const requestedDomain = agentRunWorkspaceValue(request, 'domain');
+    const requestedDomain = normalizeAgentRunDomain(agentRunWorkspaceValue(request, 'domain'));
     const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
     const requestedModelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
     const runProjectSnapshot = projectSnapshot();
@@ -3353,7 +3365,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const pending = pendingAgentContextPacks.get(request);
     if (pending) return pending;
     const snapshot = projectSnapshot();
-    const requestedDomain = agentRunWorkspaceValue(request, 'domain');
+    const requestedDomain = normalizeAgentRunDomain(agentRunWorkspaceValue(request, 'domain'));
     // CTX-003: resolve result entities/values before evidence retrieval. The
     // router, planner, and answer loop must rank the same typed follow-up; doing
     // this only inside the provider adapter allowed stale catalog matches to win
@@ -18230,7 +18242,7 @@ function saveDqlGenerationDraftForProject(
 
 /** AI may propose block logic, but ownership is assigned by a human at promotion. */
 export function sanitizeAgentBlockDraftSource(source: string): string {
-  return source.replace(/^(\s*owner\s*=\s*).+$/mi, '$1""');
+  return source.replace(/^\s*owner\s*=\s*.+(?:\r?\n|$)/gmi, '');
 }
 
 export function saveBlockStudioArtifacts(
@@ -19106,29 +19118,18 @@ function buildSemanticImportCandidateSource(
   const allowedFilters = (patch.allowedFilters ?? [])
     .map((filter) => compatibleByName.get(normalizedTerm(filter))?.name)
     .filter((filter): filter is string => Boolean(filter));
-  const quote = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-  const metricLine = metricNames.length === 1
-    ? `  metric = ${quote(metricNames[0])}`
-    : `  metrics = [${metricNames.map(quote).join(', ')}]`;
-  const lines = [
-    `block ${quote(candidate.name)} {`,
-    '  status = "draft"',
-    `  domain = ${quote(candidate.domain)}`,
-    '  type = "semantic"',
-    `  description = ${quote(candidate.description)}`,
-    `  owner = ${quote(candidate.owner)}`,
-    `  tags = [${candidate.tags.map(quote).join(', ')}]`,
-    metricLine,
-    dimensionNames.length > 0 ? `  dimensions = [${dimensionNames.map(quote).join(', ')}]` : '',
-    allowedFilters.length > 0 ? `  requested_filters = [${allowedFilters.map(quote).join(', ')}]` : '',
-    '',
-    '  visualization {',
-    `    chart = "${dimensionNames.length > 0 ? 'bar' : 'kpi'}"`,
-    '  }',
-    '}',
-    '',
-  ];
-  return lines.filter((line, index) => line !== '' || (index > 0 && lines[index - 1] !== '')).join('\n');
+  return renderSemanticBlockSource({
+    name: candidate.name,
+    status: 'draft',
+    domain: candidate.domain,
+    description: candidate.description,
+    owner: candidate.owner,
+    tags: candidate.tags,
+    metrics: metricNames,
+    dimensions: dimensionNames,
+    requestedFilters: allowedFilters,
+    visualization: { chart: dimensionNames.length > 0 ? 'bar' : 'kpi' },
+  });
 }
 
 function inferDqlGenerationTerms(evidence: DqlGenerationEvidence[]): string[] {
@@ -20528,39 +20529,23 @@ function buildSemanticBlockContent(options: {
   timeDimension?: { name: string; granularity: string };
   chart?: string;
 }): string {
-  const lines = [
-    `block "${options.name}" {`,
-    `    domain = "${options.domain ?? 'uncategorized'}"`,
-    '    type = "semantic"',
-  ];
-  if (options.description) lines.push(`    description = "${escapeDqlString(options.description)}"`);
-  if (options.owner) lines.push(`    owner = "${escapeDqlString(options.owner)}"`);
-  if (options.tags && options.tags.length > 0) {
-    lines.push(`    tags = [${options.tags.map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`);
-  }
-  if (options.metrics.length === 0) {
-    lines.push('    metric = ""');
-  } else if (options.metrics.length === 1) {
-    lines.push(`    metric = "${escapeDqlString(options.metrics[0])}"`);
-  } else {
-    lines.push(`    metrics = [${options.metrics.map((metric) => `"${escapeDqlString(metric)}"`).join(', ')}]`);
-  }
-  if (options.dimensions.length > 0) {
-    lines.push(`    dimensions = [${options.dimensions.map((dimension) => `"${escapeDqlString(dimension)}"`).join(', ')}]`);
-  } else {
-    lines.push('    dimensions = []');
-  }
-  if (options.timeDimension) {
-    lines.push(`    time_dimension = "${escapeDqlString(options.timeDimension.name)}"`);
-    lines.push(`    granularity = "${escapeDqlString(options.timeDimension.granularity)}"`);
-  }
-  const visualization = buildVisualizationBlock(options.chart ?? 'table', options.dimensions, options.timeDimension, options.metrics);
-  if (visualization) {
-    lines.push('');
-    lines.push(...visualization);
-  }
-  lines.push('}');
-  return lines.join('\n') + '\n';
+  return renderSemanticBlockSource({
+    name: options.name,
+    status: 'draft',
+    domain: options.domain,
+    description: options.description,
+    owner: options.owner,
+    tags: options.tags,
+    metrics: options.metrics,
+    dimensions: options.dimensions,
+    timeDimension: options.timeDimension,
+    visualization: semanticBlockVisualization(
+      options.chart ?? 'table',
+      options.dimensions,
+      options.timeDimension,
+      options.metrics,
+    ),
+  });
 }
 
 function buildCustomSemanticBlockContent(options: {
@@ -20626,6 +20611,24 @@ function buildVisualizationBlock(
     `        y = ${y}`,
     '    }',
   ];
+}
+
+function semanticBlockVisualization(
+  chart: string,
+  dimensions: string[],
+  timeDimension: { name: string; granularity: string } | undefined,
+  metrics: string[],
+): { chart: string; x?: string; y?: string } {
+  if (metrics.length > 1) return { chart: 'table' };
+  const x = timeDimension ? `${timeDimension.name}_${timeDimension.granularity}` : dimensions[0];
+  const y = metrics[0];
+  if (chart === 'table') return { chart: 'table' };
+  if (chart === 'kpi') return { chart: 'kpi', ...(y ? { y } : {}) };
+  return {
+    chart: x ? chart : 'table',
+    ...(x ? { x } : {}),
+    ...(x && y ? { y } : {}),
+  };
 }
 
 function writeBlockCompanionFile(
@@ -20863,23 +20866,17 @@ function buildBlankSemanticBlockContent(options: {
   description?: string;
   tags?: string[];
 }): string {
-  const lines = [
-    `block "${escapeDqlString(options.name)}" {`,
-    `    domain = "${escapeDqlString(options.domain)}"`,
-    '    type = "semantic"',
-    '    status = "draft"',
-    `    description = "${escapeDqlString(options.description?.trim() || options.name)}"`,
-    `    owner = "${escapeDqlString(options.owner?.trim() ?? '')}"`,
-    `    tags = [${(options.tags ?? []).map((tag) => `"${escapeDqlString(tag)}"`).join(', ')}]`,
-    '    metric = ""',
-    '    dimensions = []',
-    '',
-    '    visualization {',
-    '        chart = "table"',
-    '    }',
-    '}',
-  ];
-  return lines.join('\n') + '\n';
+  return renderSemanticBlockSource({
+    name: options.name,
+    status: 'draft',
+    domain: options.domain,
+    description: options.description?.trim() || options.name,
+    owner: options.owner,
+    tags: options.tags,
+    metrics: [],
+    dimensions: [],
+    visualization: { chart: 'table' },
+  });
 }
 
 function parseYamlScalar(value: string): string {

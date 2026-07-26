@@ -262,6 +262,60 @@ describe('composeSemanticQueryForQuestion — grain-aware metric disambiguation'
     expect(result?.sql).toContain('AS refunds');
     expect(result?.sql).toContain('AS gross_margin');
   });
+
+  it('AGT-021 preserves five explicitly named metrics across metric and measure objects', () => {
+    const names = [
+      'percent_dod_eu_core_ccu_acm_qty',
+      'percent_dod_eu_core_ccu_bcm',
+      'percent_dod_eu_core_ccu_bcm_qty',
+      'percent_dod_legacy_acm_qty',
+      'percent_dod_legacy_bcm',
+    ];
+    const l = new SemanticLayer({
+      metrics: names.map((name, index) => ({
+        name,
+        label: name,
+        description: '',
+        domain: 'consumption',
+        sql: name,
+        type: 'sum' as const,
+        table: 'consumption_daily',
+        objectKind: index === 2 ? 'metric' as const : 'measure' as const,
+      })),
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: '', domain: 'consumption', sql: 'customer_name', type: 'string', table: 'consumption_daily' },
+      ],
+    });
+    const question = `what is ${names.map((name) => `"${name}"`).join(', ')} for Capital One?`;
+    const direct = composeSemanticQueryFromMembers({
+      semanticLayer: l,
+      question,
+      selection: {
+        metrics: names,
+        dimensions: [],
+        filters: [{ dimension: 'customer_name', operator: 'equals', values: ['Capital One'] }],
+      },
+    });
+    const result = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      filterValueBindings: (value) => value.toLowerCase() === 'capital one'
+        ? [{ column: 'customer_name', canonicalValue: 'Capital One', match: 'exact', confidence: 1 }]
+        : [],
+    });
+
+    expect(direct?.metrics).toEqual(names);
+    expect(result?.metrics).toEqual(names);
+    for (const name of names) {
+      expect(direct?.sql).toContain(`AS ${name}`);
+      expect(result?.sql).toContain(`AS ${name}`);
+    }
+    expect(result?.sql).toContain("customer_name = 'Capital One'");
+    expect(result?.dqlArtifact.source).toContain(`metrics = [${names.map((name) => `"${name}"`).join(', ')}]`);
+    expect(result?.dqlArtifact.source).toContain('dimensions = []');
+    expect(result?.dqlArtifact.source).not.toMatch(/\n\s*metric\s*=/);
+  });
 });
 
 describe('metric/measure de-conflation (Phase 5)', () => {

@@ -498,7 +498,7 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
     });
     expect(permissionFailure.executionError).not.toMatch(/private_usage|hunter2/);
     expect(permissionFailure.sql).toContain('SUM(balance) AS rollover_balance');
-    expect(permissionFailure.dqlArtifact?.source).toContain('metric = "rollover_balance"');
+    expect(permissionFailure.dqlArtifact?.source).toContain('metrics = ["rollover_balance"]');
 
     const unboundedFrame = structuredClone(frame);
     unboundedFrame.timeContext!.completenessPolicy = 'latest_complete';

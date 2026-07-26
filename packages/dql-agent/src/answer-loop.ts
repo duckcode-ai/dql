@@ -78,6 +78,8 @@ import {
   composeSemanticQueryForQuestion,
   composeSemanticQueryFromCompiledMembers,
   composeSemanticQueryFromMembers,
+  renderSemanticDqlArtifact,
+  semanticDqlArtifactName,
   type SemanticBridgeQueryResult,
   type SemanticFilterValueBinding,
   type SemanticMemberSelection,
@@ -245,6 +247,7 @@ export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Prom
 interface SemanticCompilerFailure {
   message: string;
   code?: string;
+  attemptedSql?: string;
   trace?: SemanticExecutionTrace;
   candidates?: AgentRunClarificationOption[];
 }
@@ -260,6 +263,14 @@ function semanticCompilerFailure(error: unknown): SemanticCompilerFailure {
     : details?.semanticTrace && typeof details.semanticTrace === 'object'
       ? details.semanticTrace as SemanticExecutionTrace
       : undefined;
+  const attemptedSql = [
+    record?.compiledSql,
+    record?.attemptedSql,
+    record?.sql,
+    details?.compiledSql,
+    details?.attemptedSql,
+    details?.sql,
+  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim();
   const rawCandidates = Array.isArray(details?.candidates)
     ? details.candidates
     : Array.isArray(trace?.failure?.candidates)
@@ -279,8 +290,50 @@ function semanticCompilerFailure(error: unknown): SemanticCompilerFailure {
   return {
     message,
     ...(typeof record?.code === 'string' ? { code: record.code } : {}),
+    ...(attemptedSql ? { attemptedSql } : {}),
     ...(trace ? { trace } : {}),
     ...(candidates.length > 0 ? { candidates } : {}),
+  };
+}
+
+/**
+ * Preserve the authoring contract before calling an external semantic compiler.
+ * A compiler failure is still a researchable DQL attempt, not an empty answer.
+ * Acceptance: AGT-017, API-007, UI-012, UI-013, E2E-015.
+ */
+function semanticAttemptArtifact(
+  semanticLayer: SemanticLayer,
+  question: string,
+  selection: SemanticMemberSelection,
+): DqlArtifactReference {
+  const metrics = [...new Set(selection.metrics.map((value) => value.trim()).filter(Boolean))];
+  const dimensions = [...new Set((selection.dimensions ?? []).map((value) => value.trim()).filter(Boolean))];
+  const filters = selection.filters ?? [];
+  const domains = [...new Set(metrics
+    .map((name) => semanticLayer.listMetrics().find((metric) => metric.name.toLowerCase() === name.toLowerCase())?.domain)
+    .filter((domain): domain is string => Boolean(domain?.trim())))];
+  const sourceInput = {
+    question,
+    metrics,
+    dimensions,
+    filters,
+    ...(domains.length === 1 ? { domain: domains[0] } : {}),
+    ...(selection.timeDimension ? { timeDimension: selection.timeDimension } : {}),
+    ...(selection.orderBy ? { orderBy: selection.orderBy } : {}),
+    ...(selection.limit ? { limit: selection.limit } : {}),
+  };
+  return {
+    kind: 'semantic_block',
+    name: semanticDqlArtifactName(sourceInput),
+    source: renderSemanticDqlArtifact(sourceInput),
+    metrics,
+    dimensions,
+    filters,
+    ...(selection.timeDimension ? { timeDimension: selection.timeDimension } : {}),
+    ...(selection.orderBy ? { orderBy: selection.orderBy } : {}),
+    ...(selection.limit ? { limit: selection.limit } : {}),
+    persistence: 'transient',
+    trustState: 'governed',
   };
 }
 
@@ -2629,9 +2682,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
   let semanticRuntimeFailure: SemanticCompilerFailure | undefined;
   let semanticExecutionTrace: SemanticExecutionTrace | undefined;
+  let semanticAttemptedArtifact: DqlArtifactReference | undefined;
   let semanticRuntimeCompiledAnswer = false;
   if (authoritativeSemanticBinding && input.semanticLayer) {
     const selection = authoritativeSemanticBinding.selection;
+    semanticAttemptedArtifact = semanticAttemptArtifact(input.semanticLayer, question, selection);
     semanticBridgeAnswer = composeSemanticQueryFromMembers({
       semanticLayer: input.semanticLayer,
       question,
@@ -2695,6 +2750,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         || semanticMetricMatch!.metric.name.endsWith(`.${metric.name}`))?.name;
       if (matchedName) {
         const selection: SemanticMemberSelection = { metrics: [matchedName], dimensions: [] };
+        semanticAttemptedArtifact = semanticAttemptArtifact(input.semanticLayer, question, selection);
         try {
           const compiled = await input.semanticQueryCompiler(selection);
           semanticExecutionTrace = compiled.trace;
@@ -2740,6 +2796,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       // metrics native can't express. Side effects (runtime flags, tool calls)
       // are recorded here so a retry reruns them cleanly.
       const composeSelection = async (selection: SemanticMemberSelection) => {
+        semanticAttemptedArtifact = semanticAttemptArtifact(bridgeLayer, question, selection);
         let composed = composeSemanticQueryFromMembers({
           semanticLayer: bridgeLayer,
           question,
@@ -2825,11 +2882,34 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
   if (!semanticBridgeAnswer && semanticRuntimeFailure) {
-    const isPathAmbiguity = semanticRuntimeFailure.code === 'SEMANTIC_PATH_AMBIGUOUS'
-      || semanticRuntimeFailure.trace?.failure?.code === 'SEMANTIC_PATH_AMBIGUOUS';
+    const runtimeFailure = semanticRuntimeFailure;
+    const isPathAmbiguity = runtimeFailure.code === 'SEMANTIC_PATH_AMBIGUOUS'
+      || runtimeFailure.trace?.failure?.code === 'SEMANTIC_PATH_AMBIGUOUS';
     const text = isPathAmbiguity
-      ? semanticRuntimeFailure.message
-      : `The governed semantic metric was found, but its semantic runtime could not compile the request: ${compactSemanticRuntimeFailure(semanticRuntimeFailure.message)}`;
+      ? runtimeFailure.message
+      : `The governed semantic metric was found, but its semantic runtime could not compile the request: ${compactSemanticRuntimeFailure(runtimeFailure.message)}`;
+    const failedArtifact = semanticAttemptedArtifact
+      ? {
+          ...semanticAttemptedArtifact,
+          ...(runtimeFailure.attemptedSql ? { compiledSql: runtimeFailure.attemptedSql } : {}),
+        }
+      : undefined;
+    const analyticalFailure = isPathAmbiguity
+      ? undefined
+      : analyticalFailureForInput(input, {
+          error: {
+            code: runtimeFailure.code ?? 'COMPILATION_FAILED',
+            message: runtimeFailure.message,
+          },
+          phase: 'compilation',
+          dqlArtifact: failedArtifact,
+          compiledSql: runtimeFailure.attemptedSql,
+          failedBindings: failedArtifact?.metrics?.map((metric) => ({
+            qualifiedId: metric,
+            role: 'metric',
+            reasonCode: runtimeFailure.code ?? 'SEMANTIC_COMPILATION_FAILED',
+          })),
+        });
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -2838,16 +2918,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       confidence: 0,
       text,
       answer: text,
+      ...(analyticalFailure ? { executionError: analyticalFailure.message } : {}),
       refusalCode: isPathAmbiguity ? 'ambiguous' : 'modeling_gap',
       // The answer shows the compact business-readable failure; the FULL compiler
       // output stays here for Inspect/debugging.
       refusalDetails: {
         code: isPathAmbiguity ? 'semantic_path_ambiguous' : 'semantic_runtime_required',
-        message: semanticRuntimeFailure.message,
+        message: runtimeFailure.message,
       },
       ...(semanticExecutionTrace ? { semanticExecutionTrace } : {}),
-      ...(semanticRuntimeFailure.candidates?.length
-        ? { clarificationOptions: semanticRuntimeFailure.candidates.map((candidate) => ({ ...candidate, question })) }
+      ...(analyticalFailure ? { analyticalFailure } : {}),
+      ...(failedArtifact ? { dqlArtifact: failedArtifact } : {}),
+      ...(runtimeFailure.attemptedSql
+        ? { proposedSql: runtimeFailure.attemptedSql, sql: runtimeFailure.attemptedSql }
+        : {}),
+      ...(runtimeFailure.candidates?.length
+        ? { clarificationOptions: runtimeFailure.candidates.map((candidate) => ({ ...candidate, question })) }
         : {}),
       citations: [],
       memoryContext: input.memoryContext,
@@ -4204,6 +4290,11 @@ async function executeSemanticAnalyticalGraph(input: {
   const artifacts: DqlArtifactReference[] = [];
   let semanticExecutionTrace: SemanticExecutionTrace | undefined;
   for (const invocation of input.binding.invocations) {
+    const attemptedArtifact = semanticAttemptArtifact(
+      layer,
+      input.input.question,
+      invocation.selection,
+    );
     let composed = composeSemanticQueryFromMembers({
       semanticLayer: layer,
       question: input.input.question,
@@ -4252,7 +4343,10 @@ async function executeSemanticAnalyticalGraph(input: {
           error instanceof Error ? error.message : String(error),
           {
             phase: 'compilation',
-            ...(compiledSql.length ? { compiledSql: renderAnalyticalStatements(compiledSql) } : {}),
+            dqlArtifact: attemptedArtifact,
+            ...([...compiledSql, ...(failure.attemptedSql ? [failure.attemptedSql] : [])].length
+              ? { compiledSql: renderAnalyticalStatements([...compiledSql, ...(failure.attemptedSql ? [failure.attemptedSql] : [])]) }
+              : {}),
             ...(failure.trace ? { semanticExecutionTrace: failure.trace } : {}),
           },
         );
@@ -4265,6 +4359,7 @@ async function executeSemanticAnalyticalGraph(input: {
         `The pinned semantic adapter could not compile ${invocation.nodeId}.`,
         {
           phase: 'compilation',
+          dqlArtifact: attemptedArtifact,
           ...(compiledSql.length ? { compiledSql: renderAnalyticalStatements(compiledSql) } : {}),
           failedBindings: [{ role: 'source_invocation', reasonCode: 'SEMANTIC_COMPILE_FAILED' }],
         },

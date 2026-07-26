@@ -326,13 +326,23 @@ function formatBlock(node: BlockDeclNode, level: number, state: FormatState): st
     lines.push(`${indent(level + 1, state)}invariants = [${node.invariants.map(quote).join(', ')}]`);
   }
   if (node.blockType === 'semantic') {
-    if (node.metricsRef && node.metricsRef.length > 0) {
-      lines.push(`${indent(level + 1, state)}metrics = [${node.metricsRef.map(quote).join(', ')}]`);
-    } else if (node.metricRef !== undefined) {
-      lines.push(`${indent(level + 1, state)}metric = ${quote(node.metricRef)}`);
+    const metrics = node.metricsRef ?? (node.metricRef !== undefined ? [node.metricRef] : []);
+    lines.push(`${indent(level + 1, state)}metrics = [${metrics.map(quote).join(', ')}]`);
+    lines.push(`${indent(level + 1, state)}dimensions = [${(node.dimensionsRef ?? []).map(quote).join(', ')}]`);
+    if (node.timeDimension) {
+      lines.push(`${indent(level + 1, state)}time_dimension = ${quote(node.timeDimension)}`);
     }
-    if (node.dimensionsRef !== undefined) {
-      lines.push(`${indent(level + 1, state)}dimensions = [${node.dimensionsRef.map(quote).join(', ')}]`);
+    if (node.granularity) {
+      lines.push(`${indent(level + 1, state)}granularity = ${quote(node.granularity)}`);
+    }
+    if (node.requestedFilters && node.requestedFilters.length > 0) {
+      lines.push(`${indent(level + 1, state)}requested_filters = [${node.requestedFilters.map(quote).join(', ')}]`);
+    }
+    if (node.orderBy && node.orderBy.length > 0) {
+      lines.push(`${indent(level + 1, state)}order_by = [${node.orderBy.map(quote).join(', ')}]`);
+    }
+    if (node.limit !== undefined) {
+      lines.push(`${indent(level + 1, state)}limit = ${node.limit}`);
     }
   }
 

@@ -8,6 +8,23 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('AGT-021 treats quoted technical metric IDs as measures instead of filter values', () => {
+    const metrics = [
+      'percent_dod_eu_core_ccu_acm_qty',
+      'percent_dod_eu_core_ccu_bcm',
+      'percent_dod_eu_core_ccu_bcm_qty',
+      'percent_dod_legacy_acm_qty',
+      'percent_dod_legacy_bcm',
+    ];
+    const plan = buildAnalysisQuestionPlan(
+      `what is ${metrics.map((metric) => `"${metric}"`).join(', ')} for Capital One?`,
+    );
+
+    expect(plan.requestedShape.measures).toEqual(expect.arrayContaining(metrics));
+    expect(plan.requestedShape.filters).toContain('Capital One');
+    expect(plan.requestedShape.filters).not.toEqual(expect.arrayContaining(metrics));
+  });
+
   it('treats a ranking metric after by as the measure, not a phantom dimension', () => {
     const plan = buildAnalysisQuestionPlan('Who are the top 10 customers by monthly rollover balance amount?');
 
