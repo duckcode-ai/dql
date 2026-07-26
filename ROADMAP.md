@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.8)
+## Current State (v1.10.9)
 
 DQL OSS is ready for local-first use cases:
 
@@ -25,6 +25,10 @@ DQL OSS is ready for local-first use cases:
 - Edit Raw SQL blocks visually without losing runtime parameters, parameter
   policies, filter bindings, chart series/color, tests, or unknown DQL
   metadata; remove one exact saved block through a confirmed guarded action.
+- Keep semantic, Raw SQL, and DQL-source Block Studio edits synchronized before
+  save; organize blocks in Git-backed folders and subfolders, move exact block
+  and companion artifacts safely, and delete from the library, detail, or
+  toolbar.
 - Compile `dql-manifest.json`, the dbt-like project artifact for blocks,
   notebooks, Apps, dashboards, metrics, dimensions, sources, dbt imports, and
   lineage.
@@ -43,6 +47,11 @@ DQL OSS is ready for local-first use cases:
 - Preserve model-scoped dbt semantic identities across import, retrieval,
   compatibility, generated DQL, and execution while showing both business
   labels and exact technical metric/group-by names.
+- Preserve every explicitly requested measure through planning, execution,
+  result contracts, lossless visualization, and human-readable narration.
+- Validate generated SQL identifiers inside their actual `SELECT` and CTE
+  scopes, fail closed on ambiguous ownership, and hand DQL or SQL inspector
+  scripts into focused editable notebook cells.
 - Lock semantic execution to one tested dbt Cloud, local MetricFlow, or native
   adapter per request without silently changing engines after a failure.
 - Bind the semantic compiler target to the active warehouse account, database,
@@ -111,7 +120,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.8
+  cold-start and warm-context latency budgets remain above target. The v1.10.9
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

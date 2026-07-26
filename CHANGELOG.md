@@ -6,6 +6,47 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.10.9 - 2026-07-25
+
+### Multi-measure governed answers and organized Block Studio authoring
+
+This patch preserves every explicitly requested measure through planning,
+execution, visualization, and narration while making Block Studio a complete,
+live-synchronized workspace for semantic and Raw SQL blocks.
+
+### Fixed
+
+- **Multi-measure answer fidelity.** Explicitly requested metrics remain in the
+  immutable analytical plan and result contract. Multi-measure results default
+  to a lossless table instead of silently selecting one chart measure, and
+  deterministic narration describes both leading and supporting measures.
+- **Scope-aware SQL validation.** Generated SQL resolves identifiers within
+  each `SELECT` and CTE scope. Ambiguous ownership now fails closed and repair
+  prompts preserve the requested output contract instead of guessing the first
+  relation.
+- **Editable notebook handoff.** DQL and SQL shown in the answer inspector can
+  be inserted into a notebook cell, focused, and scrolled into view for
+  research, correction, and rerun.
+- **One live Block Studio draft.** Semantic, Raw SQL, and DQL-source authoring
+  share the same draft state. Pasted SQL opens the complete visual builder and
+  visual/source changes round-trip before save.
+- **Nested block organization.** Block libraries render Git-backed folders and
+  subfolders. Saving to a new folder safely moves the exact `.dql` block and
+  semantic companion while rejecting traversal and hidden path segments.
+- **Visible guarded deletion.** Saved blocks expose confirmed delete actions in
+  the library row, block detail, and toolbar; save, move, and delete refresh the
+  library immediately.
+
+### Release exceptions
+
+- Acceptance IDs `API-006`, `UI-001`, `UI-009`, `E2E-008`, `AGT-015`,
+  `AGT-017`, `AGT-018`, `AGT-020`, `UI-012`, `UI-013`, `E2E-012`, and
+  `E2E-014` remain implementer-validated. Independent enterprise Snowflake,
+  dbt Cloud, and local MetricFlow verification is still required.
+- The tracked `PERF-001` latency exception remains unchanged. This release
+  improves answer fidelity, SQL safety, and authoring UX without claiming
+  GA-scale latency.
+
 ## v1.10.8 - 2026-07-23
 
 ### Governed semantic authoring parity and safe block deletion
