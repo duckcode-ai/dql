@@ -10,7 +10,8 @@ inspects, repairs, reruns, and promotes a failed answer without overstating
 trust.
 
 The canonical acceptance IDs are `CONTRACT-002`, `SKILL-004`, `AGT-017` through
-`AGT-020`, `API-007`, `UI-012`, `UI-013`, `SEC-004`, `E2E-013`, and `E2E-014`.
+`AGT-021`, `API-007`, `API-008`, `UI-012` through `UI-016`, `SEC-004`,
+`E2E-013` through `E2E-015`.
 
 ## 2. Scope and non-goals
 
@@ -752,3 +753,37 @@ cannot weaken assertions or normative contracts.
   built-CLI browser, npm upgrade/reapply, and Cloud embed gates pass unchanged.
 - No generated evidence, snapshots, traces, connection state, secrets, or
   Playwright artifacts are committed.
+
+## 17. Universal AI run and surface-action contract
+
+Acceptance: `AGT-021`, `API-008`, `UI-014`, `UI-015`, `UI-016`, `E2E-015`.
+
+Ask, Notebook AI, and Block AI share one server-owned run lifecycle. Every
+accepted run may publish bounded progress checkpoints, but it has exactly one
+canonical terminal run and diagnostic receipt. A conversation turn stores that
+run identity. A remounted client reads current progress or the terminal run and
+must not rebuild the answer from a lossy subset of conversation fields.
+
+An analytical frame preserves all explicitly requested metrics. The
+compatibility solver evaluates each metric independently and intersects the
+safe execution tuple: adapter, semantic model or governed source identity,
+entity grain, dimensional roles, and time contract. No route may keep one
+metric and discard another. When there is no safe common tuple, the result is a
+typed `MULTI_METRIC_INCOMPATIBLE` modeling gap.
+
+Failure is also a terminal product result. Even when planning, compilation, or
+SQL execution throws, the canonical run retains every available plan, DQL, SQL,
+lineage, trust/evidence, actual-step, and failure/repair section. Missing
+artifacts are represented as unavailable with a stable reason; their sections
+do not disappear.
+
+Surface actions are explicit:
+
+1. Notebook AI can add the governed artifact as a new cell or replace the
+   selected cell. Generation alone does not edit notebook state.
+2. Block AI can add the governed artifact to Block Studio. Commit stores an
+   ownerless, review-required draft under the draft path, creates the DQL file,
+   and opens the saved artifact in the visual builder. Ownership is assigned by
+   a human during promotion, and the action never certifies.
+3. Ask remains consumption-first and may hand the same artifact to Notebook or
+   Block authoring without changing its source run or receipt.

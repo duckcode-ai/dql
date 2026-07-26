@@ -11,7 +11,12 @@
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { AgentRun, AgentRunStore } from './agent-run-engine.js';
+import type {
+  AgentRun,
+  AgentRunDiagnosticReceiptV1,
+  AgentRunProgressV1,
+  AgentRunStore,
+} from './agent-run-engine.js';
 
 export interface SqliteAgentRunStoreOptions {
   /** Path of the .sqlite file (created on first use). */
@@ -58,6 +63,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
       );
       CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC);
     `);
+    this.finalizeInterruptedRuns();
     if (options.legacyJsonPath) this.migrateLegacyJson(options.legacyJsonPath);
   }
 
@@ -89,9 +95,39 @@ export class SqliteAgentRunStore implements AgentRunStore {
     this.compactOldRuns();
   }
 
+  saveProgress(progress: AgentRunProgressV1): void {
+    const updatedAt = progress.lifecycle.updatedAt;
+    this.db.prepare(`
+      INSERT INTO agent_runs (id, question, route, status, started_at, completed_at, compacted, payload_json, updated_at)
+      VALUES (?, ?, ?, NULL, ?, NULL, 0, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        question = excluded.question,
+        route = excluded.route,
+        status = NULL,
+        started_at = excluded.started_at,
+        completed_at = NULL,
+        compacted = 0,
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+      WHERE agent_runs.completed_at IS NULL
+    `).run(
+      progress.id,
+      progress.question,
+      progress.route ?? 'blocked',
+      progress.lifecycle.startedAt,
+      JSON.stringify(progress),
+      updatedAt,
+    );
+  }
+
   get(id: string): AgentRun | undefined {
     const row = this.db.prepare('SELECT payload_json FROM agent_runs WHERE id = ?').get(id) as { payload_json: string } | undefined;
     return row ? parseRun(row.payload_json) : undefined;
+  }
+
+  getProgress(id: string): AgentRunProgressV1 | undefined {
+    const row = this.db.prepare('SELECT payload_json FROM agent_runs WHERE id = ? AND completed_at IS NULL').get(id) as { payload_json: string } | undefined;
+    return row ? parseProgress(row.payload_json) : undefined;
   }
 
   list(): AgentRun[] {
@@ -104,6 +140,112 @@ export class SqliteAgentRunStore implements AgentRunStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * A local runtime restart cannot safely recreate provider/tool continuations.
+   * Close orphaned rows with one inspectable, retryable terminal receipt instead
+   * of leaving the UI in a permanent running state.
+   *
+   * Acceptance: API-008, API-007.
+   */
+  private finalizeInterruptedRuns(): void {
+    const rows = this.db.prepare(
+      'SELECT id, payload_json FROM agent_runs WHERE completed_at IS NULL',
+    ).all() as Array<{ id: string; payload_json: string }>;
+    if (rows.length === 0) return;
+    const update = this.db.prepare(`
+      UPDATE agent_runs
+      SET route = ?, status = ?, completed_at = ?, payload_json = ?, updated_at = ?
+      WHERE id = ? AND completed_at IS NULL
+    `);
+    const closeAll = this.db.transaction(() => {
+      for (const row of rows) {
+        const progress = parseProgress(row.payload_json);
+        if (!progress) continue;
+        const completedAt = new Date().toISOString();
+        const failure: AgentRunDiagnosticReceiptV1['failure'] = {
+          code: 'RUN_INTERRUPTED',
+          phase: progress.lifecycle.phase,
+          message: 'The local DQL runtime restarted before this agent run completed. No result was accepted.',
+          recoverable: true,
+          safeActions: ['retry_same_request'],
+        };
+        const receipt: AgentRunDiagnosticReceiptV1 = {
+          version: 1,
+          runId: progress.id,
+          phase: progress.lifecycle.phase,
+          route: progress.route,
+          plan: progress.plan,
+          steps: progress.steps,
+          artifacts: progress.artifacts,
+          evaluations: progress.evaluations,
+          failure,
+        };
+        const diagnosticArtifact = {
+          id: `${progress.id}:diagnostic`,
+          kind: 'answer' as const,
+          title: 'Interrupted agent run',
+          trustState: 'blocked' as const,
+          payload: { diagnosticReceipt: receipt },
+        };
+        const run: AgentRun = {
+          id: progress.id,
+          question: progress.question,
+          requestedMode: progress.requestedMode,
+          route: progress.route ?? 'blocked',
+          status: 'blocked',
+          trustState: 'blocked',
+          stopReason: 'blocked',
+          startedAt: progress.lifecycle.startedAt,
+          completedAt,
+          selectedObject: progress.selectedObject,
+          plan: progress.plan,
+          steps: progress.steps,
+          summary: failure.message,
+          artifacts: [...progress.artifacts.filter((artifact) => artifact.trustState === 'blocked'), diagnosticArtifact],
+          evaluations: [
+            ...progress.evaluations,
+            {
+              id: 'run-interrupted',
+              label: 'Run interrupted',
+              passed: false,
+              severity: 'blocking',
+              message: failure.message,
+              suggestedRepair: 'Retry the same request.',
+            },
+          ],
+          events: [
+            ...progress.events,
+            {
+              id: `${progress.id}:event:${progress.events.length + 1}`,
+              runId: progress.id,
+              type: 'run.failed',
+              at: completedAt,
+              message: failure.message,
+              route: progress.route ?? 'blocked',
+              status: 'blocked',
+              trustState: 'blocked',
+            },
+          ],
+          nextActions: [{ id: 'retry-interrupted-run', label: 'Retry request', route: progress.route }],
+          repairAttempts: 0,
+          escalationAttempts: 0,
+          diagnosticReceipt: receipt,
+          lifecycle: {
+            ...progress.lifecycle,
+            state: 'terminal',
+            phase: 'run.failed',
+            revision: progress.lifecycle.revision + 1,
+            eventCursor: progress.events.length + 1,
+            updatedAt: completedAt,
+            completedAt,
+          },
+        };
+        update.run(run.route, run.status, completedAt, JSON.stringify(run), completedAt, run.id);
+      }
+    });
+    closeAll();
   }
 
   private enforceRetention(): void {
@@ -190,12 +332,37 @@ function parseRun(payload: string): AgentRun | undefined {
   }
 }
 
+function parseProgress(payload: string): AgentRunProgressV1 | undefined {
+  try {
+    const value = JSON.parse(payload) as unknown;
+    return isAgentRunProgressRecord(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function isAgentRunRecord(value: unknown): value is AgentRun {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return typeof record.id === 'string'
     && typeof record.question === 'string'
     && typeof record.route === 'string'
+    && typeof record.status === 'string'
+    && typeof record.completedAt === 'string'
+    && Array.isArray(record.events)
+    && Array.isArray(record.artifacts)
+    && Array.isArray(record.evaluations);
+}
+
+function isAgentRunProgressRecord(value: unknown): value is AgentRunProgressV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const lifecycle = record.lifecycle;
+  return record.version === 1
+    && typeof record.id === 'string'
+    && typeof record.question === 'string'
+    && Boolean(lifecycle && typeof lifecycle === 'object' && !Array.isArray(lifecycle))
+    && (lifecycle as Record<string, unknown>).state !== 'terminal'
     && Array.isArray(record.events)
     && Array.isArray(record.artifacts)
     && Array.isArray(record.evaluations);

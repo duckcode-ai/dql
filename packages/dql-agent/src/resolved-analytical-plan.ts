@@ -154,11 +154,18 @@ export function buildResolvedAnalyticalPlan(
         status: 'resolved' as const,
         candidateIds: [canonicalId(candidate)],
       }));
+  // A v2 frame has already proved the exact governed dimensional tuple. Keep
+  // semantic-member evidence available for the human phrasing ("customer")
+  // even when selectedConceptIds intentionally contains only requested
+  // metrics.
+  const dimensionBindingCandidates = input.resolution.analyticalFrame
+    ? input.candidates
+    : bindingCandidates;
   const dimensions = input.resolution.queryIntent.dimensions
-    .map((requested) => bindRequestedMember(requested, bindingCandidates, 'dimension'));
+    .map((requested) => bindRequestedMember(requested, dimensionBindingCandidates, 'dimension'));
   const filters = input.resolution.queryIntent.filters.map((filter) => ({
     ...filter,
-    binding: bindRequestedMember(filter.field, bindingCandidates, 'dimension'),
+    binding: bindRequestedMember(filter.field, dimensionBindingCandidates, 'dimension'),
   }));
   const compatibilityProof = selectedCandidates.map((candidate) => ({
     candidateId: canonicalId(candidate),

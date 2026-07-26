@@ -827,6 +827,7 @@ export type AgentRunRoute =
 export type AgentRunAnswerKind = 'governed' | 'conversational' | 'general_knowledge';
 export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'blocked';
 export type AgentRunTrustState = 'certified' | 'governed' | 'grounded' | 'review_required' | 'blocked' | 'not_applicable';
+export type AgentRunLifecycleState = 'queued' | 'running' | 'cancelling' | 'terminal';
 export type AgentRunStopReason =
   | 'conversational_reply'
   | 'certified_answer_found'
@@ -958,6 +959,51 @@ export interface AgentRunEvent {
   payload?: unknown;
 }
 
+export interface AgentRunLifecycleV1 {
+  version: 1;
+  state: AgentRunLifecycleState;
+  phase: AgentRunEvent['type'] | 'queued';
+  revision: number;
+  eventCursor: number;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface AgentRunDiagnosticReceiptV1 {
+  version: 1;
+  runId: string;
+  phase: string;
+  route?: AgentRunRoute;
+  plan?: AgentRunPlan;
+  steps: AgentRunStep[];
+  artifacts: AgentRunArtifact[];
+  evaluations: AgentRunEvaluation[];
+  failure?: {
+    code: string;
+    phase: string;
+    message: string;
+    recoverable: boolean;
+    safeActions: string[];
+  };
+}
+
+export interface AgentRunProgressV1 {
+  version: 1;
+  id: string;
+  question: string;
+  requestedMode: AgentRunRequestedMode;
+  selectedObject?: AgentRunSelectedObject;
+  route?: AgentRunRoute;
+  trustState?: AgentRunTrustState;
+  plan?: AgentRunPlan;
+  steps: AgentRunStep[];
+  artifacts: AgentRunArtifact[];
+  evaluations: AgentRunEvaluation[];
+  events: AgentRunEvent[];
+  lifecycle: AgentRunLifecycleV1;
+}
+
 export interface AgentRun {
   id: string;
   question: string;
@@ -981,7 +1027,13 @@ export interface AgentRun {
   nextActions: AgentRunNextAction[];
   clarificationOptions?: AgentRunClarificationOption[];
   repairAttempts: number;
+  lifecycle?: AgentRunLifecycleV1;
+  diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
 }
+
+export type AgentRunStateResponse =
+  | { lifecycleState: 'terminal'; run: AgentRun }
+  | { lifecycleState: Exclude<AgentRunLifecycleState, 'terminal'>; progress: AgentRunProgressV1 };
 
 export interface AnalyticalRepairRequest {
   version: 1;
@@ -1126,6 +1178,7 @@ export interface AgentConversationTurnResult {
 export interface AgentConversationTurn {
   id: string;
   threadId: string;
+  agentRunId?: string;
   seq: number;
   question: string;
   answerSummary?: string;
@@ -2722,8 +2775,15 @@ export const api = {
   },
 
   async getAgentRun(id: string): Promise<AgentRun> {
-    const raw = await request<{ run: AgentRun }>(`/api/agent-runs/${encodeURIComponent(id)}`);
-    return raw.run;
+    const state = await this.getAgentRunState(id);
+    if (state.lifecycleState !== 'terminal') {
+      throw new Error(`Agent run ${id} is still ${state.lifecycleState}.`);
+    }
+    return state.run;
+  },
+
+  async getAgentRunState(id: string): Promise<AgentRunStateResponse> {
+    return request<AgentRunStateResponse>(`/api/agent-runs/${encodeURIComponent(id)}`);
   },
 
   async deriveAnalyticalRepair(id: string, repair: AnalyticalRepairRequest): Promise<AnalyticalRepairDerivationResponse> {
@@ -2760,10 +2820,12 @@ export const api = {
   async getAgentThread(id: string): Promise<{
     thread: AgentConversationThread;
     turns: AgentConversationTurn[];
+    runs: AgentRun[];
   }> {
     return request<{
       thread: AgentConversationThread;
       turns: AgentConversationTurn[];
+      runs: AgentRun[];
     }>(`/api/agent/threads/${encodeURIComponent(id)}`);
   },
 
@@ -3104,6 +3166,20 @@ export const api = {
     };
   }): Promise<BlockStudioOpenPayload> {
     return request<BlockStudioOpenPayload>('/api/block-studio/save', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async saveAgentBlockDraft(payload: {
+    source: string;
+    name: string;
+    domain?: string;
+    description?: string;
+    tags?: string[];
+    runId?: string;
+  }): Promise<BlockStudioOpenPayload> {
+    return request<BlockStudioOpenPayload>('/api/block-studio/agent-drafts', {
       method: 'POST',
       body: JSON.stringify(payload),
     });

@@ -50,6 +50,7 @@ an acceptance-matrix update.
 | AGT-018 | A deterministic solver proves the complete metric/entity/dimension/member/time/period/comparison/ranking/output tuple against capability, additivity, relationship, policy, and adapter contracts; it returns one unique plan, the smallest material clarification, or an actionable gap/refusal. |
 | AGT-019 | Multi-period comparison and ranking compile as a typed executable graph that aggregates at the declared entity grain, aligns governed periods, computes decimal-safe deltas, ranks after aggregation, applies deterministic ties, and validates every requested output. |
 | AGT-020 | Analytical answers and stories verbalize only deterministic result facts bound to execution receipts, including freshness and caveats; unsupported numbers, causal claims, grain/filter drift, and hidden partial-period claims fail closed. |
+| AGT-021 | An explicit multi-metric question preserves every requested metric in one analytical frame and output contract; execution requires one provably compatible governed tuple, otherwise the run returns a modeling gap instead of silently dropping a metric. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
 | API-003 | Browser Ask, CLI, MCP, and Chat use the same snapshot, retrieval, meaning-resolution, route, trust, and error contracts and expose only redacted phase diagnostics. |
@@ -57,6 +58,7 @@ an acceptance-matrix update.
 | API-005 | Ask, Notebook, native tools, CLI, and MCP invoke parameterized certified blocks through one typed values-only contract and return equivalent resolved values, provenance, and redacted audit identity. |
 | API-006 | Browser Ask, CLI, MCP, Chat, Notebook, Preview, and Block Studio use versioned resolved-plan, executable-plan, result-contract, and execution-receipt interfaces with identical fingerprints for equivalent requests. |
 | API-007 | Every failed analytical run returns one versioned, redacted failure/repair contract binding stable code, phase, failed qualified bindings, recoverability, immutable plan/DQL/SQL fingerprints, safe actions, and derived-artifact trust transitions consistently across Browser Ask, Notebook, CLI, MCP, and Chat. |
+| API-008 | Agent runs persist bounded lifecycle checkpoints and one terminal diagnostic receipt; conversation turns bind the canonical run ID so remounts hydrate the complete DQL, SQL, lineage, trust, steps, and failure contract rather than reconstructing lossy client state. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
@@ -68,6 +70,9 @@ an acceptance-matrix update.
 | UI-010 | Ask renders ambiguity as identifier-bound governed choices and never presents failed grounding, policy, model, provider, or timeout outcomes as passed, reusable answers. |
 | UI-012 | How it answered progressively exposes plan, DQL, compiled SQL, lineage, trust/evidence, actual steps, and stable failure details for successful and failed executable runs in the built CLI. |
 | UI-013 | Capability-gated repair actions derive rather than mutate artifacts: parameter rerun, DQL repair/recompile, SQL notebook copy, snapshot refresh, authorized connection/access action, and draft-block save all show the resulting trust/review state. |
+| UI-014 | Leaving and returning to Ask or another AI surface continues the accepted run in the background and hydrates current progress or the canonical terminal run without displaying a false reconnect state or dropping inspector sections. |
+| UI-015 | Notebook AI uses the universal run result and exposes explicit add-cell and replace-selected-cell actions; it never edits notebook content merely because generation completed. |
+| UI-016 | Block AI uses the universal run result and exposes an explicit Add to Block Studio commit that stores an ownerless review draft as DQL and opens the saved draft in the visual builder; generation alone performs no editor mutation or certification. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
@@ -90,6 +95,7 @@ an acceptance-matrix update.
 | E2E-012 | Release proves the plan-first answer engine end to end: qualified retrieval, Domain/Skill selection, meaning resolution, plan binding, exact compatibility/time/join proof, single-adapter compilation, result-contract validation, typed follow-ups, bounded Research, rollback, and legacy-cascade retirement. |
 | E2E-013 | Release proves complete analytical composition for revenue-today, named-customer filtering, and current-versus-prior top-customer comparison, including exact roles, governed time/completeness, additivity/join proof, ranking/output contracts, receipt-backed stories, ambiguity/gap failures, route equivalence, and cross-surface parity. |
 | E2E-014 | Release proves transparent repair for missing column/relation, permission, ambiguity, dialect, drift, timeout, and result-contract failures; original artifacts remain immutable, permissions never broaden, edits follow trust transitions, and every surface returns identical failure/repair identity. |
+| E2E-015 | Release proves multi-metric Ask, durable navigation/remount, complete failed-run diagnostics, canonical history hydration, explicit Notebook add/replace, and explicit ownerless Block draft commit in the built CLI. |
 
 ## OSS and Cloud boundary
 

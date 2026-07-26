@@ -26,6 +26,7 @@ export interface AnalyticalCapabilityCandidate {
 export type AnalyticalCompatibilityCode =
   | 'FRAME_AMBIGUOUS'
   | 'MULTI_METRIC_UNSUPPORTED'
+  | 'MULTI_METRIC_INCOMPATIBLE'
   | 'METRIC_CAPABILITY_MISSING'
   | 'ENTITY_GRAIN_UNSUPPORTED'
   | 'DIMENSION_ROLE_UNSUPPORTED'
@@ -60,7 +61,9 @@ export type AnalyticalCompatibilityResult =
       status: 'ready';
       frame: AnalyticalQuestionFrameV2;
       candidateId: string;
+      candidateIds: string[];
       capability: MetricCapabilityContract;
+      capabilities: MetricCapabilityContract[];
       route: MetricCapabilityContract['executionCapabilities'][number]['route'];
       adapterId?: string;
       fitClass: AnalyticalFitClass;
@@ -159,20 +162,12 @@ export function solveAnalyticalCompatibility(input: {
       policyIds,
     };
   }
-  if (frame.metricConceptIds.length !== 1) {
-    return {
-      status: 'blocked',
+  if (frame.metricConceptIds.length > 1) {
+    return solveMultiMetricCompatibility({
       frame,
-      failures: [
-        {
-          code: 'MULTI_METRIC_UNSUPPORTED',
-          field: 'metricConceptIds',
-          message: 'This composition stage requires exactly one metric contract.',
-          candidateIds: [...frame.metricConceptIds],
-        },
-      ],
+      candidates: input.candidates,
       policyIds,
-    };
+    });
   }
 
   const metricId = frame.metricConceptIds[0]!;
@@ -278,13 +273,196 @@ export function solveAnalyticalCompatibility(input: {
     status: 'ready',
     frame: winner.frame,
     candidateId: winner.candidate.candidateId,
+    candidateIds: [winner.candidate.candidateId],
     capability: winner.candidate.capability,
+    capabilities: [winner.candidate.capability],
     route: winner.route.route,
     ...(winner.route.adapterId ? { adapterId: winner.route.adapterId } : {}),
     fitClass: winner.fitClass,
     proof: winner.proof,
     policyIds,
   };
+}
+
+function solveMultiMetricCompatibility(input: {
+  frame: AnalyticalQuestionFrameV2;
+  candidates: AnalyticalCapabilityCandidate[];
+  policyIds: string[];
+}): AnalyticalCompatibilityResult {
+  type ReadyCandidate = {
+    candidate: AnalyticalCapabilityCandidate;
+    frame: AnalyticalQuestionFrameV2;
+    route: MetricCapabilityContract['executionCapabilities'][number];
+    fitClass: AnalyticalFitClass;
+    proof: string[];
+    executionKey: string;
+  };
+  const byMetric = new Map<string, ReadyCandidate[]>();
+  const failed: AnalyticalCompatibilityFailure[] = [];
+
+  for (const metricId of input.frame.metricConceptIds) {
+    const metricFrame = analyticalFrameForMetric(input.frame, metricId);
+    const matching = input.candidates.filter((candidate) => candidate.capability.metricId === metricId);
+    if (matching.length === 0) {
+      failed.push({
+        code: 'METRIC_CAPABILITY_MISSING',
+        field: 'metricConceptIds',
+        message: `No normalized capability contract covers ${metricId}.`,
+        candidateIds: [metricId],
+      });
+      byMetric.set(metricId, []);
+      continue;
+    }
+    const ready: ReadyCandidate[] = [];
+    for (const candidate of matching) {
+      const resolvedTime = resolveTimeDimension(metricFrame, candidate.capability);
+      if ('failure' in resolvedTime) {
+        failed.push({ ...resolvedTime.failure, candidateIds: [candidate.candidateId] });
+        continue;
+      }
+      const failures = evaluateCapabilityTuple(resolvedTime.frame, candidate.capability);
+      if (failures.length > 0) {
+        failed.push(...failures.map((failure) => ({ ...failure, candidateIds: [candidate.candidateId] })));
+        continue;
+      }
+      for (const route of candidate.capability.executionCapabilities) {
+        const executionKey = compatibleMultiMetricExecutionKey(candidate, route, resolvedTime.frame);
+        if (!executionKey) continue;
+        ready.push({
+          candidate,
+          frame: resolvedTime.frame,
+          route,
+          fitClass: candidate.fitClass ?? 'exact',
+          proof: buildProof(resolvedTime.frame, candidate.capability, route),
+          executionKey,
+        });
+      }
+    }
+    byMetric.set(metricId, ready);
+  }
+
+  const keySets = input.frame.metricConceptIds.map((metricId) =>
+    new Set((byMetric.get(metricId) ?? []).map((candidate) => candidate.executionKey)));
+  const commonKeys = keySets.length > 0
+    ? [...keySets[0]!].filter((key) => keySets.slice(1).every((set) => set.has(key)))
+    : [];
+  if (commonKeys.length === 0) {
+    return {
+      status: 'blocked',
+      frame: input.frame,
+      failures: dedupeFailures([
+        ...failed,
+        {
+          code: 'MULTI_METRIC_INCOMPATIBLE',
+          field: 'metricConceptIds',
+          message: 'The requested metrics do not share one proven entity, time, semantic-model, and adapter contract.',
+          candidateIds: [...input.frame.metricConceptIds],
+        },
+      ]),
+      policyIds: input.policyIds,
+    };
+  }
+
+  const combinations = commonKeys.map((key) => {
+    const selected = input.frame.metricConceptIds.map((metricId) =>
+      (byMetric.get(metricId) ?? [])
+        .filter((candidate) => candidate.executionKey === key)
+        .sort((left, right) =>
+          FIT_PRIORITY[right.fitClass] - FIT_PRIORITY[left.fitClass]
+          || left.candidate.candidateId.localeCompare(right.candidate.candidateId))[0]!);
+    return {
+      key,
+      selected,
+      routePriority: ROUTE_PRIORITY[selected[0]!.route.route],
+      fitPriority: selected.reduce((total, candidate) => total + FIT_PRIORITY[candidate.fitClass], 0),
+    };
+  }).sort((left, right) =>
+    right.routePriority - left.routePriority
+    || right.fitPriority - left.fitPriority
+    || left.key.localeCompare(right.key));
+  const winner = combinations[0]!;
+  const tied = combinations.filter((candidate) =>
+    candidate.routePriority === winner.routePriority
+    && candidate.fitPriority === winner.fitPriority);
+  if (tied.length > 1) {
+    const failure: AnalyticalCompatibilityFailure = {
+      code: 'EXECUTION_AMBIGUOUS',
+      field: 'execution',
+      message: 'More than one materially equivalent execution contract covers every requested metric.',
+      candidateIds: tied.flatMap((candidate) => candidate.selected.map((item) => item.candidate.candidateId)).sort(),
+    };
+    return {
+      status: 'clarify',
+      frame: input.frame,
+      failure,
+      failures: [failure, ...dedupeFailures(failed)],
+      policyIds: input.policyIds,
+    };
+  }
+
+  const selected = winner.selected;
+  const primary = selected[0]!;
+  const resolvedFrame: AnalyticalQuestionFrameV2 = {
+    ...input.frame,
+    timeContext: primary.frame.timeContext,
+  };
+  return {
+    status: 'ready',
+    frame: resolvedFrame,
+    candidateId: primary.candidate.candidateId,
+    candidateIds: selected.map((candidate) => candidate.candidate.candidateId),
+    capability: primary.candidate.capability,
+    capabilities: selected.map((candidate) => candidate.candidate.capability),
+    route: primary.route.route,
+    ...(primary.route.adapterId ? { adapterId: primary.route.adapterId } : {}),
+    fitClass: selected.every((candidate) => candidate.fitClass === 'exact') ? 'exact' : 'adaptable',
+    proof: [...new Set(selected.flatMap((candidate) => candidate.proof))].sort(),
+    policyIds: input.policyIds,
+  };
+}
+
+function analyticalFrameForMetric(
+  frame: AnalyticalQuestionFrameV2,
+  metricId: string,
+): AnalyticalQuestionFrameV2 {
+  const rankingApplies = frame.ranking?.byMetricId === metricId;
+  return {
+    ...structuredClone(frame),
+    metricConceptIds: [metricId],
+    ...(rankingApplies ? {} : { ranking: undefined }),
+    requestedOutputs: frame.requestedOutputs.filter((output) =>
+      output.kind === 'dimension'
+      || (output.kind === 'rank' && rankingApplies)
+      || output.metricId === metricId),
+  };
+}
+
+function compatibleMultiMetricExecutionKey(
+  candidate: AnalyticalCapabilityCandidate,
+  route: MetricCapabilityContract['executionCapabilities'][number],
+  frame: AnalyticalQuestionFrameV2,
+): string | undefined {
+  const capability = candidate.capability;
+  const time = frame.timeContext;
+  const sharedShape = [
+    capability.primaryEntityId,
+    frame.entityGrainIds.join(','),
+    time?.timeDimensionId ?? '',
+    time?.timeRole ?? '',
+    time?.grain ?? '',
+  ].join(':');
+  if (route.route === 'semantic') {
+    if (!capability.semanticModelId) return undefined;
+    return `semantic:${route.adapterId ?? 'native'}:${capability.semanticModelId}:${sharedShape}`;
+  }
+  // Certified assets are complete-output contracts. Multiple metric contracts
+  // may share one asset only when they resolve to the exact same candidate.
+  if (route.route === 'certified') {
+    return `certified:${candidate.candidateId}:${route.adapterId ?? 'native'}:${sharedShape}`;
+  }
+  // Relational/exploratory multi-metric composition is admitted only when the
+  // source fingerprint is identical; cross-source joins remain a modeling gap.
+  return `${route.route}:${route.adapterId ?? 'native'}:${capability.sourceFingerprint}:${sharedShape}`;
 }
 
 function applyAnalyticalPolicies(

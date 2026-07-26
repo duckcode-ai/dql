@@ -851,20 +851,58 @@ export function BlockStudio() {
     setResultTab('results');
   };
 
-  // DQL-first: land a governed answer's DQL artifact as the block draft (its source
-  // becomes the block; compiled SQL is the fallback). Reuses handleAiSqlInsert so
-  // metadata/validation are parsed the same way, then closes the overlay.
-  const insertGeneratedDqlIntoDraft = (payload: InsertDqlPayload) => {
-    const blockSource = payload.dqlArtifact?.source?.trim();
+  const addGeneratedDqlToBlockStudio = async (payload: InsertDqlPayload) => {
+    const generatedSource = payload.dqlArtifact?.source?.trim();
     const sql = (payload.sql ?? '').trim();
-    if (!blockSource && !sql) return;
-    handleAiSqlInsert(sql, {
-      question: payload.title ?? activeBlockName ?? 'analysis',
-      title: payload.title ?? payload.dqlArtifact?.name,
-      blockSource,
-    });
-    setWorkspaceMode('manual');
-    setEditorMode('source');
+    if (!generatedSource && !sql) return;
+    const source = generatedSource
+      ?? applyGeneratedSqlToBlockDraft(
+        buildCustomSkeleton(payload.title?.trim() || 'AI Generated Block'),
+        sql,
+      );
+    const parsed = parseBlockFields(source);
+    const name = parsed?.name || payload.dqlArtifact?.name || payload.title || 'AI Generated Block';
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const saved = await api.saveAgentBlockDraft({
+        source,
+        name,
+        domain: parsed?.domain || state.blockStudioMetadata?.domain || 'uncategorized',
+        description: parsed?.description || `AI-generated draft for ${payload.title ?? name}`,
+        tags: parsed?.tags?.length ? parsed.tags : ['ai-generated', 'review-required'],
+      });
+      dispatch({
+        type: 'OPEN_BLOCK_STUDIO',
+        file: {
+          name: `${saved.metadata.name}.dql`,
+          path: saved.path,
+          type: 'block',
+          folder: 'blocks',
+          isNew: false,
+        },
+        payload: saved,
+      });
+      if (!state.files.some((file) => file.path === saved.path)) {
+        dispatch({
+          type: 'FILE_ADDED',
+          file: {
+            name: `${saved.metadata.name}.dql`,
+            path: saved.path,
+            type: 'block',
+            folder: 'blocks',
+          },
+        });
+      }
+      setBlockLibraryRefreshKey((current) => current + 1);
+      setWorkspaceMode('manual');
+      setEditorMode('visual');
+      setResultTab('save');
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
   };
 
   // Open the governed Ask-AI overlay in a given mode. Only the explicit 'edit'
@@ -1491,9 +1529,9 @@ export function BlockStudio() {
               onThreadIdChange={agentThread.onThreadIdChange}
               onRunningChange={setAiRunning}
               onInsertSql={(sql, title) => handleAiSqlInsert(sql, { question: title ?? activeBlockName ?? 'analysis', title })}
-              onInsertDql={insertGeneratedDqlIntoDraft}
-              onArtifactReady={(payload) => insertGeneratedDqlIntoDraft(payload)}
+              onInsertDql={(payload) => { void addGeneratedDqlToBlockStudio(payload); }}
               answerFirstCards
+              insertDqlActionLabel="Add to Block Studio"
               emptyHint="Describe the governed block you need. DQL checks certified blocks and semantic metrics before creating a review-required draft."
               examplePrompts={[
                 { label: 'Build from business question', prompt: 'Build a reusable governed DQL block for this business question: ' },

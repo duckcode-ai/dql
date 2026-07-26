@@ -61,6 +61,14 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
         status: 'ambiguous',
       },
     })).toBe(true);
+    expect(hasAnalyticalInspectorContract({
+      diagnosticReceipt: {
+        version: 1,
+        runId: 'run-failed',
+        phase: 'executor.started',
+        failure: { code: 'EXECUTOR_FAILURE' },
+      },
+    })).toBe(true);
     expect(analyticalInspectorSections()).toEqual([
       'Plan',
       'DQL',
@@ -176,6 +184,14 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     ]);
     expect(querying.at(-1)).toMatchObject({ id: 'execute', label: 'Running the governed query', state: 'active' });
     expect(querying.some((item) => /plan|validate/i.test(item.label))).toBe(false);
+  });
+
+  it('shows durable background continuation instead of reconnecting when a view remounts', () => {
+    expect(liveAgentActivityFor([], true)).toEqual([{
+      id: 'background',
+      label: 'Continuing this request in the background',
+      state: 'active',
+    }]);
   });
 
   it('finishes the transient activity trail by checking governed evidence', () => {
@@ -424,6 +440,14 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       question: 'unmatched analysis',
       artifacts: [{ kind: 'answer', payload: { sql: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region' } }],
     } as any)).toMatchObject({ sql: expect.stringContaining('SELECT region') });
+
+    expect(artifactReadyPayloadFromRun({
+      id: 'blocked',
+      question: 'failed analysis',
+      status: 'blocked',
+      route: 'generated_answer',
+      artifacts: [{ kind: 'answer', payload: { sql: 'SELECT broken FROM missing_table' } }],
+    } as any)).toBeUndefined();
   });
 
   it('describes the full executed result count even when only a row sample is present', () => {

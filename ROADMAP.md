@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.10.9)
+## Current State (v1.11.0)
 
 DQL OSS is ready for local-first use cases:
 
@@ -49,6 +49,16 @@ DQL OSS is ready for local-first use cases:
   labels and exact technical metric/group-by names.
 - Preserve every explicitly requested measure through planning, execution,
   result contracts, lossless visualization, and human-readable narration.
+- Run Ask AI, Notebook AI, and Block AI through one durable orchestration
+  lifecycle with canonical progress, failure diagnostics, history hydration,
+  and explicit surface-specific artifact actions.
+- Continue active AI runs across navigation, restore DQL, compiled SQL,
+  lineage, trust evidence, steps, and safe repair guidance after reload, and
+  fail closed when all requested metrics cannot share one governed execution
+  path.
+- Add generated DQL to a notebook or replace the selected cell only after an
+  explicit user action; save ownerless Block AI proposals as Git-backed draft
+  artifacts and open them directly in Block Studio's visual builder.
 - Validate generated SQL identifiers inside their actual `SELECT` and CTE
   scopes, fail closed on ambiguous ownership, and hand DQL or SQL inspector
   scripts into focused editable notebook cells.
@@ -120,7 +130,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.10.9
+  cold-start and warm-context latency budgets remain above target. The v1.11.0
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

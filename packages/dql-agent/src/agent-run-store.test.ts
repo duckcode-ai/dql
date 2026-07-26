@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteAgentRunStore } from './agent-run-store.js';
-import type { AgentRun } from './agent-run-engine.js';
+import type { AgentRun, AgentRunProgressV1 } from './agent-run-engine.js';
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); dirs.length = 0; });
@@ -23,6 +23,36 @@ function run(id: string, startedAt: string, events = 3): AgentRun {
   } as unknown as AgentRun;
 }
 
+function progress(id: string): AgentRunProgressV1 {
+  const startedAt = '2026-07-20T10:00:00Z';
+  return {
+    version: 1,
+    id,
+    question: `question ${id}`,
+    requestedMode: 'ask',
+    route: 'generated_answer',
+    steps: [],
+    artifacts: [],
+    evaluations: [],
+    events: [{
+      id: `${id}:event:1`,
+      runId: id,
+      type: 'run.started',
+      at: startedAt,
+      message: 'Started.',
+    }],
+    lifecycle: {
+      version: 1,
+      state: 'running',
+      phase: 'run.started',
+      revision: 1,
+      eventCursor: 1,
+      startedAt,
+      updatedAt: startedAt,
+    },
+  };
+}
+
 describe('SqliteAgentRunStore', () => {
   it('round-trips save/get/list ordered newest-first', () => {
     const store = new SqliteAgentRunStore({ path: join(tmp(), 'runs.sqlite') });
@@ -40,6 +70,38 @@ describe('SqliteAgentRunStore', () => {
     expect(store.list()).toHaveLength(1);
     expect(store.get('a')?.question).toBe('updated');
     store.close();
+  });
+
+  it('persists accepted running state and replaces it with the terminal run', () => {
+    const store = new SqliteAgentRunStore({ path: join(tmp(), 'runs.sqlite') });
+    store.saveProgress(progress('active'));
+    expect(store.get('active')).toBeUndefined();
+    expect(store.getProgress('active')?.lifecycle.state).toBe('running');
+    store.save(run('active', '2026-07-20T10:00:00Z'));
+    expect(store.getProgress('active')).toBeUndefined();
+    expect(store.get('active')?.status).toBe('completed');
+    store.close();
+  });
+
+  it('closes orphaned running state as an inspectable interrupted run on restart', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const store = new SqliteAgentRunStore({ path });
+    store.saveProgress(progress('orphan'));
+    store.close();
+    const reopened = new SqliteAgentRunStore({ path });
+    const interrupted = reopened.get('orphan');
+    expect(interrupted).toMatchObject({
+      id: 'orphan',
+      status: 'blocked',
+      lifecycle: { state: 'terminal', phase: 'run.failed' },
+      diagnosticReceipt: {
+        failure: { code: 'RUN_INTERRUPTED', recoverable: true },
+      },
+    });
+    expect(interrupted?.artifacts[0]?.payload).toMatchObject({
+      diagnosticReceipt: { failure: { code: 'RUN_INTERRUPTED' } },
+    });
+    reopened.close();
   });
 
   it('enforces retention on write (oldest pruned)', () => {

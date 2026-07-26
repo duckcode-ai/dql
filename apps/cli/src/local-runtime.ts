@@ -942,8 +942,10 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
   const rowCountRaw = result?.rowCount;
   const measureColumns = conversationMeasureColumns(columns, requestedShape, rows);
   return {
+    agentRunId: run.id,
     question: run.question,
     answerSummary: run.answer ?? run.summary,
+    answerText: run.answer,
     route: run.route,
     trustLabel: agentRunString(payload?.trustLabel) ?? run.trustState,
     certification: agentRunString(payload?.certification),
@@ -6155,6 +6157,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({ ok: false, error: 'This run is no longer active.' }));
         return;
       }
+      const progress = agentRunStore.getProgress(id);
+      if (progress) {
+        agentRunStore.saveProgress({
+          ...progress,
+          lifecycle: {
+            ...progress.lifecycle,
+            state: 'cancelling',
+            revision: progress.lifecycle.revision + 1,
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      }
       controller.abort(new Error('Stopped by user.'));
       res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ ok: true, id }));
@@ -6288,13 +6302,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'GET' && agentRunMatch) {
       const id = decodeURIComponent(agentRunMatch[1]);
       const run = await agentRunStore.get(id);
-      if (!run) {
+      const progress = run ? undefined : agentRunStore.getProgress(id);
+      if (!run && !progress) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: 'Agent run not found.' }));
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ run }));
+      res.end(serializeJSON(run
+        ? { lifecycleState: 'terminal', run }
+        : { lifecycleState: progress!.lifecycle.state, progress }));
       return;
     }
 
@@ -7230,10 +7247,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           if (req.method === 'GET' && !action) {
             const limit = Number(url.searchParams.get('limit') ?? '50');
+            const turns = store.recentTurns(threadId, Number.isFinite(limit) ? limit : 50);
+            const runs = turns.flatMap((turn) => {
+              if (!turn.agentRunId) return [];
+              const run = agentRunStore.get(turn.agentRunId);
+              return run ? [run] : [];
+            });
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(serializeJSON({
               thread,
-              turns: store.recentTurns(threadId, Number.isFinite(limit) ? limit : 50),
+              turns,
+              runs,
             }));
             return;
           }
@@ -10065,6 +10089,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // `error` stays the full compiler output (the UI shows it in a
         // collapsible); `friendlyMessage` is the one actionable sentence.
         res.end(serializeJSON({ error: raw, friendlyMessage: compactSemanticRuntimeFailure(raw) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/block-studio/agent-drafts') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string'
+          ? sanitizeAgentBlockDraftSource(body.source)
+          : '';
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        if (!source.trim() || !name) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'DQL source and block name are required.' }));
+          return;
+        }
+        const savedPath = saveBlockStudioDraftArtifacts(projectRoot, {
+          source,
+          name,
+          domain: typeof body.domain === 'string' ? body.domain : undefined,
+          description: typeof body.description === 'string' ? body.description : undefined,
+          tags: Array.isArray(body.tags) ? body.tags.map(String) : ['ai-generated', 'review-required'],
+          stableSuffix: typeof body.runId === 'string' ? body.runId : undefined,
+        });
+        const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(payload));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -18172,6 +18226,11 @@ function saveDqlGenerationDraftForProject(
       evidence: candidate.evidence ?? [],
     };
   }
+}
+
+/** AI may propose block logic, but ownership is assigned by a human at promotion. */
+export function sanitizeAgentBlockDraftSource(source: string): string {
+  return source.replace(/^(\s*owner\s*=\s*).+$/mi, '$1""');
 }
 
 export function saveBlockStudioArtifacts(

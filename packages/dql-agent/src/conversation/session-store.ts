@@ -64,6 +64,8 @@ export interface ConversationTurnResult {
 }
 
 export interface ConversationTurnInput {
+  /** Canonical persisted AgentRun backing this presentation turn. */
+  agentRunId?: string;
   question: string;
   answerSummary?: string;
   answerText?: string;
@@ -131,6 +133,7 @@ export class ConversationStore {
       CREATE TABLE IF NOT EXISTS conversation_turns (
         id                     TEXT PRIMARY KEY,
         thread_id              TEXT NOT NULL,
+        agent_run_id           TEXT,
         seq                    INTEGER NOT NULL,
         question               TEXT NOT NULL,
         answer_summary         TEXT,
@@ -165,6 +168,7 @@ export class ConversationStore {
     this.ensureColumn('conversation_turns', 'dql_artifact_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_turns', 'cascade_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_turns', 'knowledge_lens_json', "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn('conversation_turns', 'agent_run_id', 'TEXT');
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -243,14 +247,15 @@ export class ConversationStore {
       turn.seq = seqRow.next;
       this.db.prepare(`
         INSERT INTO conversation_turns (
-          id, thread_id, seq, question, answer_summary, answer_text, route,
+          id, thread_id, agent_run_id, seq, question, answer_summary, answer_text, route,
           trust_label, certification, source_certified_block, context_pack_id,
           knowledge_lens_json, sql, dql_artifact_json, cascade_json, result_json,
           contract_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         turn.id,
         threadId,
+        turn.agentRunId ?? null,
         turn.seq,
         turn.question,
         turn.answerSummary ?? null,
@@ -468,6 +473,7 @@ type ThreadRow = {
 type TurnRow = {
   id: string;
   thread_id: string;
+  agent_run_id: string | null;
   seq: number;
   question: string;
   answer_summary: string | null;
@@ -510,6 +516,7 @@ function rowToTurn(row: TurnRow): ConversationTurn {
   return {
     id: row.id,
     threadId: row.thread_id,
+    agentRunId: row.agent_run_id ?? undefined,
     seq: row.seq,
     question: row.question,
     answerSummary: row.answer_summary ?? undefined,

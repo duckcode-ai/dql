@@ -111,6 +111,12 @@ describe("AgentRunEngine", () => {
       answer: "Revenue is $2.8M.",
     });
     expect(run.artifacts[0]).toMatchObject({ kind: "answer", trustState: "certified" });
+    expect(run.lifecycle).toMatchObject({ state: "terminal", phase: "run.completed" });
+    expect(run.diagnosticReceipt).toMatchObject({
+      version: 1,
+      runId: "run-certified",
+      route: "certified_answer",
+    });
     expect(events.map((event) => event.type)).toEqual([
       "run.started",
       "plan.created",
@@ -388,7 +394,12 @@ describe("AgentRunEngine", () => {
     expect(run.status).toBe("blocked");
     expect(run.trustState).toBe("blocked");
     expect(run.stopReason).toBe("blocked");
-    expect(run.artifacts).toHaveLength(0);
+    expect(run.artifacts).toHaveLength(1);
+    expect(run.artifacts[0]?.payload).toMatchObject({
+      diagnosticReceipt: {
+        failure: { code: "EXECUTION_BLOCKED" },
+      },
+    });
   });
 
   it("API-007 retains only explicitly blocked diagnostic artifacts on terminal runs", async () => {
@@ -441,6 +452,16 @@ describe("AgentRunEngine", () => {
       message: "warehouse unavailable",
     });
     expect(run.events.at(-1)?.type).toBe("run.failed");
+    expect(run.diagnosticReceipt).toMatchObject({
+      failure: {
+        code: "EXECUTOR_FAILURE",
+        phase: "executor.started",
+        recoverable: true,
+      },
+    });
+    expect(run.artifacts[0]?.payload).toMatchObject({
+      diagnosticReceipt: { failure: { code: "EXECUTOR_FAILURE" } },
+    });
   });
 
   it("persists a bounded timeout even when it occurs during retrieval-first routing", async () => {

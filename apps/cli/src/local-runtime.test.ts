@@ -57,6 +57,7 @@ import {
   runtimeSnapshotStale,
   saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
+  sanitizeAgentBlockDraftSource,
   setBlockStudioStatus,
   shouldAugmentAgentRuntimeSchema,
   shouldSynthesizeAgentRunAnswer,
@@ -1508,6 +1509,7 @@ describe('agent run runtime API', () => {
 
     // The sample now retains the full bounded window (up to 50) so a
     // cross-result follow-up can compute over the shown rows.
+    expect(turn.agentRunId).toBe('run_member_memory');
     expect(turn.result?.rowsSample).toHaveLength(10);
     expect(turn.result?.dimensionValues?.product_name).toContain('flame impala');
   });
@@ -3917,6 +3919,13 @@ describe('semantic block save artifacts', () => {
     expect(secondPath).toBe(firstPath);
     expect(readFileSync(join(projectRoot, firstPath), 'utf-8')).toContain('select 2');
     expect(() => readFileSync(join(projectRoot, 'blocks/finance/revenue-draft.dql'), 'utf-8')).toThrow();
+  });
+
+  it('keeps AI-authored drafts ownerless until a human promotes them', () => {
+    const source = 'block "Revenue Draft" {\n  owner = "invented-team"\n  query = """\nselect 1\n"""\n}';
+    const sanitized = sanitizeAgentBlockDraftSource(source);
+    expect(sanitized).toContain('owner = ""');
+    expect(sanitized).not.toContain('invented-team');
   });
 
   it('promotes domain-first drafts into the domain block folder and removes stale draft artifacts', () => {

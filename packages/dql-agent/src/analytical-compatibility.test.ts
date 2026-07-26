@@ -10,6 +10,8 @@ import type { AgentEvidenceCandidate, AgentRetrievalEvidence, MeaningResolution 
 const ids = {
   metric: 'commerce::metric::net_revenue',
   measure: 'commerce::measure::net_revenue',
+  orderCountMetric: 'commerce::metric::order_count',
+  orderCountMeasure: 'commerce::measure::order_count',
   order: 'commerce::entity::order',
   customer: 'commerce::entity::customer',
   customerName: 'commerce::dimension::customer_name',
@@ -187,6 +189,23 @@ const metricCandidate: AgentEvidenceCandidate = {
   analyticalCapability: semanticCapability,
 };
 
+const orderCountCapability: MetricCapabilityContract = {
+  ...semanticCapability,
+  metricId: ids.orderCountMetric,
+  measureIds: [ids.orderCountMeasure],
+  aggregation: 'count',
+  sourceFingerprint: 'semantic-order-count-capability-v1',
+};
+
+const orderCountCandidate: AgentEvidenceCandidate = {
+  ...metricCandidate,
+  id: 'metric:order_count',
+  qualifiedId: ids.orderCountMetric,
+  name: 'Order Count',
+  aliases: ['orders'],
+  analyticalCapability: orderCountCapability,
+};
+
 const customerCandidate: AgentEvidenceCandidate = {
   id: 'dimension:customer_name',
   qualifiedId: ids.customerName,
@@ -321,6 +340,96 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
         { id: 'net_revenue__percent_delta', kind: 'percent_delta' },
         { id: 'rank', kind: 'rank' },
       ],
+    });
+  });
+
+  it('preserves every explicitly requested metric in the deterministic frame', () => {
+    const frame = buildDeterministicAnalyticalFrame({
+      question: 'Show net revenue and order count by customer.',
+      evidence: {
+        candidates: [metricCandidate, orderCountCandidate, customerCandidate],
+        parsedIntent: {
+          measures: ['net revenue', 'order count'],
+          dimensions: ['customer'],
+        },
+      },
+      metricCandidate,
+      metricCandidates: [metricCandidate, orderCountCandidate],
+      candidates: [metricCandidate, orderCountCandidate, customerCandidate],
+    });
+
+    expect(frame.metricConceptIds).toEqual([ids.metric, ids.orderCountMetric]);
+    expect(frame.requestedOutputs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'metric_value', metricId: ids.metric }),
+      expect.objectContaining({ kind: 'metric_value', metricId: ids.orderCountMetric }),
+    ]));
+  });
+
+  it('selects one compatible semantic execution tuple for a multi-metric frame', () => {
+    const frame = buildDeterministicAnalyticalFrame({
+      question: 'Show net revenue and order count by customer.',
+      evidence: {
+        candidates: [metricCandidate, orderCountCandidate, customerCandidate],
+        parsedIntent: {
+          measures: ['net revenue', 'order count'],
+          dimensions: ['customer'],
+        },
+      },
+      metricCandidate,
+      metricCandidates: [metricCandidate, orderCountCandidate],
+      candidates: [metricCandidate, orderCountCandidate, customerCandidate],
+    });
+    const result = solveAnalyticalCompatibility({
+      frame,
+      candidates: [
+        { candidateId: ids.metric, capability: semanticCapability },
+        { candidateId: ids.orderCountMetric, capability: orderCountCapability },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      status: 'ready',
+      route: 'semantic',
+      adapterId: 'metricflow-cli',
+      candidateIds: [ids.metric, ids.orderCountMetric],
+      capabilities: [
+        expect.objectContaining({ metricId: ids.metric }),
+        expect.objectContaining({ metricId: ids.orderCountMetric }),
+      ],
+    });
+  });
+
+  it('fails closed when requested metrics cannot share a governed execution tuple', () => {
+    const frame = buildDeterministicAnalyticalFrame({
+      question: 'Show net revenue and order count by customer.',
+      evidence: {
+        candidates: [metricCandidate, orderCountCandidate, customerCandidate],
+        parsedIntent: {
+          measures: ['net revenue', 'order count'],
+          dimensions: ['customer'],
+        },
+      },
+      metricCandidate,
+      metricCandidates: [metricCandidate, orderCountCandidate],
+      candidates: [metricCandidate, orderCountCandidate, customerCandidate],
+    });
+    const result = solveAnalyticalCompatibility({
+      frame,
+      candidates: [
+        { candidateId: ids.metric, capability: semanticCapability },
+        {
+          candidateId: ids.orderCountMetric,
+          capability: {
+            ...orderCountCapability,
+            semanticModelId: 'commerce::semantic_model::shipments',
+          },
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      status: 'blocked',
+      failures: [expect.objectContaining({ code: 'MULTI_METRIC_INCOMPATIBLE' })],
     });
   });
 
@@ -686,6 +795,76 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
           timeDimensionId: ids.reportDate,
           timezone: 'America/Chicago',
         },
+      },
+    });
+  });
+
+  it('uses the zero-AI path for compatible multi-metric questions without dropping a metric', async () => {
+    let resolverCalls = 0;
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-zero-ai-multi-metric',
+        candidates: [
+          { ...metricCandidate, exactMatch: true },
+          { ...orderCountCandidate, exactMatch: true },
+          customerCandidate,
+        ],
+        parsedIntent: {
+          measures: ['net revenue', 'order count'],
+          dimensions: ['customer'],
+        },
+      }),
+      resolveMeaning: async () => {
+        resolverCalls += 1;
+        throw new Error('The exact multi-metric path must not call AI meaning resolution.');
+      },
+      resolvedPlanMode: 'authoritative',
+    });
+    const decision = await router.decide({
+      question: 'Show net revenue and order count by customer.',
+      intent: 'ad_hoc_ranking',
+    });
+
+    expect(resolverCalls).toBe(0);
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      schemaVersion: 2,
+      capability: 'semantic_execution',
+      analyticalFrame: {
+        metricConceptIds: [ids.metric, ids.orderCountMetric],
+        requestedOutputs: expect.arrayContaining([
+          expect.objectContaining({ kind: 'metric_value', metricId: ids.metric }),
+          expect.objectContaining({ kind: 'metric_value', metricId: ids.orderCountMetric }),
+        ]),
+      },
+    });
+  });
+
+  it('returns a modeling clarification when one requested metric has no governed capability', async () => {
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-missing-multi-metric',
+        candidates: [{ ...metricCandidate, exactMatch: true }, customerCandidate],
+        parsedIntent: {
+          measures: ['net revenue', 'order count'],
+          dimensions: ['customer'],
+        },
+      }),
+      resolveMeaning: async () => {
+        throw new Error('The deterministic missing-metric guard must run first.');
+      },
+      resolvedPlanMode: 'authoritative',
+    });
+    const decision = await router.decide({
+      question: 'Show net revenue and order count by customer.',
+      intent: 'ad_hoc_ranking',
+    });
+
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      meaningResolution: {
+        recommendedRoute: 'clarify',
+        missingInformation: [expect.stringContaining('order count')],
       },
     });
   });

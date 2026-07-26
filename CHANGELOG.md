@@ -6,6 +6,50 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.11.0 - 2026-07-26
+
+### Unified AI orchestration for Ask, Notebook, and Block authoring
+
+This minor release gives Ask AI, Notebook AI, and Block AI one durable,
+governed execution lifecycle while keeping the final actions appropriate to
+each product surface.
+
+### Added
+
+- **Durable universal AI runs.** Agent progress, plans, artifacts, diagnostics,
+  and terminal receipts are checkpointed so active requests continue across
+  navigation and completed history restores the same canonical evidence.
+- **Notebook authoring actions.** Successful governed output can be added as a
+  new notebook cell or used to replace the selected cell only after an explicit
+  user action, preserving cell identity and execution provenance.
+- **Block AI draft handoff.** Successful DQL proposals can be saved as
+  ownerless, Git-backed draft blocks and opened immediately in Block Studio's
+  visual builder without silently certifying or mutating canonical blocks.
+
+### Fixed
+
+- **Multi-metric Ask fidelity.** Every explicitly requested metric is retained.
+  Compatible metrics resolve through one safe semantic adapter and model;
+  incompatible or missing metrics fail closed with stable diagnostics.
+- **Complete failure evidence.** Failed runs preserve the plan, DQL, compiled
+  SQL, lineage, trust evidence, actual steps, failure code, and safe repair
+  actions instead of dropping the inspector or displaying a stale answer.
+- **Canonical history hydration.** Returning to Ask AI restores DQL and lineage
+  together with SQL and Trust & Steps, while unfinished work polls durable
+  progress instead of presenting a misleading reconnect state.
+- **Safe surface actions.** Blocked or clarification runs cannot be added to a
+  notebook or Block Studio, and generated output never mutates either surface
+  before the user selects an explicit action.
+
+### Release exceptions
+
+- Acceptance IDs `AGT-021`, `API-008`, `UI-014`, `UI-015`, and `UI-016`
+  remain implementer-validated. `E2E-015` remains specified pending independent
+  built-CLI verification against the designated fixture.
+- The tracked `PERF-001` latency exception remains unchanged. This release
+  improves lifecycle durability, diagnostic completeness, and surface wiring
+  without claiming GA-scale latency.
+
 ## v1.10.9 - 2026-07-25
 
 ### Multi-measure governed answers and organized Block Studio authoring

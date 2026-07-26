@@ -96,6 +96,24 @@ export type AgentRunAnswerKind = "governed" | "conversational" | "general_knowle
 
 export type AgentRunStatus = "completed" | "needs_review" | "needs_clarification" | "blocked";
 export type AgentRunTrustState = "certified" | "governed" | "grounded" | "review_required" | "blocked" | "not_applicable";
+export type AgentRunLifecycleState = "queued" | "running" | "cancelling" | "terminal";
+
+/**
+ * Durable lifecycle for an accepted run. This is intentionally separate from
+ * `AgentRunStatus`, which remains the terminal analytical outcome.
+ *
+ * Acceptance: API-008, UI-014.
+ */
+export interface AgentRunLifecycleV1 {
+  version: 1;
+  state: AgentRunLifecycleState;
+  phase: AgentRunEvent["type"] | "queued";
+  revision: number;
+  eventCursor: number;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
 
 export type AgentRunStopReason =
   | "conversational_reply"
@@ -152,6 +170,34 @@ export interface AgentRunArtifact {
   trustState: AgentRunTrustState;
   ref?: string;
   payload?: unknown;
+}
+
+export interface AgentRunDiagnosticFailureV1 {
+  code: string;
+  phase: string;
+  message: string;
+  recoverable: boolean;
+  safeActions: string[];
+}
+
+/**
+ * One stable presentation receipt for successful and failed executable runs.
+ * Detailed analytical contracts stay on their original artifact; this receipt
+ * binds them to the immutable run trace and prevents an outer executor failure
+ * from erasing the plan/steps already produced.
+ *
+ * Acceptance: API-007, UI-012, UI-013, SEC-004.
+ */
+export interface AgentRunDiagnosticReceiptV1 {
+  version: 1;
+  runId: string;
+  phase: string;
+  route?: AgentRunRoute;
+  plan?: AgentRunPlan;
+  steps: AgentRunStep[];
+  artifacts: AgentRunArtifact[];
+  evaluations: AgentRunEvaluation[];
+  failure?: AgentRunDiagnosticFailureV1;
 }
 
 export interface AgentRunNextAction {
@@ -302,6 +348,31 @@ export interface AgentRun {
   escalationAttempts?: number;
   /** Visible budget model and spend for audits/traces. */
   budgetUsage?: CascadeBudgetTrace;
+  lifecycle?: AgentRunLifecycleV1;
+  diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
+}
+
+/**
+ * Lightweight durable state written while a run is executing. It deliberately
+ * excludes answer deltas and raw result rows; those remain transient until the
+ * terminal, gate-accepted AgentRun is saved.
+ *
+ * Acceptance: API-008, UI-014, PERF-002, SEC-004.
+ */
+export interface AgentRunProgressV1 {
+  version: 1;
+  id: string;
+  question: string;
+  requestedMode: AgentRunRequestedMode;
+  selectedObject?: AgentRunSelectedObject;
+  route?: AgentRunRoute;
+  trustState?: AgentRunTrustState;
+  plan?: AgentRunPlan;
+  steps: AgentRunStep[];
+  artifacts: AgentRunArtifact[];
+  evaluations: AgentRunEvaluation[];
+  events: AgentRunEvent[];
+  lifecycle: AgentRunLifecycleV1;
 }
 
 export interface AgentRouteExecutionContext {
@@ -417,6 +488,8 @@ export interface AgentRunStore {
   save(run: AgentRun): void | Promise<void>;
   get(id: string): AgentRun | undefined | Promise<AgentRun | undefined>;
   list?(): AgentRun[] | Promise<AgentRun[]>;
+  saveProgress?(progress: AgentRunProgressV1): void | Promise<void>;
+  getProgress?(id: string): AgentRunProgressV1 | undefined | Promise<AgentRunProgressV1 | undefined>;
 }
 
 /**
@@ -684,8 +757,10 @@ function applyAudienceToNextActions(
 
 export class InMemoryAgentRunStore implements AgentRunStore {
   private readonly runs = new Map<string, AgentRun>();
+  private readonly progress = new Map<string, AgentRunProgressV1>();
 
   save(run: AgentRun): void {
+    this.progress.delete(run.id);
     this.runs.set(run.id, run);
   }
 
@@ -695,6 +770,14 @@ export class InMemoryAgentRunStore implements AgentRunStore {
 
   list(): AgentRun[] {
     return [...this.runs.values()];
+  }
+
+  saveProgress(progress: AgentRunProgressV1): void {
+    if (!this.runs.has(progress.id)) this.progress.set(progress.id, progress);
+  }
+
+  getProgress(id: string): AgentRunProgressV1 | undefined {
+    return this.progress.get(id);
   }
 }
 
@@ -724,6 +807,15 @@ export class FileAgentRunStore implements AgentRunStore {
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, this.maxRuns);
     this.write(pruned);
+  }
+
+  saveProgress(_progress: AgentRunProgressV1): void {
+    // The file store is retained only for backwards-compatible tests and old
+    // embedders. Durable in-progress state is provided by SqliteAgentRunStore.
+  }
+
+  getProgress(_id: string): AgentRunProgressV1 | undefined {
+    return undefined;
   }
 
   get(id: string): AgentRun | undefined {
@@ -862,6 +954,48 @@ export class AgentRunEngine {
     const startedAt = this.timestamp();
     const requestedMode = request.requestedMode ?? "auto";
     const events: AgentRunEvent[] = [];
+    let plan: AgentRunPlan | undefined;
+    const executedSteps: AgentRunStep[] = [];
+    const progress: AgentRunProgressV1 = {
+      version: 1,
+      id: runId,
+      question: submittedQuestion,
+      requestedMode,
+      selectedObject: request.selectedObject,
+      steps: [],
+      artifacts: [],
+      evaluations: [],
+      events: [],
+      lifecycle: {
+        version: 1,
+        state: "running",
+        phase: "queued",
+        revision: 0,
+        eventCursor: 0,
+        startedAt,
+        updatedAt: startedAt,
+      },
+    };
+    let checkpointQueue: Promise<void> = Promise.resolve();
+    const persistProgress = () => {
+      if (!this.store?.saveProgress) return;
+      const snapshot: AgentRunProgressV1 = {
+        ...progress,
+        lifecycle: { ...progress.lifecycle },
+        steps: [...progress.steps],
+        artifacts: [...progress.artifacts],
+        evaluations: [...progress.evaluations],
+        events: [...progress.events],
+      };
+      checkpointQueue = checkpointQueue.then(async () => {
+        try {
+          await this.store?.saveProgress?.(snapshot);
+        } catch {
+          // Progress persistence is additive; terminal persistence remains
+          // authoritative and must not be failed by a checkpoint write.
+        }
+      });
+    };
     const emit = (event: Omit<AgentRunEvent, "id" | "runId" | "at">) => {
       const full: AgentRunEvent = {
         id: `${runId}:event:${events.length + 1}`,
@@ -870,6 +1004,32 @@ export class AgentRunEngine {
         ...event,
       };
       events.push(full);
+      progress.events = events.slice(-200);
+      progress.lifecycle = {
+        ...progress.lifecycle,
+        phase: full.type,
+        revision: progress.lifecycle.revision + 1,
+        eventCursor: events.length,
+        updatedAt: full.at,
+      };
+      if (full.route) progress.route = full.route;
+      if (full.trustState) progress.trustState = full.trustState;
+      if (full.type === "plan.created" && full.payload && typeof full.payload === "object") {
+        progress.plan = full.payload as AgentRunPlan;
+      }
+      if (full.type === "artifact.created" && full.payload && typeof full.payload === "object") {
+        const artifact = full.payload as AgentRunArtifact;
+        progress.artifacts = [...progress.artifacts.filter((candidate) => candidate.id !== artifact.id), artifact];
+      }
+      if (full.type === "evaluation.recorded" && full.payload && typeof full.payload === "object") {
+        const evaluation = full.payload as AgentRunEvaluation;
+        progress.evaluations = [
+          ...progress.evaluations.filter((candidate) => candidate.id !== evaluation.id),
+          evaluation,
+        ];
+      }
+      if (full.type === "step.completed") progress.steps = [...executedSteps];
+      persistProgress();
       onEvent?.(full);
     };
 
@@ -905,7 +1065,7 @@ export class AgentRunEngine {
         audience,
         routeDecision,
       );
-      const plan = await this.planner.plan({
+      plan = await this.planner.plan({
         request,
         routeDecision,
         defaultRoute,
@@ -919,7 +1079,6 @@ export class AgentRunEngine {
         payload: plan,
       });
 
-      const executedSteps: AgentRunStep[] = [];
       // Normalize planned routes to the audience (works for LLM and deterministic
       // plans alike): stakeholders never author and never dead-end on clarify
       // without explicit missing context.
@@ -1225,12 +1384,18 @@ export class AgentRunEngine {
         payload: { budgetUsage: run.budgetUsage },
       });
       run.completedAt = this.timestamp();
+      run.lifecycle = terminalLifecycle(progress.lifecycle, "run.completed", run.completedAt, events.length);
+      run.diagnosticReceipt = diagnosticReceiptForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt);
+      await checkpointQueue;
       await this.store?.save(run);
       return run;
     } catch (err) {
       const message = err instanceof Error && err.name === "TimeoutError"
         ? "This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry the same bounded question or use Research for a longer budget. No result was accepted."
         : err instanceof Error ? err.message : String(err);
+      const failedRoute = progress.route;
+      const failedPhase = progress.lifecycle.phase;
       emit({
         type: "run.failed",
         message,
@@ -1238,6 +1403,31 @@ export class AgentRunEngine {
         status: "blocked",
         trustState: "blocked",
       });
+      const completedAt = this.timestamp();
+      const failure = diagnosticFailureFromError(err, failedPhase);
+      const evaluations: AgentRunEvaluation[] = [
+        ...progress.evaluations,
+        {
+          id: "executor-error",
+          label: "Executor error",
+          passed: false,
+          severity: "blocking",
+          message,
+          suggestedRepair: failure.recoverable ? "Retry the same request." : undefined,
+        },
+      ];
+      const retainedArtifacts = progress.artifacts.filter((artifact) => artifact.trustState === "blocked");
+      const receipt: AgentRunDiagnosticReceiptV1 = {
+        version: 1,
+        runId,
+        phase: failure.phase,
+        route: failedRoute,
+        plan,
+        steps: executedSteps,
+        artifacts: retainedArtifacts,
+        evaluations,
+        failure,
+      };
       const run: AgentRun = {
         id: runId,
         question: submittedQuestion,
@@ -1247,25 +1437,25 @@ export class AgentRunEngine {
         trustState: "blocked",
         stopReason: "blocked",
         startedAt,
-        completedAt: this.timestamp(),
+        completedAt,
         selectedObject: request.selectedObject,
         routeDecision,
-        steps: [],
+        plan,
+        steps: executedSteps,
         summary: message,
-        artifacts: [],
-        evaluations: [{
-          id: "executor-error",
-          label: "Executor error",
-          passed: false,
-          severity: "blocking",
-          message,
-        }],
+        artifacts: attachDiagnosticReceipt(retainedArtifacts, receipt),
+        evaluations,
         events,
-        nextActions: [],
+        nextActions: failure.recoverable
+          ? [{ id: "retry-failed-run", label: "Retry request", route: failedRoute }]
+          : [],
         repairAttempts: 0,
         escalationAttempts: 0,
         budgetUsage: cascadeBudgetTrace(createCascadeBudgetState(this.budgetModel)),
+        diagnosticReceipt: receipt,
+        lifecycle: terminalLifecycle(progress.lifecycle, "run.failed", completedAt, events.length),
       };
+      await checkpointQueue;
       await this.store?.save(run);
       return run;
     }
@@ -1386,6 +1576,112 @@ export class AgentRunEngine {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+function terminalLifecycle(
+  prior: AgentRunLifecycleV1,
+  phase: "run.completed" | "run.failed",
+  completedAt: string,
+  eventCursor: number,
+): AgentRunLifecycleV1 {
+  return {
+    ...prior,
+    state: "terminal",
+    phase,
+    revision: prior.revision + 1,
+    eventCursor,
+    updatedAt: completedAt,
+    completedAt,
+  };
+}
+
+function diagnosticFailureFromError(
+  error: unknown,
+  phase: string,
+): AgentRunDiagnosticFailureV1 {
+  const name = error instanceof Error ? error.name : "";
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = `${name} ${message}`.toLowerCase();
+  if (name === "TimeoutError" || lower.includes("time limit") || lower.includes("timeout")) {
+    return {
+      code: "TIMEOUT",
+      phase,
+      message,
+      recoverable: true,
+      safeActions: ["retry_same_plan"],
+    };
+  }
+  if (lower.includes("stopped by user") || lower.includes("cancel")) {
+    return {
+      code: "RUN_CANCELLED",
+      phase,
+      message,
+      recoverable: true,
+      safeActions: ["retry_same_request"],
+    };
+  }
+  return {
+    code: "EXECUTOR_FAILURE",
+    phase,
+    message,
+    recoverable: true,
+    safeActions: ["retry_same_request", "inspect_failure"],
+  };
+}
+
+function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
+  const failureEvaluation = run.evaluations.find((evaluation) => !evaluation.passed && evaluation.severity === "blocking");
+  return {
+    version: 1,
+    runId: run.id,
+    phase: run.lifecycle?.phase ?? (run.status === "blocked" ? "run.failed" : "run.completed"),
+    route: run.route,
+    plan: run.plan,
+    steps: run.steps,
+    artifacts: run.artifacts,
+    evaluations: run.evaluations,
+    ...(run.status === "blocked"
+      ? {
+          failure: {
+            code: "EXECUTION_BLOCKED",
+            phase: run.lifecycle?.phase ?? "run.completed",
+            message: failureEvaluation?.message ?? run.summary,
+            recoverable: Boolean(run.nextActions.length),
+            safeActions: run.nextActions.map((action) => action.id),
+          },
+        }
+      : {}),
+  };
+}
+
+function attachDiagnosticReceipt(
+  artifacts: AgentRunArtifact[],
+  receipt: AgentRunDiagnosticReceiptV1,
+): AgentRunArtifact[] {
+  if (artifacts.length === 0) {
+    if (!receipt.failure) return artifacts;
+    return [{
+      id: `${receipt.runId}:diagnostic`,
+      kind: "answer",
+      title: "Agent run diagnostics",
+      trustState: "blocked",
+      payload: { diagnosticReceipt: receipt },
+    }];
+  }
+  const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
+  return artifacts.map((artifact, index) => {
+    if (index !== preferredIndex) return artifact;
+    const payload = artifact.payload && typeof artifact.payload === "object" && !Array.isArray(artifact.payload)
+      ? artifact.payload as Record<string, unknown>
+      : {};
+    return {
+      ...artifact,
+      payload: {
+        ...payload,
+        diagnosticReceipt: receipt,
+      },
+    };
+  });
 }
 
 function computeStepOutcome(

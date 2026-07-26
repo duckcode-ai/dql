@@ -19,6 +19,7 @@ import {
   ListTree,
   Loader2,
   MoreHorizontal,
+  Pencil,
   Plus,
   RefreshCw,
   Route,
@@ -136,6 +137,8 @@ interface UnifiedAgentRunPanelProps {
    * self-contained, ready-rendered query cell. Preferred over onInsertSql when set.
    */
   onInsertDql?: (payload: InsertDqlPayload) => void;
+  /** Replace the host-selected notebook cell after an explicit user action. */
+  onReplaceDql?: (payload: InsertDqlPayload) => void;
   /**
    * Optional host handoff for authoring surfaces. Fires once when a completed
    * non-certified run produces a new DQL/SQL artifact, allowing the host to
@@ -152,6 +155,8 @@ interface UnifiedAgentRunPanelProps {
   answerFirstCards?: boolean;
   /** Add a contextual DQL insertion action to an answer-first card. */
   insertDqlActionLabel?: string;
+  /** Add a second explicit action for replacing the selected notebook cell. */
+  replaceDqlActionLabel?: string;
   /**
    * Opt into the redesigned "Ask" experience: a wide chat column with a page
    * header, centered 720px transcript of plain-text answers + trust lines +
@@ -205,6 +210,7 @@ export function UnifiedAgentRunPanel({
   autoRun,
   onInsertSql,
   onInsertDql,
+  onReplaceDql,
   onArtifactReady,
   onOpenBlock,
   onOpenResearch,
@@ -212,6 +218,7 @@ export function UnifiedAgentRunPanel({
   onRunningChange,
   answerFirstCards = false,
   insertDqlActionLabel,
+  replaceDqlActionLabel,
   askLayout = false,
 }: UnifiedAgentRunPanelProps): JSX.Element {
   const t = themes[themeMode];
@@ -296,7 +303,11 @@ export function UnifiedAgentRunPanel({
     setRunningEvents(run.events.slice(-8));
     setStreamingAnswer('');
     setItems((current) => {
-      if (current.some((item) => item.kind === 'run' && item.run.id === run.id)) return current;
+      if (current.some((item) => item.kind === 'run' && item.run.id === run.id)) {
+        return current.map((item) => item.kind === 'run' && item.run.id === run.id
+          ? { ...item, id: run.id, run }
+          : item);
+      }
       // A reload can happen after the question was sent but before its local item
       // was rendered. Restore that question ahead of the recovered answer.
       const alreadyHasQuestion = current.some((item) => item.kind === 'user' && item.text === pending.question);
@@ -325,12 +336,15 @@ export function UnifiedAgentRunPanel({
     const check = async () => {
       if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
       try {
-        // Runs are saved atomically at completion. A 404 while the server is still
-        // working is expected; keep the reconnect loop quiet and lightweight.
-        const run = await api.getAgentRun(pending.id);
+        const state = await api.getAgentRunState(pending.id);
         if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
-        appendFinishedRun(run, pending);
-        setRunning(false);
+        if (state.lifecycleState === 'terminal') {
+          appendFinishedRun(state.run, pending);
+          setRunning(false);
+          return;
+        }
+        setRunningEvents(state.progress.events.slice(-8));
+        recoveryTimerRef.current = window.setTimeout(() => { void check(); }, 600);
       } catch {
         if (recoveryEpoch !== recoveryEpochRef.current || activeRunIdRef.current !== pending.id) return;
         recoveryTimerRef.current = window.setTimeout(() => { void check(); }, 1_200);
@@ -359,11 +373,17 @@ export function UnifiedAgentRunPanel({
     threadIdRef.current ??= threadIdProp;
     let cancelled = false;
     api.getAgentThread(threadIdProp)
-      .then(({ turns }) => {
+      .then(({ turns, runs }) => {
         if (cancelled || turns.length === 0) return;
         setItems((current) => {
           const localAnswerCount = current.filter((item) => item.kind === 'run').length;
-          return turns.length > localAnswerCount ? threadItemsFromTurns(turns) : current;
+          const canonical = threadItemsFromTurns(turns, runs);
+          if (turns.length >= localAnswerCount) return canonical;
+          const canonicalRuns = new Map(canonical.flatMap((item) =>
+            item.kind === 'run' ? [[item.run.id, item.run] as const] : []));
+          return current.map((item) => item.kind === 'run' && canonicalRuns.has(item.run.id)
+            ? { ...item, run: canonicalRuns.get(item.run.id)! }
+            : item);
         });
       })
       .catch(() => {
@@ -840,7 +860,9 @@ export function UnifiedAgentRunPanel({
             onOpenApp={onOpenApp}
             onInsertSql={onInsertSql}
             onInsertDql={onInsertDql}
+            onReplaceDql={onReplaceDql}
             insertDqlActionLabel={insertDqlActionLabel}
+            replaceDqlActionLabel={replaceDqlActionLabel}
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
             onSelectClarification={(option) => {
@@ -997,7 +1019,7 @@ function clearActiveAgentRun(runId: string): void {
 function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
   const runs = readActiveAgentRuns().sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   if (threadId) return runs.find((entry) => entry.threadId === threadId);
-  return runs.find((entry) => !entry.threadId) ?? runs[0];
+  return runs.find((entry) => !entry.threadId);
 }
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
@@ -1026,11 +1048,15 @@ const AGENT_RUN_TRUST_STATES = new Set<AgentRunTrustState>([
  * RunCard (route, trust, answer, result preview) and for
  * `buildConversationContext` to keep working as the no-threadId fallback.
  */
-export function threadItemsFromTurns(turns: AgentConversationTurn[]): ThreadItem[] {
-  return turns.flatMap((turn): ThreadItem[] => [
-    { kind: 'user', id: `${turn.id}-q`, text: turn.question },
-    { kind: 'run', id: turn.id, run: runFromConversationTurn(turn) },
-  ]);
+export function threadItemsFromTurns(turns: AgentConversationTurn[], runs: AgentRun[] = []): ThreadItem[] {
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  return turns.flatMap((turn): ThreadItem[] => {
+    const run = turn.agentRunId ? runsById.get(turn.agentRunId) : undefined;
+    return [
+      { kind: 'user', id: `${turn.id}-q`, text: turn.question },
+      { kind: 'run', id: run?.id ?? turn.id, run: run ?? runFromConversationTurn(turn) },
+    ];
+  });
 }
 
 function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
@@ -1050,7 +1076,7 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
   const result = columns.length > 0
     ? { columns, rows, rowCount: turn.result?.rowCount ?? rows.length }
     : undefined;
-  const artifact: AgentRunArtifact | undefined = result || turn.sql || turn.sourceCertifiedBlock
+  const artifact: AgentRunArtifact | undefined = result || turn.sql || turn.dqlArtifact || turn.sourceCertifiedBlock
     ? {
         id: `${turn.id}-artifact`,
         kind: 'answer',
@@ -1062,6 +1088,8 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
           ...(turn.certification ? { certification: turn.certification } : {}),
           ...(turn.contextPackId ? { contextPackId: turn.contextPackId } : {}),
           ...(turn.sql ? { sql: turn.sql } : {}),
+          ...(turn.dqlArtifact ? { dqlArtifact: turn.dqlArtifact } : {}),
+          ...(turn.cascade ? { cascade: turn.cascade } : {}),
           ...(result ? { result } : {}),
           ...(turn.contract && Object.keys(turn.contract).length > 0
             ? { contextPack: { questionPlan: { requestedShape: turn.contract } } }
@@ -1179,7 +1207,7 @@ export function completedRunGuidanceFor(
 }
 
 export interface LiveAgentActivity {
-  id: 'search' | 'match' | 'execute' | 'verify' | 'reconnect';
+  id: 'search' | 'match' | 'execute' | 'verify' | 'background';
   label: string;
   state: 'complete' | 'active';
 }
@@ -1191,7 +1219,7 @@ export interface LiveAgentActivity {
  */
 export function liveAgentActivityFor(events: AgentRunEvent[], reconnecting = false): LiveAgentActivity[] {
   if (events.length === 0 && reconnecting) {
-    return [{ id: 'reconnect', label: 'Reconnecting to the running request', state: 'active' }];
+    return [{ id: 'background', label: 'Continuing this request in the background', state: 'active' }];
   }
   const route = latestRoute(events);
   if (route === 'conversation') return [];
@@ -1748,7 +1776,9 @@ function AskRunCard({
   onOpenApp,
   onInsertSql,
   onInsertDql,
+  onReplaceDql,
   insertDqlActionLabel,
+  replaceDqlActionLabel,
   onOpenBlock,
   onOpenResearch,
   onSelectClarification,
@@ -1763,7 +1793,9 @@ function AskRunCard({
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onInsertSql?: (sql: string, title?: string) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
+  onReplaceDql?: (payload: InsertDqlPayload) => void;
   insertDqlActionLabel?: string;
+  replaceDqlActionLabel?: string;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onSelectClarification?: (option: AgentRunClarificationOption) => void;
@@ -1798,6 +1830,19 @@ function AskRunCard({
   }
 
   const certified = run.trustState === 'certified';
+  const blocked = run.status === 'blocked';
+  const needsClarification = run.status === 'needs_clarification';
+  const presentationAnswer = blocked || needsClarification ? undefined : run.answer;
+  const outcomeLabel = blocked
+    ? 'Blocked — no answer produced'
+    : needsClarification
+      ? 'Needs clarification'
+      : certified
+        ? 'Certified answer'
+        : 'AI-generated answer';
+  const failureMessage = blocked
+    ? run.diagnosticReceipt?.failure?.message ?? run.summary
+    : undefined;
   const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
   const evidence = evidenceFromRun(run);
   const inlineResultArtifacts = run.artifacts.filter((artifact) => {
@@ -1816,10 +1861,12 @@ function AskRunCard({
   const showResearchDeeper = isAnswer && pinnable && !hasResearchAction;
   const sourceArtifact = answerDqlArtifactFromRun(run);
   const canSaveBlock = pinnable && !sourceArtifact?.sourcePath && Boolean(sourceArtifact?.source ?? answerSqlFromRun(run));
-  const insertionPayload = insertDqlActionLabel && onInsertDql ? artifactReadyPayloadFromRun(run) : undefined;
+  const insertionPayload = (insertDqlActionLabel && onInsertDql) || (replaceDqlActionLabel && onReplaceDql)
+    ? artifactReadyPayloadFromRun(run)
+    : undefined;
 
   const copyAnswer = () => {
-    const text = run.answer ? cleanAnswerText(run.answer) : run.summary;
+    const text = presentationAnswer ? cleanAnswerText(presentationAnswer) : failureMessage ?? run.summary;
     if (!text) return;
     void navigator.clipboard?.writeText(text).catch(() => undefined);
     setCopied(true);
@@ -1830,11 +1877,15 @@ function AskRunCard({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: '100%', animation: 'dql-agent-fadein 0.3s ease-out' }}>
       {/* Trust line */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-        {certified ? <ShieldCheck size={14} color={t.success} /> : <Sparkles size={14} color={t.accent} />}
-        <span style={{ fontSize: 12, fontWeight: 650, color: t.textSecondary }}>{certified ? 'Certified answer' : 'AI-generated answer'}</span>
+        {blocked
+          ? <ShieldAlert size={14} color={t.error} />
+          : certified
+            ? <ShieldCheck size={14} color={t.success} />
+            : <Sparkles size={14} color={t.accent} />}
+        <span style={{ fontSize: 12, fontWeight: 650, color: blocked ? t.error : t.textSecondary }}>{outcomeLabel}</span>
         {certified && evidence[0] ? (
           <span style={{ fontSize: 11, color: t.textMuted }}>from <span style={{ color: t.accent, fontWeight: 600 }}>{evidence[0].label}</span></span>
-        ) : primaryArtifact && passedChecks > 0 ? (
+        ) : !blocked && primaryArtifact && passedChecks > 0 ? (
           <button type="button" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Check size={11} color={t.success} /> {passedChecks} check{passedChecks === 1 ? '' : 's'} passed
           </button>
@@ -1842,10 +1893,12 @@ function AskRunCard({
       </div>
 
       {/* Answer (plain text, selectable for follow-up) */}
-      {run.answer ? (
+      {presentationAnswer ? (
         <div data-followup="answer" style={{ fontSize: 14.5, lineHeight: 1.65, color: t.textPrimary }}>
-          <StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} />
+          <StructuredAnswerText text={cleanAnswerText(presentationAnswer)} t={t} />
         </div>
+      ) : failureMessage ? (
+        <div data-followup="answer" style={{ fontSize: 13.5, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(failureMessage)}</div>
       ) : run.summary ? (
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
@@ -1910,14 +1963,19 @@ function AskRunCard({
       ) : null}
 
       {/* Quiet action row */}
-      {(run.answer || insertionPayload || pinnable || canSaveBlock || showResearchDeeper || primaryArtifact) ? (
+      {(presentationAnswer || failureMessage || insertionPayload || pinnable || canSaveBlock || showResearchDeeper || primaryArtifact) ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap', marginTop: -2 }}>
           {insertionPayload && onInsertDql ? (
             <button type="button" className="dql-ask-ghost" onClick={() => onInsertDql(insertionPayload)} style={askGhostBtnStyle(t)}>
               <Plus size={12} /> {insertDqlActionLabel}
             </button>
           ) : null}
-          {run.answer ? (
+          {insertionPayload && onReplaceDql && replaceDqlActionLabel ? (
+            <button type="button" className="dql-ask-ghost" onClick={() => onReplaceDql(insertionPayload)} style={askGhostBtnStyle(t)}>
+              <Pencil size={12} /> {replaceDqlActionLabel}
+            </button>
+          ) : null}
+          {presentationAnswer || failureMessage ? (
             <button type="button" className="dql-ask-ghost" onClick={copyAnswer} style={askGhostBtnStyle(t)}>
               {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
             </button>
@@ -1983,6 +2041,7 @@ interface AnalyticalInspectorContract {
   freshness?: Record<string, unknown>;
   failure?: Record<string, unknown>;
   semantic?: Record<string, unknown>;
+  diagnostic?: Record<string, unknown>;
 }
 
 export function hasAnalyticalInspectorContract(payload: Record<string, unknown>): boolean {
@@ -1991,13 +2050,15 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     || recordOf(payload.analyticalExecutionGraph)
     || recordOf(payload.analyticalExecutionReceipt)
     || recordOf(payload.analyticalFailure)
-    || recordOf(payload.semanticExecutionTrace),
+    || recordOf(payload.semanticExecutionTrace)
+    || recordOf(payload.diagnosticReceipt),
   );
 }
 
 function analyticalInspectorContract(payload: Record<string, unknown>): AnalyticalInspectorContract | undefined {
   if (!hasAnalyticalInspectorContract(payload)) return undefined;
-  const plan = recordOf(payload.resolvedAnalyticalPlan);
+  const diagnostic = recordOf(payload.diagnosticReceipt);
+  const plan = recordOf(payload.resolvedAnalyticalPlan) ?? recordOf(diagnostic?.plan);
   return {
     plan,
     frame: recordOf(plan?.analyticalFrame),
@@ -2006,8 +2067,9 @@ function analyticalInspectorContract(payload: Record<string, unknown>): Analytic
     facts: recordOf(payload.analyticalFacts),
     narrative: recordOf(payload.analyticalNarrative),
     freshness: recordOf(payload.analyticalFreshnessObservation),
-    failure: recordOf(payload.analyticalFailure),
+    failure: recordOf(payload.analyticalFailure) ?? recordOf(diagnostic?.failure),
     semantic: recordOf(payload.semanticExecutionTrace),
+    diagnostic,
   };
 }
 
@@ -2427,6 +2489,8 @@ function AskInspector({
   const lineage = lineageEntriesFromRun(run);
   const trustNote = trustExplainer(run);
   const certified = artifact.trustState === 'certified';
+  const blocked = run.status === 'blocked' || artifact.trustState === 'blocked';
+  const pinnable = isAgentRunPinnable(run);
   const analytical = analyticalInspectorContract(payload);
 
   const tabs: Array<{ id: AskInspectorTab; label: string }> = [];
@@ -2437,9 +2501,9 @@ function AskInspector({
   tabs.push({ id: 'trust', label: 'Trust & steps' });
   const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
-  const badgeLabel = certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
-  const badgeColor = certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
-  const badgeBg = certified ? 'var(--status-success-bg)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent-dim)' : 'var(--status-warning-bg)';
+  const badgeLabel = blocked ? 'Blocked' : certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
+  const badgeColor = blocked ? 'var(--status-error)' : certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
+  const badgeBg = blocked ? 'var(--status-error-bg)' : certified ? 'var(--status-success-bg)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent-dim)' : 'var(--status-warning-bg)';
 
   return (
     <div style={{ width: 'clamp(300px, 34vw, 440px)', flexShrink: 0, background: 'var(--bg-2)', borderLeft: '1px solid var(--border-default)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -2460,8 +2524,8 @@ function AskInspector({
 
       {/* Action row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
-        <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} />
-        {isAgentRunPinnable(run) ? (
+        {pinnable ? <AddToAppButton run={run} t={t} appContext={appContext} onOpenApp={onOpenApp} /> : null}
+        {pinnable ? (
           <button type="button" className="dql-hover" onClick={onSaveBlock} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 13px', borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: t.textSecondary, fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: t.font }}>
             <Blocks size={13} /> Save as block
           </button>
@@ -3846,7 +3910,7 @@ function answerDqlArtifactFromRun(run: AgentRun): AgentConversationDqlArtifact |
 }
 
 export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | undefined {
-  if (run.route === 'certified_answer') return undefined;
+  if (run.route === 'certified_answer' || !isAgentRunPinnable(run)) return undefined;
   const dqlArtifact = answerDqlArtifactFromRun(run);
   const sql = answerSqlFromRun(run);
   if ((!dqlArtifact?.source || dqlArtifact.sourcePath) && !sql) return undefined;

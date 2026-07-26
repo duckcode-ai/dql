@@ -1597,8 +1597,10 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const analyticalAdapterId = analyticalCapability && analyticalRoute
     ? analyticalCapability.executionCapabilities.find((candidate) => candidate.route === analyticalRoute)?.adapterId
     : undefined;
+  const multiMetricPlan = (normalizedInput.resolvedAnalyticalPlan?.analyticalFrame?.metricConceptIds.length ?? 0) > 1;
   const analyticalGraphBuild = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
     && normalizedInput.resolvedAnalyticalPlan.analyticalFrame
+    && !multiMetricPlan
     && !normalizedInput.analyticalPeriodResolutionFailure
     && analyticalCapability
     && analyticalRoute
@@ -1613,6 +1615,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? analyticalGraphBuild.graph
     : undefined;
   const analyticalExecutionGraphFailure: AnswerLoopInput['analyticalExecutionGraphFailure'] = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
+    && !multiMetricPlan
     ? analyticalGraphBuild?.status === 'blocked'
       ? {
           code: analyticalGraphBuild.code,

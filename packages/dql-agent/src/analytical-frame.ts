@@ -16,10 +16,22 @@ export function buildDeterministicAnalyticalFrame(input: {
   question: string;
   evidence: AgentRetrievalEvidence;
   metricCandidate: AgentEvidenceCandidate;
+  /** Complete explicitly requested metric set; the first remains the ranking/default metric. */
+  metricCandidates?: AgentEvidenceCandidate[];
   candidates: AgentEvidenceCandidate[];
 }): AnalyticalQuestionFrameV2 | undefined {
   const capability = normalizeMetricCapabilityContract(input.metricCandidate.analyticalCapability);
   if (!capability) return undefined;
+  const metricCapabilities = [
+    capability,
+    ...(input.metricCandidates ?? [])
+      .filter((candidate) => candidate.id !== input.metricCandidate.id)
+      .flatMap((candidate) => {
+        const normalized = normalizeMetricCapabilityContract(candidate.analyticalCapability);
+        return normalized ? [normalized] : [];
+      }),
+  ].filter((candidate, index, all) =>
+    all.findIndex((other) => other.metricId === candidate.metricId) === index);
   const meaningType = questionTypeFromText(input.question);
   if (meaningType === 'definition') return undefined;
   const queryIntent: MeaningQueryIntent = {
@@ -168,13 +180,49 @@ export function buildDeterministicAnalyticalFrame(input: {
           tiePolicy: 'stable_secondary_key' as const,
         }
       : undefined;
-  const localMetric = localId(capability.metricId);
   const projectedTimeDimensions = meaningType === 'trend' && timeContext?.timeDimensionId
     ? [{
         dimensionId: timeContext.timeDimensionId,
         outputId: localId(timeContext.timeDimensionId),
       }]
     : [];
+  const metricOutputs: AnalyticalQuestionFrameV2['requestedOutputs'] = metricCapabilities.flatMap(
+    (metricCapability): AnalyticalQuestionFrameV2['requestedOutputs'] => {
+      const localMetric = localId(metricCapability.metricId);
+      if (comparison) {
+        return [
+          {
+            id: `${localMetric}__current`,
+            kind: 'metric_value',
+            metricId: metricCapability.metricId,
+            periodId: 'current',
+          },
+          {
+            id: `${localMetric}__previous_year`,
+            kind: 'metric_value',
+            metricId: metricCapability.metricId,
+            periodId: 'previous_year',
+          },
+          {
+            id: `${localMetric}__delta`,
+            kind: 'delta',
+            metricId: metricCapability.metricId,
+          },
+          {
+            id: `${localMetric}__percent_delta`,
+            kind: 'percent_delta',
+            metricId: metricCapability.metricId,
+          },
+        ];
+      }
+      return [{
+        id: localMetric,
+        kind: 'metric_value',
+        metricId: metricCapability.metricId,
+        ...(timeContext?.periods[0]?.id ? { periodId: timeContext.periods[0].id } : {}),
+      }];
+    },
+  );
   const requestedOutputs: AnalyticalQuestionFrameV2['requestedOutputs'] = [
     ...grouped.map((dimension) => ({
       id: localId(dimension.dimensionId),
@@ -184,39 +232,7 @@ export function buildDeterministicAnalyticalFrame(input: {
       id: dimension.outputId,
       kind: 'dimension' as const,
     })),
-    ...(comparison
-      ? [
-          {
-            id: `${localMetric}__current`,
-            kind: 'metric_value' as const,
-            metricId: capability.metricId,
-            periodId: 'current',
-          },
-          {
-            id: `${localMetric}__previous_year`,
-            kind: 'metric_value' as const,
-            metricId: capability.metricId,
-            periodId: 'previous_year',
-          },
-          {
-            id: `${localMetric}__delta`,
-            kind: 'delta' as const,
-            metricId: capability.metricId,
-          },
-          {
-            id: `${localMetric}__percent_delta`,
-            kind: 'percent_delta' as const,
-            metricId: capability.metricId,
-          },
-        ]
-      : [
-          {
-            id: localMetric,
-            kind: 'metric_value' as const,
-            metricId: capability.metricId,
-            ...(timeContext?.periods[0]?.id ? { periodId: timeContext.periods[0].id } : {}),
-          },
-        ]),
+    ...metricOutputs,
     ...(ranking ? [{ id: 'rank', kind: 'rank' as const }] : []),
   ];
 
@@ -224,7 +240,7 @@ export function buildDeterministicAnalyticalFrame(input: {
     version: 2,
     interpretedQuestion: input.question.trim(),
     questionType: meaningType === 'value' ? 'scalar' : meaningType,
-    metricConceptIds: [capability.metricId],
+    metricConceptIds: metricCapabilities.map((candidate) => candidate.metricId),
     entityGrainIds,
     dimensions: filteredDimensions,
     memberBindings,

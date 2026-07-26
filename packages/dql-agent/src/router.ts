@@ -527,6 +527,32 @@ function enforceAnalyticalCompatibility(
   evidence: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[],
 ): MeaningResolution {
+  const missingMetricTerms = missingExplicitMetricTerms(
+    evidence.parsedIntent?.measures ?? resolution.queryIntent.measures,
+    candidates,
+  );
+  const requestedMetricCount = new Set(
+    (evidence.parsedIntent?.measures ?? resolution.queryIntent.measures)
+      .map(normalizeMetricPhrase)
+      .filter(Boolean),
+  ).size;
+  if (
+    requestedMetricCount > 1
+    && (missingMetricTerms.length > 0
+      || (resolution.analyticalFrame?.metricConceptIds.length ?? 0) < requestedMetricCount)
+  ) {
+    const missing = missingMetricTerms.length > 0
+      ? missingMetricTerms
+      : ['one or more requested metrics'];
+    const message = `No governed metric capability was resolved for ${missing.join(', ')}; no requested metric was dropped.`;
+    return {
+      ...resolution,
+      confidence: 'low',
+      recommendedRoute: 'clarify',
+      missingInformation: [...new Set([...resolution.missingInformation, message])],
+      clarifyingQuestion: `I can’t safely compose all requested metrics because ${missing.join(', ')} is unavailable or ambiguous. Which governed metric should I use?`,
+    };
+  }
   if (!resolution.analyticalFrame) return resolution;
   const capabilityCandidates = candidates.flatMap((candidate) => {
     const normalized = normalizeEvidenceAnalyticalCapability(candidate);
@@ -549,16 +575,20 @@ function enforceAnalyticalCompatibility(
     policies: evidence.analyticalPolicies,
   });
   if (result.status === "ready") {
-    const metricEvidence = candidates.find(
+    const metricIds = new Set(result.capabilities.map((capability) => capability.metricId));
+    const metricEvidence = candidates.filter(
       (candidate) =>
         candidate.kind === "semantic_metric" &&
-        candidate.analyticalCapability?.metricId === result.capability.metricId,
+        candidate.analyticalCapability?.metricId &&
+        metricIds.has(candidate.analyticalCapability.metricId),
     );
     return {
       ...resolution,
       analyticalFrame: result.frame,
       analyticalPolicyIds: result.policyIds,
-      ...(metricEvidence ? { selectedConceptIds: [metricEvidence.id] } : {}),
+      ...(metricEvidence.length > 0
+        ? { selectedConceptIds: metricEvidence.map((candidate) => candidate.id) }
+        : {}),
       recommendedExecutionId: result.candidateId,
       recommendedRoute: result.route,
       missingInformation: [],
@@ -626,16 +656,23 @@ function directResolution(
   candidate: AgentEvidenceCandidate,
   candidates: AgentEvidenceCandidate[],
 ): MeaningResolution {
+  const metricCandidates = explicitlyRequestedMetricCandidates(
+    request.question,
+    evidence,
+    candidate,
+    candidates,
+  );
   const analyticalFrame = buildDeterministicAnalyticalFrame({
     question: request.question,
     evidence,
     metricCandidate: candidate,
+    metricCandidates,
     candidates,
   });
   return {
     interpretedQuestion: request.question,
     questionType: questionTypeFromText(request.question),
-    selectedConceptIds: [candidate.id],
+    selectedConceptIds: metricCandidates.map((metric) => metric.id),
     recommendedExecutionId: candidate.id,
     queryIntent: defaultQueryIntent(evidence),
     rejectedCandidates: [],
@@ -646,6 +683,93 @@ function directResolution(
   };
 }
 
+function explicitlyRequestedMetricCandidates(
+  question: string,
+  evidence: AgentRetrievalEvidence,
+  primary: AgentEvidenceCandidate,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const requested = evidence.parsedIntent?.measures ?? [];
+  const requestedTerms = [...new Set(
+    requested.map(normalizeMetricPhrase).filter(Boolean),
+  )];
+  // A single business metric can be retrieved alongside technical dbt measure
+  // shims and registry aliases that share its words. Those are execution
+  // representations of the same request, not additional requested metrics.
+  if (requestedTerms.length <= 1) return [primary];
+  const questionText = normalizeMetricPhrase(question);
+  const metrics = candidates.filter((candidate) => {
+    if (candidate.kind !== 'semantic_metric' || candidate.compatibility === 'incompatible') return false;
+    if (!normalizeEvidenceAnalyticalCapability(candidate).capability) return false;
+    if (candidate.id === primary.id) return true;
+    const names = [candidate.name, ...(candidate.aliases ?? [])]
+      .map(normalizeMetricPhrase)
+      .filter(Boolean);
+    return requestedTerms.some((term) => names.some((name) => metricTermsMatch(name, term)))
+      || names.some((name) => name.length >= 3 && questionText.includes(name));
+  });
+  const ordered = [
+    primary,
+    ...metrics.filter((candidate) => candidate.id !== primary.id),
+  ];
+  return ordered.filter((candidate, index, all) =>
+    all.findIndex((other) => other.id === candidate.id) === index);
+}
+
+function normalizeMetricPhrase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function metricTermsMatch(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  if (left === right || left.endsWith(` ${right}`) || right.endsWith(` ${left}`)) return true;
+  const leftTokens = new Set(left.split(' '));
+  const rightTokens = right.split(' ').filter((token) => token.length >= 3);
+  return rightTokens.length > 0 && rightTokens.every((token) => leftTokens.has(token));
+}
+
+function missingExplicitMetricTerms(
+  requested: string[],
+  candidates: AgentEvidenceCandidate[],
+): string[] {
+  const metricTerms = candidates
+    .filter((candidate) =>
+      candidate.kind === 'semantic_metric'
+      && candidate.compatibility !== 'incompatible'
+      && Boolean(normalizeEvidenceAnalyticalCapability(candidate).capability))
+    .map((candidate) =>
+      [candidate.name, ...(candidate.aliases ?? [])]
+        .map(normalizeMetricPhrase)
+        .filter(Boolean));
+  return [...new Set(requested.map(normalizeMetricPhrase).filter(Boolean))]
+    .filter((term) => !metricTerms.some((names) =>
+      names.some((name) => metricTermsMatch(name, term))));
+}
+
+function exactMultiMetricPrimary(
+  question: string,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  if ((evidence.parsedIntent?.measures?.length ?? 0) < 2) return undefined;
+  const primary = candidates.find((candidate) =>
+    candidate.kind === 'semantic_metric'
+    && candidate.exactMatch
+    && candidate.compatibility !== 'incompatible'
+    && Boolean(normalizeEvidenceAnalyticalCapability(candidate).capability));
+  if (!primary) return undefined;
+  const requested = explicitlyRequestedMetricCandidates(question, evidence, primary, candidates);
+  return requested.length >= 2
+    && requested.every((candidate) => candidate.exactMatch)
+    ? primary
+    : undefined;
+}
+
 function routeWithoutMeaningModel(
   request: AgentRunRequest,
   base: IntentDecision,
@@ -653,6 +777,18 @@ function routeWithoutMeaningModel(
   candidates: AgentEvidenceCandidate[],
   planMode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
 ): IntentDecision {
+  const multiMetricPrimary = exactMultiMetricPrimary(request.question, evidence, candidates);
+  if (multiMetricPrimary) {
+    return routeDecisionForResolution(
+      base,
+      evidence,
+      candidates,
+      directResolution(request, evidence, multiMetricPrimary, candidates),
+      "heuristic",
+      request.question,
+      planMode,
+    );
+  }
   const exactCompatible = candidates.filter(
     (candidate) =>
       candidate.exactMatch && candidate.compatibility !== "incompatible",
@@ -910,6 +1046,19 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               evidence,
               candidates,
               directResolution(request, evidence, explicit, candidates),
+              "heuristic",
+              request.question,
+              options.resolvedPlanMode ?? 'authoritative',
+            );
+          }
+
+          const multiMetricPrimary = exactMultiMetricPrimary(request.question, evidence, candidates);
+          if (multiMetricPrimary) {
+            return routeDecisionForResolution(
+              base,
+              evidence,
+              candidates,
+              directResolution(request, evidence, multiMetricPrimary, candidates),
               "heuristic",
               request.question,
               options.resolvedPlanMode ?? 'authoritative',

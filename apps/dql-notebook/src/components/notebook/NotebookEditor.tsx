@@ -325,6 +325,50 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     [aiSourceCellId, datasets, dispatch],
   );
 
+  const replaceSelectedCellFromAi = useCallback(
+    (payload: InsertDqlPayload) => {
+      if (!aiSourceCellId) return;
+      const sql = (payload.sql ?? payload.dqlArtifact?.source ?? '').trim();
+      const dqlSource = payload.dqlArtifact?.source?.trim();
+      const content = dqlSource || sql;
+      if (!content) return;
+      dispatch({
+        type: 'UPDATE_CELL',
+        id: aiSourceCellId,
+        updates: {
+          type: dqlSource ? 'dql' : 'sql',
+          content,
+          name: safeCellName(payload.title ?? payload.dqlArtifact?.name ?? 'AI edited cell'),
+          ...(payload.result
+            ? { result: payload.result, status: 'success', executionCount: 1, stale: false }
+            : { result: undefined, status: 'idle', executionCount: undefined }),
+          ...(payload.chartConfig ? { chartConfig: payload.chartConfig } : {}),
+          ...(payload.dqlArtifact
+            ? {
+                dqlArtifact: {
+                  source: payload.dqlArtifact.source,
+                  sql: payload.sql,
+                  name: payload.dqlArtifact.name,
+                  sourcePath: payload.dqlArtifact.sourcePath,
+                  kind: payload.dqlArtifact.kind,
+                  metrics: payload.dqlArtifact.metrics,
+                  dimensions: payload.dqlArtifact.dimensions,
+                  parameters: payload.dqlArtifact.parameters,
+                  parameterValues: payload.dqlArtifact.parameterValues,
+                  persistence: payload.dqlArtifact.persistence,
+                  trustState: payload.dqlArtifact.trustState,
+                  compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
+                },
+                dqlParameterValues: payload.dqlArtifact.parameterValues,
+              }
+            : { dqlArtifact: undefined, dqlParameterValues: undefined }),
+        },
+      });
+      focusInsertedNotebookCell(aiSourceCellId);
+    },
+    [aiSourceCellId, dispatch],
+  );
+
   const askFromHistory = useCallback((run: NotebookResearchRun) => {
     setAiSourceCellId(run.sourceCellId ?? null);
     setAiInitialInput(run.question);
@@ -447,6 +491,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
             onToggleHistory={() => setAiHistoryOpen((open) => !open)}
             onInsertSql={insertAiSqlCell}
             onInsertDql={insertGeneratedDqlCell}
+            onReplaceDql={replaceSelectedCellFromAi}
             onAskFromHistory={askFromHistory}
             onOpenResearch={openResearchFromAgentRun}
             compact={compactWorkspace}
@@ -612,6 +657,7 @@ function NotebookAiDrawer({
   onToggleHistory,
   onInsertSql,
   onInsertDql,
+  onReplaceDql,
   onAskFromHistory,
   onOpenResearch,
   compact,
@@ -628,6 +674,7 @@ function NotebookAiDrawer({
   onToggleHistory: () => void;
   onInsertSql: (sql: string, title?: string) => void;
   onInsertDql: (payload: InsertDqlPayload) => void;
+  onReplaceDql: (payload: InsertDqlPayload) => void;
   onAskFromHistory: (run: NotebookResearchRun) => void;
   onOpenResearch: (id: string, notebookPath?: string) => void | Promise<void>;
   compact: boolean;
@@ -723,8 +770,10 @@ function NotebookAiDrawer({
           onThreadIdChange={agentThread.onThreadIdChange}
           onInsertSql={onInsertSql}
           onInsertDql={onInsertDql}
+          onReplaceDql={sourceCell ? onReplaceDql : undefined}
           answerFirstCards
           insertDqlActionLabel="Add to notebook"
+          replaceDqlActionLabel={sourceCell ? 'Replace selected cell' : undefined}
           onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
           onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}
         />
