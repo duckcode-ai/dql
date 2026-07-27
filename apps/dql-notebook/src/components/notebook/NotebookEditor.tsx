@@ -693,6 +693,10 @@ function NotebookAiDrawer({
   // resumes the same conversation.
   const agentThread = usePersistedAgentThreadId(`notebook:${notebookPath ?? 'notebook'}`);
   const [expanded, setExpanded] = useState(false);
+  const [aiRunning, setAiRunning] = useState(false);
+  // Bump to remount the panel so "New chat" clears the transcript, not just the
+  // thread id (mirrors Block Studio).
+  const [aiPanelEpoch, setAiPanelEpoch] = useState(0);
   const sourceTitle = sourceCell
     ? `${sourceCell.type.toUpperCase()} cell${sourceCell.name ? ` · ${sourceCell.name}` : ''}`
     : 'Whole notebook';
@@ -726,6 +730,8 @@ function NotebookAiDrawer({
       onToggleExpanded={() => setExpanded((value) => !value)}
       onClose={onClose}
       compact={compact}
+      onNewChat={() => { agentThread.resetThreadId(); setAiPanelEpoch((value) => value + 1); }}
+      running={aiRunning}
       ariaLabel="Notebook AI"
       headerActions={(
         <AiSidePanelAction
@@ -737,20 +743,7 @@ function NotebookAiDrawer({
           <History size={14} />
         </AiSidePanelAction>
       )}
-      style={{
-        position: compact ? 'relative' : 'absolute',
-        inset: compact ? undefined : '0 0 0 auto',
-        zIndex: 30,
-        width: compact
-          ? '100%'
-          : expanded
-            ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, calc(100% - 40px))`
-            : 'min(520px, calc(100% - 40px))',
-        maxWidth: compact ? 'none' : expanded ? '72vw' : '52vw',
-        minWidth: compact ? 0 : 400,
-        flex: "0 0 auto",
-        boxShadow: compact ? 'none' : '-16px 0 36px rgba(0,0,0,0.18)',
-      }}
+      dock="overlay"
     >
       {historyOpen && (
         <NotebookAiHistoryPanel
@@ -764,7 +757,7 @@ function NotebookAiDrawer({
 
       <div style={{ flex: 1, minHeight: 0 }}>
         <UnifiedAgentRunPanel
-          key={`auto:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}`}
+          key={`auto:${notebookPath ?? 'notebook'}:${sourceCell?.id ?? 'all'}:${aiPanelEpoch}`}
           themeMode={state.themeMode}
           title="Notebook AI"
           scopeHint={scopeHint}
@@ -776,6 +769,7 @@ function NotebookAiDrawer({
           autoRun={autoAsk ? { text: autoAsk.text, mode: 'ask', nonce: autoAsk.nonce } : undefined}
           threadId={agentThread.threadId}
           onThreadIdChange={agentThread.onThreadIdChange}
+          onRunningChange={setAiRunning}
           onInsertSql={onInsertSql}
           onInsertDql={onInsertDql}
           onReplaceDql={sourceCell ? onReplaceDql : undefined}

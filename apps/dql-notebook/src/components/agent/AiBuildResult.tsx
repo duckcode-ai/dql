@@ -42,6 +42,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
+import { controlStyle } from '../../themes/control-tokens';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import type { AiBuildResult as AiBuildResultPayload, AiBuildTarget, AiBuildMode, AiRoute, Domain, NotebookFile } from '../../store/types';
 
@@ -1101,37 +1102,11 @@ function codeBlockStyle(t: Theme): React.CSSProperties {
 }
 
 function primaryButtonStyle(t: Theme): React.CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '7px 12px',
-    borderRadius: 7,
-    border: `1px solid ${t.accent}`,
-    background: t.accent,
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: 750,
-    fontFamily: t.font,
-    cursor: 'pointer',
-  };
+  return controlStyle(t, { variant: 'primary', size: 'md' });
 }
 
 function ghostButtonStyle(t: Theme): React.CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 5,
-    padding: '7px 11px',
-    borderRadius: 7,
-    border: `1px solid ${t.btnBorder}`,
-    background: t.btnBg,
-    color: t.textSecondary,
-    fontSize: 12,
-    fontWeight: 600,
-    fontFamily: t.font,
-    cursor: 'pointer',
-  };
+  return controlStyle(t, { variant: 'ghost', size: 'md' });
 }
 
 function disclosureToggleStyle(t: Theme): React.CSSProperties {

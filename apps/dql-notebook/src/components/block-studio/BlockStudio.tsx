@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core/blocks';
-import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, Trash2, X, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, Trash2, X, type LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
+import { controlStyle } from '../../themes/control-tokens';
 import type {
   BlockStudioDiagnostic,
   DatabaseSchemaNode,
@@ -121,7 +122,7 @@ const TREE_OVERSCAN = 10;
 export function BlockStudio() {
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
-  const [draftSessionId, setDraftSessionId] = useState(() => makeBlockStudioDraftId());
+  const [draftSessionId, setDraftSessionId] = useState(() => readBlockStudioDraftId());
   const agentScope = state.activeBlockPath
     ? `block-studio.block.${encodeURIComponent(state.activeBlockPath)}`
     : `block-studio.draft.${draftSessionId}`;
@@ -483,21 +484,30 @@ export function BlockStudio() {
     setEditorMode('visual');
   };
 
-  // "New block" opens the builder form directly (defaulting to a semantic
-  // draft — the Query section toggles to Raw SQL) rather than the start page.
-  const resetNewWorkspace = () => {
+  const resetToBlockStudioHome = () => {
     dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
     setDraftSessionId(makeBlockStudioDraftId());
     setImportSession(null);
-    beginManualDraft('semantic');
+    setWorkspaceMode('start');
+    setEditorMode('visual');
   };
 
-  const beginNewWorkspace = () => {
+  // Return to the Block Studio home — the page that offers the three ways in
+  // (Ask AI / Import SQL / Build manually). After saving a block there was no
+  // route back to where that choice is made.
+  const goToBlockStudioHome = () => {
     if (state.blockStudioDirty) {
       setDirtyGuardOpen(true);
       return;
     }
-    resetNewWorkspace();
+    resetToBlockStudioHome();
+  };
+
+  // "New block" now lands on the home page rather than jumping straight into the
+  // manual form: after saving a block the user had no route back to the place
+  // where the AI / import / manual choice is made.
+  const beginNewWorkspace = () => {
+    goToBlockStudioHome();
   };
 
   const beginManualDraft = (type: 'custom' | 'semantic') => {
@@ -709,7 +719,7 @@ export function BlockStudio() {
     void handleSave().then((saved) => {
       if (saved && newAfterSaveRef.current) {
         newAfterSaveRef.current = false;
-        resetNewWorkspace();
+        resetToBlockStudioHome();
       }
     });
   }, [state.blockStudioMetadata?.name, state.blockStudioMetadata?.owner, state.blockStudioDraft]);
@@ -1124,7 +1134,18 @@ export function BlockStudio() {
               ›
             </button>
           )}
-          <span style={{ fontSize: 12, color: t.textMuted, fontFamily: t.font, whiteSpace: 'nowrap' }}>Blocks</span>
+          {/* The breadcrumb root is the way BACK. It was a plain span, so once you
+              were inside a block or a draft there was no route to the Block Studio
+              home other than picking some other block from the explorer. */}
+          <button
+            type="button"
+            onClick={goToBlockStudioHome}
+            title="Back to Block Studio"
+            className="dql-hover"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'transparent', border: 'none', padding: '2px 4px', margin: '0 -4px', borderRadius: 6, color: t.textMuted, fontSize: 12, fontFamily: t.font, whiteSpace: 'nowrap', cursor: 'pointer' }}
+          >
+            <ChevronLeft size={12} strokeWidth={2} /> Blocks
+          </button>
           <ChevronRight size={11} color={t.textMuted} style={{ flexShrink: 0 }} />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: t.textPrimary, fontFamily: t.fontMono, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 220 }}>
             {activeBlockName || state.blockStudioMetadata?.name || (hasActiveDraft ? 'new_block' : (isSemanticBlock ? 'semantic' : 'sql'))}
@@ -1147,14 +1168,13 @@ export function BlockStudio() {
           )}
           <div style={{ flex: 1 }} />
           {state.activeBlockPath && (
-            <button
-              type="button"
-              onClick={() => requestDeleteBlock(state.activeBlockPath!, state.blockStudioMetadata?.name || activeBlockName || state.activeBlockPath!)}
+            <TemplateButton
+              label="Delete"
+              Icon={Trash2}
+              variant="danger"
               title="Delete this saved block"
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 28, padding: '0 9px', borderRadius: 7, border: `1px solid ${t.error}55`, background: `${t.error}0d`, color: t.error, fontSize: 11.5, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, whiteSpace: 'nowrap' }}
-            >
-              <Trash2 size={13} strokeWidth={2} /> Delete
-            </button>
+              onClick={() => requestDeleteBlock(state.activeBlockPath!, state.blockStudioMetadata?.name || activeBlockName || state.activeBlockPath!)}
+            />
           )}
           <TemplateButton label="New block" Icon={Plus} onClick={beginNewWorkspace} />
           {hasActiveDraft && (
@@ -1173,14 +1193,14 @@ export function BlockStudio() {
                   onClick={() => openAskAi({ kind: 'edit', initialInput: `Modify this block${activeBlockName ? ` (${activeBlockName})` : ''}: ` })}
                 />
               )}
-              <TemplateButton label="Run" onClick={() => void handleRun()} busy={running} />
-              <button
-                type="button"
+              <TemplateButton label="Run" Icon={Play} onClick={() => void handleRun()} busy={running} />
+              <TemplateButton
+                label={saving ? 'Saving' : 'Save draft'}
+                Icon={CheckCircle2}
+                variant="primary"
+                busy={saving}
                 onClick={() => void handleSave()}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 13px', borderRadius: 999, border: `1px solid ${t.accent}`, background: t.accent, color: '#ffffff', fontSize: 12, fontWeight: 650, cursor: 'pointer', fontFamily: t.font, boxShadow: '0 1px 2px rgba(107,93,211,0.25)', opacity: saving ? 0.7 : 1, whiteSpace: 'nowrap' }}
-              >
-                {saving ? 'Saving & refreshing…' : 'Save draft'}
-              </button>
+              />
             </>
           )}
           {saveError && (
@@ -1595,7 +1615,7 @@ export function BlockStudio() {
           onCancel={() => setDirtyGuardOpen(false)}
           onDiscard={() => {
             setDirtyGuardOpen(false);
-            resetNewWorkspace();
+            resetToBlockStudioHome();
           }}
           onSave={async () => {
             newAfterSaveRef.current = true;
@@ -1603,7 +1623,7 @@ export function BlockStudio() {
             const saved = await handleSave();
             if (saved) {
               newAfterSaveRef.current = false;
-              resetNewWorkspace();
+              resetToBlockStudioHome();
             }
           }}
           t={t}
@@ -1636,25 +1656,35 @@ function ExplorerTabButton({
   busy,
   Icon,
   variant = 'secondary',
+  title,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
   busy?: boolean;
   Icon?: LucideIcon;
-  variant?: 'primary' | 'secondary';
+  variant?: 'primary' | 'secondary' | 'danger';
+  title?: string;
 }) {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
   const primary = variant === 'primary';
+  const danger = variant === 'danger';
+  // One shape for every toolbar control — same height, radius, icon size and
+  // label weight. Only colour carries the meaning (accent = commit, red =
+  // destructive, neutral = navigate). Delete and Save were previously bespoke
+  // inline styles with their own heights and radii, which is what made the
+  // toolbar read as a row of mismatched boxes.
   return (
     <button
       onClick={onClick}
+      title={title ?? label}
       style={{
-        background: primary ? t.accent : active ? `${t.accent}18` : t.btnBg,
-        border: `1px solid ${primary || active ? t.accent : t.btnBorder}`,
+        background: primary ? t.accent : danger ? `${t.error}0d` : active ? `${t.accent}18` : t.btnBg,
+        border: `1px solid ${primary ? t.accent : danger ? `${t.error}55` : active ? t.accent : t.btnBorder}`,
         borderRadius: 6,
-        color: primary ? '#ffffff' : active ? t.accent : t.textSecondary,
+        height: 28,
+        color: primary ? '#ffffff' : danger ? t.error : active ? t.accent : t.textSecondary,
         cursor: 'pointer',
         display: 'inline-flex',
         alignItems: 'center',
@@ -1662,7 +1692,8 @@ function ExplorerTabButton({
         fontSize: 11,
         fontWeight: primary ? 800 : 600,
         fontFamily: t.font,
-        padding: '6px 10px',
+        padding: '0 10px',
+        whiteSpace: 'nowrap',
         opacity: busy ? 0.7 : 1,
       }}
     >
@@ -1672,7 +1703,7 @@ function ExplorerTabButton({
   );
 }
 
-function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean; Icon?: LucideIcon; variant?: 'primary' | 'secondary' }) {
+function TemplateButton(props: { label: string; onClick: () => void; busy?: boolean; Icon?: LucideIcon; variant?: 'primary' | 'secondary' | 'danger'; title?: string }) {
   return <ExplorerTabButton active={false} {...props} />;
 }
 
@@ -1771,18 +1802,7 @@ function OutputTab({ active, onClick, label, t }: { active: boolean; onClick: ()
 
 // Prototype segmented toggle: 2px-padded track, active = accent tint + accent text.
 function editorModeButtonStyle(t: Theme, active: boolean): React.CSSProperties {
-  return {
-    border: 'none',
-    borderRadius: 5,
-    background: active ? 'var(--accent-dim)' : 'transparent',
-    color: active ? t.accent : t.textMuted,
-    cursor: 'pointer',
-    fontSize: 11.5,
-    fontWeight: 600,
-    fontFamily: t.font,
-    padding: '4px 10px',
-    whiteSpace: 'nowrap' as const,
-  };
+  return controlStyle(t, { variant: active ? 'accent' : 'ghost', size: 'xs', active });
 }
 
 // Prototype semantic chips: pill radius, mono identifiers, accent tint when selected.
@@ -5757,8 +5777,26 @@ SELECT 1 AS value
 `;
 }
 
+const BLOCK_STUDIO_DRAFT_SESSION_KEY = 'dql.block-studio.draft-session';
+
 function makeBlockStudioDraftId(): string {
-  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  try { window.localStorage.setItem(BLOCK_STUDIO_DRAFT_SESSION_KEY, id); } catch { /* ignore */ }
+  return id;
+}
+
+/**
+ * The unsaved-draft session id, stable across navigation. It scopes the Block AI
+ * conversation thread, so minting a fresh one on every mount silently discarded
+ * the conversation (and any in-flight run) each time the user left Block Studio
+ * and came back. Only an explicit "new block" or a delete starts a new session.
+ */
+function readBlockStudioDraftId(): string {
+  try {
+    const stored = window.localStorage.getItem(BLOCK_STUDIO_DRAFT_SESSION_KEY)?.trim();
+    if (stored) return stored;
+  } catch { /* ignore */ }
+  return makeBlockStudioDraftId();
 }
 
 function readBlockStudioDomain(): string {

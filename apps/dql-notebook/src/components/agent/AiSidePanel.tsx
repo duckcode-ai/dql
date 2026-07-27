@@ -18,6 +18,13 @@ interface AiSidePanelProps {
   running?: boolean;
   compact?: boolean;
   floating?: boolean;
+  /**
+   * How the panel sits in its surface. Geometry lives HERE, not in each caller,
+   * so Notebook AI / Block AI / App AI are literally the same panel at the same
+   * size. They previously hand-rolled their own widths (520 vs 420 vs CSS), so
+   * the "same" copilot looked different on every screen.
+   */
+  dock?: 'column' | 'overlay';
   ariaLabel?: string;
   className?: string;
   style?: CSSProperties;
@@ -37,6 +44,7 @@ export function AiSidePanel({
   running = false,
   compact = false,
   floating = false,
+  dock = 'column',
   ariaLabel = title,
   className,
   style,
@@ -54,6 +62,23 @@ export function AiSidePanel({
         flexDirection: 'column',
         overflow: 'hidden',
         background: t.cellBg,
+        ...(dock === 'overlay' && !compact
+          ? {
+              position: 'absolute' as const,
+              inset: '0 0 0 auto',
+              zIndex: 30,
+              width: expanded
+                ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, calc(100% - 40px))`
+                : `min(${AI_SIDE_PANEL_WIDTH}px, calc(100% - 40px))`,
+              maxWidth: expanded ? '72vw' : '52vw',
+              minWidth: Math.min(AI_SIDE_PANEL_WIDTH, 400),
+              flex: '0 0 auto',
+              boxShadow: '-16px 0 36px rgba(0,0,0,0.18)',
+            }
+          : {}),
+        ...(dock === 'overlay' && compact
+          ? { position: 'relative' as const, width: '100%', flex: '0 0 auto' }
+          : {}),
         borderLeft: compact ? 'none' : `1px solid ${t.headerBorder}`,
         border: floating ? `1px solid ${t.headerBorder}` : undefined,
         borderRadius: floating ? 12 : undefined,

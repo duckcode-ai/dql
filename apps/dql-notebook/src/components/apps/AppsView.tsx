@@ -1830,6 +1830,7 @@ function UnifiedAppAiPanel({
   const appId = app?.id ?? appDoc?.app.id ?? 'app';
   const dashboardId = dashboard?.id ?? 'dashboard';
   const agentThread = usePersistedAgentThreadId(`app:${appId}:${dashboardId}`);
+  const [appAiRunning, setAppAiRunning] = useState(false);
   const appTitle = formatBusinessLabel(app?.name ?? appDoc?.app.name ?? dashboard?.metadata.title ?? 'App workspace');
   const dashboardTitle = formatBusinessLabel(dashboard?.metadata.title ?? 'Dashboard');
   const scopeHint = selectedBlock
@@ -1871,6 +1872,8 @@ function UnifiedAppAiPanel({
       expanded={expanded}
       onToggleExpanded={onToggleExpanded}
       onClose={onClose}
+      onNewChat={agentThread.resetThreadId}
+      running={appAiRunning}
       ariaLabel="App AI"
       className="dql-app-explain-panel dql-app-assistant-panel"
     >
@@ -1886,6 +1889,7 @@ function UnifiedAppAiPanel({
         autoRun={askSeed?.text ? { text: askSeed.text, mode: 'ask', nonce: askSeed.nonce } : undefined}
         threadId={agentThread.threadId}
         onThreadIdChange={agentThread.onThreadIdChange}
+        onRunningChange={setAppAiRunning}
         answerFirstCards
         examplePrompts={[
           { label: 'Explain this dashboard', prompt: 'Explain the most important business story in this dashboard and what action it suggests.' },
@@ -6354,7 +6358,8 @@ const APP_STYLES = `
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  background: linear-gradient(180deg, var(--dql-app-surface), var(--dql-app-surface-muted));
+  /* No background override: the shared AiSidePanel owns the surface so App AI,
+     Notebook AI and Block AI read as the same panel rather than three skins. */
 }
 
 .dql-app-assistant-top {

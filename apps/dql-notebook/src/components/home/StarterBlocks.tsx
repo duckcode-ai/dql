@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { TrustBadge } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
+import { controlStyle } from '../../themes/control-tokens';
 import { useNotebook } from '../../store/NotebookStore';
 import type { Theme } from '../../themes/notebook-theme';
 import type { ProposeReadiness, ProposePlanCandidate } from '../../store/types';
@@ -469,35 +470,9 @@ const footerStyle = (t: Theme): CSSProperties => ({
   paddingTop: 12,
 });
 
-const primaryBtnStyle = (t: Theme): CSSProperties => ({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 7,
-  padding: '8px 14px',
-  borderRadius: 8,
-  border: `1px solid ${t.accent}`,
-  background: t.accent,
-  color: 'var(--accent-on, #fff)',
-  fontSize: 12.5,
-  fontWeight: 720,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-});
+const primaryBtnStyle = (t: Theme): CSSProperties => controlStyle(t, { variant: 'primary', size: 'md' });
 
-const ghostBtnStyle = (t: Theme): CSSProperties => ({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 7,
-  padding: '8px 13px',
-  borderRadius: 8,
-  border: `1px solid ${t.cellBorder}`,
-  background: 'transparent',
-  color: t.textSecondary,
-  fontSize: 12.5,
-  fontWeight: 650,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-});
+const ghostBtnStyle = (t: Theme): CSSProperties => controlStyle(t, { variant: 'ghost', size: 'md' });
 
 const skeletonWrapStyle: CSSProperties = { display: 'grid', gap: 8 };
 

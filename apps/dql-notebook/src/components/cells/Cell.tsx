@@ -13,6 +13,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { makeCell, useNotebook } from "../../store/NotebookStore";
+import { controlStyle } from '../../themes/control-tokens';
 import { themes } from "../../themes/notebook-theme";
 import { useQueryExecution } from "../../hooks/useQueryExecution";
 import { SQLCellEditor, type SQLCellEditorHandle } from "./SQLCellEditor";
@@ -2644,26 +2645,10 @@ function cellHeaderTextButtonStyle(
   t: Theme,
   tone: "default" | "accent" | "danger" = "default",
 ): React.CSSProperties {
-  const isAccent = tone === "accent";
-  const isDanger = tone === "danger";
-  return {
-    height: 24,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    border: `1px solid ${isAccent ? t.accent : isDanger ? `${t.error}80` : t.btnBorder}`,
-    borderRadius: 5,
-    background: isAccent ? `${t.accent}12` : 'transparent',
-    color: isAccent ? t.accent : isDanger ? t.error : t.textMuted,
-    fontSize: 10,
-    fontFamily: t.font,
-    fontWeight: 700,
-    letterSpacing: 0,
-    lineHeight: 1,
-    padding: '0 8px',
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  };
+  return controlStyle(t, {
+    variant: tone === 'accent' ? 'accent' : tone === 'danger' ? 'danger' : 'secondary',
+    size: 'xs',
+  });
 }
 
 function ExploreStepButton({
