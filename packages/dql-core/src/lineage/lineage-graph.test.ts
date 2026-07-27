@@ -515,6 +515,18 @@ describe('queryLineage', () => {
     );
 
     const result = queryLineage(graph, { focus: 'monthly_revenue', upstreamDepth: 1, downstreamDepth: 1 });
+
+    // A focus that does not resolve must NOT fall through to the whole project.
+    // A notebook AI block is transient — never saved under blocks/ — so
+    // `block:<name>` is not a node, and this used to return EVERY node, which
+    // rendered in the cell as unrelated "demo" lineage.
+    const unresolved = queryLineage(graph, { focus: 'block:transient_ai_block', upstreamDepth: 1, downstreamDepth: 1 });
+    expect(unresolved.focalNode).toBeUndefined();
+    expect(unresolved.graph.nodes).toHaveLength(0);
+    expect(unresolved.graph.edges).toHaveLength(0);
+    // No focus at all still means the whole graph (the DAG page relies on it).
+    expect(queryLineage(graph, {}).graph.nodes.length).toBeGreaterThan(0);
+
     const ids = new Set(result.graph.nodes.map((node) => node.id));
     expect(ids.has('block:monthly_revenue')).toBe(true);
     expect(ids.has('block:base_orders')).toBe(true);

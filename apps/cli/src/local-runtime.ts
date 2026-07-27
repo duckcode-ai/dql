@@ -23,6 +23,7 @@ import {
   normalize,
   relative,
   resolve,
+  sep,
 } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
@@ -8161,6 +8162,54 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // DELETE /api/notebooks?path=notebooks/x.dqlnb — remove a notebook file.
+    // Deliberately narrow: only .dqlnb/.dql files under notebooks/, resolved and
+    // re-checked against the project root so a crafted path cannot escape it.
+    if (req.method === 'DELETE' && path === '/api/notebooks') {
+      try {
+        const relativePath = url.searchParams.get('path')?.trim();
+        if (!relativePath) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Missing notebook path.' }));
+          return;
+        }
+        const normalized = relativePath.replace(/\\/g, '/').replace(/^\.\//, '');
+        if (!normalized.startsWith('notebooks/') || !/\.(dqlnb|dql)$/i.test(normalized) || normalized.includes('..')) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Only notebook files under notebooks/ can be deleted.' }));
+          return;
+        }
+        const absolute = resolve(projectRoot, normalized);
+        const rootPrefix = `${resolve(projectRoot)}${sep}`;
+        if (!absolute.startsWith(rootPrefix)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Path escapes the project root.' }));
+          return;
+        }
+        if (!existsSync(absolute)) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Notebook not found.' }));
+          return;
+        }
+        rmSync(absolute, { force: true });
+        // Drop the run-state sidecar too, or the next notebook created with the
+        // same slug inherits the deleted one's cached results.
+        const sidecar = absolute.replace(/\.(dqlnb|dql)$/i, '.run.json');
+        if (sidecar !== absolute) rmSync(sidecar, { force: true });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, path: normalized }));
+      } catch (error) {
+        if (error instanceof DQLAccessDeniedError) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: error.message, code: 'unauthorized' }));
+          return;
+        }
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }

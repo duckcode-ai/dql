@@ -491,8 +491,22 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       if (state.files.some((f) => f.path === action.file.path)) return state;
       return { ...state, files: [...state.files, action.file] };
 
-    case 'FILE_REMOVED':
-      return { ...state, files: state.files.filter((file) => file.path !== action.path) };
+    case 'FILE_REMOVED': {
+      const files = state.files.filter((file) => file.path !== action.path);
+      // Deleting the file that is currently open must also close it, or the
+      // editor keeps rendering a notebook that no longer exists and the next
+      // save recreates it.
+      if (state.activeFile?.path !== action.path) return { ...state, files };
+      return {
+        ...state,
+        files,
+        activeFile: null,
+        cells: [],
+        notebookTitle: '',
+        notebookMetadata: {},
+        notebookDirty: false,
+      };
+    }
 
     case 'SET_TABLE_COLUMNS':
       return {

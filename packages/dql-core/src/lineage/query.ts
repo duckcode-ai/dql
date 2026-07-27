@@ -133,6 +133,13 @@ export function queryLineage(graph: LineageGraph, query: LineageQuery): LineageQ
   const matches = query.search ? searchLineage(graph, query.search) : [];
   const focalNode = query.focus ? resolveFocusNode(graph, query.focus) : undefined;
 
+  // A focus that does not resolve must NOT silently widen to the whole project.
+  // It used to: asking for `block:<transient AI block>` — which is never in the
+  // graph, because notebook AI blocks are unsaved — returned every node in the
+  // project, so a cell displayed an unrelated project-wide graph that looked like
+  // demo data. An unresolvable focus is an empty result; callers detect it via
+  // `focalNode === undefined`.
+  const focusRequested = Boolean(query.focus);
   let resultGraph = focalNode
     ? buildFocusedSubgraph(
         graph,
@@ -140,7 +147,9 @@ export function queryLineage(graph: LineageGraph, query: LineageQuery): LineageQ
         query.upstreamDepth,
         query.downstreamDepth,
       )
-    : graph;
+    : focusRequested
+      ? graph.subgraph(() => false)
+      : graph;
 
   if (query.types?.length || query.domain) {
     const allowedTypes = query.types ? new Set(query.types) : null;

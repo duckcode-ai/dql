@@ -436,6 +436,13 @@ function LineageDetailBlock({ title, t, children }: { title: string; t: Theme; c
 interface CellLineageProps {
   cellContent: string;
   cellType: 'sql' | 'dql';
+  /**
+   * Compiled SQL behind a DQL cell. An AI-generated DQL block is TRANSIENT — it
+   * is not saved under blocks/, so `block:<name>` is not a project lineage node
+   * and there is no saved graph to focus. Its real lineage lives in the SQL it
+   * compiles to, so we read the sources from there instead of showing nothing.
+   */
+  compiledSql?: string;
   cellId?: string;
   cellName?: string;
   cells?: Cell[];
@@ -445,7 +452,7 @@ interface CellLineageProps {
   onFocusNode?: (nodeId: string) => void;
 }
 
-export function CellLineage({ cellContent, cellType, cellId, cellName, cells, themeMode, t, onFocusNode }: CellLineageProps) {
+export function CellLineage({ cellContent, cellType, compiledSql, cellId, cellName, cells, themeMode, t, onFocusNode }: CellLineageProps) {
   const [expanded, setExpanded] = useState(false);
   const [graphHeight, setGraphHeight] = useState(380);
   const graphHeightRef = useRef(graphHeight);
@@ -459,7 +466,27 @@ export function CellLineage({ cellContent, cellType, cellId, cellName, cells, th
   const [businessMatches, setBusinessMatches] = useState<BusinessContextMatch[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  const sqlSummary = useMemo(() => analyzeSqlLineage(cellContent), [cellContent]);
+  // A DQL cell has TWO halves of its lineage and neither alone is complete:
+  // the block source declares the governed metrics/dimensions, while the physical
+  // relations only appear in the SQL it compiles to. Read the compiled SQL for
+  // structure and merge the block's own semantic references back in, so the panel
+  // reflects THIS block's logic rather than the project at large.
+  const sqlSummary = useMemo(() => {
+    const isDql = cellType === 'dql';
+    const compiled = compiledSql?.trim();
+    if (!isDql || !compiled) return analyzeSqlLineage(cellContent);
+    const fromCompiled = analyzeSqlLineage(compiled);
+    const fromBlock = analyzeSqlLineage(cellContent);
+    const merge = (left: string[], right: string[]) => [...new Set([...left, ...right])];
+    return {
+      ...fromCompiled,
+      semanticRefs: {
+        metrics: merge(fromBlock.semanticRefs.metrics, fromCompiled.semanticRefs.metrics),
+        dimensions: merge(fromBlock.semanticRefs.dimensions, fromCompiled.semanticRefs.dimensions),
+      },
+      outputs: fromCompiled.outputs.length > 0 ? fromCompiled.outputs : fromBlock.outputs,
+    };
+  }, [cellType, cellContent, compiledSql]);
   const downstreamCells = useMemo(
     () => findDownstreamCells(cells, cellId, cellName),
     [cells, cellId, cellName],
@@ -468,67 +495,71 @@ export function CellLineage({ cellContent, cellType, cellId, cellName, cells, th
   const lookupName = blockName || cellName;
   const isSqlCell = cellType === 'sql';
 
+  /** Resolve the governed business nodes behind the relations this cell reads. */
+  const loadBusinessMatchesFromSql = useCallback(async () => {
+    const tableSources = sqlSummary.sources.filter((source) => source.kind !== 'cte').slice(0, 6);
+    const scopedMatches = await Promise.all(
+      tableSources.map(async (source) => {
+        const searchName = source.name.split('.').pop() || source.name;
+        const result = await api.searchLineage(searchName);
+        return (result.matches ?? [])
+          .filter(({ node }) => node && BUSINESS_CONTEXT_TYPES.has(String(node.type)))
+          .slice(0, 3)
+          .map(({ node, score }) => ({ source: source.name, node: node as LineageNode, score }));
+      }),
+    );
+    const seen = new Set<string>();
+    setBusinessMatches(
+      scopedMatches
+        .flat()
+        .filter((match) => {
+          const key = `${match.source}:${match.node.id}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .slice(0, 8),
+    );
+  }, [sqlSummary.sources]);
+
   const loadLineage = useCallback(async () => {
     if (!lookupName && cellType !== 'sql') return;
-
     setLoading(true);
     setError(null);
-
     try {
       if (isSqlCell) {
         setGraphNodes([]);
         setGraphEdges([]);
         setFocalNodeId(undefined);
         setPathResult(null);
-
-        const tableSources = sqlSummary.sources.filter((source) => source.kind !== 'cte').slice(0, 6);
-        const scopedMatches = await Promise.all(
-          tableSources.map(async (source) => {
-            const searchName = source.name.split('.').pop() || source.name;
-            const result = await api.searchLineage(searchName);
-            return (result.matches ?? [])
-              .filter(({ node }) => node && BUSINESS_CONTEXT_TYPES.has(String(node.type)))
-              .slice(0, 3)
-              .map(({ node, score }) => ({ source: source.name, node: node as LineageNode, score }));
-          }),
-        );
-        const seen = new Set<string>();
-        setBusinessMatches(
-          scopedMatches
-            .flat()
-            .filter((match) => {
-              const key = `${match.source}:${match.node.id}`;
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            })
-            .slice(0, 8),
-        );
+        await loadBusinessMatchesFromSql();
         return;
       }
 
       if (lookupName) {
         const nodeId = `block:${lookupName}`;
         setFocalNodeId(nodeId);
-
-        // Parallel fetch: focused subgraph + complete paths.
-        // Cap depth so dense fan-outs stay legible inside the cell.
-        // Users can click "View in DAG" for the full graph.
         const [graphResult, paths] = await Promise.all([
           api.queryLineage({ focus: nodeId, upstreamDepth: 2, downstreamDepth: 2 }),
-          api.fetchLineagePaths(nodeId),
+          api.fetchLineagePaths(nodeId).catch(() => null),
         ]);
-
-        if (graphResult?.graph) {
-          setGraphNodes(graphResult.graph.nodes ?? []);
-          setGraphEdges(graphResult.graph.edges ?? []);
-        }
-        if (paths) {
-          setPathResult(paths);
+        const resolved = Boolean(graphResult?.focalNode) && (graphResult?.graph?.nodes?.length ?? 0) > 0;
+        if (resolved) {
+          setGraphNodes(graphResult.graph?.nodes ?? []);
+          setGraphEdges(graphResult.graph?.edges ?? []);
+          if (paths) setPathResult(paths);
+        } else {
+          // Transient AI block: no saved project node to focus, so show the
+          // relations its compiled SQL actually reads. An unresolved focus used
+          // to return the ENTIRE project graph, which rendered as an unrelated
+          // "demo" lineage with nothing to do with this cell.
+          setFocalNodeId(undefined);
+          setGraphNodes([]);
+          setGraphEdges([]);
+          setPathResult(null);
+          await loadBusinessMatchesFromSql();
         }
       } else {
-        // Unnamed DQL-like executable fallback: avoid loading app lineage unless
-        // there is a real project node to focus.
         setFocalNodeId(undefined);
         setGraphNodes([]);
         setGraphEdges([]);
@@ -538,7 +569,7 @@ export function CellLineage({ cellContent, cellType, cellId, cellName, cells, th
     } finally {
       setLoading(false);
     }
-  }, [lookupName, cellType, isSqlCell, sqlSummary.sources]);
+  }, [lookupName, cellType, isSqlCell, loadBusinessMatchesFromSql]);
 
   useEffect(() => {
     if (expanded) {

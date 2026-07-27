@@ -2314,6 +2314,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
           <CellLineage
             cellContent={cell.content}
             cellType={cell.type as 'sql' | 'dql'}
+            compiledSql={cell.dqlArtifact?.compiledSql ?? cell.dqlArtifact?.sql}
             cellId={cell.id}
             cellName={cell.name}
             cells={state.cells}

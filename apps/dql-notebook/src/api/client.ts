@@ -3020,6 +3020,10 @@ export const api = {
     );
   },
 
+  async deleteNotebook(path: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+    return request(`/api/notebooks?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+  },
+
   async createNotebook(
     name: string,
     template: string

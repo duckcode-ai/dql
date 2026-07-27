@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Hash, KeyRound, Layers, Link2, Plus, Search, Trash2, Type } from 'lucide-react';
 import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
+import { controlStyle } from '../../themes/control-tokens';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { ExecutionTarget, NotebookFile, SchemaTable } from '../../store/types';
 import { DataSourceIcon, describeSchemaObject } from './DataSourceIcon';
@@ -199,9 +200,31 @@ function columnRelation(colName: string, tableName: string): 'pk' | 'fk' | undef
 
 function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: NotebookFile) => void }) {
   const { state, dispatch } = useNotebook();
+  const [pendingDelete, setPendingDelete] = useState<NotebookFile | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const notebooks = Array.from(
     new Map(state.files.filter((f) => f.type === 'notebook').map((f) => [f.path, f])).values(),
   ).sort((a, b) => a.name.localeCompare(b.name));
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await api.deleteNotebook(pendingDelete.path);
+      if (!result.ok) {
+        setDeleteError(result.error ?? 'Could not delete this notebook.');
+        return;
+      }
+      dispatch({ type: 'FILE_REMOVED', path: pendingDelete.path });
+      setPendingDelete(null);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleting(false);
+    }
+  };
   return (
     <div>
       <button
@@ -219,20 +242,92 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
         <EmptyNote text="No notebooks yet. Create one to start building." t={t} />
       ) : (
         notebooks.map((file) => (
-          <button
-            key={file.path}
-            type="button"
-            onClick={() => onOpenFile(file)}
-            style={rowStyle(t, state.activeFile?.path === file.path)}
-            title={file.path}
-          >
-            <FileText size={13} color={t.textMuted} style={{ flexShrink: 0 }} />
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
-              {file.name.replace(/\.dqln?$|\.ipynb$/i, '')}
-            </span>
-          </button>
+          <div key={file.path} style={{ position: 'relative', display: 'flex', alignItems: 'center' }} className="dql-nb-row">
+            <button
+              type="button"
+              onClick={() => onOpenFile(file)}
+              style={{ ...rowStyle(t, state.activeFile?.path === file.path), paddingRight: 30 }}
+              title={file.path}
+            >
+              <FileText size={13} color={t.textMuted} style={{ flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
+                {file.name.replace(/\.dqln?$|\.ipynb$/i, '')}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="dql-nb-delete"
+              onClick={(event) => { event.stopPropagation(); setDeleteError(null); setPendingDelete(file); }}
+              title={`Delete ${file.name}`}
+              aria-label={`Delete ${file.name}`}
+              style={{
+                position: 'absolute', right: 6, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 22, height: 22, borderRadius: 5, border: '1px solid transparent',
+                background: 'transparent', color: t.textMuted, cursor: 'pointer', padding: 0,
+              }}
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
         ))
       )}
+      {/* Reveal the destructive action on hover only, and colour it red on
+          approach — the row's primary action is opening the notebook. */}
+      <style>{`
+        .dql-nb-delete { opacity: 0; transition: opacity .12s, color .12s, background .12s, border-color .12s; }
+        .dql-nb-row:hover .dql-nb-delete { opacity: 1; }
+        .dql-nb-delete:hover { color: ${t.error} !important; background: ${t.error}12 !important; border-color: ${t.error}44 !important; }
+        .dql-nb-delete:focus-visible { opacity: 1; }
+      `}</style>
+      {pendingDelete ? (
+        <DeleteNotebookDialog
+          file={pendingDelete}
+          t={t}
+          busy={deleting}
+          error={deleteError}
+          onCancel={() => { setPendingDelete(null); setDeleteError(null); }}
+          onConfirm={() => void confirmDelete()}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/** Deleting a notebook removes the file from disk, so it asks first. */
+function DeleteNotebookDialog({
+  file, t, busy, error, onCancel, onConfirm,
+}: {
+  file: NotebookFile;
+  t: Theme;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Delete ${file.name}`}
+      onClick={onCancel}
+      style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(15,23,42,0.34)', display: 'grid', placeItems: 'center' }}
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        style={{ width: 'min(420px, calc(100vw - 40px))', background: t.cellBg, border: `1px solid ${t.headerBorder}`, borderRadius: 12, padding: 18, display: 'grid', gap: 10, boxShadow: '0 18px 60px rgba(15,23,42,0.22)' }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Delete this notebook?</div>
+        <div style={{ fontSize: 12.5, color: t.textSecondary, fontFamily: t.font, lineHeight: 1.5 }}>
+          <code style={{ fontFamily: t.fontMono, fontSize: 12 }}>{file.path}</code> will be removed from disk. Blocks and metrics it referenced are not affected.
+        </div>
+        {error ? <div style={{ fontSize: 12, color: t.error, fontFamily: t.font }}>{error}</div> : null}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
+          <button type="button" onClick={onCancel} disabled={busy} style={controlStyle(t, { variant: 'secondary', size: 'md', disabled: busy })}>Cancel</button>
+          <button type="button" onClick={onConfirm} disabled={busy} style={controlStyle(t, { variant: 'danger', size: 'md', disabled: busy })}>
+            {busy ? 'Deleting…' : 'Delete notebook'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
