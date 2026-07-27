@@ -221,9 +221,13 @@ export function validateSqlAgainstLocalContext(
   // AGT-015 / E2E-014: validate ambiguity inside every SELECT/CTE scope before
   // the warehouse binder sees it. Scope-local aliases prevent false positives
   // between an inner CTE and its outer consumer.
+  // A CTE that shares a name with a real relation must never be treated as that
+  // relation's owner — `WITH orders AS (...) ... FROM orders o JOIN dw.customers`
+  // would otherwise report a phantom conflict now that partial relations count.
   const ambiguousColumn = findScopeAwareAmbiguousColumn(
     analysis.scopes ?? [],
     allowed,
+    new Set((analysis.ctes ?? []).flatMap(relationLookupKeys)),
   );
   if (ambiguousColumn) {
     return {
@@ -463,16 +467,25 @@ function findAmbiguousUnqualifiedColumn(
   columns: Array<{ column: string; relation?: string; unqualified: boolean; outputAliasReference?: boolean }>,
   aliasToRelation: Record<string, string>,
   allowed: Map<string, MetadataAllowedSqlRelation>,
+  cteNames?: Set<string>,
 ): { column: string; owners: string[] } | undefined {
   for (const column of columns) {
     if (!column.unqualified || column.outputAliasReference || column.column === '*') continue;
     const owners = Object.entries(aliasToRelation)
-      .filter(([, relationName]) => {
+      // Ambiguity does NOT need complete column knowledge. Truncation can hide a
+      // column, never invent one — so two relations that BOTH list the name are
+      // genuinely ambiguous whether or not their column lists were capped. This
+      // conjunct used to require `complete`, which meant every relation wider
+      // than MAX_ALLOWED_SQL_COLUMNS (the enterprise fact tables that carry
+      // report_as_of_date) was silently excluded and the guard never fired.
+      // Completeness stays load-bearing for findUnknownColumn, where a missing
+      // column really is unprovable.
+      .filter(([alias, relationName]) => {
+        if (cteNames && (relationLookupKeys(relationName).some((key) => cteNames.has(key)) || cteNames.has(alias.toLowerCase()))) return false;
         const relation = findAllowedRelation(allowed, relationName);
         return Boolean(
           relation
           && relation.columns.length > 0
-          && relationColumnCompleteness(relation) === 'complete'
           && relation.columns.some((candidate) => namesEqual(candidate.name, column.column)),
         );
       })
@@ -490,6 +503,7 @@ function findScopeAwareAmbiguousColumn(
     outputAliases: string[];
   }>,
   allowed: Map<string, MetadataAllowedSqlRelation>,
+  cteNames?: Set<string>,
 ): { column: string; owners: string[] } | undefined {
   if (scopes.length === 0) return undefined;
   for (const scope of scopes) {
@@ -497,6 +511,7 @@ function findScopeAwareAmbiguousColumn(
       scope.columns,
       scope.aliasToRelation,
       allowed,
+      cteNames,
     );
     if (ambiguous) return ambiguous;
   }

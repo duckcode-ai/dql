@@ -1174,7 +1174,15 @@ export class SemanticLayer {
     }
 
     if ((options.orderBy ?? []).length > 0) {
-      body += `\nORDER BY ${options.orderBy!.map((order) => `${order.name} ${order.direction.toUpperCase()}`).join(', ')}`;
+      // The outer query joins grain_keys to every metric CTE, and each of those
+      // CTEs also projects the grain keys — so a bare grain-key ORDER BY is
+      // ambiguous across N+1 relations. Metric names stay unqualified: they are
+      // output aliases owned by exactly one CTE.
+      const grainKeySet = new Set(grainKeys.map((key) => key.toLowerCase()));
+      body += `\nORDER BY ${options.orderBy!.map((order) => {
+        const qualified = grainKeySet.has(order.name.toLowerCase()) ? `grain_keys.${order.name}` : order.name;
+        return `${qualified} ${order.direction.toUpperCase()}`;
+      }).join(', ')}`;
     }
     if (options.limit) body += `\n${dialect.limitClause(options.limit)}`;
     return {

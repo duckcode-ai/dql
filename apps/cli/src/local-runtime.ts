@@ -17916,10 +17916,29 @@ export function validateBlockStudioSource(
           message: 'Semantic block is not runnable yet. Select a metric and complete any required time settings.',
         }
       : {
-          severity: 'warning',
+          // A block that DECLARES a query section and leaves it blank is broken,
+          // not merely incomplete: it can never execute, yet it saved cleanly
+          // because this was only a warning. A bare skeleton with no query
+          // section at all stays a warning so draft authoring is unbroken.
+          severity: /query\s*=\s*"""/i.test(source) ? 'error' : 'warning',
           code: 'sql_missing',
-          message: 'No executable SQL found in the block source.',
+          message: /query\s*=\s*"""/i.test(source)
+            ? 'The block declares a query section but it is empty. Add the SQL, or remove the query section and define metrics and dimensions instead.'
+            : 'No executable SQL found in the block source.',
         });
+  }
+
+  // The mirror image: a semantic block is metrics x dimensions and must not carry
+  // a query. Both together is the corrupt shape the analyzer lets through silently.
+  if (semanticConfig.blockType === 'semantic') {
+    const semanticQueryBody = source.match(/query\s*=\s*"""([\s\S]*?)"""/i)?.[1] ?? '';
+    if (semanticQueryBody.trim()) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'semantic_block_has_query',
+        message: 'Semantic blocks are defined by metrics and dimensions and must not contain a query section. Move the SQL into a custom block.',
+      });
+    }
   }
 
   const parameterInvocation = prepareBlockInvocation({ source, surface: 'block_studio' });

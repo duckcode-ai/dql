@@ -490,3 +490,41 @@ describe('LIKE/ILIKE filter parameterization (auto filter pickup)', () => {
     expect(parameterized.sql).toContain("internal_flag LIKE 'x%'");
   });
 });
+
+describe('candidateToDqlSource — never emits an unrunnable empty query', () => {
+  const base = {
+    name: 'dod_bic_bcm_by_customer',
+    domain: 'commerce',
+    description: 'Percent DOD BIC BCM by customer.',
+    owner: '',
+    tags: ['ai-generated'],
+    terms: [],
+    pattern: '',
+    grain: '',
+    entities: [],
+    outputs: ['customer_name', 'percent_dod_bic_bcm'],
+    dimensions: ['customer_name'],
+    allowedFilters: [],
+    parameterPolicy: [],
+    filterBindings: [],
+    parameterDecisions: [],
+    sourceSystems: [],
+    replacementFor: [],
+    reviewCadence: '',
+    llmContext: '',
+  };
+
+  it('omits the query section when the semantic route produced no SQL', () => {
+    // A semantic answer has metrics/dimensions and no generated SQL. Emitting
+    // `query = """ """` produced a custom block that could never execute.
+    const source = candidateToDqlSource({ ...base, sql: '' });
+    expect(source).not.toContain('query = """');
+    expect(source).toContain('dimensions = ["customer_name"]');
+  });
+
+  it('still emits the query section when there is SQL', () => {
+    const source = candidateToDqlSource({ ...base, sql: 'SELECT 1 AS value' });
+    expect(source).toContain('query = """');
+    expect(source).toContain('SELECT 1 AS value');
+  });
+});

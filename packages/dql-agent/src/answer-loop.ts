@@ -5549,12 +5549,54 @@ function renderAllowedSqlRelationsForPrompt(contextPack: LocalContextPack, budge
     ].join('');
   });
   const otherRelations = renderOtherAvailableRelationsForPrompt(contextPack, budget);
+  const sharedColumns = renderSharedColumnWarningForPrompt(relations.slice(0, budget.relationCardLimit), budget);
   return [
     'Selected SQL relation context:',
     'Use these ranked relations and columns as the primary SQL-generation boundary. Prefer lower rank when multiple relations look plausible.',
     ...cards,
+    sharedColumns,
     otherRelations,
   ].filter(Boolean).join('\n');
+}
+
+/**
+ * Name the columns that are owned by more than one selected relation.
+ *
+ * The system prompt already says "qualify every column", but with 12-40 relation
+ * cards of up to 120 columns each the model cannot practically diff them to work
+ * out WHICH names overlap — so it emits a bare `report_as_of_date` and the
+ * warehouse raises an ambiguous-column error. Naming the offenders is the part
+ * the model can actually act on.
+ *
+ * Computed from the already budget-capped card set, so the cost is bounded by
+ * the prompt budget rather than by catalog size — it does not degrade as the
+ * project grows to thousands of models.
+ */
+function renderSharedColumnWarningForPrompt(
+  relations: LocalContextPack['allowedSqlContext'] extends { relations: infer R } ? R : never,
+  budget: PromptContextBudget,
+): string {
+  const owners = new Map<string, { display: string; relations: Set<string> }>();
+  for (const relation of relations) {
+    for (const column of relation.columns.slice(0, budget.relationColumnLimit)) {
+      const key = column.name.trim().replace(/^["'`\[]|["'`\]]$/g, '').toLowerCase();
+      if (!key) continue;
+      const entry = owners.get(key) ?? { display: column.name, relations: new Set<string>() };
+      entry.relations.add(relation.relation);
+      owners.set(key, entry);
+    }
+  }
+  const shared = [...owners.values()]
+    .filter((entry) => entry.relations.size > 1)
+    .sort((left, right) => right.relations.size - left.relations.size || left.display.localeCompare(right.display))
+    .slice(0, 25);
+  if (shared.length === 0) return '';
+  return [
+    '',
+    'Shared column names across the selected relations — ALWAYS qualify these with a relation alias:',
+    ...shared.map((entry) => `  ${entry.display} -> ${[...entry.relations].join(', ')}`),
+    'Referencing any of these without an alias is an ambiguous-column error. If you cannot prove which relation is meant, pick the one whose grain the question asks about; never rely on FROM/JOIN order.',
+  ].join('\n');
 }
 
 function renderOtherAvailableRelationsForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
@@ -7644,7 +7686,10 @@ function isRetryableGeneratedSqlError(error: string): boolean {
  */
 function isRetryableCertifiedExecutionError(error: string): boolean {
   return /\b(?:binder|parser|catalog)\s+error\b/i.test(error)
-    || /\bambiguous\s+reference\b/i.test(error)
+    // DuckDB says "ambiguous reference"; Snowflake says "ambiguous column name".
+    // Matching only the former left the certified lane unable to retry on
+    // Snowflake, which is the warehouse this most often happens on.
+    || /\bambiguous\s+(?:reference|column(?:\s+name)?)\b/i.test(error)
     || /\breferenced\s+column\b.*\bnot\s+found\b/i.test(error)
     || /\bcolumn\b.*\b(?:not\s+found|does\s+not\s+exist|not\s+recognized|unknown)\b/i.test(error)
     || /\btable\b.*\b(?:not\s+found|does\s+not\s+exist|unknown)\b/i.test(error);

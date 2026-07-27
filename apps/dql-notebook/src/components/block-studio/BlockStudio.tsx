@@ -808,10 +808,18 @@ export function BlockStudio() {
       return;
     }
     if (item.kind === 'segment' && item.sql) {
+      if (isSemanticBlock) {
+        setDatabaseInsertWarning('Segments are SQL. Keep this Semantic Block on metrics and dimensions, or switch to a SQL Block to inline the segment.');
+        return;
+      }
       handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, `/* segment:${item.name} */ (${item.sql})`));
       return;
     }
     if (item.kind === 'pre_aggregation') {
+      if (isSemanticBlock) {
+        setDatabaseInsertWarning('Pre-aggregations are referenced by the semantic runtime, not pasted into a query. This Semantic Block stays on metrics and dimensions.');
+        return;
+      }
       handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, `/* pre_aggregation:${item.name} */`));
     }
   };
@@ -892,9 +900,12 @@ export function BlockStudio() {
         // Compose is an optimization, never a blocker.
       }
     }
+    // `||` not `??`: both operands are .trim()ed, so a blank-but-present artifact
+    // source is '' — with `??` that skipped the SQL fallback and posted an empty
+    // source, which the server rejects with 400 and the answer's SQL was lost.
     const source = semanticSource
-      ?? generatedSource
-      ?? applyGeneratedSqlToBlockDraft(
+      || generatedSource
+      || applyGeneratedSqlToBlockDraft(
         buildCustomSkeleton(payload.title?.trim() || 'AI Generated Block'),
         sql,
       );
@@ -1091,7 +1102,13 @@ export function BlockStudio() {
             defaultTab={explorerTab}
             blockDomain={domainFilter}
             onBlockDomainChange={setDomainFilter}
-            onInsertText={(text) => handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text))}
+            onInsertText={(text) => {
+              if (isSemanticBlock) {
+                setDatabaseInsertWarning('That snippet is SQL. Use a SQL Block for raw SELECT work, or keep this Semantic Block on metrics and dimensions.');
+                return;
+              }
+              handleDraftChange(appendSnippetToDraft(state.blockStudioDraft, text));
+            }}
             onSemanticCompose={applySemanticComposition}
             onNewBlock={beginNewWorkspace}
             onDeleteBlock={(block) => requestDeleteBlock(block.path, block.name)}

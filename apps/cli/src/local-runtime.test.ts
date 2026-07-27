@@ -5521,3 +5521,27 @@ describe('probeableExploratoryJoins (Slice 1c — CTE endpoints are not warehous
     expect(probeableExploratoryJoins([physical, derivedJoin], [], ['subq_2'])).toEqual([physical]);
   });
 });
+
+describe('validateBlockStudioSource — empty and mis-typed query sections', () => {
+  it('rejects a custom block that declares a query and leaves it blank', () => {
+    // This shape used to validate and save cleanly, producing a block that can
+    // never execute (the semantic route has no SQL to put in the section).
+    const source = [
+      'block "dod_bic_bcm" {',
+      '    type = "custom"',
+      '    dimensions = ["customer_name"]',
+      '    query = """',
+      '    """',
+      '}',
+    ].join('\n');
+    const validation = validateBlockStudioSource(source, undefined);
+    expect(validation.valid).toBe(false);
+    expect(validation.diagnostics.some((d) => d.code === 'sql_missing' && d.severity === 'error')).toBe(true);
+  });
+
+  it('keeps a bare skeleton with no query section a warning, not an error', () => {
+    const source = ['block "draft" {', '    type = "custom"', '}'].join('\n');
+    const validation = validateBlockStudioSource(source, undefined);
+    expect(validation.diagnostics.some((d) => d.code === 'sql_missing' && d.severity === 'error')).toBe(false);
+  });
+});

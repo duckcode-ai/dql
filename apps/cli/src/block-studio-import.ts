@@ -480,7 +480,13 @@ export function candidateToDqlSource(candidate: Pick<BlockStudioImportCandidate,
     lines.push(...params.map((param) => `        ${param.name} = ${formatDqlLiteral(param.value)}`));
     lines.push('    }');
   }
-  lines.push('', '    query = """', sql, '    """');
+  // A block whose query is empty is not a runnable custom block. This was emitted
+  // unconditionally, so a SEMANTIC answer (metrics/dimensions, no SQL) was written
+  // out as type="custom" with `query = """ """` — a block that can never execute.
+  // Emit the section only when there is SQL to put in it.
+  if (sql.trim()) {
+    lines.push('', '    query = """', sql, '    """');
+  }
   lines.push('', '    visualization {', '        chart = "table"', '    }');
   lines.push('', '    tests {', '        assert row_count > 0', '    }', '}');
   return `${lines.join('\n')}\n`;

@@ -682,3 +682,66 @@ function pack(): LocalContextPack {
     },
   };
 }
+
+describe('ambiguity detection on WIDE (truncated) enterprise relations', () => {
+  // Reproduces the Snowflake failure: two wide fact tables both carry
+  // report_as_of_date. Because each has >120 columns the catalog marks them
+  // `partial`, which used to switch the ambiguity guard off entirely — so the
+  // unqualified reference sailed through and Snowflake raised the error instead.
+  const wide = (relation: string, extra: string[]): LocalContextPack['allowedSqlContext']['relations'][number] => ({
+    relation,
+    name: relation.split('.').pop()!,
+    source: 'test',
+    columnCompleteness: 'partial',
+    columns: [
+      { name: 'report_as_of_date', type: 'date' },
+      ...extra.map((name) => ({ name, type: 'text' })),
+      ...Array.from({ length: 200 }, (_, index) => ({ name: `filler_${index}`, type: 'text' })),
+    ],
+  });
+
+  const widePack = (): LocalContextPack => {
+    const base = pack();
+    base.allowedSqlContext.relations = [
+      wide('dw.fct_bcm_hdr', ['bcm_id', 'split_qty']),
+      wide('dw.fct_bcm_dtl', ['bcm_id', 'amount']),
+    ];
+    return base;
+  };
+
+  it('detects an unqualified column owned by two truncated relations', () => {
+    const result = validateSqlAgainstLocalContext(
+      `SELECT report_as_of_date, SUM(h.split_qty) AS qty
+       FROM dw.fct_bcm_hdr h
+       JOIN dw.fct_bcm_dtl d ON h.bcm_id = d.bcm_id
+       GROUP BY report_as_of_date`,
+      widePack(),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('unknown_column');
+    expect(result.offending?.column).toBe('report_as_of_date');
+    expect(result.error).toContain('multiple joined relations');
+  });
+
+  it('does not report a CTE that shadows a real relation name', () => {
+    // Relaxing the completeness rule makes partial relations count as owners,
+    // which opens this false positive: the CTE `fct_bcm_dtl` is not the table.
+    const result = validateSqlAgainstLocalContext(
+      `WITH fct_bcm_dtl AS (SELECT bcm_id FROM dw.fct_bcm_dtl)
+       SELECT report_as_of_date FROM dw.fct_bcm_hdr h JOIN fct_bcm_dtl d ON h.bcm_id = d.bcm_id`,
+      widePack(),
+    );
+    expect(result.offending?.column).toBeUndefined();
+  });
+
+  it('stays quiet when the column is qualified', () => {
+    const result = validateSqlAgainstLocalContext(
+      `SELECT h.report_as_of_date, SUM(h.split_qty) AS qty
+       FROM dw.fct_bcm_hdr h
+       JOIN dw.fct_bcm_dtl d ON h.bcm_id = d.bcm_id
+       GROUP BY h.report_as_of_date`,
+      widePack(),
+    );
+    expect(result.ok).toBe(true);
+  });
+});
