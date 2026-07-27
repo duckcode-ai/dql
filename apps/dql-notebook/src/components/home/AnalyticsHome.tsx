@@ -4,6 +4,7 @@ import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { focusInsertedNotebookCell } from '../../utils/notebook-cell-focus';
+import { useOpenAnswerInNotebook } from '../../utils/answer-to-notebook';
 import {
   UnifiedAgentRunPanel,
   type InsertDqlPayload,
@@ -199,6 +200,7 @@ function relativeTime(iso: string): string {
 
 export function AnalyticsHome() {
   const { state, dispatch } = useNotebook();
+  const openAnswerInNotebook = useOpenAnswerInNotebook();
   const t = themes[state.themeMode];
   const [domainContext, setDomainContext] = useState(() => consumePendingDomainContext());
 
@@ -300,12 +302,20 @@ export function AnalyticsHome() {
   };
 
   const openEditableNotebookCell = useCallback((payload: InsertDqlPayload) => {
+    // With no notebook open, ADD_CELL writes into a store the NotebookEditor is
+    // not rendering (it shows the welcome screen whenever there is no active
+    // file), so the answer silently vanished. Create and open a notebook that
+    // already contains it instead.
+    if (!state.activeFile || state.activeFile.type === 'block') {
+      void openAnswerInNotebook(payload);
+      return;
+    }
     const cell = askNotebookCellFromPayload(payload);
     if (!cell) return;
     dispatch({ type: 'ADD_CELL', cell });
     dispatch({ type: 'SET_MAIN_VIEW', view: 'notebook' });
     focusInsertedNotebookCell(cell.id);
-  }, [dispatch]);
+  }, [dispatch, openAnswerInNotebook, state.activeFile]);
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', overflow: 'hidden', background: t.appBg }}>

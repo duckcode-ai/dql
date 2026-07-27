@@ -27,6 +27,7 @@ import { emitNotebookResearchChanged } from "../../utils/notebook-research";
 import type { Cell, NotebookDocMetadata, NotebookFile } from "../../store/types";
 import { DatasetImportPanel } from "./DatasetImportPanel";
 import { focusInsertedNotebookCell } from "../../utils/notebook-cell-focus";
+import { useOpenAnswerInNotebook } from "../../utils/answer-to-notebook";
 
 interface NotebookEditorProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -47,6 +48,7 @@ const EMPTY_AI_HISTORY_BADGE: AiHistoryBadge = {
 
 export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorProps) {
   const { state, dispatch } = useNotebook();
+  const openAnswerInNotebook = useOpenAnswerInNotebook();
   const t = themes[state.themeMode];
   const [aiOpen, setAiOpen] = useState(false);
   const [aiHistoryOpen, setAiHistoryOpen] = useState(false);
@@ -227,6 +229,12 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
   // carry the DQL artifact as provenance (surfaced + save-as-block on the cell).
   const insertGeneratedDqlCell = useCallback(
     (payload: InsertDqlPayload) => {
+      // No notebook open: ADD_CELL would write into an empty store behind the
+      // welcome screen and the user would see nothing happen.
+      if (!state.activeFile) {
+        void openAnswerInNotebook(payload, { datasets });
+        return;
+      }
       const sql = (payload.sql ?? payload.dqlArtifact?.source ?? "").trim();
       if (!sql) return;
       if (payload.mixedSourcePlan) {

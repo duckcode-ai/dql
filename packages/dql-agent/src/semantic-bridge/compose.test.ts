@@ -355,3 +355,58 @@ describe('metric/measure de-conflation (Phase 5)', () => {
     expect(compiled?.metric).toBe('bcm_line_amount');
   });
 });
+describe('explicit metric naming — a nested phrase is not a second metric', () => {
+  it('keeps only the specific metric when a broad name is contained in it', () => {
+    const mk = (name: string) => ({ name, label: name, description: `${name}.`, domain: 'commerce', sql: 'amount', type: 'sum' as const, table: 'orders' });
+    const l = new SemanticLayer({
+      metrics: [mk('revenue'), mk('drink_revenue'), mk('orders'), mk('drink_orders')],
+      dimensions: [{ name: 'customer_name', label: 'Customer', description: 'Customer name.', domain: 'commerce', sql: 'customer_name', type: 'string', table: 'orders' }],
+    });
+    const question = 'drink revenue and drink orders by customer name';
+    const composed = composeSemanticQueryForQuestion({
+      semanticLayer: l,
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    });
+    // "drink revenue" also contains the bare phrase "revenue"; selecting both
+    // turned a two-metric question into a four-metric block.
+    expect(composed?.metrics).toEqual(['drink_revenue', 'drink_orders']);
+  });
+});
+
+describe('business synonyms reach the specific metric', () => {
+  const mk = (name: string) => ({ name, label: name, description: `${name}.`, domain: 'commerce', sql: 'amount', type: 'sum' as const, table: 'orders' });
+  const layerFor = () => new SemanticLayer({
+    metrics: [mk('revenue'), mk('drink_revenue'), mk('food_revenue'), mk('drink_orders')],
+    dimensions: [{ name: 'customer_name', label: 'Customer', description: 'Customer name.', domain: 'commerce', sql: 'customer_name', type: 'string', table: 'orders' }],
+  });
+  const metricsFor = (question: string) => composeSemanticQueryForQuestion({
+    semanticLayer: layerFor(),
+    question,
+    questionPlan: buildAnalysisQuestionPlan(question),
+  })?.metrics;
+
+  it('resolves "beverage revenue" to drink_revenue, not the generic revenue', () => {
+    // The question planner discards the qualifier — both "beverage revenue" and
+    // "drink revenue" parse to measures:["revenue"], filters:[] — so verbatim
+    // phrase matching is the only stage that can still see "beverage".
+    expect(metricsFor('beverage revenue by customer name')).toEqual(['drink_revenue']);
+    expect(metricsFor('drink revenue by customer name')).toEqual(['drink_revenue']);
+  });
+
+  it('does not let the routing hint re-broaden a qualified selection', () => {
+    // The catalog's KG match is deliberately broad. Adding it back alongside the
+    // specific metric the qualifier resolved would undo the narrowing.
+    const composed = composeSemanticQueryForQuestion({
+      semanticLayer: layerFor(),
+      question: 'beverage revenue by customer name',
+      questionPlan: buildAnalysisQuestionPlan('beverage revenue by customer name'),
+      matchedMetric: { id: 'semantic:metric:revenue', kind: 'semantic_metric', name: 'revenue' } as never,
+    });
+    expect(composed?.metrics).toEqual(['drink_revenue']);
+  });
+
+  it('leaves an unqualified measure on the generic metric', () => {
+    expect(metricsFor('revenue by customer name')).toEqual(['revenue']);
+  });
+});

@@ -50,6 +50,7 @@ import {
   type MixedSourceNotebookPlan,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
+import { controlStyle } from '../../themes/control-tokens';
 import { ThinkingModeControl } from './ThinkingModeControl';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
@@ -177,6 +178,8 @@ export interface InsertDqlPayload {
   mixedSourcePlan?: MixedSourceNotebookPlan;
   /** Canonical run identity used for stable explicit draft commits. */
   sourceRunId?: string;
+  /** The question this artifact answered, so an authoring host can recompose it. */
+  question?: string;
 }
 
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
@@ -1634,7 +1637,7 @@ function askUserBubbleStyle(t: Theme): React.CSSProperties {
 }
 
 function askGhostBtnStyle(t: Theme): React.CSSProperties {
-  return { display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 8px', borderRadius: 6, border: 'none', background: 'none', color: t.textMuted, fontSize: 11.5, fontWeight: 550, cursor: 'pointer', fontFamily: t.font };
+  return controlStyle(t, { variant: 'ghost', size: 'sm' });
 }
 
 /** Rich artifacts render inline (they own interactive flows); the rest chip out. */
@@ -3988,6 +3991,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         title: dqlArtifact?.name ?? artifact.title ?? run.question,
         mixedSourcePlan,
         sourceRunId: run.id,
+        question: run.question,
       };
     }
     if (mixedSourcePlan) {
@@ -3997,6 +4001,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         title: dqlArtifact?.name ?? artifact.title ?? run.question,
         mixedSourcePlan,
         sourceRunId: run.id,
+        question: run.question,
       };
     }
   }
@@ -4005,6 +4010,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
     dqlArtifact,
     title: dqlArtifact?.name ?? run.question,
     sourceRunId: run.id,
+    question: run.question,
   };
 }
 
@@ -4120,17 +4126,7 @@ function largeIconShellStyle(t: Theme): React.CSSProperties {
 }
 
 function suggestionChipStyle(t: Theme): React.CSSProperties {
-  return {
-    border: `1px solid ${t.btnBorder}`,
-    background: t.btnBg,
-    color: t.textSecondary,
-    borderRadius: 999,
-    padding: '7px 13px',
-    fontSize: 12.5,
-    fontWeight: 550,
-    fontFamily: t.font,
-    cursor: 'pointer',
-  };
+  return { ...controlStyle(t, { variant: 'secondary', size: 'md', pill: true }), fontWeight: 550 };
 }
 
 function inputStyle(t: Theme): React.CSSProperties {
@@ -4153,21 +4149,11 @@ function inputStyle(t: Theme): React.CSSProperties {
 }
 
 function sendButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
+  // Keeps its taller `lg` footprint but shares the radius, type scale and
+  // disabled treatment with every other control.
   return {
-    border: 'none',
-    background: enabled ? t.accent : t.btnBg,
-    color: enabled ? '#fff' : t.textMuted,
-    borderRadius: 12,
-    height: 54,
-    padding: '0 17px',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 7,
-    fontSize: 12.5,
-    fontWeight: 700,
-    fontFamily: t.font,
-    cursor: enabled ? 'pointer' : 'not-allowed',
-    boxShadow: enabled ? `0 2px 9px ${t.accent}59` : 'none',
+    ...controlStyle(t, { variant: enabled ? 'primary' : 'secondary', size: 'lg' }),
+    ...(enabled ? {} : { color: t.textMuted }),
   };
 }
 
@@ -4344,15 +4330,5 @@ function codeStyle(t: Theme): React.CSSProperties {
 }
 
 function smallButtonStyle(t: Theme): React.CSSProperties {
-  return {
-    border: `1px solid ${t.btnBorder}`,
-    background: t.btnBg,
-    color: t.textSecondary,
-    borderRadius: 7,
-    padding: '5px 8px',
-    fontSize: 11,
-    fontWeight: 800,
-    fontFamily: t.font,
-    cursor: 'pointer',
-  };
+  return controlStyle(t, { variant: 'secondary', size: 'sm' });
 }

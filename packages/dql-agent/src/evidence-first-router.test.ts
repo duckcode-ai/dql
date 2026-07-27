@@ -542,3 +542,58 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.action).toBe("converse");
   });
 });
+describe("AGT-017 multi-metric questions divert to the semantic bridge", () => {
+  const revenueId = "semantic:orders:revenue";
+  const refundsId = "semantic:orders:refunds";
+  const monthGrain = "semantic:grain:month";
+
+  const metricCandidate = (id: string, name: string): AgentEvidenceCandidate => candidate({
+    id,
+    name,
+    aliases: [name.toLowerCase()],
+    primaryEntity: monthGrain,
+    relevanceScore: 0.9,
+  });
+
+  const multiMetricFrame = {
+    version: 2 as const,
+    interpretedQuestion: "Revenue and refunds by month",
+    questionType: "trend" as const,
+    metricConceptIds: [revenueId, refundsId],
+    entityGrainIds: [monthGrain],
+    dimensions: [],
+    memberBindings: [],
+    requestedOutputs: [],
+    ambiguity: { status: "resolved" as const, competingConceptIds: [] },
+  };
+
+  it("drops the single-metric frame instead of asking the user to clarify", async () => {
+    const router = createHybridRouter({
+      getEvidence: async () => evidence([
+        metricCandidate(revenueId, "Revenue"),
+        metricCandidate(refundsId, "Refunds"),
+      ]),
+      resolveMeaning: async () => resolved({
+        interpretedQuestion: "Revenue and refunds by month",
+        questionType: "trend",
+        selectedConceptIds: [revenueId, refundsId],
+        recommendedExecutionId: revenueId,
+        analyticalFrame: multiMetricFrame,
+      } as Partial<MeaningResolution>),
+    });
+
+    const decision = await router.decide(request("show revenue and refunds by month"));
+
+    // The v2 analytical lane is contract-per-metric by construction, so it cannot
+    // carry this question — but a legitimate multi-metric ask is not ambiguous.
+    // It must fall through to the semantic bridge, which compiles several metrics,
+    // rather than clarifying or silently collapsing to one metric.
+    expect(decision.requiresClarification).toBeFalsy();
+    expect(decision.action).not.toBe("clarify");
+    expect(decision.meaningResolution?.recommendedRoute).not.toBe("clarify");
+    expect(decision.meaningResolution?.analyticalFrame).toBeUndefined();
+    expect(decision.meaningResolution?.missingInformation ?? []).not.toContain(
+      "This composition stage requires exactly one metric contract.",
+    );
+  });
+});

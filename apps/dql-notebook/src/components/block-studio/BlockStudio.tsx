@@ -154,6 +154,9 @@ export function BlockStudio() {
   const [runElapsedMs, setRunElapsedMs] = useState(0);
   const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
+  // One-shot: how the NEXT block open should present. 'builder' skips the
+  // read-only detail overview when the user just created the block from an answer.
+  const openIntentRef = useRef<'builder' | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [pendingDeleteBlock, setPendingDeleteBlock] = useState<{ path: string; name: string } | null>(null);
@@ -368,9 +371,17 @@ export function BlockStudio() {
   const isSemanticBlock = blockType === 'semantic';
   const hasActiveDraft = Boolean(state.blockStudioDraft.trim() || state.blockStudioMetadata || state.activeBlockPath);
 
-  // Prototype flow: opening an EXISTING block lands on the read-only detail
-  // overview; new drafts (no saved path) go straight to the builder.
+  // Opening an EXISTING block from the library lands on the read-only detail
+  // overview; new drafts (no saved path) go straight to the builder. A block the
+  // user just created from an AI answer is the second case, not the first — they
+  // asked to build on it, so honour that intent for exactly one open.
   useEffect(() => {
+    if (!state.activeBlockPath) return;
+    if (openIntentRef.current === 'builder') {
+      openIntentRef.current = null;
+      setEditorMode(parseBlockFields(state.blockStudioDraft)?.blockType === 'semantic' ? 'visual' : 'source');
+      return;
+    }
     if (state.activeBlockPath) setEditorMode('detail');
   }, [state.activeBlockPath]);
 
@@ -856,7 +867,23 @@ export function BlockStudio() {
     const generatedSource = payload.dqlArtifact?.source?.trim();
     const sql = (payload.sql ?? '').trim();
     if (!generatedSource && !sql) return;
-    const source = generatedSource
+    // Semantic-first authoring: if the governed catalog can express this question
+    // as {metrics} x {dimensions}, save the simple semantic block rather than the
+    // SQL body we happened to answer with. The answer may have come from a
+    // certified SQL block — reuse is the right ANSWER, but it is the wrong shape
+    // to author a new governed block from. Falls back to the answer's artifact
+    // when the catalog cannot cover the question.
+    let semanticSource: string | undefined;
+    if (payload.question?.trim()) {
+      try {
+        const composed = await api.composeSemanticBlock(payload.question.trim());
+        if (composed.ok && composed.source.trim()) semanticSource = composed.source.trim();
+      } catch {
+        // Compose is an optimization, never a blocker.
+      }
+    }
+    const source = semanticSource
+      ?? generatedSource
       ?? applyGeneratedSqlToBlockDraft(
         buildCustomSkeleton(payload.title?.trim() || 'AI Generated Block'),
         sql,
@@ -874,6 +901,7 @@ export function BlockStudio() {
         tags: parsed?.tags?.length ? parsed.tags : ['ai-generated', 'review-required'],
         runId: payload.sourceRunId,
       });
+      openIntentRef.current = 'builder';
       dispatch({
         type: 'OPEN_BLOCK_STUDIO',
         file: {

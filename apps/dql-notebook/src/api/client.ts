@@ -3148,6 +3148,21 @@ export const api = {
     };
   },
 
+  /**
+   * Compose the SEMANTIC block form for a question, when the governed catalog can
+   * express it as {metrics} x {dimensions}. Returns ok:false when it cannot, so
+   * the caller falls back to the answer's own SQL-backed artifact.
+   */
+  async composeSemanticBlock(question: string): Promise<
+    | { ok: true; source: string; sql?: string; metrics: string[]; dimensions: string[] }
+    | { ok: false; reason?: string }
+  > {
+    return request('/api/block-studio/compose-semantic', {
+      method: 'POST',
+      body: JSON.stringify({ question }),
+    });
+  },
+
   async saveBlockStudio(payload: {
     path?: string | null;
     source: string;

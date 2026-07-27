@@ -3677,7 +3677,18 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     };
   }
 
-  const dbtFirstJoinSafety = input.manifest
+  // The dbt-first join guard adjudicates GENERATED SQL — joins an LLM invented,
+  // which must be proven against certified analytical relationships. SQL emitted
+  // by the governed semantic compiler is not that: the semantic layer owns those
+  // joins by construction, which is the entire point of compiling through it.
+  // Running the guard over it made every governed metric x dimension answer fail
+  // "could not prove this join", divert into the DBT-grounded exploratory lane,
+  // and come back re-rendered as a type="custom" block with raw SQL — even though
+  // the numbers came from the semantic layer.
+  const semanticCompiledSql = Boolean(
+    semanticBridgeAnswer && parsed.sql && semanticBridgeAnswer.sql.trim() === parsed.sql.trim(),
+  );
+  const dbtFirstJoinSafety = input.manifest && !semanticCompiledSql
     ? evaluateDbtFirstGeneratedSql(parsed.sql, input.manifest, input.domainContext?.purpose, input.domainContext, input.semanticDriver)
     : undefined;
   if (dbtFirstJoinSafety && !dbtFirstJoinSafety.safe) {

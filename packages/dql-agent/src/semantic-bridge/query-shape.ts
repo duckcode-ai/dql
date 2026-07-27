@@ -47,15 +47,19 @@ const GENUINE_GAP_RE = new RegExp(
 
 /**
  * @param questionPlan the parsed question plan (shape, terms).
- * @param metricName   the governed metric that matched (its runtime need is
- *                     read from the semantic layer, not guessed).
+ * @param metricNames  the governed metric(s) that matched. A multi-metric
+ *                     question ("revenue and refunds by month") is composable
+ *                     only if EVERY selected metric is — one runtime-only metric
+ *                     pulls the whole query to the runtime compiler.
  * @param semanticLayer the catalog (for `canComposeMetric`).
  */
 export function classifyGovernedQueryShape(
   questionPlan: AnalysisQuestionPlan,
-  metricName: string | undefined,
+  metricNames: string | string[] | undefined,
   semanticLayer: Pick<SemanticLayer, 'canComposeMetric'>,
 ): GovernedQueryShape {
+  const selectedMetrics = (typeof metricNames === 'string' ? [metricNames] : metricNames ?? [])
+    .filter((name): name is string => Boolean(name));
   // Genuine gaps first — a shape neither compiler nor runtime expresses.
   // Per-group top-N ("top 3 products PER region") is the clearest structural one.
   if (questionPlan.requestedShape.topN?.scope === 'per_group') return 'genuine_gap';
@@ -65,7 +69,7 @@ export function classifyGovernedQueryShape(
 
   // A derived/ratio/cumulative/non-additive metric is not natively composable and
   // must run through the runtime compiler (MetricFlow / dbt Cloud).
-  if (metricName && !semanticLayer.canComposeMetric(metricName)) return 'runtime_required';
+  if (selectedMetrics.some((name) => !semanticLayer.canComposeMetric(name))) return 'runtime_required';
 
   // A simple/additive metric × dims × grain × AND-filters × global order/limit —
   // exactly the compiler's wheelhouse. If it matched a governed metric and still

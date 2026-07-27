@@ -37,3 +37,31 @@ describe('classifyGovernedQueryShape', () => {
     expect(shape('bcm per region')).toBe('compiler_expressible');
   });
 });
+describe('classifyGovernedQueryShape — multi-metric questions (AGT-017)', () => {
+  it('keeps a multi-metric question compiler_expressible when every metric composes', () => {
+    expect(
+      classifyGovernedQueryShape(
+        buildAnalysisQuestionPlan('total bcm and total bcm by customer'),
+        ['total_bcm', 'total_bcm'],
+        layer,
+      ),
+    ).toBe('compiler_expressible');
+  });
+
+  it('sends the whole query to the runtime when any selected metric is derived', () => {
+    // One runtime-only metric pulls the combined query with it: the native
+    // compiler cannot build half of a multi-metric selection.
+    expect(
+      classifyGovernedQueryShape(
+        buildAnalysisQuestionPlan('total bcm and percent mom bcm by customer'),
+        ['total_bcm', 'percent_mom_bcm'],
+        layer,
+      ),
+    ).toBe('runtime_required');
+  });
+
+  it('still accepts the single-metric string form unchanged', () => {
+    expect(shape('total bcm by customer')).toBe('compiler_expressible');
+    expect(shape('total bcm by customer', undefined)).toBe('compiler_expressible');
+  });
+});

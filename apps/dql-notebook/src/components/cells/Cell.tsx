@@ -108,7 +108,7 @@ function CellToolbarWrap({
   const actions = hovered ? (
     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
       {onRun && (
-        <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={onRun} t={t} accent>
+        <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={onRun} t={t} run>
           <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
             <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
           </svg>
@@ -627,14 +627,17 @@ function BlockGovernanceBar({
   const fields = parseBlockFields(content);
   if (!fields) return null;
 
+  // These are editable fields, but they were drawn with `cellBorder` on a tinted
+  // row — in the light theme that border is almost invisible, so the row read as
+  // static labels and nobody could tell what was clickable.
   const fieldStyle = {
-    background: t.editorBg,
-    border: `1px solid ${t.cellBorder}`,
-    borderRadius: 3,
-    color: t.textSecondary,
+    background: t.cellBg,
+    border: `1px solid ${t.btnBorder}`,
+    borderRadius: 6,
+    color: t.textPrimary,
     fontSize: 11,
     fontFamily: t.fontMono,
-    padding: '2px 6px',
+    padding: '3px 7px',
     outline: 'none',
   };
 
@@ -1771,7 +1774,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                 </svg>
               </HeaderActionBtn>
             ) : cellHovered && isExecutable ? (
-              <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={handleRun} t={t} accent>
+              <HeaderActionBtn title="Run cell (Shift+Enter)" onClick={handleRun} t={t} run>
                 <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
                   <path d="M1.5 1.5l7 3.5-7 3.5V1.5Z" />
                 </svg>
@@ -2699,6 +2702,7 @@ function HeaderActionBtn({
   t,
   accent,
   danger,
+  run,
 }: {
   title: string;
   onClick: () => void;
@@ -2706,38 +2710,36 @@ function HeaderActionBtn({
   t: Theme;
   accent?: boolean;
   danger?: boolean;
+  /** Execute action — carries the success green so Run reads at a glance. */
+  run?: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
+  // Every icon used to sit at `textMuted` until hovered, with a transparent
+  // background — so a row of identical grey glyphs gave no clue which one runs
+  // the cell and which one deletes it. Intent now shows at REST: green = run,
+  // red = destructive, accent = AI/edit, neutral = reorder. Hover only deepens it.
+  const tone = run ? t.success : danger ? t.error : accent ? t.accent : undefined;
   return (
     <button
       title={title}
+      aria-label={title}
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        width: 24,
-        height: 24,
+        width: 26,
+        height: 26,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: hovered
-          ? danger
-            ? `${t.error}18`
-            : accent
-            ? `${t.accent}18`
-            : t.btnHover
-          : 'transparent',
-        border: 'none',
-        borderRadius: 4,
+        background: tone
+          ? (hovered ? `${tone}24` : `${tone}12`)
+          : (hovered ? t.btnHover : 'transparent'),
+        border: `1px solid ${tone ? (hovered ? `${tone}66` : `${tone}33`) : (hovered ? t.btnBorder : 'transparent')}`,
+        borderRadius: 6,
         cursor: 'pointer',
-        color: hovered
-          ? danger
-            ? t.error
-            : accent
-            ? t.accent
-            : t.textSecondary
-          : t.textMuted,
-        transition: 'all 0.15s',
+        color: tone ?? (hovered ? t.textSecondary : t.textMuted),
+        transition: 'background 0.15s, border-color 0.15s, color 0.15s',
         padding: 0,
       }}
     >

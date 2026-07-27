@@ -594,6 +594,21 @@ function enforceAnalyticalCompatibility(
       missingInformation: [],
     };
   }
+  // A question asking for SEVERAL metrics ("revenue and refunds by month") is a
+  // legitimate question, not an ambiguous one. The v2 analytical lane is
+  // contract-per-metric by construction, so it blocks — but blocking must not
+  // turn into a clarify prompt or a silent collapse to one metric. Drop the
+  // single-metric frame instead and let the cascade fall through to the semantic
+  // bridge, which compiles multi-metric selections natively.
+  if (result.status === "blocked"
+    && result.failures.length > 0
+    && result.failures.every((failure) => failure.code === "MULTI_METRIC_UNSUPPORTED")) {
+    const { analyticalFrame: _droppedFrame, ...withoutFrame } = resolution;
+    return {
+      ...withoutFrame,
+      analyticalPolicyIds: result.policyIds,
+    };
+  }
   const failures = result.failures.map((failure) => failure.message);
   return {
     ...resolution,

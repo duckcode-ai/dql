@@ -549,10 +549,17 @@ function selectMetrics(metrics: MetricDefinition[], input: ComposeSemanticQueryI
     : [];
   for (const hint of hintedNames) {
     const hit = metrics.find((metric) => semanticNameMatches(metric, hint));
-    if (hit && !selected.some((metric) => metric.name === hit.name)) {
-      selected.push(hit);
-      break;
-    }
+    if (!hit || selected.some((metric) => metric.name === hit.name)) continue;
+    // The routing hint is the catalog's best SINGLE guess and is deliberately
+    // broad. If the question already resolved a more specific member of the same
+    // family — "beverage revenue" -> drink_revenue — adding the generic `revenue`
+    // back alongside it re-broadens the very answer the qualifier narrowed.
+    const hitPhrase = ` ${normalizeMetricPhrase(leafName(hit.name))} `;
+    const alreadyMoreSpecific = selected.some((metric) =>
+      ` ${normalizeMetricPhrase(leafName(metric.name))} `.includes(hitPhrase));
+    if (alreadyMoreSpecific) break;
+    selected.push(hit);
+    break;
   }
 
   const concepts = metricSelectionConcepts(input.questionPlan);
@@ -586,11 +593,18 @@ function explicitlyNamedMetrics(metrics: MetricDefinition[], question: string): 
   const normalizedQuestion = ` ${normalizeMetricPhrase(question)} `;
   const byPhrase = new Map<string, MetricDefinition[]>();
   for (const metric of metrics) {
-    const phrases = new Set([
+    const base = [
       normalizeMetricPhrase(metric.name),
       normalizeMetricPhrase(leafName(metric.name)),
       normalizeMetricPhrase(metric.label ?? ''),
-    ].filter((phrase) => phrase.length > 0));
+    ].filter((phrase) => phrase.length > 0);
+    // Match the metric's business SYNONYMS too. The question planner throws the
+    // qualifier away — "beverage revenue" and "drink revenue" both parse to
+    // measures:["revenue"], filters:[] — so this verbatim phrase match is the only
+    // stage that can still see it. Without synonym variants, `drink_revenue` was
+    // reachable by the word "drink" but not by "beverage", and the question fell
+    // back to the generic `revenue`, silently dropping the beverage restriction.
+    const phrases = new Set([...base, ...base.flatMap(metricPhraseSynonymVariants)]);
     for (const phrase of phrases) {
       if (!normalizedQuestion.includes(` ${phrase} `)) continue;
       const candidates = byPhrase.get(phrase) ?? [];
@@ -599,14 +613,62 @@ function explicitlyNamedMetrics(metrics: MetricDefinition[], question: string): 
     }
   }
 
-  const resolved = [...byPhrase.entries()]
-    .filter(([, candidates]) => new Set(candidates.map((metric) => metric.name)).size === 1)
+  const unambiguous = [...byPhrase.entries()]
+    .filter(([, candidates]) => new Set(candidates.map((metric) => metric.name)).size === 1);
+  // A broad phrase nested inside a more specific one is not a second metric the
+  // user asked for: "drink revenue" also contains "revenue", which would turn a
+  // two-metric question into a four-metric block.
+  //
+  // Occurrences decide it, not substring containment. A question naming BOTH
+  // `..._bcm` and `..._bcm_qty` mentions the shorter name once on its own and
+  // once inside the longer one, so it survives; "drink revenue" mentions
+  // "revenue" only inside the specific phrase, so the generic drops out.
+  const occurrences = (phrase: string): number => {
+    const needle = ` ${phrase} `;
+    let count = 0;
+    let at = normalizedQuestion.indexOf(needle);
+    while (at !== -1) {
+      count += 1;
+      at = normalizedQuestion.indexOf(needle, at + 1);
+    }
+    return count;
+  };
+  const subsumed = new Set(unambiguous
+    .filter(([phrase]) => {
+      const containedBy = unambiguous.filter(([other]) =>
+        other !== phrase && ` ${other} `.includes(` ${phrase} `));
+      if (containedBy.length === 0) return false;
+      const covered = containedBy.reduce((total, [other]) => total + occurrences(other), 0);
+      return occurrences(phrase) <= covered;
+    })
+    .map(([phrase]) => phrase));
+  const resolved = unambiguous
+    .filter(([phrase]) => !subsumed.has(phrase))
     .sort(([left], [right]) =>
       normalizedQuestion.indexOf(` ${left} `) - normalizedQuestion.indexOf(` ${right} `)
       || right.split(' ').length - left.split(' ').length)
     .map(([, candidates]) => candidates[0]!)
     .filter((metric, index, all) => all.findIndex((candidate) => candidate.name === metric.name) === index);
   return resolved;
+}
+
+/**
+ * Business-synonym variants of a metric phrase, one token swapped at a time:
+ * "drink revenue" also answers to "beverage revenue". Bounded to single-token
+ * substitutions so the phrase stays a real business name rather than a fuzzy net.
+ */
+function metricPhraseSynonymVariants(phrase: string): string[] {
+  const words = phrase.split(' ').filter(Boolean);
+  if (words.length === 0) return [];
+  const out: string[] = [];
+  words.forEach((word, index) => {
+    for (const synonym of SEMANTIC_TERM_SYNONYM_INDEX.get(word) ?? []) {
+      if (synonym === word) continue;
+      const variant = [...words.slice(0, index), synonym, ...words.slice(index + 1)].join(' ');
+      if (variant !== phrase) out.push(variant);
+    }
+  });
+  return out;
 }
 
 function normalizeMetricPhrase(value: string): string {

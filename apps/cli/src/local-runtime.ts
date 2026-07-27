@@ -143,6 +143,7 @@ import {
   buildBlockBusinessFingerprint,
   buildBlockSqlFingerprints,
   buildAnalysisQuestionPlan,
+  composeSemanticQueryForQuestion,
   aggregationIntegrityIssuesForSql,
   buildLocalContextPack,
   applyContextPackCompatibility,
@@ -10112,6 +10113,66 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Semantic-first block authoring. When the governed catalog can express a
+    // question as {metrics} x {dimensions}, a generated block must be the SEMANTIC
+    // form — not hand-rolled SQL. The answer that prompted this may legitimately
+    // have come from a certified block (certified-first stays the answering rule),
+    // but the block we CREATE from it should still be the simple governed shape.
+    // Returns ok:false when the catalog cannot cover it, so the caller falls back
+    // to the answer's own SQL-backed artifact.
+    if (req.method === 'POST' && path === '/api/block-studio/compose-semantic') {
+      try {
+        const body = await readJSON(req).catch(() => null) as Record<string, unknown> | null;
+        const question = typeof body?.question === 'string' ? body.question.trim() : '';
+        if (!question) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'question is required.' }));
+          return;
+        }
+        if (!semanticLayer) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, reason: 'no_semantic_layer' }));
+          return;
+        }
+        let driver: string | undefined;
+        let composeConnection: ConnectionConfig | undefined;
+        try {
+          composeConnection = requireActiveConnection();
+          driver = composeConnection.driver;
+        } catch {
+          driver = undefined;
+        }
+        const tableMapping = composeConnection
+          ? await resolveSemanticTableMapping(executor, composeConnection, semanticLayer)
+          : undefined;
+        const composed = composeSemanticQueryForQuestion({
+          semanticLayer,
+          question,
+          questionPlan: buildAnalysisQuestionPlan(question),
+          ...(driver ? { driver } : {}),
+          ...(tableMapping ? { tableMapping } : {}),
+        });
+        if (!composed?.dqlArtifact?.source) {
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, reason: 'no_semantic_coverage' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          source: composed.dqlArtifact.source,
+          sql: composed.sql,
+          metrics: composed.metrics,
+          dimensions: composed.dimensions,
+          dqlArtifact: composed.dqlArtifact,
+        }));
+      } catch (error) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, reason: 'compose_failed', error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
