@@ -2675,7 +2675,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 undefined,
                 'review_required',
               )]
-            : [])
+            // Every refusal still owes the user an account of itself. Emitting no
+            // artifact leaves the answer as a bare sentence with a Copy button:
+            // the inspector can only be opened FROM an artifact, so "How it was
+            // answered", the DQL draft and the compiled SQL all become
+            // unreachable exactly when the user most needs to see why it stopped
+            // and carry the query into a notebook.
+            : [agentRunArtifact(
+                'answer',
+                'No answer was accepted',
+                governedAnswer,
+                undefined,
+                needsClarification ? 'not_applicable' : 'blocked',
+              )])
         : [agentRunArtifact(
             'answer',
             isCertified ? 'Certified answer' : isSemantic ? 'Governed semantic answer' : isExploratory ? 'Exploratory DBT-grounded answer' : 'Review-required answer',

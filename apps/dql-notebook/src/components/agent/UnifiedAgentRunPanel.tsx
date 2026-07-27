@@ -2074,6 +2074,34 @@ interface AnalyticalInspectorContract {
   diagnostic?: Record<string, unknown>;
 }
 
+/**
+ * A run that stopped outside the v2 analytical lane — a refusal ("could not
+ * compose a governed query", "drafted a query but the table was not in the
+ * retrieved metadata"), or a raw execution error — still has a reason worth
+ * showing. Rebuild the minimum failure record from whatever the envelope carried
+ * so "How it was answered" opens with a real account instead of vanishing
+ * exactly when the user needs to see why it stopped.
+ */
+function fallbackAnalyticalFailure(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  const executionError = payload.executionError;
+  if (typeof executionError === 'string' && executionError.trim()) {
+    return { stage: 'execution', message: executionError };
+  }
+  const errorRecord = recordOf(executionError);
+  if (errorRecord) return { stage: 'execution', ...errorRecord };
+  const refusalCode = typeof payload.refusalCode === 'string' ? payload.refusalCode : undefined;
+  if (refusalCode) {
+    const details = recordOf(payload.refusalDetails);
+    const message = typeof details?.message === 'string' && details.message.trim()
+      ? details.message
+      : typeof payload.answer === 'string' && payload.answer.trim()
+        ? payload.answer
+        : 'No answer was accepted for this question.';
+    return { stage: 'answer', code: refusalCode, message };
+  }
+  return undefined;
+}
+
 export function hasAnalyticalInspectorContract(payload: Record<string, unknown>): boolean {
   return Boolean(
     recordOf(payload.resolvedAnalyticalPlan)
@@ -2081,7 +2109,8 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     || recordOf(payload.analyticalExecutionReceipt)
     || recordOf(payload.analyticalFailure)
     || recordOf(payload.semanticExecutionTrace)
-    || recordOf(payload.diagnosticReceipt),
+    || recordOf(payload.diagnosticReceipt)
+    || fallbackAnalyticalFailure(payload),
   );
 }
 
@@ -2102,7 +2131,7 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
     facts: recordOf(payload.analyticalFacts),
     narrative: recordOf(payload.analyticalNarrative),
     freshness: recordOf(payload.analyticalFreshnessObservation),
-    failure: recordOf(payload.analyticalFailure) ?? recordOf(diagnostic?.failure),
+    failure: recordOf(payload.analyticalFailure) ?? recordOf(diagnostic?.failure) ?? fallbackAnalyticalFailure(payload),
     semantic: recordOf(payload.semanticExecutionTrace),
     diagnostic,
   };

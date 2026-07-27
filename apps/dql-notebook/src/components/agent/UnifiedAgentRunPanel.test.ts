@@ -877,3 +877,40 @@ describe('buildConversationContext', () => {
     });
   });
 });
+
+describe('a refusal is still inspectable', () => {
+  let hasContract: typeof UnifiedAgentRunPanelModule.hasAnalyticalInspectorContract;
+  let contractOf: typeof UnifiedAgentRunPanelModule.analyticalInspectorContract;
+
+  beforeAll(async () => {
+    vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
+    const module = await import('./UnifiedAgentRunPanel');
+    hasContract = module.hasAnalyticalInspectorContract;
+    contractOf = module.analyticalInspectorContract;
+  });
+
+  it('opens "How it was answered" for a bare refusal with no analytical contract', () => {
+    // Regression: these refusals rendered as a plain sentence with only Copy —
+    // no DQL, no SQL, no "How it was answered" — so the user could not see why
+    // the query stopped or carry it into a notebook to research.
+    const groundingGap = {
+      refusalCode: 'grounding_gap',
+      answer: 'I could not compose a governed query for this from the available tables and metrics.',
+    };
+    expect(hasContract(groundingGap)).toBe(true);
+    expect(contractOf(groundingGap)?.failure).toMatchObject({ stage: 'answer', code: 'grounding_gap' });
+
+    const unretrievedTable = {
+      refusalCode: 'ungrounded_table',
+      refusalDetails: { message: 'It uses a table that was not part of the metadata retrieved for this question.' },
+    };
+    expect(hasContract(unretrievedTable)).toBe(true);
+    expect(contractOf(unretrievedTable)?.failure).toMatchObject({ code: 'ungrounded_table' });
+
+    // A raw execution error is a failure too, even outside the v2 lane.
+    expect(hasContract({ executionError: 'Binder Error: column "revenu" not found' })).toBe(true);
+
+    // A healthy answer is unchanged — no phantom failure section.
+    expect(hasContract({ sql: 'select 1', result: { columns: [], rows: [] } })).toBe(false);
+  });
+});

@@ -2307,6 +2307,10 @@ describe('agent run runtime API', () => {
       // Without a reachable provider the run is cleanly blocked (ai-provider eval); with one
       // it returns a governed / needs-clarification result. Either way, no raw infra leak.
       expect(['blocked', 'needs_review', 'needs_clarification', 'completed']).toContain(ask.run.status);
+      // Every terminal run must stay inspectable. The inspector can only be opened
+      // FROM an artifact, so an empty list renders a refusal as a bare sentence
+      // with no DQL, no SQL and no "How it was answered".
+      expect(ask.run.artifacts.length).toBeGreaterThan(0);
       if (ask.run.status === 'blocked') {
         expect(ask.run.evaluations.some((evaluation: any) => evaluation.id === 'ai-provider')).toBe(true);
         expect(ask.run.lifecycle).toMatchObject({ state: 'terminal', phase: 'run.failed' });
