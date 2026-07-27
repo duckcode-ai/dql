@@ -1142,6 +1142,30 @@ export interface RequestCertificationResult {
   error?: string;
 }
 
+export type AgentHintStatus = 'candidate' | 'approved' | 'rejected';
+
+export interface AgentHint {
+  id: string;
+  title: string;
+  guidance: string;
+  status: AgentHintStatus;
+  scope: { metric?: string; dbtModel?: string; domain?: string; dialect?: string; term?: string; block?: string };
+  correctedSql?: string;
+  tags?: string[];
+  author?: string;
+  reviewer?: string;
+  requiredEvaluation?: string;
+  evaluationId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentHintListResponse {
+  hints: AgentHint[];
+  counts: { candidate: number; approved: number; rejected: number };
+  error?: string;
+}
+
 export interface AgentRunListResponse {
   runs: AgentRun[];
   total: number;
@@ -2923,6 +2947,37 @@ export const api = {
     return request('/api/settings/mcp', {
       method: 'POST',
       body: JSON.stringify({ entries }),
+    });
+  },
+
+  /**
+   * Teach DQL from a wrong -> right SQL edit. Recorded as a git trace plus a
+   * CANDIDATE hint; it only shapes other people's answers once approved in
+   * Settings -> Agent learning.
+   */
+  async recordAgentCorrection(input: {
+    question: string;
+    correctedSql: string;
+    wrongSql?: string;
+    rationale?: string;
+    scope?: { metric?: string; dbtModel?: string; domain?: string; term?: string; block?: string };
+    failedRoute?: string;
+  }): Promise<{ ok: boolean; hint?: AgentHint; error?: string }> {
+    return request('/api/agent/learnings/correction', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async listAgentHints(status?: AgentHintStatus): Promise<AgentHintListResponse> {
+    const suffix = status ? `?status=${encodeURIComponent(status)}` : '';
+    return request<AgentHintListResponse>(`/api/agent/hints${suffix}`);
+  },
+
+  async reviewAgentHint(hintId: string, decision: 'approved' | 'rejected', note?: string): Promise<{ ok: boolean; hint?: AgentHint; error?: string }> {
+    return request(`/api/agent/hints/${encodeURIComponent(hintId)}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, ...(note ? { note } : {}) }),
     });
   },
 

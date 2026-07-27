@@ -641,6 +641,8 @@ export interface CellDqlArtifact {
   routeEvidence?: Array<Record<string, unknown>>;
   lineage?: Record<string, unknown>;
   reviewState?: "certified" | "draft" | "review_required";
+  /** The question this artifact answered — lets an edit be captured as a correction. */
+  question?: string;
 }
 
 export interface ExecutionTarget {

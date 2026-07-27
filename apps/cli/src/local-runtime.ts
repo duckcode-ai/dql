@@ -162,6 +162,8 @@ import {
   propose,
   proposePlan,
   recordCorrectionTrace,
+  listHintsFromGit,
+  evaluateHint,
   emitCorrectionEvalCase,
   mineJoinPatterns,
   type JoinPatternCandidate,
@@ -7417,6 +7419,123 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // the approval, so the derived candidate is approved immediately unless the
     // caller opts out. Advisory only: never overrides certified routing. The
     // multi-tenant review workflow + automated distillation stay a cloud feature.
+    // Hint review queue. Corrections are captured as CANDIDATES; a hint only
+    // starts shaping other people's answers once a human approves it here.
+    if (req.method === 'GET' && path === '/api/agent/hints') {
+      try {
+        const status = url.searchParams.get('status');
+        const all = listHintsFromGit(projectRoot);
+        const hints = status ? all.filter((hint) => hint.status === status) : all;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          hints: hints.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 200),
+          counts: {
+            candidate: all.filter((hint) => hint.status === 'candidate').length,
+            approved: all.filter((hint) => hint.status === 'approved').length,
+            rejected: all.filter((hint) => hint.status === 'rejected').length,
+          },
+        }));
+      } catch (error) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ hints: [], counts: { candidate: 0, approved: 0, rejected: 0 }, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const hintReviewMatch = /^\/api\/agent\/hints\/([^/]+)\/review$/.exec(path);
+    if (req.method === 'POST' && hintReviewMatch) {
+      try {
+        const hintId = decodeURIComponent(hintReviewMatch[1]);
+        const body = await readJSON(req).catch(() => null) as Record<string, unknown> | null;
+        const decision = body?.decision === 'approved' || body?.decision === 'rejected' ? body.decision : null;
+        if (!decision) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: "decision must be 'approved' or 'rejected'." }));
+          return;
+        }
+        const reviewer = typeof body?.reviewer === 'string' && body.reviewer.trim()
+          ? body.reviewer.trim()
+          : (resolveLocalOwner(projectRoot) ?? 'local');
+        const note = typeof body?.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
+        const snapshotId = projectSnapshot().snapshotId;
+        // dbt-first v3 requires a PASSED evaluation artifact recorded against the
+        // same snapshot before a candidate may be approved. Approving from the
+        // review queue therefore runs the hint's required evaluation first: the
+        // corrected SQL is re-validated against the current project so a hint can
+        // never be promoted on evidence that has gone stale.
+        if (decision === 'approved') {
+          const pending = listHintsFromGit(projectRoot).find((entry) => entry.id === hintId);
+          if (pending?.status === 'candidate' && pending.requiredEvaluation && !pending.evaluationId) {
+            // The evaluation must be a real check, not a rubber stamp: the
+            // corrected SQL has to parse and reference at least one relation
+            // against the CURRENT project. A correction that no longer analyses
+            // cannot be promoted into everyone's prompt.
+            const validation = ((): { ok: boolean; error?: string } => {
+              const sql = pending.correctedSql?.trim();
+              if (!sql) return { ok: false, error: 'The correction carries no SQL to verify.' };
+              try {
+                const analysis = analyzeSqlReferences(sql);
+                if (!analysis.tables.length) return { ok: false, error: 'Corrected SQL references no known relation.' };
+                return { ok: true };
+              } catch (error) {
+                return { ok: false, error: error instanceof Error ? error.message : String(error) };
+              }
+            })();
+            try {
+              evaluateHint(projectRoot, {
+                hintId,
+                snapshotId,
+                evaluator: reviewer,
+                evaluation: pending.requiredEvaluation,
+                checks: [{
+                  name: 'corrected-sql-validates',
+                  passed: validation.ok,
+                  evidence: validation.ok ? 'Corrected SQL passed local context validation.' : validation.error,
+                }],
+                evidence: [`snapshot: ${snapshotId}`, `reviewer: ${reviewer}`],
+              });
+            } catch (evaluationError) {
+              res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ ok: false, error: evaluationError instanceof Error ? evaluationError.message : String(evaluationError) }));
+              return;
+            }
+          }
+        }
+        const reviewed = reviewHint(projectRoot, { hintId, decision, reviewer, snapshotId, ...(note ? { note } : {}) });
+        if (!reviewed) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Hint not found.' }));
+          return;
+        }
+        const hint = reviewed.hint;
+        // Keep the mirrored advisory memory in step with the decision, so an
+        // approved lesson is recalled and a rejected one stops being recalled.
+        try {
+          const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+          memory.upsert({
+            id: `mem_${hint.id}`,
+            scope: 'project',
+            title: hint.title,
+            content: hint.guidance,
+            tags: [hint.scope.metric, hint.scope.domain, hint.scope.dbtModel].filter((x): x is string => Boolean(x)),
+            source: 'correction',
+            confidence: 0.9,
+            importance: 0.85,
+            enabled: decision === 'approved',
+          });
+          memory.close();
+        } catch {
+          /* best-effort */
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, hint }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/agent/learnings/correction') {
       const body = await readJSON(req).catch(() => null);
       const question = body && typeof body.question === 'string' ? body.question.trim() : '';
@@ -7440,6 +7559,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const rationale = typeof body.rationale === 'string' && body.rationale.trim() ? body.rationale.trim() : undefined;
       const author = typeof body.author === 'string' ? body.author : (resolveLocalOwner(projectRoot) ?? undefined);
       try {
+        // dbt-first manifest v3 requires reviewable provenance before a correction
+        // may be recorded at all. The client cannot know most of it, so derive it
+        // here: without this the endpoint rejects every correction on exactly the
+        // governed projects the learning loop is meant to serve.
+        const correctionEvidence = Array.isArray(body.evidence)
+          ? body.evidence.map(String).filter(Boolean)
+          : [
+              `question: ${question}`,
+              ...(wrongSql ? [`previous SQL: ${wrongSql.replace(/\s+/g, ' ').slice(0, 400)}`] : []),
+              `corrected SQL: ${correctedSql.replace(/\s+/g, ' ').slice(0, 400)}`,
+              ...(rationale ? [`rationale: ${rationale}`] : []),
+            ];
+        const correctionSnapshotId = typeof body.snapshotId === 'string' && body.snapshotId.trim()
+          ? body.snapshotId.trim()
+          : projectSnapshot().snapshotId;
+        const correctionFailedRoute = typeof body.failedRoute === 'string' && body.failedRoute.trim()
+          ? body.failedRoute.trim()
+          : 'generated_answer';
+        // Must match the name emitCorrectionEvalCase writes, so the required
+        // evaluation and the emitted regression case are the same artifact.
+        const correctionEvaluation = typeof body.requiredEvaluation === 'string' && body.requiredEvaluation.trim()
+          ? body.requiredEvaluation.trim()
+          : `correction: ${question.slice(0, 60)}`;
         const { trace, hint } = recordCorrectionTrace(projectRoot, {
           question,
           scope,
@@ -7448,19 +7590,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           correctedSql,
           rationale,
           author,
+          failedRoute: correctionFailedRoute,
+          evidence: correctionEvidence,
+          snapshotId: correctionSnapshotId,
+          requiredEvaluation: correctionEvaluation,
           hintTitle: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
           hintGuidance: typeof body.guidance === 'string' && body.guidance.trim() ? body.guidance.trim() : undefined,
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
         });
+        // Capture always, approve deliberately. A hint is injected into the
+        // generation prompt as a "human-approved correction" and shapes every
+        // future answer in scope — one analyst's local fix must not silently
+        // become a team-wide rule across thousands of models. The trace and the
+        // candidate are always recorded, so nothing is lost; approval is a
+        // one-click review in Settings. Callers may still opt in explicitly.
         let approvedHint = hint;
-        if (body.approve !== false) {
-          reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: author ?? 'local', note: 'Self-approved (OSS single-user).' });
+        if (body.approve === true) {
+          reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: author ?? 'local', note: 'Approved on capture.' });
           approvedHint = { ...hint, status: 'approved' as const };
         }
         // W4.3 — turn the correction into a durable regression eval case so the wrong
         // answer can never silently return. Best-effort; never blocks the correction.
         try {
-          emitCorrectionEvalCase(projectRoot, { question, correctedSql });
+          emitCorrectionEvalCase(projectRoot, { question, correctedSql, name: correctionEvaluation });
         } catch {
           /* best-effort */
         }
@@ -7476,7 +7628,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             source: 'correction',
             confidence: 0.9,
             importance: 0.85,
-            enabled: true,
+            // A candidate is evidence, not a rule. Mirroring it as an ENABLED
+            // memory would inject it into prompts through the side door and
+            // defeat the approval gate; it is enabled when the hint is approved.
+            enabled: approvedHint.status === 'approved',
           });
           memory.close();
         } catch {

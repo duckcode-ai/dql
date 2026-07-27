@@ -4813,6 +4813,10 @@ function deriveQuestionScope(
   return {
     metric: lowerOrUndef(metric),
     dbtModel: lowerOrUndef(dbtModel),
+    // Carry every retrieved model/metric so a hint scoped to any of them fires,
+    // instead of only the one that happened to rank first.
+    dbtModels: objects.filter((o) => o.objectType === 'dbt_model').map((o) => o.name.toLowerCase()).slice(0, 40),
+    metrics: objects.filter((o) => o.objectType === 'semantic_metric').map((o) => o.name.toLowerCase()).slice(0, 40),
     domain: lowerOrUndef(domain),
     term: lowerOrUndef(term),
     block,

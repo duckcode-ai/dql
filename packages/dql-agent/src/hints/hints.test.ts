@@ -205,3 +205,25 @@ describe('Git hint file format', () => {
     expect(listHintsFromGit(projectRoot).map((h) => h.id)).toContain(hint.id);
   });
 });
+
+describe('hint recall does not depend on which model ranked first', () => {
+  const scopedHint = { dbtModel: 'fct_orders' };
+
+  it('applies when the scoped model is anywhere in the retrieved set', () => {
+    // At 4000 models a hint used to fire only when its model happened to be the
+    // single top-ranked pick — so recall degraded as the catalog grew.
+    expect(hintAppliesToScope(scopedHint, {
+      dbtModel: 'dim_customers',
+      dbtModels: ['dim_customers', 'fct_orders', 'dim_dates'],
+      text: 'orders by customer',
+    }).applies).toBe(true);
+  });
+
+  it('still rejects a model the question never retrieved', () => {
+    expect(hintAppliesToScope(scopedHint, {
+      dbtModel: 'dim_customers',
+      dbtModels: ['dim_customers', 'dim_dates'],
+      text: 'customers',
+    }).applies).toBe(false);
+  });
+});

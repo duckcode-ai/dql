@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Sparkles } from 'lucide-react';
 import {
   api,
+  type AgentHint,
   type AgentMemory,
   type OAuthProviderId,
   type OAuthStatus,
@@ -15,6 +16,7 @@ import {
 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
+import { controlStyle } from '../../themes/control-tokens';
 
 const PROVIDER_ORDER: ProviderSettingsId[] = ['claude-code', 'codex', 'anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
 // Subscription providers (log in with an installed CLI) render as their own group,
@@ -204,6 +206,7 @@ export function ConnectionRuntimeSettings({
                 onChange={setMemories}
                 onStatus={setStatus}
               />
+              <HintReviewQueue t={t} onStatus={setStatus} />
             </section>
           )}
 
@@ -1306,6 +1309,100 @@ function ProviderCard({
         </div>
       )}
     </section>
+  );
+}
+
+
+/**
+ * Pending corrections awaiting approval.
+ *
+ * A correction is captured the moment someone fixes AI SQL, but it is recorded
+ * as a CANDIDATE: it does not shape anyone else's answers until approved here.
+ * Approving runs the hint's required evaluation first, so a correction can never
+ * be promoted on evidence that has gone stale.
+ */
+function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string | null) => void }) {
+  const [hints, setHints] = useState<AgentHint[]>([]);
+  const [counts, setCounts] = useState<{ candidate: number; approved: number; rejected: number }>({ candidate: 0, approved: 0, rejected: 0 });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const response = await api.listAgentHints();
+      setHints(response.hints ?? []);
+      setCounts(response.counts ?? { candidate: 0, approved: 0, rejected: 0 });
+    } catch {
+      setHints([]);
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const review = async (hint: AgentHint, decision: 'approved' | 'rejected') => {
+    setBusy(hint.id);
+    onStatus(null);
+    try {
+      const result = await api.reviewAgentHint(hint.id, decision);
+      if (!result.ok) {
+        onStatus(result.error ?? `Could not ${decision === 'approved' ? 'approve' : 'reject'} this correction.`);
+      } else {
+        onStatus(decision === 'approved'
+          ? `Approved. DQL will apply "${hint.title}" to matching questions.`
+          : `Rejected. "${hint.title}" will not be used.`);
+      }
+      await refresh();
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const pending = hints.filter((hint) => hint.status === 'candidate');
+  if (!loaded) return null;
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Corrections awaiting review</span>
+        <span style={{ fontSize: 11, color: t.textMuted }}>
+          {counts.candidate} pending · {counts.approved} approved{counts.rejected ? ` · ${counts.rejected} rejected` : ''}
+        </span>
+      </div>
+      {pending.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5 }}>
+          Nothing pending. When you fix AI-generated SQL and it runs, DQL captures the before/after here so you can decide whether it should apply to future questions.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gap: 8 }}>
+          {pending.map((hint) => (
+            <div key={hint.id} style={{ border: `1px solid ${t.btnBorder}`, borderRadius: 8, padding: '10px 12px', background: t.btnBg, display: 'grid', gap: 6 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: t.textPrimary }}>{hint.title}</div>
+              <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.5 }}>{hint.guidance}</div>
+              {hint.correctedSql ? (
+                <pre style={{ margin: 0, fontSize: 10.5, fontFamily: t.fontMono, color: t.textMuted, whiteSpace: 'pre-wrap', maxHeight: 96, overflow: 'auto' }}>
+                  {hint.correctedSql}
+                </pre>
+              ) : null}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'approved')} style={controlStyle(t, { variant: 'primary', size: 'sm', disabled: busy === hint.id })}>
+                  {busy === hint.id ? 'Checking…' : 'Approve'}
+                </button>
+                <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'rejected')} style={controlStyle(t, { variant: 'danger', size: 'sm', disabled: busy === hint.id })}>
+                  Reject
+                </button>
+                <span style={{ fontSize: 10.5, color: t.textMuted }}>
+                  {[hint.scope.dbtModel, hint.scope.metric, hint.scope.domain].filter(Boolean).join(' · ') || 'project-wide'}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

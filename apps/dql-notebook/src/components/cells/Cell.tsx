@@ -7,6 +7,7 @@ import React, {
   useRef,
 } from "react";
 import {
+  Check,
   Database,
   MessageSquarePlus,
   ShieldCheck,
@@ -2080,6 +2081,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     </button>
                   </>
                 )}
+              <TeachCorrectionBar cell={cell} t={t} />
               {cell.result && (
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} aria-label="Explore this result">
                   <span style={{ font: `700 9px ${t.font}`, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.05em' }}>
@@ -2677,6 +2679,84 @@ function ExploreStepButton({
     >
       {label}
     </button>
+  );
+}
+
+
+/**
+ * "You fixed this — teach DQL?"
+ *
+ * Shown only when an AI-generated cell was EDITED and then ran SUCCESSFULLY, so
+ * the captured pair is a correction that demonstrably works rather than an
+ * abandoned experiment. Recorded as a candidate; it shapes nobody else's answers
+ * until approved in Settings -> Agent learning.
+ */
+function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
+  const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'dismissed' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  const generated = (cell.dqlArtifact?.sql ?? cell.dqlArtifact?.compiledSql ?? '').trim();
+  const current = cell.content.trim();
+  const question = cell.dqlArtifact?.question?.trim();
+  const edited = Boolean(generated) && Boolean(current) && generated !== current;
+  const eligible = edited && Boolean(question) && cell.status === 'success' && Boolean(cell.result);
+
+  if (!eligible || state === 'dismissed') return null;
+
+  if (state === 'saved') {
+    return (
+      <span style={{ fontSize: 10.5, color: t.success, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <Check size={11} /> Saved for review
+      </span>
+    );
+  }
+
+  const teach = async () => {
+    setState('saving');
+    setError(null);
+    try {
+      const result = await api.recordAgentCorrection({
+        question: question!,
+        wrongSql: generated,
+        correctedSql: current,
+        rationale: 'Edited in the notebook and ran successfully.',
+        ...(cell.dqlArtifact?.metrics?.[0] ? { scope: { metric: cell.dqlArtifact.metrics[0] } } : {}),
+      });
+      if (result.ok === false) {
+        setError(result.error ?? 'Could not save this correction.');
+        setState('error');
+        return;
+      }
+      setState('saved');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setState('error');
+    }
+  };
+
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
+        {state === 'error' ? (error ?? 'Could not save.') : 'You changed this and it ran. Teach DQL?'}
+      </span>
+      <button
+        type="button"
+        onClick={() => void teach()}
+        disabled={state === 'saving'}
+        title="Record this fix so DQL stops repeating the mistake. Reviewed before it applies."
+        style={{ ...controlStyle(t, { variant: 'accent', size: 'xs', disabled: state === 'saving' }), fontSize: 10 }}
+      >
+        {state === 'saving' ? 'Saving…' : 'Teach DQL'}
+      </button>
+      <button
+        type="button"
+        onClick={() => setState('dismissed')}
+        title="Dismiss"
+        style={{ ...controlStyle(t, { variant: 'ghost', size: 'xs' }), fontSize: 10 }}
+      >
+        Not now
+      </button>
+    </div>
   );
 }
 

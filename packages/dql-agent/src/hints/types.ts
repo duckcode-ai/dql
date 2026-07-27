@@ -169,6 +169,17 @@ export interface ScopedHintMatch {
 export interface QuestionScope {
   metric?: string;
   dbtModel?: string;
+  /**
+   * Every dbt model the question retrieved, not just the top-ranked one.
+   *
+   * The gate below fails a hint whose model the question does not declare. With
+   * only the FIRST model in scope, a hint scoped to `fct_orders` fired solely
+   * when `fct_orders` happened to rank first — so recall got WORSE as the
+   * catalog grew. Matching against the retrieved set makes it get better.
+   */
+  dbtModels?: string[];
+  /** Every metric the question retrieved, for the same reason. */
+  metrics?: string[];
   domain?: string;
   dialect?: string;
   term?: string;
@@ -206,10 +217,18 @@ export function hintAppliesToScope(scope: HintScope, question: QuestionScope): {
     const want = scope[hintField];
     if (want === undefined || want === '') continue; // wildcard
     const have = question[qField];
-    if (have === undefined || have === '') {
+    // A hint matches when its value is anywhere in the question's retrieved set
+    // for that field, not only when it is the single top-ranked pick.
+    const candidates = hintField === 'dbtModel'
+      ? (question.dbtModels ?? [])
+      : hintField === 'metric'
+        ? (question.metrics ?? [])
+        : [];
+    const inCandidates = candidates.some((candidate) => eqScope(want, candidate));
+    if ((have === undefined || have === '') && !inCandidates) {
       return { applies: false, reason: `hint requires ${hintField}=${want} but question scope is unknown` };
     }
-    if (!eqScope(want, have)) {
+    if (!inCandidates && !(typeof have === 'string' && eqScope(want, have))) {
       return { applies: false, reason: `hint ${hintField}=${want} ≠ question ${String(have)}` };
     }
     matched.push(`${hintField}=${want}`);

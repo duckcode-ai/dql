@@ -300,6 +300,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           persistence: payload.dqlArtifact.persistence,
           trustState: payload.dqlArtifact.trustState,
           compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
+          ...(payload.question ? { question: payload.question } : {}),
         };
         cell.dqlParameterValues = payload.dqlArtifact.parameterValues;
       }
