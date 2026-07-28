@@ -3486,6 +3486,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     }
   }
 
+  // Why a relation-grounding refusal happened, in the refusal itself. Without
+  // this the user sees "it uses a table that was not part of the metadata
+  // retrieved" and cannot tell whether re-grounding never ran, ran and found
+  // nothing, or found the table and something else rejected the SQL — which are
+  // three different fixes.
+  let regroundDiagnostic: string | undefined;
   if (!contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && !governedMetricAnswer && input.expandGroundingContext && canUseLaneRepair(repairBudgetState, 'reground')) {
     recordLaneRepair(repairBudgetState, 'reground');
     try {
@@ -3498,6 +3504,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         schemaContext: contextLedger.schemaContext,
       });
       const merged = contextLedger.withExpansion(expansion);
+      const requestedRelations = contextValidation.offending?.relations
+        ?? (contextValidation.offending?.relation ? [contextValidation.offending.relation] : []);
+      regroundDiagnostic = `re-ground: requested ${requestedRelations.length || 'none'}${requestedRelations.length ? ` (${requestedRelations.slice(0, 6).join(', ')})` : ''}, resolved ${expansion?.relations?.length ?? 0}`;
       if (merged.notes.length > 0) {
         contextLedger = merged.ledger;
         parsed.sql = contextLedger.qualifySql(parsed.sql).sql;
@@ -3540,8 +3549,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     } catch (err) {
       if (input.signal?.aborted) throw input.signal.reason ?? err;
       if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) throw err;
+      regroundDiagnostic = `re-ground: failed (${err instanceof Error ? err.message : String(err)})`;
       // Re-grounding is best-effort; the bounded self-repair below still runs.
     }
+  } else if (!contextValidation.ok && contextValidation.code === 'unknown_relation') {
+    regroundDiagnostic = !input.expandGroundingContext
+      ? 're-ground: unavailable on this surface'
+      : governedMetricAnswer
+        ? 're-ground: skipped (a governed metric answer was already produced)'
+        : 're-ground: budget already spent earlier in this run';
+  }
+  if (regroundDiagnostic && !contextValidation.ok) {
+    contextValidation = {
+      ...contextValidation,
+      warnings: [...contextValidation.warnings, regroundDiagnostic],
+    };
   }
 
   // One bounded self-repair before refusing: hand the model the EXACT guard
