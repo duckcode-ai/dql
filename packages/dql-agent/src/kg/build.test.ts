@@ -248,6 +248,45 @@ describe('buildKGFromManifest', () => {
     ]));
   });
 
+
+  it('keeps a metric retrievable when its dbt-derived domain is not a declared DQL domain', () => {
+    // The exact enterprise failure: dbt derives a metric domain from
+    // meta.group/fqn[1]/package_name, DQL domains are declared separately, and
+    // the two namespaces were never reconciled. Pinning DQL domain "growth"
+    // SQL-filtered this metric out BEFORE ranking, silently demoting the answer
+    // from the governed semantic lane to raw SQL.
+    const layer = new SemanticLayer({
+      metrics: [{
+        name: 'net_revenue', label: 'Net Revenue', description: 'Revenue.',
+        domain: 'finance', status: 'certified', sql: 'amount', type: 'sum', table: 'orders',
+      }],
+      dimensions: [],
+    });
+
+    const declared = new Set(['growth', 'commerce']);
+    const metric = buildKGFromSemanticLayer(layer, declared).nodes.find((node) => node.nodeId === 'metric:net_revenue');
+
+    // Unreconciled: no governed domain, so the retrieval filter (which passes
+    // NULL) can never exclude it...
+    expect(metric?.domain).toBeUndefined();
+    // ...but the dbt origin survives for ranking and workspace grouping.
+    expect(metric?.sourceDomain).toBe('finance');
+
+    // A derived domain that DOES name a declared domain stays governed.
+    const governed = buildKGFromSemanticLayer(layer, new Set(['finance', 'growth'])).nodes
+      .find((node) => node.nodeId === 'metric:net_revenue');
+    expect(governed?.domain).toBe('finance');
+
+    // No declared domains at all (nothing can be pinned) keeps prior behaviour --
+    // both when the argument is omitted and when the project simply declares
+    // none, which is the common case and must not lose every domain.
+    const ungoverned = buildKGFromSemanticLayer(layer).nodes.find((node) => node.nodeId === 'metric:net_revenue');
+    expect(ungoverned?.domain).toBe('finance');
+    const noDomainsDeclared = buildKGFromSemanticLayer(layer, new Set<string>()).nodes
+      .find((node) => node.nodeId === 'metric:net_revenue');
+    expect(noDomainsDeclared?.domain).toBe('finance');
+  });
+
   it('maps semantic-layer metric and dimension status into KG certification', () => {
     const layer = new SemanticLayer({
       metrics: [{

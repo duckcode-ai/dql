@@ -407,7 +407,7 @@ describe('buildFromPrompt (spec 15) — grounded SQL accuracy', () => {
       domain: 'sales',
       domainContext: {
         activeDomain: 'finance',
-        ancestors: [],
+        ancestors: [], descendants: [],
         allowedImports: [],
         source: 'explicit_api',
         confidence: 'high',

@@ -623,13 +623,66 @@ function renderBusinessViewContext(view: ManifestBusinessView): string | undefin
   ].filter(Boolean).join('\n') || undefined;
 }
 
-export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
+/**
+ * Every identifier a project has actually declared a domain under.
+ *
+ * Deliberately generous — package ids, their trailing segment, and the legacy
+ * name-keyed `manifest.domains` map. A value listed here keeps today's
+ * behaviour; a value missing from it only ever loses its *filtering* authority,
+ * never its retrievability. Erring wide therefore cannot hide a metric, while
+ * erring narrow could.
+ */
+export function declaredDomainIds(manifest: DQLManifest): Set<string> {
+  const ids = new Set<string>();
+  const add = (value: string | undefined): void => {
+    const trimmed = value?.trim();
+    if (trimmed) ids.add(trimmed.toLowerCase());
+  };
+  for (const [key, pkg] of Object.entries(manifest.modeling?.packages ?? {})) {
+    add(key);
+    add(pkg?.id);
+    // A nested package id is dot-qualified (`growth.acquisition`); accept the
+    // trailing segment too, since a dbt group or folder is usually named for
+    // the sub-domain alone rather than its full path.
+    add(pkg?.id?.split('.').pop());
+  }
+  for (const [key, domain] of Object.entries(manifest.domains ?? {})) {
+    add(key);
+    add(domain?.id);
+    add(domain?.name);
+  }
+  return ids;
+}
+
+/**
+ * @param declaredDomains ids of the domains declared under `domains/`. A
+ * dbt-derived domain is only allowed to become the governed `domain` (the field
+ * retrieval filters on) when it names one of these. Anything else is recorded as
+ * `sourceDomain` and leaves `domain` unset, so an unreconciled metric stays
+ * retrievable instead of silently vanishing when a domain is pinned.
+ */
+export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined, declaredDomains?: Iterable<string>): {
   nodes: KGNode[];
   edges: KGEdge[];
 } {
   const nodes: KGNode[] = [];
   const edges: KGEdge[] = [];
   if (!layer) return { nodes, edges };
+  // An EMPTY declared set means the project declares no domains at all, so
+  // there is nothing to reconcile against and nothing can be pinned. Treat that
+  // as "no reconciliation" rather than "nothing is governed" — the latter would
+  // strip every domain from every semantic object for the majority of projects.
+  const declaredList = declaredDomains ? [...declaredDomains].map((id) => id.trim().toLowerCase()).filter(Boolean) : [];
+  const declared = declaredList.length > 0 ? new Set(declaredList) : undefined;
+  /** Split a dbt-derived domain into the governed field and the provenance field. */
+  const governDomain = (value: string | undefined): { domain?: string; sourceDomain?: string } => {
+    const derived = value?.trim() || undefined;
+    if (!derived) return {};
+    if (!declared) return { domain: derived, sourceDomain: derived };
+    return declared.has(derived.toLowerCase())
+      ? { domain: derived, sourceDomain: derived }
+      : { sourceDomain: derived };
+  };
 
   const semanticMeasures = layer.listMeasures();
   const semanticDimensions = layer.listDimensions(undefined, { includeVariants: true });
@@ -705,7 +758,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       nodeId,
       kind: 'metric',
       name: qualifiedSemanticName(metric.cube, metric.name),
-      domain: metric.domain,
+      ...governDomain(metric.domain),
       status: metric.status,
       owner: metric.owner,
       description: metric.description,
@@ -761,7 +814,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       nodeId,
       kind: 'dimension',
       name: qualifiedSemanticName(dimension.cube, dimension.name),
-      domain: dimension.domain,
+      ...governDomain(dimension.domain),
       status: dimension.status,
       owner: dimension.owner,
       description: dimension.description,
@@ -808,7 +861,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       nodeId,
       kind: 'measure',
       name: qualifiedSemanticName(measure.cube, measure.name),
-      domain: measure.domain,
+      ...governDomain(measure.domain),
       status: semanticObjectStatus(measure),
       owner: measure.owner,
       description: measure.description,
@@ -846,7 +899,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       nodeId,
       kind: 'entity',
       name: qualifiedSemanticName(entity.cube, entity.name),
-      domain: entity.domain,
+      ...governDomain(entity.domain),
       status: semanticObjectStatus(entity),
       owner: entity.owner,
       description: entity.description,
@@ -875,7 +928,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       nodeId,
       kind: 'semantic_model',
       name: model.name,
-      domain: model.domain,
+      ...governDomain(model.domain),
       status: semanticObjectStatus(model),
       owner: model.owner,
       description: model.description,
@@ -907,7 +960,7 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined): {
       nodeId,
       kind: 'saved_query',
       name: query.name,
-      domain: query.domain,
+      ...governDomain(query.domain),
       status: semanticObjectStatus(query),
       owner: query.owner,
       description: query.description,

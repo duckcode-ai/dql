@@ -44,7 +44,7 @@ import {
   normalizeMetricCapabilityContract,
   type MetricCapabilityContract,
 } from "@duckcodeailabs/dql-core";
-import { buildKGFromManifest, buildKGFromSemanticLayer } from "../kg/build.js";
+import { buildKGFromManifest, buildKGFromSemanticLayer, declaredDomainIds } from "../kg/build.js";
 import type { KGEdge, KGNode } from "../kg/types.js";
 import {
   domainContextSearchDomains,
@@ -1576,7 +1576,7 @@ export function buildMetadataSnapshot(
   skills: Skill[] = loadSkills(projectRoot).skills,
 ): MetadataSnapshot {
   const manifestGraph = buildKGFromManifest(manifest);
-  const semanticGraph = buildKGFromSemanticLayer(semanticLayer);
+  const semanticGraph = buildKGFromSemanticLayer(semanticLayer, declaredDomainIds(manifest));
   const objects = new Map<string, MetadataObject>();
   const edges = new Map<string, MetadataEdge>();
   const diagnostics: MetadataDiagnostic[] = [
@@ -3537,6 +3537,9 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     kgNodeId: node.nodeId,
     tags: node.tags ?? [],
     examples: node.examples ?? [],
+    // The dbt-derived domain, kept out of the indexed `domain` column so it can
+    // never gate retrieval, but preserved for ranking and workspace grouping.
+    sourceDomain: node.sourceDomain,
     sourceTier: node.sourceTier,
     certification: node.certification,
     provenance: node.provenance,
@@ -7250,7 +7253,12 @@ function buildSourceFingerprints(objects: MetadataObject[], updatedAt: string): 
 function buildDomainShards(objects: MetadataObject[], updatedAt: string): MetadataDomainShard[] {
   const byDomain = new Map<string, MetadataObject[]>();
   for (const object of objects) {
-    const domain = object.domain?.trim() || '_uncategorized';
+    // Fall back to the dbt-derived origin so an unreconciled metric still
+    // groups under a recognisable heading in the domain workspace instead of
+    // collapsing into _uncategorized — it lost filtering authority, not identity.
+    const domain = object.domain?.trim()
+      || stringValue((object.payload as Record<string, unknown> | undefined)?.sourceDomain)?.trim()
+      || '_uncategorized';
     const list = byDomain.get(domain) ?? [];
     list.push(object);
     byDomain.set(domain, list);

@@ -66,7 +66,26 @@ export interface KGNode {
   nodeId: string;
   kind: KGNodeKind;
   name: string;
+  /**
+   * Governed domain. For semantic objects this is set ONLY when the dbt-derived
+   * domain names a domain declared in `domains/`, because this field is what
+   * retrieval filters on — see `sourceDomain`.
+   */
   domain?: string;
+  /**
+   * The domain dbt reported, whatever it was.
+   *
+   * dbt derives a domain from `meta.domain || meta.group || config.group ||
+   * fqn[1] || package_name || 'uncategorized'` — a folder or package name in
+   * dbt's namespace. DQL domains are declared separately. The two were never
+   * reconciled, so pinning DQL domain `growth` silently SQL-filtered out a
+   * metric whose dbt-derived domain read `finance`, demoting the answer from
+   * the governed semantic lane to raw SQL. Keeping the dbt value here and
+   * leaving `domain` unset means an unreconciled metric stays retrievable
+   * (the filter passes NULL) while the origin is preserved for ranking and
+   * display.
+   */
+  sourceDomain?: string;
   status?: string;
   owner?: string;
   description?: string;

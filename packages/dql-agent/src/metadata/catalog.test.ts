@@ -551,6 +551,58 @@ describe('local metadata catalog', () => {
     }
   });
 
+
+  it('CTX-006 keeps a governed metric retrievable when its dbt domain is not a declared DQL domain', async () => {
+    // The enterprise regression: dbt derives a metric's domain from
+    // meta.group / fqn[1] / package_name, DQL domains are declared separately,
+    // and the two namespaces were never reconciled. Pinning DQL domain "growth"
+    // SQL-filtered a metric deriving "finance" out BEFORE ranking -- silently
+    // demoting the answer from the governed semantic lane to raw SQL. Selecting
+    // a domain made answers WORSE.
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'pipeline_revenue', label: 'Pipeline Revenue',
+        description: 'Revenue from the acquisition pipeline.',
+        domain: 'finance', status: 'certified', sql: 'amount', type: 'sum', table: 'orders',
+      }],
+      dimensions: [],
+    });
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
+      domains: { growth: { id: 'growth', name: 'Growth', filePath: 'domains/growth/domain.dql' } },
+      blocks: {}, businessViews: {}, terms: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {}, sources: {},
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'reconcile-snapshot', nodes: {}, metricFlow: {} },
+      modeling: {
+        mode: 'dbt-first',
+        packages: { growth: { id: 'growth', filePath: 'domains/growth/domain.dql', exports: [] } },
+        areas: {}, entities: {}, relationships: {}, contracts: {}, conformance: {}, rules: {},
+        interfaces: { exports: {}, imports: {} }, domainLineage: [],
+      },
+    } as unknown as DQLManifest;
+
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest, semanticLayer);
+    upsertMetadataSnapshot(projectRoot, snapshot);
+
+    const metric = snapshot.objects.find((object) => object.objectType === 'semantic_metric');
+    // Unreconciled, so it carries no governed domain the filter could exclude on...
+    expect(metric?.domain).toBeUndefined();
+    // ...while the dbt origin survives for ranking and workspace grouping.
+    expect(metric?.payload).toMatchObject({ sourceDomain: 'finance' });
+
+    const pinned = await buildLocalContextPack(projectRoot, {
+      question: 'pipeline revenue',
+      preparedMetadataFingerprint: snapshot.fingerprint,
+      domainContext: {
+        activeDomain: 'growth', ancestors: [], descendants: [], allowedImports: [],
+        source: 'explicit_api', confidence: 'high', snapshotId: 'reconcile-snapshot',
+      },
+    });
+    // The whole point: pinning a domain must never hide a governed metric.
+    expect(pinned.objects.map((object) => object.objectKey)).toContain(metric!.objectKey);
+  });
+
   it('CTX-005 generates vector candidates independently and applies Domain eligibility before ranking', async () => {
     writeQualifiedSemanticIdentityFixture(projectRoot);
     const semanticLayer = resolveSemanticLayerWithDiagnostics({
@@ -581,7 +633,7 @@ describe('local metadata catalog', () => {
         embeddingProvider: provider,
         domainContext: {
           activeDomain: 'consumption',
-          ancestors: [],
+          ancestors: [], descendants: [],
           allowedImports: [],
           source: 'explicit_api',
           confidence: 'high',
@@ -671,7 +723,7 @@ This must not leak into the NBA domain.
       question: 'Who are the leading points scorers?',
       domainContext: {
         activeDomain: 'nba',
-        ancestors: [],
+        ancestors: [], descendants: [],
         allowedImports: [],
         modelAreaId: 'scoring',
         source: 'explicit_api',
@@ -790,7 +842,7 @@ Use the finance model area.
 
     const explicit = await buildLocalContextPack(projectRoot, {
       question: 'Who are the points leaders?', preparedMetadataFingerprint: snapshot.fingerprint,
-      domainContext: { activeDomain: 'nba', ancestors: [], allowedImports: [], modelAreaId: 'nba::model_area::scoring', source: 'explicit_api', confidence: 'high', snapshotId: 'area-snapshot' },
+      domainContext: { activeDomain: 'nba', ancestors: [], descendants: [], allowedImports: [], modelAreaId: 'nba::model_area::scoring', source: 'explicit_api', confidence: 'high', snapshotId: 'area-snapshot' },
     });
     expect(explicit.retrievalDiagnostics).toMatchObject({ focusedModelAreaId: 'nba::model_area::scoring', modelAreaSource: 'explicit' });
     expect(explicit.objects.map((object) => object.objectType)).toContain('model_area');
@@ -799,7 +851,7 @@ Use the finance model area.
 
     const inferred = await buildLocalContextPack(projectRoot, {
       question: 'Which team has the largest salary payroll spending?', preparedMetadataFingerprint: snapshot.fingerprint,
-      domainContext: { activeDomain: 'nba', ancestors: [], allowedImports: [], source: 'explicit_api', confidence: 'high', snapshotId: 'area-snapshot' },
+      domainContext: { activeDomain: 'nba', ancestors: [], descendants: [], allowedImports: [], source: 'explicit_api', confidence: 'high', snapshotId: 'area-snapshot' },
     });
     expect(inferred.retrievalDiagnostics).toMatchObject({ focusedModelAreaId: 'nba::model_area::finance', modelAreaSource: 'inferred' });
     expect(inferred.skills.map((skill) => skill.id)).toEqual(['finance-guide']);

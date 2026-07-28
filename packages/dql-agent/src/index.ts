@@ -19,7 +19,7 @@ import {
   resolveSemanticLayerWithDiagnostics,
 } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { buildKGFromManifest, buildKGFromSemanticLayer } from "./kg/build.js";
+import { buildKGFromManifest, buildKGFromSemanticLayer, declaredDomainIds } from "./kg/build.js";
 import { loadSkills } from "./skills/loader.js";
 import type { Skill } from "./skills/loader.js";
 import type { KGEdge, KGNode } from "./kg/types.js";
@@ -1185,7 +1185,7 @@ export async function reindexProject(
   const manifest = opts.manifest ?? loadManifest(projectRoot);
   const manifestGraph = buildKGFromManifest(manifest);
   const semanticLayer = loadAgentSemanticLayer(projectRoot);
-  const semanticGraph = buildKGFromSemanticLayer(semanticLayer);
+  const semanticGraph = buildKGFromSemanticLayer(semanticLayer, declaredDomainIds(manifest));
   let nodes = [...manifestGraph.nodes, ...semanticGraph.nodes];
   let edges = [...manifestGraph.edges, ...semanticGraph.edges];
 

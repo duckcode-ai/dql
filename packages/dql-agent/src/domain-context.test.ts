@@ -102,4 +102,41 @@ describe('resolveDomainContextEnvelope', () => {
       skillRefs: ['missing'],
     })).toThrow('Unknown knowledge skill');
   });
+
+  it('carries sub-domains DOWN into the search scope, not just ancestors up', () => {
+    // A sub-domain lives physically under its parent's root (the registry
+    // enforces it), so it is inside the parent's boundary by construction.
+    // Scope used to walk the parent chain up only, which made every question
+    // answerable solely from a sub-domain fail while its parent was pinned.
+    const nested = {
+      ...manifest,
+      modeling: {
+        ...(manifest as never as { modeling: Record<string, unknown> }).modeling,
+        packages: {
+          company: { id: 'company', filePath: 'domains/company/domain.dql', exports: [] },
+          growth: { id: 'growth', filePath: 'domains/growth/domain.dql', parent: 'company', exports: [] },
+          'growth.acquisition': { id: 'growth.acquisition', filePath: 'domains/growth/acquisition/domain.dql', parent: 'growth', exports: [] },
+          'growth.acquisition.paid': { id: 'growth.acquisition.paid', filePath: 'domains/growth/acquisition/paid/domain.dql', parent: 'growth.acquisition', exports: [] },
+          'growth.acquisition.organic': { id: 'growth.acquisition.organic', filePath: 'domains/growth/acquisition/organic/domain.dql', parent: 'growth.acquisition', exports: [] },
+          commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] },
+        },
+      },
+    } as unknown as DQLManifest;
+
+    const growth = resolveDomainContextEnvelope({ manifest: nested, activeDomain: 'growth' });
+    expect(growth.ancestors).toEqual(['company']);
+    // Every depth, not just immediate children.
+    expect(growth.descendants).toEqual(['growth.acquisition', 'growth.acquisition.organic', 'growth.acquisition.paid']);
+    const scope = domainContextSearchDomains(growth);
+    expect(scope).toContain('growth.acquisition');
+    expect(scope).toContain('growth.acquisition.paid');
+    // A sibling tree stays out of scope — descendants must not widen to everything.
+    expect(scope).not.toContain('commerce');
+
+    // Pinning the micro-domain stays narrow: its own ancestry, nothing sideways.
+    // `growth.acquisition` IS in scope here — as an ancestor, which is correct.
+    const micro = resolveDomainContextEnvelope({ manifest: nested, activeDomain: 'growth.acquisition.paid' });
+    expect(micro.descendants).toEqual([]);
+    expect(domainContextSearchDomains(micro)).not.toContain('growth.acquisition.organic');
+  });
 });

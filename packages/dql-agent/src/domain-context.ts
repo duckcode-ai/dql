@@ -4,6 +4,16 @@ export interface DomainContextEnvelope {
   /** CTX-001: server-validated request scope shared by UI, runtime, and agent. */
   activeDomain: string | null;
   ancestors: string[];
+  /**
+   * Sub-domains beneath `activeDomain`, at any depth.
+   *
+   * A sub-domain is inside its parent's boundary by construction — the registry
+   * enforces that a child package lives physically under its parent's root — so
+   * pinning a domain must see everything its descendants own. Scope used to walk
+   * the parent chain UP only, which made every sub-domain and micro-domain
+   * invisible to the domain that contains it.
+   */
+  descendants: string[];
   allowedImports: Array<{
     providerDomain: string;
     exportRef: string;
@@ -56,6 +66,23 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
     ancestors.unshift(parent);
     parent = packages[parent]?.parent;
   }
+  // Walk DOWN as well as up. Guarded by `seen` so a malformed parent cycle
+  // among descendants terminates rather than spinning (the ancestor walk above
+  // throws on a cycle, but that only covers the chain above activeDomain).
+  const descendants: string[] = [];
+  if (activeDomain) {
+    const seen = new Set<string>([activeDomain]);
+    let frontier = [activeDomain];
+    while (frontier.length > 0) {
+      const children = Object.values(packages)
+        .filter((pkg) => pkg.parent && frontier.includes(pkg.parent) && !seen.has(pkg.id))
+        .map((pkg) => pkg.id);
+      for (const child of children) seen.add(child);
+      descendants.push(...children);
+      frontier = children;
+    }
+    descendants.sort();
+  }
   const purpose = input.purpose?.trim() || undefined;
   const requestedModelAreaId = input.modelAreaId?.trim() || undefined;
   const requestedSkillRefs = [...new Set((input.skillRefs ?? []).map((value) => value.trim()).filter(Boolean))];
@@ -102,6 +129,7 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
   return {
     activeDomain,
     ancestors,
+    descendants,
     allowedImports,
     purpose,
     modelAreaId,
@@ -114,5 +142,12 @@ export function resolveDomainContextEnvelope(input: ResolveDomainContextInput): 
 
 export function domainContextSearchDomains(context: DomainContextEnvelope | undefined): string[] {
   if (!context?.activeDomain) return [];
-  return [...new Set([context.activeDomain, ...context.ancestors, ...context.allowedImports.map((item) => item.providerDomain)])];
+  return [...new Set([
+    context.activeDomain,
+    ...context.ancestors,
+    // Descendants are inside the pinned boundary; without them a question
+    // answerable only from a sub-domain fails while its parent is pinned.
+    ...(context.descendants ?? []),
+    ...context.allowedImports.map((item) => item.providerDomain),
+  ])];
 }
