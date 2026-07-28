@@ -11,6 +11,7 @@
 // inline message and never crashes.
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { CommaListInput } from '../common/CommaListInput';
 import type { CSSProperties } from 'react';
 import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, FolderOpen } from 'lucide-react';
 import { api } from '../../api/client';
@@ -20,6 +21,20 @@ import type { Skill, SkillPathSettings, Domain } from '../../store/types';
 import { skillMatchesModelingScope } from './modeling-scope';
 
 type FormMode = { kind: 'create' } | { kind: 'edit'; skill: Skill };
+
+/**
+ * Identifier normalization applied WHILE the user types.
+ *
+ * The full `slugify` trims and strips leading/trailing separators, so applying
+ * it per keystroke made the space bar do nothing at all: the separator it
+ * produced was immediately stripped as trailing, the character vanished, and a
+ * second word could never be started. Here the separator is kept, so a space
+ * visibly becomes "-" and typing continues; `slugify` still runs on blur and on
+ * save to settle the value.
+ */
+function slugifyWhileTyping(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 64);
+}
 
 function slugify(value: string): string {
   return value
@@ -524,8 +539,9 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
                   disabled={editing}
                   onChange={(e) => {
                     setIdTouched(true);
-                    set('id', slugify(e.target.value.replace(/^skills\//, '').replace(/\.skill\.md$/, '')));
+                    set('id', slugifyWhileTyping(e.target.value.replace(/^skills\//, '').replace(/\.skill\.md$/, '')));
                   }}
+                  onBlur={() => set('id', slugify(draft.id))}
                   title="File name — letters, numbers, and dashes"
                   style={{ border: 'none', background: 'none', outline: 'none', padding: 0, fontFamily: t.fontMono, fontSize: 10.5, color: t.textSecondary, width: `${Math.max(20, draft.id.length + 15)}ch`, borderBottom: editing ? 'none' : `1px dashed ${t.btnBorder}` }}
                 />
@@ -603,18 +619,18 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
             </label>
             <label style={formLabelCol}>
               <span style={formLabelText(t)}>Ask first when</span>
-              <input
-                value={(draft.clarifyWhen ?? []).join(', ')}
-                onChange={(e) => set('clarifyWhen', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
+              <CommaListInput
+                values={draft.clarifyWhen ?? []}
+                onChange={(next) => set('clarifyWhen', next)}
                 placeholder="e.g. 'sales' could mean revenue or order count"
                 style={inputStyle(t)}
               />
             </label>
             <label style={formLabelCol}>
               <span style={formLabelText(t)}>Avoid when</span>
-              <input
-                value={(draft.exclusions ?? []).join(', ')}
-                onChange={(e) => set('exclusions', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))}
+              <CommaListInput
+                values={draft.exclusions ?? []}
+                onChange={(next) => set('exclusions', next)}
                 placeholder="e.g. question is about pipeline or bookings"
                 style={inputStyle(t)}
               />
@@ -652,10 +668,10 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
             <summary style={{ fontSize: 11.5, fontWeight: 650, color: t.accent, cursor: 'pointer' }}>Advanced — model areas, dimensions, and vocabulary</summary>
             <div style={{ display: 'grid', gap: 14, marginTop: 12 }}>
               <Field label="Focused model areas (optional)" t={t} hint="Comma-separated area ids from the Model workspace. This boosts the skill only inside its selected domain; it never expands access.">
-                <input value={(draft.modelAreaRefs ?? []).join(', ')} onChange={(e) => set('modelAreaRefs', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="customer_lifecycle, revenue_reporting" style={inputStyle(t)} />
+                <CommaListInput values={draft.modelAreaRefs ?? []} onChange={(next) => set('modelAreaRefs', next)} placeholder="customer_lifecycle, revenue_reporting" style={inputStyle(t)} />
               </Field>
               <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">
-                <input value={(draft.preferredDimensions ?? []).join(', ')} onChange={(e) => set('preferredDimensions', e.target.value.split(',').map((value) => value.trim()).filter(Boolean))} placeholder="region, month" style={inputStyle(t)} />
+                <CommaListInput values={draft.preferredDimensions ?? []} onChange={(next) => set('preferredDimensions', next)} placeholder="region, month" style={inputStyle(t)} />
               </Field>
               <Field label="Vocabulary" t={t} hint="Map your terms to a target, e.g. arr → metric:arr or revenue → block:revenue_by_region.">
                 <VocabularyEditor t={t} value={draft.vocabulary} onChange={(next) => set('vocabulary', next)} />

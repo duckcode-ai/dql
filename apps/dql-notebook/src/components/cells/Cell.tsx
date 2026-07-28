@@ -1,4 +1,5 @@
 import type { Theme } from "../../themes/notebook-theme";
+import { CommaListInput } from '../common/CommaListInput';
 import React, {
   useState,
   useCallback,
@@ -691,14 +692,11 @@ function BlockGovernanceBar({
       </div>
       <div style={groupStyle}>
         <span style={labelStyle}>tags</span>
-        <input
+        <CommaListInput
           style={{ ...fieldStyle, width: 110 }}
-          value={fields.tags.join(', ')}
+          values={fields.tags}
           placeholder="revenue, kpi"
-          onChange={e => {
-            const tags = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
-            onChange(setBlockTags(content, tags));
-          }}
+          onChange={(tags) => onChange(setBlockTags(content, tags))}
         />
       </div>
       <div style={{ ...groupStyle, flex: 1 }}>

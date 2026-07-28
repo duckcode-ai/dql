@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CommaListInput } from '../common/CommaListInput';
 import { Sparkles } from 'lucide-react';
 import {
   api,
@@ -524,9 +525,9 @@ function McpConnectionsEditor({
                   placeholder={entry.hasAuthorizationToken ? `Leave blank to keep ${entry.authorizationTokenPreview ?? 'stored token'}` : 'Optional OAuth token'}
                   style={inputStyle(t)}
                 />
-                <input
-                  value={(entry.allowedTools ?? []).join(', ')}
-                  onChange={(event) => update(index, { allowedTools: splitCsv(event.target.value) })}
+                <CommaListInput
+                  values={entry.allowedTools ?? []}
+                  onChange={(allowedTools) => update(index, { allowedTools })}
                   placeholder="Allowed tools, comma separated"
                   style={inputStyle(t)}
                 />

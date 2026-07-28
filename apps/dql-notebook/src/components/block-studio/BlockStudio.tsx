@@ -4,6 +4,7 @@ import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, Che
 import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { controlStyle } from '../../themes/control-tokens';
+import { CommaListInput } from '../common/CommaListInput';
 import type {
   BlockStudioDiagnostic,
   DatabaseSchemaNode,
@@ -2942,7 +2943,7 @@ function CompactBlockIdentity({
           </select>
         </FieldLabel>
         <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => onTextChange('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
-        <FieldLabel label="Tags" t={t}><input value={(metadata?.tags ?? []).join(', ')} onChange={(event) => onTagsChange(event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean))} placeholder="finance, emea" style={input} /></FieldLabel>
+        <FieldLabel label="Tags" t={t}><CommaListInput values={metadata?.tags ?? []} onChange={onTagsChange} placeholder="finance, emea" style={input} /></FieldLabel>
         <div style={{ gridColumn: '1 / -1' }}>
           <FieldLabel label="Folder (optional)" t={t}>
             <input
@@ -5094,7 +5095,7 @@ function SavePanel({
       <input value={values.folderPath} onChange={(event) => onChange({ folderPath: event.target.value })} placeholder="Folder (optional), e.g. executive/monthly" style={{ ...inputStyle, fontFamily: t.fontMono }} />
       <input value={values.owner} onChange={(event) => onChange({ owner: event.target.value })} placeholder="Owner" style={inputStyle} />
       <input value={values.description} onChange={(event) => onChange({ description: event.target.value })} placeholder="Description" style={inputStyle} />
-      <input value={values.tags.join(', ')} onChange={(event) => onChange({ tags: event.target.value.split(',').map((tag) => tag.trim()).filter(Boolean) })} placeholder="Tags" style={inputStyle} />
+      <CommaListInput values={values.tags} onChange={(tags) => onChange({ tags })} placeholder="Tags" style={inputStyle} />
     </div>
   );
 }

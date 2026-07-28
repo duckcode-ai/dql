@@ -38,6 +38,20 @@ type FormMode = { kind: 'create' } | { kind: 'edit'; domain: Domain };
 const BOOTSTRAP_SESSION_KEY = 'dql-context-bootstrap-session';
 const BOOTSTRAP_SELECTION_KEY = 'dql-context-bootstrap-selection';
 
+/**
+ * Identifier normalization applied WHILE the user types.
+ *
+ * The full `slugify` trims and strips leading/trailing separators, so applying
+ * it per keystroke made the space bar do nothing at all: the separator it
+ * produced was immediately stripped as trailing, the character vanished, and a
+ * second word could never be started. Here the separator is kept, so a space
+ * visibly becomes "-" and typing continues; `slugify` still runs on blur and on
+ * save to settle the value.
+ */
+function slugifyWhileTyping(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 64);
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -516,8 +530,9 @@ function DomainFormDrawer({
               disabled={editing}
               onChange={(e) => {
                 setIdTouched(true);
-                set('id', slugify(e.target.value));
+                set('id', slugifyWhileTyping(e.target.value));
               }}
+              onBlur={() => set('id', slugify(draft.id))}
               placeholder="revenue"
               style={{ ...inputStyle(t), fontFamily: t.fontMono, opacity: editing ? 0.7 : 1 }}
             />
