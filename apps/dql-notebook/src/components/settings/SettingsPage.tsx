@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { EmbeddingSettings } from './EmbeddingSettings';
 import { CommaListInput } from '../common/CommaListInput';
 import { Sparkles } from 'lucide-react';
 import {
@@ -137,15 +138,21 @@ export function ConnectionRuntimeSettings({
       ) : (
         <>
           {section === 'providers' && (
-            <ProviderSettingsForm
-              providers={providers}
-              cliStatus={cliStatus}
-              t={t}
-              onSaved={(next) => setProviders(next)}
-              onStatus={setStatus}
-              editorMode={editorMode}
-              onProviderConfigured={onProviderConfigured}
-            />
+            <>
+              <ProviderSettingsForm
+                providers={providers}
+                cliStatus={cliStatus}
+                t={t}
+                onSaved={(next) => setProviders(next)}
+                onStatus={setStatus}
+                editorMode={editorMode}
+                onProviderConfigured={onProviderConfigured}
+              />
+              {/* Retrieval quality is a provider choice too: without a real
+                  embedder every lane is lexical, so plain-English questions
+                  cannot reach a metric by meaning. */}
+              <EmbeddingSettings t={t} onStatus={setStatus} />
+            </>
           )}
           {!section && (
           <section style={{ marginTop: 22 }}>

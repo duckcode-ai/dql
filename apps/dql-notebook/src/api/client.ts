@@ -5552,6 +5552,51 @@ export const api = {
   },
 
   /** Delete a skill. → DELETE /api/skills/:id */
+// --- Embeddings ------------------------------------------------------
+  // Whether retrieval can match MEANING or only shared words.
+  async getEmbeddingSettings(): Promise<{
+    settings: { provider: 'hashed' | 'ollama' | 'openai'; endpoint: string; model: string; apiKeySet: boolean };
+    activeProviderId: string;
+    semantic: boolean;
+    indexedProviderId?: string;
+    reindexRequired: boolean;
+  }> {
+    return request('/api/settings/embeddings');
+  },
+
+  async saveEmbeddingSettings(input: {
+    provider: 'hashed' | 'ollama' | 'openai';
+    endpoint?: string;
+    model?: string;
+    apiKey?: string;
+  }): Promise<{ ok: true; activeProviderId: string; semantic: boolean; reindexRequired: boolean }> {
+    return request('/api/settings/embeddings', { method: 'PUT', body: JSON.stringify(input) });
+  },
+
+  async listEmbeddingModels(endpoint?: string): Promise<{
+    catalog: {
+      ollama: Array<{ model: string; label: string; dimensions: number; size: string; recommended: boolean; description: string }>;
+      openai: Array<{ model: string; label: string; dimensions: number; size: string; recommended: boolean; description: string }>;
+    };
+    ollamaReachable: boolean;
+    installed: string[];
+  }> {
+    const query = endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : '';
+    return request(`/api/settings/embeddings/models${query}`);
+  },
+
+  async installEmbeddingModel(model: string, endpoint?: string): Promise<{ ok: true; model: string }> {
+    return request('/api/settings/embeddings/install', { method: 'POST', body: JSON.stringify({ model, endpoint }) });
+  },
+
+  async testEmbeddingProvider(): Promise<{ ok: boolean; providerId: string; dimensions: number; elapsedMs: number; semantic: boolean }> {
+    return request('/api/settings/embeddings/test', { method: 'POST' });
+  },
+
+  async reindexEmbeddings(): Promise<{ upgraded: boolean; providerId: string; reason?: string }> {
+    return request('/api/settings/embeddings/reindex', { method: 'POST' });
+  },
+
   async deleteSkill(id: string): Promise<{ ok: true }> {
     return request<{ ok: true }>(`/api/skills/${encodeURIComponent(id)}`, {
       method: 'DELETE',

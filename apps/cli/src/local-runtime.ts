@@ -228,6 +228,11 @@ import {
   invalidateAgentProjectState,
   recordAgentRuntimeVersion,
   resolveDomainContextEnvelope,
+  projectEmbeddingProvider,
+  isHashedEmbeddingProvider,
+  clearProjectEmbeddingCache,
+  upgradeVectorIndexForProject,
+  openMetadataCatalog,
   type DomainContextEnvelope,
   type ResolveDomainContextInput,
   defaultKgPath,
@@ -597,6 +602,33 @@ export function resolveUiDomainContext(input: ResolveDomainContextInput): Domain
     throw error;
   }
 }
+
+
+/**
+ * Embedding models we offer by name so a user never has to know one.
+ *
+ * Retrieval quality is bounded by the embedder, and picking one is the single
+ * step between lexical-only matching and real meaning-based recall — so the
+ * product should name good defaults rather than expect a model string.
+ * `dimensions` is informational: the index records whatever the provider
+ * actually returns.
+ */
+export const EMBEDDING_MODEL_CATALOG = {
+  ollama: [
+    { model: 'nomic-embed-text', label: 'Nomic Embed Text', dimensions: 768, size: '274 MB', recommended: true,
+      description: 'Best general default. Strong paraphrase matching for metric and dimension descriptions.' },
+    { model: 'mxbai-embed-large', label: 'MxBai Embed Large', dimensions: 1024, size: '670 MB', recommended: false,
+      description: 'Higher quality, slower and larger. Worth it for very large catalogs.' },
+    { model: 'all-minilm', label: 'All-MiniLM', dimensions: 384, size: '46 MB', recommended: false,
+      description: 'Smallest and fastest. Use on constrained machines.' },
+  ],
+  openai: [
+    { model: 'text-embedding-3-small', label: 'text-embedding-3-small', dimensions: 1536, size: 'hosted', recommended: true,
+      description: 'Cheapest hosted option and strong for catalog text.' },
+    { model: 'text-embedding-3-large', label: 'text-embedding-3-large', dimensions: 3072, size: 'hosted', recommended: false,
+      description: 'Highest quality hosted embedding; higher cost per index.' },
+  ],
+} as const;
 
 export function normalizeAgentRunDomain(value: unknown): string | undefined {
   const domain = agentRunString(value);
@@ -7227,6 +7259,188 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Embeddings decide whether retrieval can match MEANING or only shared
+    // words. This was environment-variable-only and mentioned nowhere in the
+    // product, so in practice every project ran the lexical hashed fallback.
+    if (req.method === 'GET' && path === '/api/settings/embeddings') {
+      try {
+        const provider = projectEmbeddingProvider(projectRoot);
+        const configPath = join(projectRoot, 'dql.config.json');
+        const raw = existsSync(configPath)
+          ? JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+          : {};
+        const ai = raw.ai && typeof raw.ai === 'object' && !Array.isArray(raw.ai) ? raw.ai as Record<string, unknown> : {};
+        const settings = ai.embeddings && typeof ai.embeddings === 'object' && !Array.isArray(ai.embeddings)
+          ? ai.embeddings as Record<string, unknown>
+          : {};
+        const catalog = openMetadataCatalog(projectRoot);
+        let indexedProvider: string | undefined;
+        try { indexedProvider = catalog.state('vector_provider') ?? undefined; } finally { catalog.close(); }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          settings: {
+            provider: typeof settings.provider === 'string' ? settings.provider : 'hashed',
+            endpoint: typeof settings.endpoint === 'string' ? settings.endpoint : '',
+            model: typeof settings.model === 'string' ? settings.model : '',
+            // Never return the key itself.
+            apiKeySet: typeof settings.apiKey === 'string' && settings.apiKey.trim().length > 0,
+          },
+          activeProviderId: provider.id,
+          semantic: !isHashedEmbeddingProvider(provider),
+          indexedProviderId: indexedProvider,
+          // A mismatch means the catalog still holds vectors from the previous
+          // embedder; the next compile/refresh re-embeds it.
+          reindexRequired: Boolean(indexedProvider) && indexedProvider !== provider.id,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === 'PUT' && path === '/api/settings/embeddings') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as Record<string, unknown>;
+        const provider = typeof body.provider === 'string' ? body.provider.trim() : 'hashed';
+        if (provider !== 'hashed' && provider !== 'ollama' && provider !== 'openai') {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Embedding provider must be hashed, ollama, or openai.' }));
+          return;
+        }
+        const str = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
+        if (provider === 'ollama' && !str(body.endpoint)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'An Ollama endpoint is required, e.g. http://127.0.0.1:11434' }));
+          return;
+        }
+        const configPath = join(projectRoot, 'dql.config.json');
+        const raw = existsSync(configPath)
+          ? JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+          : {};
+        const ai = raw.ai && typeof raw.ai === 'object' && !Array.isArray(raw.ai) ? raw.ai as Record<string, unknown> : {};
+        const existing = ai.embeddings && typeof ai.embeddings === 'object' && !Array.isArray(ai.embeddings)
+          ? ai.embeddings as Record<string, unknown>
+          : {};
+        // Preserve a stored key when the form did not resend it.
+        const apiKey = str(body.apiKey) || (typeof existing.apiKey === 'string' ? existing.apiKey : '');
+        raw.ai = {
+          ...ai,
+          embeddings: {
+            provider,
+            ...(str(body.endpoint) ? { endpoint: str(body.endpoint) } : {}),
+            ...(str(body.model) ? { model: str(body.model) } : {}),
+            ...(provider === 'openai' && apiKey ? { apiKey } : {}),
+          },
+        };
+        writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf-8');
+        projectConfig = loadProjectConfig(projectRoot);
+        clearProjectEmbeddingCache(projectRoot);
+        invalidateAgentProjectState(projectRoot);
+        const resolved = projectEmbeddingProvider(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          activeProviderId: resolved.id,
+          semantic: !isHashedEmbeddingProvider(resolved),
+          reindexRequired: !isHashedEmbeddingProvider(resolved),
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Re-embed now, rather than waiting for the next compile.
+    if (req.method === 'POST' && path === '/api/settings/embeddings/reindex') {
+      try {
+        const provider = projectEmbeddingProvider(projectRoot);
+        const result = await upgradeVectorIndexForProject(projectRoot, provider);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(result));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // The model catalog, plus which Ollama models are already pulled, so the UI
+    // can offer names and an install button instead of a free-text field.
+    if (req.method === 'GET' && path === '/api/settings/embeddings/models') {
+      try {
+        const endpoint = (url.searchParams.get('endpoint') ?? 'http://127.0.0.1:11434').replace(/\/$/, '');
+        let installed: string[] = [];
+        let reachable = false;
+        try {
+          const response = await fetch(`${endpoint}/api/tags`, { signal: AbortSignal.timeout(2500) });
+          if (response.ok) {
+            reachable = true;
+            const payload = await response.json() as { models?: Array<{ name?: string }> };
+            installed = (payload.models ?? []).map((m) => String(m.name ?? '').split(':')[0]).filter(Boolean);
+          }
+        } catch { /* Ollama not running — the UI says so rather than failing */ }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ catalog: EMBEDDING_MODEL_CATALOG, ollamaReachable: reachable, installed }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Pull an Ollama embedding model so "use this one" is a single click.
+    if (req.method === 'POST' && path === '/api/settings/embeddings/install') {
+      try {
+        const body = (await readJSON(req).catch(() => ({}))) as { model?: unknown; endpoint?: unknown };
+        const model = typeof body.model === 'string' ? body.model.trim() : '';
+        const endpoint = (typeof body.endpoint === 'string' && body.endpoint.trim() ? body.endpoint.trim() : 'http://127.0.0.1:11434').replace(/\/$/, '');
+        const known = EMBEDDING_MODEL_CATALOG.ollama.some((entry) => entry.model === model);
+        if (!known) {
+          // Only ever pull a model we list: this shells out to a local daemon,
+          // so an arbitrary caller-supplied name is not something to forward.
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Unknown embedding model: ${model || '(none)'}` }));
+          return;
+        }
+        const response = await fetch(`${endpoint}/api/pull`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: model, stream: false }),
+          signal: AbortSignal.timeout(15 * 60_000),
+        });
+        if (!response.ok) throw new Error(`Ollama pull failed (${response.status}). Is Ollama running at ${endpoint}?`);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, model }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    // Prove the configured embedder actually answers before we re-index on it.
+    if (req.method === 'POST' && path === '/api/settings/embeddings/test') {
+      try {
+        const provider = projectEmbeddingProvider(projectRoot);
+        const started = Date.now();
+        const [vector] = await provider.embed(['monthly revenue by customer segment']);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: Array.isArray(vector) && vector.length > 0,
+          providerId: provider.id,
+          dimensions: vector?.length ?? 0,
+          elapsedMs: Date.now() - started,
+          semantic: !isHashedEmbeddingProvider(provider),
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
