@@ -228,6 +228,8 @@ import {
   invalidateAgentProjectState,
   recordAgentRuntimeVersion,
   resolveDomainContextEnvelope,
+  type DomainContextEnvelope,
+  type ResolveDomainContextInput,
   defaultKgPath,
   planAppFromPrompt,
   KGStore,
@@ -576,6 +578,26 @@ function agentRunString(value: unknown): string | undefined {
 }
 
 /** UI catalog fallback labels are not declared project domains. */
+/**
+ * Resolve a UI-pinned domain scope, tolerating one that no longer exists.
+ *
+ * The Ask scope persists across reloads, so a domain that was renamed, deleted,
+ * or simply mistyped would otherwise throw `Unknown domain: x` and BLOCK every
+ * question with "no answer produced" until the user found the chip and cleared
+ * it. A scope that cannot be resolved should widen the search, never wedge the
+ * surface. Anything other than an unresolvable scope still throws, because that
+ * is a real contract violation worth reporting.
+ */
+export function resolveUiDomainContext(input: ResolveDomainContextInput): DomainContextEnvelope | undefined {
+  try {
+    return resolveDomainContextEnvelope(input);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/^Unknown domain:|^Unknown model area:|^Ambiguous model area:/.test(message)) return undefined;
+    throw error;
+  }
+}
+
 export function normalizeAgentRunDomain(value: unknown): string | undefined {
   const domain = agentRunString(value);
   if (!domain) return undefined;
@@ -1667,7 +1689,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   }) => {
     const snapshot = projectSnapshot();
     const activeDomain = normalizeAgentRunDomain(input.domain);
-    const domainContext = resolveDomainContextEnvelope({
+    const domainContext = resolveUiDomainContext({
       manifest: snapshot.manifest,
       activeDomain,
       purpose: input.purpose,
@@ -1867,7 +1889,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const requestedModelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
     const runProjectSnapshot = projectSnapshot();
     const domainContext = requestedDomain
-      ? resolveDomainContextEnvelope({
+      ? resolveUiDomainContext({
           manifest: runProjectSnapshot.manifest,
           activeDomain: requestedDomain,
           purpose: requestedPurpose,
@@ -3462,7 +3484,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       strictness: request.analysisDepth === 'deep' ? 'exploratory' : 'balanced',
       limit: request.analysisDepth === 'deep' ? 120 : 80,
       domainContext: requestedDomain
-        ? resolveDomainContextEnvelope({
+        ? resolveUiDomainContext({
             manifest: snapshot.manifest,
             activeDomain: requestedDomain,
             purpose: agentRunWorkspaceValue(request, 'purpose'),
@@ -12974,7 +12996,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         if (!source.trim()) throw new Error('Provide an executable DQL artifact or block name.');
         const expectedReceipt = requestedArtifact?.executionReceipt;
-        if (expectedReceipt && expectedReceipt.sourceFingerprint !== executionFingerprint(source)) {
+        // When a block name is given we deliberately re-read the CANONICAL block
+        // from disk, so `source` is no longer the text the receipt was taken
+        // from. Comparing the two made every "change an input and apply" fail
+        // with "source changed after the answer was produced" whenever the saved
+        // block differed from the answer's copy at all — even by formatting —
+        // and changing inputs is precisely what that control is for.
+        //
+        // Check the receipt against the artifact the CLIENT holds (tamper
+        // detection, its real purpose). A canonical block that has genuinely
+        // moved on is reported alongside the fresh result instead of refusing
+        // to run: the user still gets their answer and is told it was rebuilt.
+        const receiptSource = requestedArtifact?.source ?? '';
+        const sourceRefreshedFromDisk = Boolean(requestedBlockName)
+          && receiptSource.trim().length > 0
+          && receiptSource !== source;
+        if (expectedReceipt && !sourceRefreshedFromDisk && expectedReceipt.sourceFingerprint !== executionFingerprint(source)) {
           throw new Error('DQL artifact source changed after the answer was produced. Refresh the answer before applying it.');
         }
         const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
@@ -12991,7 +13028,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           rowLimit: requestedArtifact?.limit,
         });
         const actualReceipt = result.executionReceipt;
-        if (expectedReceipt && actualReceipt) {
+        // Same reasoning: if the canonical block was reloaded, its compiled SQL
+        // is EXPECTED to differ, so this determinism check would fire on a
+        // change we already know about.
+        if (expectedReceipt && actualReceipt && !sourceRefreshedFromDisk) {
           if (
             expectedReceipt.parameterFingerprint === actualReceipt.parameterFingerprint
             && expectedReceipt.compiledSqlFingerprint !== actualReceipt.compiledSqlFingerprint

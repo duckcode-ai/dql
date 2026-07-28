@@ -45,6 +45,7 @@ import {
   isAgentValueProbeColumn,
   normalizeProjectConnection,
   normalizeAgentRunDomain,
+  resolveUiDomainContext,
   ownerlessReviewDqlArtifactFromAnswer,
   openBlockStudioDocument,
   parseBlockSourceMetadata,
@@ -5543,5 +5544,43 @@ describe('validateBlockStudioSource — empty and mis-typed query sections', () 
     const source = ['block "draft" {', '    type = "custom"', '}'].join('\n');
     const validation = validateBlockStudioSource(source, undefined);
     expect(validation.diagnostics.some((d) => d.code === 'sql_missing' && d.severity === 'error')).toBe(false);
+  });
+});
+
+describe('a stale Ask scope must not wedge the surface', () => {
+  const manifest = {
+    manifestVersion: 3,
+    dbtProvenance: { manifestFingerprint: 'snap-1' },
+    modeling: {
+      mode: 'dbt-first',
+      packages: { commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] } },
+      areas: {}, entities: {}, relationships: {}, contracts: {}, conformance: {}, rules: {},
+      interfaces: { exports: {}, imports: {} }, domainLineage: [],
+    },
+  } as never;
+
+  it('ignores a pinned domain that no longer exists instead of blocking the answer', () => {
+    // The Ask scope now survives reloads, so a domain that was renamed, deleted
+    // or mistyped would throw `Unknown domain` on EVERY question and the user
+    // saw "Blocked — no answer produced" until they found the chip and cleared
+    // it. An unresolvable scope must widen the search, never wedge the surface.
+    expect(resolveUiDomainContext({ manifest, activeDomain: 'jaffle', source: 'explicit_ui' })).toBeUndefined();
+  });
+
+  it('still resolves a domain that does exist', () => {
+    expect(resolveUiDomainContext({ manifest, activeDomain: 'commerce', source: 'explicit_ui' }))
+      .toMatchObject({ activeDomain: 'commerce' });
+  });
+
+  it('ignores a stale model area the same way', () => {
+    expect(resolveUiDomainContext({ manifest, activeDomain: 'commerce', modelAreaId: 'gone', source: 'explicit_ui' }))
+      .toBeUndefined();
+  });
+
+  it('does not swallow unrelated failures', () => {
+    // Only an unresolvable SCOPE is tolerated; a broken manifest is a real bug
+    // and must still surface.
+    expect(() => resolveUiDomainContext({ manifest: undefined as never, activeDomain: 'commerce', source: 'explicit_ui' }))
+      .toThrow();
   });
 });

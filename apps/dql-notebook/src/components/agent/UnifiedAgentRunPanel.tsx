@@ -2267,7 +2267,51 @@ function AnalyticalHowAnswered({
 
   return (
     <div style={{ display: 'grid', gap: 9 }} aria-label="How it answered">
-      <AnalyticalInspectorSection index={1} label="Plan" t={t} open>
+      {/*
+        Outcome first. The real execution error used to sit at the BOTTOM of this
+        panel, below Plan, DQL, SQL, Lineage, Trust and Steps, so a failed run
+        showed six sections of diagnostics before saying what actually went
+        wrong. Success or the warehouse's own message now leads.
+      */}
+      <div
+        role="status"
+        style={{
+          display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 8,
+          border: `1px solid ${failure ? 'var(--status-error-border)' : 'var(--status-success-border)'}`,
+          background: failure ? 'var(--status-error-bg)' : 'var(--status-success-bg)',
+        }}
+      >
+        {failure
+          ? <ShieldAlert size={13} color="var(--status-error)" style={{ flexShrink: 0, marginTop: 2 }} />
+          : <ShieldCheck size={13} color="var(--status-success)" style={{ flexShrink: 0, marginTop: 2 }} />}
+        <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, color: failure ? 'var(--status-error)' : 'var(--status-success)' }}>
+            {failure ? 'Execution failed' : 'Answered successfully'}
+          </div>
+          {failure ? (
+            <>
+              {/* The engine's own words, not a paraphrase — that is what makes
+                  a failure actionable. */}
+              <div style={{ marginTop: 3, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: t.fontMono, fontSize: 11 }}>
+                {typeof failure.message === 'string' && failure.message.trim()
+                  ? failure.message
+                  : 'The engine did not report a message. Open the DQL and SQL tabs to inspect what ran.'}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 10.5, color: t.textMuted }}>
+                {[failure.code, failure.phase ? `during ${failure.phase}` : ''].filter(Boolean).map(displayValue).join(' · ')}
+              </div>
+            </>
+          ) : (
+            <div style={{ marginTop: 2 }}>
+              {typeof receipt?.rowCount === 'number'
+                ? `Returned ${receipt.rowCount} row${receipt.rowCount === 1 ? '' : 's'}.`
+                : 'The query ran and returned a result.'}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <AnalyticalInspectorSection index={1} label="Plan" t={t} open={!failure}>
         <InspectorRows rows={[
           ['Question type', displayValue(frame?.questionType ?? plan?.questionType)],
           ['Selected route', displayValue(graph?.route ?? plan?.recommendedRoute)],
@@ -2285,42 +2329,13 @@ function AnalyticalHowAnswered({
         ]} t={t} />
       </AnalyticalInspectorSection>
 
-      <AnalyticalInspectorSection index={2} label="DQL" t={t} open={Boolean(failure)}>
-        {dqlArtifact?.source ? (
-          <>
-            <pre style={codeStyle(t)}>{dqlArtifact.source}</pre>
-            {safeActions.includes('edit_dql') && onInsertDql ? (
-              <button type="button" onClick={() => void openDqlRepair()} style={smallButtonStyle(t)}>
-                <Wrench size={12} /> Open DQL to repair
-              </button>
-            ) : null}
-          </>
-        ) : <InspectorEmpty t={t}>No DQL source was produced before this phase.</InspectorEmpty>}
-      </AnalyticalInspectorSection>
-
-      <AnalyticalInspectorSection index={3} label="Compiled SQL" t={t} open={Boolean(failure)}>
-        {sql ? (
-          <>
-            <pre style={codeStyle(t)}>{sql}</pre>
-            {safeActions.includes('open_sql_notebook') && onInsertSql ? (
-              <button type="button" onClick={() => void openSqlRepair()} style={smallButtonStyle(t)}>
-                <Code2 size={12} /> Open SQL in Notebook
-              </button>
-            ) : null}
-          </>
-        ) : <InspectorEmpty t={t}>Compilation did not produce SQL.</InspectorEmpty>}
-      </AnalyticalInspectorSection>
-
-      <AnalyticalInspectorSection index={4} label="Lineage" t={t}>
-        {lineage.length > 0 ? lineage.map((entry) => (
-          <div key={`${entry.kind ?? 'asset'}:${entry.name}`} style={{ padding: '7px 8px', border: '1px solid var(--border-subtle)', borderRadius: 7, background: 'var(--bg-1)' }}>
-            <div style={{ fontSize: 11.5, fontWeight: 650, color: t.textPrimary }}>{entry.name}</div>
-            <div style={{ fontSize: 10.5, color: t.textMuted }}>{[entry.kind, entry.detail].filter(Boolean).join(' · ')}</div>
-          </div>
-        )) : <InspectorEmpty t={t}>No additional lineage nodes were returned.</InspectorEmpty>}
-      </AnalyticalInspectorSection>
-
-      <AnalyticalInspectorSection index={5} label="Trust & evidence" t={t}>
+      {/*
+        DQL, Compiled SQL and Lineage each have their OWN tab. Repeating them
+        here meant a user read the same script twice and could not tell whether
+        the two copies were the same thing — which is exactly the confusion this
+        panel should remove. Diagnostics that exist nowhere else stay below.
+      */}
+      <AnalyticalInspectorSection index={2} label="Trust & evidence" t={t}>
         <InspectorRows rows={[
           ['Trust state', run.trustState],
           ['Snapshot', displayValue(plan?.snapshotId ?? graph?.snapshotId)],
@@ -2357,7 +2372,7 @@ function AnalyticalHowAnswered({
         ]} t={t} mono />
       </AnalyticalInspectorSection>
 
-      <AnalyticalInspectorSection index={6} label="Actual steps" t={t}>
+      <AnalyticalInspectorSection index={3} label="Actual steps" t={t}>
         <div style={{ display: 'grid', gap: 6 }}>
           {semanticSteps.map((step, index) => (
             <div key={`semantic:${displayValue(step.id) || index}`} style={{ fontSize: 11.5, color: t.textSecondary }}>
@@ -2382,13 +2397,11 @@ function AnalyticalHowAnswered({
         </div>
       </AnalyticalInspectorSection>
 
-      <AnalyticalInspectorSection index={7} label="Failure & repair" t={t} open={Boolean(failure)}>
+      <AnalyticalInspectorSection index={4} label="Failure & repair" t={t} open={Boolean(failure)}>
         {failure ? (
           <div style={{ display: 'grid', gap: 9 }}>
-            <div style={{ padding: '9px 10px', borderRadius: 8, border: '1px solid var(--status-error-border)', background: 'var(--status-error-bg)', color: t.textSecondary, fontSize: 11.5, lineHeight: 1.5 }}>
-              <strong style={{ color: 'var(--status-error)' }}>{displayValue(failure.code)}</strong>
-              {' '}during {displayValue(failure.phase)} — {displayValue(failure.message)}
-            </div>
+            {/* The engine's message now leads the whole panel, so only the
+                diagnostics that exist nowhere else belong here. */}
             <InspectorRows rows={[
               ['Failure ID', displayValue(failure.failureId)],
               ['Recoverability', displayValue(failure.recoverability)],
@@ -2411,6 +2424,16 @@ function AnalyticalHowAnswered({
               </div>
             ) : null}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} aria-label="Safe repair actions">
+              {safeActions.includes('edit_dql') && onInsertDql ? (
+                <button type="button" onClick={() => void openDqlRepair()} style={smallButtonStyle(t)}>
+                  <Wrench size={12} /> Open DQL to repair
+                </button>
+              ) : null}
+              {safeActions.includes('open_sql_notebook') && onInsertSql ? (
+                <button type="button" onClick={() => void openSqlRepair()} style={smallButtonStyle(t)}>
+                  <Code2 size={12} /> Open SQL in Notebook
+                </button>
+              ) : null}
               {safeActions.includes('retry_same_plan') ? (
                 <button type="button" onClick={() => void deriveSimpleRepair('retry_same_plan')} style={smallButtonStyle(t)}>
                   <RefreshCw size={12} /> Retry same plan
