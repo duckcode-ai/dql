@@ -485,3 +485,52 @@ describe('project vocabulary from DQL terms', () => {
     })?.metric).not.toBe('bcm_total');
   });
 });
+
+describe('time-sliced answers default to most recent first', () => {
+  const timeLayer = (): SemanticLayer => new SemanticLayer({
+    metrics: [{ name: 'revenue', label: 'Revenue', description: 'Revenue.', domain: 'finance', sql: 'amount', type: 'sum', table: 'orders' }],
+    dimensions: [
+      { name: 'channel', label: 'Channel', description: 'Channel.', domain: 'finance', sql: 'channel', type: 'string', table: 'orders' },
+      {
+        name: 'metric_time', label: 'Metric time', description: 'Aggregate time axis.', domain: 'finance',
+        sql: 'ordered_at', type: 'date', table: 'orders', isTimeDimension: true,
+        granularities: ['day', 'week', 'month', 'quarter', 'year'], baseGranularity: 'day', primaryTime: true,
+      },
+    ],
+  });
+
+  it('orders a time breakdown newest first instead of emitting no ordering', () => {
+    // With no ORDER BY the warehouse returned rows in whatever order it liked --
+    // in practice oldest first -- so a LIMIT kept the OLDEST periods and "revenue
+    // by month" showed the start of history rather than what just happened.
+    const compiled = composeSemanticQueryFromMembers({
+      semanticLayer: timeLayer(),
+      question: 'revenue by month',
+      selection: { metrics: ['revenue'], timeDimension: { name: 'metric_time', granularity: 'month' } },
+    });
+    expect(compiled?.sql).toContain('ORDER BY metric_time_month DESC');
+  });
+
+  it('lets an explicit ranking win, because that ordering is the question', () => {
+    const compiled = composeSemanticQueryFromMembers({
+      semanticLayer: timeLayer(),
+      question: 'lowest revenue month',
+      selection: {
+        metrics: ['revenue'],
+        timeDimension: { name: 'metric_time', granularity: 'month' },
+        orderBy: [{ name: 'revenue', direction: 'asc' }],
+      },
+    });
+    expect(compiled?.sql).toContain('ORDER BY revenue ASC');
+    expect(compiled?.sql).not.toContain('metric_time_month DESC');
+  });
+
+  it('adds no ordering when there is no time axis to order by', () => {
+    const compiled = composeSemanticQueryFromMembers({
+      semanticLayer: timeLayer(),
+      question: 'revenue by channel',
+      selection: { metrics: ['revenue'], dimensions: ['channel'] },
+    });
+    expect(compiled?.sql).not.toContain('ORDER BY');
+  });
+});

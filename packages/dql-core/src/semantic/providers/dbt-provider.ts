@@ -675,6 +675,9 @@ function registerSemanticModel(
 
 /** The five MetricFlow time grains, coarsest-last. A column stored at grain N
  * can be truncated to any grain ≥ N but never finer. */
+/** MetricFlow's reserved name for the global aggregate time axis. */
+export const METRIC_TIME = 'metric_time';
+
 const GRAIN_ORDER = ['day', 'week', 'month', 'quarter', 'year'] as const;
 type TimeGrain = typeof GRAIN_ORDER[number];
 
@@ -830,6 +833,57 @@ function convertSemanticModel(
       // The foreign-entity name this join traverses — the compatibility service
       // concatenates these to build MetricFlow multi-hop group-by names.
       entity: entity.name,
+    });
+  }
+
+  // MetricFlow's global time axis.
+  //
+  // `metric_time` is not declared on any semantic model — MetricFlow synthesizes
+  // it from each measure's aggregate time dimension, and it is the name every
+  // MetricFlow query uses for a time breakdown (`metric_time__day`,
+  // `metric_time__month`, ...). Because DQL only imported DECLARED dimensions it
+  // never existed here, so the agent could not select it, compatibility rejected
+  // it as unknown, and any question that needed the standard time axis failed
+  // with "metric_time__day not found".
+  //
+  // Project it onto the model's own aggregate time column so the native compiler
+  // can resolve it to real SQL while MetricFlow still receives the name it
+  // expects. Grains come from the underlying column, so a month-grain fact never
+  // advertises a day breakdown it cannot serve.
+  const aggTimeName = model.defaults?.agg_time_dimension
+    ?? (model.measures ?? []).map((measure) => measure.agg_time_dimension).find(Boolean);
+  const aggTimeDim = aggTimeName
+    ? (model.dimensions ?? []).find((dim) => dim.type === 'time' && dim.name === aggTimeName)
+    : (model.dimensions ?? []).find((dim) => dim.type === 'time');
+  if (aggTimeDim && !timeDimensions.some((dim) => dim.name === METRIC_TIME)) {
+    const baseGranularity = isTimeGrain(aggTimeDim.type_params?.time_granularity)
+      ? aggTimeDim.type_params.time_granularity
+      : undefined;
+    timeDimensions.push({
+      name: METRIC_TIME,
+      label: 'Metric time',
+      description: `MetricFlow aggregate time axis for ${model.name} (${aggTimeDim.name}).`,
+      sql: aggTimeDim.expr ?? aggTimeDim.name,
+      type: 'date',
+      table: tableName,
+      cube: model.name,
+      expr: aggTimeDim.expr,
+      isTimeDimension: true,
+      // Deliberately NOT entity-prefixed: MetricFlow addresses this axis
+      // globally as `metric_time`, never `<entity>__metric_time`.
+      qualifiedName: METRIC_TIME,
+      entityLink: primaryEntity,
+      typeParams: aggTimeDim.type_params,
+      granularities: grainsAtOrAbove(baseGranularity),
+      baseGranularity,
+      primaryTime: true,
+      domain,
+      source: dbtSource('time_dimension', `${model.name}.${METRIC_TIME}`, METRIC_TIME, {
+        semantic_model: model.name,
+        agg_time_dimension: aggTimeDim.name,
+        synthesized: true,
+        artifactKind,
+      }),
     });
   }
 

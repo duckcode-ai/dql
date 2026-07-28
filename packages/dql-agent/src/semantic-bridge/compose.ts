@@ -470,9 +470,17 @@ function buildSemanticBridgeResult(input: {
   driver?: string;
   tableMapping?: Record<string, string>;
 }): SemanticBridgeQueryResult | undefined {
-  const { metrics, dimensions, filters, timeDimension, orderBy, limit } = input;
+  const { metrics, dimensions, filters, timeDimension, limit } = input;
   const primaryMetric = metrics[0];
   if (!primaryMetric) return undefined;
+  // A time breakdown with no requested ranking used to emit NO ordering at all,
+  // so the warehouse returned rows in whatever order it liked — in practice
+  // oldest first — and a LIMIT then kept the OLDEST periods. "Revenue by month"
+  // showed the start of history instead of what just happened. Most recent
+  // first is what a time question means; an explicit ranking still wins,
+  // because that ordering IS the question.
+  const orderBy = input.orderBy
+    ?? (timeDimension ? [{ name: timeDimension.name, direction: 'desc' as const }] : undefined);
   const composed = input.semanticLayer.composeQuery({
     metrics: metrics.map((metric) => metric.name),
     dimensions,

@@ -770,3 +770,94 @@ saved_queries:
     expect(qualified?.sql).toBe(bare?.sql);
   });
 });
+
+describe('MetricFlow global time axis', () => {
+  let tmpDir: string;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'dbt-metric-time-')); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  const load = (semanticModel: Record<string, unknown>, measureName: string) => {
+    mkdirSync(join(tmpDir, 'target'), { recursive: true });
+    writeFileSync(join(tmpDir, 'target', 'manifest.json'), JSON.stringify({
+      semantic_models: { 'semantic_model.demo.m': semanticModel },
+      metrics: {
+        'metric.demo.total': {
+          name: 'total', label: 'Total', type: 'simple', type_params: { measure: measureName },
+        },
+      },
+    }));
+    return new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+  };
+
+  it('synthesizes metric_time from the model aggregate time dimension', () => {
+    const layer = load({
+      name: 'orders',
+      model: "ref('fct_orders')",
+      defaults: { agg_time_dimension: 'ordered_at' },
+      entities: [{ name: 'order', type: 'primary', expr: 'order_id' }],
+      dimensions: [
+        { name: 'ordered_at', type: 'time', expr: 'ordered_at_ts', type_params: { time_granularity: 'day' } },
+        { name: 'closed_at', type: 'time', type_params: { time_granularity: 'month' } },
+      ],
+      measures: [{ name: 'revenue', agg: 'sum', expr: 'amount' }],
+    }, 'revenue');
+
+    const metricTime = layer.listTimeDimensions(undefined, { includeVariants: true })
+      .find((dimension) => dimension.name === 'metric_time');
+
+    // metric_time is never DECLARED — MetricFlow synthesizes it — so DQL had no
+    // such dimension at all and every `metric_time__day` query failed as unknown.
+    expect(metricTime).toBeDefined();
+    // It projects onto the model's AGGREGATE time column, not just any time dim.
+    expect(metricTime?.sql).toBe('ordered_at_ts');
+    // Addressed globally: MetricFlow wants `metric_time__day`, never
+    // `<entity>__metric_time__day`.
+    expect(metricTime?.qualifiedName).toBe('metric_time');
+    expect(metricTime?.granularities).toEqual(['day', 'week', 'month', 'quarter', 'year']);
+
+    // It must also be groupable by the model's metrics, or member selection
+    // refuses it as incompatible even though it now exists.
+    expect(layer.explainCompatibleDimensions(['total']).compatible.map((d) => d.name))
+      .toContain('metric_time');
+  });
+
+  it('never advertises a grain the aggregate column cannot serve', () => {
+    const layer = load({
+      name: 'monthly_snapshot',
+      model: "ref('fct_monthly')",
+      defaults: { agg_time_dimension: 'month_end' },
+      entities: [{ name: 'snapshot', type: 'primary', expr: 'id' }],
+      dimensions: [{ name: 'month_end', type: 'time', type_params: { time_granularity: 'month' } }],
+      measures: [{ name: 'balance', agg: 'sum', expr: 'balance' }],
+    }, 'balance');
+    const metricTime = layer.listTimeDimensions(undefined, { includeVariants: true })
+      .find((dimension) => dimension.name === 'metric_time');
+    expect(metricTime?.granularities).toEqual(['month', 'quarter', 'year']);
+  });
+
+  it('compiles metric_time to the real column and orders newest first', () => {
+    const layer = load({
+      name: 'orders',
+      model: "ref('fct_orders')",
+      defaults: { agg_time_dimension: 'ordered_at' },
+      entities: [{ name: 'order', type: 'primary', expr: 'order_id' }],
+      dimensions: [{ name: 'ordered_at', type: 'time', type_params: { time_granularity: 'day' } }],
+      measures: [{ name: 'revenue', agg: 'sum', expr: 'amount' }],
+    }, 'revenue');
+
+    const compiled = layer.composeQuery({
+      metrics: ['total'],
+      dimensions: [],
+      timeDimension: { name: 'metric_time', granularity: 'month' },
+      orderBy: [{ name: 'metric_time', direction: 'desc' }],
+    });
+
+    expect(compiled?.sql).toContain("DATE_TRUNC('month'");
+    expect(compiled?.sql).toContain('ordered_at');
+    // The time column is PROJECTED under its grain alias, so ordering by the
+    // dimension's bare name would emit a column that is not in the output and
+    // the query would fail at the warehouse.
+    expect(compiled?.sql).toContain('ORDER BY metric_time_month DESC');
+    expect(compiled?.sql).not.toMatch(/ORDER BY metric_time DESC/);
+  });
+});

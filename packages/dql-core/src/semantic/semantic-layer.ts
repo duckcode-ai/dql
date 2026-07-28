@@ -960,10 +960,19 @@ export class SemanticLayer {
       whereParts.push(okFilters[0].sql);
     }
 
-    // Build ORDER BY
+    // Build ORDER BY.
+    //
+    // A time dimension is PROJECTED under its grain alias (`metric_time_month`),
+    // so ordering by the dimension's own name emits a column that does not exist
+    // in the output and the query fails at the warehouse. Map it to the alias
+    // that was actually selected.
     const orderByParts: string[] = [];
+    const timeAlias = timeDimDef && timeDimension ? `${timeDimDef.name}_${timeDimension.granularity}` : undefined;
     for (const o of orderBy ?? []) {
-      orderByParts.push(`${o.name} ${o.direction.toUpperCase()}`);
+      const target = timeAlias && (o.name === timeDimDef?.name || o.name === timeDimension?.name)
+        ? timeAlias
+        : o.name;
+      orderByParts.push(`${target} ${o.direction.toUpperCase()}`);
     }
 
     // Compose full SQL (dialect-aware)
