@@ -20,11 +20,13 @@ import {
   upsertMetadataSnapshot,
   buildGovernedTermIndex,
   reclassifyGovernedNameMentions,
+  upgradeVectorIndexForProject,
 } from './catalog.js';
 import { buildAnalysisQuestionPlan } from './analysis-planner.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
 import { resolveSemanticLayerWithDiagnostics, SemanticLayer, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { recordCorrectionTrace, reviewHint } from '../hints/git-store.js';
+import { HashedTokenEmbeddingProvider } from '../embeddings/provider.js';
 import { defaultKgPath, reindexProject } from '../index.js';
 import { KGStore } from '../kg/sqlite-fts.js';
 
@@ -627,6 +629,59 @@ describe('local metadata catalog', () => {
       preparedMetadataFingerprint: snapshot.fingerprint,
     });
     expect(unpinned.domainBriefing).toBeUndefined();
+  });
+
+it('upgrades the vector index to a real embedder after the sync write, and is idempotent', async () => {
+    // The snapshot write is synchronous, so it can only use the hashed
+    // provider's sync embedOne — remote embedders are async-only and could
+    // never participate, which is why the "vector" lane stayed a bag-of-words
+    // hash no matter what was configured. The upgrade runs after the
+    // transaction, where awaiting is fine.
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({ provider: 'dbt', projectPath: '.' }, projectRoot).layer;
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+
+    const readProvider = (): string | undefined => {
+      const catalog = openMetadataCatalog(projectRoot);
+      try { return catalog.state('vector_provider'); } finally { catalog.close(); }
+    };
+    // The sync write always leaves a usable hashed index, so the vector lane is
+    // never empty while an upgrade runs or if it fails.
+    expect(readProvider()).toBe('hashed-token-v1');
+
+    const remote = {
+      id: 'test-remote-v1',
+      dimensions: 8,
+      async embed(texts: string[]): Promise<number[][]> {
+        return texts.map((text) => Array.from({ length: 8 }, (_, i) => ((text.charCodeAt(i % Math.max(1, text.length)) || 1) % 17) / 17));
+      },
+    };
+    expect(await upgradeVectorIndexForProject(projectRoot, remote)).toMatchObject({ upgraded: true, providerId: 'test-remote-v1' });
+    expect(readProvider()).toBe('test-remote-v1');
+
+    // Re-running must not re-embed the whole catalog.
+    expect(await upgradeVectorIndexForProject(projectRoot, remote)).toMatchObject({ upgraded: false });
+  });
+
+  it('leaves the index alone for the hashed provider and survives an unreachable embedder', async () => {
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({ provider: 'dbt', projectPath: '.' }, projectRoot).layer;
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+
+    expect(await upgradeVectorIndexForProject(projectRoot, new HashedTokenEmbeddingProvider()))
+      .toMatchObject({ upgraded: false });
+
+    // An Ollama that is not running must degrade to lexical retrieval, never
+    // break indexing or answering.
+    const dead = { id: 'dead-v1', dimensions: 4, async embed(): Promise<number[][]> { throw new Error('ECONNREFUSED'); } };
+    const result = await upgradeVectorIndexForProject(projectRoot, dead);
+    expect(result.upgraded).toBe(false);
+    expect(result.reason).toContain('ECONNREFUSED');
+    const catalog = openMetadataCatalog(projectRoot);
+    try {
+      // Still the working hashed index — not wiped by the failed attempt.
+      expect(catalog.state('vector_provider')).toBe('hashed-token-v1');
+    } finally { catalog.close(); }
   });
 
   it('CTX-006 keeps a governed metric retrievable when its dbt domain is not a declared DQL domain', async () => {

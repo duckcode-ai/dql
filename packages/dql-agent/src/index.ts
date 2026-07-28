@@ -656,6 +656,13 @@ export type {
 export {
   validateSqlAgainstLocalContext,
 } from "./metadata/sql-context-validation.js";
+export { upgradeVectorIndexForProject, awaitVectorIndexUpgrade } from "./metadata/catalog.js";
+export {
+  projectEmbeddingProvider,
+  isHashedEmbeddingProvider,
+  clearProjectEmbeddingCache,
+  type ProjectEmbeddingSettings,
+} from "./embeddings/project-embeddings.js";
 export {
   applyGroundingExpansion,
   expandGroundingFromCatalog,

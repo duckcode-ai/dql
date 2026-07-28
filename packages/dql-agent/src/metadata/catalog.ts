@@ -89,6 +89,7 @@ import {
   HashedTokenEmbeddingProvider,
   type EmbeddingProvider,
 } from '../embeddings/provider.js';
+import { projectEmbeddingProvider } from '../embeddings/project-embeddings.js';
 import { matchExampleParaphrase } from './example-match.js';
 import { loadSkills, selectRelevantSkills, type Skill } from '../skills/loader.js';
 import {
@@ -999,6 +1000,59 @@ export function readIndexedKnowledge360(projectRoot: string, identity: string) {
   }
 }
 
+/**
+ * In-flight vector upgrades, so a caller that needs semantic retrieval right
+ * away (tests, `dql compile`) can await one instead of racing it.
+ */
+const pendingVectorUpgrades = new Map<string, Promise<void>>();
+
+/** Await any vector-index upgrade started by the last catalog refresh. */
+export async function awaitVectorIndexUpgrade(projectRoot: string): Promise<void> {
+  const pending = pendingVectorUpgrades.get(projectRoot);
+  if (!pending) return;
+  await pending;
+  pendingVectorUpgrades.delete(projectRoot);
+}
+
+/**
+ * Re-embed the vector index with the project's configured provider.
+ *
+ * The snapshot write is synchronous — vectors are produced inside a
+ * better-sqlite3 transaction — so it can only use the hashed provider, whose
+ * `embedOne` is sync. Remote providers (Ollama, OpenAI) are async-only, so a
+ * real embedder could never participate and the "vector" lane stayed a
+ * bag-of-words hash no matter what was configured.
+ *
+ * This runs AFTER the transaction, where awaiting is fine. The hashed index is
+ * already in place by then, so the vector lane is never empty while the upgrade
+ * runs or if it fails. Best-effort by design: an unreachable Ollama must not
+ * break indexing or answering.
+ */
+export async function upgradeVectorIndexForProject(
+  projectRoot: string,
+  provider: EmbeddingProvider,
+): Promise<{ upgraded: boolean; providerId: string; reason?: string }> {
+  if (provider.id.startsWith('hashed-token')) {
+    return { upgraded: false, providerId: provider.id, reason: 'project uses the offline hashed embedder' };
+  }
+  const catalog = openMetadataCatalog(projectRoot);
+  try {
+    if (catalog.state('vector_provider') === provider.id) {
+      return { upgraded: false, providerId: provider.id, reason: 'index already embedded with this provider' };
+    }
+    await catalog.rebuildVectorIndex(provider);
+    return { upgraded: true, providerId: provider.id };
+  } catch (error) {
+    return {
+      upgraded: false,
+      providerId: catalog.state('vector_provider') ?? DEFAULT_VECTOR_PROVIDER.id,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    catalog.close();
+  }
+}
+
 export async function ensureMetadataCatalogFresh(
   projectRoot: string,
   options: EnsureMetadataCatalogOptions = {},
@@ -1082,6 +1136,8 @@ export async function retrieveMetadataSnapshotCandidates(
     objectTypes?: string[];
     domainContext?: DomainContextEnvelope;
     embeddingProvider?: EmbeddingProvider;
+    /** Needed to resolve the project's configured embedder for the vector lane. */
+    projectRoot?: string;
     limit?: number;
   },
 ): Promise<MetadataSnapshotRetrievalResult> {
@@ -1113,7 +1169,13 @@ export async function retrieveMetadataSnapshotCandidates(
     objectTypes: input.objectTypes,
     domains: domains.length > 0 ? domains : undefined,
     limit: Math.min(limit, 24),
-    provider: input.embeddingProvider,
+    // Fall back to the PROJECT's configured embedder rather than the hashed
+    // default, so a project that turned on a real one actually queries with it.
+    // searchVectorObjects still refuses (with a reason) if the index was built
+    // by a different provider, which keeps a half-migrated index from silently
+    // returning nonsense.
+    provider: input.embeddingProvider
+      ?? (input.projectRoot ? projectEmbeddingProvider(input.projectRoot) : undefined),
   });
   const vectorObjects = vector.candidates.filter(isEligible);
   const seedKeys = mergeObjects([...exactObjects, ...lexicalObjects.slice(0, 12), ...vectorObjects.slice(0, 12)])
@@ -1300,6 +1362,7 @@ export async function buildLocalContextPack(
       searchQueries,
       objectTypes: request.objectTypes,
       domainContext: effectiveDomainContext,
+      projectRoot,
       limit: Math.max(request.limit ?? 80, 20),
     });
     const searchRows = retrievalObjects(snapshotRetrieval.selected);
