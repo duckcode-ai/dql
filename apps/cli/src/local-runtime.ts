@@ -15788,27 +15788,53 @@ export function ensureConnectorInstalledForStartup(projectRoot: string, driver: 
   }
 }
 
+/** Node majors this Snowflake path has actually been exercised on. */
+const SNOWFLAKE_TESTED_NODE_MAJORS = [20, 22, 24];
+/** `snowflake-sdk` declares `engines: { node: '>=20' }`; that is the real floor. */
+const SNOWFLAKE_MINIMUM_NODE_MAJOR = 20;
+
 export function assertConnectionNodeCompatibility(
   connection: Pick<ConnectionConfig, 'driver'>,
   version = process.versions.node,
 ): void {
   if (connection.driver !== 'snowflake') return;
   const major = Number(version.match(/^(\d+)/)?.[1] ?? 0);
-  if (major === 20 || major === 22 || major === 24) return;
-  throw Object.assign(
-    new Error(
-      `Snowflake notebook execution does not support Node.js ${version}. `
-      + 'Use Node 20, 22, or 24, reinstall project dependencies, and start the notebook again. '
-      + 'DQL stopped before loading the connector so the server cannot crash later under an unsupported runtime.',
-    ),
-    {
-      code: 'UNSUPPORTED_NODE_RUNTIME',
-      details: {
-        driver: 'snowflake',
-        version,
-        supportedMajorVersions: [20, 22, 24],
+
+  // Below the driver's own floor is a genuine incompatibility — refuse.
+  if (major < SNOWFLAKE_MINIMUM_NODE_MAJOR) {
+    throw Object.assign(
+      new Error(
+        `Snowflake notebook execution requires Node.js ${SNOWFLAKE_MINIMUM_NODE_MAJOR} or newer, but this process is Node.js ${version}. `
+        + `Install Node ${SNOWFLAKE_TESTED_NODE_MAJORS.join(', ')} (or newer), reinstall project dependencies, and start the notebook again. `
+        + 'DQL stopped before loading the connector so the server cannot crash later under an unsupported runtime.',
+      ),
+      {
+        code: 'UNSUPPORTED_NODE_RUNTIME',
+        details: { driver: 'snowflake', version, minimumMajorVersion: SNOWFLAKE_MINIMUM_NODE_MAJOR, testedMajorVersions: SNOWFLAKE_TESTED_NODE_MAJORS },
       },
-    },
+    );
+  }
+
+  // Above the floor but outside the tested set (Node 21/23/25, and every future
+  // release) is NOT a known incompatibility. This used to be an allowlist of
+  // exactly [20, 22, 24], which is stricter than `snowflake-sdk` itself and made
+  // every new Node line — including each future LTS — hard-fail at the first
+  // query until DQL shipped a new build. Users installed cleanly, because our
+  // own `engines.node` is `>=20`, then were blocked at runtime by a stricter
+  // rule. Warn once so an untested runtime is still visible, and let it run.
+  if (!SNOWFLAKE_TESTED_NODE_MAJORS.includes(major)) {
+    warnOnceForUntestedNodeRuntime(version, major);
+  }
+}
+
+const warnedNodeRuntimes = new Set<number>();
+function warnOnceForUntestedNodeRuntime(version: string, major: number): void {
+  if (warnedNodeRuntimes.has(major)) return;
+  warnedNodeRuntimes.add(major);
+  console.warn(
+    `[dql] Node.js ${version} has not been exercised with the Snowflake driver `
+    + `(tested on ${SNOWFLAKE_TESTED_NODE_MAJORS.join(', ')}). Continuing — if you hit a connector crash, `
+    + `switch to Node ${SNOWFLAKE_TESTED_NODE_MAJORS.at(-1)} and reinstall project dependencies.`,
   );
 }
 

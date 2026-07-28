@@ -2905,15 +2905,34 @@ describe('ensureConnectorInstalledForStartup', () => {
 });
 
 describe('Snowflake Node runtime startup guard (API-007, E2E-014)', () => {
-  it('fails before connector startup on unsupported Node 26 and allows supported LTS releases', () => {
-    expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, '26.5.0')).toThrow(
-      expect.objectContaining({
-        code: 'UNSUPPORTED_NODE_RUNTIME',
-        message: expect.stringContaining('Use Node 20, 22, or 24'),
-      }),
+  it('refuses below the driver floor', () => {
+    // `snowflake-sdk` declares `engines: { node: '>=20' }`. Below that is a real
+    // incompatibility and stopping early beats crashing mid-query.
+    expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, '18.20.4')).toThrow(
+      expect.objectContaining({ code: 'UNSUPPORTED_NODE_RUNTIME' }),
     );
-    expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, '22.18.0')).not.toThrow();
-    expect(() => assertConnectionNodeCompatibility({ driver: 'duckdb' }, '26.5.0')).not.toThrow();
+  });
+
+  it('allows tested LTS releases', () => {
+    for (const version of ['20.11.0', '22.18.0', '24.3.0']) {
+      expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, version)).not.toThrow();
+    }
+  });
+
+  it('allows a newer Node than we have tested instead of blocking it', () => {
+    // This previously threw. The guard was an allowlist of exactly [20, 22, 24],
+    // which is stricter than snowflake-sdk itself: users installed cleanly
+    // (our engines.node is >=20) and were then blocked at the first query on
+    // Node 25, and every future release — including each new LTS — would have
+    // hard-failed the same way until DQL shipped a new build. An untested
+    // runtime above the driver's own floor is a warning, not a refusal.
+    for (const version of ['25.2.1', '26.0.0']) {
+      expect(() => assertConnectionNodeCompatibility({ driver: 'snowflake' }, version)).not.toThrow();
+    }
+  });
+
+  it('never gates a non-Snowflake driver', () => {
+    expect(() => assertConnectionNodeCompatibility({ driver: 'duckdb' }, '18.20.4')).not.toThrow();
   });
 });
 
