@@ -552,6 +552,83 @@ describe('local metadata catalog', () => {
   });
 
 
+
+  it('CTX-007 resolves the pinned domain capsule into a readable briefing', async () => {
+    // The capsule stores REFS and was read only to compute a fingerprint, so a
+    // domain's glossary, intent examples and standing filters -- everything a
+    // user authored about their business -- never reached the model. There was
+    // no "Active domain" line in any prompt at all.
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
+      domains: { growth: { id: 'growth', name: 'Growth', filePath: 'domains/growth/domain.dql' } },
+      blocks: {}, businessViews: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {}, sources: {},
+      terms: {
+        qualified_lead: {
+          name: 'qualified_lead', filePath: 'domains/growth/terms/qualified_lead.dql', domain: 'growth',
+          description: 'A lead that passed scoring.', synonyms: ['MQL', 'marketing qualified lead'],
+        },
+      },
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'briefing-snapshot', nodes: {}, metricFlow: {} },
+      modeling: {
+        mode: 'dbt-first',
+        packages: { growth: { id: 'growth', filePath: 'domains/growth/domain.dql', exports: [] } },
+        areas: {}, entities: {}, relationships: {}, contracts: {}, conformance: {}, rules: {},
+        interfaces: { exports: {}, imports: {} }, domainLineage: [],
+      },
+      knowledgeGraph: {
+        objects: {}, objectRefs: [], edges: [], crossDomainRoutes: [], diagnostics: [],
+        sourceFingerprint: 'kg-1',
+        domainCapsules: {
+          'growth::capsule': {
+            id: 'growth::capsule', domainId: 'growth', name: 'Growth',
+            description: 'Acquisition and activation.',
+            intentExamples: ['How many qualified leads this month?'],
+            exclusions: [], termRefs: ['growth::term::qualified_lead'], skillRefs: [],
+            entityRefs: [], metricRefs: [], blockRefs: [], routeRefs: [],
+            caveats: ['Excludes internal test accounts.'],
+            requiredFilters: ['is_test = false'],
+            fingerprint: 'capsule-1',
+          },
+        },
+      },
+    } as unknown as DQLManifest;
+
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest);
+    upsertMetadataSnapshot(projectRoot, snapshot);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'how many qualified leads',
+      preparedMetadataFingerprint: snapshot.fingerprint,
+      domainContext: {
+        activeDomain: 'growth', ancestors: [], descendants: [], allowedImports: [],
+        source: 'explicit_ui', confidence: 'high', snapshotId: 'briefing-snapshot',
+      },
+    });
+
+    expect(pack.domainBriefing).toMatchObject({
+      domainId: 'growth',
+      name: 'Growth',
+      intentExamples: ['How many qualified leads this month?'],
+      requiredFilters: ['is_test = false'],
+      caveats: ['Excludes internal test accounts.'],
+    });
+    // Refs resolved to TEXT, not left as ids -- the point of the briefing.
+    expect(pack.domainBriefing?.terms).toEqual([{
+      name: 'qualified_lead',
+      description: 'A lead that passed scoring.',
+      synonyms: ['MQL', 'marketing qualified lead'],
+    }]);
+
+    // No domain pinned means no briefing to render.
+    const unpinned = await buildLocalContextPack(projectRoot, {
+      question: 'how many qualified leads',
+      preparedMetadataFingerprint: snapshot.fingerprint,
+    });
+    expect(unpinned.domainBriefing).toBeUndefined();
+  });
+
   it('CTX-006 keeps a governed metric retrievable when its dbt domain is not a declared DQL domain', async () => {
     // The enterprise regression: dbt derives a metric's domain from
     // meta.group / fqn[1] / package_name, DQL domains are declared separately,

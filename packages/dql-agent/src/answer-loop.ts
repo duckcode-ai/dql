@@ -5462,6 +5462,7 @@ function renderContextPackForPrompt(contextPack: LocalContextPack, budget: Promp
     `context_pack_id: ${contextPack.id}`,
     `trust_label: ${contextPack.trustLabel}`,
     contextPack.trustLabelInfo ? `trust_label_canonical: ${contextPack.trustLabelInfo.display}` : '',
+    renderDomainBriefingForPrompt(contextPack).trim(),
     questionPlan.trim(),
     route.trim(),
     warnings.trim(),
@@ -5474,6 +5475,41 @@ function renderContextPackForPrompt(contextPack: LocalContextPack, budget: Promp
     sourceSql.trim(),
     conflicts.trim(),
   ].filter(Boolean).join('\n');
+}
+
+/**
+ * The pinned domain's authored business context.
+ *
+ * There was previously no "Active domain" line in ANY prompt, and the compiled
+ * capsule holding a domain's glossary, intent examples and standing filters was
+ * read only to compute a fingerprint. A user could model their business
+ * carefully and none of it reached the model. Every list is bounded upstream so
+ * a large domain degrades instead of crowding out relation cards.
+ */
+function renderDomainBriefingForPrompt(contextPack: LocalContextPack): string {
+  const briefing = contextPack.domainBriefing;
+  if (!briefing) return '';
+  const lines = [`## Active domain: ${briefing.name}`];
+  if (briefing.modelArea) lines.push(`Model area: ${briefing.modelArea}`);
+  if (briefing.purpose) lines.push(`Purpose: ${briefing.purpose}`);
+  if (briefing.description) lines.push(briefing.description);
+  if (briefing.intentExamples.length > 0) {
+    lines.push(`Answers questions like: ${briefing.intentExamples.join(' | ')}`);
+  }
+  if (briefing.terms.length > 0) {
+    lines.push('Business glossary:');
+    for (const term of briefing.terms) {
+      const synonyms = term.synonyms.length > 0 ? ` (also: ${term.synonyms.join(', ')})` : '';
+      lines.push(`- ${term.name}${synonyms}${term.description ? ` — ${term.description}` : ''}`);
+    }
+  }
+  if (briefing.requiredFilters.length > 0) {
+    lines.push(`Always apply: ${briefing.requiredFilters.join('; ')}`);
+  }
+  if (briefing.caveats.length > 0) {
+    lines.push(`Caveats: ${briefing.caveats.join('; ')}`);
+  }
+  return lines.join('\n');
 }
 
 function renderCandidateJoinsForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {

@@ -545,6 +545,15 @@ export interface LocalContextPack {
   skills: LocalContextSkill[];
   /** Exact domain capsule and skills used for this immutable context pack. */
   knowledgeLens: KnowledgeLens;
+  /**
+   * The pinned domain's compiled business context, resolved to text.
+   *
+   * The capsule stores REFS (term ids, metric ids) and was previously read only
+   * to compute a fingerprint, so everything a user authored about their domain —
+   * its glossary, what questions it answers, the filters it always applies —
+   * never reached the model.
+   */
+  domainBriefing?: DomainBriefing;
   edges: MetadataEdge[];
   queryRuns: QueryRunSummary[];
   citations: Array<{
@@ -760,6 +769,9 @@ const OBJECT_PRIORITY: Record<string, number> = {
   relationship: 7.2,
   contract: 7.4,
   model_area: 7.6,
+  // Was absent entirely, so a capsule scored 0 and could never win a slot in
+  // the retrieval window -- the compiled domain context was unreachable.
+  domain_capsule: 7.7,
   semantic_model: 8,
   dbt_model: 9,
   dbt_source: 10,
@@ -1421,6 +1433,7 @@ export async function buildLocalContextPack(
     }).catch(() => ({ applied: [], conflicts: [] }));
 
     const knowledgeLens = buildKnowledgeLens(catalog, effectiveDomainContext, selectedSkills);
+    const domainBriefing = buildDomainBriefing(catalog, effectiveDomainContext);
 
     const payload: LocalContextPack = {
       id: '',
@@ -1434,6 +1447,7 @@ export async function buildLocalContextPack(
       objects,
       skills: selectedSkills.map((item) => item.skill),
       knowledgeLens,
+      ...(domainBriefing ? { domainBriefing } : {}),
       edges: contextEdges,
       queryRuns,
       citations,
@@ -1489,6 +1503,76 @@ export async function buildLocalContextPack(
     snapshotLease.release();
     runtimeCatalog.close();
   }
+}
+
+/** A pinned domain's authored context, resolved from capsule refs into text. */
+export interface DomainBriefing {
+  domainId: string;
+  name: string;
+  description?: string;
+  modelArea?: string;
+  purpose?: string;
+  intentExamples: string[];
+  terms: Array<{ name: string; description?: string; synonyms: string[] }>;
+  caveats: string[];
+  requiredFilters: string[];
+}
+
+/**
+ * Resolve the pinned domain's capsule into the text the model can actually read.
+ *
+ * Bounded at every list: a large domain must degrade gracefully rather than
+ * crowd relation cards out of the prompt.
+ */
+function buildDomainBriefing(
+  catalog: MetadataCatalog,
+  context: DomainContextEnvelope | undefined,
+): DomainBriefing | undefined {
+  const activeDomainId = context?.activeDomain;
+  if (!activeDomainId) return undefined;
+  const capsules = catalog.listAllObjects({ objectTypes: ['domain_capsule'] })
+    .filter((object) => object.domain === activeDomainId);
+  // A focused Model Area has its own capsule; prefer it so pinning a sub-area
+  // narrows the briefing rather than restating the whole domain.
+  const capsule = (context.modelAreaId
+    ? capsules.find((object) => stringValue(object.payload?.modelAreaId) === context.modelAreaId)
+    : undefined)
+    ?? capsules.find((object) => !stringValue(object.payload?.modelAreaId))
+    ?? capsules[0];
+  if (!capsule) return undefined;
+
+  const payload = (capsule.payload ?? {}) as Record<string, unknown>;
+  const list = (value: unknown, limit: number): string[] =>
+    (Array.isArray(value) ? value : []).map((item) => stringValue(item)).filter((item): item is string => Boolean(item)).slice(0, limit);
+
+  const termRefs = list(payload.termRefs, 24);
+  const terms = termRefs.flatMap((ref) => {
+    const leaf = ref.split('::').pop() ?? ref;
+    // Capsule refs are qualified (`<domain>::term::<name>`) while a term object
+    // is keyed by bare name, so try the leaf segment before falling back to
+    // identity resolution.
+    const object = catalog.getObject(`dql:term:${ref}`)
+      ?? catalog.getObject(`dql:term:${leaf}`)
+      ?? catalog.findObjectByIdentity(leaf);
+    if (!object || object.objectType !== 'dql_term') return [];
+    return [{
+      name: object.name,
+      description: object.description,
+      synonyms: list((object.payload as Record<string, unknown> | undefined)?.synonyms, 8),
+    }];
+  }).slice(0, 16);
+
+  return {
+    domainId: activeDomainId,
+    name: capsule.name || activeDomainId,
+    description: capsule.description,
+    modelArea: context.modelAreaId,
+    purpose: context.purpose,
+    intentExamples: list(payload.intentExamples, 6),
+    terms,
+    caveats: list(payload.caveats, 6),
+    requiredFilters: list(payload.requiredFilters, 8),
+  };
 }
 
 function buildKnowledgeLens(
