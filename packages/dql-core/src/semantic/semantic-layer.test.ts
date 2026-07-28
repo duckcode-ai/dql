@@ -928,3 +928,51 @@ describe('display-format contract', () => {
     expect(layer.displayFormatFor('nonexistent')).toBeUndefined();
   });
 });
+
+describe('explainCompatibleDimensions memoization', () => {
+  const build = (): SemanticLayer => {
+    const layer = new SemanticLayer();
+    layer.addMetric({
+      name: 'revenue', label: 'Revenue', description: 'Revenue.',
+      domain: 'finance', sql: 'amount', type: 'sum', table: 'orders',
+    });
+    layer.addDimension({
+      name: 'channel', label: 'Channel', description: 'Channel.',
+      domain: 'finance', sql: 'channel', type: 'string', table: 'orders',
+    });
+    return layer;
+  };
+
+  it('returns an identical result on repeat calls and is order-independent', () => {
+    const layer = build();
+    const first = layer.explainCompatibleDimensions(['revenue']);
+    const second = layer.explainCompatibleDimensions(['revenue']);
+    // Same object identity proves the memo served it rather than recomputing:
+    // the agent asks many times per question and each call BFSs per dimension.
+    expect(second).toBe(first);
+    expect(first.compatible.map((dimension) => dimension.name)).toContain('channel');
+
+    layer.addMetric({
+      name: 'orders_count', label: 'Orders', description: 'Orders.',
+      domain: 'finance', sql: '1', type: 'count', table: 'orders',
+    });
+    // Compatibility is an intersection over the metric SET, so argument order
+    // must not produce a second cache entry.
+    expect(layer.explainCompatibleDimensions(['revenue', 'orders_count']))
+      .toBe(layer.explainCompatibleDimensions(['orders_count', 'revenue']));
+  });
+
+  it('invalidates when the layer changes, so a stale answer cannot survive', () => {
+    const layer = build();
+    expect(layer.explainCompatibleDimensions(['revenue']).compatible.map((d) => d.name)).toEqual(['channel']);
+
+    // The layer is still mutable after construction; a memo that ignored this
+    // would hide a newly added dimension for the life of the process.
+    layer.addDimension({
+      name: 'region', label: 'Region', description: 'Region.',
+      domain: 'finance', sql: 'region', type: 'string', table: 'orders',
+    });
+    expect(layer.explainCompatibleDimensions(['revenue']).compatible.map((d) => d.name).sort())
+      .toEqual(['channel', 'region']);
+  });
+});

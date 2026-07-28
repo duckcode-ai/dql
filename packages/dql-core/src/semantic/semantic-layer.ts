@@ -520,6 +520,17 @@ export class SemanticLayer {
   private segments: Map<string, SegmentDefinition> = new Map();
   private preAggregations: Map<string, PreAggregationDefinition> = new Map();
   private cubes: Map<string, CubeDefinition> = new Map();
+  /**
+   * Memo for `explainCompatibleDimensions`, keyed by the sorted metric set.
+   *
+   * The computation BFSs the join graph once per dimension variant, and the
+   * agent asks for it many times per question — once per candidate metric while
+   * building the member-selection catalog, again for the final selection, and
+   * twice more on the modeling-gap refusal path. It was uncached, so a wide
+   * catalog paid that cost repeatedly for the same answer. Invalidated by every
+   * mutator, since the layer can still be added to after construction.
+   */
+  private compatibilityCache: Map<string, ReturnType<SemanticLayer['explainCompatibleDimensions']>> = new Map();
   private measures: Map<string, MeasureDefinition> = new Map();
   private entities: Map<string, EntityDefinition> = new Map();
   private semanticModels: Map<string, SemanticModelDefinition> = new Map();
@@ -542,6 +553,7 @@ export class SemanticLayer {
   }
 
   addMetric(metric: MetricDefinition): void {
+    this.compatibilityCache.clear();
     // A real dbt metric (or DQL YAML metric) is authoritative for its name and
     // overrides any measure-derived entry of the same name (dbt emits both a
     // measure and a metric when `create_metric: true`). Default the tag to
@@ -554,6 +566,7 @@ export class SemanticLayer {
   }
 
   addCube(cube: CubeDefinition): void {
+    this.compatibilityCache.clear();
     this.cubes.set(cube.name, cube);
     // Auto-populate flat maps for backward compatibility. Measures are projected
     // into the metrics map so native composition can aggregate them, but they are
@@ -579,10 +592,12 @@ export class SemanticLayer {
   }
 
   addMeasure(measure: MeasureDefinition): void {
+    this.compatibilityCache.clear();
     this.measures.set(measure.name, measure);
   }
 
   private registerDimension(dimension: DimensionDefinition): void {
+    this.compatibilityCache.clear();
     const variants = this.dimensionVariants.get(dimension.name) ?? [];
     const identity = semanticDimensionIdentity(dimension);
     const existingIndex = variants.findIndex((candidate) => semanticDimensionIdentity(candidate) === identity);
@@ -1572,6 +1587,19 @@ export class SemanticLayer {
    *   - `metric_unresolved`         a requested metric name is unknown.
    */
   explainCompatibleDimensions(metricNames: string[]): {
+    compatible: Array<DimensionDefinition & { qualifiedName?: string; entityPath?: string[] }>;
+    incompatible: Array<{ name: string; qualifiedName?: string; reason: 'no_join_path' | 'not_shared_across_metrics' | 'metric_unresolved' }>;
+  } {
+    // Order-independent: compatibility is an intersection over the metric set.
+    const cacheKey = [...new Set(metricNames)].sort().join('\u0000');
+    const cached = this.compatibilityCache.get(cacheKey);
+    if (cached) return cached;
+    const computed = this.computeCompatibleDimensions(metricNames);
+    this.compatibilityCache.set(cacheKey, computed);
+    return computed;
+  }
+
+  private computeCompatibleDimensions(metricNames: string[]): {
     compatible: Array<DimensionDefinition & { qualifiedName?: string; entityPath?: string[] }>;
     incompatible: Array<{ name: string; qualifiedName?: string; reason: 'no_join_path' | 'not_shared_across_metrics' | 'metric_unresolved' }>;
   } {

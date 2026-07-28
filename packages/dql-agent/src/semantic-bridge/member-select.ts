@@ -59,7 +59,12 @@ export async function selectSemanticMembersViaLlm(input: {
   // Build the UNION of compatible dimensions across the top candidate metrics
   // (the model picks one metric, so a dim groupable by ANY candidate is valid),
   // and keep the qualified name to hand the runtime the exact group-by it wants.
-  const candidateMetricNames = visibleMetrics.slice(0, 5).map((metric) => metric.name);
+  // Compatibility used to be computed for only the top FIVE of the sixty
+  // visible metrics, so metrics 6-60 reached the model as a bare name and it had
+  // to guess whether a dimension was groupable — the exact mistake the cards
+  // exist to prevent. `explainCompatibleDimensions` is memoized per metric set,
+  // which is what makes covering the whole visible set affordable.
+  const candidateMetricNames = visibleMetrics.map((metric) => metric.name);
   const compatibleByName = new Map<string, string | undefined>();
   const compatibleByMetric = new Map<string, string[]>();
   for (const metricName of candidateMetricNames) {

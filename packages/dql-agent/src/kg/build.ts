@@ -779,6 +779,14 @@ export function buildKGFromSemanticLayer(layer: SemanticLayer | undefined, decla
         metric.metricType ? `metric type: ${metric.metricType}` : '',
         metric.aggregation ? `aggregation: ${metric.aggregation}` : '',
         metric.semanticModelIds?.length ? `semantic models: ${metric.semanticModelIds.join(', ')}` : '',
+        // The dimensions this metric can actually be grouped by. `payload.dimensions`
+        // has carried them all along but was never rendered, so the SQL-generating
+        // lane saw metrics and dimensions as two unlinked lists and could pair an
+        // incompatible one -- producing a WRONG NUMBER rather than the clean refusal
+        // the semantic lane gives. Bounded so a wide model cannot flood the prompt.
+        qualifiedDimensions.length > 0
+          ? `groupable by: ${qualifiedDimensions.slice(0, 40).join(', ')}${qualifiedDimensions.length > 40 ? `, +${qualifiedDimensions.length - 40} more` : ''}`
+          : '',
         metric.table ? `table: ${metric.table}` : '',
         metric.sql ? `sql: ${metric.sql}` : '',
         nonAdditiveDimensions.length > 0 ? 'non-additive: semantic runtime required' : '',
