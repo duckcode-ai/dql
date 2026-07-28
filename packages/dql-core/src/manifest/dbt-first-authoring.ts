@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
@@ -144,7 +144,20 @@ export type ModelingAuthoringChange =
   | { operation: 'upsert_relationship'; value: RelationshipAuthoringInput }
   | { operation: 'upsert_contract'; value: ContractAuthoringInput }
   | { operation: 'upsert_export'; value: DomainExportAuthoringInput }
-  | { operation: 'upsert_import'; value: DomainImportAuthoringInput };
+  | { operation: 'upsert_import'; value: DomainImportAuthoringInput }
+  // Removals. Modeling was upsert-only, so an entity, relationship or model
+  // area authored by mistake could only be removed by hand-editing YAML.
+  | { operation: 'remove_entity'; value: ModelingObjectRef }
+  | { operation: 'remove_relationship'; value: ModelingObjectRef }
+  | { operation: 'remove_area'; value: ModelingObjectRef };
+
+/** Identifies an authored modeling object for removal. */
+export interface ModelingObjectRef {
+  id: string;
+  domain: string;
+  /** Set when the object is owned by a Model Area rather than the domain root. */
+  areaId?: string;
+}
 
 export interface ModelingSourcePatch {
   path: string;
@@ -270,7 +283,13 @@ export function previewModelingChange(projectRoot: string, change: ModelingAutho
             ? [previewContract(root, change.value)]
             : change.operation === 'upsert_export'
               ? [previewExport(root, change.value)]
-              : [previewImport(root, change.value)];
+              : change.operation === 'remove_entity'
+                ? [previewRemoveListEntry(root, change.value, 'entities.dql.yaml', 'entities')]
+                : change.operation === 'remove_relationship'
+                  ? [previewRemoveListEntry(root, change.value, 'relationships.dql.yaml', 'relationships')]
+                  : change.operation === 'remove_area'
+                    ? previewRemoveArea(root, change.value)
+                    : [previewImport(root, change.value)];
   return {
     operation: change.operation,
     patches,
@@ -290,6 +309,13 @@ export function applyModelingChange(
   for (const patch of preview.patches) {
     if (!patch.changed) continue;
     const absolute = safeProjectPath(projectRoot, patch.path);
+    // An empty `after` means the source itself is being removed (deleting a
+    // Model Area). Writing an empty file would leave a stray, un-parseable
+    // artifact behind instead of removing the object.
+    if (patch.after === '' && patch.before !== '') {
+      rmSync(absolute, { force: true });
+      continue;
+    }
     mkdirSync(dirname(absolute), { recursive: true });
     safeProjectPath(projectRoot, patch.path);
     writeFileSync(absolute, patch.after, 'utf8');
@@ -547,6 +573,67 @@ function upsertListPatch(
   list.sort((left, right) => String(asRecord(left)[identityKey] ?? '').localeCompare(String(asRecord(right)[identityKey] ?? '')));
   document[listKey] = list;
   return { path, before, after: dumpYaml(document), changed: before !== dumpYaml(document) };
+}
+
+/**
+ * Drop one entry from an authored modeling list.
+ *
+ * Removing the last entry leaves the list key present but empty rather than
+ * deleting the file: the file is the domain's authored source, and silently
+ * removing it would lose any sibling content and read as data loss in git.
+ */
+function previewRemoveListEntry(
+  projectRoot: string,
+  ref: ModelingObjectRef,
+  legacyName: string,
+  listKey: string,
+): ModelingSourcePatch {
+  const id = requiredId(ref.id, listKey);
+  const domain = requiredId(ref.domain, 'domain');
+  // Callers hold the QUALIFIED area id (`commerce::model_area::revenue`) while
+  // the source-file resolver wants the local segment. Reduce it, and when there
+  // is none fall through to the resolver's own search, which finds whichever
+  // file actually declares this id — more robust than trusting a stale hint.
+  const areaId = ref.areaId?.includes('::') ? ref.areaId.split('::').pop() : ref.areaId;
+  const path = modelingSourceFile(projectRoot, domain, legacyName, listKey, 'id', id, areaId?.trim() || undefined);
+  const absolute = safeProjectPath(projectRoot, path);
+  const before = existsSync(absolute) ? readFileSync(absolute, 'utf8') : '';
+  if (!before.trim()) return { path, before, after: before, changed: false };
+  const document = asRecord(yaml.load(before));
+  const list = Array.isArray(document[listKey]) ? [...(document[listKey] as unknown[])] : [];
+  const next = list.filter((entry) => asRecord(entry).id !== id);
+  if (next.length === list.length) return { path, before, after: before, changed: false };
+  document[listKey] = next;
+  const after = dumpYaml(document);
+  return { path, before, after, changed: before !== after };
+}
+
+/**
+ * Remove a Model Area.
+ *
+ * An area OWNS its entities and relationships (they live in the same file), so
+ * deleting the area file would silently delete them too. Refuse instead — the
+ * user must clear the area first, which keeps the destructive step explicit.
+ */
+function previewRemoveArea(projectRoot: string, ref: ModelingObjectRef): ModelingSourcePatch[] {
+  const id = requiredId(ref.id, 'model area');
+  const domain = requiredId(ref.domain, 'domain');
+  const root = findPackageRoot(projectRoot, domain);
+  if (!root) throw new Error(`Unknown domain: ${domain}`);
+  const localId = id.includes('::') ? id.split('::').pop() ?? id : id;
+  const path = join(relative(projectRoot, root), 'modeling', 'areas', `${localId}.dql.yaml`).split(sep).join('/');
+  const absolute = safeProjectPath(projectRoot, path);
+  if (!existsSync(absolute)) return [{ path, before: '', after: '', changed: false }];
+  const before = readFileSync(absolute, 'utf8');
+  const document = asRecord(yaml.load(before));
+  const entities = Array.isArray(document.entities) ? document.entities.length : 0;
+  const relationships = Array.isArray(document.relationships) ? document.relationships.length : 0;
+  if (entities > 0 || relationships > 0) {
+    throw new Error(
+      `Model area "${localId}" still owns ${entities} entit${entities === 1 ? 'y' : 'ies'} and ${relationships} relationship${relationships === 1 ? '' : 's'}. Remove or move them before deleting the area.`,
+    );
+  }
+  return [{ path, before, after: '', changed: true }];
 }
 
 function sourcePatch(projectRoot: string, path: string, after: string): ModelingSourcePatch {

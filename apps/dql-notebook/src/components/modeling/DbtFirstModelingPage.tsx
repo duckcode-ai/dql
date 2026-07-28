@@ -65,6 +65,15 @@ export function DbtFirstModelingPage() {
   const inspectorRef = useRef<HTMLElement>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [dbtSourceEntity, setDbtSourceEntity] = useState<ManifestModelEntity | null>(null);
+  /**
+   * Pending model deletion. Modeling authoring was upsert-only, so an entity or
+   * relationship added by mistake could only be removed by hand-editing YAML.
+   */
+  const [pendingModelDelete, setPendingModelDelete] = useState<
+    { kind: 'entity' | 'relationship'; id: string; domain: string; areaId?: string; label: string } | null
+  >(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ modelingView, columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [modelingView, columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
   useEffect(() => {
     const onResize = () => setNarrowLayout(window.innerWidth < 980);
@@ -436,6 +445,16 @@ export function DbtFirstModelingPage() {
               }
               onEditDbtSource={() => setDbtSourceEntity(selectedEntity)}
               onSelectRelationship={(relationship) => setSelectedId(relationshipRecordKey(data.modeling.relationships, relationship))}
+              onDelete={() => {
+                setDeleteError(null);
+                setPendingModelDelete({
+                  kind: 'entity',
+                  id: selectedEntity.localId || selectedEntity.id,
+                  domain: selectedEntity.domain,
+                  areaId: selectedEntity.areaId,
+                  label: selectedEntity.businessName || selectedEntity.localId || selectedEntity.id,
+                });
+              }}
             />
           ) : selectedRelationship ? (
             <RelationshipInspector
@@ -447,6 +466,18 @@ export function DbtFirstModelingPage() {
                   relationship: selectedRelationship,
                 })
               }
+              onDelete={() => {
+                setDeleteError(null);
+                setPendingModelDelete({
+                  kind: 'relationship',
+                  id: selectedRelationship.localId || selectedRelationship.id,
+                  // A relationship is authored in its OWNING domain's source,
+                  // which for a cross-domain edge is not either endpoint's domain.
+                  domain: selectedRelationship.ownerDomain ?? selectedRelationship.qualifiedId.split('::')[0],
+                  areaId: selectedRelationship.areaId,
+                  label: selectedRelationship.localId || selectedRelationship.id,
+                });
+              }}
             />
           ) : (
             <StudioSummary data={data} domainEntities={domainEntities.map(({ entity }) => entity)} domainRelationships={domainRelationships} t={t} onSelectRelationship={(relationship) => setSelectedId(relationshipRecordKey(data.modeling.relationships, relationship))} />
@@ -480,6 +511,84 @@ export function DbtFirstModelingPage() {
           onApplied={async () => { setDbtSourceEntity(null); await refresh(); }}
         />
       )}
+      {pendingModelDelete && (
+        <ConfirmModelDelete
+          pending={pendingModelDelete}
+          busy={deleting}
+          error={deleteError}
+          t={t}
+          onCancel={() => { setPendingModelDelete(null); setDeleteError(null); }}
+          onConfirm={async () => {
+            setDeleting(true);
+            setDeleteError(null);
+            try {
+              const change = {
+                operation: pendingModelDelete.kind === 'entity' ? 'remove_entity' as const : 'remove_relationship' as const,
+                value: {
+                  id: pendingModelDelete.id,
+                  domain: pendingModelDelete.domain,
+                  ...(pendingModelDelete.areaId ? { areaId: pendingModelDelete.areaId } : {}),
+                },
+              };
+              // Same preview-then-apply contract as every other modeling edit,
+              // so a concurrent source change is caught by the fingerprint
+              // instead of silently clobbering someone else's work.
+              const preview = await api.previewModelingChange(change, data.snapshotId);
+              if (!preview.patches.some((patch) => patch.changed)) {
+                throw new Error('Nothing to remove — it is no longer in the domain source.');
+              }
+              await api.applyModelingChange(change, preview.fingerprint, data.snapshotId);
+              setPendingModelDelete(null);
+              setSelectedId(null);
+              await refresh();
+            } catch (error) {
+              setDeleteError(error instanceof Error ? error.message : String(error));
+            } finally {
+              setDeleting(false);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Confirm removing an authored model object, naming exactly what will go. */
+function ConfirmModelDelete({ pending, busy, error, t, onCancel, onConfirm }: {
+  pending: { kind: 'entity' | 'relationship'; id: string; domain: string; label: string };
+  busy: boolean;
+  error: string | null;
+  t: Theme;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Delete ${pending.kind}`}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.34)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 130 }}
+      onClick={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}
+    >
+      <div style={{ width: 'min(92vw, 420px)', background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 12, padding: 18, boxShadow: '0 18px 44px rgba(0,0,0,.22)' }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, marginBottom: 6 }}>
+          Delete this {pending.kind}?
+        </div>
+        <div style={{ fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>
+          <strong style={{ fontFamily: t.fontMono }}>{pending.label}</strong> will be removed from the
+          {' '}<strong>{pending.domain}</strong> domain source. dbt models and warehouse data are not affected.
+        </div>
+        {pending.kind === 'entity' ? (
+          <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+            Relationships that reference it are left in place and will report a missing endpoint until you remove or repoint them.
+          </div>
+        ) : null}
+        {error ? <div style={{ fontSize: 11.5, color: t.error, marginTop: 10, lineHeight: 1.5 }}>{error}</div> : null}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <Button t={t} onClick={onCancel} disabled={busy}>Cancel</Button>
+          <Button t={t} danger onClick={onConfirm} disabled={busy}>{busy ? 'Deleting…' : `Delete ${pending.kind}`}</Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1887,7 +1996,7 @@ function DbtInventory({ data, domain, unbound, t, onBind }: { data: DbtFirstMode
 // Prototype entity inspector: kind square + mono name + uppercase kind,
 // description, dbt-binding mono box, columns with PK/FK glyphs, relationship
 // click-through list, and an Edit entity action.
-function EntityInspector({ entity, detail, relationships = [], t, onEdit, onEditDbtSource, onSelectRelationship }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; relationships?: ManifestModelRelationship[]; t: Theme; onEdit: () => void; onEditDbtSource: () => void; onSelectRelationship?: (relationship: ManifestModelRelationship) => void }) {
+function EntityInspector({ entity, detail, relationships = [], t, onEdit, onEditDbtSource, onSelectRelationship, onDelete }: { entity: ManifestModelEntity; detail: DbtNodeAuthoringDetail | null; relationships?: ManifestModelRelationship[]; t: Theme; onEdit: () => void; onEditDbtSource: () => void; onSelectRelationship?: (relationship: ManifestModelRelationship) => void; onDelete?: () => void }) {
   const kindColor = entityKindColor(entity.analyticalRole);
   const keys = new Set(entity.keys.length ? entity.keys : (detail?.dqlMeta?.keys ?? []));
   const heading: React.CSSProperties = { fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted, margin: '0 0 5px' };
@@ -1950,6 +2059,7 @@ function EntityInspector({ entity, detail, relationships = [], t, onEdit, onEdit
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <Button primary t={t} onClick={onEdit}>Edit entity</Button>
         <Button t={t} onClick={onEditDbtSource}>Preview dbt source patch</Button>
+        {onDelete ? <Button t={t} danger onClick={onDelete}>Delete entity</Button> : null}
       </div>
     </Inspector>
   );
@@ -2037,7 +2147,7 @@ function SourcePreview({ title, source, t }: { title: string; source: string; t:
   return <section><strong style={{ fontSize: 10 }}>{title}</strong><pre tabIndex={0} style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre-wrap', background: t.appBg, border: `1px solid ${t.headerBorder}`, borderRadius: 6, padding: 10, fontSize: 9.5, color: t.textSecondary }}>{source}</pre></section>;
 }
 
-function RelationshipInspector({ relationship, t, onEdit }: { relationship: ManifestModelRelationship; t: Theme; onEdit: () => void }) {
+function RelationshipInspector({ relationship, t, onEdit, onDelete }: { relationship: ManifestModelRelationship; t: Theme; onEdit: () => void; onDelete?: () => void }) {
   return (
     <Inspector t={t}>
       <InspectorTitle title={relationship.localId} subtitle={`${relationship.from} → ${relationship.to}`} t={t} />
@@ -2056,6 +2166,10 @@ function RelationshipInspector({ relationship, t, onEdit }: { relationship: Mani
       <Property label="allowed joins" value={relationship.joinTypes?.join(', ') || 'left'} t={t} />
       <Property label="automatic agent join" value={relationship.automaticJoinAllowed ? 'Allowed' : 'Blocked'} t={t} />
       {relationship.validation ? <Evidence evidence={relationship.validation} t={t} /> : <Message text="No warehouse proof has been captured. This edge cannot authorize automatic SQL joins." t={t} />}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
+        <Button primary t={t} onClick={onEdit}>Edit relationship</Button>
+        {onDelete ? <Button t={t} danger onClick={onDelete}>Delete relationship</Button> : null}
+      </div>
     </Inspector>
   );
 }
@@ -2329,7 +2443,7 @@ function Select({ value, onChange, values, labels, t }: { value: string; onChang
     </select>
   );
 }
-function Button({ children, t, onClick, primary, disabled }: { children: React.ReactNode; t: Theme; onClick: () => void; primary?: boolean; disabled?: boolean }) {
+function Button({ children, t, onClick, primary, disabled, danger }: { children: React.ReactNode; t: Theme; onClick: () => void; primary?: boolean; disabled?: boolean; danger?: boolean }) {
   return (
     <button
       disabled={disabled}
@@ -2339,9 +2453,9 @@ function Button({ children, t, onClick, primary, disabled }: { children: React.R
         alignItems: 'center',
         justifyContent: 'center',
         gap: 6,
-        border: `1px solid ${primary ? t.accent : t.headerBorder}`,
-        background: primary ? t.accent : t.appBg,
-        color: primary ? '#fff' : t.textPrimary,
+        border: `1px solid ${danger ? t.error : primary ? t.accent : t.headerBorder}`,
+        background: danger ? `${t.error}12` : primary ? t.accent : t.appBg,
+        color: danger ? t.error : primary ? '#fff' : t.textPrimary,
         borderRadius: 6,
         padding: '7px 10px',
         fontSize: 11,

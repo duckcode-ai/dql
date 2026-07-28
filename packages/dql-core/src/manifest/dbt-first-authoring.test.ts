@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { applyDbtSourcePatch, applyModelingChange, dbtArtifactReadCount, loadDbtNodeAuthoringDetail, previewDbtSourcePatch, previewModelingChange, resetDbtArtifactReadCount } from './dbt-first-authoring.js';
@@ -28,6 +28,71 @@ describe('dbt-first Domain Package authoring', () => {
     applyModelingChange(root, change, preview.fingerprint);
     const rebuilt = previewModelingChange(root, change);
     expect(rebuilt.patches[0]?.changed).toBe(false);
+  });
+
+it('removes an authored entity, leaving the domain source intact', () => {
+    // Modeling authoring was upsert-only: an entity added by mistake could only
+    // be removed by hand-editing YAML.
+    const add = (id: string) => {
+      const change = { operation: 'upsert_entity' as const, value: { id, domain: 'commerce', dbtModel: `model.shop.${id}s` } };
+      applyModelingChange(root, change, previewModelingChange(root, change).fingerprint);
+    };
+    add('order');
+    add('customer');
+
+    const remove = { operation: 'remove_entity' as const, value: { id: 'order', domain: 'commerce' } };
+    const preview = previewModelingChange(root, remove);
+    expect(preview.patches[0]).toMatchObject({ path: 'domains/commerce/modeling/model.dql.yaml', changed: true });
+    applyModelingChange(root, remove, preview.fingerprint);
+
+    const after = readFileSync(join(root, 'domains', 'commerce', 'modeling', 'model.dql.yaml'), 'utf8');
+    expect(after).not.toContain('id: order');
+    // The sibling must survive — removing one entry is not a file wipe.
+    expect(after).toContain('id: customer');
+
+    // Removing something already gone is a no-op, not a crash or a phantom diff.
+    expect(previewModelingChange(root, remove).patches[0]?.changed).toBe(false);
+  });
+
+  it('removes an authored relationship by id', () => {
+    for (const id of ['order', 'customer']) {
+      const change = { operation: 'upsert_entity' as const, value: { id, domain: 'commerce', dbtModel: `model.shop.${id}s` } };
+      applyModelingChange(root, change, previewModelingChange(root, change).fingerprint);
+    }
+    const rel = {
+      operation: 'upsert_relationship' as const,
+      value: { id: 'order_customer', domain: 'commerce', from: 'order', to: 'customer', keys: [{ from: 'customer_id', to: 'customer_id' }] },
+    };
+    applyModelingChange(root, rel, previewModelingChange(root, rel).fingerprint);
+
+    const remove = { operation: 'remove_relationship' as const, value: { id: 'order_customer', domain: 'commerce' } };
+    const preview = previewModelingChange(root, remove);
+    expect(preview.patches[0]?.changed).toBe(true);
+    applyModelingChange(root, remove, preview.fingerprint);
+    expect(readFileSync(join(root, 'domains', 'commerce', 'modeling', 'model.dql.yaml'), 'utf8')).not.toContain('id: order_customer');
+  });
+
+  it('refuses to delete a model area that still owns objects', () => {
+    mkdirSync(join(root, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    writeFileSync(
+      join(root, 'domains', 'commerce', 'modeling', 'areas', 'acquisition.dql.yaml'),
+      'domain: commerce\narea:\n  id: acquisition\n  name: Acquisition\nentities:\n  - id: lead\n    dbt_model: model.shop.leads\n',
+    );
+    // An area OWNS its entities (same file), so deleting it would silently take
+    // them with it. Refuse and make the user clear it first.
+    expect(() => previewModelingChange(root, { operation: 'remove_area', value: { id: 'acquisition', domain: 'commerce' } }))
+      .toThrow(/still owns 1 entity/);
+  });
+
+  it('deletes an empty model area file', () => {
+    mkdirSync(join(root, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    const areaPath = join(root, 'domains', 'commerce', 'modeling', 'areas', 'acquisition.dql.yaml');
+    writeFileSync(areaPath, 'domain: commerce\narea:\n  id: acquisition\n  name: Acquisition\nentities: []\nrelationships: []\n');
+    const remove = { operation: 'remove_area' as const, value: { id: 'acquisition', domain: 'commerce' } };
+    const preview = previewModelingChange(root, remove);
+    expect(preview.patches[0]?.changed).toBe(true);
+    applyModelingChange(root, remove, preview.fingerprint);
+    expect(existsSync(areaPath)).toBe(false);
   });
 
   it('rejects an apply when source changed after preview', () => {
