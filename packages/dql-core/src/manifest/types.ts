@@ -592,6 +592,15 @@ export interface ManifestTerm {
   description?: string;
   identifiers?: string[];
   synonyms?: string[];
+  /**
+   * Governed metrics this term names.
+   *
+   * Terms carry the vocabulary half of the business layer — synonyms, caveats,
+   * business rules — but could only ever attach to blocks and business views.
+   * A project's own words ("BCM", "ACM") therefore had no path to the semantic
+   * layer, which is why the agent's synonym table was hardcoded in TypeScript.
+   */
+  metricRefs?: string[];
   businessOutcome?: string;
   businessOwner?: string;
   decisionUse?: string;

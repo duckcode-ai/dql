@@ -76,10 +76,39 @@ export interface ComposeSemanticQueryInput {
    * warehouse member (`Melissa Lopez`) while keeping the user's typo out of SQL.
    */
   filterValueBindings?: (value: string) => SemanticFilterValueBinding[];
+  /**
+   * Project vocabulary from DQL terms — the words THIS business uses.
+   *
+   * The built-in synonym clusters below are deliberately domain-neutral, which
+   * means an internal term ("BCM", "ACM") could only ever be taught to the agent
+   * by editing this file. Terms now carry `synonyms` and `metricRefs`, so a
+   * project extends the vocabulary by writing a term instead of patching DQL.
+   */
+  vocabulary?: SemanticVocabulary;
+}
+
+export interface SemanticVocabulary {
+  /** Equivalence clusters, merged with (never replacing) the built-in defaults. */
+  synonymClusters?: string[][];
+  /** Lowercased phrase -> governed metric names the phrase names. */
+  metricAliases?: Record<string, string[]>;
 }
 
 export function composeSemanticQueryForQuestion(input: ComposeSemanticQueryInput): SemanticBridgeQueryResult | undefined {
   if (input.questionPlan.requestedShape.topN?.scope === 'per_group') return undefined;
+  activeProjectSynonyms = buildProjectSynonymIndex(input.vocabulary?.synonymClusters);
+  activeMetricAliasPhrases = buildMetricAliasPhrases(input.vocabulary?.metricAliases);
+  try {
+    return composeSemanticQueryForQuestionInner(input);
+  } finally {
+    // Always clear: a leaked overlay would apply one project's vocabulary to
+    // the next question in a long-lived server process.
+    activeProjectSynonyms = undefined;
+    activeMetricAliasPhrases = undefined;
+  }
+}
+
+function composeSemanticQueryForQuestionInner(input: ComposeSemanticQueryInput): SemanticBridgeQueryResult | undefined {
 
   // Prefer REAL metrics over dbt measures projected into the metrics map: match
   // against metrics-only first, and only fall back to the full pool (measures
@@ -604,7 +633,13 @@ function explicitlyNamedMetrics(metrics: MetricDefinition[], question: string): 
     // stage that can still see it. Without synonym variants, `drink_revenue` was
     // reachable by the word "drink" but not by "beverage", and the question fell
     // back to the generic `revenue`, silently dropping the beverage restriction.
-    const phrases = new Set([...base, ...base.flatMap(metricPhraseSynonymVariants)]);
+    // Phrases this project's terms declare for the metric ("BCM" -> bcm_total).
+    // Without this a business's own vocabulary can only reach the agent by
+    // editing DQL's hardcoded synonym table.
+    const aliasPhrases = (activeMetricAliasPhrases?.get(metric.name.toLowerCase()) ?? [])
+      .map((phrase) => normalizeMetricPhrase(phrase))
+      .filter((phrase) => phrase.length > 0);
+    const phrases = new Set([...base, ...aliasPhrases, ...[...base, ...aliasPhrases].flatMap(metricPhraseSynonymVariants)]);
     for (const phrase of phrases) {
       if (!normalizedQuestion.includes(` ${phrase} `)) continue;
       const candidates = byPhrase.get(phrase) ?? [];
@@ -662,7 +697,7 @@ function metricPhraseSynonymVariants(phrase: string): string[] {
   if (words.length === 0) return [];
   const out: string[] = [];
   words.forEach((word, index) => {
-    for (const synonym of SEMANTIC_TERM_SYNONYM_INDEX.get(word) ?? []) {
+    for (const synonym of semanticSynonymsFor(word)) {
       if (synonym === word) continue;
       const variant = [...words.slice(0, index), synonym, ...words.slice(index + 1)].join(' ');
       if (variant !== phrase) out.push(variant);
@@ -727,8 +762,8 @@ function expandedSemanticTokens(values: string[]): Set<string> {
       const singular = token.replace(/ies$/, 'y').replace(/s$/, '');
       out.add(token);
       if (singular.length > 1) out.add(singular);
-      for (const synonym of SEMANTIC_TERM_SYNONYM_INDEX.get(token) ?? []) out.add(synonym);
-      for (const synonym of SEMANTIC_TERM_SYNONYM_INDEX.get(singular) ?? []) out.add(synonym);
+      for (const synonym of semanticSynonymsFor(token)) out.add(synonym);
+      for (const synonym of semanticSynonymsFor(singular)) out.add(synonym);
     }
   }
   return out;
@@ -874,6 +909,65 @@ const SEMANTIC_TERM_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
   }
   return index;
 })();
+
+/**
+ * Project vocabulary for the current compose call.
+ *
+ * `composeSemanticQueryForQuestion` is fully synchronous, so a call-scoped
+ * overlay cannot interleave with another question. This keeps the project's
+ * words out of six separate helper signatures while leaving the built-in
+ * clusters untouched — project terms EXTEND the defaults, never replace them.
+ */
+let activeProjectSynonyms: Map<string, Set<string>> | undefined;
+/** metric name (lowercased) -> phrases this project's terms use for it. */
+let activeMetricAliasPhrases: Map<string, string[]> | undefined;
+
+function buildProjectSynonymIndex(clusters: string[][] | undefined): Map<string, Set<string>> | undefined {
+  if (!clusters || clusters.length === 0) return undefined;
+  const index = new Map<string, Set<string>>();
+  for (const cluster of clusters) {
+    const words = cluster.map((word) => word.trim().toLowerCase()).filter(Boolean);
+    if (words.length < 2) continue;
+    for (const word of words) {
+      const existing = index.get(word);
+      if (existing) for (const other of words) existing.add(other);
+      else index.set(word, new Set(words));
+    }
+  }
+  return index.size > 0 ? index : undefined;
+}
+
+function buildMetricAliasPhrases(aliases: Record<string, string[]> | undefined): Map<string, string[]> | undefined {
+  if (!aliases) return undefined;
+  const index = new Map<string, string[]>();
+  for (const [phrase, metrics] of Object.entries(aliases)) {
+    const trimmed = phrase.trim();
+    if (!trimmed) continue;
+    for (const metric of metrics) {
+      const key = metric.trim().toLowerCase();
+      if (!key) continue;
+      const current = index.get(key) ?? [];
+      // Also key on the leaf name so `cube.metric` refs match a bare metric name.
+      if (!current.includes(trimmed)) current.push(trimmed);
+      index.set(key, current);
+      const leaf = key.split('.').pop();
+      if (leaf && leaf !== key) {
+        const leafCurrent = index.get(leaf) ?? [];
+        if (!leafCurrent.includes(trimmed)) leafCurrent.push(trimmed);
+        index.set(leaf, leafCurrent);
+      }
+    }
+  }
+  return index.size > 0 ? index : undefined;
+}
+
+/** Built-in synonyms for a word, plus anything this project's terms declare. */
+function semanticSynonymsFor(word: string): Set<string> {
+  const builtin = SEMANTIC_TERM_SYNONYM_INDEX.get(word);
+  const project = activeProjectSynonyms?.get(word);
+  if (!project) return builtin ?? new Set<string>();
+  return new Set([...(builtin ?? []), ...project]);
+}
 
 const DIMENSION_SYNONYM_INDEX: Map<string, Set<string>> = (() => {
   const index = new Map<string, Set<string>>();

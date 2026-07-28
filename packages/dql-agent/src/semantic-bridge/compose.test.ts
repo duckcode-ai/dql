@@ -410,3 +410,78 @@ describe('business synonyms reach the specific metric', () => {
     expect(metricsFor('revenue by customer name')).toEqual(['revenue']);
   });
 });
+
+describe('project vocabulary from DQL terms', () => {
+  const officeLayer = (): SemanticLayer => new SemanticLayer({
+    metrics: [
+      { name: 'bcm_total', label: 'BCM Total', description: 'Booked contribution margin.', domain: 'finance', sql: 'bcm_amount', type: 'sum', table: 'fct_bcm' },
+      { name: 'total_revenue', label: 'Total Revenue', description: 'Recognized revenue.', domain: 'finance', sql: 'amount', type: 'sum', table: 'fct_bcm' },
+    ],
+    dimensions: [{ name: 'channel', label: 'Channel', description: 'Sales channel.', domain: 'finance', sql: 'channel', type: 'string', table: 'fct_bcm' }],
+  });
+
+  it('resolves an internal term to the metric it names, with no change to the built-in synonym table', () => {
+    // The built-in clusters are deliberately domain-neutral, so an internal
+    // term like "BCM" used to be teachable ONLY by editing compose.ts. A term
+    // declaring metricRefs now carries it instead.
+    const question = 'what is BCM by channel';
+
+    const withoutVocabulary = composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(),
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    });
+
+    const withVocabulary = composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(),
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      vocabulary: { metricAliases: { bcm: ['bcm_total'] } },
+    });
+
+    expect(withVocabulary?.metric).toBe('bcm_total');
+    // Guard the premise: if the bare question already resolved, the test would
+    // prove nothing about the vocabulary.
+    expect(withoutVocabulary?.metric).not.toBe('bcm_total');
+  });
+
+  it('extends the built-in vocabulary instead of replacing it', () => {
+    // A project word reaches its metric through a project cluster...
+    const question = 'show me margin by channel';
+    expect(composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(),
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      vocabulary: { synonymClusters: [['margin', 'bcm']], metricAliases: { bcm: ['bcm_total'] } },
+    })?.metric).toBe('bcm_total');
+
+    // ...and a question the built-ins already handled resolves exactly as
+    // before once a project cluster is present. Project vocabulary must never
+    // shadow the defaults.
+    const revenueQuestion = 'total revenue by channel';
+    const plan = buildAnalysisQuestionPlan(revenueQuestion);
+    expect(composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(), question: revenueQuestion, questionPlan: plan,
+    })?.metric).toBe('total_revenue');
+    expect(composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(), question: revenueQuestion, questionPlan: plan,
+      vocabulary: { synonymClusters: [['margin', 'bcm']], metricAliases: { bcm: ['bcm_total'] } },
+    })?.metric).toBe('total_revenue');
+  });
+
+  it('does not leak the vocabulary from one call into the next', () => {
+    const question = 'what is BCM by channel';
+    composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(),
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+      vocabulary: { metricAliases: { bcm: ['bcm_total'] } },
+    });
+    // A long-lived server serves many questions; the overlay must be per-call.
+    expect(composeSemanticQueryForQuestion({
+      semanticLayer: officeLayer(),
+      question,
+      questionPlan: buildAnalysisQuestionPlan(question),
+    })?.metric).not.toBe('bcm_total');
+  });
+});

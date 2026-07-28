@@ -2601,6 +2601,7 @@ function termDeclToManifestTerm(term: any, filePath: string): ManifestTerm {
     description: extractProp(term, 'description'),
     identifiers: Array.isArray(term.identifiers) ? term.identifiers : undefined,
     synonyms: Array.isArray(term.synonyms) ? term.synonyms : undefined,
+    metricRefs: Array.isArray(term.metricRefs) ? term.metricRefs : undefined,
     businessOutcome: typeof term.businessOutcome === 'string' ? term.businessOutcome : undefined,
     businessOwner: typeof term.businessOwner === 'string' ? term.businessOwner : undefined,
     decisionUse: typeof term.decisionUse === 'string' ? term.decisionUse : undefined,

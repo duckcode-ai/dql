@@ -88,6 +88,7 @@ import { runAgenticToolLoop } from './agentic/tool-loop.js';
 import { buildSemanticStageTools } from './agentic/toolset.js';
 import { deriveAgenticTrust, type CompiledSemanticRecord } from './agentic/answer-contract.js';
 import { selectSemanticMembersViaLlm } from './semantic-bridge/member-select.js';
+import { buildSemanticVocabulary } from './semantic-bridge/vocabulary.js';
 import { normalizeValueIndexText } from './grounding/value-index.js';
 import { questionTypeFromText } from './meaning-resolution.js';
 import {
@@ -1955,6 +1956,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? input.contextPack.questionPlan
     : buildAnalysisQuestionPlan(question, input.followUp);
   const questionPlan = questionPlanWithResolvedMemberBindings(baseQuestionPlan, schemaContext);
+  // Vocabulary this project authored in its DQL terms. Built once per turn:
+  // metric matching consults it, so a business's own words reach the semantic
+  // layer without a DQL code change.
+  const projectVocabulary = buildSemanticVocabulary(input.manifest);
   // Retrieval may surface a high-trust block because its source tables and
   // vocabulary overlap the question even when its output contract does not.
   // Keep such candidates in the audit trail, but do not put their SQL or a stale
@@ -2732,6 +2737,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       matchedMetric: semanticMetricMatch.metric,
       filterValueColumns: (value) => resolveFilterValueColumns(value, schemaContext),
       filterValueBindings: (value) => resolveAgentFilterValueBindings(value, schemaContext),
+      // The project's own words, from its DQL terms — so "BCM" can reach the
+      // metric it names without editing DQL's built-in synonym table.
+      ...(projectVocabulary ? { vocabulary: projectVocabulary } : {}),
       ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
       ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
     });

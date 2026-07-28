@@ -428,6 +428,12 @@ export interface TermDeclNode extends BaseNode {
   owner?: string;
   identifiers?: string[];
   synonyms?: string[];
+  /**
+   * Governed metrics this term names. Terms could previously only attach to
+   * blocks and business views, so a project's own vocabulary had no way to
+   * reach the semantic layer and the agent's synonym table had to be hardcoded.
+   */
+  metricRefs?: string[];
   businessOutcome?: string;
   businessOwner?: string;
   decisionUse?: string;

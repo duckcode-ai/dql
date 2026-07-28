@@ -954,6 +954,7 @@ export class Parser {
     let owner: string | undefined;
     let identifiers: string[] | undefined;
     let synonyms: string[] | undefined;
+    let metricRefs: string[] | undefined;
     let businessOutcome: string | undefined;
     let businessOwner: string | undefined;
     let decisionUse: string | undefined;
@@ -991,6 +992,7 @@ export class Parser {
         && (this.current().value === 'status'
           || this.current().value === 'identifiers'
           || this.current().value === 'synonyms'
+          || this.current().value === 'metricRefs'
           || this.current().value === 'businessOutcome'
           || this.current().value === 'businessOwner'
           || this.current().value === 'decisionUse'
@@ -1007,6 +1009,8 @@ export class Parser {
           identifiers = this.parseStringArrayValues();
         } else if (keyToken.value === 'synonyms') {
           synonyms = this.parseStringArrayValues();
+        } else if (keyToken.value === 'metricRefs') {
+          metricRefs = this.parseStringArrayValues();
         } else if (keyToken.value === 'businessOutcome') {
           const val = this.expect(TokenType.StringLiteral);
           businessOutcome = val.value;
@@ -1028,7 +1032,7 @@ export class Parser {
         break;
       } else {
         this.error(
-          `Unexpected token '${this.current().value}' inside term. Expected 'domain', 'type', 'status', 'description', 'tags', 'owner', 'identifiers', 'synonyms', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
+          `Unexpected token '${this.current().value}' inside term. Expected 'domain', 'type', 'status', 'description', 'tags', 'owner', 'identifiers', 'synonyms', 'metricRefs', 'businessOutcome', 'businessOwner', 'decisionUse', 'reviewCadence', 'businessRules', 'caveats', or '}'.`,
         );
         this.advance();
       }
@@ -1047,6 +1051,7 @@ export class Parser {
       owner,
       identifiers,
       synonyms,
+      metricRefs,
       businessOutcome,
       businessOwner,
       decisionUse,

@@ -59,8 +59,18 @@ export function buildKGFromManifest(manifest: DQLManifest): {
       sourcePath: term.filePath,
       sourceTier: 'business_context',
       certification: certificationFromStatus(term.status),
+      payload: {
+        synonyms: term.synonyms ?? [],
+        identifiers: term.identifiers ?? [],
+        metricRefs: term.metricRefs ?? [],
+      },
       provenance: 'DQL business term',
     });
+    // A term can now name the governed metrics it describes, so a project's own
+    // vocabulary reaches the semantic layer instead of dying in the glossary.
+    for (const metricRef of term.metricRefs ?? []) {
+      edges.push({ src: `term:${term.name}`, dst: `metric:${metricRef}`, kind: 'defines' });
+    }
   }
 
   // Blocks
