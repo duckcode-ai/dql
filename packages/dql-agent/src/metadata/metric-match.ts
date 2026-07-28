@@ -286,7 +286,17 @@ export async function matchSemanticMetric(
     // {avg, tax, rate} and can actually earn the name-match boost below. Without
     // this, `tokenize('avg_tax_rate')` stays one glued token and the boost never
     // fires for the most common naming style (the docstring's own example).
-    const nameTokens = new Set(tokenize(metric.name.replace(/[_.]+/g, ' ')));
+    // Match singular and plural as the same word. "how many orders" reduces to
+    // the measure term "order", while the metric is named `orders` — a bare
+    // token comparison scored zero on the name, so a plain count question lost
+    // to `order_total` (a sum of money) purely on word form.
+    const nameTokens = new Set<string>();
+    for (const token of tokenize(metric.name.replace(/[_.]+/g, ' '))) {
+      nameTokens.add(token);
+      const singular = token.replace(/ies$/, 'y').replace(/s$/, '');
+      if (singular.length > 1) nameTokens.add(singular);
+      nameTokens.add(`${token}s`);
+    }
     // Family is derived from the metric's name/label only (not its `table:`), so a
     // measure is never mis-assigned to the family of the relation it sits on.
     const metricFams = familiesForWithLookup(contentTokens(metricFamilyText(metric)), familyLookup);
@@ -390,10 +400,25 @@ export async function matchSemanticMetric(
   // mention is closest to the base metric, and every unrequested modifier
   // (percent, mom, forecast, prior…) is evidence of a more specific intent
   // the question did not express.
+  // "Never said" must be measured against what the USER said, not against the
+  // planner's reduced measure terms.
+  //
+  // The planner strips qualifiers — "drink revenue" and "beverage revenue" both
+  // reduce to measures:["revenue"] — and Ask passes only those terms as the
+  // measure signal. `qContent` was therefore {revenue}, so this tie-breaker
+  // charged `drink_revenue` an extra for the word "drink" that the question DID
+  // contain, and the generic `revenue` won. Block AI, which passes the bare
+  // prompt, kept the qualifier and picked `drink_revenue` — the same question
+  // resolving to different metrics depending on the surface.
+  //
+  // Scoring still runs on the measure terms (that is what keeps "region tax by
+  // product" on tax_amount rather than product_count), and only this
+  // near-tie ordering consults the full question.
+  const spokenTokens = new Set([...qContent, ...contentTokens(question)]);
   const nameDistance = (metric: KGNode): number => {
     let extras = 0;
     for (const token of tokenize(metric.name.replace(/[_.]+/g, ' '))) {
-      if (!qContent.has(token) && !STOPWORDS.has(token)) extras += 1;
+      if (!spokenTokens.has(token) && !STOPWORDS.has(token)) extras += 1;
     }
     return extras;
   };

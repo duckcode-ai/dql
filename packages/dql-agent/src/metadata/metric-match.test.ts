@@ -223,3 +223,46 @@ describe('name-proximity tie-breaker (BCM sibling metrics)', () => {
     expect(match?.metric.name).toBe('percent_mom_bcm');
   });
 });
+
+describe('Ask and Block AI must resolve the same question to the same metric', () => {
+  const metric = (name: string, description = ''): KGNode => ({
+    nodeId: `metric:${name}`, kind: 'metric', name, description, tags: [],
+  } as KGNode);
+  const pool = [
+    metric('revenue', 'Total revenue across all order items.'),
+    metric('drink_revenue', 'Revenue from drink and beverage products.'),
+    metric('orders', 'Count of orders placed.'),
+    metric('order_total', 'Gross monetary total of an order.'),
+  ];
+
+  it('keeps a qualifier the question planner stripped', async () => {
+    // The planner reduces "drink revenue" to measures:["revenue"], and Ask
+    // passed only those terms. The near-tie tie-breaker then charged
+    // `drink_revenue` an extra for the word "drink" that the question DID
+    // contain, so the generic `revenue` won — while Block AI, which passes the
+    // bare prompt, picked `drink_revenue`. Same question, different metric,
+    // depending on the surface.
+    const question = 'what is the drink revenue by customer';
+    const block = await matchSemanticMetric(question, pool);
+    const ask = await matchSemanticMetric(question, pool, { measureTerms: ['revenue'] });
+    expect(block?.metric.name).toBe('drink_revenue');
+    expect(ask?.metric.name).toBe('drink_revenue');
+  });
+
+  it('matches a metric name across singular and plural', async () => {
+    // "how many orders" reduces to the measure term "order" while the metric is
+    // named `orders`; a bare token comparison scored zero on the name, so a
+    // plain count question lost to `order_total`, a sum of money.
+    const question = 'how many orders did we get by location';
+    const ask = await matchSemanticMetric(question, pool, { measureTerms: ['count', 'order'] });
+    expect(ask?.metric.name).toBe('orders');
+  });
+
+  it('still prefers the measure the question named over an unrelated dimension noun', async () => {
+    // The precision case the measure-term signal exists for: "region tax by
+    // product" must stay on the tax measure and never drift to a product count.
+    const taxPool = [metric('tax_amount', 'Tax collected.'), metric('product_count', 'Distinct products sold.')];
+    const ask = await matchSemanticMetric('region tax by product', taxPool, { measureTerms: ['tax'] });
+    expect(ask?.metric.name).toBe('tax_amount');
+  });
+});
