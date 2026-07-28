@@ -105,4 +105,41 @@ describe('expandGroundingFromCatalog', () => {
     const relation = merged.contextPack?.allowedSqlContext.relations.find((r) => r.relation === 'dev.order_items');
     expect(relation?.columnCompleteness).not.toBe('complete');
   });
+
+  it('resolves EVERY unknown relation in one pass, not just the first', () => {
+    // Re-grounding gets a single attempt per run. Reporting only the first
+    // unknown relation meant a query joining two un-retrieved tables could never
+    // recover: the expander resolved one, revalidation failed on the next, and
+    // the budget was already spent. The user saw "it uses a table that was not
+    // part of the metadata retrieved" for SQL that runs fine in a notebook.
+    const firstOnly = expandGroundingFromCatalog(catalog, {
+      question: 'join order items to supplies',
+      sql: 'SELECT * FROM dev.order_items JOIN dev.supplies USING (product_id)',
+      code: 'unknown_relation',
+      offending: { relation: 'dev.order_items' },
+    });
+    const firstNames = (firstOnly?.relations ?? []).map((relation) => relation.relation);
+    expect(firstNames.some((name) => name.endsWith('order_items'))).toBe(true);
+    expect(firstNames.some((name) => name.endsWith('supplies'))).toBe(false);
+
+    const all = expandGroundingFromCatalog(catalog, {
+      question: 'join order items to supplies',
+      sql: 'SELECT * FROM dev.order_items JOIN dev.supplies USING (product_id)',
+      code: 'unknown_relation',
+      offending: { relation: 'dev.order_items', relations: ['dev.order_items', 'dev.supplies'] },
+    });
+    const allNames = (all?.relations ?? []).map((relation) => relation.relation);
+    expect(allNames.some((name) => name.endsWith('order_items'))).toBe(true);
+    expect(allNames.some((name) => name.endsWith('supplies'))).toBe(true);
+  });
+
+  it('still expands from a bare relation when no list is supplied', () => {
+    const result = expandGroundingFromCatalog(catalog, {
+      question: 'q',
+      sql: 'SELECT * FROM dev.supplies',
+      code: 'unknown_relation',
+      offending: { relation: 'dev.supplies' },
+    });
+    expect((result?.relations ?? []).some((relation) => relation.relation.endsWith('supplies'))).toBe(true);
+  });
 });

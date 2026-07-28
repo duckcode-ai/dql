@@ -745,3 +745,37 @@ describe('ambiguity detection on WIDE (truncated) enterprise relations', () => {
     expect(result.ok).toBe(true);
   });
 });
+
+describe('unknown relations are reported completely', () => {
+  it('names every unretrieved relation so one re-ground can resolve them all', () => {
+    const contextPack = {
+      objects: [],
+      missingContext: [],
+      allowedSqlContext: {
+        relations: [{
+          relation: 'dev.orders', name: 'orders', source: 'test',
+          columnCompleteness: 'complete' as const,
+          columns: [{ name: 'order_id' }, { name: 'customer_id' }],
+        }],
+        sourceBlockSql: [],
+      },
+    } as unknown as Parameters<typeof validateSqlAgainstLocalContext>[1];
+
+    const result = validateSqlAgainstLocalContext(
+      'SELECT o.order_id FROM dev.orders o JOIN dev.customers c ON c.id = o.customer_id JOIN dev.products p ON p.id = o.product_id',
+      contextPack,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('unknown_relation');
+    // The first is kept for compatibility...
+    expect(result.offending?.relation).toBeTruthy();
+    // ...but every unknown relation must be reported, or the single re-ground
+    // attempt fixes one and the answer is refused for the next.
+    const reported = result.offending?.relations ?? [];
+    expect(reported.some((relation) => relation.endsWith('customers'))).toBe(true);
+    expect(reported.some((relation) => relation.endsWith('products'))).toBe(true);
+    expect(reported.some((relation) => relation.endsWith('orders'))).toBe(false);
+  });
+});

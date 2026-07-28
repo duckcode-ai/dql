@@ -76,22 +76,36 @@ export function expandGroundingFromCatalog(
   request: GroundingExpansionRequest,
 ): GroundingExpansionResult | undefined {
   if (request.code !== 'unknown_relation' && request.code !== 'unknown_column') return undefined;
-  const relationName = request.offending?.relation;
+  // Resolve EVERY unknown relation in one pass. Re-grounding is budgeted to a
+  // single attempt, so expanding only the first left multi-table SQL permanently
+  // refused even though the missing tables were all sitting in the catalog.
+  const relationNames = request.offending?.relations?.length
+    ? request.offending.relations
+    : request.offending?.relation
+      ? [request.offending.relation]
+      : [undefined];
   const columnName = request.offending?.column;
   const relations: MetadataAllowedSqlRelation[] = [];
   const runtimeTables: RuntimeSchemaTable[] = [];
   const notes: string[] = [];
 
-  for (const relation of findRuntimeRelations(catalog, relationName, columnName)) {
-    relations.push(runtimeTableToAllowedRelation(relation, 'runtime schema snapshot'));
-    runtimeTables.push(relation);
-  }
-  for (const relation of findCatalogRelations(catalog, relationName, columnName)) {
-    relations.push(relation);
+  for (const relationName of relationNames) {
+    for (const relation of findRuntimeRelations(catalog, relationName, columnName)) {
+      relations.push(runtimeTableToAllowedRelation(relation, 'runtime schema snapshot'));
+      runtimeTables.push(relation);
+    }
+    for (const relation of findCatalogRelations(catalog, relationName, columnName)) {
+      relations.push(relation);
+    }
   }
 
-  const mergedRelations = mergeAllowedRelations(relations).slice(0, 8);
-  const mergedRuntimeTables = mergeRuntimeSchemaTables(runtimeTables, relationsToRuntimeTables(mergedRelations)).slice(0, 8);
+  // Scale the cap with how many relations we are actually resolving — a fixed 8
+  // silently truncated a multi-table repair, re-creating the same refusal the
+  // expansion exists to prevent. Still bounded so a broad match cannot flood the
+  // prompt budget.
+  const expansionLimit = Math.min(32, Math.max(8, relationNames.length * 6));
+  const mergedRelations = mergeAllowedRelations(relations).slice(0, expansionLimit);
+  const mergedRuntimeTables = mergeRuntimeSchemaTables(runtimeTables, relationsToRuntimeTables(mergedRelations)).slice(0, expansionLimit);
   for (const relation of mergedRelations) {
     const selectedColumns = columnName
       ? relation.columns.filter((column) => namesEqual(column.name, columnName)).map((column) => column.name)
@@ -103,7 +117,7 @@ export function expandGroundingFromCatalog(
   return {
     relations: mergedRelations,
     schemaContext: mergedRuntimeTables,
-    notes: uniqueStrings(notes).slice(0, 8),
+    notes: uniqueStrings(notes).slice(0, expansionLimit),
   };
 }
 

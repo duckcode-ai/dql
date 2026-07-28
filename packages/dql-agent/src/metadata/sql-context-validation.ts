@@ -21,6 +21,16 @@ export type SqlContextValidationCode =
 
 export interface SqlContextValidationOffending {
   relation?: string;
+  /**
+   * EVERY relation the SQL referenced that the context did not cover.
+   *
+   * Re-grounding gets one attempt per run, so reporting only the first unknown
+   * relation meant a query joining two un-retrieved tables could never recover:
+   * the expander resolved one, revalidation failed on the next, and the budget
+   * was already spent. The user saw "it uses a table that was not part of the
+   * metadata retrieved" for SQL that runs perfectly well in a notebook.
+   */
+  relations?: string[];
   column?: string;
 }
 
@@ -185,7 +195,7 @@ export function validateSqlAgainstLocalContext(
       ok: false,
       code: 'unknown_relation',
       error: `SQL references relation(s) outside the inspected metadata context: ${unknownRelations.join(', ')}. Use inspect_metadata_context and only query allowed relations.`,
-      offending: { relation: unknownRelations[0] },
+      offending: { relation: unknownRelations[0], relations: unknownRelations },
       ...base,
     };
   }
