@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck } from 'lucide-react';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
+import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { focusInsertedNotebookCell } from '../../utils/notebook-cell-focus';
 import { useOpenAnswerInNotebook } from '../../utils/answer-to-notebook';
@@ -78,25 +79,6 @@ export function askNotebookCellFromPayload(payload: InsertDqlPayload): Cell | un
     cell.dqlParameterValues = payload.dqlArtifact.parameterValues;
   }
   return cell;
-}
-
-function consumePendingDomainContext(): { domain: string; purpose?: string; modelAreaId?: string } | undefined {
-  if (typeof window === 'undefined') return undefined;
-  try {
-    const raw = window.sessionStorage.getItem('dql-ask-domain-context');
-    window.sessionStorage.removeItem('dql-ask-domain-context');
-    if (!raw) return undefined;
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return typeof parsed.domain === 'string' && parsed.domain.trim()
-      ? {
-          domain: parsed.domain.trim(),
-          purpose: typeof parsed.purpose === 'string' ? parsed.purpose : undefined,
-          modelAreaId: typeof parsed.modelAreaId === 'string' ? parsed.modelAreaId : undefined,
-        }
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function makeConversationId(): string {
@@ -202,7 +184,7 @@ export function AnalyticsHome() {
   const { state, dispatch } = useNotebook();
   const openAnswerInNotebook = useOpenAnswerInNotebook();
   const t = themes[state.themeMode];
-  const [domainContext, setDomainContext] = useState(() => consumePendingDomainContext());
+  const [domainContext, setDomainContext] = useState<DomainScope | undefined>(() => initialDomainScope());
 
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
   // Keep the selected thread across a page remount/reload. The panel's pending-run
@@ -336,7 +318,7 @@ export function AnalyticsHome() {
           title="Ask your data"
           askLayout
           scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ` · ${domainContext.modelAreaId.split('::').at(-1)?.replace(/_/g, ' ')}` : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
-          onClearScope={domainContext ? () => setDomainContext(undefined) : undefined}
+          onClearScope={domainContext ? () => { setDomainContext(undefined); persistDomainScope(undefined); } : undefined}
           workspaceContext={domainContext}
           audience="stakeholder"
           initialMode="auto"
