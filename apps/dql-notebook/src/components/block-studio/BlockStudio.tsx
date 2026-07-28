@@ -5,6 +5,7 @@ import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { controlStyle } from '../../themes/control-tokens';
 import { CommaListInput } from '../common/CommaListInput';
+import { SourceTextField } from '../common/SourceTextField';
 import type {
   BlockStudioDiagnostic,
   DatabaseSchemaNode,
@@ -2284,16 +2285,16 @@ function BlockContextInspector({
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
         <FieldLabel label="Business outcome" t={t}>
-          <input value={field('businessOutcome')} onChange={(event) => onChange(setBlockStringField(source, 'businessOutcome', event.target.value))} placeholder="Decision or outcome this block supports" style={importInputStyle(t)} />
+          <SourceTextField value={field('businessOutcome')} onChange={(next) => onChange(setBlockStringField(source, 'businessOutcome', next))} placeholder="Decision or outcome this block supports" style={importInputStyle(t)} />
         </FieldLabel>
         <FieldLabel label="Agent guidance" t={t}>
-          <input value={field('llmContext')} onChange={(event) => onChange(setBlockStringField(source, 'llmContext', event.target.value))} placeholder="When to use this block" style={importInputStyle(t)} />
+          <SourceTextField value={field('llmContext')} onChange={(next) => onChange(setBlockStringField(source, 'llmContext', next))} placeholder="When to use this block" style={importInputStyle(t)} />
         </FieldLabel>
         {tokenFields.map((item) => (
           <ContextTokenEditor key={item.key} label={item.label} hint={item.hint} values={array(item.key)} onChange={(values) => onChange(setBlockArray(source, item.key, values))} t={t} />
         ))}
         <FieldLabel label="Rules and caveats" t={t}>
-          <input value={field('caveats')} onChange={(event) => onChange(setBlockStringField(source, 'caveats', event.target.value))} placeholder="Known limitation or interpretation rule" style={importInputStyle(t)} />
+          <SourceTextField value={field('caveats')} onChange={(next) => onChange(setBlockStringField(source, 'caveats', next))} placeholder="Known limitation or interpretation rule" style={importInputStyle(t)} />
         </FieldLabel>
       </div>
       <div style={{ fontSize: 10, color: t.textMuted }}>Available authoring context: {semanticCount} semantic objects, {databaseStats.schemas} schemas, {databaseStats.columns} columns. SQL completion uses the same loaded catalog.</div>
@@ -2903,7 +2904,7 @@ function SemanticBlockBuilder({
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>{outputFields.length > 0 ? outputFields.map((field) => <span key={field} style={selectionChipStyle(t, true)}>{businessLabel(field)}</span>) : <span style={{ fontSize: 11, color: t.textMuted }}>Select metrics and dimensions to define outputs.</span>}</div>
       </PanelBox>
       <PanelBox title="Tests" hint="Assertions checked on every run and required for certification." t={t}>
-        <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...compactInput, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
+        <SourceTextField multiline value={testsBody} onChange={(next) => onChange(setDqlSectionBody(source, 'tests', next))} placeholder={'assert row_count >= 1\nassert total_revenue >= 0'} style={{ ...compactInput, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
       </PanelBox>
 
       <details style={{ padding: '14px 0', color: t.textSecondary, fontFamily: t.font }}>
@@ -3241,7 +3242,7 @@ function SqlBlockVisualBuilder({
       </PanelBox>
       <VisualParameterEditor source={source} kind="custom" onChange={onChange} t={t} />
       <PanelBox title="Tests" hint="Assertions checked on every run and required for certification." t={t}>
-        <textarea value={testsBody} onChange={(event) => onChange(setDqlSectionBody(source, 'tests', event.target.value))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
+        <SourceTextField multiline value={testsBody} onChange={(next) => onChange(setDqlSectionBody(source, 'tests', next))} placeholder={'assert row_count >= 1\nassert revenue >= 0'} style={{ ...input, minHeight: 64, resize: 'vertical', fontFamily: t.fontMono }} />
       </PanelBox>
       <details style={{ padding: '14px 0', color: t.textSecondary, fontFamily: t.font }}>
         <summary style={{ cursor: 'pointer', fontSize: 11, fontWeight: 750 }}>Generated DQL preview</summary>
