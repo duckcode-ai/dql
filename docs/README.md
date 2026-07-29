@@ -51,6 +51,8 @@ How DQL is built.
 
 ## Contributing
 
+- [Current DQL truth](./contribute/current-dql-truth.md)
+- [OSS delivery orchestration](./contribute/delivery-orchestration.md)
 - [Repo layout](./contribute/repo-layout.md)
 - [Testing](./contribute/testing.md)
 - [Releasing](./contribute/releasing.md)

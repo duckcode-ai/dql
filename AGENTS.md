@@ -26,9 +26,10 @@ that will **fail the build** if you do:
    writes the key and dispatches that event to drive the embedded theme. Don't
    rename it or remove the `storage` listener.
 
-DQL hides its own nav in cloud mode via the `AppShell` cloud branches
-(`apps/dql-notebook/src/cloud/cloud-mode.ts`), not via cloud CSS — so there is no
-layout-class dependency to preserve (unlike DataLex).
+Cloud-specific navigation, identity, and managed workflow are not OSS contracts
+in this repository. The compatibility surface here is limited to the selector,
+token, and storage-key names above; do not infer a hosted layout contract from
+historical cloud branches.
 
 If you must change any of the above, **coordinate with the cloud repo**
 (`governed-analytics-cloud`): update `packages/design-tokens`, and run
@@ -36,15 +37,24 @@ If you must change any of the above, **coordinate with the cloud repo**
 cloud — these are just stability guarantees on the names the cloud depends on.
 
 ## General
+
 - Notebook app: `apps/dql-notebook`. Build:
   `pnpm --filter @duckcodeailabs/dql-notebook-app build`.
 - See `CONTRIBUTING.md` for setup, tests, and the OSS-readiness checklist.
 
+## Current truth and delivery
+
+- Start with `docs/contribute/current-dql-truth.md`; live repository and registry
+  evidence always outranks memory, issues, old worktrees, and roadmap snapshots.
+- Follow `docs/contribute/delivery-orchestration.md` for bounded roles, handoffs,
+  evidence gates, memory lifecycle, and the OSS/commercial boundary.
+- Do not add managed multi-tenancy, SSO/RBAC, centralized audit, managed
+  secrets, or hosted approval workflows to close an OSS task.
+
 ## DQL 2.0 domain-context implementation
 
 The normative implementation pack is
-`docs/specs/dql-2-domain-context/README.md`, with decisions in RFC 0002 and RFC
-0003. Git-tracked specs take precedence over chat history, Codex memory, issues,
+`docs/specs/dql-2-domain-context/README.md`, with decisions in RFC 0002 and RFC 0003. Git-tracked specs take precedence over chat history, Codex memory, issues,
 or ignored planning files. Every implementation change in this program must
 name its stable acceptance IDs and follow the workstream dependency/ownership
 rules in that pack.

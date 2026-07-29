@@ -18,7 +18,13 @@ This repository covers the open DQL layer:
 - CLI: `dql` commands
 - Docs and examples
 
-Please do **not** open issues here for DuckCode product behavior, closed notebook UX features, or agentic orchestration workflows. Those belong to the closed product repository.
+The local notebook and governed agent workflows shipped by DQL are OSS scope.
+Managed multi-tenancy, SSO/RBAC, centralized audit, managed secrets, hosted
+approvals, and other commercial control-plane behavior are not.
+
+Before a non-trivial change, read the
+[current DQL truth](./docs/contribute/current-dql-truth.md) and follow the
+[OSS delivery orchestration playbook](./docs/contribute/delivery-orchestration.md).
 
 ---
 
@@ -77,6 +83,7 @@ docs/                    All documentation
 ## Pull Requests
 
 - Keep changes focused on the public DQL surface.
+- Verify current repository state before relying on issues, memory, or roadmap snapshots.
 - Add or update tests when behavior changes.
 - Update docs or examples when syntax or CLI workflow changes.
 - Run `pnpm build && pnpm test` before opening a PR.
@@ -85,6 +92,7 @@ docs/                    All documentation
 ### Commit style
 
 Use conventional commit prefixes:
+
 - `feat:` — new feature or behavior
 - `fix:` — bug fix
 - `docs:` — documentation only
@@ -97,6 +105,7 @@ Use conventional commit prefixes:
 Look for issues tagged [`good first issue`](https://github.com/duckcode-ai/dql/issues?q=label%3A%22good+first+issue%22) on GitHub. These are scoped tasks with clear acceptance criteria.
 
 Common contribution areas:
+
 - Adding a new database connector driver in `packages/dql-connectors/`
 - Improving error messages from the parser (`packages/dql-core/src/parser/`)
 - Extending test coverage for edge cases in governance rules
