@@ -3115,11 +3115,15 @@ export const api = {
 
   async createNotebook(
     name: string,
-    template: string
+    template: string,
+    context: {
+      ownerDomain?: string;
+      usesDomains?: string[];
+    } = {},
   ): Promise<{ path: string; content: string }> {
     return request<{ path: string; content: string }>('/api/notebooks', {
       method: 'POST',
-      body: JSON.stringify({ name, template }),
+      body: JSON.stringify({ name, template, ...context }),
     });
   },
 
@@ -3131,6 +3135,7 @@ export const api = {
       description?: string;
       owner?: string;
       tags?: string[];
+      folderPath?: string;
     },
   ): Promise<{ path: string; content: string }> {
     return request<{ path: string; content: string }>('/api/blocks', {
@@ -4875,13 +4880,24 @@ export const api = {
   async fetchGitGovernedContext(): Promise<{
     inRepo: boolean;
     trackingReady: boolean;
+    legacyBroadIgnore: boolean;
     domains: GitGovernedContextGroup;
     skills: GitGovernedContextGroup;
+    artifacts: GitGovernedContextGroup;
+    learning: GitGovernedContextGroup;
   }> {
     try {
       return await request('/api/git/governed-context');
     } catch {
-      return { inRepo: false, trackingReady: false, domains: emptyGitGovernedContextGroup(), skills: emptyGitGovernedContextGroup() };
+      return {
+        inRepo: false,
+        trackingReady: false,
+        legacyBroadIgnore: false,
+        domains: emptyGitGovernedContextGroup(),
+        skills: emptyGitGovernedContextGroup(),
+        artifacts: emptyGitGovernedContextGroup(),
+        learning: emptyGitGovernedContextGroup(),
+      };
     }
   },
 

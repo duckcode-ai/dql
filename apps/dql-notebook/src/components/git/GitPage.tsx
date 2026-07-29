@@ -300,7 +300,7 @@ export function GitPage() {
   };
   const onEnableGovernedTracking = async () => {
     const result = await runOp('enable governed tracking', () => api.enableGitGovernedContextTracking());
-    if (result.ok) flash('ok', 'Domains and project skills are now included in source control.');
+    if (result.ok) flash('ok', 'Governed project source and Hint Graph files are now visible to source control.');
   };
   const onPull = () => runOp('pull', () => api.gitPull(), 'Pulled from remote');
   const onPush = () => runOp('push', () => api.gitPush(), 'Pushed to remote');
@@ -964,22 +964,52 @@ function GovernedContextSummary({ t, context, onEnableTracking }: { t: Theme; co
     if (group.changed > 0 || group.untracked > 0) return `${label}: ${group.total} · ${group.changed + group.untracked} need review`;
     return `${label}: ${group.total} tracked`;
   };
-  const needsRepair = context.domains.ignored > 0 || context.skills.ignored > 0;
+  const groups: Array<[string, GitGovernedContextGroup]> = [
+    ['Domains', context.domains],
+    ['Skills', context.skills],
+    ['Project source', context.artifacts],
+    ['Governed learning', context.learning],
+  ];
+  const needsRepair = !context.trackingReady;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: needsRepair ? `${t.warning}10` : `${t.success}0d`, border: `1px solid ${needsRepair ? `${t.warning}45` : `${t.success}35`}`, borderRadius: 6, flexWrap: 'wrap' }}>
       <span style={{ fontSize: 10, fontWeight: 750, letterSpacing: '0.05em', textTransform: 'uppercase', color: needsRepair ? t.warning : t.success }}>Governed context</span>
       <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Domains', context.domains)}</span>
       <span style={{ color: t.textMuted }}>·</span>
       <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Skills', context.skills)}</span>
+      <span style={{ color: t.textMuted }}>·</span>
+      <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Project source', context.artifacts)}</span>
+      <span style={{ color: t.textMuted }}>·</span>
+      <span style={{ fontSize: 11, color: t.textPrimary }}>{groupSummary('Governed learning', context.learning)}</span>
       <div style={{ flex: 1 }} />
       {needsRepair ? (
         <>
-          <span style={{ fontSize: 10, color: t.textMuted }}>A legacy local folder is hiding shared guidance.</span>
-          <button type="button" onClick={onEnableTracking} style={miniBtn(t, 'primary')}>Move skills to source control</button>
+          <span style={{ fontSize: 10, color: t.textMuted }}>
+            {context.legacyBroadIgnore ? 'A legacy .dql/ rule is hiding governed learning.' : 'Some shared project source is hidden from Git.'}
+          </span>
+          <button type="button" onClick={onEnableTracking} style={miniBtn(t, 'primary')}>Repair source-control tracking</button>
         </>
       ) : (
         <span style={{ fontSize: 10, color: t.textMuted }}>Shared project source</span>
       )}
+      <details style={{ width: '100%', borderTop: `1px solid ${t.headerBorder}`, paddingTop: 5 }}>
+        <summary style={{ cursor: 'pointer', fontSize: 10, color: t.textSecondary }}>View governed source inventory</summary>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: 7 }}>
+          {groups.map(([label, group]) => (
+            <div key={label} style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: t.textPrimary, marginBottom: 3 }}>{label}</div>
+              {group.paths.length === 0 ? (
+                <div style={{ fontSize: 10, color: t.textMuted }}>No files yet</div>
+              ) : group.paths.map((entry) => (
+                <div key={`${label}:${entry.path}`} title={entry.path} style={{ display: 'flex', gap: 5, minWidth: 0, fontSize: 9.5, lineHeight: 1.5 }}>
+                  <span style={{ color: entry.state === 'ignored' ? t.error : entry.state === 'tracked' ? t.success : t.warning, flexShrink: 0 }}>{entry.state}</span>
+                  <span style={{ color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.path}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1006,7 +1036,12 @@ function artifactGroupForPath(path: string): ArtifactGroup {
   if (/\/apps\/[^/]+\/dql\.app\.json$/.test(path) || /^apps\/[^/]+\/dql\.app\.json$/.test(path) || /\/dashboards\/[^/]+\.dqld$/.test(path) || /^apps\/[^/]+\/dashboards\/[^/]+\.dqld$/.test(path)) {
     return { id: 'apps', label: 'Shared app', tone: 'neutral', rank: 1 };
   }
-  if (path.startsWith('skills/') || path.startsWith('.dql/skills/') || /^domains\/[^/]+\/domain\.dql$/i.test(path)) {
+  if (
+    path.startsWith('skills/')
+    || path.startsWith('.dql/skills/')
+    || /^domains\//i.test(path)
+    || /^\.dql\/(hints|traces|evaluations|reviews)\//i.test(path)
+  ) {
     return { id: 'business', label: 'Governed context', tone: 'good', rank: 0 };
   }
   if (/\.dql$/i.test(path) || path.startsWith('semantic-layer/') || /\.(ya?ml)$/i.test(path) || path === 'dql.config.json' || path === 'package.json') {

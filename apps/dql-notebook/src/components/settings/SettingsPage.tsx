@@ -1647,11 +1647,6 @@ function MemoryEditor({
     onStatus('Memory saved.');
   };
 
-  const ensureFiles = async () => {
-    const result = await api.ensureAgentMemoryFiles();
-    onStatus(`Memory files ready: ${result.files.join(', ')}`);
-  };
-
   const remove = async (id: string) => {
     await api.deleteAgentMemory(id);
     await refresh();
@@ -1792,8 +1787,7 @@ function MemoryEditor({
 
       <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: '1px solid var(--border-subtle)', background: t.cellBg, borderRadius: 10, padding: '11px 13px' }}>
         <span style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.55 }}>
-          Entries added here are local advisory records under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/cache/</span>. You can separately prepare Git-versionable context templates under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/memory/</span>; neither path approves or certifies a governed hint.
-          {' '}<button type="button" onClick={() => void ensureFiles()} style={{ border: 'none', background: 'none', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 11.5, fontFamily: t.font }}>Prepare context files</button>
+          Entries added here are local advisory records under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/cache/</span>. Put shared agent guidance in Git under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>skills/</span> or <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>domains/&lt;domain&gt;/skills/</span>. Advisory memory and skills never approve or certify a governed hint.
         </span>
       </div>
     </div>

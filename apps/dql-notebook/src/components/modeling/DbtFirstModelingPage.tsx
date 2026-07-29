@@ -29,8 +29,9 @@ type Editor =
 type DiagramSearchItem = { recordKey: string; type: 'model' | 'column'; label: string; sublabel: string; role: string | undefined };
 
 export function DbtFirstModelingPage() {
-  // UI-001: keep OSS domain authoring focused on Model + Skills, while Ask and
-  // global products remain outside this contextual workspace.
+  // UI-001/UI-006: Domain Studio is one domain-scoped workspace. DQL-owned
+  // package source is edited here; global Apps and Notebooks appear only as
+  // ProductDomainContext backlinks and keep their canonical root storage.
   const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
   const [data, setData] = useState<DbtFirstModelingResponse | null>(null);
@@ -308,15 +309,12 @@ export function DbtFirstModelingPage() {
             background: t.appBg,
           }}
         >
-          <div style={{ padding: '12px 10px 10px', borderBottom: `1px solid ${t.headerBorder}` }}>
-            <label style={{ display: 'grid', gap: 6, color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>
-              Domain
-              <select aria-label="Active domain" value={selectedDomain ?? ''} onChange={(event) => selectDomain(event.target.value || null)} style={{ ...inputStyle(t), minHeight: 32, padding: '6px 8px' }}>
-                <option value="">All domains</option>
-                {domainPackageTree(data.modeling.packages).map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.label}</option>)}
-              </select>
-            </label>
-          </div>
+          <DomainPackageNavigation
+            data={data}
+            selectedDomain={selectedDomain}
+            onSelect={selectDomain}
+            t={t}
+          />
           <DomainWorkspaceNavigation
             data={data}
             domain={selectedDomain}
@@ -593,6 +591,55 @@ function ConfirmModelDelete({ pending, busy, error, t, onCancel, onConfirm }: {
   );
 }
 
+function DomainPackageNavigation({
+  data,
+  selectedDomain,
+  onSelect,
+  t,
+}: {
+  data: DbtFirstModelingResponse;
+  selectedDomain: string | null;
+  onSelect: (domain: string | null) => void;
+  t: Theme;
+}) {
+  const packages = domainPackageTree(data.modeling.packages);
+  return (
+    <nav aria-label="Domain packages" style={{ padding: '10px 7px', borderBottom: `1px solid ${t.headerBorder}` }}>
+      <div style={{ padding: '0 8px 6px', color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>Domains</div>
+      <button
+        type="button"
+        onClick={() => onSelect(null)}
+        aria-current={selectedDomain === null ? 'page' : undefined}
+        style={workspaceNavButton(t, selectedDomain === null, false)}
+      >
+        <FolderTree size={14} color={selectedDomain === null ? t.accent : t.textMuted} />
+        <span style={{ flex: 1 }}>All domains</span>
+        <small style={{ color: selectedDomain === null ? t.accent : t.textMuted }}>{packages.length}</small>
+      </button>
+      {packages.map((pkg) => {
+        const selected = selectedDomain === pkg.id;
+        const localName = pkg.id.split('.').at(-1) ?? pkg.id;
+        return (
+          <button
+            key={pkg.id}
+            type="button"
+            onClick={() => onSelect(pkg.id)}
+            aria-current={selected ? 'page' : undefined}
+            title={pkg.id}
+            style={{
+              ...workspaceNavButton(t, selected, false),
+              paddingLeft: 9 + pkg.depth * 15,
+            }}
+          >
+            <span aria-hidden="true" style={{ width: 12, color: t.textMuted, textAlign: 'center' }}>{pkg.depth > 0 ? '└' : '•'}</span>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{localName}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
 function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data: DbtFirstModelingResponse; domain: string | null; active: Tab; onSelect: (section: Tab) => void; t: Theme }) {
   const assets = domain ? (data.domainAssets?.[domain] ?? {}) : {};
   const entities = domainEntityRecords(data.modeling, domain);
@@ -601,32 +648,63 @@ function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data
     return data.modeling.entities[relationship.from]?.domain === domain || data.modeling.entities[relationship.to]?.domain === domain;
   });
   const counts: Partial<Record<Tab, number>> = {
+    overview: domain ? 1 : Object.keys(data.modeling.packages).length,
     diagram: entities.length,
     knowledge: relationships.length,
+    terms: assets.terms?.length ?? 0,
     skills: assets.skills?.length ?? 0,
     blocks: assets.blocks?.length ?? 0,
+    views: assets.views?.length ?? 0,
+    'join-proofs': relationships.length,
+    contracts: Object.values(data.modeling.contracts).filter((contract) => !domain || contract.domain === domain).length,
+    interfaces: [
+      ...Object.values(data.modeling.interfaces?.exports ?? {}),
+      ...Object.values(data.modeling.interfaces?.imports ?? {}),
+    ].filter((item) => !domain || item.domain === domain).length,
+    evaluations: (assets.evaluations?.length ?? 0) + (assets.tests?.length ?? 0),
+    dbt: entities.length,
   };
   return (
     <nav aria-label={domain ? `${domain} workspace` : 'All domains workspace'} style={{ padding: '10px 7px 14px' }}>
-      <div style={{ padding: '0 8px 6px', color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>Workspace</div>
-      {DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items).map((item) => (
-        <button
-          key={item.id}
-          onClick={() => onSelect(item.id)}
-          aria-current={active === item.id ? 'page' : undefined}
-          style={workspaceNavButton(t, active === item.id, false)}
-        >
-          {domainSectionIcon(item.id, 14, t, active === item.id)}
-          <span style={{ flex: 1 }}>{item.label}</span>
-          {counts[item.id] !== undefined && <small style={{ color: active === item.id ? t.accent : t.textMuted }}>{counts[item.id]}</small>}
-        </button>
+      {DOMAIN_STUDIO_NAVIGATION.map((group, groupIndex) => (
+        <div key={group.label ?? `group-${groupIndex}`} style={{ marginTop: groupIndex === 0 ? 0 : 12 }}>
+          {group.label ? <div style={{ padding: '0 8px 6px', color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>{group.label}</div> : null}
+          {group.items.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => onSelect(item.id)}
+              aria-current={active === item.id ? 'page' : undefined}
+              style={workspaceNavButton(t, active === item.id, false)}
+            >
+              {domainSectionIcon(item.id, 14, t, active === item.id)}
+              <span style={{ flex: 1 }}>{item.label}</span>
+              {counts[item.id] !== undefined && <small style={{ color: active === item.id ? t.accent : t.textMuted }}>{counts[item.id]}</small>}
+            </button>
+          ))}
+        </div>
       ))}
     </nav>
   );
 }
 
 function domainSectionIcon(section: Tab, size: number, t: Theme, active = false) {
-  const Icon = section === 'blocks' ? Blocks : section === 'diagram' ? GitBranch : section === 'knowledge' ? Network : section === 'skills' ? GraduationCap : Boxes;
+  const Icon = section === 'blocks'
+    ? Blocks
+    : section === 'diagram' || section === 'dbt'
+      ? GitBranch
+      : section === 'knowledge' || section === 'interfaces'
+        ? Network
+        : section === 'skills'
+          ? GraduationCap
+          : section === 'join-proofs'
+            ? Link2
+            : section === 'contracts' || section === 'evaluations'
+              ? ShieldCheck
+              : section === 'views'
+                ? Columns3
+                : section === 'terms' || section === 'notebooks' || section === 'apps'
+                  ? FolderTree
+                  : Boxes;
   return <Icon size={size} color={active ? t.accent : t.textMuted} />;
 }
 

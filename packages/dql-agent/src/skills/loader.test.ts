@@ -290,6 +290,18 @@ describe('writeSkill / round-trip (spec 16)', () => {
     expect(existsSync(skillPath(root, 'temp'))).toBe(false);
     expect(deleteSkill(root, 'temp')).toBe(false);
   });
+
+  it('deletes one domain skill by qualified identity when local ids collide', () => {
+    for (const domain of ['commerce', 'growth']) {
+      mkdirSync(join(root, 'domains', domain, 'skills'), { recursive: true });
+      writeFileSync(join(root, 'domains', domain, 'domain.dql'), `domain "${domain}" {\n  id = "${domain}"\n}\n`);
+      writeFileSync(join(root, 'domains', domain, 'skills', 'analyst.skill.md'), '---\nid: analyst\n---\nDomain guidance', 'utf-8');
+    }
+
+    expect(deleteSkill(root, 'growth::skill::analyst')).toBe(true);
+    expect(existsSync(join(root, 'domains', 'growth', 'skills', 'analyst.skill.md'))).toBe(false);
+    expect(existsSync(join(root, 'domains', 'commerce', 'skills', 'analyst.skill.md'))).toBe(true);
+  });
 });
 
 describe('selectRelevantSkills (spec 16)', () => {

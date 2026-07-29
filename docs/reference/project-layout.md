@@ -1,8 +1,9 @@
 # Project layout
 
-A DQL project is a local-first git repo with a few conventional directories.
-Shared assets are plain files. Private App overlays, saved layouts, and AI pins
-live under `.dql/local/` and are not committed.
+A DQL project is a local-first Git repo with a few conventional directories.
+Shared assets are plain files. The governed Hint Graph also uses plain files
+under selected `.dql/` subdirectories. Private App overlays, local indexes,
+saved layouts, and AI pins stay ignored.
 
 For new enterprise-style repos, prefer the domain-first layout:
 
@@ -20,17 +21,22 @@ my-dql-project/
 │   │   ├─ blocks/
 │   │   │   └─ _drafts/
 │   │   ├─ views/
-│   │   ├─ notebooks/
+│   │   ├─ contracts/
+│   │   ├─ interfaces/
 │   │   ├─ evaluations/
-│   │   ├─ tests/
-│   │   └─ apps/
+│   │   └─ tests/
 │   └─ revenue/
 ├─ skills/                  # shared, Git-tracked agent guidance
 ├─ tests/                   # block and agent-eval checks
 ├─ notebooks/
 ├─ apps/
 ├─ semantic-layer/          # optional local semantic source
-└─ .dql/cache/
+└─ .dql/
+    ├─ hints/               # Git-owned governed hint candidates and decisions
+    ├─ traces/              # Git-owned correction provenance
+    ├─ evaluations/         # Git-owned evaluation evidence
+    ├─ reviews/             # Git-owned human review decisions
+    └─ cache/               # ignored, rebuildable local indexes
 ```
 
 `model.dql.yaml` is the simple default. A large domain may split its sections
@@ -72,9 +78,14 @@ my-dql-project/
 │   ├─ metrics/revenue.yaml
 │   └─ dimensions/customer.yaml
 ├─ data/                    # local CSV/Parquet — git-ignored by default
-└─ .dql/                    # manifest cache and private local state — git-ignored
-    ├─ imports/             # SQL import review sessions
-    └─ local/apps.sqlite    # private Apps, AI pins, saved layouts
+└─ .dql/
+    ├─ hints/               # committed *.hint.yaml governed hints
+    ├─ traces/              # committed *.trace.json correction provenance
+    ├─ evaluations/         # committed *.hint-evaluation.yaml evidence
+    ├─ reviews/             # committed *.review.yaml decisions
+    ├─ cache/               # ignored, rebuildable SQLite indexes
+    ├─ imports/             # ignored local SQL import review sessions
+    └─ local/apps.sqlite    # ignored private Apps, AI pins, saved layouts
 ```
 
 ## What each directory holds
@@ -82,8 +93,8 @@ my-dql-project/
 - **`domains/<domain>/domain.dql`** — the only canonical package declaration:
   stable id, parent, owner, business owner, bounded context, source systems,
   primary terms, cadence, and tags. Domain folders recursively own
-  `modeling/`, `terms/`, `skills/`, `blocks/`, `views/`, `notebooks/`,
-  `evaluations/`, `tests/`, and `apps/`.
+  `modeling/`, `terms/`, `skills/`, `blocks/`, `views/`, `contracts/`,
+  `interfaces/`, `evaluations/`, and `tests/`.
 - **`domains/<domain>/modeling/`** — sparse analytical identity, relationship
   proof, cross-domain interfaces, contracts, conformance, and saved layouts.
   It references dbt unique IDs and never copies dbt schema metadata.
@@ -94,11 +105,15 @@ my-dql-project/
 - **`business-views/`** — one `.dql` file per `business_view`. These compose
   blocks and other business views into business lineage, without running SQL.
 - **`notebooks/`** — interactive analysis. Saved results live beside the
-  notebook as `.run.json` (git-ignored).
-- **`apps/`** — decision-facing packages. An App can have dashboard pages,
+  notebook as `.run.json` (git-ignored). Notebooks remain global products and
+  use `ownerDomain` / `usesDomains` metadata to appear in Domain Studio.
+- **`apps/`** — global decision-facing packages. An App can have dashboard pages,
   attached notebooks, AI conversations and pins, and draft DQL blocks. In OSS, `domain`,
   `subdomain`, `groups`, `audience`, `visibility`, and `lifecycle` are
   organization metadata, not enterprise access-control boundaries.
+- **`domains/**/{notebooks,apps}/`** — legacy-read-compatible product paths.
+  New authoring keeps products in root `notebooks/` and `apps/` and records
+  domain ownership/use through `ProductDomainContext`.
 - **`semantic-layer/`** — metrics and dimensions authored locally. When you
   configure dbt artifacts, DQL reads MetricFlow semantics from
   `target/semantic_manifest.json` and keeps generated cache files under `.dql/`.
@@ -107,12 +122,22 @@ my-dql-project/
 - **`tests/`** — committed block assertions and agent evaluation fixtures.
 - **`data/`** — sample data for local exploration. Production projects usually
   query a warehouse instead.
+- **`.dql/hints/`, `.dql/traces/`, `.dql/evaluations/`, `.dql/reviews/`** —
+  committed governed-learning source. A clone rebuilds its local Hint Graph
+  index from these files. Candidates are reviewable but not retrievable;
+  approval still requires the lifecycle's evidence and human review gates.
+- **`.dql/cache/`** — ignored, rebuildable metadata, memory, and Hint Graph
+  indexes. SQLite is never the shared source of truth.
 - **`.dql/imports/`** — local import review sessions. AI SQL imports follow
   `extract -> parameterize -> match/reuse -> validate -> review -> certify`.
   The session stores draft candidates, parameter decisions, evidence, and
   duplicate/reuse recommendations.
 - **`.dql/local/apps.sqlite`** — private single-user state such as local Apps,
   layout overrides, AI pins, and saved views.
+
+Do not add a broad `.dql/` rule to `.gitignore`: it hides the governed Hint
+Graph files. DQL scaffolds and notebook startup use granular ignores for
+`cache/`, `local/`, `imports/`, runtime state, connectors, and credentials.
 
 ## App mental model
 
@@ -211,8 +236,8 @@ dbt source -> dbt model -> semantic metric -> DQL block -> business_view -> dash
 ## What gets committed
 
 **Commit:** durable shared source: `domains/**/domain.dql`,
-`domains/**/blocks/**/*.dql`, legacy `blocks/**/*.dql`, `terms/**/*.dql`,
-`skills/**/*.skill.md`,
+`domains/**/{modeling,terms,skills,blocks,views,contracts,interfaces,evaluations,tests}/**`,
+legacy/global `blocks/**/*.dql`, `terms/**/*.dql`, `skills/**/*.skill.md`,
 `business-views/**/*.dql`, `semantic-layer/**/*.yaml`, reviewed
 `apps/*/dql.app.json`, reviewed `apps/*/dashboards/*.dqld`, curated/shared
 `.dqlnb` notebooks, `dql.config.json`, and `package.json`.

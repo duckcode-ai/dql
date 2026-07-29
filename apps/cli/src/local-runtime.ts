@@ -35,6 +35,11 @@ import {
 } from "./mixed-source-sql.js";
 import { resolveNpmInvocation } from './npm-runtime.js';
 import {
+  ensureDqlGitignore,
+  isGovernedSourceFile,
+  isLegacyBroadDqlIgnore,
+} from './git-contract.js';
+import {
   QueryExecutor,
   type ConnectionConfig,
   type DatabaseConnector,
@@ -8464,10 +8469,34 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/notebooks') {
       try {
         const body = await readJSON(req);
-        const { name, template } = body as { name: string; template: string };
+        const { name, template, ownerDomain, usesDomains } = body as {
+          name: string;
+          template: string;
+          ownerDomain?: string;
+          usesDomains?: string[];
+        };
         if (!name || typeof name !== 'string') {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: 'Missing notebook name' }));
+          return;
+        }
+        const normalizedOwnerDomain = typeof ownerDomain === 'string' && ownerDomain.trim()
+          ? ownerDomain.trim()
+          : undefined;
+        if (normalizedOwnerDomain && !loadDomainPackageRegistry(projectRoot).get(normalizedOwnerDomain)) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Unknown domain: ${normalizedOwnerDomain}` }));
+          return;
+        }
+        const normalizedUsesDomains = Array.from(new Set([
+          ...(normalizedOwnerDomain ? [normalizedOwnerDomain] : []),
+          ...(Array.isArray(usesDomains) ? usesDomains : []),
+        ].map((domain) => typeof domain === 'string' ? domain.trim() : '').filter(Boolean)));
+        const registry = loadDomainPackageRegistry(projectRoot);
+        const unknownUsedDomain = normalizedUsesDomains.find((domain) => !registry.get(domain));
+        if (unknownUsedDomain) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: `Unknown domain: ${unknownUsedDomain}` }));
           return;
         }
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'notebook';
@@ -8479,7 +8508,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Notebook already exists' }));
           return;
         }
-        const content = buildNotebookTemplate(name, template ?? 'blank');
+        const content = buildNotebookTemplate(name, template ?? 'blank', {
+          ownerDomain: normalizedOwnerDomain,
+          usesDomains: normalizedUsesDomains,
+        });
         writeFileSync(nbPath, content, 'utf-8');
         res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ path: `notebooks/${slug}.dqlnb`, content }));
@@ -9173,6 +9205,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/git/pull') {
       try {
         const result = await gitPull(projectRoot);
+        if (result.ok) {
+          try {
+            await refreshUnifiedProjectIndexes(projectRoot);
+          } catch (error) {
+            const refreshWarning = `Git pull succeeded, but local DQL indexes could not be refreshed: ${error instanceof Error ? error.message : String(error)}`;
+            result.output = [result.output, refreshWarning].filter(Boolean).join('\n');
+          }
+        }
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (e) {
@@ -9185,6 +9225,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const body = (await readJSON(req)) as { name?: string; checkout?: boolean };
         const result = await gitCreateBranch(projectRoot, body.name ?? '', body.checkout !== false);
+        if (result.ok && body.checkout !== false) {
+          await refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
+        }
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (e) {
@@ -9197,6 +9240,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const body = (await readJSON(req)) as { name?: string };
         const result = await gitCheckout(projectRoot, body.name ?? '');
+        if (result.ok) await refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(result));
       } catch (e) {
@@ -9292,6 +9336,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           content,
           description,
           tags,
+          folderPath,
           metricRefs,
           template,
           blockType,
@@ -9301,6 +9346,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           content?: string;
           description?: string;
           tags?: string[];
+          folderPath?: string;
           metricRefs?: string[];
           template?: string;
           blockType?: 'custom' | 'semantic';
@@ -9321,6 +9367,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           content,
           description,
           tags,
+          folderPath,
           metricRefs,
           template,
           blockType,
@@ -9511,7 +9558,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 const llmMatch = /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(source);
                 blocks.push({
                   name: nameMatch?.[1] ?? entry.name.replace('.dql', ''),
-                  domain: (domainMatch?.[1] ?? inferBlockStudioPathDomain(relPath)) || 'uncategorized',
+                  domain: (domainMatch?.[1] ?? inferBlockStudioPathDomain(projectRoot, relPath)) || 'uncategorized',
                   status: statusMatch?.[1] ?? 'draft',
                   owner: ownerMatch?.[1] ?? null,
                   tags: parsedTags,
@@ -14325,6 +14372,8 @@ export function analyticalFreshnessObservedThrough(
 /** Serialize a Skill to the shared API contract shape (spec 16). */
 function serializeSkill(skill: Skill): {
   id: string;
+  localId?: string;
+  qualifiedId?: string;
   scope: 'project' | 'personal';
   user?: string;
   domain?: string;
@@ -14350,6 +14399,8 @@ function serializeSkill(skill: Skill): {
 } {
   return {
     id: skill.id,
+    localId: skill.localId,
+    qualifiedId: skill.qualifiedId,
     scope: 'project',
     user: undefined,
     domain: skill.domain,
@@ -17867,15 +17918,15 @@ export function openBlockStudioDocument(
     throw new Error(`File not found: ${normalizedPath}`);
   }
   const source = readFileSync(absPath, 'utf-8');
-  const companionPath = blockCompanionRelativePath(normalizedPath);
+  const companionPath = blockCompanionRelativePath(projectRoot, normalizedPath);
   const companion = companionPath ? readBlockCompanionFile(projectRoot, companionPath) : null;
   const parsedMetadata = parseBlockSourceMetadata(source);
   const fileName = normalizedPath.split('/').pop()?.replace(/\.dql$/, '') ?? 'block';
   const metadata = {
     name: parsedMetadata.name || companion?.name || fileName,
     path: normalizedPath,
-    domain: parsedMetadata.domain || companion?.domain || inferBlockStudioPathDomain(normalizedPath) || 'uncategorized',
-    folderPath: inferBlockStudioFolderPath(normalizedPath),
+    domain: parsedMetadata.domain || companion?.domain || inferBlockStudioPathDomain(projectRoot, normalizedPath) || 'uncategorized',
+    folderPath: inferBlockStudioFolderPath(projectRoot, normalizedPath),
     description: parsedMetadata.description || companion?.description || '',
     owner: parsedMetadata.owner || companion?.owner || '',
     tags: parsedMetadata.tags.length > 0 ? parsedMetadata.tags : companion?.tags ?? [],
@@ -19077,7 +19128,7 @@ export function saveBlockStudioArtifacts(
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/[^a-z0-9._/-]+/g, '-')
     .replace(/^\/+|\/+$/g, '') || 'uncategorized';
   const safeFolderPath = normalizeBlockStudioFolderPath(options.folderPath);
   const previousPath = options.currentPath ? normalize(options.currentPath).replace(/^\/+/, '') : null;
@@ -19107,7 +19158,7 @@ export function saveBlockStudioArtifacts(
   if (previousPath && previousPath !== targetRelativePath) {
     const previousAbsPath = join(projectRoot, previousPath);
     if (existsSync(previousAbsPath)) rmSync(previousAbsPath, { force: true });
-    const previousCompanion = blockCompanionRelativePath(previousPath);
+    const previousCompanion = blockCompanionRelativePath(projectRoot, previousPath);
     if (previousCompanion) {
       const previousCompanionPath = join(projectRoot, previousCompanion);
       if (existsSync(previousCompanionPath)) rmSync(previousCompanionPath, { force: true });
@@ -19140,7 +19191,7 @@ export function deleteBlockStudioArtifacts(
     throw new Error(`File not found: ${normalizedPath}`);
   }
 
-  const companionPath = blockCompanionRelativePath(normalizedPath);
+  const companionPath = blockCompanionRelativePath(projectRoot, normalizedPath);
   rmSync(absolutePath, { force: true });
   if (companionPath) {
     const absoluteCompanionPath = resolve(rootPath, companionPath);
@@ -19228,7 +19279,12 @@ function canonicalBlockRelativePath(
   previousPath: string | null,
 ): string {
   const folder = safeFolderPath ? `${safeFolderPath}/` : '';
-  const previousDomainFirst = Boolean(previousPath?.match(/^domains\/[^/]+\/blocks\//));
+  const packageRoot = loadDomainPackageRegistry(projectRoot).get(safeDomain)?.root;
+  if (packageRoot) {
+    const relativePackageRoot = relative(projectRoot, packageRoot).replaceAll('\\', '/');
+    return `${relativePackageRoot}/blocks/${folder}${slug}.dql`;
+  }
+  const previousDomainFirst = Boolean(previousPath?.match(/^domains\/.+\/blocks\//));
   if (previousDomainFirst || existsSync(join(projectRoot, 'domains', safeDomain))) {
     return `domains/${safeDomain}/blocks/${folder}${slug}.dql`;
   }
@@ -19251,19 +19307,23 @@ function normalizeBlockStudioFolderPath(value: string | null | undefined): strin
 function isDraftBlockPath(value: string | null | undefined): boolean {
   if (!value) return false;
   const normalized = normalize(value).replace(/^\/+/, '');
-  return normalized.startsWith('blocks/_drafts/') || /^domains\/[^/]+\/blocks\/_drafts\//.test(normalized);
+  return normalized.startsWith('blocks/_drafts/') || /^domains\/.+\/blocks\/_drafts\//.test(normalized);
 }
 
 function isBlockStudioBlockPath(value: string | null | undefined): boolean {
   if (!value) return false;
   const normalized = normalize(value).replace(/^\/+/, '');
-  return normalized.startsWith('blocks/') || /^domains\/[^/]+\/blocks\//.test(normalized);
+  return normalized.startsWith('blocks/') || /^domains\/.+\/blocks\//.test(normalized);
 }
 
-function inferBlockStudioPathDomain(blockPath: string): string {
+function inferBlockStudioPathDomain(projectRoot: string, blockPath: string): string {
   const normalized = normalize(blockPath).replace(/^\/+/, '');
   if (normalized.startsWith('blocks/')) {
     return normalized.split('/')[1] ?? '';
+  }
+  const resolved = domainBlockPathParts(projectRoot, normalized);
+  if (resolved) {
+    return resolved.subpath.startsWith('_drafts/') ? `_drafts/${resolved.domain}` : resolved.domain;
   }
   const domainFirst = normalized.match(/^domains\/([^/]+)\/blocks\/(.+)$/);
   if (!domainFirst) return '';
@@ -19273,8 +19333,10 @@ function inferBlockStudioPathDomain(blockPath: string): string {
   return domain;
 }
 
-function inferBlockStudioFolderPath(blockPath: string): string {
+function inferBlockStudioFolderPath(projectRoot: string, blockPath: string): string {
   const normalized = normalize(blockPath).replace(/^\/+/, '').replaceAll('\\', '/');
+  const resolved = domainBlockPathParts(projectRoot, normalized);
+  if (resolved) return resolved.subpath.split('/').slice(0, -1).join('/');
   const domainFirst = normalized.match(/^domains\/[^/]+\/blocks\/(.+)$/);
   if (domainFirst) return domainFirst[1].split('/').slice(0, -1).join('/');
   const legacy = normalized.match(/^blocks\/[^/]+\/(.+)$/);
@@ -19282,11 +19344,19 @@ function inferBlockStudioFolderPath(blockPath: string): string {
   return '';
 }
 
-function blockCompanionRelativePath(blockPath: string): string | null {
+function blockCompanionRelativePath(projectRoot: string, blockPath: string): string | null {
   const normalized = normalize(blockPath).replace(/^\/+/, '');
   if (normalized.startsWith('blocks/')) {
     const withoutRoot = normalized.slice('blocks/'.length).replace(/\.dql$/, '.yaml');
     return join('semantic-layer', 'blocks', withoutRoot).replaceAll('\\', '/');
+  }
+  const resolved = domainBlockPathParts(projectRoot, normalized);
+  if (resolved && resolved.subpath.endsWith('.dql')) {
+    const blockPath = resolved.subpath.replace(/\.dql$/, '');
+    const companionBlockPath = blockPath.startsWith('_drafts/')
+      ? join('_drafts', resolved.domain, blockPath.slice('_drafts/'.length))
+      : join(resolved.domain, blockPath);
+    return join('semantic-layer', 'blocks', `${companionBlockPath}.yaml`).replaceAll('\\', '/');
   }
   const domainFirst = normalized.match(/^domains\/([^/]+)\/blocks\/(.+)\.dql$/);
   if (domainFirst) {
@@ -19298,6 +19368,20 @@ function blockCompanionRelativePath(blockPath: string): string | null {
     return join('semantic-layer', 'blocks', `${companionBlockPath}.yaml`).replaceAll('\\', '/');
   }
   return null;
+}
+
+function domainBlockPathParts(
+  projectRoot: string,
+  blockPath: string,
+): { domain: string; subpath: string } | null {
+  const normalized = normalize(blockPath).replace(/^\/+/, '').replaceAll('\\', '/');
+  if (!normalized.startsWith('domains/')) return null;
+  const absolute = join(projectRoot, normalized);
+  const pkg = loadDomainPackageRegistry(projectRoot).packageForPath(absolute);
+  if (!pkg) return null;
+  const local = relative(pkg.root, absolute).replaceAll('\\', '/');
+  if (!local.startsWith('blocks/')) return null;
+  return { domain: pkg.id, subpath: local.slice('blocks/'.length) };
 }
 
 function readBlockCompanionFile(projectRoot: string, relativePath: string) {
@@ -19621,7 +19705,7 @@ export function setBlockStudioStatus(projectRoot: string, blockPath: string, new
   const source = setBlockStudioStatusInSource(readFileSync(absPath, 'utf-8'), newStatus);
   writeFileSync(absPath, source, 'utf-8');
 
-  const companionPath = blockCompanionRelativePath(normalizedPath);
+  const companionPath = blockCompanionRelativePath(projectRoot, normalizedPath);
   if (!companionPath) return;
   const absCompanionPath = join(projectRoot, companionPath);
   if (!existsSync(absCompanionPath)) return;
@@ -21179,13 +21263,21 @@ export function readGitMetadata(projectRoot: string): BlockGitMetadata | null {
 function resolveBlockWriteTarget(
   projectRoot: string,
   safeDomain: string,
+  safeFolderPath: string,
   slug: string,
 ): { relativePath: string; absPath: string } {
-  if (safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))) {
-    const relativePath = `domains/${safeDomain}/blocks/${slug}.dql`;
+  const folder = safeFolderPath ? `${safeFolderPath}/` : '';
+  const packageRoot = safeDomain ? loadDomainPackageRegistry(projectRoot).get(safeDomain)?.root : undefined;
+  if (packageRoot) {
+    const relativePackageRoot = relative(projectRoot, packageRoot).replaceAll('\\', '/');
+    const relativePath = `${relativePackageRoot}/blocks/${folder}${slug}.dql`;
     return { relativePath, absPath: join(projectRoot, relativePath) };
   }
-  const relativePath = safeDomain ? `blocks/${safeDomain}/${slug}.dql` : `blocks/${slug}.dql`;
+  if (safeDomain && existsSync(join(projectRoot, 'domains', safeDomain))) {
+    const relativePath = `domains/${safeDomain}/blocks/${folder}${slug}.dql`;
+    return { relativePath, absPath: join(projectRoot, relativePath) };
+  }
+  const relativePath = safeDomain ? `blocks/${safeDomain}/${folder}${slug}.dql` : `blocks/${folder}${slug}.dql`;
   return { relativePath, absPath: join(projectRoot, relativePath) };
 }
 
@@ -21198,6 +21290,7 @@ export function createBlockArtifacts(
     content?: string;
     description?: string;
     tags?: string[];
+    folderPath?: string;
     metricRefs?: string[];
     template?: string;
     blockType?: 'custom' | 'semantic';
@@ -21211,9 +21304,10 @@ export function createBlockArtifacts(
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/[^a-z0-9._/-]+/g, '-')
     .replace(/^\/+|\/+$/g, '');
-  const target = resolveBlockWriteTarget(projectRoot, safeDomain, slug);
+  const safeFolderPath = normalizeBlockStudioFolderPath(options.folderPath);
+  const target = resolveBlockWriteTarget(projectRoot, safeDomain, safeFolderPath, slug);
   mkdirSync(dirname(target.absPath), { recursive: true });
   const blockPath = target.absPath;
   if (existsSync(blockPath)) {
@@ -21249,6 +21343,7 @@ export function createBlockArtifacts(
     slug,
     name: options.name,
     domain: safeDomain || 'uncategorized',
+    folderPath: safeFolderPath,
     owner: options.owner,
     description: options.description,
     tags: options.tags,
@@ -21286,9 +21381,9 @@ export function createSemanticBuilderBlock(
   const safeDomain = (options.domain ?? '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9/_-]+/g, '-')
+    .replace(/[^a-z0-9._/-]+/g, '-')
     .replace(/^\/+|\/+$/g, '') || 'uncategorized';
-  const target = resolveBlockWriteTarget(projectRoot, safeDomain, slug);
+  const target = resolveBlockWriteTarget(projectRoot, safeDomain, '', slug);
   mkdirSync(dirname(target.absPath), { recursive: true });
   const blockPath = target.absPath;
   if (existsSync(blockPath)) {
@@ -21704,7 +21799,11 @@ function yamlScalar(value: string): string {
   return JSON.stringify(value);
 }
 
-function buildNotebookTemplate(title: string, template: string): string {
+function buildNotebookTemplate(
+  title: string,
+  template: string,
+  productContext: { ownerDomain?: string; usesDomains?: string[] } = {},
+): string {
   const id = () => Math.random().toString(36).slice(2, 10);
   let cells: object[];
 
@@ -21821,7 +21920,18 @@ function buildNotebookTemplate(title: string, template: string): string {
     cells = [];
   }
 
-  return JSON.stringify({ dqlnbVersion: 2, version: 1, title, cells }, null, 2);
+  return JSON.stringify({
+    dqlnbVersion: 2,
+    version: 1,
+    title,
+    metadata: {
+      createdWith: 'dql',
+      ...(productContext.ownerDomain ? { ownerDomain: productContext.ownerDomain } : {}),
+      usesDomains: productContext.usesDomains ?? (productContext.ownerDomain ? [productContext.ownerDomain] : []),
+      requiredExports: [],
+    },
+    cells,
+  }, null, 2);
 }
 
 /** Build a lineage graph from the project's blocks and semantic layer. */
@@ -22954,33 +23064,8 @@ function ensureGitignoreEntry(projectRoot: string, pattern: string): void {
   }
 }
 
-/**
- * UI-001, SEC-001, E2E-001: local runtime, credential, and generated artifacts must never be offered as
- * shareable source-control changes. Project skills are intentionally absent:
- * `.dql/skills` remains readable during migration and can be governed in Git.
- */
-const LOCAL_RUNTIME_GITIGNORE_RULES = [
-  'dql-manifest.json',
-  '*.duckdb',
-  '*.duckdb.wal',
-  '*.run.json',
-  '**/.dql/runs/',
-  '**/.dql/cache/',
-  '**/.dql/imports/',
-  '**/.dql/local/',
-  '**/.dql/runtimes/',
-  '**/.dql/connectors/',
-  '**/.dql/memory/',
-  '**/.dql/migration-staging/',
-  '**/.dql/docker-starter/',
-  '**/.dql/oauth-credentials.json',
-  '**/.dql/provider-settings.json',
-  '**/.dql/mcp-servers.json',
-  '**/.dql-user-prefs.json',
-] as const;
-
 export function ensureLocalRuntimeGitignore(projectRoot: string): void {
-  for (const rule of LOCAL_RUNTIME_GITIGNORE_RULES) ensureGitignoreEntry(projectRoot, rule);
+  ensureDqlGitignore(projectRoot);
 }
 
 async function readGitDiff(
@@ -23345,8 +23430,15 @@ interface GitGovernedContextGroup {
   paths: Array<{ path: string; state: GitGovernedFileState }>;
 }
 
-function collectGovernedSourcePaths(root: string, folder: string, predicate: (name: string) => boolean): string[] {
-  const start = join(root, folder);
+function collectGovernedSourcePaths(
+  root: string,
+  folder: string,
+  predicate: (name: string, relativePath: string) => boolean = () => true,
+): string[] {
+  // `layout.skillsPath` may point at a sibling folder in the same Git
+  // repository. Resolve both project-relative and absolute source roots so the
+  // governed inventory follows the loader instead of assuming `./skills`.
+  const start = resolve(root, folder);
   if (!existsSync(start)) return [];
   const paths: string[] = [];
   const walk = (dir: string) => {
@@ -23355,11 +23447,15 @@ function collectGovernedSourcePaths(root: string, folder: string, predicate: (na
       if (paths.length >= 400) return;
       const absolute = join(dir, entry.name);
       if (entry.isDirectory()) walk(absolute);
-      else if (entry.isFile() && predicate(entry.name)) paths.push(absolute);
+      else if (entry.isFile() && predicate(entry.name, relative(root, absolute).replace(/\\/g, '/'))) paths.push(absolute);
     }
   };
   walk(start);
   return paths;
+}
+
+function uniqueGovernedSourcePaths(paths: string[]): string[] {
+  return [...new Set(paths.map((path) => resolve(path)))].sort();
 }
 
 async function gitGovernedFileState(gitRoot: string, path: string): Promise<GitGovernedFileState> {
@@ -23373,48 +23469,92 @@ async function gitGovernedFileState(gitRoot: string, path: string): Promise<GitG
 async function readGitGovernedContext(cwd: string): Promise<{
   inRepo: boolean;
   trackingReady: boolean;
+  legacyBroadIgnore: boolean;
   domains: GitGovernedContextGroup;
   skills: GitGovernedContextGroup;
+  artifacts: GitGovernedContextGroup;
+  learning: GitGovernedContextGroup;
 }> {
   const gitRoot = await resolveGitRoot(cwd);
   const empty = (): GitGovernedContextGroup => ({ total: 0, tracked: 0, changed: 0, untracked: 0, ignored: 0, paths: [] });
-  if (!gitRoot) return { inRepo: false, trackingReady: false, domains: empty(), skills: empty() };
+  if (!gitRoot) {
+    return {
+      inRepo: false,
+      trackingReady: false,
+      legacyBroadIgnore: false,
+      domains: empty(),
+      skills: empty(),
+      artifacts: empty(),
+      learning: empty(),
+    };
+  }
   const summarize = async (files: string[]): Promise<GitGovernedContextGroup> => {
     const group = empty();
-    for (const absolute of files) {
-      const path = relative(gitRoot, absolute).replace(/\\/g, '/');
-      const state = await gitGovernedFileState(gitRoot, path);
+    for (const absolute of uniqueGovernedSourcePaths(files)) {
+      const gitPath = relative(gitRoot, absolute).replace(/\\/g, '/');
+      const path = relative(cwd, absolute).replace(/\\/g, '/');
+      const state = await gitGovernedFileState(gitRoot, gitPath);
       group.total += 1;
       group[state] += 1;
       if (group.paths.length < 24) group.paths.push({ path, state });
     }
     return group;
   };
-  const [domains, skills] = await Promise.all([
-    summarize(collectGovernedSourcePaths(cwd, 'domains', (name) => name === 'domain.dql')),
+  const rootArtifacts = [
+    'blocks',
+    'terms',
+    'business-views',
+    'notebooks',
+    'workbooks',
+    'apps',
+    'dashboards',
+    'semantic-layer',
+    'tests',
+  ].flatMap((folder) => collectGovernedSourcePaths(cwd, folder));
+  const configArtifacts = ['dql.config.json', 'package.json']
+    .map((path) => join(cwd, path))
+    .filter(existsSync);
+  const [domains, skills, artifacts, learning] = await Promise.all([
+    summarize(collectGovernedSourcePaths(
+      cwd,
+      'domains',
+      (name, path) => !name.endsWith('.skill.md') && isGovernedSourceFile(path),
+    )),
     summarize([
-      ...collectGovernedSourcePaths(cwd, 'skills', (name) => name.endsWith('.skill.md')),
+      ...collectGovernedSourcePaths(cwd, skillsDir(cwd), (name) => name.endsWith('.skill.md')),
+      ...collectGovernedSourcePaths(cwd, 'domains', (name) => name.endsWith('.skill.md')),
       ...collectGovernedSourcePaths(cwd, '.dql/skills', (name) => name.endsWith('.skill.md')),
     ]),
+    summarize([...rootArtifacts.filter((path) => isGovernedSourceFile(relative(cwd, path))), ...configArtifacts]),
+    summarize([
+      ...collectGovernedSourcePaths(cwd, '.dql/hints'),
+      ...collectGovernedSourcePaths(cwd, '.dql/traces'),
+      ...collectGovernedSourcePaths(cwd, '.dql/evaluations'),
+      ...collectGovernedSourcePaths(cwd, '.dql/reviews'),
+    ]),
   ]);
-  return { inRepo: true, trackingReady: domains.ignored === 0 && skills.ignored === 0, domains, skills };
+  const gitignorePath = join(cwd, '.gitignore');
+  const legacyBroadIgnore = existsSync(gitignorePath)
+    && readFileSync(gitignorePath, 'utf-8').split(/\r?\n/).some(isLegacyBroadDqlIgnore);
+  const groups = [domains, skills, artifacts, learning];
+  return {
+    inRepo: true,
+    trackingReady: !legacyBroadIgnore && groups.every((group) => group.ignored === 0),
+    legacyBroadIgnore,
+    domains,
+    skills,
+    artifacts,
+    learning,
+  };
 }
 
 /** Replace only the legacy broad `.dql/` ignore with cache/runtime-specific rules. */
 async function enableGitGovernedContextTracking(cwd: string): Promise<{ ok: boolean; changed?: boolean; error?: string }> {
   const gitRoot = await resolveGitRoot(cwd);
   if (!gitRoot) return { ok: false, error: 'Not a git repository' };
-  const ignorePath = join(cwd, '.gitignore');
-  const existing = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf-8') : '';
-  const lines = existing.split(/\r?\n/);
-  const next = lines.filter((line) => !/^\s*\/?\.dql\/\s*$/.test(line));
-  for (const rule of LOCAL_RUNTIME_GITIGNORE_RULES) {
-    if (!next.some((line) => line.trim() === rule)) next.push(rule);
-  }
-  const rendered = `${next.join('\n').replace(/\n+$/, '')}\n`;
-  if (rendered !== existing) writeFileSync(ignorePath, rendered, 'utf-8');
+  const gitignore = ensureDqlGitignore(cwd);
   const migration = migrateLegacySkills(cwd);
-  return { ok: true, changed: rendered !== existing || migration.moved.length > 0 };
+  return { ok: true, changed: gitignore.changed || migration.moved.length > 0 };
 }
 
 async function gitCreateBranch(cwd: string, name: string, checkout: boolean): Promise<{ ok: boolean; error?: string }> {

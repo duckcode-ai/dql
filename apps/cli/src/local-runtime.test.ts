@@ -813,11 +813,13 @@ describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', ()
     }
   });
 
-  it('repairs local-only ignore rules on notebook startup without hiding governed skills', async () => {
+  it('repairs a legacy broad .dql ignore without hiding governed skills or Hint Graph files (UI-001, SEC-001, E2E-001)', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-local-ignore-'));
     tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, '.dql', 'hints'), { recursive: true });
     writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
-    writeFileSync(join(projectRoot, '.gitignore'), 'node_modules/\n');
+    writeFileSync(join(projectRoot, '.gitignore'), 'node_modules/\n.dql/\n');
+    writeFileSync(join(projectRoot, '.dql', 'hints', 'customer-region.hint.yaml'), 'version: 3\nid: customer-region\nstatus: candidate\n');
     execFileSync('git', ['init'], { cwd: projectRoot, stdio: 'ignore' });
     let server: Server | undefined;
     try {
@@ -835,6 +837,21 @@ describe('local runtime source-control isolation (UI-001, SEC-001, E2E-001)', ()
       expect(gitignore).toContain('.dql/mcp-servers.json');
       expect(gitignore).toContain('.dql/memory/');
       expect(gitignore).not.toContain('.dql/skills/');
+      expect(gitignore.split(/\r?\n/).map((line) => line.trim())).not.toContain('.dql/');
+
+      const governedResponse = await fetch(`http://127.0.0.1:${port}/api/git/governed-context`);
+      const governed = await governedResponse.json() as {
+        trackingReady: boolean;
+        legacyBroadIgnore: boolean;
+        learning: { untracked: number; ignored: number; paths: Array<{ path: string }> };
+      };
+      expect(governed.trackingReady).toBe(true);
+      expect(governed.legacyBroadIgnore).toBe(false);
+      expect(governed.learning.ignored).toBe(0);
+      expect(governed.learning.untracked).toBe(1);
+      expect(governed.learning.paths).toContainEqual(expect.objectContaining({
+        path: '.dql/hints/customer-region.hint.yaml',
+      }));
 
       const prematureReview = await fetch(`http://127.0.0.1:${port}/api/git/review/open`, {
         method: 'POST',
@@ -1546,6 +1563,59 @@ describe('domain Related Products backlinks', () => {
       const business360 = await business360Response.json() as { knowledge: { focus: { id: string }; routes: Array<{ state: string }> } };
       expect(business360.knowledge.focus.id).toBe(relationshipId);
       expect(business360.knowledge.routes.some((route) => route.state === 'authorized')).toBe(true);
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+});
+
+describe('global Notebook ProductDomainContext authoring (UI-001, PRD-001)', () => {
+  it('keeps the file global while recording a validated domain backlink', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-notebook-create-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const domainRoot = join(projectRoot, 'domains', 'commerce');
+    mkdirSync(domainRoot, { recursive: true });
+    writeFileSync(join(domainRoot, 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const response = await fetch(`${base}/api/notebooks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Customer Research',
+          template: 'analysis',
+          ownerDomain: 'commerce',
+          usesDomains: ['commerce'],
+        }),
+      });
+      expect(response.status).toBe(201);
+      const created = await response.json() as { path: string };
+      expect(created.path).toBe('notebooks/customer_research.dqlnb');
+      const document = JSON.parse(readFileSync(join(projectRoot, created.path), 'utf-8')) as {
+        metadata: { ownerDomain?: string; usesDomains?: string[]; requiredExports?: string[] };
+      };
+      expect(document.metadata).toMatchObject({
+        ownerDomain: 'commerce',
+        usesDomains: ['commerce'],
+        requiredExports: [],
+      });
+      expect(existsSync(join(projectRoot, 'domains', 'commerce', 'notebooks', 'customer_research.dqlnb'))).toBe(false);
+
+      const rejected = await fetch(`${base}/api/notebooks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Unknown Domain', template: 'blank', ownerDomain: 'missing' }),
+      });
+      expect(rejected.status).toBe(400);
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
@@ -4333,6 +4403,29 @@ describe('semantic block save artifacts', () => {
     expect(readFileSync(join(projectRoot, created.companionPath), 'utf-8')).toContain('domain: finance');
   });
 
+  it('resolves a qualified nested domain id to its physical package and preserves subfolders', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-nested-domain-block-artifacts-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const commerceRoot = join(projectRoot, 'domains', 'commerce');
+    const customerRoot = join(commerceRoot, 'customer');
+    mkdirSync(customerRoot, { recursive: true });
+    writeFileSync(join(commerceRoot, 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    writeFileSync(join(customerRoot, 'domain.dql'), 'domain "Customer" {\n  id = "commerce.customer"\n  parent = "commerce"\n}\n');
+
+    const created = createBlockArtifacts(projectRoot, {
+      name: 'Customer Health',
+      domain: 'commerce.customer',
+      folderPath: 'reporting/monthly',
+      content: 'SELECT 1 AS healthy',
+      owner: 'customer-analytics',
+    });
+
+    expect(created.path).toBe('domains/commerce/customer/blocks/reporting/monthly/customer-health.dql');
+    expect(existsSync(join(projectRoot, created.path))).toBe(true);
+    expect(created.companionPath).toBe('semantic-layer/blocks/commerce.customer/reporting/monthly/customer-health.yaml');
+  });
+
   it('writes semantic builder blocks with lineage companion metadata', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-builder-artifacts-'));
     tempDirs.push(projectRoot);
@@ -5430,6 +5523,7 @@ describe('configured Skills folder API', () => {
     mkdirSync(sharedSkills, { recursive: true });
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'p' }), 'utf-8');
     writeFileSync(join(sharedSkills, 'existing.skill.md'), '---\nid: existing\n---\nExisting shared guidance', 'utf-8');
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoRoot, stdio: 'ignore' });
 
     let server: Server | undefined;
     try {
@@ -5444,6 +5538,14 @@ describe('configured Skills folder API', () => {
 
       const existing = await fetch(`${base}/api/skills`).then((response) => response.json()) as { skills: Array<{ id: string }> };
       expect(existing.skills.map((skill) => skill.id)).toContain('existing');
+
+      const governed = await fetch(`${base}/api/git/governed-context`).then((response) => response.json()) as {
+        skills: { paths: Array<{ path: string; state: string }> };
+      };
+      expect(governed.skills.paths).toContainEqual({
+        path: '../skills/existing.skill.md',
+        state: 'untracked',
+      });
 
       const created = await fetch(`${base}/api/skills`, {
         method: 'POST',
@@ -5605,6 +5707,76 @@ describe('a stale Ask scope must not wedge the surface', () => {
 });
 
 describe('governed correction lifecycle API', () => {
+  it('rebuilds the local Hint Graph index after a fast-forward pull', async () => {
+    const remoteRoot = mkdtempSync(join(tmpdir(), 'dql-hint-pull-remote-'));
+    const producerRoot = mkdtempSync(join(tmpdir(), 'dql-hint-pull-producer-'));
+    const consumerParent = mkdtempSync(join(tmpdir(), 'dql-hint-pull-consumer-'));
+    const consumerRoot = join(consumerParent, 'project');
+    tempDirs.push(remoteRoot, producerRoot, consumerParent);
+    execFileSync('git', ['init', '--bare'], { cwd: remoteRoot, stdio: 'ignore' });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: producerRoot, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'dql-test@example.com'], { cwd: producerRoot });
+    execFileSync('git', ['config', 'user.name', 'DQL Test'], { cwd: producerRoot });
+    writeFileSync(join(producerRoot, 'dql.config.json'), JSON.stringify({ project: 'hint_pull' }));
+    writeFileSync(join(producerRoot, '.gitignore'), [
+      '**/.dql/cache/',
+      '**/.dql/local/',
+      '**/.dql/imports/',
+      '**/.dql/connectors/',
+      '',
+    ].join('\n'));
+    execFileSync('git', ['add', '.'], { cwd: producerRoot });
+    execFileSync('git', ['commit', '-m', 'initial project'], { cwd: producerRoot, stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteRoot], { cwd: producerRoot });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: producerRoot, stdio: 'ignore' });
+    execFileSync('git', ['clone', '--branch', 'main', remoteRoot, consumerRoot], { stdio: 'ignore' });
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: consumerRoot,
+        projectRoot: consumerRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const before = await fetch(`http://127.0.0.1:${port}/api/agent/hints`).then((response) => response.json()) as {
+        hints: Array<{ id: string }>;
+      };
+      expect(before.hints).toEqual([]);
+
+      const hintDir = join(producerRoot, '.dql', 'hints');
+      mkdirSync(hintDir, { recursive: true });
+      writeFileSync(join(hintDir, 'pulled-revenue.hint.yaml'), [
+        'id: pulled-revenue',
+        'title: Use governed net revenue',
+        'guidance: Use net amount and exclude refunds.',
+        'status: approved',
+        'scope:',
+        '  metric: revenue',
+        'createdAt: 2026-01-01T00:00:00.000Z',
+        'updatedAt: 2026-01-01T00:00:00.000Z',
+        '',
+      ].join('\n'));
+      execFileSync('git', ['add', '.dql/hints/pulled-revenue.hint.yaml'], { cwd: producerRoot });
+      execFileSync('git', ['commit', '-m', 'add governed hint'], { cwd: producerRoot, stdio: 'ignore' });
+      execFileSync('git', ['push'], { cwd: producerRoot, stdio: 'ignore' });
+
+      const pulled = await fetch(`http://127.0.0.1:${port}/api/git/pull`, {
+        method: 'POST',
+      });
+      expect(pulled.status).toBe(200);
+      const after = await fetch(`http://127.0.0.1:${port}/api/agent/hints`).then((response) => response.json()) as {
+        hints: Array<{ id: string; graphEdges?: Array<{ kind: string; targetId: string }> }>;
+      };
+      expect(after.hints).toEqual([
+        expect.objectContaining({ id: 'pulled-revenue' }),
+      ]);
+    } finally {
+      await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
+    }
+  });
+
   it('materializes Git-owned Hint Graph data when a cloned project opens', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-hint-clone-bootstrap-'));
     tempDirs.push(projectRoot);

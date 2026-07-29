@@ -439,6 +439,8 @@ export interface Domain {
 // (Metrics glossary, SQL conventions, Domain rules) — flagged via `isStarter`.
 export interface Skill {
   id: string;
+  localId?: string;
+  qualifiedId?: string;
   scope: 'project' | 'personal';
   user?: string;
   description?: string;

@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { NotebookFile } from '../../store/types';
+import type { Domain, NotebookFile } from '../../store/types';
+import { blockGitPath } from './artifact-location';
 
 interface NewBlockModalProps {
   onFileOpened: (file: NotebookFile) => void;
@@ -29,12 +30,20 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
 
   const [name, setName] = useState('');
   const [blockType, setBlockType] = useState<'custom' | 'semantic'>(state.newBlockModalDefaultType);
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [domain, setDomain] = useState('');
+  const [folderPath, setFolderPath] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     nameRef.current?.focus();
+    let active = true;
+    void api.getDomains().then((result) => {
+      if (active) setDomains(result.domains);
+    });
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -62,12 +71,16 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
     const slug = slugify(name);
 
     try {
-      const result = await api.createBlock(name.trim(), { blockType });
+      const result = await api.createBlock(name.trim(), {
+        blockType,
+        ...(domain ? { domain } : {}),
+        ...(folderPath.trim() ? { folderPath: folderPath.trim() } : {}),
+      });
       const file: NotebookFile = {
         name: `${slug}.dql`,
         path: result.path,
         type: 'block',
-        folder: 'blocks',
+        folder: result.path.split('/').slice(0, -1).join('/'),
         isNew: true,
       };
       dispatch({ type: 'FILE_ADDED', file });
@@ -240,9 +253,52 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
             )}
             {name && !error && (
               <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
-                blocks/{slugify(name)}.dql
+                Git path: {blockGitPath(domains, domain, folderPath, slugify(name))}
               </span>
             )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <label style={{ display: 'grid', gap: 6, fontSize: 12, fontWeight: 500, color: t.textSecondary, fontFamily: t.font }}>
+              Domain
+              <select
+                aria-label="Block domain"
+                value={domain}
+                onChange={(event) => setDomain(event.target.value)}
+                style={{
+                  background: t.inputBg,
+                  border: `1px solid ${t.inputBorder}`,
+                  borderRadius: 6,
+                  color: t.textPrimary,
+                  fontSize: 13,
+                  fontFamily: t.font,
+                  padding: '8px 10px',
+                  outline: 'none',
+                }}
+              >
+                <option value="">Global / cross-domain</option>
+                {domains.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: 6, fontSize: 12, fontWeight: 500, color: t.textSecondary, fontFamily: t.font }}>
+              Folder
+              <input
+                aria-label="Block folder"
+                value={folderPath}
+                onChange={(event) => setFolderPath(event.target.value)}
+                placeholder="reporting/monthly"
+                style={{
+                  background: t.inputBg,
+                  border: `1px solid ${t.inputBorder}`,
+                  borderRadius: 6,
+                  color: t.textPrimary,
+                  fontSize: 13,
+                  fontFamily: t.fontMono,
+                  padding: '8px 10px',
+                  outline: 'none',
+                }}
+              />
+            </label>
           </div>
 
           <div

@@ -4,6 +4,7 @@ import { createWelcomeNotebook, serializeNotebook } from '@duckcodeailabs/dql-no
 import { resolveLocalOwner, seedDefaultSkills, seedDomainSkills } from '@duckcodeailabs/dql-agent';
 import { buildManifest } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
+import { ensureDqlGitignore } from '../git-contract.js';
 import { runNotebook } from './notebook.js';
 
 export async function runInit(targetArg: string | null, flags: CLIFlags): Promise<void> {
@@ -68,6 +69,11 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     }
   }
 
+  // UI-001, SEC-001, E2E-001: repair the legacy broad `.dql/` ignore while
+  // retaining local runtime and credential exclusions. This also applies to
+  // `dql init --force` repairs of existing projects.
+  ensureDqlGitignore(targetDir);
+
   // `--force` on an initialized project is intentionally a directory repair,
   // not an implicit migration. Leave config and every existing or missing
   // content file alone; explicit migration commands own format changes.
@@ -81,7 +87,7 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
       }, null, 2));
     } else {
       console.log(`\n  ✓ Patched missing DQL directories: ${projectName}`);
-      console.log('    Existing config and content files were not changed.');
+      console.log('    Existing config and authored content files were not changed; Git ignore rules were safely repaired.');
     }
     return;
   }
@@ -92,19 +98,6 @@ export async function runInit(targetArg: string | null, flags: CLIFlags): Promis
     defaultConnectionName?: string;
     connections?: Record<string, { driver?: string }>;
   };
-
-  // UI-001, SEC-001, E2E-001: keep generated runtime and credential artifacts local.
-  const gitignorePath = join(targetDir, '.gitignore');
-  const dqlIgnoreEntries =
-    '\n# DQL\ndql-manifest.json\n*.duckdb\n*.duckdb.wal\n.dql/runs/\n.dql/cache/\n.dql/imports/\n.dql/local/\n.dql/connectors/\n.dql/memory/\n.dql/migration-staging/\n.dql/docker-starter/\n.dql/oauth-credentials.json\n.dql/provider-settings.json\n.dql/mcp-servers.json\n.dql-user-prefs.json\n*.run.json\n';
-  if (existsSync(gitignorePath)) {
-    const existing = readFileSync(gitignorePath, 'utf-8');
-    if (!existing.includes('dql-manifest.json')) {
-      writeFileSync(gitignorePath, existing + dqlIgnoreEntries);
-    }
-  } else {
-    writeFileSync(gitignorePath, 'node_modules/\n' + dqlIgnoreEntries);
-  }
 
   // Create welcome notebook with driver-aware SQL
   const notebookPath = join(targetDir, 'notebooks', 'welcome.dqlnb');

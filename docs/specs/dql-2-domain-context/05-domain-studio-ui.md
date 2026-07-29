@@ -10,22 +10,26 @@ Build      Notebooks · Blocks · Lineage
 Govern     Domains · Source control
 ```
 
-Domains opens a focused Domain Workspace. OSS v1 deliberately avoids asking a
-new user to construct every governance object up front. Selecting a domain
-opens a domain selector plus two contextual tabs:
+Domains opens a focused Domain Workspace. OSS deliberately avoids asking a new
+user to construct every governance object up front. The workspace presents the
+parent-first Domain Package tree and progressively disclosed source groups:
 
 ```text
-Model
-Skills
+Workspace             Overview · Models · Knowledge 360
+Knowledge & assets    Terms · Skills · Blocks · Business views
+Governance            Join proofs · Contracts · Interfaces · Evaluations & tests
+Related products      Notebooks · Apps · dbt scope
 ```
 
-The Model tab begins with an Area selector (`All domain` plus focused Model
+Models remains the primary authoring destination. The tab begins with an Area
+selector (`All domain` plus focused Model
 Areas), a business/data view switch, and compact actions to add a dbt model,
 connect a relationship, create an Area, auto-layout, fit, and inspect. Skills
-is the only parallel tab. Terms, business views, join proofs, contracts,
-interfaces, evaluations, related products, and dbt scope are contextual
-inspector/readiness details—not top-level authoring destinations in this first
-OSS workflow. Global Apps/Ask/Notebooks behavior is unchanged (`UI-001`).
+is the parallel knowledge editor. The remaining entries expose contextual
+inventory, readiness, and backlinks through the same compiled snapshot; they
+do not create duplicate feature editors or duplicate product storage. Global
+Apps/Ask/Notebooks behavior and canonical root storage remain unchanged
+(`PRD-001`, `UI-001`).
 
 The Domain selector presents nested Domain Packages parent-first. Domain and
 Area selection round-trip through `domain`, `modelArea`, and `domainSection`

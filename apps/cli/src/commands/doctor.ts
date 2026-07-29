@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { buildManifest, collectInputFiles, resolveDbtManifestPath, resolveSemanticLayerWithDiagnostics } from '@duckcodeailabs/dql-core';
@@ -21,6 +21,7 @@ import { describeNpmInvocation, resolveNpmInvocation } from '../npm-runtime.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from '../version-status.js';
 import { resolveRetrievalHealthStatus } from '../retrieval-health.js';
 import { getSemanticRuntimeStatus } from '../semantic-runtime.js';
+import { isGovernedSourceFile, isLegacyBroadDqlIgnore } from '../git-contract.js';
 
 interface Check {
   name: string;
@@ -171,7 +172,10 @@ interface GitHygieneReport {
 function runDoctorGitHygiene(targetPath: string | null, flags: CLIFlags): void {
   const projectRoot = findProjectRoot(resolve(targetPath || '.'));
   const tracked = listTrackedGitFiles(projectRoot);
-  const issues = tracked.flatMap((path) => classifyGitHygieneIssue(path));
+  const issues = [
+    ...tracked.flatMap((path) => classifyGitHygieneIssue(path)),
+    ...findGovernedSourceIgnoreIssues(projectRoot),
+  ];
   const report: GitHygieneReport = {
     ok: issues.length === 0,
     projectRoot,
@@ -180,14 +184,22 @@ function runDoctorGitHygiene(targetPath: string | null, flags: CLIFlags): void {
     commitPolicy: {
       durable: [
         'domains/**/domain.dql',
+        'domains/**/modeling/**/*.dql.yaml',
+        'domains/**/skills/**/*.skill.md',
         'domains/**/blocks/**/*.dql',
+        'skills/**/*.skill.md',
         'blocks/**/*.dql',
         'terms/**/*.dql',
         'business-views/**/*.dql',
         'semantic-layer/**/*.yaml',
+        'tests/**',
         'apps/*/dql.app.json',
         'apps/*/dashboards/*.dqld',
         'curated/shared .dqlnb files',
+        '.dql/hints/**/*.hint.yaml',
+        '.dql/traces/**/*.trace.json',
+        '.dql/evaluations/**/*.hint-evaluation.yaml',
+        '.dql/reviews/**/*.review.yaml',
         'dql.config.json',
         'package.json',
       ],
@@ -222,9 +234,91 @@ function runDoctorGitHygiene(targetPath: string | null, flags: CLIFlags): void {
     }
   }
   console.log('');
-  console.log('  Durable shared source: DQL domains/blocks/terms/views, reviewed Apps/dashboards, curated notebooks, semantic-layer YAML, config.');
+  console.log('  Durable shared source: DQL domains/modeling/skills/blocks/terms/views, tests, reviewed Apps/dashboards, curated notebooks, semantic-layer YAML, governed Hint Graph evidence, config.');
   console.log('  Keep local/private: .dql cache/local/imports, run snapshots, compiled manifests, data files, AI pins, saved views, layout overrides.');
   console.log('');
+}
+
+const GOVERNED_SOURCE_ROOTS = [
+  'domains',
+  'skills',
+  'blocks',
+  'terms',
+  'business-views',
+  'notebooks',
+  'workbooks',
+  'apps',
+  'dashboards',
+  'semantic-layer',
+  'tests',
+  '.dql/hints',
+  '.dql/traces',
+  '.dql/evaluations',
+  '.dql/reviews',
+] as const;
+
+function listGovernedSourceFiles(projectRoot: string): string[] {
+  const files: string[] = [];
+  const walk = (absoluteDir: string) => {
+    if (files.length >= 2_000) return;
+    for (const entry of readdirSync(absoluteDir, { withFileTypes: true })) {
+      if (files.length >= 2_000) return;
+      const absolute = join(absoluteDir, entry.name);
+      if (entry.isDirectory()) walk(absolute);
+      else if (entry.isFile()) {
+        const path = relative(projectRoot, absolute).replace(/\\/g, '/');
+        if (isGovernedSourceFile(path)) files.push(path);
+      }
+    }
+  };
+  for (const root of GOVERNED_SOURCE_ROOTS) {
+    const absolute = join(projectRoot, root);
+    if (existsSync(absolute)) walk(absolute);
+  }
+  for (const path of ['dql.config.json', 'package.json']) {
+    if (existsSync(join(projectRoot, path))) files.push(path);
+  }
+  return [...new Set(files)].sort();
+}
+
+function findGovernedSourceIgnoreIssues(projectRoot: string): GitHygieneIssue[] {
+  const issues: GitHygieneIssue[] = [];
+  const gitignorePath = join(projectRoot, '.gitignore');
+  if (existsSync(gitignorePath)) {
+    const hasLegacyBroadIgnore = readFileSync(gitignorePath, 'utf-8')
+      .split(/\r?\n/)
+      .some(isLegacyBroadDqlIgnore);
+    if (hasLegacyBroadIgnore) {
+      issues.push({
+        severity: 'error',
+        path: '.gitignore',
+        code: 'broad_dql_ignore',
+        message: 'The broad .dql/ rule hides Git-owned Hint Graph evidence. Use granular local-runtime ignores instead.',
+      });
+    }
+  }
+  const governedFiles = listGovernedSourceFiles(projectRoot);
+  let ignoredFiles: string[] = [];
+  if (governedFiles.length > 0) {
+    try {
+      ignoredFiles = execFileSync('git', ['check-ignore', '-z', '--stdin'], {
+        cwd: projectRoot,
+        encoding: 'utf-8',
+        input: `${governedFiles.join('\0')}\0`,
+      }).split('\0').filter(Boolean);
+    } catch {
+      // Exit 1 means none of the governed files are ignored.
+    }
+  }
+  for (const path of ignoredFiles) {
+    issues.push({
+      severity: 'error',
+      path,
+      code: 'governed_source_ignored',
+      message: 'Governed project source is ignored by Git and cannot be shared, reviewed, or rebuilt in another clone.',
+    });
+  }
+  return issues;
 }
 
 function listTrackedGitFiles(projectRoot: string): string[] {

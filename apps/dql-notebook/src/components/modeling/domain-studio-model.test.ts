@@ -20,9 +20,12 @@ function modeling(entities: Record<string, ManifestModelEntity>): Pick<ManifestD
 }
 
 describe('Domain Studio navigation', () => {
-  it('keeps the locked contextual information architecture', () => {
+  it('keeps domain modeling first while exposing domain-owned source and global product backlinks', () => {
     expect(DOMAIN_STUDIO_NAVIGATION.map((group) => [group.label, group.items.map((item) => item.label)])).toEqual([
-      [undefined, ['Model', 'Knowledge 360', 'Skills']],
+      ['Workspace', ['Overview', 'Models', 'Knowledge 360']],
+      ['Knowledge & assets', ['Terms', 'Skills', 'Blocks', 'Business views']],
+      ['Governance', ['Join proofs', 'Contracts', 'Interfaces', 'Evaluations & tests']],
+      ['Related products', ['Notebooks', 'Apps', 'dbt scope']],
     ]);
   });
 

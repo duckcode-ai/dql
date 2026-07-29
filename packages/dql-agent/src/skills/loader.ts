@@ -414,7 +414,7 @@ export function upsertSkill(projectRoot: string, input: WriteSkillInput): Skill 
 
 /** Delete a skill from its actual source path. Returns true when a file was removed. */
 export function deleteSkill(projectRoot: string, id: string): boolean {
-  const existing = loadSkills(projectRoot).skills.find((skill) => skill.id === id);
+  const existing = loadSkills(projectRoot).skills.find((skill) => skill.qualifiedId === id || skill.id === id);
   const path = existing?.sourcePath ?? skillPath(projectRoot, id);
   if (!existsSync(path)) return false;
   rmSync(path, { force: true });

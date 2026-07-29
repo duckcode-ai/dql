@@ -12,6 +12,12 @@ The core path is:
 source data -> DQL block -> business_view -> dashboard/app/AI answer
 ```
 
+Shared source includes `domains/`, `skills/`, `blocks/`, `notebooks/`, `apps/`,
+tests, and governed learning evidence under `.dql/hints/`, `.dql/traces/`,
+`.dql/evaluations/`, and `.dql/reviews/`. Rebuildable indexes, connectors,
+credentials, and private state remain ignored under their granular `.dql/`
+subdirectories. Do not broadly ignore `.dql/`.
+
 Run `npm run compile` to produce `dql-manifest.json`, the local manifest that
 connects technical lineage with business lineage.
 

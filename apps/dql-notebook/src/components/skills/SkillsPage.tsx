@@ -144,7 +144,7 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
 
   const handleSaved = useCallback((saved: Skill) => {
     setSkills((prev) => {
-      const idx = prev.findIndex((s) => s.id === saved.id);
+      const idx = prev.findIndex((s) => (s.qualifiedId ?? s.id) === (saved.qualifiedId ?? saved.id));
       if (idx === -1) return [...prev, saved];
       const next = [...prev];
       next[idx] = saved;
@@ -158,8 +158,9 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
     setDeleting(true);
     setDeleteError(null);
     try {
-      await api.deleteSkill(pendingDelete.id);
-      setSkills((prev) => prev.filter((s) => s.id !== pendingDelete.id));
+      const identity = pendingDelete.qualifiedId ?? pendingDelete.id;
+      await api.deleteSkill(identity);
+      setSkills((prev) => prev.filter((s) => (s.qualifiedId ?? s.id) !== identity));
       setPendingDelete(null);
     } catch (error) {
       setDeleteError(error instanceof Error && error.message ? error.message : 'Could not delete this skill.');
@@ -301,7 +302,7 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
           <div style={{ display: 'grid', gap: 10 }}>
             {sorted.map((skill) => (
               <SkillRow
-                key={skill.id}
+                key={skill.qualifiedId ?? skill.id}
                 skill={skill}
                 t={t}
                 onEdit={() => setForm({ kind: 'edit', skill })}
@@ -384,6 +385,20 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
             }}
           >
             {skill.description || 'No description yet.'}
+          </div>
+          <div
+            title={skill.sourcePath}
+            style={{
+              marginTop: 3,
+              color: t.textMuted,
+              fontSize: 10,
+              fontFamily: t.fontMono,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {skill.sourcePath}
           </div>
         </div>
         <button type="button" onClick={() => setExpanded((value) => !value)} style={{ ...ghostButton(t), height: 26, padding: '0 10px', fontSize: 11 }} title={expanded ? 'Hide skill details' : 'Show skill details'}>

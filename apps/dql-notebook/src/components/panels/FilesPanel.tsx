@@ -26,6 +26,11 @@ import {
   type NotebookResearchSummary,
   useNotebookResearchSummary,
 } from '../notebook/useNotebookResearchSummary';
+import {
+  buildFileLibraryTree,
+  fileLibraryFolder,
+  type FileLibraryTreeNode,
+} from './file-library-tree';
 
 interface FilesPanelProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -161,10 +166,8 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
   };
 
   for (const f of state.files) {
-    const key = f.folder.toLowerCase() as FolderKey;
-    if (key in grouped) {
-      grouped[key].push(f);
-    }
+    const key = fileLibraryFolder(f);
+    if (key) grouped[key].push(f);
   }
 
   const toggleFolder = (key: string) => {
@@ -261,21 +264,18 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
                     No {FOLDER_LABELS[key].toLowerCase()}
                   </div>
                 ) : (
-                  sortFilesForFolder(files, key, researchByNotebookPath).map((file) => (
-                    <FileRow
-                      key={file.path}
-                      file={file}
-                      active={state.activeFile?.path === file.path}
-                      researchSummary={key === 'notebooks' ? researchByNotebookPath.get(file.path) : undefined}
-                      onClick={() => onOpenFile(file)}
-                      onShowLineage={() => {
-                        const nodeId = lineageNodeIdForFile(file);
-                        dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
-                        dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
-                      }}
-                      t={t}
-                    />
-                  ))
+                  <FileLibraryTree
+                    nodes={buildFileLibraryTree(sortFilesForFolder(files, key, researchByNotebookPath), key)}
+                    activePath={state.activeFile?.path}
+                    researchByNotebookPath={key === 'notebooks' ? researchByNotebookPath : new Map()}
+                    onOpenFile={onOpenFile}
+                    onShowLineage={(file) => {
+                      const nodeId = lineageNodeIdForFile(file);
+                      dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
+                      dispatch({ type: 'OPEN_LINEAGE_DRAWER', nodeId });
+                    }}
+                    t={t}
+                  />
                 )}
               </div>
             )}
@@ -283,6 +283,110 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
         );
       })}
     </PanelFrame>
+  );
+}
+
+function FileLibraryTree({
+  nodes,
+  activePath,
+  researchByNotebookPath,
+  onOpenFile,
+  onShowLineage,
+  t,
+  depth = 0,
+}: {
+  nodes: FileLibraryTreeNode[];
+  activePath?: string;
+  researchByNotebookPath: Map<string, NotebookResearchSummary>;
+  onOpenFile: (file: NotebookFile) => void;
+  onShowLineage: (file: NotebookFile) => void;
+  t: Theme;
+  depth?: number;
+}) {
+  return (
+    <>
+      {nodes.map((node) => node.kind === 'folder' ? (
+        <NestedFolder
+          key={`folder:${node.path}`}
+          node={node}
+          activePath={activePath}
+          researchByNotebookPath={researchByNotebookPath}
+          onOpenFile={onOpenFile}
+          onShowLineage={onShowLineage}
+          t={t}
+          depth={depth}
+        />
+      ) : (
+        <FileRow
+          key={node.file.path}
+          file={node.file}
+          active={activePath === node.file.path}
+          researchSummary={researchByNotebookPath.get(node.file.path)}
+          onClick={() => onOpenFile(node.file)}
+          onShowLineage={() => onShowLineage(node.file)}
+          depth={depth}
+          t={t}
+        />
+      ))}
+    </>
+  );
+}
+
+function NestedFolder({
+  node,
+  activePath,
+  researchByNotebookPath,
+  onOpenFile,
+  onShowLineage,
+  t,
+  depth,
+}: {
+  node: Extract<FileLibraryTreeNode, { kind: 'folder' }>;
+  activePath?: string;
+  researchByNotebookPath: Map<string, NotebookResearchSummary>;
+  onOpenFile: (file: NotebookFile) => void;
+  onShowLineage: (file: NotebookFile) => void;
+  t: Theme;
+  depth: number;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: `4px 8px 4px ${24 + depth * 14}px`,
+          border: 0,
+          background: 'transparent',
+          color: t.textMuted,
+          cursor: 'pointer',
+          fontFamily: t.font,
+          fontSize: 11,
+          textAlign: 'left',
+        }}
+      >
+        <ChevronRight size={11} style={{ transform: expanded ? 'rotate(90deg)' : undefined }} />
+        {expanded ? <FolderOpen size={13} /> : <Folder size={13} />}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
+      </button>
+      {expanded ? (
+        <FileLibraryTree
+          nodes={node.children}
+          activePath={activePath}
+          researchByNotebookPath={researchByNotebookPath}
+          onOpenFile={onOpenFile}
+          onShowLineage={onShowLineage}
+          t={t}
+          depth={depth + 1}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -426,6 +530,7 @@ function FileRow({
   onClick,
   onShowLineage,
   researchSummary,
+  depth = 0,
   t,
 }: {
   file: NotebookFile;
@@ -433,6 +538,7 @@ function FileRow({
   onClick: () => void;
   onShowLineage?: () => void;
   researchSummary?: NotebookResearchSummary;
+  depth?: number;
   t: Theme;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -460,7 +566,7 @@ function FileRow({
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          padding: '4px 8px 4px 24px',
+          padding: `4px 8px 4px ${24 + depth * 14}px`,
           background: 'transparent',
           border: 'none',
           cursor: 'pointer',

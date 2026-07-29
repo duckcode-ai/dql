@@ -89,6 +89,10 @@ describe('runInit', () => {
 
     const notebook = readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8');
     expect(notebook).toContain('DQL');
+    const gitignore = readFileSync(join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('node_modules/');
+    expect(gitignore).toContain('**/.dql/cache/');
+    expect(gitignore.split(/\r?\n/).map((line) => line.trim())).not.toContain('.dql/');
 
     // `dql init` seeds the editable starter skills (spec 16).
     expect(loadSkills(projectDir).skills.map((skill) => skill.id).sort()).toEqual([
@@ -203,6 +207,7 @@ describe('runInit', () => {
     };
     writeFileSync(join(projectDir, 'dbt_project.yml'), 'name: "jaffle_shop"\n');
     writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify(originalConfig, null, 2) + '\n');
+    writeFileSync(join(projectDir, '.gitignore'), 'node_modules/\n.dql/\n');
     mkdirSync(join(projectDir, 'notebooks'), { recursive: true });
     writeFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'existing notebook\n');
 
@@ -212,7 +217,10 @@ describe('runInit', () => {
     expect(readFileSync(join(projectDir, 'notebooks', 'welcome.dqlnb'), 'utf-8')).toBe('existing notebook\n');
     expect(readdirSync(projectDir)).toEqual(expect.arrayContaining(['apps', 'domains', 'skills', 'tests']));
     expect(readdirSync(join(projectDir, 'skills'))).toEqual([]);
-    expect(readdirSync(projectDir)).not.toContain('.gitignore');
+    const gitignore = readFileSync(join(projectDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('**/.dql/cache/');
+    expect(gitignore).toContain('**/.dql/connectors/');
+    expect(gitignore.split(/\r?\n/).map((line) => line.trim())).not.toContain('.dql/');
     expect(readdirSync(projectDir)).not.toContain('semantic-layer');
   });
 });

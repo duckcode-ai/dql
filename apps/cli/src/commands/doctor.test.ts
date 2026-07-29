@@ -371,4 +371,41 @@ type: string
     expect(report.projectRoot).toBe(projectDir);
     expect(report.issues.map((issue: { code: string }) => issue.code)).toContain('compiled_manifest_tracked');
   });
+
+  it('fails git hygiene when a legacy broad .dql rule hides governed Hint Graph evidence (UI-001, SEC-001, E2E-001)', async () => {
+    const projectDir = makeProject('dql-doctor-hidden-hints-');
+    mkdirSync(join(projectDir, '.dql', 'hints'), { recursive: true });
+    writeFileSync(join(projectDir, 'dql.config.json'), JSON.stringify({ project: 'demo' }));
+    writeFileSync(join(projectDir, '.gitignore'), '.dql/\n');
+    writeFileSync(join(projectDir, '.dql', 'hints', 'customer-region.hint.yaml'), 'version: 3\nid: customer-region\nstatus: approved\n');
+    execFileSync('git', ['init'], { cwd: projectDir });
+
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runDoctor('git-hygiene', {
+      check: false,
+      chart: '',
+      domain: '',
+      format: 'json',
+      help: false,
+      open: null,
+      input: '',
+      outDir: '',
+      owner: '',
+      port: null,
+      queryOnly: false,
+      template: '',
+      connection: '',
+      verbose: false,
+      skipTests: false, version: false,
+    }, [projectDir]);
+
+    const report = JSON.parse(String(spy.mock.calls.at(-1)?.[0] ?? '{}'));
+    expect(report.ok).toBe(false);
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'broad_dql_ignore', path: '.gitignore' }),
+      expect.objectContaining({ code: 'governed_source_ignored', path: '.dql/hints/customer-region.hint.yaml' }),
+    ]));
+    expect(report.commitPolicy.durable).toContain('.dql/hints/**/*.hint.yaml');
+    expect(report.commitPolicy.durable).toContain('.dql/evaluations/**/*.hint-evaluation.yaml');
+  });
 });

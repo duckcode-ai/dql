@@ -29,22 +29,45 @@ export type DomainStudioNavigationGroup = {
 
 export const DOMAIN_STUDIO_NAVIGATION: DomainStudioNavigationGroup[] = [
   {
+    label: 'Workspace',
     items: [
-      { id: 'diagram', label: 'Model' },
+      { id: 'overview', label: 'Overview' },
+      { id: 'diagram', label: 'Models' },
       { id: 'knowledge', label: 'Knowledge 360' },
+    ],
+  },
+  {
+    label: 'Knowledge & assets',
+    items: [
+      { id: 'terms', label: 'Terms' },
       { id: 'skills', label: 'Skills' },
+      { id: 'blocks', label: 'Blocks' },
+      { id: 'views', label: 'Business views' },
+    ],
+  },
+  {
+    label: 'Governance',
+    items: [
+      { id: 'join-proofs', label: 'Join proofs' },
+      { id: 'contracts', label: 'Contracts' },
+      { id: 'interfaces', label: 'Interfaces' },
+      { id: 'evaluations', label: 'Evaluations & tests' },
+    ],
+  },
+  {
+    label: 'Related products',
+    items: [
+      { id: 'notebooks', label: 'Notebooks' },
+      { id: 'apps', label: 'Apps' },
+      { id: 'dbt', label: 'dbt scope' },
     ],
   },
 ];
 
 const NAVIGATION_IDS = new Set(DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items.map((item) => item.id)));
-const HIDDEN_SECTION_IDS = new Set<DomainStudioSection>([
-  'terms', 'views', 'join-proofs', 'contracts', 'interfaces', 'evaluations',
-  'notebooks', 'apps', 'dbt',
-]);
 
 export function isDomainStudioSection(value: string | null): value is DomainStudioSection {
-  return value === 'ai' || (value !== null && (NAVIGATION_IDS.has(value as DomainStudioSection) || HIDDEN_SECTION_IDS.has(value as DomainStudioSection)));
+  return value === 'ai' || (value !== null && NAVIGATION_IDS.has(value as DomainStudioSection));
 }
 
 export type EntityRecord = {

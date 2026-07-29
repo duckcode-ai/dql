@@ -63,6 +63,16 @@ function assertTemplateDqlSyntax(target) {
   }
 }
 
+function assertGitContract(target) {
+  const lines = readFileSync(join(target, '.gitignore'), 'utf-8')
+    .split(/\r?\n/)
+    .map((line) => line.trim());
+  assert(!lines.includes('.dql/') && !lines.includes('/.dql/'), '.gitignore does not hide governed Hint Graph source');
+  assert(lines.includes('**/.dql/cache/'), '.gitignore keeps generated Hint Graph indexes local');
+  assert(lines.includes('**/.dql/local/'), '.gitignore keeps private local state local');
+  assert(!lines.includes('.dql/hints/'), '.gitignore leaves approved hint source visible to Git');
+}
+
 function runTest(template, name, expected, placeholderFile) {
   console.log(`\n▸ template: ${template}`);
   const { base, target, result } = scaffold(template, name);
@@ -76,6 +86,7 @@ function runTest(template, name, expected, placeholderFile) {
     assert(!placeholder.includes('{{PROJECT_NAME}}'), `${placeholderFile} has no unresolved placeholders`);
     assertGeneratedPackage(target);
     assertTemplateDqlSyntax(target);
+    assertGitContract(target);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

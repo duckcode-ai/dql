@@ -32,7 +32,8 @@ DQL OSS currently is:
 
 - a local-first, single-user, dbt-first analytics-as-code workspace;
 - Git-versioned through DQL source files for blocks, notebooks, Apps, domains,
-  skills, contracts, tests, and related project metadata;
+  skills, contracts, tests, related project metadata, and governed Hint Graph
+  traces/hints/evaluations/reviews; rebuildable SQLite indexes remain local;
 - grounded in dbt artifacts and semantic metadata as the physical and semantic
   source of truth, with DQL adding a sparse governed answer layer;
 - distributed as synchronized npm packages, including the CLI and

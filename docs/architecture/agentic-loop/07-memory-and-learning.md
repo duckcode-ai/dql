@@ -44,7 +44,7 @@ flowchart TD
     subgraph Tiers["The learning hierarchy"]
         M["① Memory<br/>advisory facts, per scope<br/>(SQLite FTS · scope/confidence/supersedes)"]
         H["② Hints<br/>MICRO scope-gated corrections<br/>('revenue excludes refunds')<br/>Git-authoritative · approved-only"]
-        S["③ Domain skills<br/>MACRO conventions per domain<br/>('active customer = order in 90d')<br/>.dql/skills/&lt;domain&gt;.skill.md"]
+        S["③ Domain skills<br/>MACRO conventions per domain<br/>('active customer = order in 90d')<br/>domains/&lt;domain&gt;/skills/*.skill.md"]
     end
     COR["Explicit corrections"] --> H
     S --> H
@@ -55,7 +55,7 @@ flowchart TD
 |---|---|---|---|
 | **Memory** | a local advisory fact | scope match | `.dql/cache/agent-memory.sqlite` (ignored cache) |
 | **Hints** | one governed correction | exact scope (metric/model/domain/dialect/term/block) | `.dql/hints/*.hint.yaml` plus Git traces/evaluations/reviews |
-| **Domain skills** | a convention | whole domain | `.dql/skills/*.skill.md` (Git, editable) |
+| **Domain skills** | a convention | whole domain | `domains/<domain>/skills/*.skill.md` or root `skills/*.skill.md` (Git, editable) |
 
 Hints are not mirrored into advisory memory. Git is authoritative; the
 `.dql/cache/agent-kg.sqlite` index is rebuildable.
@@ -141,7 +141,8 @@ separate, explicit authoring and review action.
 
 Skills already ship as editable starters (`metrics-glossary`, `sql-conventions`, `domain-rules`,
 `block-authoring`) via `seedDefaultSkills`; they are selected per question by lexical relevance and
-folded into the generation prompt.
+folded into the generation prompt. Legacy `.dql/skills/` remains readable only for migration
+compatibility; it is not the recommended shared layout.
 
 ## Open-core boundary
 

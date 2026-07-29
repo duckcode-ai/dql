@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { NotebookFile } from '../../store/types';
+import type { Domain, NotebookFile } from '../../store/types';
 import {
   buildTemplateCells,
   NOTEBOOK_TEMPLATE_DESCRIPTIONS,
@@ -36,12 +36,19 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
 
   const [name, setName] = useState('');
   const [template, setTemplate] = useState<NotebookTemplate>('blank');
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [ownerDomain, setOwnerDomain] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     nameRef.current?.focus();
+    let active = true;
+    void api.getDomains().then((result) => {
+      if (active) setDomains(result.domains);
+    });
+    return () => { active = false; };
   }, []);
 
   // Close on Escape
@@ -67,7 +74,9 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
     const cells = buildTemplateCells(template);
 
     try {
-      const result = await api.createNotebook(slug, template);
+      const result = await api.createNotebook(slug, template, {
+        ...(ownerDomain ? { ownerDomain, usesDomains: [ownerDomain] } : {}),
+      });
       const file: NotebookFile = {
         name: `${slug}.dqlnb`,
         path: result.path,
@@ -220,9 +229,40 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
             )}
             {name && !error && (
               <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>
-                File: {slugify(name)}.dqlnb
+                Git path: notebooks/{slugify(name)}.dqlnb
               </span>
             )}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: t.textSecondary, fontFamily: t.font }}>
+              Domain context
+            </label>
+            <select
+              aria-label="Notebook owner domain"
+              value={ownerDomain}
+              onChange={(event) => setOwnerDomain(event.target.value)}
+              style={{
+                background: t.inputBg,
+                border: `1px solid ${t.inputBorder}`,
+                borderRadius: 6,
+                color: t.textPrimary,
+                fontSize: 13,
+                fontFamily: t.font,
+                padding: '8px 12px',
+                outline: 'none',
+              }}
+            >
+              <option value="">Global / cross-domain</option>
+              {domains.map((domain) => (
+                <option key={domain.id} value={domain.id}>
+                  {domain.id}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
+              Notebooks stay in the global notebooks folder. Domain context creates a backlink in Domain Studio.
+            </span>
           </div>
 
           {/* Template selector */}
