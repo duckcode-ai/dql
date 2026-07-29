@@ -81,6 +81,7 @@ import {
   type CertifiedBlockFit,
 } from './block-fit.js';
 import { retrieveScopedHints } from '../hints/retrieval.js';
+import { currentHintDependencyFingerprints } from '../hints/dependencies.js';
 import type { QuestionScope } from '../hints/types.js';
 import { buildFtsMatch, sanitizeFtsQuery } from '../memory/fts-query.js';
 import {
@@ -590,6 +591,13 @@ export interface LocalContextPack {
   appliedHints: AppliedContextHint[];
   /** Conflicting approved hints surfaced for review (advisory). */
   hintConflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
+  /** Approved hints withheld because they are stale, superseded, or conflicting. */
+  hintExclusions?: Array<{
+    hintId: string;
+    title: string;
+    reason: 'stale' | 'superseded' | 'conflict';
+    detail: string;
+  }>;
   retrievalDiagnostics: {
     strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context' | 'full_catalog';
     /** Independent snapshot-bound candidate lanes; vector is not a BM25 reranker. */
@@ -1493,7 +1501,12 @@ export async function buildLocalContextPack(
     const hintResult = await retrieveScopedHints(projectRoot, {
       questionScope,
       limit: 6,
-    }).catch(() => ({ applied: [], conflicts: [] }));
+      currentSnapshotId: catalog.state('fingerprint'),
+      currentDependencies: currentHintDependencyFingerprints({
+        objects,
+        relations: allowedSqlContext.relations,
+      }),
+    }).catch(() => ({ applied: [], conflicts: [], excluded: [] }));
 
     const knowledgeLens = buildKnowledgeLens(catalog, effectiveDomainContext, selectedSkills);
     const domainBriefing = buildDomainBriefing(catalog, effectiveDomainContext);
@@ -1523,6 +1536,7 @@ export async function buildLocalContextPack(
       conflicts,
       appliedHints: hintResult.applied,
       hintConflicts: hintResult.conflicts,
+      hintExclusions: hintResult.excluded,
       retrievalDiagnostics: {
         strategy: usedFullCatalog ? 'full_catalog' : 'sqlite_fts',
         lanes: snapshotRetrieval.lanes,

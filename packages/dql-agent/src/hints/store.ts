@@ -72,6 +72,12 @@ export class HintStore {
         tags_json     TEXT NOT NULL DEFAULT '[]',
         author        TEXT,
         reviewer      TEXT,
+        snapshot_id   TEXT,
+        required_evaluation TEXT,
+        evaluation_id TEXT,
+        evaluation_status TEXT,
+        dependencies_json TEXT NOT NULL DEFAULT '[]',
+        lifecycle_errors_json TEXT NOT NULL DEFAULT '[]',
         supersedes    TEXT,
         created_at    TEXT NOT NULL,
         updated_at    TEXT NOT NULL,
@@ -91,6 +97,19 @@ export class HintStore {
         tokenize = 'porter unicode61'
       );
     `);
+    this.ensureColumn('snapshot_id', 'TEXT');
+    this.ensureColumn('required_evaluation', 'TEXT');
+    this.ensureColumn('evaluation_id', 'TEXT');
+    this.ensureColumn('evaluation_status', 'TEXT');
+    this.ensureColumn('dependencies_json', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('lifecycle_errors_json', "TEXT NOT NULL DEFAULT '[]'");
+  }
+
+  private ensureColumn(name: string, definition: string): void {
+    const columns = this.db.pragma('table_info(agent_hints)') as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === name)) {
+      this.db.exec(`ALTER TABLE agent_hints ADD COLUMN ${name} ${definition}`);
+    }
   }
 
   /** Replace the whole index from the Git-authoritative hint set. */
@@ -98,9 +117,10 @@ export class HintStore {
     const insert = this.db.prepare(`
       INSERT OR REPLACE INTO agent_hints (
         id, title, guidance, status, metric, dbt_model, domain, dialect, term, block,
-        trace_id, corrected_sql, tags_json, author, reviewer, supersedes,
-        created_at, updated_at, source_path
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        trace_id, corrected_sql, tags_json, author, reviewer, snapshot_id,
+        required_evaluation, evaluation_id, evaluation_status, dependencies_json,
+        lifecycle_errors_json, supersedes, created_at, updated_at, source_path
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertFts = this.db.prepare(`
       INSERT INTO agent_hints_fts (id, title, guidance, tags, scope)
@@ -121,9 +141,10 @@ export class HintStore {
     const insert = this.db.prepare(`
       INSERT OR REPLACE INTO agent_hints (
         id, title, guidance, status, metric, dbt_model, domain, dialect, term, block,
-        trace_id, corrected_sql, tags_json, author, reviewer, supersedes,
-        created_at, updated_at, source_path
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        trace_id, corrected_sql, tags_json, author, reviewer, snapshot_id,
+        required_evaluation, evaluation_id, evaluation_status, dependencies_json,
+        lifecycle_errors_json, supersedes, created_at, updated_at, source_path
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertFts = this.db.prepare(`
       INSERT INTO agent_hints_fts (id, title, guidance, tags, scope)
@@ -157,6 +178,12 @@ export class HintStore {
       JSON.stringify(hint.tags ?? []),
       hint.author ?? null,
       hint.reviewer ?? null,
+      hint.snapshotId ?? null,
+      hint.requiredEvaluation ?? null,
+      hint.evaluationId ?? null,
+      hint.evaluationStatus ?? null,
+      JSON.stringify(hint.dependencies ?? []),
+      JSON.stringify(hint.lifecycleErrors ?? []),
       hint.supersedes ?? null,
       hint.createdAt,
       hint.updatedAt,
@@ -302,6 +329,12 @@ type HintRow = {
   tags_json: string;
   author: string | null;
   reviewer: string | null;
+  snapshot_id: string | null;
+  required_evaluation: string | null;
+  evaluation_id: string | null;
+  evaluation_status: string | null;
+  dependencies_json: string;
+  lifecycle_errors_json: string;
   supersedes: string | null;
   created_at: string;
   updated_at: string;
@@ -327,6 +360,12 @@ function rowToHint(row: HintRow): Hint {
     tags: safeJSON(row.tags_json, [] as string[]),
     author: row.author ?? undefined,
     reviewer: row.reviewer ?? undefined,
+    snapshotId: row.snapshot_id ?? undefined,
+    requiredEvaluation: row.required_evaluation ?? undefined,
+    evaluationId: row.evaluation_id ?? undefined,
+    evaluationStatus: row.evaluation_status === 'passed' ? 'passed' : row.evaluation_status === 'failed' ? 'failed' : undefined,
+    dependencies: safeJSON(row.dependencies_json, []),
+    lifecycleErrors: safeJSON(row.lifecycle_errors_json, []),
     supersedes: row.supersedes ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -341,4 +380,3 @@ function safeJSON<T>(raw: string | null | undefined, fallback: T): T {
     return fallback;
   }
 }
-

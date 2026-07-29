@@ -15,15 +15,15 @@ import type { DQLContext } from '../context.js';
 import {
   getHintFromGit,
   listHintsFromGit,
-  recordCorrectionTrace,
-  reviewHint,
+  recordGovernedCorrection,
+  reviewGovernedHint,
   type Hint,
 } from '@duckcodeailabs/dql-agent';
 import { zodInputShapeForTool } from '../tool-schema.js';
 
 export const recordCorrectionInput = zodInputShapeForTool('record_correction');
 
-export function recordCorrection(
+export async function recordCorrection(
   ctx: DQLContext,
   args: {
     question: string;
@@ -46,7 +46,7 @@ export function recordCorrection(
     anchorObjectKey?: string;
   },
 ) {
-  const { trace, hint } = recordCorrectionTrace(ctx.projectRoot, {
+  const { trace, hint } = await recordGovernedCorrection(ctx.projectRoot, {
     question: args.question,
     scope: args.scope,
     wrongAnswer: args.wrongAnswer,
@@ -58,6 +58,7 @@ export function recordCorrection(
     hintGuidance: args.hintGuidance,
     tags: args.tags,
     anchorObjectKey: args.anchorObjectKey,
+    failedRoute: 'mcp_generated_answer',
   });
   return {
     ok: true,
@@ -73,7 +74,7 @@ export function recordCorrection(
 
 export const approveHintInput = zodInputShapeForTool('approve_hint');
 
-export function approveHint(
+export async function approveHint(
   ctx: DQLContext,
   args: { hintId: string; decision: 'approved' | 'rejected'; reviewer: string; note?: string },
 ) {
@@ -81,12 +82,21 @@ export function approveHint(
   if (!existing) {
     return { ok: false, error: `Hint ${args.hintId} not found under .dql/hints/.` };
   }
-  const result = reviewHint(ctx.projectRoot, {
-    hintId: args.hintId,
-    decision: args.decision,
-    reviewer: args.reviewer,
-    note: args.note,
-  });
+  let result;
+  try {
+    result = await reviewGovernedHint(ctx.projectRoot, {
+      hintId: args.hintId,
+      decision: args.decision,
+      reviewer: args.reviewer,
+      note: args.note,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      status: getHintFromGit(ctx.projectRoot, args.hintId)?.status ?? existing.status,
+    };
+  }
   if (!result) {
     return { ok: false, error: `Could not review hint ${args.hintId}.` };
   }

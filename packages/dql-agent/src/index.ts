@@ -859,6 +859,7 @@ export {
   reindexHints,
   listHintsFromGit,
   getHintFromGit,
+  getCorrectionTraceFromGit,
   writeHintFile,
   readHintFile,
   hintsDir,
@@ -871,7 +872,27 @@ export {
   getHintEvaluationFromGit,
   listHintEvaluationsFromGit,
   HintLifecycleError,
+  requiresEvaluatedApproval,
 } from "./hints/git-store.js";
+export {
+  recordGovernedCorrection,
+  reviewGovernedHint,
+  resolveGovernedHintContext,
+} from "./hints/lifecycle.js";
+export type {
+  GovernedHintContext,
+  GovernedHintExecutionResult,
+  ExecuteGovernedHintSql,
+  ResolveGovernedHintContext,
+  RecordGovernedCorrectionInput,
+  ReviewGovernedHintInput,
+  ReviewGovernedHintResult,
+} from "./hints/lifecycle.js";
+export {
+  collectHintDependencies,
+  currentHintDependencyFingerprints,
+  staleHintDependencies,
+} from "./hints/dependencies.js";
 export {
   buildCorrectionEvalCase,
   emitCorrectionEvalCase,
@@ -911,6 +932,9 @@ export type {
   HintEvaluation,
   HintEvaluationCheck,
   HintEvaluationStatus,
+  HintDependency,
+  HintDependencyKind,
+  HintLifecycleFailure,
   HintReview,
   HintScope,
   HintStatus,

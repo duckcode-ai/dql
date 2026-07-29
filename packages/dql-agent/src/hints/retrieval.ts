@@ -12,7 +12,8 @@
 import { existsSync } from 'node:fs';
 import { defaultHintIndexPath } from './git-store.js';
 import { HintStore } from './store.js';
-import type { QuestionScope, ScopedHintMatch } from './types.js';
+import { hintsConflict, type Hint, type QuestionScope, type ScopedHintMatch } from './types.js';
+import { staleHintDependencies } from './dependencies.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 
 export interface AppliedHint {
@@ -30,6 +31,13 @@ export interface HintRetrievalResult {
   applied: AppliedHint[];
   /** Approved hints whose scopes overlap and disagree — surfaced for review. */
   conflicts: Array<{ hintIds: [string, string]; titles: [string, string]; reason: string }>;
+  /** Approved hints withheld by governance gates, retained for review/repair. */
+  excluded: Array<{
+    hintId: string;
+    title: string;
+    reason: 'stale' | 'superseded' | 'conflict';
+    detail: string;
+  }>;
 }
 
 export interface RetrieveScopedHintsOptions {
@@ -42,6 +50,10 @@ export interface RetrieveScopedHintsOptions {
   alpha?: number;
   embeddingProvider?: EmbeddingProvider;
   indexPath?: string;
+  /** Current content fingerprints keyed by persisted dependency id. */
+  currentDependencies?: ReadonlyMap<string, string>;
+  /** Conservative fallback for older v3 hints without dependency provenance. */
+  currentSnapshotId?: string | null;
 }
 
 /**
@@ -54,7 +66,7 @@ export async function retrieveScopedHints(
   options: RetrieveScopedHintsOptions,
 ): Promise<HintRetrievalResult> {
   const indexPath = options.indexPath ?? defaultHintIndexPath(projectRoot);
-  if (!existsSync(indexPath)) return { applied: [], conflicts: [] };
+  if (!existsSync(indexPath)) return { applied: [], conflicts: [], excluded: [] };
 
   const store = new HintStore(indexPath);
   try {
@@ -64,21 +76,79 @@ export async function retrieveScopedHints(
       alpha: options.alpha,
       embeddingProvider: options.embeddingProvider,
     });
-    const applied = matches.map(toAppliedHint);
+    const excluded: HintRetrievalResult['excluded'] = [];
+    const fresh = matches.filter((match) => {
+      const currentDependencies = new Map(options.currentDependencies ?? []);
+      if (options.currentSnapshotId) {
+        for (const dependency of match.hint.dependencies ?? []) {
+          if (dependency.id.startsWith('scope:')) {
+            currentDependencies.set(dependency.id, options.currentSnapshotId);
+          }
+        }
+      }
+      const staleDependencies = staleHintDependencies(match.hint.dependencies, currentDependencies);
+      const legacySnapshotStale = (match.hint.dependencies?.length ?? 0) === 0
+        && Boolean(match.hint.snapshotId)
+        && Boolean(options.currentSnapshotId)
+        && match.hint.snapshotId !== options.currentSnapshotId;
+      if (staleDependencies.length === 0 && !legacySnapshotStale) return true;
+      excluded.push({
+        hintId: match.hint.id,
+        title: match.hint.title,
+        reason: 'stale',
+        detail: staleDependencies.length > 0
+          ? `Changed or missing dependencies: ${staleDependencies.map((dependency) => dependency.id).join(', ')}.`
+          : `Candidate snapshot ${match.hint.snapshotId} differs from current snapshot ${options.currentSnapshotId}.`,
+      });
+      return false;
+    });
 
-    // Surface conflicts only among the hints we actually applied, so unrelated
-    // overlaps elsewhere in the project do not noise up an answer.
-    const appliedIds = new Set(applied.map((hint) => hint.hintId));
-    const conflicts = store
-      .conflictingApprovedHints()
-      .filter(([a, b]) => appliedIds.has(a.id) || appliedIds.has(b.id))
-      .map(([a, b]) => ({
+    const eligibleIds = new Set(fresh.map((match) => match.hint.id));
+    const supersededIds = new Set(
+      fresh
+        .map((match) => match.hint.supersedes)
+        .filter((id): id is string => Boolean(id) && eligibleIds.has(id!)),
+    );
+    const unsuperseded = fresh.filter((match) => {
+      if (!supersededIds.has(match.hint.id)) return true;
+      excluded.push({
+        hintId: match.hint.id,
+        title: match.hint.title,
+        reason: 'superseded',
+        detail: 'A newer eligible approved hint explicitly supersedes this hint.',
+      });
+      return false;
+    });
+
+    const conflictPairs: Array<[Hint, Hint]> = [];
+    for (let left = 0; left < unsuperseded.length; left += 1) {
+      for (let right = left + 1; right < unsuperseded.length; right += 1) {
+        const a = unsuperseded[left].hint;
+        const b = unsuperseded[right].hint;
+        if (hintsConflict(a, b)) conflictPairs.push([a, b]);
+      }
+    }
+    const conflictingIds = new Set(conflictPairs.flatMap(([a, b]) => [a.id, b.id]));
+    for (const match of unsuperseded) {
+      if (!conflictingIds.has(match.hint.id)) continue;
+      excluded.push({
+        hintId: match.hint.id,
+        title: match.hint.title,
+        reason: 'conflict',
+        detail: 'Overlapping approved hints are withheld until one explicitly supersedes the other.',
+      });
+    }
+    const applied = unsuperseded
+      .filter((match) => !conflictingIds.has(match.hint.id))
+      .slice(0, options.limit ?? 6)
+      .map(toAppliedHint);
+    const conflicts = conflictPairs.map(([a, b]) => ({
         hintIds: [a.id, b.id] as [string, string],
         titles: [a.title, b.title] as [string, string],
-        reason: `Approved hints "${a.title}" and "${b.title}" overlap on scope and may disagree; review which is authoritative.`,
+        reason: `Approved hints "${a.title}" and "${b.title}" overlap on scope and are withheld until review resolves the conflict.`,
       }));
 
-    return { applied, conflicts };
+    return { applied, conflicts, excluded };
   } finally {
     store.close();
   }

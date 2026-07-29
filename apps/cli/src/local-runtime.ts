@@ -162,13 +162,11 @@ import {
   classifyAnalyticalFailure,
   propose,
   proposePlan,
-  recordCorrectionTrace,
+  recordGovernedCorrection,
   listHintsFromGit,
-  evaluateHint,
-  emitCorrectionEvalCase,
   mineJoinPatterns,
   type JoinPatternCandidate,
-  reviewHint,
+  reviewGovernedHint,
   AgentRunEngine,
   SqliteAgentRunStore,
   defaultAgentRunGates,
@@ -7650,14 +7648,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    // Local learning loop (OSS): record an analyst's wrong→right correction as a
-    // scope-matched Hint-Graph hint plus an advisory memory, so future similar
-    // questions avoid the same mistake. Single-user self-serve — the correction IS
-    // the approval, so the derived candidate is approved immediately unless the
-    // caller opts out. Advisory only: never overrides certified routing. The
-    // multi-tenant review workflow + automated distillation stay a cloud feature.
-    // Hint review queue. Corrections are captured as CANDIDATES; a hint only
-    // starts shaping other people's answers once a human approves it here.
+    // Local-first Hint Graph review queue. Corrections are captured as
+    // candidates; only the shared governed lifecycle can evaluate and approve
+    // them for future advisory retrieval.
     if (req.method === 'GET' && path === '/api/agent/hints') {
       try {
         const status = url.searchParams.get('status');
@@ -7695,79 +7688,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           : (resolveLocalOwner(projectRoot) ?? 'local');
         const note = typeof body?.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
         const snapshotId = projectSnapshot().snapshotId;
-        // dbt-first v3 requires a PASSED evaluation artifact recorded against the
-        // same snapshot before a candidate may be approved. Approving from the
-        // review queue therefore runs the hint's required evaluation first: the
-        // corrected SQL is re-validated against the current project so a hint can
-        // never be promoted on evidence that has gone stale.
-        if (decision === 'approved') {
-          const pending = listHintsFromGit(projectRoot).find((entry) => entry.id === hintId);
-          if (pending?.status === 'candidate' && pending.requiredEvaluation && !pending.evaluationId) {
-            // The evaluation must be a real check, not a rubber stamp: the
-            // corrected SQL has to parse and reference at least one relation
-            // against the CURRENT project. A correction that no longer analyses
-            // cannot be promoted into everyone's prompt.
-            const validation = ((): { ok: boolean; error?: string } => {
-              const sql = pending.correctedSql?.trim();
-              if (!sql) return { ok: false, error: 'The correction carries no SQL to verify.' };
-              try {
-                const analysis = analyzeSqlReferences(sql);
-                if (!analysis.tables.length) return { ok: false, error: 'Corrected SQL references no known relation.' };
-                return { ok: true };
-              } catch (error) {
-                return { ok: false, error: error instanceof Error ? error.message : String(error) };
-              }
-            })();
-            try {
-              evaluateHint(projectRoot, {
-                hintId,
-                snapshotId,
-                evaluator: reviewer,
-                evaluation: pending.requiredEvaluation,
-                checks: [{
-                  name: 'corrected-sql-validates',
-                  passed: validation.ok,
-                  evidence: validation.ok ? 'Corrected SQL passed local context validation.' : validation.error,
-                }],
-                evidence: [`snapshot: ${snapshotId}`, `reviewer: ${reviewer}`],
-              });
-            } catch (evaluationError) {
-              res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(serializeJSON({ ok: false, error: evaluationError instanceof Error ? evaluationError.message : String(evaluationError) }));
-              return;
-            }
-          }
-        }
-        const reviewed = reviewHint(projectRoot, { hintId, decision, reviewer, snapshotId, ...(note ? { note } : {}) });
+        const reviewed = await reviewGovernedHint(projectRoot, {
+          hintId,
+          decision,
+          reviewer,
+          snapshotId,
+          ...(note ? { note } : {}),
+          ...(decision === 'approved' ? {
+            executeSql: async (sql, execution) => executeGeneratedSqlForAgent(sql, {
+              ...generatedSqlArtifactContract(execution.question, sql),
+              limit: execution.rowLimit,
+            }),
+          } : {}),
+        });
         if (!reviewed) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ ok: false, error: 'Hint not found.' }));
           return;
         }
         const hint = reviewed.hint;
-        // Keep the mirrored advisory memory in step with the decision, so an
-        // approved lesson is recalled and a rejected one stops being recalled.
-        try {
-          const memory = new MemoryStore(defaultMemoryPath(projectRoot));
-          memory.upsert({
-            id: `mem_${hint.id}`,
-            scope: 'project',
-            title: hint.title,
-            content: hint.guidance,
-            tags: [hint.scope.metric, hint.scope.domain, hint.scope.dbtModel].filter((x): x is string => Boolean(x)),
-            source: 'correction',
-            confidence: 0.9,
-            importance: 0.85,
-            enabled: decision === 'approved',
-          });
-          memory.close();
-        } catch {
-          /* best-effort */
-        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: true, hint }));
+        res.end(serializeJSON({ ok: true, hint, evaluation: reviewed.evaluation }));
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.writeHead(error instanceof Error && error.name === 'HintLifecycleError' ? 409 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       }
       return;
@@ -7814,12 +7757,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const correctionFailedRoute = typeof body.failedRoute === 'string' && body.failedRoute.trim()
           ? body.failedRoute.trim()
           : 'generated_answer';
-        // Must match the name emitCorrectionEvalCase writes, so the required
-        // evaluation and the emitted regression case are the same artifact.
+        // Stable name linked to the Git evaluation artifacts created during
+        // review. Capture itself does not silently write a regression source.
         const correctionEvaluation = typeof body.requiredEvaluation === 'string' && body.requiredEvaluation.trim()
           ? body.requiredEvaluation.trim()
           : `correction: ${question.slice(0, 60)}`;
-        const { trace, hint } = recordCorrectionTrace(projectRoot, {
+        const { trace, hint } = await recordGovernedCorrection(projectRoot, {
           question,
           scope,
           wrongAnswer: wrongSql || '(no prior SQL captured)',
@@ -7835,47 +7778,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           hintGuidance: typeof body.guidance === 'string' && body.guidance.trim() ? body.guidance.trim() : undefined,
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
         });
-        // Capture always, approve deliberately. A hint is injected into the
-        // generation prompt as a "human-approved correction" and shapes every
-        // future answer in scope — one analyst's local fix must not silently
-        // become a team-wide rule across thousands of models. The trace and the
-        // candidate are always recorded, so nothing is lost; approval is a
-        // one-click review in Settings. Callers may still opt in explicitly.
-        let approvedHint = hint;
-        if (body.approve === true) {
-          reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: author ?? 'local', note: 'Approved on capture.' });
-          approvedHint = { ...hint, status: 'approved' as const };
-        }
-        // W4.3 — turn the correction into a durable regression eval case so the wrong
-        // answer can never silently return. Best-effort; never blocks the correction.
-        try {
-          emitCorrectionEvalCase(projectRoot, { question, correctedSql, name: correctionEvaluation });
-        } catch {
-          /* best-effort */
-        }
-        // Plain-language advisory memory mirroring the lesson, for transparency + recall.
-        try {
-          const memory = new MemoryStore(defaultMemoryPath(projectRoot));
-          memory.upsert({
-            id: `mem_${hint.id}`,
-            scope: 'project',
-            title: approvedHint.title,
-            content: `${approvedHint.guidance}${rationale ? ` (${rationale})` : ''}`,
-            tags: [scope.metric, scope.domain, scope.dbtModel].filter((x): x is string => Boolean(x)),
-            source: 'correction',
-            confidence: 0.9,
-            importance: 0.85,
-            // A candidate is evidence, not a rule. Mirroring it as an ENABLED
-            // memory would inject it into prompts through the side door and
-            // defeat the approval gate; it is enabled when the hint is approved.
-            enabled: approvedHint.status === 'approved',
-          });
-          memory.close();
-        } catch {
-          /* best-effort */
-        }
+        // `approve` is intentionally ignored: capture never promotes a hint.
+        // Review must use /api/agent/hints/:id/review so the same evidence gates
+        // run for notebook, CLI runtime, and MCP callers.
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: true, trace, hint: approvedHint }));
+        res.end(serializeJSON({
+          ok: true,
+          trace,
+          hint,
+          approvalRequested: body.approve === true,
+          note: body.approve === true
+            ? 'Captured as a candidate. Automatic approval is not permitted; use the review queue.'
+            : undefined,
+        }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));

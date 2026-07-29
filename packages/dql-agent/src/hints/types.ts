@@ -39,6 +39,35 @@ export interface HintScope {
 export type HintStatus = 'candidate' | 'approved' | 'rejected';
 export type HintEvaluationStatus = 'passed' | 'failed';
 
+export type HintDependencyKind =
+  | 'relation'
+  | 'dbt_model'
+  | 'metric'
+  | 'domain'
+  | 'term'
+  | 'block'
+  | 'semantic';
+
+/**
+ * A source object whose exact contents were used to validate a correction.
+ * Fingerprints make drift detection content-aware instead of relying on a
+ * missing-name check.
+ */
+export interface HintDependency {
+  id: string;
+  kind: HintDependencyKind;
+  name: string;
+  fingerprint: string;
+  sourcePath?: string;
+}
+
+/** Persisted fail-closed lifecycle diagnostic for review and retry. */
+export interface HintLifecycleFailure {
+  code: string;
+  message: string;
+  at: string;
+}
+
 /** One deterministic check executed by the required correction evaluation. */
 export interface HintEvaluationCheck {
   name: string;
@@ -97,6 +126,10 @@ export interface CorrectionTrace {
   snapshotId?: string;
   /** Stable evaluation name that must pass before approval. */
   requiredEvaluation?: string;
+  /** Exact governed inputs used to validate the correction. */
+  dependencies?: HintDependency[];
+  /** Fail-closed validation problems retained with the candidate. */
+  lifecycleErrors?: HintLifecycleFailure[];
   /** id of the hint derived from this trace, once created. */
   derivedHintId?: string;
 }
@@ -133,6 +166,12 @@ export interface Hint {
   requiredEvaluation?: string;
   /** Latest Git-authoritative evaluation artifact for this candidate. */
   evaluationId?: string;
+  /** Status of the latest linked evaluation (failed evaluations may be retried). */
+  evaluationStatus?: HintEvaluationStatus;
+  /** Exact governed inputs used to validate the correction. */
+  dependencies?: HintDependency[];
+  /** Fail-closed validation problems retained with the candidate. */
+  lifecycleErrors?: HintLifecycleFailure[];
   /** ISO-8601. */
   createdAt: string;
   /** ISO-8601. */

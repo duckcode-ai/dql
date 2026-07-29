@@ -5603,3 +5603,46 @@ describe('a stale Ask scope must not wedge the surface', () => {
       .toThrow();
   });
 });
+
+describe('governed correction lifecycle API', () => {
+  it('never fabricates approval during correction capture', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-hint-capture-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'hint_capture' }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent/learnings/correction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'What is net revenue?',
+          wrongSql: 'SELECT SUM(amount) FROM orders',
+          correctedSql: 'SELECT SUM(net_amount) FROM orders',
+          scope: { metric: 'revenue' },
+          approve: true,
+        }),
+      });
+      const payload = await response.json() as {
+        ok: boolean;
+        hint: { status: string };
+        approvalRequested: boolean;
+        note?: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.hint.status).toBe('candidate');
+      expect(payload.approvalRequested).toBe(true);
+      expect(payload.note).toContain('Automatic approval is not permitted');
+    } finally {
+      await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
+    }
+  });
+});

@@ -33,6 +33,8 @@ import type {
   Hint,
   HintEvaluation,
   HintEvaluationCheck,
+  HintDependency,
+  HintLifecycleFailure,
   HintReview,
   HintScope,
 } from './types.js';
@@ -85,6 +87,10 @@ export interface RecordCorrectionTraceInput {
   snapshotId?: string;
   /** Stable evaluation name that must pass before approval. Required by v3. */
   requiredEvaluation?: string;
+  /** Exact governed inputs used to validate the correction. */
+  dependencies?: HintDependency[];
+  /** Fail-closed validation problems retained with the candidate. */
+  lifecycleErrors?: HintLifecycleFailure[];
   /** Override the derived candidate hint's title. */
   hintTitle?: string;
   /** Override the derived candidate hint's guidance (defaults to the correction). */
@@ -96,6 +102,21 @@ export interface RecordCorrectionTraceInput {
 export interface RecordCorrectionTraceResult {
   trace: CorrectionTrace;
   hint: Hint;
+}
+
+export function correctionTraceFilePath(projectRoot: string, traceId: string): string {
+  return join(tracesDir(projectRoot), `${traceId}.trace.json`);
+}
+
+export function getCorrectionTraceFromGit(projectRoot: string, traceId: string): CorrectionTrace | null {
+  const path = correctionTraceFilePath(projectRoot, traceId);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as CorrectionTrace;
+    return raw && raw.id === traceId ? raw : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -138,6 +159,8 @@ export function recordCorrectionTrace(
     evidence: cleanStringList(input.evidence),
     snapshotId: strOrUndef(input.snapshotId),
     requiredEvaluation: strOrUndef(input.requiredEvaluation),
+    dependencies: cleanDependencies(input.dependencies),
+    lifecycleErrors: cleanLifecycleErrors(input.lifecycleErrors),
     derivedHintId: hintId,
   };
 
@@ -153,6 +176,8 @@ export function recordCorrectionTrace(
     author: input.author,
     snapshotId: strOrUndef(input.snapshotId),
     requiredEvaluation: strOrUndef(input.requiredEvaluation),
+    dependencies: cleanDependencies(input.dependencies),
+    lifecycleErrors: cleanLifecycleErrors(input.lifecycleErrors),
     createdAt,
     updatedAt: createdAt,
   };
@@ -194,6 +219,9 @@ export function writeHintFile(projectRoot: string, hint: Hint): void {
     snapshotId: hint.snapshotId,
     requiredEvaluation: hint.requiredEvaluation,
     evaluationId: hint.evaluationId,
+    evaluationStatus: hint.evaluationStatus,
+    dependencies: hint.dependencies,
+    lifecycleErrors: hint.lifecycleErrors,
     supersedes: hint.supersedes,
     createdAt: hint.createdAt,
     updatedAt: hint.updatedAt,
@@ -231,6 +259,9 @@ export function readHintFile(path: string, sourcePath?: string): Hint | null {
       snapshotId: strOrUndef(raw.snapshotId),
       requiredEvaluation: strOrUndef(raw.requiredEvaluation),
       evaluationId: strOrUndef(raw.evaluationId),
+      evaluationStatus: raw.evaluationStatus === 'passed' ? 'passed' : raw.evaluationStatus === 'failed' ? 'failed' : undefined,
+      dependencies: cleanDependencies(raw.dependencies),
+      lifecycleErrors: cleanLifecycleErrors(raw.lifecycleErrors),
       supersedes: strOrUndef(raw.supersedes),
       createdAt: String(raw.createdAt ?? nowIso()),
       updatedAt: String(raw.updatedAt ?? nowIso()),
@@ -342,7 +373,20 @@ export function evaluateHint(projectRoot: string, input: EvaluateHintInput): Eva
     yaml.dump(stripUndefined({ ...evaluation }), { lineWidth: 100, noRefs: true }),
     'utf-8',
   );
-  const updated: Hint = { ...hint, evaluationId, updatedAt: createdAt };
+  const lifecycleErrors = evaluation.status === 'failed'
+    ? appendLifecycleError(hint.lifecycleErrors, {
+        code: 'HINT_EVALUATION_FAILED',
+        message: `Evaluation ${evaluation.id} failed: ${checks.filter((check) => !check.passed).map((check) => check.name).join(', ')}`,
+        at: createdAt,
+      })
+    : [];
+  const updated: Hint = {
+    ...hint,
+    evaluationId,
+    evaluationStatus: evaluation.status,
+    lifecycleErrors,
+    updatedAt: createdAt,
+  };
   writeHintFile(projectRoot, updated);
   reindexHints(projectRoot);
   return { hint: updated, evaluation };
@@ -412,6 +456,12 @@ export interface ReviewHintResult {
 export function reviewHint(projectRoot: string, input: ReviewHintInput): ReviewHintResult | null {
   const hint = getHintFromGit(projectRoot, input.hintId);
   if (!hint) return null;
+  if (hint.status !== 'candidate') {
+    throw new HintLifecycleError(
+      'HINT_NOT_CANDIDATE',
+      `Hint ${input.hintId} is ${hint.status}; only candidates can be reviewed.`,
+    );
+  }
 
   if (input.decision === 'approved' && requiresEvaluatedApproval(projectRoot)) {
     if (!input.snapshotId || !hint.snapshotId || input.snapshotId !== hint.snapshotId) {
@@ -515,13 +565,55 @@ function cleanEvaluationChecks(value: HintEvaluationCheck[]): HintEvaluationChec
   });
 }
 
-function requiresEvaluatedApproval(projectRoot: string): boolean {
+export function requiresEvaluatedApproval(projectRoot: string): boolean {
   try {
     const config = loadProjectConfig(projectRoot) as { manifestVersion?: number; modeling?: { mode?: string } };
     return config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first';
   } catch {
     return false;
   }
+}
+
+function cleanDependencies(value: unknown): HintDependency[] {
+  if (!Array.isArray(value)) return [];
+  const byId = new Map<string, HintDependency>();
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const item = raw as Record<string, unknown>;
+    const id = strOrUndef(item.id);
+    const name = strOrUndef(item.name);
+    const fingerprint = strOrUndef(item.fingerprint);
+    const kind = strOrUndef(item.kind) as HintDependency['kind'] | undefined;
+    if (!id || !name || !fingerprint || !kind) continue;
+    if (!['relation', 'dbt_model', 'metric', 'domain', 'term', 'block', 'semantic'].includes(kind)) continue;
+    byId.set(id, {
+      id,
+      kind,
+      name,
+      fingerprint,
+      sourcePath: strOrUndef(item.sourcePath),
+    });
+  }
+  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function cleanLifecycleErrors(value: unknown): HintLifecycleFailure[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const item = raw as Record<string, unknown>;
+    const code = strOrUndef(item.code);
+    const message = strOrUndef(item.message);
+    const at = strOrUndef(item.at);
+    return code && message && at ? [{ code, message, at }] : [];
+  }).slice(-20);
+}
+
+function appendLifecycleError(
+  existing: HintLifecycleFailure[] | undefined,
+  next: HintLifecycleFailure,
+): HintLifecycleFailure[] {
+  return [...(existing ?? []), next].slice(-20);
 }
 
 function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {

@@ -8,6 +8,7 @@ import {
   listHintsFromGit,
   getHintFromGit,
   reindexHints,
+  writeHintFile,
   hintsDir,
   tracesDir,
   reviewsDir,
@@ -15,6 +16,7 @@ import {
 } from './git-store.js';
 import { HintStore } from './store.js';
 import { hintAppliesToScope, hintsConflict, type Hint, type QuestionScope } from './types.js';
+import { retrieveScopedHints } from './retrieval.js';
 
 let projectRoot: string;
 
@@ -225,5 +227,81 @@ describe('hint recall does not depend on which model ranked first', () => {
       dbtModels: ['dim_customers', 'dim_dates'],
       text: 'customers',
     }).applies).toBe(false);
+  });
+});
+
+describe('retrieval governance gates', () => {
+  function approvedHint(id: string, overrides: Partial<Hint> = {}): Hint {
+    return {
+      id,
+      title: 'Revenue correction',
+      guidance: 'Use governed net revenue',
+      status: 'approved',
+      scope: { metric: 'revenue' },
+      dependencies: [{
+        id: 'relation:analytics.fct_orders',
+        kind: 'relation',
+        name: 'analytics.fct_orders',
+        fingerprint: 'current-fingerprint',
+      }],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  async function retrieve() {
+    return retrieveScopedHints(projectRoot, {
+      questionScope: { metric: 'revenue', text: 'revenue correction governed' },
+      currentDependencies: new Map([['relation:analytics.fct_orders', 'current-fingerprint']]),
+      currentSnapshotId: 'snapshot-current',
+      limit: 10,
+    });
+  }
+
+  it('withholds approved hints whose dependency fingerprint drifted', async () => {
+    writeHintFile(projectRoot, approvedHint('stale', {
+      dependencies: [{
+        id: 'relation:analytics.fct_orders',
+        kind: 'relation',
+        name: 'analytics.fct_orders',
+        fingerprint: 'old-fingerprint',
+      }],
+    }));
+    reindexHints(projectRoot);
+
+    const result = await retrieve();
+    expect(result.applied).toHaveLength(0);
+    expect(result.excluded).toEqual([
+      expect.objectContaining({ hintId: 'stale', reason: 'stale' }),
+    ]);
+  });
+
+  it('returns only the explicit superseder', async () => {
+    writeHintFile(projectRoot, approvedHint('old'));
+    writeHintFile(projectRoot, approvedHint('new', {
+      title: 'Revenue correction v2',
+      guidance: 'Use governed net revenue after refunds',
+      supersedes: 'old',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }));
+    reindexHints(projectRoot);
+
+    const result = await retrieve();
+    expect(result.applied.map((hint) => hint.hintId)).toEqual(['new']);
+    expect(result.excluded).toEqual(expect.arrayContaining([
+      expect.objectContaining({ hintId: 'old', reason: 'superseded' }),
+    ]));
+  });
+
+  it('withholds both sides of an unresolved conflict', async () => {
+    writeHintFile(projectRoot, approvedHint('net', { guidance: 'Use net revenue.' }));
+    writeHintFile(projectRoot, approvedHint('gross', { guidance: 'Use gross revenue.' }));
+    reindexHints(projectRoot);
+
+    const result = await retrieve();
+    expect(result.applied).toHaveLength(0);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.excluded.filter((item) => item.reason === 'conflict')).toHaveLength(2);
   });
 });

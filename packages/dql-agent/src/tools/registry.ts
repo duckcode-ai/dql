@@ -720,7 +720,7 @@ const CORE_TOOL_DEFINITIONS = [
   {
     name: 'feedback_record',
     description:
-      'Record thumbs-up/down feedback on an answer. Feedback feeds promotion signals and answer-quality review; it never upgrades generated output to certified.',
+      'Record thumbs-up/down feedback for local answer-quality review. Feedback does not create or promote a hint and never upgrades generated output to certified.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -751,7 +751,7 @@ const CORE_TOOL_DEFINITIONS = [
         scope: HINT_SCOPE_SCHEMA,
         rationale: { type: 'string', description: 'Why the original answer was wrong.' },
         author: { type: 'string', description: 'Who recorded the correction.' },
-        correctedSql: { type: 'string', description: 'Optional canonical corrected SQL to endorse.' },
+        correctedSql: { type: 'string', description: 'Canonical corrected SQL. Required before a dbt-first v3 candidate can be approved.' },
         hintTitle: { type: 'string', description: 'Override the derived hint title.' },
         hintGuidance: { type: 'string', description: 'Override the hint guidance.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Searchable keywords.' },
@@ -763,7 +763,7 @@ const CORE_TOOL_DEFINITIONS = [
   {
     name: 'approve_hint',
     description:
-      'Approve or reject a candidate correction hint. Approval is the only path that makes a scoped hint usable in future Tier-2 drafts.',
+      'Evaluate and approve, or reject, a candidate correction hint. Approval fails closed on stale/unsafe evidence and is the only path that makes a scoped hint usable.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -772,7 +772,7 @@ const CORE_TOOL_DEFINITIONS = [
         hintId: { type: 'string', description: 'Id of the candidate hint to review.' },
         decision: { type: 'string', enum: ['approved', 'rejected'], description: 'Approve or reject the candidate hint.' },
         reviewer: { type: 'string', description: 'Who is reviewing.' },
-        note: { type: 'string', description: 'Optional review note.' },
+        note: { type: 'string', description: 'Review evidence note. Required for v3 approval on MCP because MCP has no local SQL executor.' },
       },
     },
     surfaces: ['mcp'],

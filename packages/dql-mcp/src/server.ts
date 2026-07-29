@@ -132,7 +132,9 @@ const DQL_MCP_FULL_PROFILE_INSTRUCTIONS =
   'Correction memory: when an analyst corrects a Tier-2 answer, call ' +
   '`record_correction` with the scope (metric/dbt model/domain/dialect). It ' +
   'creates a scoped CANDIDATE hint that is NOT used until a human runs ' +
-  '`approve_hint`. Approved hints are folded into matching future Tier-2 drafts ' +
+  '`approve_hint`. Approval uses the shared fail-closed lifecycle; MCP reviewers ' +
+  'must provide an evidence note because MCP does not execute warehouse SQL. ' +
+  'Approved hints are folded into matching future Tier-2 drafts ' +
   'AFTER certified routing (never overriding certified answers) and are cited. ' +
   'Use `list_hints` to review pending corrections.';
 

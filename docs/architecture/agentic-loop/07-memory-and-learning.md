@@ -3,32 +3,37 @@
 > `packages/dql-agent/src/memory/sqlite-memory.ts` · `hints/*` · `skills/loader.ts` ·
 > `skills/defaults.ts` · `metadata/catalog.ts`
 
-DQL learns like an analyst, not like a chatbot. It **never learns from raw chat** — a question is not
-a correctness signal. It learns only from **governed deltas**: the actions a human already takes
-(certify, correct, reject) plus execution/gate outcomes. Those carry an unambiguous label *with
-context*.
+DQL does not treat raw chat, a thumb, an execution error, or a successful query as truth. The shipped
+learning path is narrower: an analyst explicitly records a correction, DQL stores it as a
+Git-versioned candidate, and a later review runs the governed evaluation before approval. Runtime
+errors and feedback remain diagnostics; they do not create or promote hints automatically.
 
 ## The learning signal — governed actions, not chat sentiment
 
 ```mermaid
 flowchart LR
     subgraph Signals["What counts as a lesson"]
-        A["✅ Certify a draft/block<br/>= 'good' (canonical Q→SQL)"]
-        B["✏️ Correct/edit before accept<br/>= wrong→right diff"]
-        C["🚫 Reject = 'bad'"]
-        D["⚙️ Execution error / gate fail<br/>= automatic 'wrong'"]
+        A["✏️ Explicit Teach action<br/>= proposed wrong→right correction"]
+        B["✅ Explicit review<br/>= semantic approval assertion"]
+        C["🚫 Reject<br/>= candidate remains unusable"]
+        D["⚙️ Execution error / gate fail<br/>= diagnostic only"]
     end
-    E["💬 Raw chat / thumbs-up"] -.->|"❌ never"| L
-    Signals --> CAP["Capture (silent, from the action)<br/>+ question, before/after SQL, scope, domain"]
-    CAP --> CAND["Candidate lesson (advisory)"]
-    CAND -->|"human approves"| L["Applied → retrieved next time"]
+    E["💬 Raw chat / thumbs-up"] -.->|"never promotes"| L
+    A --> CAP["Capture explicit correction<br/>+ question, before/after SQL, scope, snapshot, dependencies"]
+    CAP --> CAND["Git candidate (not retrieved)"]
+    CAND -->|"evaluate + human approves"| L["Approved advisory hint"]
+    D -.-> CAND
 ```
 
-- **Capture is silent, from strong actions** — no separate "rate this" step; the *act* of correcting
-  or certifying *is* the label. An optional one-line reason becomes the lesson's rationale.
-- **Application is human-gated** — a captured lesson stays a **candidate** until approved
-  (**self-approve** in OSS single-user; **team review** in Cloud). That gate stops a bad auto-lesson
-  from silently changing behavior.
+- **Capture is explicit** — the notebook's Teach action or the equivalent API/MCP tool records the
+  correction. Editing, running, rating, saving, or certifying elsewhere does not silently create a
+  hint.
+- **Application is human- and evidence-gated** — a candidate is never retrieved. In a dbt-first v3
+  project, approval reruns current SQL/context checks, verifies the original snapshot and
+  content-addressed dependencies, and performs bounded execution when the local runtime is
+  available. The human approval is the semantic assertion; execution success alone is insufficient.
+- **Failure is durable and retryable** — failed evaluations and lifecycle errors remain in Git. The
+  candidate can be corrected and evaluated again; no endpoint fabricates an approved response.
 
 ## Three learning altitudes (promotion, not duplication)
 
@@ -39,17 +44,19 @@ flowchart TD
         H["② Hints<br/>MICRO scope-gated corrections<br/>('revenue excludes refunds')<br/>Git-authoritative · approved-only"]
         S["③ Domain skills<br/>MACRO conventions per domain<br/>('active customer = order in 90d')<br/>.dql/skills/&lt;domain&gt;.skill.md"]
     end
-    COR["Corrections + certified blocks"] --> H
-    H -->|"≥N in a domain / recurring pattern"| CONS["Consolidation (evidence-gated)"]
-    CONS -->|"draft → human certifies"| S
-    S -.->|"absorbed hints marked superseded"| H
+    COR["Explicit corrections"] --> H
+    S --> H
+    H -.->|"manual replacement names supersedes"| H
 ```
 
 | Tier | Grain | Fires on | Storage |
 |---|---|---|---|
-| **Memory** | a fact | scope match | `.dql/cache/agent-memory.sqlite` + `.dql/memory/*.md` |
-| **Hints** | one correction | exact scope (metric/model/domain/dialect/term/block) | `.dql/hints/*.yaml` (Git) + FTS index |
+| **Memory** | a local advisory fact | scope match | `.dql/cache/agent-memory.sqlite` (ignored cache) |
+| **Hints** | one governed correction | exact scope (metric/model/domain/dialect/term/block) | `.dql/hints/*.hint.yaml` plus Git traces/evaluations/reviews |
 | **Domain skills** | a convention | whole domain | `.dql/skills/*.skill.md` (Git, editable) |
+
+Hints are not mirrored into advisory memory. Git is authoritative; the
+`.dql/cache/agent-kg.sqlite` index is rebuildable.
 
 ## The closed loop
 
@@ -65,8 +72,11 @@ sequenceDiagram
     R-->>L: prior lessons + certified-block exemplars
     L-->>U: grounded answer (shaped by lessons)
     U->>L: correct / certify the draft
-    L->>G: capture governed delta → candidate hint / memory
-    U->>G: approve (self-approve OSS / team Cloud)
+    L->>G: explicit Teach → trace + candidate hint
+    U->>G: review candidate
+    G->>G: validate SQL + snapshot + dependencies + bounded result
+    G-->>U: persist passed/failed evaluation
+    U->>G: approve only after passed evaluation
     Note over G,R: next similar question retrieves the lesson → mistake not repeated
 ```
 
@@ -84,24 +94,11 @@ flowchart LR
     FEW --> GEN["generate grounded SQL that adapts them"]
 ```
 
-## Domain-skill creation — seeded from structure, not guessed
+## Domain skills are separate governed source
 
-```mermaid
-flowchart TD
-    subgraph Create["How a domain skill comes to exist"]
-        SEED["① Seed (default)<br/>on dql init/compile, distil a starter<br/>&lt;domain&gt;.skill.md from that domain's<br/>blocks/metrics/terms (like metrics-glossary)"]
-        EDIT["② Manual<br/>it's a Git .skill.md — edit/add rules anytime"]
-        AUTO["③ Auto-update (evidence-gated)<br/>consolidation drafts refinements →<br/>'Promote to domain skill?' → human certifies"]
-    end
-    SEED --> EDIT --> AUTO
-    AUTO -.->|"supersedes absorbed hints"| EDIT
-```
-
-- **Seeded from your declared DQL domains** (which map to your dbt folders/groups + the semantic
-  layer) — deterministic, not a guess.
-- **Always human-editable** (Git `.skill.md`, PR-able).
-- **Auto-*proposed*** updates as learning accumulates — but **AI drafts, humans certify** (the DQL
-  invariant), never a silent write.
+Skills ship as Git-editable source and are selected per question. The Hint Graph does not
+automatically consolidate corrections into skills or edit dbt/domain/block source. Any promotion is a
+separate, explicit authoring and review action.
 
 Skills already ship as editable starters (`metrics-glossary`, `sql-conventions`, `domain-rules`,
 `block-authoring`) via `seedDefaultSkills`; they are selected per question by lexical relevance and
@@ -115,25 +112,27 @@ flowchart LR
         O1["experience memory + approved hints"]
         O2["skills + domain seeding"]
         O3["few-shot from certified blocks"]
-        O4["self-approve loop · FTS retrieval (offline)"]
+        O4["local review + evidence-gated approval"]
     end
     subgraph Cloud["Cloud (governed, multi-tenant)"]
         C1["team review / RBAC / audit"]
-        C2["automated LLM hint distillation at scale"]
+        C2["managed review and lifecycle operations"]
         C3["reuse + accuracy measurement harness"]
         C4["cross-project skill libraries · embedding retrieval"]
     end
 ```
 
-The moat was never "having hints" — it is the **governed system around them** (team review,
-measurement, cross-project learning). The local self-approved loop drives OSS adoption; the governed,
-measured loop is the commercial product.
+OSS remains local-first, single-user, dbt-first, and Git-versioned. Managed multi-tenancy, SSO/RBAC,
+centralized audit, managed secrets, and approval workflows are future commercial scope, not behavior
+implemented by this local lifecycle.
 
 ## Why this beats generic agent memory
 
 - **Scope-gated** by `HintScope` (domain/metric/grain/dbtModel/dialect/term) — "revenue excludes
   refunds" fires only on revenue questions and never leaks into a headcount query.
-- **Execution-grounded** — lessons come from what the warehouse + gates verified, not chat vibes.
-- **Confidence + decay + `supersedes`** — stale lessons fade; the newest correction wins.
+- **Evidence-grounded** — read-only SQL, authorized relations, current snapshots/dependencies,
+  bounded execution where available, result shape, and explicit human semantic review are recorded.
+- **Fail-closed retrieval** — stale, explicitly superseded, and unresolved conflicting hints are
+  withheld. No confidence-decay mechanism silently changes authority.
 
 ← Back to the [master overview](./README.md)

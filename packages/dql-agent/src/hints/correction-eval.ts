@@ -1,12 +1,10 @@
 /**
  * Corrections become regression eval cases (W4.3).
  *
- * When an analyst corrects an answer, we already capture a scoped hint. This also
- * distills the correction into an agent-eval case so the wrong answer can never
- * silently return: the case asserts a future answer to the same question references
- * the same relations the human's corrected SQL used. Cases accumulate in the
- * project's `agent-evals/corrections.agent-evals.yml`, which `dql agent eval` reads.
- * This is the Anthropic pattern — a stakeholder correction turns into a durable test.
+ * Explicit utility for turning a reviewed correction into an agent-eval case.
+ * Correction capture does not call this automatically: writing a regression
+ * source is a separate authoring action. The generated assertion only checks
+ * referenced relations and is not semantic proof for hint approval.
  */
 import { analyzeSqlReferences } from '@duckcodeailabs/dql-core';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
