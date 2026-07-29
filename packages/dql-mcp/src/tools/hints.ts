@@ -115,9 +115,10 @@ export async function approveHint(
 
 export const listHintsInput = zodInputShapeForTool('list_hints');
 
+/** API-003: MCP exposes the same persisted lifecycle statuses as CLI/notebook. */
 export function listHints(
   ctx: DQLContext,
-  args: { status?: 'candidate' | 'approved' | 'rejected'; domain?: string; metric?: string },
+  args: { status?: 'candidate' | 'approved' | 'rejected' | 'retired'; domain?: string; metric?: string },
 ) {
   let hints = listHintsFromGit(ctx.projectRoot);
   if (args.status) hints = hints.filter((hint) => hint.status === args.status);

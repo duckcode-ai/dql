@@ -871,12 +871,19 @@ export {
   readHintEvaluationFile,
   getHintEvaluationFromGit,
   listHintEvaluationsFromGit,
+  updateHintCandidate,
+  retireHint,
+  reopenHint,
+  supersedeHint,
   HintLifecycleError,
   requiresEvaluatedApproval,
 } from "./hints/git-store.js";
 export {
   recordGovernedCorrection,
   reviewGovernedHint,
+  inspectGovernedHint,
+  editGovernedHintCandidate,
+  reopenGovernedHint,
   resolveGovernedHintContext,
 } from "./hints/lifecycle.js";
 export type {
@@ -887,6 +894,8 @@ export type {
   RecordGovernedCorrectionInput,
   ReviewGovernedHintInput,
   ReviewGovernedHintResult,
+  GovernedHintInspection,
+  EditGovernedHintCandidateInput,
 } from "./hints/lifecycle.js";
 export {
   collectHintDependencies,
@@ -913,6 +922,7 @@ export type {
   EvaluateHintResult,
   ReviewHintInput,
   ReviewHintResult,
+  UpdateHintCandidateInput,
 } from "./hints/git-store.js";
 export {
   retrieveScopedHints,

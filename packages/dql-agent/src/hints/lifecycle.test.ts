@@ -5,10 +5,15 @@ import { join } from 'node:path';
 import {
   getHintFromGit,
   listHintEvaluationsFromGit,
+  retireHint,
   reviewsDir,
+  supersedeHint,
 } from './git-store.js';
 import {
+  editGovernedHintCandidate,
+  inspectGovernedHint,
   recordGovernedCorrection,
+  reopenGovernedHint,
   reviewGovernedHint,
   type GovernedHintContext,
 } from './lifecycle.js';
@@ -108,6 +113,29 @@ describe('governed v3 hint lifecycle', () => {
     expect(listHintEvaluationsFromGit(projectRoot, hint.id).map((item) => item.status)).toEqual(['failed', 'passed']);
   });
 
+  it('allows review across unrelated snapshot drift when scoped dependencies still match', async () => {
+    const { hint } = await recordCandidate();
+    const approved = await reviewGovernedHint(projectRoot, {
+      hintId: hint.id,
+      decision: 'approved',
+      reviewer: 'lead',
+      snapshotId: 'snapshot-v2',
+      resolveContext: context({ snapshotId: 'snapshot-v2' }),
+      executeSql: async () => ({
+        columns: [{ name: 'net_revenue' }],
+        rows: [{ net_revenue: 42 }],
+        rowCount: 1,
+      }),
+    });
+
+    expect(approved?.hint.status).toBe('approved');
+    expect(approved?.evaluation.checks).toContainEqual(expect.objectContaining({
+      name: 'snapshot-current',
+      passed: true,
+      evidence: expect.stringContaining('every scoped dependency still matches'),
+    }));
+  });
+
   it('refuses unsafe or unauthorized correction evidence without creating a review', async () => {
     const { hint } = await recordCandidate();
     const unsafeContext = context({
@@ -179,5 +207,105 @@ describe('governed v3 hint lifecycle', () => {
       resolveContext: context(),
     });
     expect(approved?.hint.status).toBe('approved');
+  });
+
+  it('edits a candidate against current context and clears failed evaluation state', async () => {
+    const { hint } = await recordCandidate();
+    await expect(reviewGovernedHint(projectRoot, {
+      hintId: hint.id,
+      decision: 'approved',
+      reviewer: 'lead',
+      snapshotId: 'snapshot-v1',
+      resolveContext: context(),
+      executeSql: async () => ({ columns: [], rows: [], rowCount: 0 }),
+    })).rejects.toMatchObject({ code: 'HINT_EVALUATION_FAILED' });
+
+    const dependencyV2 = { ...dependency, fingerprint: 'relation-fingerprint-v2' };
+    const edited = await editGovernedHintCandidate(projectRoot, {
+      hintId: hint.id,
+      title: 'Use governed net revenue',
+      correctedSql: 'SELECT SUM(governed_net_amount) FROM analytics.fct_orders',
+      snapshotId: 'snapshot-v2',
+      resolveContext: context({ snapshotId: 'snapshot-v2', dependencies: [dependencyV2] }),
+    });
+
+    expect(edited).toMatchObject({
+      title: 'Use governed net revenue',
+      snapshotId: 'snapshot-v2',
+      dependencies: [dependencyV2],
+      evaluationId: undefined,
+      evaluationStatus: undefined,
+      status: 'candidate',
+    });
+  });
+
+  it('reports live drift and reopens or retires hints without making them retrievable', async () => {
+    const { hint } = await recordCandidate();
+    const approved = await reviewGovernedHint(projectRoot, {
+      hintId: hint.id,
+      decision: 'approved',
+      reviewer: 'lead',
+      note: 'Matched the finance report.',
+      snapshotId: 'snapshot-v1',
+      resolveContext: context(),
+    });
+    expect(approved?.hint.status).toBe('approved');
+
+    const inspection = await inspectGovernedHint(projectRoot, {
+      hintId: hint.id,
+      snapshotId: 'snapshot-v2',
+      resolveContext: context({
+        snapshotId: 'snapshot-v2',
+        dependencies: [{ ...dependency, fingerprint: 'changed' }],
+      }),
+    });
+    expect(inspection).toMatchObject({
+      state: 'stale',
+      snapshotCurrent: false,
+      dependenciesCurrent: false,
+    });
+
+    const reopened = await reopenGovernedHint(projectRoot, {
+      hintId: hint.id,
+      reviewer: 'lead',
+      snapshotId: 'snapshot-v2',
+      resolveContext: context({ snapshotId: 'snapshot-v2' }),
+    });
+    expect(reopened?.hint).toMatchObject({ status: 'candidate', snapshotId: 'snapshot-v2' });
+
+    const retired = retireHint(projectRoot, { hintId: hint.id, reviewer: 'lead', note: 'No longer applicable.' });
+    expect(retired.hint.status).toBe('retired');
+  });
+
+  it('records an explicit supersede resolution between two approved conflicts', async () => {
+    const first = await recordCandidate();
+    const second = await recordCandidate();
+    for (const candidate of [first, second]) {
+      await reviewGovernedHint(projectRoot, {
+        hintId: candidate.hint.id,
+        decision: 'approved',
+        reviewer: 'lead',
+        note: 'Matched governed report results.',
+        snapshotId: 'snapshot-v1',
+        resolveContext: context(),
+      });
+    }
+
+    const resolved = supersedeHint(projectRoot, {
+      hintId: second.hint.id,
+      targetHintId: first.hint.id,
+      reviewer: 'lead',
+      note: 'The later correction is authoritative.',
+    });
+
+    expect(resolved.hint).toMatchObject({
+      id: second.hint.id,
+      status: 'approved',
+      supersedes: first.hint.id,
+    });
+    expect(resolved.review).toMatchObject({
+      decision: 'superseded',
+      targetHintId: first.hint.id,
+    });
   });
 });

@@ -164,6 +164,14 @@ import {
   proposePlan,
   recordGovernedCorrection,
   listHintsFromGit,
+  getHintEvaluationFromGit,
+  getCorrectionTraceFromGit,
+  inspectGovernedHint,
+  editGovernedHintCandidate,
+  reopenGovernedHint,
+  retireHint,
+  supersedeHint,
+  hintsConflict,
   mineJoinPatterns,
   type JoinPatternCandidate,
   reviewGovernedHint,
@@ -7648,26 +7656,177 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    // Local-first Hint Graph review queue. Corrections are captured as
+    // CTX-005 / API-003 / E2E-001 local-first Hint Graph review queue.
+    // Corrections are captured as
     // candidates; only the shared governed lifecycle can evaluate and approve
     // them for future advisory retrieval.
     if (req.method === 'GET' && path === '/api/agent/hints') {
       try {
         const status = url.searchParams.get('status');
         const all = listHintsFromGit(projectRoot);
-        const hints = status ? all.filter((hint) => hint.status === status) : all;
+        const selected = (status ? all.filter((hint) => hint.status === status) : all)
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+          .slice(0, 200);
+        const snapshotId = projectSnapshot().snapshotId;
+        const approved = all.filter((hint) => hint.status === 'approved');
+        const inspectionById = new Map(await Promise.all(
+          all
+            .filter((hint) => hint.status === 'candidate' || hint.status === 'approved')
+            .map(async (hint) => [
+              hint.id,
+              await inspectGovernedHint(projectRoot, { hintId: hint.id, snapshotId }),
+            ] as const),
+        ));
+        // Match retrieval truth: stale/invalid approved hints cannot create a
+        // conflict or supersede another otherwise-current hint.
+        const eligibleApproved = approved.filter(
+          (hint) => inspectionById.get(hint.id)?.state === 'current',
+        );
+        const conflictIds = new Map<string, string[]>();
+        for (let left = 0; left < eligibleApproved.length; left += 1) {
+          for (let right = left + 1; right < eligibleApproved.length; right += 1) {
+            if (!hintsConflict(eligibleApproved[left], eligibleApproved[right])) continue;
+            conflictIds.set(eligibleApproved[left].id, [...(conflictIds.get(eligibleApproved[left].id) ?? []), eligibleApproved[right].id]);
+            conflictIds.set(eligibleApproved[right].id, [...(conflictIds.get(eligibleApproved[right].id) ?? []), eligibleApproved[left].id]);
+          }
+        }
+        const supersededIds = new Map(
+          eligibleApproved.filter((hint) => hint.supersedes).map((hint) => [hint.supersedes!, hint.id]),
+        );
+        const hints = await Promise.all(selected.map(async (hint) => {
+          const inspection = inspectionById.get(hint.id) ?? null;
+          const exclusions = [
+            ...(inspection && inspection.state !== 'current'
+              ? [{ reason: inspection.state, detail: inspection.checks.filter((check) => !check.passed).map((check) => check.evidence).join(' ') }]
+              : []),
+            ...(supersededIds.has(hint.id)
+              ? [{ reason: 'superseded', detail: `Superseded by ${supersededIds.get(hint.id)}.`, relatedHintId: supersededIds.get(hint.id) }]
+              : []),
+            ...((conflictIds.get(hint.id) ?? []).map((relatedHintId) => ({
+              reason: 'conflict',
+              detail: `Conflicts with approved hint ${relatedHintId}.`,
+              relatedHintId,
+            }))),
+          ];
+          return {
+            ...hint,
+            trace: hint.traceId ? getCorrectionTraceFromGit(projectRoot, hint.traceId) : undefined,
+            evaluation: hint.evaluationId ? getHintEvaluationFromGit(projectRoot, hint.evaluationId) : undefined,
+            inspection: inspection ? {
+              currentSnapshotId: inspection.currentSnapshotId,
+              snapshotCurrent: inspection.snapshotCurrent,
+              dependenciesCurrent: inspection.dependenciesCurrent,
+              driftedDependencies: inspection.driftedDependencies,
+              checks: inspection.checks,
+              state: inspection.state,
+            } : undefined,
+            exclusions,
+          };
+        }));
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          hints: hints.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 200),
+          hints,
           counts: {
             candidate: all.filter((hint) => hint.status === 'candidate').length,
             approved: all.filter((hint) => hint.status === 'approved').length,
             rejected: all.filter((hint) => hint.status === 'rejected').length,
+            retired: all.filter((hint) => hint.status === 'retired').length,
           },
         }));
       } catch (error) {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ hints: [], counts: { candidate: 0, approved: 0, rejected: 0 }, error: error instanceof Error ? error.message : String(error) }));
+        res.end(serializeJSON({ hints: [], counts: { candidate: 0, approved: 0, rejected: 0, retired: 0 }, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const hintEditMatch = /^\/api\/agent\/hints\/([^/]+)$/.exec(path);
+    if (req.method === 'PATCH' && hintEditMatch) {
+      try {
+        const hintId = decodeURIComponent(hintEditMatch[1]);
+        const body = await readJSON(req).catch(() => null) as Record<string, unknown> | null;
+        if (!body) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Candidate fields are required.' }));
+          return;
+        }
+        const rawScope = body.scope && typeof body.scope === 'object' ? body.scope as Record<string, unknown> : undefined;
+        const scopeValue = (key: string): string | undefined => {
+          const value = rawScope?.[key];
+          return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+        };
+        const hint = await editGovernedHintCandidate(projectRoot, {
+          hintId,
+          title: typeof body.title === 'string' ? body.title : undefined,
+          guidance: typeof body.guidance === 'string' ? body.guidance : undefined,
+          correctedSql: typeof body.correctedSql === 'string' ? body.correctedSql : undefined,
+          scope: rawScope ? {
+            metric: scopeValue('metric'),
+            dbtModel: scopeValue('dbtModel'),
+            domain: scopeValue('domain'),
+            dialect: scopeValue('dialect'),
+            term: scopeValue('term'),
+            block: scopeValue('block'),
+          } : undefined,
+          snapshotId: projectSnapshot().snapshotId,
+        });
+        if (!hint) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Hint not found.' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, hint }));
+      } catch (error) {
+        res.writeHead(error instanceof Error && error.name === 'HintLifecycleError' ? 409 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    const hintLifecycleMatch = /^\/api\/agent\/hints\/([^/]+)\/lifecycle$/.exec(path);
+    if (req.method === 'POST' && hintLifecycleMatch) {
+      try {
+        const hintId = decodeURIComponent(hintLifecycleMatch[1]);
+        const body = await readJSON(req).catch(() => null) as Record<string, unknown> | null;
+        const action = body?.action;
+        const reviewer = typeof body?.reviewer === 'string' && body.reviewer.trim()
+          ? body.reviewer.trim()
+          : (resolveLocalOwner(projectRoot) ?? 'local');
+        const note = typeof body?.note === 'string' && body.note.trim() ? body.note.trim() : undefined;
+        let result;
+        if (action === 'retire') {
+          result = retireHint(projectRoot, { hintId, reviewer, note });
+        } else if (action === 'reopen') {
+          result = await reopenGovernedHint(projectRoot, {
+            hintId,
+            reviewer,
+            note,
+            snapshotId: projectSnapshot().snapshotId,
+          });
+        } else if (action === 'supersede') {
+          const targetHintId = typeof body?.targetHintId === 'string' ? body.targetHintId.trim() : '';
+          if (!targetHintId) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ ok: false, error: 'targetHintId is required for supersede.' }));
+            return;
+          }
+          result = supersedeHint(projectRoot, { hintId, targetHintId, reviewer, note });
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: "action must be 'retire', 'reopen', or 'supersede'." }));
+          return;
+        }
+        if (!result) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ ok: false, error: 'Hint not found.' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: true, hint: result.hint, review: result.review }));
+      } catch (error) {
+        res.writeHead(error instanceof Error && error.name === 'HintLifecycleError' ? 409 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ ok: false, error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }

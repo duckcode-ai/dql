@@ -19,6 +19,13 @@ import {
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { controlStyle } from '../../themes/control-tokens';
+import {
+  hintGovernanceLabel,
+  hintReviewActionLabel,
+  runHintMutation,
+  updateHintScopeField,
+  type AgentHintScopeField,
+} from './hint-review';
 
 const PROVIDER_ORDER: ProviderSettingsId[] = ['claude-code', 'codex', 'anthropic', 'openai', 'gemini', 'ollama', 'custom-openai'];
 // Subscription providers (log in with an installed CLI) render as their own group,
@@ -205,7 +212,7 @@ export function ConnectionRuntimeSettings({
             <section style={{ marginTop: section ? 0 : 22 }}>
               <SectionTitle
                 title="Agent learning & memory"
-                detail="Durable business context the agent now reads on every question — your glossary, rules, and the lessons it learns when you correct or certify a draft. Advisory only: it never overrides certified metadata or routing."
+                detail="Durable business context you add explicitly, plus a separate governed correction queue. Advisory context never overrides current certified metadata, dbt truth, or routing."
                 t={t}
               />
               <MemoryEditor
@@ -1322,7 +1329,7 @@ function ProviderCard({
 
 
 /**
- * Pending corrections awaiting approval.
+ * CTX-005 / API-003: governed correction review and lifecycle resolution.
  *
  * A correction is captured the moment someone fixes AI SQL, but it is recorded
  * as a CANDIDATE: it does not shape anyone else's answers until approved here.
@@ -1331,15 +1338,17 @@ function ProviderCard({
  */
 function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string | null) => void }) {
   const [hints, setHints] = useState<AgentHint[]>([]);
-  const [counts, setCounts] = useState<{ candidate: number; approved: number; rejected: number }>({ candidate: 0, approved: 0, rejected: 0 });
+  const [counts, setCounts] = useState<{ candidate: number; approved: number; rejected: number; retired: number }>({ candidate: 0, approved: 0, rejected: 0, retired: 0 });
   const [busy, setBusy] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [editing, setEditing] = useState<AgentHint | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const response = await api.listAgentHints();
       setHints(response.hints ?? []);
-      setCounts(response.counts ?? { candidate: 0, approved: 0, rejected: 0 });
+      setCounts(response.counts ?? { candidate: 0, approved: 0, rejected: 0, retired: 0 });
     } catch {
       setHints([]);
     } finally {
@@ -1353,13 +1362,64 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
     setBusy(hint.id);
     onStatus(null);
     try {
-      const result = await api.reviewAgentHint(hint.id, decision);
+      const note = notes[hint.id]?.trim();
+      const result = await runHintMutation(
+        () => api.reviewAgentHint(hint.id, decision, note),
+        refresh,
+      );
       if (!result.ok) {
         onStatus(result.error ?? `Could not ${decision === 'approved' ? 'approve' : 'reject'} this correction.`);
       } else {
         onStatus(decision === 'approved'
           ? `Approved. DQL will apply "${hint.title}" to matching questions.`
           : `Rejected. "${hint.title}" will not be used.`);
+      }
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const transition = async (hint: AgentHint, action: 'retire' | 'reopen' | 'supersede', targetHintId?: string) => {
+    setBusy(hint.id);
+    onStatus(null);
+    try {
+      const result = await api.transitionAgentHint(hint.id, {
+        action,
+        targetHintId,
+        note: notes[hint.id]?.trim() || undefined,
+      });
+      onStatus(result.ok
+        ? action === 'retire'
+          ? `Retired "${hint.title}". It is excluded from future answers.`
+          : action === 'reopen'
+            ? `Reopened "${hint.title}" as a candidate.`
+            : `Resolved the conflict. "${hint.title}" is authoritative.`
+        : (result.error ?? `Could not ${action} this hint.`));
+      await refresh();
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    setBusy(editing.id);
+    onStatus(null);
+    try {
+      const result = await api.updateAgentHint(editing.id, {
+        title: editing.title,
+        guidance: editing.guidance,
+        correctedSql: editing.correctedSql,
+        scope: editing.scope,
+      });
+      if (!result.ok) onStatus(result.error ?? 'Could not update this candidate.');
+      else {
+        onStatus(`Updated "${editing.title}" and refreshed its current dependencies.`);
+        setEditing(null);
       }
       await refresh();
     } catch (error) {
@@ -1369,47 +1429,172 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
     }
   };
 
+  const requestCertification = async (hint: AgentHint) => {
+    if (!hint.trace?.question || !hint.correctedSql) {
+      onStatus('This hint is missing the question or SQL required for an analyst certification request.');
+      return;
+    }
+    setBusy(hint.id);
+    try {
+      const result = await api.requestCertification({
+        question: hint.trace.question,
+        generatedSql: hint.correctedSql,
+        domain: hint.scope.domain,
+        context: {
+          source: 'governed_hint_review',
+          hintId: hint.id,
+          evaluationId: hint.evaluationId,
+          snapshotId: hint.snapshotId,
+        },
+      });
+      onStatus(result.ok
+        ? `Certification research requested for "${hint.title}". Approval of a hint did not certify an asset.`
+        : (result.error ?? 'Could not request certification.'));
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const pending = hints.filter((hint) => hint.status === 'candidate');
+  const approved = hints.filter((hint) => hint.status === 'approved');
+  const history = hints.filter((hint) => hint.status === 'rejected' || hint.status === 'retired');
   if (!loaded) return null;
+
+  const renderEvidence = (hint: AgentHint) => (
+    <details style={{ fontSize: 10.5, color: t.textMuted }}>
+      <summary style={{ cursor: 'pointer' }}>Evidence, provenance & exclusions</summary>
+      <div style={{ display: 'grid', gap: 5, paddingTop: 6 }}>
+        {hint.trace?.question ? <div><b>Question:</b> {hint.trace.question}</div> : null}
+        {hint.trace?.wrongAnswer ? <div><b>Previous answer:</b> {hint.trace.wrongAnswer}</div> : null}
+        <div><b>Snapshot:</b> {hint.snapshotId ?? 'missing'}{hint.inspection?.currentSnapshotId ? ` · current ${hint.inspection.currentSnapshotId}` : ''}</div>
+        <div><b>Dependencies:</b> {hint.dependencies?.map((item) => `${item.kind}:${item.id}@${item.fingerprint.slice(0, 10)}`).join(', ') || 'none recorded'}</div>
+        {hint.lifecycleErrors?.map((item) => <div key={`${item.code}-${item.at}`} style={{ color: t.error }}><b>{item.code}:</b> {item.message}</div>)}
+        {hint.evaluation ? (
+          <div>
+            <b>Evaluation {hint.evaluation.status}:</b>
+            {hint.evaluation.checks.map((check) => (
+              <div key={check.name} style={{ color: check.passed ? t.success : t.error }}>
+                {check.passed ? '✓' : '✕'} {check.name} — {check.evidence}
+              </div>
+            ))}
+          </div>
+        ) : <div><b>Evaluation:</b> not run</div>}
+        {hint.inspection?.checks.map((check) => (
+          <div key={`live-${check.name}`} style={{ color: check.passed ? t.success : t.error }}>
+            {check.passed ? '✓' : '✕'} live {check.name} — {check.evidence}
+          </div>
+        ))}
+        {hint.exclusions?.map((item, index) => (
+          <div key={`${item.reason}-${index}`} style={{ color: t.error }}><b>Excluded: {item.reason}</b> — {item.detail}</div>
+        ))}
+      </div>
+    </details>
+  );
+
+  const renderCard = (hint: AgentHint) => {
+    const conflictTargets = hint.exclusions?.filter((item) => item.reason === 'conflict' && item.relatedHintId) ?? [];
+    const isEditing = editing?.id === hint.id;
+    const canRequestCertification = hint.status === 'approved'
+      && hint.evaluation?.status === 'passed'
+      && hint.inspection?.state === 'current'
+      && (hint.exclusions?.length ?? 0) === 0;
+    return (
+      <div key={hint.id} style={{ border: `1px solid ${t.btnBorder}`, borderRadius: 8, padding: '10px 12px', background: t.btnBg, display: 'grid', gap: 7 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: t.textPrimary }}>{hint.title}</div>
+          <span style={{ fontSize: 10, color: hint.exclusions?.length || hint.evaluation?.status === 'failed' ? t.error : t.success }}>{hintGovernanceLabel(hint)}</span>
+        </div>
+        {isEditing ? (
+          <>
+            <input value={editing.title} onChange={(event) => setEditing({ ...editing, title: event.target.value })} placeholder="Hint title" style={controlStyle(t, { size: 'sm' })} />
+            <textarea value={editing.guidance} onChange={(event) => setEditing({ ...editing, guidance: event.target.value })} placeholder="Guidance for matching questions" rows={3} style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical' }} />
+            <textarea value={editing.correctedSql ?? ''} onChange={(event) => setEditing({ ...editing, correctedSql: event.target.value })} placeholder="Read-only corrected SQL" rows={5} style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', fontFamily: t.fontMono }} />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 7 }}>
+              {([
+                ['dbtModel', 'dbt model'],
+                ['metric', 'metric'],
+                ['domain', 'domain'],
+                ['dialect', 'dialect'],
+                ['term', 'business term'],
+                ['block', 'block'],
+              ] as Array<[AgentHintScopeField, string]>).map(([field, label]) => (
+                <label key={field} style={{ display: 'grid', gap: 3, fontSize: 10, color: t.textMuted }}>
+                  {label}
+                  <input
+                    value={editing.scope[field] ?? ''}
+                    onChange={(event) => setEditing({
+                      ...editing,
+                      scope: updateHintScopeField(editing.scope, field, event.target.value),
+                    })}
+                    placeholder={`Optional ${label}`}
+                    style={controlStyle(t, { size: 'sm' })}
+                  />
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" disabled={busy === hint.id} onClick={() => void saveEdit()} style={controlStyle(t, { variant: 'primary', size: 'sm', disabled: busy === hint.id })}>Save & recheck</button>
+              <button type="button" onClick={() => setEditing(null)} style={controlStyle(t, { variant: 'ghost', size: 'sm' })}>Cancel</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.5 }}>{hint.guidance}</div>
+            {hint.correctedSql ? <pre style={{ margin: 0, fontSize: 10.5, fontFamily: t.fontMono, color: t.textMuted, whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{hint.correctedSql}</pre> : null}
+            {renderEvidence(hint)}
+            <textarea
+              value={notes[hint.id] ?? ''}
+              onChange={(event) => setNotes({ ...notes, [hint.id]: event.target.value })}
+              placeholder="Reviewer note or result assertion (required evidence when this surface cannot execute)"
+              rows={2}
+              style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical' }}
+            />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {hint.status === 'candidate' ? (
+                <>
+                  <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'approved')} style={controlStyle(t, { variant: 'primary', size: 'sm', disabled: busy === hint.id })}>{busy === hint.id ? 'Checking…' : hintReviewActionLabel(hint)}</button>
+                  <button type="button" disabled={busy === hint.id} onClick={() => setEditing({ ...hint })} style={controlStyle(t, { size: 'sm', disabled: busy === hint.id })}>Edit candidate</button>
+                  <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'rejected')} style={controlStyle(t, { variant: 'danger', size: 'sm', disabled: busy === hint.id })}>Reject</button>
+                </>
+              ) : null}
+              {hint.status === 'approved' ? (
+                <>
+                  {canRequestCertification ? <button type="button" disabled={busy === hint.id} onClick={() => void requestCertification(hint)} style={controlStyle(t, { variant: 'primary', size: 'sm', disabled: busy === hint.id })}>Request certification</button> : null}
+                  <button type="button" disabled={busy === hint.id} onClick={() => void transition(hint, 'reopen')} style={controlStyle(t, { size: 'sm', disabled: busy === hint.id })}>Reopen & edit</button>
+                  <button type="button" disabled={busy === hint.id} onClick={() => void transition(hint, 'retire')} style={controlStyle(t, { variant: 'danger', size: 'sm', disabled: busy === hint.id })}>Retire</button>
+                  {conflictTargets.map((item) => <button key={item.relatedHintId} type="button" disabled={busy === hint.id} onClick={() => void transition(hint, 'supersede', item.relatedHintId)} style={controlStyle(t, { size: 'sm', disabled: busy === hint.id })}>Keep this; supersede conflict</button>)}
+                </>
+              ) : null}
+              {hint.status === 'retired' ? <button type="button" disabled={busy === hint.id} onClick={() => void transition(hint, 'reopen')} style={controlStyle(t, { size: 'sm', disabled: busy === hint.id })}>Reopen as candidate</button> : null}
+              <span style={{ fontSize: 10.5, color: t.textMuted }}>{[hint.scope.dbtModel, hint.scope.metric, hint.scope.domain].filter(Boolean).join(' · ') || 'project-wide'}</span>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div style={{ marginTop: 18 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Corrections awaiting review</span>
         <span style={{ fontSize: 11, color: t.textMuted }}>
-          {counts.candidate} pending · {counts.approved} approved{counts.rejected ? ` · ${counts.rejected} rejected` : ''}
+          {counts.candidate} pending · {counts.approved} approved{counts.rejected ? ` · ${counts.rejected} rejected` : ''}{counts.retired ? ` · ${counts.retired} retired` : ''}
         </span>
       </div>
       {pending.length === 0 ? (
         <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5 }}>
-          Nothing pending. When you fix AI-generated SQL and it runs, DQL captures the before/after here so you can decide whether it should apply to future questions.
+          Nothing pending. A candidate appears only after you explicitly choose Teach DQL on edited SQL that has run successfully.
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>
-          {pending.map((hint) => (
-            <div key={hint.id} style={{ border: `1px solid ${t.btnBorder}`, borderRadius: 8, padding: '10px 12px', background: t.btnBg, display: 'grid', gap: 6 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: t.textPrimary }}>{hint.title}</div>
-              <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.5 }}>{hint.guidance}</div>
-              {hint.correctedSql ? (
-                <pre style={{ margin: 0, fontSize: 10.5, fontFamily: t.fontMono, color: t.textMuted, whiteSpace: 'pre-wrap', maxHeight: 96, overflow: 'auto' }}>
-                  {hint.correctedSql}
-                </pre>
-              ) : null}
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'approved')} style={controlStyle(t, { variant: 'primary', size: 'sm', disabled: busy === hint.id })}>
-                  {busy === hint.id ? 'Checking…' : 'Approve'}
-                </button>
-                <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'rejected')} style={controlStyle(t, { variant: 'danger', size: 'sm', disabled: busy === hint.id })}>
-                  Reject
-                </button>
-                <span style={{ fontSize: 10.5, color: t.textMuted }}>
-                  {[hint.scope.dbtModel, hint.scope.metric, hint.scope.domain].filter(Boolean).join(' · ') || 'project-wide'}
-                </span>
-              </div>
-            </div>
-          ))}
+          {pending.map(renderCard)}
         </div>
       )}
+      {approved.length > 0 ? <><div style={{ margin: '16px 0 8px', fontSize: 12.5, fontWeight: 650, color: t.textPrimary }}>Approved learning</div><div style={{ display: 'grid', gap: 8 }}>{approved.map(renderCard)}</div></> : null}
+      {history.length > 0 ? <details style={{ marginTop: 16 }}><summary style={{ cursor: 'pointer', fontSize: 12, color: t.textSecondary }}>Rejected & retired history ({history.length})</summary><div style={{ display: 'grid', gap: 8, marginTop: 8 }}>{history.map(renderCard)}</div></details> : null}
     </div>
   );
 }
@@ -1573,13 +1758,13 @@ function MemoryEditor({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {visible.length === 0 ? (
           <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 11, background: t.cellBg, padding: '13px 15px', fontSize: 12, color: t.textSecondary, lineHeight: 1.5 }}>
-            No memory yet. Add business context by hand, or correct/certify a draft and the agent will remember it here automatically.
+            No advisory memory yet. Add business context explicitly here. Edited SQL corrections use the separate governed review queue and are never promoted into memory automatically.
           </div>
         ) : visible.slice(0, 30).map((memory) => {
           const learned = !['settings-ui', 'manual', ''].includes(memory.source);
           const badge = scopeBadge(memory.scope);
           const meta = learned
-            ? `Learned from ${memory.source}${typeof memory.confidence === 'number' ? ` · ${Math.round(memory.confidence * 100)}% confidence` : ''}`
+            ? `Saved from ${memory.source}${typeof memory.confidence === 'number' ? ` · ${Math.round(memory.confidence * 100)}% confidence` : ''}`
             : `Added by hand${memory.tags.length ? ` · ${memory.tags.join(', ')}` : ''}`;
           return (
             <div key={memory.id} style={{ border: '1px solid var(--border-subtle)', borderRadius: 11, background: t.cellBg, padding: '13px 15px', display: 'flex', gap: 11, alignItems: 'flex-start' }}>
@@ -1599,8 +1784,8 @@ function MemoryEditor({
 
       <div style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: '1px solid var(--border-subtle)', background: t.cellBg, borderRadius: 10, padding: '11px 13px' }}>
         <span style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.55 }}>
-          Memories are Git-backed files under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/memory/</span>. The agent also proposes new ones when you correct or certify a draft — they appear here for review.
-          {' '}<button type="button" onClick={() => void ensureFiles()} style={{ border: 'none', background: 'none', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 11.5, fontFamily: t.font }}>Prepare files</button>
+          Entries added here are local advisory records under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/cache/</span>. You can separately prepare Git-versionable context templates under <span style={{ fontFamily: t.fontMono, fontSize: 10.5 }}>.dql/memory/</span>; neither path approves or certifies a governed hint.
+          {' '}<button type="button" onClick={() => void ensureFiles()} style={{ border: 'none', background: 'none', color: t.accent, cursor: 'pointer', padding: 0, fontSize: 11.5, fontFamily: t.font }}>Prepare context files</button>
         </span>
       </div>
     </div>

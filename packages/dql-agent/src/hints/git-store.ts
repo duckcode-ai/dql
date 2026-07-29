@@ -3,7 +3,7 @@
  *
  * Files (the source of truth, consistent with DQL):
  *   - `.dql/traces/<id>.trace.json`  — correction traces
- *   - `.dql/hints/<id>.hint.yaml`     — candidate / approved / rejected hints
+ *   - `.dql/hints/<id>.hint.yaml`     — candidate / approved / rejected / retired hints
  *   - `.dql/evaluations/<id>.hint-evaluation.yaml` — required evaluation results
  *   - `.dql/reviews/<id>.review.yaml` — human review decisions
  *
@@ -448,6 +448,51 @@ export interface ReviewHintResult {
   review: HintReview;
 }
 
+export interface UpdateHintCandidateInput {
+  hintId: string;
+  title?: string;
+  guidance?: string;
+  correctedSql?: string;
+  scope?: HintScope;
+  snapshotId: string;
+  dependencies: HintDependency[];
+  lifecycleErrors: HintLifecycleFailure[];
+}
+
+export function updateHintCandidate(
+  projectRoot: string,
+  input: UpdateHintCandidateInput,
+): Hint {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) throw new HintLifecycleError('HINT_NOT_FOUND', `Hint ${input.hintId} was not found.`);
+  if (hint.status !== 'candidate') {
+    throw new HintLifecycleError('HINT_NOT_CANDIDATE', `Hint ${input.hintId} is ${hint.status}; only candidates can be edited.`);
+  }
+  const title = input.title?.trim() || hint.title;
+  const guidance = input.guidance?.trim() || hint.guidance;
+  const correctedSql = input.correctedSql?.trim() || hint.correctedSql;
+  if (!title || !guidance) {
+    throw new HintLifecycleError('HINT_CONTENT_REQUIRED', 'A candidate requires a title and guidance.');
+  }
+  const updated: Hint = {
+    ...hint,
+    title,
+    guidance,
+    correctedSql,
+    scope: input.scope ? cleanScope(input.scope) : hint.scope,
+    snapshotId: input.snapshotId,
+    dependencies: cleanDependencies(input.dependencies),
+    lifecycleErrors: cleanLifecycleErrors(input.lifecycleErrors),
+    evaluationId: undefined,
+    evaluationStatus: undefined,
+    reviewer: undefined,
+    updatedAt: nowIso(),
+  };
+  writeHintFile(projectRoot, updated);
+  reindexHints(projectRoot);
+  return updated;
+}
+
 /**
  * Approve or reject a candidate hint. Writes the review record, flips the hint
  * file's status, and reindexes SQLite. Approval is the ONLY path that makes a
@@ -482,23 +527,14 @@ export function reviewHint(projectRoot: string, input: ReviewHintInput): ReviewH
     }
   }
 
-  const reviewId = genId('review');
   const createdAt = nowIso();
-  const review: HintReview = {
-    id: reviewId,
+  const review = writeHintReview(projectRoot, {
     hintId: input.hintId,
     decision: input.decision,
     reviewer: input.reviewer,
     note: input.note,
     createdAt,
-  };
-
-  mkdirSync(reviewsDir(projectRoot), { recursive: true });
-  writeFileSync(
-    join(reviewsDir(projectRoot), `${reviewId}.review.yaml`),
-    yaml.dump(stripUndefined({ ...review }), { lineWidth: 100, noRefs: true }),
-    'utf-8',
-  );
+  });
 
   const updated: Hint = {
     ...hint,
@@ -509,6 +545,126 @@ export function reviewHint(projectRoot: string, input: ReviewHintInput): ReviewH
   writeHintFile(projectRoot, updated);
   reindexHints(projectRoot);
   return { hint: updated, review };
+}
+
+export function retireHint(
+  projectRoot: string,
+  input: { hintId: string; reviewer: string; note?: string },
+): ReviewHintResult {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) throw new HintLifecycleError('HINT_NOT_FOUND', `Hint ${input.hintId} was not found.`);
+  if (hint.status === 'retired') {
+    throw new HintLifecycleError('HINT_ALREADY_RETIRED', `Hint ${input.hintId} is already retired.`);
+  }
+  const createdAt = nowIso();
+  const review = writeHintReview(projectRoot, {
+    hintId: hint.id,
+    decision: 'retired',
+    reviewer: input.reviewer,
+    note: input.note,
+    createdAt,
+  });
+  const updated: Hint = {
+    ...hint,
+    status: 'retired',
+    reviewer: input.reviewer,
+    updatedAt: createdAt,
+  };
+  writeHintFile(projectRoot, updated);
+  reindexHints(projectRoot);
+  return { hint: updated, review };
+}
+
+export function reopenHint(
+  projectRoot: string,
+  input: {
+    hintId: string;
+    reviewer: string;
+    note?: string;
+    snapshotId: string;
+    dependencies: HintDependency[];
+    lifecycleErrors: HintLifecycleFailure[];
+  },
+): ReviewHintResult {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) throw new HintLifecycleError('HINT_NOT_FOUND', `Hint ${input.hintId} was not found.`);
+  if (hint.status !== 'approved' && hint.status !== 'retired') {
+    throw new HintLifecycleError(
+      'HINT_REOPEN_NOT_ALLOWED',
+      `Hint ${input.hintId} is ${hint.status}; only approved or retired hints can be reopened.`,
+    );
+  }
+  const createdAt = nowIso();
+  const review = writeHintReview(projectRoot, {
+    hintId: hint.id,
+    decision: 'reopened',
+    reviewer: input.reviewer,
+    note: input.note,
+    createdAt,
+  });
+  const updated: Hint = {
+    ...hint,
+    status: 'candidate',
+    reviewer: undefined,
+    snapshotId: input.snapshotId,
+    dependencies: cleanDependencies(input.dependencies),
+    lifecycleErrors: cleanLifecycleErrors(input.lifecycleErrors),
+    evaluationId: undefined,
+    evaluationStatus: undefined,
+    updatedAt: createdAt,
+  };
+  writeHintFile(projectRoot, updated);
+  reindexHints(projectRoot);
+  return { hint: updated, review };
+}
+
+export function supersedeHint(
+  projectRoot: string,
+  input: { hintId: string; targetHintId: string; reviewer: string; note?: string },
+): ReviewHintResult {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  const target = getHintFromGit(projectRoot, input.targetHintId);
+  if (!hint || !target) {
+    throw new HintLifecycleError('HINT_NOT_FOUND', 'Both the authoritative and superseded hints must exist.');
+  }
+  if (hint.id === target.id || hint.status !== 'approved' || target.status !== 'approved') {
+    throw new HintLifecycleError(
+      'HINT_SUPERSEDE_NOT_ALLOWED',
+      'Supersede resolution requires two different approved hints.',
+    );
+  }
+  const createdAt = nowIso();
+  const review = writeHintReview(projectRoot, {
+    hintId: hint.id,
+    targetHintId: target.id,
+    decision: 'superseded',
+    reviewer: input.reviewer,
+    note: input.note,
+    createdAt,
+  });
+  const updated: Hint = {
+    ...hint,
+    supersedes: target.id,
+    reviewer: input.reviewer,
+    updatedAt: createdAt,
+  };
+  writeHintFile(projectRoot, updated);
+  reindexHints(projectRoot);
+  return { hint: updated, review };
+}
+
+function writeHintReview(
+  projectRoot: string,
+  input: Omit<HintReview, 'id'>,
+): HintReview {
+  const review: HintReview = { id: genId('review'), ...input };
+  mkdirSync(reviewsDir(projectRoot), { recursive: true });
+  writeFileSync(
+    join(reviewsDir(projectRoot), `${review.id}.review.yaml`),
+    yaml.dump(stripUndefined({ ...review }), { lineWidth: 100, noRefs: true }),
+    'utf-8',
+  );
+  return review;
 }
 
 // --- Index ------------------------------------------------------------------

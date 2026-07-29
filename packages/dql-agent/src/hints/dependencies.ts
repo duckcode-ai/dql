@@ -33,6 +33,18 @@ export interface CollectedHintDependencies {
   unknownRelations: string[];
 }
 
+export interface HintFreshnessAssessment {
+  snapshotCurrent: boolean;
+  dependenciesCurrent: boolean;
+  staleDependencies: HintDependency[];
+  /**
+   * Dependency-bearing hints are scoped: an unrelated project snapshot change
+   * does not invalidate them when every recorded dependency still matches.
+   * Legacy hints without dependency evidence fall back to the project snapshot.
+   */
+  current: boolean;
+}
+
 /** Content-address the governed relation/object inputs used by a hint. */
 export function collectHintDependencies(input: {
   sql?: string;
@@ -122,6 +134,33 @@ export function staleHintDependencies(
   return dependencies.filter((dependency) => current.get(dependency.id) !== dependency.fingerprint);
 }
 
+/** Apply the same fail-closed freshness rule at review, inspection, and retrieval. */
+export function assessHintFreshness(input: {
+  dependencies?: HintDependency[];
+  snapshotId?: string;
+  currentDependencies?: ReadonlyMap<string, string>;
+  currentSnapshotId?: string | null;
+}): HintFreshnessAssessment {
+  const dependencies = input.dependencies ?? [];
+  const staleDependencies = dependencies.length > 0
+    ? staleHintDependencies(dependencies, input.currentDependencies ?? new Map())
+    : [];
+  const snapshotCurrent = Boolean(input.snapshotId)
+    && Boolean(input.currentSnapshotId)
+    && input.snapshotId === input.currentSnapshotId
+    && !input.currentSnapshotId!.startsWith('unverified:');
+  const dependenciesCurrent = dependencies.length > 0 && staleDependencies.length === 0;
+  // v1/v2 approved hints predate snapshot/dependency provenance. Preserve their
+  // historical retrieval behavior; v3 lifecycle approval cannot create these.
+  const legacyUnversioned = dependencies.length === 0 && !input.snapshotId;
+  return {
+    snapshotCurrent,
+    dependenciesCurrent,
+    staleDependencies,
+    current: dependencies.length > 0 ? dependenciesCurrent : snapshotCurrent || legacyUnversioned,
+  };
+}
+
 function relationDependency(relation: HintDependencyRelation): HintDependency {
   const name = normalizeRelation(relation.relation);
   return {
@@ -160,6 +199,7 @@ function objectDependency(
       domain: object.domain,
       status: object.status,
       description: object.description,
+      sourcePath: object.sourcePath,
       payload: object.payload,
     }),
     sourcePath: object.sourcePath,

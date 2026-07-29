@@ -77,7 +77,7 @@ const RESEARCH_INTENT_ENUM = [
   'trust_gap_review',
 ] as const;
 
-const HINT_STATUS_ENUM = ['candidate', 'approved', 'rejected'] as const;
+const HINT_STATUS_ENUM = ['candidate', 'approved', 'rejected', 'retired'] as const;
 
 const DOMAIN_FILTER_SCHEMA = {
   type: 'object',

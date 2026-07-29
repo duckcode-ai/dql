@@ -8,7 +8,7 @@
  *
  * Source of truth = Git:
  *   - `.dql/traces/*.trace.json`  — raw correction traces (what was wrong + the fix)
- *   - `.dql/hints/*.hint.yaml`     — candidate/approved/rejected hints
+ *   - `.dql/hints/*.hint.yaml`     — candidate/approved/rejected/retired hints
  *   - `.dql/evaluations/*.hint-evaluation.yaml` — required evaluation results
  *   - `.dql/reviews/*.review.yaml` — human review decisions
  *
@@ -36,7 +36,7 @@ export interface HintScope {
   block?: string;
 }
 
-export type HintStatus = 'candidate' | 'approved' | 'rejected';
+export type HintStatus = 'candidate' | 'approved' | 'rejected' | 'retired';
 export type HintEvaluationStatus = 'passed' | 'failed';
 
 export type HintDependencyKind =
@@ -184,9 +184,11 @@ export interface Hint {
 export interface HintReview {
   id: string;
   hintId: string;
-  decision: 'approved' | 'rejected';
+  decision: 'approved' | 'rejected' | 'retired' | 'reopened' | 'superseded';
   reviewer: string;
   note?: string;
+  /** Other hint affected by a supersede decision. */
+  targetHintId?: string;
   createdAt: string;
 }
 

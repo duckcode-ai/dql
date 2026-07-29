@@ -277,6 +277,15 @@ describe('retrieval governance gates', () => {
     ]);
   });
 
+  it('does not stale a scoped hint for an unrelated project snapshot change', async () => {
+    writeHintFile(projectRoot, approvedHint('scoped', { snapshotId: 'snapshot-before-unrelated-change' }));
+    reindexHints(projectRoot);
+
+    const result = await retrieve();
+    expect(result.applied.map((item) => item.hintId)).toEqual(['scoped']);
+    expect(result.excluded).toHaveLength(0);
+  });
+
   it('returns only the explicit superseder', async () => {
     writeHintFile(projectRoot, approvedHint('old'));
     writeHintFile(projectRoot, approvedHint('new', {

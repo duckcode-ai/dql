@@ -4,22 +4,27 @@ import { validateSqlAgainstLocalContext } from '../metadata/sql-context-validati
 import {
   evaluateHint,
   getCorrectionTraceFromGit,
+  getHintEvaluationFromGit,
   getHintFromGit,
   HintLifecycleError,
   recordCorrectionTrace,
+  reopenHint,
   requiresEvaluatedApproval,
   reviewHint,
+  updateHintCandidate,
   type RecordCorrectionTraceInput,
   type RecordCorrectionTraceResult,
   type ReviewHintResult,
 } from './git-store.js';
-import { collectHintDependencies, staleHintDependencies } from './dependencies.js';
+import { assessHintFreshness, collectHintDependencies } from './dependencies.js';
 import type {
   HintDependency,
   HintEvaluation,
   HintEvaluationCheck,
   HintLifecycleFailure,
   HintScope,
+  Hint,
+  CorrectionTrace,
 } from './types.js';
 
 export interface GovernedHintContext {
@@ -73,6 +78,28 @@ export interface ReviewGovernedHintInput {
 
 export interface ReviewGovernedHintResult extends ReviewHintResult {
   evaluation?: HintEvaluation;
+}
+
+export interface GovernedHintInspection {
+  hint: Hint;
+  trace?: CorrectionTrace;
+  evaluation?: HintEvaluation;
+  currentSnapshotId: string;
+  snapshotCurrent: boolean;
+  dependenciesCurrent: boolean;
+  driftedDependencies: HintDependency[];
+  checks: HintEvaluationCheck[];
+  state: 'current' | 'stale' | 'invalid' | 'unverified';
+}
+
+export interface EditGovernedHintCandidateInput {
+  hintId: string;
+  title?: string;
+  guidance?: string;
+  correctedSql?: string;
+  scope?: HintScope;
+  snapshotId?: string;
+  resolveContext?: ResolveGovernedHintContext;
 }
 
 /**
@@ -162,24 +189,31 @@ export async function reviewGovernedHint(
     snapshotId: input.snapshotId,
   }).catch((error) => unresolvedContext({ question, scope: hint.scope, correctedSql: hint.correctedSql }, error));
 
+  const freshness = assessHintFreshness({
+    dependencies: hint.dependencies,
+    snapshotId: hint.snapshotId,
+    currentSnapshotId: current.snapshotId,
+    currentDependencies: new Map(
+      current.dependencies.map((dependency) => [dependency.id, dependency.fingerprint]),
+    ),
+  });
   const checks: HintEvaluationCheck[] = [
     ...current.checks,
     {
       name: 'snapshot-current',
-      passed: current.snapshotId === hint.snapshotId && !current.snapshotId.startsWith('unverified:'),
-      evidence: current.snapshotId === hint.snapshotId
+      passed: freshness.current,
+      evidence: freshness.snapshotCurrent
         ? `Current snapshot matches ${hint.snapshotId}.`
-        : `Candidate snapshot ${hint.snapshotId}; current snapshot ${current.snapshotId}.`,
+        : freshness.dependenciesCurrent
+          ? `Project snapshot changed from ${hint.snapshotId} to ${current.snapshotId}, but every scoped dependency still matches.`
+          : `Candidate snapshot ${hint.snapshotId}; current snapshot ${current.snapshotId}.`,
     },
   ];
-  const drifted = staleHintDependencies(hint.dependencies, new Map(
-    current.dependencies.map((dependency) => [dependency.id, dependency.fingerprint]),
-  ));
   checks.push({
     name: 'dependencies-current',
-    passed: drifted.length === 0 && (hint.dependencies?.length ?? 0) > 0,
-    evidence: drifted.length > 0
-      ? `Changed or missing dependencies: ${drifted.map((dependency) => dependency.id).join(', ')}.`
+    passed: freshness.dependenciesCurrent,
+    evidence: freshness.staleDependencies.length > 0
+      ? `Changed or missing dependencies: ${freshness.staleDependencies.map((dependency) => dependency.id).join(', ')}.`
       : `${hint.dependencies?.length ?? 0} recorded dependencies match current governed context.`,
   });
 
@@ -273,6 +307,138 @@ export async function reviewGovernedHint(
     snapshotId: hint.snapshotId,
   });
   return reviewed ? { ...reviewed, evaluation: evaluated.evaluation } : null;
+}
+
+/** CTX-005 / API-003: read-only live inspection used by review surfaces and lifecycle decisions. */
+export async function inspectGovernedHint(
+  projectRoot: string,
+  input: {
+    hintId: string;
+    snapshotId?: string;
+    resolveContext?: ResolveGovernedHintContext;
+  },
+): Promise<GovernedHintInspection | null> {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) return null;
+  const trace = hint.traceId ? getCorrectionTraceFromGit(projectRoot, hint.traceId) ?? undefined : undefined;
+  const question = trace?.question?.trim() || hint.title;
+  const resolveContext = input.resolveContext ?? resolveGovernedHintContext;
+  const current = await resolveContext({
+    projectRoot,
+    question,
+    correctedSql: hint.correctedSql,
+    scope: hint.scope,
+    snapshotId: input.snapshotId,
+  }).catch((error) => unresolvedContext({ question, scope: hint.scope, correctedSql: hint.correctedSql }, error));
+  const freshness = assessHintFreshness({
+    dependencies: hint.dependencies,
+    snapshotId: hint.snapshotId,
+    currentSnapshotId: current.snapshotId,
+    currentDependencies: new Map(
+      current.dependencies.map((dependency) => [dependency.id, dependency.fingerprint]),
+    ),
+  });
+  const checks: HintEvaluationCheck[] = [
+    ...current.checks,
+    {
+      name: 'snapshot-current',
+      passed: freshness.current,
+      evidence: freshness.snapshotCurrent
+        ? `Current snapshot matches ${hint.snapshotId}.`
+        : freshness.dependenciesCurrent
+          ? `Project snapshot changed from ${hint.snapshotId ?? '(missing)'} to ${current.snapshotId}, but every scoped dependency still matches.`
+          : `Recorded snapshot ${hint.snapshotId ?? '(missing)'}; current snapshot ${current.snapshotId}.`,
+    },
+    {
+      name: 'dependencies-current',
+      passed: freshness.dependenciesCurrent,
+      evidence: freshness.staleDependencies.length > 0
+        ? `Changed or missing dependencies: ${freshness.staleDependencies.map((dependency) => dependency.id).join(', ')}.`
+        : `${hint.dependencies?.length ?? 0} recorded dependencies match current governed context.`,
+    },
+  ];
+  const state: GovernedHintInspection['state'] = current.snapshotId.startsWith('unverified:')
+    ? 'unverified'
+    : !freshness.current
+      ? 'stale'
+      : checks.some((check) => !check.passed)
+        ? 'invalid'
+        : 'current';
+  return {
+    hint,
+    trace,
+    evaluation: hint.evaluationId ? getHintEvaluationFromGit(projectRoot, hint.evaluationId) ?? undefined : undefined,
+    currentSnapshotId: current.snapshotId,
+    snapshotCurrent: freshness.snapshotCurrent,
+    dependenciesCurrent: freshness.dependenciesCurrent,
+    driftedDependencies: freshness.staleDependencies,
+    checks,
+    state,
+  };
+}
+
+/** CTX-005 / E2E-001: explicit edit revalidates provenance and clears prior evaluation state. */
+export async function editGovernedHintCandidate(
+  projectRoot: string,
+  input: EditGovernedHintCandidateInput,
+): Promise<Hint | null> {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) return null;
+  const trace = hint.traceId ? getCorrectionTraceFromGit(projectRoot, hint.traceId) : null;
+  const scope = input.scope ?? hint.scope;
+  const correctedSql = input.correctedSql?.trim() || hint.correctedSql;
+  const question = trace?.question?.trim() || input.title?.trim() || hint.title;
+  const resolveContext = input.resolveContext ?? resolveGovernedHintContext;
+  const current = await resolveContext({
+    projectRoot,
+    question,
+    correctedSql,
+    scope,
+    snapshotId: input.snapshotId,
+  }).catch((error) => unresolvedContext({ question, scope, correctedSql }, error));
+  return updateHintCandidate(projectRoot, {
+    hintId: hint.id,
+    title: input.title,
+    guidance: input.guidance,
+    correctedSql,
+    scope,
+    snapshotId: current.snapshotId,
+    dependencies: current.dependencies,
+    lifecycleErrors: failuresFromChecks(current.checks),
+  });
+}
+
+/** CTX-005: reopen an applied/retired hint as a non-retrievable candidate against current context. */
+export async function reopenGovernedHint(
+  projectRoot: string,
+  input: {
+    hintId: string;
+    reviewer: string;
+    note?: string;
+    snapshotId?: string;
+    resolveContext?: ResolveGovernedHintContext;
+  },
+): Promise<ReviewHintResult | null> {
+  const hint = getHintFromGit(projectRoot, input.hintId);
+  if (!hint) return null;
+  const trace = hint.traceId ? getCorrectionTraceFromGit(projectRoot, hint.traceId) : null;
+  const question = trace?.question?.trim() || hint.title;
+  const resolveContext = input.resolveContext ?? resolveGovernedHintContext;
+  const current = await resolveContext({
+    projectRoot,
+    question,
+    correctedSql: hint.correctedSql,
+    scope: hint.scope,
+    snapshotId: input.snapshotId,
+  }).catch((error) => unresolvedContext({ question, scope: hint.scope, correctedSql: hint.correctedSql }, error));
+  return reopenHint(projectRoot, {
+    hintId: hint.id,
+    reviewer: input.reviewer,
+    note: input.note,
+    snapshotId: current.snapshotId,
+    dependencies: current.dependencies,
+    lifecycleErrors: failuresFromChecks(current.checks),
+  });
 }
 
 /** Resolve current SQL authorization and content-addressed dependencies. */

@@ -5645,4 +5645,77 @@ describe('governed correction lifecycle API', () => {
       await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
     }
   });
+
+  it('exposes review evidence and supports explicit edit and retire transitions', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-hint-review-ui-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'hint_review_ui' }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const captured = await fetch(`${base}/api/agent/learnings/correction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'What is net revenue?',
+          wrongSql: 'SELECT SUM(amount) FROM orders',
+          correctedSql: 'SELECT SUM(net_amount) FROM orders',
+          scope: { metric: 'revenue' },
+        }),
+      }).then((response) => response.json()) as { hint: { id: string } };
+
+      const listed = await fetch(`${base}/api/agent/hints`).then((response) => response.json()) as {
+        hints: Array<{
+          id: string;
+          trace?: { question: string };
+          inspection?: { state: string; checks: unknown[] };
+          exclusions?: Array<{ reason: string }>;
+        }>;
+      };
+      expect(listed.hints[0]).toMatchObject({
+        id: captured.hint.id,
+        trace: { question: 'What is net revenue?' },
+      });
+      expect(listed.hints[0].inspection?.checks.length).toBeGreaterThan(0);
+      expect(listed.hints[0].inspection?.state).not.toBe('current');
+      expect(listed.hints[0].exclusions?.map((item) => item.reason)).toContain(listed.hints[0].inspection?.state);
+
+      const editedResponse = await fetch(`${base}/api/agent/hints/${encodeURIComponent(captured.hint.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Use governed net revenue',
+          guidance: 'Prefer net_amount for revenue.',
+          correctedSql: 'SELECT SUM(net_amount) FROM governed_orders',
+          scope: { metric: 'net_revenue', dbtModel: 'governed_orders' },
+        }),
+      });
+      const edited = await editedResponse.json() as { ok: boolean; hint: { title: string; status: string } };
+      expect(editedResponse.status).toBe(200);
+      expect(edited).toMatchObject({ ok: true, hint: { title: 'Use governed net revenue', status: 'candidate' } });
+
+      const retiredResponse = await fetch(`${base}/api/agent/hints/${encodeURIComponent(captured.hint.id)}/lifecycle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'retire', note: 'The metric changed.' }),
+      });
+      const retired = await retiredResponse.json() as { ok: boolean; hint: { status: string } };
+      expect(retiredResponse.status).toBe(200);
+      expect(retired).toMatchObject({ ok: true, hint: { status: 'retired' } });
+
+      const after = await fetch(`${base}/api/agent/hints`).then((response) => response.json()) as {
+        counts: { retired: number };
+      };
+      expect(after.counts.retired).toBe(1);
+    } finally {
+      await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
+    }
+  });
 });

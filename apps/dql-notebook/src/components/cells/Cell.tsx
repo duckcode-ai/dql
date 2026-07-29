@@ -30,6 +30,7 @@ import { PivotCell } from "./PivotCell";
 import { TableCell } from "./TableCell";
 import { ChatCell } from "./ChatCell";
 import { SnippetPicker } from "./SnippetPicker";
+import { teachCorrectionEligibility } from './teach-correction';
 import { SaveAsBlockModal } from "../modals/SaveAsBlockModal";
 import {
   deriveBlockSource,
@@ -2694,11 +2695,12 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'dismissed' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
 
-  const generated = (cell.dqlArtifact?.sql ?? cell.dqlArtifact?.compiledSql ?? '').trim();
-  const current = cell.content.trim();
-  const question = cell.dqlArtifact?.question?.trim();
-  const edited = Boolean(generated) && Boolean(current) && generated !== current;
-  const eligible = edited && Boolean(question) && cell.status === 'success' && Boolean(cell.result);
+  const {
+    eligible,
+    generatedSql: generated,
+    correctedSql: current,
+    question,
+  } = teachCorrectionEligibility(cell);
 
   if (!eligible || state === 'dismissed') return null;
 

@@ -1142,7 +1142,21 @@ export interface RequestCertificationResult {
   error?: string;
 }
 
-export type AgentHintStatus = 'candidate' | 'approved' | 'rejected';
+export type AgentHintStatus = 'candidate' | 'approved' | 'rejected' | 'retired';
+
+export interface AgentHintDependency {
+  id: string;
+  kind: 'relation' | 'dbt_model' | 'metric' | 'domain' | 'term' | 'block' | 'semantic';
+  name: string;
+  fingerprint: string;
+  sourcePath?: string;
+}
+
+export interface AgentHintCheck {
+  name: string;
+  passed: boolean;
+  evidence?: string;
+}
 
 export interface AgentHint {
   id: string;
@@ -1154,15 +1168,47 @@ export interface AgentHint {
   tags?: string[];
   author?: string;
   reviewer?: string;
+  snapshotId?: string;
   requiredEvaluation?: string;
   evaluationId?: string;
+  evaluationStatus?: 'passed' | 'failed';
+  dependencies?: AgentHintDependency[];
+  lifecycleErrors?: Array<{ code: string; message: string; at: string }>;
+  supersedes?: string;
+  trace?: {
+    id: string;
+    question: string;
+    wrongAnswer: string;
+    correction: string;
+    rationale?: string;
+    evidence?: string[];
+  };
+  evaluation?: {
+    id: string;
+    status: 'passed' | 'failed';
+    evaluation: string;
+    evaluator: string;
+    checks: AgentHintCheck[];
+    evidence: string[];
+    note?: string;
+    createdAt: string;
+  };
+  inspection?: {
+    currentSnapshotId: string;
+    snapshotCurrent: boolean;
+    dependenciesCurrent: boolean;
+    driftedDependencies: AgentHintDependency[];
+    checks: AgentHintCheck[];
+    state: 'current' | 'stale' | 'invalid' | 'unverified';
+  };
+  exclusions?: Array<{ reason: string; detail: string; relatedHintId?: string }>;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface AgentHintListResponse {
   hints: AgentHint[];
-  counts: { candidate: number; approved: number; rejected: number };
+  counts: { candidate: number; approved: number; rejected: number; retired: number };
   error?: string;
 }
 
@@ -2978,6 +3024,26 @@ export const api = {
     return request(`/api/agent/hints/${encodeURIComponent(hintId)}/review`, {
       method: 'POST',
       body: JSON.stringify({ decision, ...(note ? { note } : {}) }),
+    });
+  },
+
+  async updateAgentHint(
+    hintId: string,
+    input: Pick<AgentHint, 'title' | 'guidance' | 'correctedSql' | 'scope'>,
+  ): Promise<{ ok: boolean; hint?: AgentHint; error?: string }> {
+    return request(`/api/agent/hints/${encodeURIComponent(hintId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async transitionAgentHint(
+    hintId: string,
+    input: { action: 'retire' | 'reopen' | 'supersede'; targetHintId?: string; note?: string },
+  ): Promise<{ ok: boolean; hint?: AgentHint; error?: string }> {
+    return request(`/api/agent/hints/${encodeURIComponent(hintId)}/lifecycle`, {
+      method: 'POST',
+      body: JSON.stringify(input),
     });
   },
 

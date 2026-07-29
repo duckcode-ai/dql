@@ -107,7 +107,7 @@ const HELP = `
       dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
       dql agent threads               List persisted conversation threads (resume with --thread)
       dql agent reindex [path]        Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
-      dql agent feedback up|down      Record thumbs-up/down feedback for self-learning
+      dql agent feedback up|down      Record local answer-quality telemetry for later review
       dql agent eval agent-evals.yml  Measure certified/follow-up/refusal accuracy
     dql slack serve                 Slack slash-command bot (forwards to the answer loop)
     dql verify                      Verify dql-manifest.json is reproducible from source

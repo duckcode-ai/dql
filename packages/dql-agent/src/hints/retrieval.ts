@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 import { defaultHintIndexPath } from './git-store.js';
 import { HintStore } from './store.js';
 import { hintsConflict, type Hint, type QuestionScope, type ScopedHintMatch } from './types.js';
-import { staleHintDependencies } from './dependencies.js';
+import { assessHintFreshness } from './dependencies.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 
 export interface AppliedHint {
@@ -86,18 +86,19 @@ export async function retrieveScopedHints(
           }
         }
       }
-      const staleDependencies = staleHintDependencies(match.hint.dependencies, currentDependencies);
-      const legacySnapshotStale = (match.hint.dependencies?.length ?? 0) === 0
-        && Boolean(match.hint.snapshotId)
-        && Boolean(options.currentSnapshotId)
-        && match.hint.snapshotId !== options.currentSnapshotId;
-      if (staleDependencies.length === 0 && !legacySnapshotStale) return true;
+      const freshness = assessHintFreshness({
+        dependencies: match.hint.dependencies,
+        snapshotId: match.hint.snapshotId,
+        currentDependencies,
+        currentSnapshotId: options.currentSnapshotId,
+      });
+      if (freshness.current) return true;
       excluded.push({
         hintId: match.hint.id,
         title: match.hint.title,
         reason: 'stale',
-        detail: staleDependencies.length > 0
-          ? `Changed or missing dependencies: ${staleDependencies.map((dependency) => dependency.id).join(', ')}.`
+        detail: freshness.staleDependencies.length > 0
+          ? `Changed or missing dependencies: ${freshness.staleDependencies.map((dependency) => dependency.id).join(', ')}.`
           : `Candidate snapshot ${match.hint.snapshotId} differs from current snapshot ${options.currentSnapshotId}.`,
       });
       return false;

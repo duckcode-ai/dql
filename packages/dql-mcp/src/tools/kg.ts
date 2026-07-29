@@ -2,7 +2,8 @@
  * MCP tools wrapping the dql-agent KG.
  *
  * `kg_search` — keyword + filter search over the KG (powers chat retrieval).
- * `feedback_record` — log thumbs-up/down rows that feed self-learning.
+ * `feedback_record` — log local answer-quality telemetry for explicit review.
+ * It never promotes, suppresses, certifies, or mutates a governed hint.
  *
  * Both tools open the SQLite KG file at `.dql/cache/agent-kg.sqlite` and
  * close it after the turn so file handles never leak. If the KG hasn't

@@ -169,7 +169,7 @@ and audit logs, that's the day they pay.
 | `lineage_impact`                  | reasoning     | Trace upstream/downstream before changing a contract                               |
 | `list_metrics`, `list_dimensions` | semantic      | List dbt-semantic metrics + dimensions                                             |
 | `kg_search`                       | semantic      | FTS5 search across blocks, metrics, dashboards, apps                               |
-| `feedback_record`                 | learning      | Record thumbs-up/down on answers; feeds promotion priority                         |
+| `feedback_record`                 | telemetry     | Record local thumbs-up/down for explicit review; never auto-promotes, suppresses, certifies, or mutates a governed hint |
 
 The agent's instructions on session init explicitly document the priority:
 "Always try `query_via_block` first. Fall back to `query_via_metadata`. Use

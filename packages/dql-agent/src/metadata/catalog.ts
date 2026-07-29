@@ -4140,6 +4140,10 @@ function addRawDbtCatalogObject(input: RawDbtCatalogEntry & {
       schema,
       materialized: rawDbtMaterialization(input.node),
       dependsOn: rawDbtDependsOn(input.node),
+      // dbt's checksum changes with the model/source definition. Persist it in
+      // the governed object so Hint Graph dependency fingerprints detect SQL
+      // edits even when relation names and columns stay the same.
+      checksum: input.node.checksum,
       tags: metadataStringArray(input.node.tags),
       catalogOnly: existing ? undefined : true,
       columnCompleteness,
