@@ -30,7 +30,7 @@ describe('normalizeDqlArtifactReference', () => {
       },
     })).toEqual({
       kind: 'semantic_block',
-      source: 'block "revenue" { type = "semantic" }',
+      source: '  block "revenue" { type = "semantic" }  ',
       name: 'revenue_by_channel',
       sourcePath: 'semantic/revenue.dql',
       metrics: ['total_revenue'],
@@ -60,5 +60,13 @@ describe('normalizeDqlArtifactReference', () => {
     expect(normalizeDqlArtifactReference({ kind: 'semantic_block', source: ' ' })).toBeUndefined();
     expect(normalizeDqlArtifactReference({ kind: 'unknown', source: 'block "x" {}' })).toBeUndefined();
     expect(normalizeDqlArtifactReference(null)).toBeUndefined();
+  });
+
+  it('preserves receipt-bound source text exactly, including the final newline', () => {
+    const source = 'block "revenue" {\n  type = "semantic"\n}\n';
+    expect(normalizeDqlArtifactReference({
+      kind: 'semantic_block',
+      source,
+    })?.source).toBe(source);
   });
 });

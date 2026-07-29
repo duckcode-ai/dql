@@ -60,7 +60,7 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
   const record = objectRecord(value);
   if (!record) return undefined;
   const kind = normalizeDqlArtifactKind(record.kind);
-  const source = cleanString(record.source);
+  const source = executableText(record.source);
   if (!kind || !source) return undefined;
   const limit = finitePositiveInteger(record.limit);
   return {
@@ -81,6 +81,15 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
     executionReceipt: normalizeExecutionReceipt(record.executionReceipt),
     ...(limit === undefined ? {} : { limit }),
   };
+}
+
+/**
+ * Executable source is receipt-bound byte-for-byte. Trimming it here makes a
+ * harmless final newline look like source drift on the next parameterized run.
+ * Validate that it contains content, but preserve the exact text.
+ */
+function executableText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
 function normalizeExecutionReceipt(value: unknown): DqlArtifactExecutionReceipt | undefined {

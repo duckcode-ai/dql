@@ -9,6 +9,7 @@ import {
   setBlockQuery,
   setSemanticMetrics,
   setSemanticRuntimeFilters,
+  setVisualBlockParameterBinding,
   upsertSemanticSelection,
   upsertVisualBlockParameter,
 } from './block-studio.js';
@@ -78,6 +79,20 @@ describe('visual block parameters', () => {
     expect(result).toContain('product_category = "dynamic"');
     expect(result).toContain('product_category = "product_category"');
     expect(result).toContain('requested_filters = ["product_category"]');
+  });
+
+  it('adds one semantic result-column binding without replacing existing bindings', () => {
+    const source = `block "Revenue" {
+  type = "semantic"
+  metrics = ["revenue"]
+  dimensions = ["customer_name", "location_name"]
+  filterBindings {
+    customer_name = "customer_name"
+  }
+}`;
+    const result = setVisualBlockParameterBinding(source, 'location_name', 'locations.location_name');
+    expect(result).toContain('customer_name = "customer_name"');
+    expect(result).toContain('location_name = "locations.location_name"');
   });
 
   it('uses the same metrics array contract for zero, one, and many manual selections', () => {

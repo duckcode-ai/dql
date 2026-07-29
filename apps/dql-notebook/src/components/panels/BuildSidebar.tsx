@@ -14,6 +14,7 @@ import { SemanticTreeView } from './CatalogTree';
 import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
 import { buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-library-tree';
+import { buildFileLibraryTree, type FileLibraryTreeNode } from './file-library-tree';
 import {
   buildSemanticTreeFromLayer,
   scopeSemanticTreeForComposition,
@@ -206,6 +207,7 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
   const notebooks = Array.from(
     new Map(state.files.filter((f) => f.type === 'notebook').map((f) => [f.path, f])).values(),
   ).sort((a, b) => a.name.localeCompare(b.name));
+  const notebookTree = buildFileLibraryTree(notebooks, 'notebooks');
 
   const confirmDelete = async () => {
     if (!pendingDelete) return;
@@ -241,35 +243,13 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
       {notebooks.length === 0 ? (
         <EmptyNote text="No notebooks yet. Create one to start building." t={t} />
       ) : (
-        notebooks.map((file) => (
-          <div key={file.path} style={{ position: 'relative', display: 'flex', alignItems: 'center' }} className="dql-nb-row">
-            <button
-              type="button"
-              onClick={() => onOpenFile(file)}
-              style={{ ...rowStyle(t, state.activeFile?.path === file.path), paddingRight: 30 }}
-              title={file.path}
-            >
-              <FileText size={13} color={t.textMuted} style={{ flexShrink: 0 }} />
-              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
-                {file.name.replace(/\.dqln?$|\.ipynb$/i, '')}
-              </span>
-            </button>
-            <button
-              type="button"
-              className="dql-nb-delete"
-              onClick={(event) => { event.stopPropagation(); setDeleteError(null); setPendingDelete(file); }}
-              title={`Delete ${file.name}`}
-              aria-label={`Delete ${file.name}`}
-              style={{
-                position: 'absolute', right: 6, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                width: 22, height: 22, borderRadius: 5, border: '1px solid transparent',
-                background: 'transparent', color: t.textMuted, cursor: 'pointer', padding: 0,
-              }}
-            >
-              <Trash2 size={12} />
-            </button>
-          </div>
-        ))
+        <NotebookLibraryTree
+          nodes={notebookTree}
+          activePath={state.activeFile?.path}
+          onOpenFile={onOpenFile}
+          onDelete={(file) => { setDeleteError(null); setPendingDelete(file); }}
+          t={t}
+        />
       )}
       {/* Reveal the destructive action on hover only, and colour it red on
           approach — the row's primary action is opening the notebook. */}
@@ -289,6 +269,153 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
           onConfirm={() => void confirmDelete()}
         />
       ) : null}
+    </div>
+  );
+}
+
+function NotebookLibraryTree({
+  nodes,
+  activePath,
+  onOpenFile,
+  onDelete,
+  t,
+  depth = 0,
+}: {
+  nodes: FileLibraryTreeNode[];
+  activePath?: string;
+  onOpenFile: (file: NotebookFile) => void;
+  onDelete: (file: NotebookFile) => void;
+  t: Theme;
+  depth?: number;
+}) {
+  return (
+    <>
+      {nodes.map((node) => node.kind === 'folder' ? (
+        <NotebookFolder
+          key={`notebook-folder:${node.path}`}
+          node={node}
+          activePath={activePath}
+          onOpenFile={onOpenFile}
+          onDelete={onDelete}
+          t={t}
+          depth={depth}
+        />
+      ) : (
+        <NotebookFileRow
+          key={node.file.path}
+          file={node.file}
+          active={activePath === node.file.path}
+          onOpenFile={onOpenFile}
+          onDelete={onDelete}
+          t={t}
+          depth={depth}
+        />
+      ))}
+    </>
+  );
+}
+
+function NotebookFolder({
+  node,
+  activePath,
+  onOpenFile,
+  onDelete,
+  t,
+  depth,
+}: {
+  node: Extract<FileLibraryTreeNode, { kind: 'folder' }>;
+  activePath?: string;
+  onOpenFile: (file: NotebookFile) => void;
+  onDelete: (file: NotebookFile) => void;
+  t: Theme;
+  depth: number;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        title={node.path}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: `5px 8px 5px ${10 + depth * 14}px`,
+          border: 'none',
+          borderBottom: `1px solid ${t.cellBorder}`,
+          background: 'transparent',
+          color: t.textMuted,
+          cursor: 'pointer',
+          textAlign: 'left',
+          fontFamily: t.font,
+          fontSize: 11,
+          fontWeight: depth === 0 ? 700 : 600,
+        }}
+      >
+        <ChevronRight size={11} style={{ transform: expanded ? 'rotate(90deg)' : undefined, flexShrink: 0 }} />
+        {expanded ? <FolderOpen size={13} /> : <Folder size={13} />}
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</span>
+      </button>
+      {expanded ? (
+        <NotebookLibraryTree
+          nodes={node.children}
+          activePath={activePath}
+          onOpenFile={onOpenFile}
+          onDelete={onDelete}
+          t={t}
+          depth={depth + 1}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function NotebookFileRow({
+  file,
+  active,
+  onOpenFile,
+  onDelete,
+  t,
+  depth,
+}: {
+  file: NotebookFile;
+  active: boolean;
+  onOpenFile: (file: NotebookFile) => void;
+  onDelete: (file: NotebookFile) => void;
+  t: Theme;
+  depth: number;
+}) {
+  return (
+    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }} className="dql-nb-row">
+      <button
+        type="button"
+        onClick={() => onOpenFile(file)}
+        style={{ ...rowStyle(t, active), paddingLeft: 10 + depth * 14, paddingRight: 30 }}
+        title={`${file.path}${file.ownerDomain ? ` · Owner domain: ${file.ownerDomain}` : ''}`}
+      >
+        <FileText size={13} color={t.textMuted} style={{ flexShrink: 0 }} />
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5 }}>
+          {file.name.replace(/\.dqln?$|\.ipynb$/i, '')}
+        </span>
+      </button>
+      <button
+        type="button"
+        className="dql-nb-delete"
+        onClick={(event) => { event.stopPropagation(); onDelete(file); }}
+        title={`Delete ${file.name}`}
+        aria-label={`Delete ${file.name}`}
+        style={{
+          position: 'absolute', right: 6, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 22, height: 22, borderRadius: 5, border: '1px solid transparent',
+          background: 'transparent', color: t.textMuted, cursor: 'pointer', padding: 0,
+        }}
+      >
+        <Trash2 size={12} />
+      </button>
     </div>
   );
 }

@@ -2,12 +2,17 @@ import { describe, expect, it } from 'vitest';
 import type { NotebookFile } from '../../store/types';
 import { buildFileLibraryTree, fileLibraryFolder } from './file-library-tree';
 
-function file(path: string, type: NotebookFile['type']): NotebookFile {
+function file(
+  path: string,
+  type: NotebookFile['type'],
+  context: Pick<NotebookFile, 'ownerDomain' | 'usesDomains'> = {},
+): NotebookFile {
   return {
     name: path.split('/').at(-1) ?? path,
     path,
     type,
     folder: path.split('/').slice(0, -1).join('/'),
+    ...context,
   };
 }
 
@@ -17,10 +22,13 @@ describe('domain-aware file library tree', () => {
     expect(fileLibraryFolder(file('domains/commerce/blocks/customer/profile.dql', 'block'))).toBe('blocks');
   });
 
-  it('separates Domain Package folders from compatible project-root folders', () => {
+  it('groups global notebooks by ProductDomainContext without duplicating their Git path', () => {
     const tree = buildFileLibraryTree([
       file('notebooks/executive/overview.dqlnb', 'notebook'),
-      file('domains/commerce/customer/notebooks/research/churn.dqlnb', 'notebook'),
+      file('notebooks/research/churn.dqlnb', 'notebook', {
+        ownerDomain: 'commerce.customer',
+        usesDomains: ['commerce.customer'],
+      }),
     ], 'notebooks');
 
     expect(tree).toMatchObject([
@@ -36,7 +44,13 @@ describe('domain-aware file library tree', () => {
             children: [{
               kind: 'folder',
               name: 'research',
-              children: [{ kind: 'file', file: { path: 'domains/commerce/customer/notebooks/research/churn.dqlnb' } }],
+              children: [{
+                kind: 'file',
+                file: {
+                  path: 'notebooks/research/churn.dqlnb',
+                  ownerDomain: 'commerce.customer',
+                },
+              }],
             }],
           }],
         }],

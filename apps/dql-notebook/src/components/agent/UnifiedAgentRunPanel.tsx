@@ -63,6 +63,7 @@ import type { QueryResult, AppSummary, CellChartConfig, Cell, BlockParameterDefi
 import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
+import { addAskResultFilter, askArtifactStateKey, askResultFilterCandidates } from '../../utils/ask-runtime-parameters';
 
 export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
@@ -3198,6 +3199,7 @@ function ExecutableDqlResult({
   themeMode: ThemeMode;
   embedded?: boolean;
 }) {
+  const [activeArtifact, setActiveArtifact] = useState<AgentConversationDqlArtifact>(artifact);
   const [parameters, setParameters] = useState<BlockParameterDefinition[]>(() => artifact.parameters ?? []);
   const [values, setValues] = useState<Record<string, unknown>>(() => ({
     ...(artifact.parameterValues ?? {}),
@@ -3208,11 +3210,24 @@ function ExecutableDqlResult({
   const [loading, setLoading] = useState(Boolean(certifiedBlockName));
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [addingFilter, setAddingFilter] = useState(false);
+  const [filterColumn, setFilterColumn] = useState('');
+  const [filterValue, setFilterValue] = useState('');
+  const runInFlightRef = useRef(false);
+  const upstreamArtifactRef = useRef(artifact);
+  upstreamArtifactRef.current = artifact;
+  const artifactStateKey = askArtifactStateKey(artifact);
 
   useEffect(() => {
+    const upstreamArtifact = upstreamArtifactRef.current;
+    setActiveArtifact(upstreamArtifact);
+    setAddingFilter(false);
     if (!certifiedBlockName) {
-      setParameters(artifact.parameters ?? []);
-      setValues((current) => ({ ...(artifact.parameterValues ?? {}), ...current }));
+      setParameters(upstreamArtifact.parameters ?? []);
+      setValues({
+        ...(upstreamArtifact.parameterValues ?? {}),
+        ...resolvedParameterValues(payload),
+      });
       setLoading(false);
       return;
     }
@@ -3230,14 +3245,17 @@ function ExecutableDqlResult({
       .catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [artifact, certifiedBlockName]);
+  }, [artifactStateKey, certifiedBlockName]);
 
   const run = async () => {
+    if (runInFlightRef.current) return;
+    runInFlightRef.current = true;
     setRunning(true);
     setError(null);
     try {
-      const response = await api.invokeDqlArtifact(artifact, values, undefined, certifiedBlockName);
+      const response = await api.invokeDqlArtifact(activeArtifact, values, undefined, certifiedBlockName);
       setResult(response.result);
+      setActiveArtifact(response.artifact);
       if (response.result.chartConfig && typeof response.result.chartConfig === 'object') {
         setChartConfig(response.result.chartConfig as CellChartConfig);
       }
@@ -3245,7 +3263,33 @@ function ExecutableDqlResult({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      runInFlightRef.current = false;
       setRunning(false);
+    }
+  };
+
+  const filterCandidates = useMemo(
+    () => askResultFilterCandidates(activeArtifact, result),
+    [activeArtifact, result],
+  );
+  const openFilterEditor = () => {
+    const candidate = filterCandidates[0];
+    if (!candidate) return;
+    setFilterColumn(candidate.column);
+    setFilterValue(candidate.values[0] == null ? '' : String(candidate.values[0]));
+    setAddingFilter(true);
+    setError(null);
+  };
+  const addResultFilter = () => {
+    try {
+      const added = addAskResultFilter(activeArtifact, result, filterColumn, filterValue);
+      setActiveArtifact(added.artifact);
+      setParameters(added.artifact.parameters ?? []);
+      setValues((current) => ({ ...current, ...(added.artifact.parameterValues ?? {}) }));
+      setAddingFilter(false);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -3263,19 +3307,68 @@ function ExecutableDqlResult({
           ))}
         </div>
       ) : null}
-      {loading ? <div style={{ fontSize: 10.5, color: t.textMuted }}>Loading reusable inputs…</div> : editable ? (
+      {loading ? <div style={{ fontSize: 10.5, color: t.textMuted }}>Loading reusable inputs…</div> : editable || filterCandidates.length > 0 ? (
         <div style={{ display: 'grid', gap: 8, padding: 9, margin: embedded ? '0 12px' : 0, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.appBg }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 11, fontWeight: 800, color: t.textPrimary }}>Change DQL inputs</div>
               <div style={{ fontSize: 10, color: t.textMuted }}>Reruns this DQL artifact directly. It does not start another AI search.</div>
             </div>
+            {filterCandidates.length > 0 ? (
+              <button type="button" onClick={openFilterEditor} style={smallButtonStyle(t)}>
+                <Plus size={11} /> Add result filter
+              </button>
+            ) : null}
             <button type="button" disabled={running} onClick={() => void run()} style={{ ...smallButtonStyle(t), color: t.accent, opacity: running ? .65 : 1 }}>
               {running ? <Loader2 size={11} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Sparkles size={11} />}
               {running ? 'Running…' : 'Apply'}
             </button>
           </div>
-          <BlockParameterControls parameters={parameters} values={values} onChange={(name, value) => setValues((current) => ({ ...current, [name]: value }))} t={t} />
+          {addingFilter ? (
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 1fr) minmax(150px, 1fr) auto auto', gap: 7, alignItems: 'end', padding: 8, border: `1px solid ${t.cellBorder}`, borderRadius: 7, background: t.cellBg }}>
+              <label style={{ display: 'grid', gap: 4, fontSize: 10, fontWeight: 750, color: t.textSecondary }}>
+                Result column
+                <select
+                  aria-label="Result column for new DQL input"
+                  value={filterColumn}
+                  onChange={(event) => {
+                    const column = event.target.value;
+                    const candidate = filterCandidates.find((item) => item.column === column);
+                    setFilterColumn(column);
+                    setFilterValue(candidate?.values[0] == null ? '' : String(candidate.values[0]));
+                  }}
+                  style={askParameterControlStyle(t)}
+                >
+                  {filterCandidates.map((candidate) => <option key={candidate.column} value={candidate.column}>{candidate.column.split('_').join(' ')}</option>)}
+                </select>
+              </label>
+              <label style={{ display: 'grid', gap: 4, fontSize: 10, fontWeight: 750, color: t.textSecondary }}>
+                Default value
+                <input
+                  aria-label="Default value for new DQL input"
+                  value={filterValue}
+                  list={`ask-filter-${filterColumn}`}
+                  onChange={(event) => setFilterValue(event.target.value)}
+                  style={askParameterControlStyle(t)}
+                />
+                <datalist id={`ask-filter-${filterColumn}`}>
+                  {(filterCandidates.find((candidate) => candidate.column === filterColumn)?.values ?? []).map((value) => (
+                    <option key={`${typeof value}:${String(value)}`} value={String(value)} />
+                  ))}
+                </datalist>
+              </label>
+              <button type="button" onClick={addResultFilter} style={{ ...smallButtonStyle(t), color: t.accent }}>Add input</button>
+              <button type="button" onClick={() => setAddingFilter(false)} style={smallButtonStyle(t)}>Cancel</button>
+            </div>
+          ) : null}
+          {parameters.length > 0 ? (
+            <BlockParameterControls parameters={parameters} values={values} onChange={(name, value) => setValues((current) => ({ ...current, [name]: value }))} t={t} />
+          ) : null}
+          {filterCandidates.length > 0 ? (
+            <div style={{ fontSize: 9.5, color: t.textMuted }}>
+              Extra filters are available only for semantic dimensions in this result. They stay transient until you explicitly save a block.
+            </div>
+          ) : null}
         </div>
       ) : null}
       {error ? <div style={{ fontSize: 10.5, color: t.error }}>{error}</div> : null}
@@ -4427,6 +4520,21 @@ function codeStyle(t: Theme): React.CSSProperties {
     lineHeight: 1.45,
     fontFamily: t.fontMono,
     whiteSpace: 'pre-wrap',
+  };
+}
+
+function askParameterControlStyle(t: Theme): React.CSSProperties {
+  return {
+    width: '100%',
+    minWidth: 0,
+    boxSizing: 'border-box',
+    background: t.inputBg,
+    border: `1px solid ${t.inputBorder}`,
+    borderRadius: 5,
+    color: t.textPrimary,
+    padding: '5px 7px',
+    fontSize: 11,
+    fontFamily: t.font,
   };
 }
 

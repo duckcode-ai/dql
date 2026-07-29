@@ -222,6 +222,23 @@ export function removeVisualBlockParameter(content: string, name: string): strin
   return writeVisualParameters(content, parameters);
 }
 
+/**
+ * Bind one visual parameter to a semantic dimension without disturbing other
+ * parameter or filter bindings. Ask uses this after the user explicitly adds a
+ * result-column filter to a transient semantic artifact.
+ */
+export function setVisualBlockParameterBinding(content: string, name: string, field: string): string {
+  const safeName = normalizeParameterName(name);
+  const safeField = field.trim();
+  if (!safeName || !safeField) return content;
+  const body = readDqlSection(content, 'filterBindings');
+  const retained = body
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !new RegExp(`^${safeName}\\s*=`).test(line.trim()));
+  retained.push(`${safeName} = "${escapeDqlValue(safeField)}"`);
+  return setDqlSectionBody(content, 'filterBindings', retained.join('\n'));
+}
+
 function writeVisualParameters(
   content: string,
   parameters: Array<{

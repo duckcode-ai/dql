@@ -149,6 +149,12 @@ Inline Ask results retain the executable DQL artifact rather than flattening it
 to a table. They show the applied values and reuse the same parameter controls
 as other Notebook DQL results, so changing an input reruns the saved artifact
 directly without another metadata search or AI planning pass (`UI-011`).
+For a transient semantic result, the user may explicitly add a result-dimension
+filter as another typed runtime input. DQL derives a new review-required
+artifact and receipt from that edit; it does not mutate a saved source, certify
+the result, or infer metric/HAVING semantics. Raw-SQL artifacts require an
+explicit declared placeholder rather than structural SQL rewriting
+(`API-005`, `UI-011`).
 
 The artifact is finalized before the displayed query executes. Initial Ask and
 Apply use the same source, compiler, resolved values, and row bound. A redacted
@@ -158,6 +164,9 @@ source/parameter/compiled-SQL contract. Generated SQL is never parameterized or
 translated into a second artifact after its result has already been produced,
 and a transient artifact's supplied source is not silently replaced by a draft
 file at its optional source path (`AGT-010`, `API-003`, `UI-011`).
+Receipt comparison preserves the executable source bytes, including a final
+newline; compatibility for legacy receipts is limited to that newline
+normalization and never accepts a substantive source change.
 
 Successful and failed executable runs retain the inspectable plan, DQL artifact,
 compiled SQL when available, lineage/trust evidence, actual phase steps, and

@@ -79,5 +79,9 @@ function displayFolders(file: NotebookFile, folderKey: FileLibraryFolderKey): st
     || (folderKey === 'business-views' && part === 'views')
   ));
   const nested = featureIndex >= 0 ? parts.slice(featureIndex + 1, -1) : parts.slice(0, -1);
+  if (folderKey === 'notebooks' && file.ownerDomain) {
+    const ownerPath = file.ownerDomain.split(/[./]/).map((part) => part.trim()).filter(Boolean);
+    return ['Domains', ...ownerPath, ...nested];
+  }
   return ['Project', ...nested];
 }

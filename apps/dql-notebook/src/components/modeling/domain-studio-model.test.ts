@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
-import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, resolveEntityRecordKey } from './domain-studio-model';
+import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDomainStudioSection, resolveEntityRecordKey } from './domain-studio-model';
 
 function entity(domain: string, localId: string): ManifestModelEntity {
   return {
@@ -20,13 +20,22 @@ function modeling(entities: Record<string, ManifestModelEntity>): Pick<ManifestD
 }
 
 describe('Domain Studio navigation', () => {
-  it('keeps domain modeling first while exposing domain-owned source and global product backlinks', () => {
-    expect(DOMAIN_STUDIO_NAVIGATION.map((group) => [group.label, group.items.map((item) => item.label)])).toEqual([
-      ['Workspace', ['Overview', 'Models', 'Knowledge 360']],
-      ['Knowledge & assets', ['Terms', 'Skills', 'Blocks', 'Business views']],
-      ['Governance', ['Join proofs', 'Contracts', 'Interfaces', 'Evaluations & tests']],
-      ['Related products', ['Notebooks', 'Apps', 'dbt scope']],
+  it('keeps the Domain workspace focused on agent context and related products', () => {
+    expect(DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items.map((item) => item.label))).toEqual([
+      'Models',
+      'Skills',
+      'Blocks',
+      'Notebooks',
+      'Apps',
     ]);
+    expect(isDomainStudioSection('diagram')).toBe(true);
+    expect(isDomainStudioSection('skills')).toBe(true);
+    expect(isDomainStudioSection('blocks')).toBe(true);
+    expect(isDomainStudioSection('notebooks')).toBe(true);
+    expect(isDomainStudioSection('apps')).toBe(true);
+    expect(isDomainStudioSection('knowledge')).toBe(false);
+    expect(isDomainStudioSection('join-proofs')).toBe(false);
+    expect(isDomainStudioSection('contracts')).toBe(false);
   });
 
   it('orders nested Domain Packages parent-first with simple hierarchy labels', () => {

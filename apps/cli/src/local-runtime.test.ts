@@ -699,6 +699,42 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
       expect(parity.result.rows).toEqual(generated.result.rows);
       expect(parity.artifact.executionReceipt).toEqual(generated.artifact.executionReceipt);
 
+      const trailingNewlineSource = `${generatedSource}\n`;
+      const trailingNewlineResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: {
+            kind: 'sql_block',
+            name: 'Generated Runtime Parameter',
+            source: trailingNewlineSource,
+            persistence: 'transient',
+            trustState: 'review_required',
+          },
+          parameters: { category: 'Tea', top_n: 7 },
+        }),
+      });
+      const trailingNewline = await trailingNewlineResponse.json() as typeof generated;
+      expect({ status: trailingNewlineResponse.status, error: trailingNewline.error }).toEqual({ status: 200, error: undefined });
+      expect(trailingNewline.artifact.source).toBe(trailingNewlineSource);
+
+      const legacyTrimmedSourceResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact: {
+            ...trailingNewline.artifact,
+            // DQL <= 1.11.10 normalized away this final newline after creating
+            // the receipt. Existing saved runs must remain parameter-rerunnable.
+            source: trailingNewlineSource.trimEnd(),
+          },
+          parameters: { category: 'Coffee', top_n: 5 },
+        }),
+      });
+      const legacyTrimmedSource = await legacyTrimmedSourceResponse.json() as typeof generated;
+      expect({ status: legacyTrimmedSourceResponse.status, error: legacyTrimmedSource.error }).toEqual({ status: 200, error: undefined });
+      expect(legacyTrimmedSource.result.rows).toEqual([{ selected_category: 'Coffee', selected_limit: 5 }]);
+
       const driftResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -774,7 +810,7 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
         expect.objectContaining({ name: 'top_n', value: 4, source: 'question' }),
       ]));
       expect(questionBound.artifact.parameterValues).toEqual({ category: 'Tea', top_n: 4 });
-      expect(executeQuery).toHaveBeenCalledTimes(6);
+      expect(executeQuery).toHaveBeenCalledTimes(8);
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
@@ -1609,6 +1645,17 @@ describe('global Notebook ProductDomainContext authoring (UI-001, PRD-001)', () 
         requiredExports: [],
       });
       expect(existsSync(join(projectRoot, 'domains', 'commerce', 'notebooks', 'customer_research.dqlnb'))).toBe(false);
+
+      const listed = await fetch(`${base}/api/notebooks`).then((listing) => listing.json()) as Array<{
+        path: string;
+        ownerDomain?: string;
+        usesDomains?: string[];
+      }>;
+      expect(listed).toContainEqual(expect.objectContaining({
+        path: 'notebooks/customer_research.dqlnb',
+        ownerDomain: 'commerce',
+        usesDomains: ['commerce'],
+      }));
 
       const rejected = await fetch(`${base}/api/notebooks`, {
         method: 'POST',

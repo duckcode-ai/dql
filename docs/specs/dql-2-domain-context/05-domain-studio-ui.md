@@ -11,25 +11,28 @@ Govern     Domains · Source control
 ```
 
 Domains opens a focused Domain Workspace. OSS deliberately avoids asking a new
-user to construct every governance object up front. The workspace presents the
-parent-first Domain Package tree and progressively disclosed source groups:
+user to navigate internal governance objects. The workspace presents the
+parent-first Domain Package tree and five task-level destinations:
 
 ```text
-Workspace             Overview · Models · Knowledge 360
-Knowledge & assets    Terms · Skills · Blocks · Business views
-Governance            Join proofs · Contracts · Interfaces · Evaluations & tests
-Related products      Notebooks · Apps · dbt scope
+Models · Skills · Blocks · Notebooks · Apps
 ```
 
-Models remains the primary authoring destination. The tab begins with an Area
-selector (`All domain` plus focused Model
-Areas), a business/data view switch, and compact actions to add a dbt model,
-connect a relationship, create an Area, auto-layout, fit, and inspect. Skills
-is the parallel knowledge editor. The remaining entries expose contextual
-inventory, readiness, and backlinks through the same compiled snapshot; they
-do not create duplicate feature editors or duplicate product storage. Global
-Apps/Ask/Notebooks behavior and canonical root storage remain unchanged
-(`PRD-001`, `UI-001`).
+Models is the primary data-context destination. It begins with an Area selector
+(`All domain` plus focused Model Areas), a business/data view switch, and
+compact actions to add a dbt model, connect a relationship, create an Area,
+auto-layout, fit, and inspect. Skills is the parallel instruction/context
+editor. Blocks lists the selected domain's canonical block sources. Notebooks
+and Apps show the global products that own or use the selected domain. Selecting
+a card opens the exact source in Block Studio, the Notebook editor, or the App
+viewer; it does not create a domain-local copy. Global Apps/Ask/Notebooks
+behavior and canonical root storage remain unchanged (`PRD-001`, `UI-001`).
+
+Terms, business views, join proofs, contracts, interfaces, evaluations, dbt
+scope, and Knowledge 360 are not separate Domain navigation destinations. Their
+compiled evidence remains available to retrieval, validation, Models
+inspectors, Block Studio, Source Control, and other task-specific surfaces.
+Historical deep links to those removed sections normalize to Models.
 
 The Domain selector presents nested Domain Packages parent-first. Domain and
 Area selection round-trip through `domain`, `modelArea`, and `domainSection`
@@ -46,13 +49,6 @@ analysis, while a reviewed result can be saved as a block and explicitly
 certified to reduce repeated AI work and token usage. This guidance is shown
 only for materially long or repaired/deep turns and never implies that saving a
 draft certifies it (`UI-003`).
-
-## Overview
-
-Show ownership, parent/children, selected dbt scope, readiness by capability,
-stale/blocking diagnostics, recent source changes, certified asset counts, and
-next best actions. Do not collapse readiness into one score that hides unsafe
-joins or missing exports.
 
 ## Domain Model canvas
 
@@ -94,27 +90,26 @@ dbt-owned fields are read-only. Edit opens a source patch preview against the
 actual dbt SQL/YAML with fingerprint guard. DQL-owned changes preview and write
 Domain Package source. No canvas action writes copied dbt metadata (`UI-002`).
 
-## Knowledge and assets
+## Agent context
 
-Terms and Skills share search, source, lifecycle, evidence, and evaluation
-patterns. Domain skills clearly differ from global workflow skills. Certified
-Assets shows domain blocks/views with grain, compatible dimensions, contracts,
-evaluations, consumers, and certification state. Authoring shortcuts preserve
-the domain-qualified identity.
+Models and Skills are the user-facing Domain context. Agent retrieval may also
+consume current dbt metadata, semantic context, certified assets, relationship
+proof, and evaluation state from the compiled snapshot, but those sources do
+not require separate Domain tabs. Domain skills clearly differ from global
+workflow skills and preserve domain-qualified identity.
 
 ## Readiness
 
-Join proofs, Contracts, Interfaces, and Evaluations are task-focused queues:
-what is blocked, why it matters to Ask, evidence, affected products, and the
-next action. They are not empty configuration tables. Every item links back to
-the relevant graph edge/asset and source diff.
+Join proofs, contracts, interfaces, and evaluations remain validation and
+retrieval evidence. Surface a relevant problem in the Models inspector or in
+the task that needs action; do not expose standalone empty governance tables in
+Domain navigation.
 
-## Related Products and dbt Scope
+## Related Products
 
 Related Products is derived from `ProductDomainContext` and manifest lineage.
 It shows global Notebooks/Apps that own or use this domain and highlights
-missing required exports or unscoped legacy products. dbt Scope provides
-paginated, filterable read-only provenance and source-patch entry points.
+missing required exports or unscoped legacy products.
 
 ## Theme and accessibility contract
 
@@ -127,7 +122,8 @@ communicated by color alone.
 ## UI acceptance
 
 Browser acceptance starts the built CLI with `dql notebook` against the
-dedicated fixture. Tests cover sidebar/deep links, inspector toggle/resize,
-free movement, auto-fit, column-to-column drag, compact relationship editing,
-source preview, related products, theme changes, and a Cloud embed-contract
-check. Vite-only screenshots are insufficient.
+dedicated fixture. Tests cover the five-section sidebar, exact Block/Notebook/App
+routing, removed-section deep-link fallback, inspector toggle/resize, free
+movement, auto-fit, column-to-column drag, compact relationship editing, source
+preview, related products, theme changes, and a Cloud embed-contract check.
+Vite-only screenshots are insufficient.

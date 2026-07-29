@@ -737,6 +737,9 @@ export interface NotebookFile {
   path: string;
   type: 'notebook' | 'workbook' | 'block' | 'dashboard' | 'term' | 'business_view';
   folder: string;
+  /** Canonical ProductDomainContext for virtual Domain folders in the UI. */
+  ownerDomain?: string;
+  usesDomains?: string[];
   isNew?: boolean;
 }
 

@@ -13365,7 +13365,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const sourceRefreshedFromDisk = Boolean(requestedBlockName)
           && receiptSource.trim().length > 0
           && receiptSource !== source;
-        if (expectedReceipt && !sourceRefreshedFromDisk && expectedReceipt.sourceFingerprint !== executionFingerprint(source)) {
+        if (
+          expectedReceipt
+          && !sourceRefreshedFromDisk
+          && !executionSourceFingerprintMatches(expectedReceipt.sourceFingerprint, source)
+        ) {
           throw new Error('DQL artifact source changed after the answer was produced. Refresh the answer before applying it.');
         }
         const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
@@ -15870,6 +15874,20 @@ function executionFingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+/**
+ * Older clients normalized executable DQL with trim(), while the receipt was
+ * correctly created from the original renderer output ending in one newline.
+ * Accept only that exact legacy line-ending variant; any substantive source
+ * change still fails closed.
+ */
+function executionSourceFingerprintMatches(expected: string, source: string): boolean {
+  return [
+    source,
+    `${source}\n`,
+    `${source}\r\n`,
+  ].some((candidate) => executionFingerprint(candidate) === expected);
+}
+
 function stableExecutionValue(value: unknown): string {
   const seen = new WeakSet<object>();
   return JSON.stringify(value, (_key, item: unknown) => {
@@ -17560,6 +17578,8 @@ type NotebookFileEntry = {
   path: string;
   type: 'notebook' | 'workbook' | 'block' | 'dashboard' | 'term' | 'business_view';
   folder: string;
+  ownerDomain?: string;
+  usesDomains?: string[];
 };
 
 function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
@@ -17606,6 +17626,7 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
           path: relativePath,
           type,
           folder: relativeDir,
+          ...readNotebookFileProductContext(fullPath, type),
         });
       }
     } catch { /* skip unreadable domain package dirs */ }
@@ -17628,9 +17649,28 @@ function scanNotebookFiles(projectRoot: string): NotebookFileEntry[] {
           path: relativePath,
           type,
           folder: relativeDir.split('/')[0] ?? relativeDir,
+          ...readNotebookFileProductContext(fullPath, type),
         });
       }
     } catch { /* skip unreadable dirs */ }
+  }
+}
+
+function readNotebookFileProductContext(
+  fullPath: string,
+  type: NotebookFileEntry['type'],
+): Pick<NotebookFileEntry, 'ownerDomain' | 'usesDomains'> {
+  if ((type !== 'notebook' && type !== 'workbook') || !fullPath.endsWith('.dqlnb')) return {};
+  try {
+    const metadata = deserializeNotebook(readFileSync(fullPath, 'utf-8')).metadata;
+    return {
+      ...(metadata.ownerDomain ? { ownerDomain: metadata.ownerDomain } : {}),
+      usesDomains: metadata.usesDomains ?? [],
+    };
+  } catch {
+    // A malformed notebook must remain visible in the file list so the user
+    // can open and repair it; it simply falls back to the Project folder.
+    return {};
   }
 }
 

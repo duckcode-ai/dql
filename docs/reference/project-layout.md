@@ -106,7 +106,10 @@ my-dql-project/
   blocks and other business views into business lineage, without running SQL.
 - **`notebooks/`** — interactive analysis. Saved results live beside the
   notebook as `.run.json` (git-ignored). Notebooks remain global products and
-  use `ownerDomain` / `usesDomains` metadata to appear in Domain Studio.
+  use `ownerDomain` / `usesDomains` metadata to appear in Domain Studio. The
+  Notebook explorer renders a virtual `Domains/<ownerDomain>/` tree from that
+  metadata while keeping one canonical file under `notebooks/`; notebooks
+  without an owner remain under the virtual `Project` folder.
 - **`apps/`** — global decision-facing packages. An App can have dashboard pages,
   attached notebooks, AI conversations and pins, and draft DQL blocks. In OSS, `domain`,
   `subdomain`, `groups`, `audience`, `visibility`, and `lifecycle` are
