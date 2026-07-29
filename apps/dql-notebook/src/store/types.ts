@@ -645,6 +645,21 @@ export interface CellDqlArtifact {
   question?: string;
 }
 
+/**
+ * Immutable origin evidence for an AI draft that may later become a governed
+ * correction candidate. This is deliberately separate from `dqlArtifact`:
+ * generated SQL can be taught without pretending it is a DQL block, while
+ * saved/certified DQL remains on its normal draft/review/recertify path.
+ */
+export interface CellCorrectionProvenance {
+  version: 1;
+  source: "agent_run";
+  question: string;
+  generatedSql?: string;
+  generatedDql?: string;
+  sourceRunId?: string;
+}
+
 export interface ExecutionTarget {
   target: "connection" | "local";
   /** Named project connection. Credentials remain in project connection storage. */
@@ -702,6 +717,7 @@ export interface Cell {
   blockBinding?: BlockBinding; // Present when cell references a .dql block file
   dqlParameterValues?: Record<string, unknown>; // Ephemeral values for an inline DQL cell
   dqlArtifact?: CellDqlArtifact; // Governed DQL provenance for AI/Explore-generated cells
+  correctionProvenance?: CellCorrectionProvenance; // Original AI draft/question for explicit Teach DQL
   executionTarget?: ExecutionTarget; // Named warehouse connection or local DuckDB workspace
   datasetRefs?: DatasetReference[]; // Imported or staged datasets used by the cell
   dependencies?: CellDependency[]; // Explicit, stable cell dependency graph

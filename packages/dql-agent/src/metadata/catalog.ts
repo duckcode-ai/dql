@@ -114,6 +114,8 @@ export interface AppliedContextHint {
   title: string;
   guidance: string;
   scopeReason: string;
+  /** Matching domain/model/relation/column graph connections. */
+  graphReason?: string;
   score: number;
   correctedSql?: string;
   traceId?: string;
@@ -1497,7 +1499,13 @@ export async function buildLocalContextPack(
     // Approved scoped correction hints — folded in AFTER certified routing so
     // they never override a certified answer. On the `certified` route we still
     // surface in-scope hints as advisory context, but never to change the route.
-    const questionScope = deriveQuestionScope(request, questionPlan, objects, routeDecision);
+    const questionScope = deriveQuestionScope(
+      request,
+      questionPlan,
+      objects,
+      routeDecision,
+      allowedSqlContext,
+    );
     const hintResult = await retrieveScopedHints(projectRoot, {
       questionScope,
       limit: 6,
@@ -4958,6 +4966,7 @@ function deriveQuestionScope(
   questionPlan: AnalysisQuestionPlan,
   objects: MetadataObject[],
   routeDecision: MetadataRouteDecision,
+  allowedSqlContext: MetadataAllowedSqlContext,
 ): QuestionScope {
   const focusKey = routeDecision.exactObjectKey ?? request.focusObjectKey;
   const focus = focusKey ? objects.find((object) => object.objectKey === focusKey) : undefined;
@@ -4988,6 +4997,13 @@ function deriveQuestionScope(
     domain: lowerOrUndef(domain),
     term: lowerOrUndef(term),
     block,
+    relations: allowedSqlContext.relations
+      .map((relation) => relation.relation)
+      .filter(Boolean)
+      .slice(0, 80),
+    columns: allowedSqlContext.relations
+      .flatMap((relation) => relation.columns.map((column) => `${relation.relation}.${column.name}`))
+      .slice(0, 320),
     text: request.question,
   };
 }

@@ -1470,6 +1470,14 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
         {hint.trace?.wrongAnswer ? <div><b>Previous answer:</b> {hint.trace.wrongAnswer}</div> : null}
         <div><b>Snapshot:</b> {hint.snapshotId ?? 'missing'}{hint.inspection?.currentSnapshotId ? ` · current ${hint.inspection.currentSnapshotId}` : ''}</div>
         <div><b>Dependencies:</b> {hint.dependencies?.map((item) => `${item.kind}:${item.id}@${item.fingerprint.slice(0, 10)}`).join(', ') || 'none recorded'}</div>
+        <div>
+          <b>Graph connections:</b>{' '}
+          {hint.graphEdges?.length
+            ? hint.graphEdges
+                .map((edge) => `${edge.kind.replace(/_/g, ' ')} → ${edge.targetName}`)
+                .join(' · ')
+            : 'none materialized'}
+        </div>
         {hint.lifecycleErrors?.map((item) => <div key={`${item.code}-${item.at}`} style={{ color: t.error }}><b>{item.code}:</b> {item.message}</div>)}
         {hint.evaluation ? (
           <div>
@@ -1586,7 +1594,7 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
       </div>
       {pending.length === 0 ? (
         <div style={{ fontSize: 11.5, color: t.textMuted, lineHeight: 1.5 }}>
-          Nothing pending. A candidate appears only after you explicitly choose Teach DQL on edited SQL that has run successfully.
+          Nothing pending. A candidate appears only after you explicitly choose Teach DQL on an AI draft that you changed and ran successfully.
         </div>
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>

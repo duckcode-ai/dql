@@ -49,6 +49,40 @@ export type HintDependencyKind =
   | 'semantic';
 
 /**
+ * A typed connection from a governed hint to the current project graph.
+ *
+ * These edges are a rebuildable SQLite projection of Git-authoritative hint
+ * fields and SQL references. They make the learning scope inspectable and
+ * graph-rankable without inserting candidate hints into the normal KG search
+ * lane or changing the approved-only retrieval boundary.
+ */
+export type HintGraphEdgeKind =
+  | 'belongs_to_domain'
+  | 'refines_metric'
+  | 'uses_dbt_model'
+  | 'uses_relation'
+  | 'uses_column'
+  | 'refines_term'
+  | 'relates_to_block'
+  | 'uses_dialect'
+  | 'depends_on'
+  | 'derived_from'
+  | 'validated_by'
+  | 'supersedes';
+
+export interface HintGraphEdge {
+  hintId: string;
+  kind: HintGraphEdgeKind;
+  targetId: string;
+  targetKind: string;
+  targetName: string;
+  /** Content fingerprint when the edge came from a governed dependency. */
+  fingerprint?: string;
+  /** Where this projection came from, for review/debugging. */
+  source: 'scope' | 'dependency' | 'corrected_sql' | 'lifecycle';
+}
+
+/**
  * A source object whose exact contents were used to validate a correction.
  * Fingerprints make drift detection content-aware instead of relying on a
  * missing-name check.
@@ -199,6 +233,8 @@ export interface ScopedHintMatch {
   score: number;
   /** Plain-language scope match explanation, e.g. "metric=revenue, domain=growth". */
   scopeReason: string;
+  /** Matching graph connections used to rank this hint for the question. */
+  graphReason?: string;
   /** Snippet from the FTS match, if any. */
   snippet?: string;
 }
@@ -225,6 +261,13 @@ export interface QuestionScope {
   dialect?: string;
   term?: string;
   block?: string;
+  /** Governed relations selected for this question's bounded context pack. */
+  relations?: string[];
+  /**
+   * Qualified relation.column references available in that bounded context.
+   * These rank already-eligible hints; they do not override explicit scope.
+   */
+  columns?: string[];
   /** Free-text keywords used for FTS search (typically the question). */
   text: string;
 }

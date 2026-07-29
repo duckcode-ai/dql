@@ -14,6 +14,8 @@ describe('Ask AI Notebook repair handoff', () => {
     const cell = askNotebookCellFromPayload({
       title: 'Revenue repair',
       sql,
+      question: 'What is revenue?',
+      sourceRunId: 'run-revenue',
       dqlArtifact: {
         kind: 'semantic_block',
         name: 'revenue_repair',
@@ -39,6 +41,13 @@ describe('Ask AI Notebook repair handoff', () => {
         reviewState: 'review_required',
         compiledSql: sql,
       },
+      correctionProvenance: {
+        version: 1,
+        source: 'agent_run',
+        question: 'What is revenue?',
+        generatedSql: sql,
+        sourceRunId: 'run-revenue',
+      },
     });
   });
 
@@ -46,11 +55,20 @@ describe('Ask AI Notebook repair handoff', () => {
     expect(askNotebookCellFromPayload({
       title: 'SQL repair',
       sql: 'SELECT broken FROM missing_table',
+      question: 'Show the missing metric',
+      sourceRunId: 'run-sql-repair',
     })).toMatchObject({
       type: 'sql',
       name: 'SQL_repair',
       content: 'SELECT broken FROM missing_table',
       status: 'idle',
+      correctionProvenance: {
+        version: 1,
+        source: 'agent_run',
+        question: 'Show the missing metric',
+        generatedSql: 'SELECT broken FROM missing_table',
+        sourceRunId: 'run-sql-repair',
+      },
     });
   });
 });

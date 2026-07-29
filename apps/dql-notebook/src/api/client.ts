@@ -1158,6 +1158,28 @@ export interface AgentHintCheck {
   evidence?: string;
 }
 
+export interface AgentHintGraphEdge {
+  hintId: string;
+  kind:
+    | 'belongs_to_domain'
+    | 'refines_metric'
+    | 'uses_dbt_model'
+    | 'uses_relation'
+    | 'uses_column'
+    | 'refines_term'
+    | 'relates_to_block'
+    | 'uses_dialect'
+    | 'depends_on'
+    | 'derived_from'
+    | 'validated_by'
+    | 'supersedes';
+  targetId: string;
+  targetKind: string;
+  targetName: string;
+  fingerprint?: string;
+  source: 'scope' | 'dependency' | 'corrected_sql' | 'lifecycle';
+}
+
 export interface AgentHint {
   id: string;
   title: string;
@@ -1173,6 +1195,7 @@ export interface AgentHint {
   evaluationId?: string;
   evaluationStatus?: 'passed' | 'failed';
   dependencies?: AgentHintDependency[];
+  graphEdges?: AgentHintGraphEdge[];
   lifecycleErrors?: Array<{ code: string; message: string; at: string }>;
   supersedes?: string;
   trace?: {

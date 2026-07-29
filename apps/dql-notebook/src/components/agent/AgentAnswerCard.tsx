@@ -349,7 +349,11 @@ export function AgentAnswerCard({
   addToAppTarget?: { appId: string; dashboardId: string };
   sourceQuestion?: string;
   onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (
+    sql: string,
+    title?: string,
+    meta?: { question?: string; sourceRunId?: string },
+  ) => void;
   onCreateBlock?: (sql: string, meta: { title?: string; description?: string; tags?: string[] }) => void;
 }) {
   const t = themes[themeMode];
@@ -397,7 +401,9 @@ export function AgentAnswerCard({
   });
   const insertSql = () => {
     if (!onInsertSql || !sql) return;
-    onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL preview');
+    onInsertSql(sql, blockName ?? analysisPlan?.question ?? 'AI SQL preview', {
+      question: sourceQuestion ?? analysisPlan?.question,
+    });
     setInsertMessage('Inserted SQL preview cell for review.');
   };
   const createBlock = () => {

@@ -18,6 +18,7 @@
  */
 
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -43,6 +44,7 @@ const TRACES_DIR = ['.dql', 'traces'];
 const HINTS_DIR = ['.dql', 'hints'];
 const EVALUATIONS_DIR = ['.dql', 'evaluations'];
 const REVIEWS_DIR = ['.dql', 'reviews'];
+const HINT_INDEX_PROJECTION_VERSION = 'hint-graph-v1';
 
 export function tracesDir(projectRoot: string): string {
   return join(projectRoot, ...TRACES_DIR);
@@ -669,13 +671,57 @@ function writeHintReview(
 
 // --- Index ------------------------------------------------------------------
 
+export interface EnsureHintIndexFreshResult {
+  hintCount: number;
+  fingerprint: string;
+  rebuilt: boolean;
+}
+
+/**
+ * Content-address the Git-authoritative hint files together with the SQLite
+ * projection version. File names and bytes are stable across clones; absolute
+ * paths and filesystem timestamps are intentionally excluded.
+ */
+export function hintIndexProjectionFingerprint(projectRoot: string): string {
+  const hash = createHash('sha256').update(HINT_INDEX_PROJECTION_VERSION).update('\0');
+  const dir = hintsDir(projectRoot);
+  if (!existsSync(dir)) return hash.digest('hex');
+  for (const file of readdirSync(dir).filter((name) => name.endsWith('.hint.yaml')).sort()) {
+    hash.update(file).update('\0').update(readFileSync(join(dir, file), 'utf-8')).update('\0');
+  }
+  return hash.digest('hex');
+}
+
 /** Rebuild the SQLite hint index from the Git-authoritative files. */
 export function reindexHints(projectRoot: string, indexPath = defaultHintIndexPath(projectRoot)): number {
   const hints = listHintsFromGit(projectRoot);
+  const fingerprint = hintIndexProjectionFingerprint(projectRoot);
   const store = new HintStore(indexPath);
   try {
-    store.rebuild(hints);
+    store.rebuild(hints, fingerprint);
     return hints.length;
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Bootstrap or refresh the local hint projection only when Git data or the
+ * projection schema changed. Safe to call whenever an OSS project is opened.
+ */
+export function ensureHintIndexFresh(
+  projectRoot: string,
+  indexPath = defaultHintIndexPath(projectRoot),
+): EnsureHintIndexFreshResult {
+  const hints = listHintsFromGit(projectRoot);
+  const fingerprint = hintIndexProjectionFingerprint(projectRoot);
+  const store = new HintStore(indexPath);
+  try {
+    if (store.projectionFingerprint() === fingerprint) {
+      return { hintCount: hints.length, fingerprint, rebuilt: false };
+    }
+    store.rebuild(hints, fingerprint);
+    return { hintCount: hints.length, fingerprint, rebuilt: true };
   } finally {
     store.close();
   }

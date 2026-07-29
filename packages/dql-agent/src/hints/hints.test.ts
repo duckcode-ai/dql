@@ -8,6 +8,7 @@ import {
   listHintsFromGit,
   getHintFromGit,
   reindexHints,
+  ensureHintIndexFresh,
   writeHintFile,
   hintsDir,
   tracesDir,
@@ -17,6 +18,7 @@ import {
 import { HintStore } from './store.js';
 import { hintAppliesToScope, hintsConflict, type Hint, type QuestionScope } from './types.js';
 import { retrieveScopedHints } from './retrieval.js';
+import { buildHintGraphEdges } from './graph.js';
 
 let projectRoot: string;
 
@@ -128,6 +130,146 @@ describe('scoped correction memory — lifecycle', () => {
     expect(count).toBe(1);
     expect(await searchApproved({ domain: 'growth', text: 'anything growth' })).toHaveLength(1);
   });
+
+  it('bootstraps a cloned Git hint set once and refreshes only after Git changes', () => {
+    const hint: Hint = {
+      id: 'hint-from-clone',
+      title: 'Use governed net revenue',
+      guidance: 'Use net amount and exclude refunds.',
+      status: 'approved',
+      scope: { metric: 'revenue', domain: 'commerce', dbtModel: 'fct_orders' },
+      correctedSql: 'SELECT SUM(o.net_amount) FROM analytics.fct_orders AS o',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    writeHintFile(projectRoot, hint);
+
+    expect(existsSync(indexPath())).toBe(false);
+    expect(ensureHintIndexFresh(projectRoot)).toMatchObject({
+      hintCount: 1,
+      rebuilt: true,
+    });
+
+    const store = new HintStore(indexPath());
+    try {
+      expect(store.get(hint.id)?.title).toBe(hint.title);
+      expect(store.edgesForHint(hint.id)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'belongs_to_domain', targetId: 'domain:commerce' }),
+        expect.objectContaining({ kind: 'uses_relation', targetId: 'relation:analytics.fct_orders' }),
+        expect.objectContaining({ kind: 'uses_column', targetId: 'column:analytics.fct_orders.net_amount' }),
+      ]));
+    } finally {
+      store.close();
+    }
+
+    expect(ensureHintIndexFresh(projectRoot)).toMatchObject({
+      hintCount: 1,
+      rebuilt: false,
+    });
+
+    writeHintFile(projectRoot, {
+      ...hint,
+      guidance: 'Use recognized net amount and exclude refunds.',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    });
+    expect(ensureHintIndexFresh(projectRoot)).toMatchObject({
+      hintCount: 1,
+      rebuilt: true,
+    });
+  });
+
+  it('materializes reviewable domain, model, relation, and column graph edges', () => {
+    const { hint } = recordCorrectionTrace(projectRoot, {
+      question: 'How should net revenue be calculated?',
+      scope: { metric: 'revenue', domain: 'growth', dbtModel: 'fct_orders' },
+      wrongAnswer: 'SELECT SUM(gross_amount) FROM analytics.fct_orders',
+      correction: 'Use net amount and exclude refunds.',
+      correctedSql: `
+        SELECT SUM(o.net_amount)
+        FROM analytics.fct_orders AS o
+        WHERE o.is_refund = false
+      `,
+    });
+
+    const store = new HintStore(indexPath());
+    try {
+      expect(store.edgesForHint(hint.id)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'belongs_to_domain',
+          targetId: 'domain:growth',
+          source: 'scope',
+        }),
+        expect.objectContaining({
+          kind: 'refines_metric',
+          targetId: 'metric:revenue',
+          source: 'scope',
+        }),
+        expect.objectContaining({
+          kind: 'uses_dbt_model',
+          targetId: 'dbt_model:fct_orders',
+          source: 'scope',
+        }),
+        expect.objectContaining({
+          kind: 'uses_relation',
+          targetId: 'relation:analytics.fct_orders',
+          source: 'corrected_sql',
+        }),
+        expect.objectContaining({
+          kind: 'uses_column',
+          targetId: 'column:analytics.fct_orders.net_amount',
+          source: 'corrected_sql',
+        }),
+        expect.objectContaining({
+          kind: 'derived_from',
+          targetId: `trace:${hint.traceId}`,
+          source: 'lifecycle',
+        }),
+      ]));
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recalls differently worded approved hints through explicit graph scope and ranks structural overlap', async () => {
+    const { hint } = recordCorrectionTrace(projectRoot, {
+      question: 'How should refunds affect the recognized amount?',
+      scope: { metric: 'revenue', domain: 'growth', dbtModel: 'fct_orders' },
+      wrongAnswer: 'SELECT SUM(gross_amount) FROM analytics.fct_orders',
+      correction: 'Use net amount and exclude refunds.',
+      correctedSql: `
+        SELECT SUM(o.net_amount)
+        FROM analytics.fct_orders AS o
+        WHERE o.is_refund = false
+      `,
+    });
+    reviewHint(projectRoot, { hintId: hint.id, decision: 'approved', reviewer: 'lead' });
+
+    const matches = await searchApproved({
+      metric: 'revenue',
+      domain: 'growth',
+      dbtModel: 'fct_orders',
+      dbtModels: ['fct_orders'],
+      relations: ['analytics.fct_orders'],
+      columns: ['analytics.fct_orders.net_amount'],
+      text: 'quarterly sales overview',
+    });
+
+    expect(matches.map((match) => match.hint.id)).toEqual([hint.id]);
+    expect(matches[0].scopeReason).toContain('metric=revenue');
+    expect(matches[0].graphReason).toContain('domain=growth');
+    expect(matches[0].graphReason).toContain('relation=analytics.fct_orders');
+    expect(matches[0].graphReason).toContain('column=analytics.fct_orders.net_amount');
+
+    expect(await searchApproved({
+      metric: 'headcount',
+      domain: 'people',
+      dbtModel: 'fct_orders',
+      dbtModels: ['fct_orders'],
+      relations: ['analytics.fct_orders'],
+      columns: ['analytics.fct_orders.net_amount'],
+      text: 'quarterly staffing overview',
+    })).toHaveLength(0);
+  });
 });
 
 describe('scope matching', () => {
@@ -205,6 +347,35 @@ describe('Git hint file format', () => {
     expect(body).toContain('status: candidate');
     expect(body).toContain('metric: revenue');
     expect(listHintsFromGit(projectRoot).map((h) => h.id)).toContain(hint.id);
+  });
+});
+
+describe('hint graph SQL projection', () => {
+  it('does not materialize query-internal CTEs as governed relation targets', () => {
+    const edges = buildHintGraphEdges({
+      id: 'hint-cte',
+      title: 'Use net revenue',
+      guidance: 'Use the governed order amount.',
+      status: 'approved',
+      scope: { metric: 'revenue' },
+      correctedSql: `
+        WITH order_totals AS (
+          SELECT o.customer_id, SUM(o.net_amount) AS revenue
+          FROM analytics.fct_orders AS o
+          GROUP BY o.customer_id
+        )
+        SELECT customer_id, revenue
+        FROM order_totals
+      `,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    expect(edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'uses_relation', targetId: 'relation:analytics.fct_orders' }),
+      expect.objectContaining({ kind: 'uses_column', targetId: 'column:analytics.fct_orders.net_amount' }),
+    ]));
+    expect(edges.some((edge) => edge.targetId.includes('order_totals'))).toBe(false);
   });
 });
 

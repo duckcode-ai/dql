@@ -163,6 +163,9 @@ import {
   propose,
   proposePlan,
   recordGovernedCorrection,
+  HintStore,
+  defaultHintIndexPath,
+  ensureHintIndexFresh,
   listHintsFromGit,
   getHintEvaluationFromGit,
   getCorrectionTraceFromGit,
@@ -1182,6 +1185,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
   let projectConfig = loadProjectConfig(projectRoot);
   recordAgentRuntimeVersion(projectRoot, runtimeVersion);
+  // A clone carries governed Hint Graph files in Git, never the rebuildable
+  // `.dql/cache` database. Materialize that projection as soon as the Notebook
+  // opens so Agent Learning and the first retrieval see the same shared truth.
+  // Malformed/local cache state must not prevent the rest of the OSS notebook
+  // from starting; normal review/reindex surfaces can still report and repair it.
+  try {
+    ensureHintIndexFresh(projectRoot);
+  } catch {
+    // Best-effort bootstrap, consistent with the existing agent reindex path.
+  }
   const configuredConnection = rawConnection
     ? normalizeProjectConnection(rawConnection, projectRoot)
     : projectConfig.defaultConnection
@@ -7667,6 +7680,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const selected = (status ? all.filter((hint) => hint.status === status) : all)
           .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
           .slice(0, 200);
+        const hintIndex = new HintStore(defaultHintIndexPath(projectRoot));
+        const graphEdgesByHint = new Map(
+          selected.map((hint) => [hint.id, hintIndex.edgesForHint(hint.id)] as const),
+        );
+        hintIndex.close();
         const snapshotId = projectSnapshot().snapshotId;
         const approved = all.filter((hint) => hint.status === 'approved');
         const inspectionById = new Map(await Promise.all(
@@ -7710,6 +7728,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ];
           return {
             ...hint,
+            graphEdges: graphEdgesByHint.get(hint.id) ?? [],
             trace: hint.traceId ? getCorrectionTraceFromGit(projectRoot, hint.traceId) : undefined,
             evaluation: hint.evaluationId ? getHintEvaluationFromGit(projectRoot, hint.evaluationId) : undefined,
             inspection: inspection ? {

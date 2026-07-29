@@ -17,6 +17,7 @@ import {
   UnifiedAgentRunPanel,
   usePersistedAgentThreadId,
   type InsertDqlPayload,
+  type SqlNotebookDraftMeta,
 } from "../agent/UnifiedAgentRunPanel";
 import {
   AiSidePanel,
@@ -27,7 +28,10 @@ import { emitNotebookResearchChanged } from "../../utils/notebook-research";
 import type { Cell, NotebookDocMetadata, NotebookFile } from "../../store/types";
 import { DatasetImportPanel } from "./DatasetImportPanel";
 import { focusInsertedNotebookCell } from "../../utils/notebook-cell-focus";
-import { useOpenAnswerInNotebook } from "../../utils/answer-to-notebook";
+import {
+  correctionProvenanceForDraft,
+  useOpenAnswerInNotebook,
+} from "../../utils/answer-to-notebook";
 
 interface NotebookEditorProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -190,11 +194,16 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
   );
 
   const insertAiSqlCell = useCallback(
-    (sql: string, title?: string) => {
+    (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => {
       const trimmed = sql.trim();
       if (!trimmed) return;
       const cell = makeCell("sql", trimmed);
       cell.name = safeCellName(title ?? "AI SQL draft");
+      cell.correctionProvenance = correctionProvenanceForDraft({
+        question: meta?.question,
+        generatedSql: trimmed,
+        sourceRunId: meta?.sourceRunId,
+      });
       const datasetRefs = datasets
         .filter((dataset) =>
           new RegExp(`\\b${escapeRegExp(dataset.alias)}\\b`, "i").test(trimmed),
@@ -286,6 +295,12 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         cell.executionCount = 1;
       }
       if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+      cell.correctionProvenance = correctionProvenanceForDraft({
+        question: payload.question,
+        generatedSql: payload.sql ?? payload.dqlArtifact?.compiledSql,
+        generatedDql: dqlSource,
+        sourceRunId: payload.sourceRunId,
+      });
       if (payload.dqlArtifact) {
         cell.dqlArtifact = {
           source: payload.dqlArtifact.source,
@@ -348,10 +363,18 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
           type: dqlSource ? 'dql' : 'sql',
           content,
           name: safeCellName(payload.title ?? payload.dqlArtifact?.name ?? 'AI edited cell'),
+          execution: undefined,
+          fromSnapshot: false,
           ...(payload.result
             ? { result: payload.result, status: 'success', executionCount: 1, stale: false }
             : { result: undefined, status: 'idle', executionCount: undefined }),
           ...(payload.chartConfig ? { chartConfig: payload.chartConfig } : {}),
+          correctionProvenance: correctionProvenanceForDraft({
+            question: payload.question,
+            generatedSql: payload.sql ?? payload.dqlArtifact?.compiledSql,
+            generatedDql: dqlSource,
+            sourceRunId: payload.sourceRunId,
+          }),
           ...(payload.dqlArtifact
             ? {
                 dqlArtifact: {
@@ -367,6 +390,7 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
                   persistence: payload.dqlArtifact.persistence,
                   trustState: payload.dqlArtifact.trustState,
                   compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
+                  ...(payload.question ? { question: payload.question } : {}),
                 },
                 dqlParameterValues: payload.dqlArtifact.parameterValues,
               }
@@ -681,7 +705,7 @@ function NotebookAiDrawer({
   historyRefreshKey: number;
   onClose: () => void;
   onToggleHistory: () => void;
-  onInsertSql: (sql: string, title?: string) => void;
+  onInsertSql: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql: (payload: InsertDqlPayload) => void;
   onReplaceDql: (payload: InsertDqlPayload) => void;
   onAskFromHistory: (run: NotebookResearchRun) => void;

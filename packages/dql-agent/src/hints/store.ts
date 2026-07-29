@@ -14,11 +14,19 @@ import type Database from 'better-sqlite3';
 import {
   hintAppliesToScope,
   type Hint,
+  type HintGraphEdge,
   type HintScope,
   type HintStatus,
   type QuestionScope,
   type ScopedHintMatch,
 } from './types.js';
+import {
+  buildHintGraphEdges,
+  describeHintGraphOverlap,
+  highSignalHintGraphTargetIds,
+  hintGraphOverlapScore,
+  questionHintGraphTargetIds,
+} from './graph.js';
 import {
   defaultEmbeddingProvider,
   envEmbeddingProvider,
@@ -88,6 +96,26 @@ export class HintStore {
       CREATE INDEX IF NOT EXISTS idx_agent_hints_domain ON agent_hints(domain);
       CREATE INDEX IF NOT EXISTS idx_agent_hints_model  ON agent_hints(dbt_model);
 
+      CREATE TABLE IF NOT EXISTS agent_hint_edges (
+        hint_id       TEXT NOT NULL,
+        edge_kind     TEXT NOT NULL,
+        target_id     TEXT NOT NULL,
+        target_kind   TEXT NOT NULL,
+        target_name   TEXT NOT NULL,
+        fingerprint   TEXT,
+        source        TEXT NOT NULL,
+        PRIMARY KEY (hint_id, edge_kind, target_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_hint_edges_hint
+        ON agent_hint_edges(hint_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_hint_edges_target
+        ON agent_hint_edges(target_id, edge_kind);
+
+      CREATE TABLE IF NOT EXISTS agent_hint_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
       CREATE VIRTUAL TABLE IF NOT EXISTS agent_hints_fts USING fts5(
         id UNINDEXED,
         title,
@@ -113,7 +141,7 @@ export class HintStore {
   }
 
   /** Replace the whole index from the Git-authoritative hint set. */
-  rebuild(hints: Hint[]): void {
+  rebuild(hints: Hint[], projectionFingerprint?: string): void {
     const insert = this.db.prepare(`
       INSERT OR REPLACE INTO agent_hints (
         id, title, guidance, status, metric, dbt_model, domain, dialect, term, block,
@@ -126,11 +154,22 @@ export class HintStore {
       INSERT INTO agent_hints_fts (id, title, guidance, tags, scope)
       VALUES (?, ?, ?, ?, ?)
     `);
+    const insertEdge = this.prepareEdgeInsert();
     const txn = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM agent_hint_edges').run();
       this.db.prepare('DELETE FROM agent_hints_fts').run();
       this.db.prepare('DELETE FROM agent_hints').run();
       for (const hint of hints) {
-        this.insertRow(hint, insert, insertFts);
+        this.insertRow(hint, insert, insertFts, insertEdge);
+      }
+      if (projectionFingerprint) {
+        this.db.prepare(`
+          INSERT INTO agent_hint_meta (key, value)
+          VALUES ('projection_fingerprint', ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `).run(projectionFingerprint);
+      } else {
+        this.db.prepare(`DELETE FROM agent_hint_meta WHERE key = 'projection_fingerprint'`).run();
       }
     });
     txn();
@@ -150,17 +189,29 @@ export class HintStore {
       INSERT INTO agent_hints_fts (id, title, guidance, tags, scope)
       VALUES (?, ?, ?, ?, ?)
     `);
+    const insertEdge = this.prepareEdgeInsert();
     const txn = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM agent_hint_meta WHERE key = 'projection_fingerprint'`).run();
+      this.db.prepare('DELETE FROM agent_hint_edges WHERE hint_id = ?').run(hint.id);
       this.db.prepare('DELETE FROM agent_hints_fts WHERE id = ?').run(hint.id);
-      this.insertRow(hint, insert, insertFts);
+      this.insertRow(hint, insert, insertFts, insertEdge);
     });
     txn();
+  }
+
+  /** Fingerprint of the Git hint set and projection schema currently indexed. */
+  projectionFingerprint(): string | undefined {
+    const row = this.db.prepare(`
+      SELECT value FROM agent_hint_meta WHERE key = 'projection_fingerprint'
+    `).get() as { value: string } | undefined;
+    return row?.value;
   }
 
   private insertRow(
     hint: Hint,
     insert: Database.Statement,
     insertFts: Database.Statement,
+    insertEdge: Database.Statement,
   ): void {
     insert.run(
       hint.id,
@@ -196,6 +247,25 @@ export class HintStore {
       (hint.tags ?? []).join(' '),
       scopeText(hint.scope),
     );
+    for (const edge of buildHintGraphEdges(hint)) {
+      insertEdge.run(
+        edge.hintId,
+        edge.kind,
+        edge.targetId,
+        edge.targetKind,
+        edge.targetName,
+        edge.fingerprint ?? null,
+        edge.source,
+      );
+    }
+  }
+
+  private prepareEdgeInsert(): Database.Statement {
+    return this.db.prepare(`
+      INSERT OR REPLACE INTO agent_hint_edges (
+        hint_id, edge_kind, target_id, target_kind, target_name, fingerprint, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
   }
 
   get(id: string): Hint | null {
@@ -210,6 +280,17 @@ export class HintStore {
     return rows.map(rowToHint);
   }
 
+  /** Typed, rebuildable graph connections for review and retrieval ranking. */
+  edgesForHint(hintId: string): HintGraphEdge[] {
+    const rows = this.db.prepare(`
+      SELECT hint_id, edge_kind, target_id, target_kind, target_name, fingerprint, source
+      FROM agent_hint_edges
+      WHERE hint_id = ?
+      ORDER BY edge_kind, target_id
+    `).all(hintId) as HintGraphEdgeRow[];
+    return rows.map(rowToHintGraphEdge);
+  }
+
   /**
    * Retrieve APPROVED hints that apply to a question's scope. This is the only
    * retrieval entry point used outside review/dev mode — draft/candidate hints
@@ -218,6 +299,8 @@ export class HintStore {
   async searchApprovedHints(options: SearchApprovedHintsOptions): Promise<ScopedHintMatch[]> {
     const { questionScope, limit = 6 } = options;
     const sanitized = sanitizeFtsQuery(questionScope.text);
+    const recallTargets = [...highSignalHintGraphTargetIds(questionScope)].slice(0, 240);
+    const allGraphTargets = questionHintGraphTargetIds(questionScope);
 
     // FTS narrows the candidate set when there is searchable text; otherwise fall
     // back to all approved hints (scope filter still applies as a hard gate).
@@ -239,13 +322,35 @@ export class HintStore {
           LIMIT ?
         `).all(Math.max(limit * 4, 24)) as Array<HintRow & { rank: number }>);
 
+    // Graph recall is additive to FTS. Only explicit domain/metric/model/term/
+    // block connections may introduce a differently worded candidate; broad
+    // relation/column overlap ranks and explains candidates but cannot summon a
+    // hint by itself.
+    const graphRows = recallTargets.length > 0
+      ? this.approvedHintsForTargets(recallTargets, Math.max(limit * 4, 24))
+      : [];
+    const ftsIds = new Set(ftsRows.map((row) => row.id));
+    const candidates = new Map<string, HintRow & { rank: number }>();
+    for (const row of [...ftsRows, ...graphRows]) {
+      if (!candidates.has(row.id)) candidates.set(row.id, row);
+    }
+
     // Hard scope gate: drop any hint whose scope does not apply to the question.
-    const scoped = ftsRows
+    const scoped = [...candidates.values()]
       .map((row) => {
         const hint = rowToHint(row);
         const verdict = hintAppliesToScope(hint.scope, questionScope);
-        const ftsScore = row.rank ? 1 / (1 + Math.max(0, row.rank)) : 0.01;
-        return { hint, verdict, ftsScore };
+        const edges = this.edgesForHint(hint.id);
+        const graphScore = hintGraphOverlapScore(edges, allGraphTargets);
+        const lexicalScore = ftsIds.has(row.id)
+          ? (row.rank ? 1 / (1 + Math.max(0, row.rank)) : 0.01)
+          : 0;
+        return {
+          hint,
+          verdict,
+          graphReason: describeHintGraphOverlap(edges, allGraphTargets),
+          retrievalScore: Math.min(lexicalScore + graphScore, 1),
+        };
       })
       .filter((entry) => entry.verdict.applies);
 
@@ -257,7 +362,7 @@ export class HintStore {
       scoped.map((entry) => ({
         item: entry,
         text: `${entry.hint.title} ${entry.hint.guidance} ${(entry.hint.tags ?? []).join(' ')}`,
-        ftsScore: entry.ftsScore,
+        ftsScore: entry.retrievalScore,
       })),
       {
         alpha: options.alpha ?? 0,
@@ -269,8 +374,24 @@ export class HintStore {
       hint: entry.item.hint,
       score: entry.score,
       scopeReason: entry.item.verdict.reason,
+      graphReason: entry.item.graphReason,
       snippet: undefined,
     }));
+  }
+
+  private approvedHintsForTargets(targetIds: string[], limit: number): Array<HintRow & { rank: number }> {
+    if (targetIds.length === 0) return [];
+    const placeholders = targetIds.map(() => '?').join(', ');
+    return this.db.prepare(`
+      SELECT h.*, 0 AS rank
+      FROM agent_hint_edges AS e
+      JOIN agent_hints AS h ON h.id = e.hint_id
+      WHERE e.target_id IN (${placeholders})
+        AND h.status = 'approved'
+      GROUP BY h.id
+      ORDER BY COUNT(*) DESC, h.updated_at DESC
+      LIMIT ?
+    `).all(...targetIds, limit) as Array<HintRow & { rank: number }>;
   }
 
   /** Approved hints whose scopes overlap (surfaced as conflicts for review). */
@@ -340,6 +461,28 @@ type HintRow = {
   updated_at: string;
   source_path: string | null;
 };
+
+type HintGraphEdgeRow = {
+  hint_id: string;
+  edge_kind: string;
+  target_id: string;
+  target_kind: string;
+  target_name: string;
+  fingerprint: string | null;
+  source: string;
+};
+
+function rowToHintGraphEdge(row: HintGraphEdgeRow): HintGraphEdge {
+  return {
+    hintId: row.hint_id,
+    kind: row.edge_kind as HintGraphEdge['kind'],
+    targetId: row.target_id,
+    targetKind: row.target_kind,
+    targetName: row.target_name,
+    fingerprint: row.fingerprint ?? undefined,
+    source: row.source as HintGraphEdge['source'],
+  };
+}
 
 function rowToHint(row: HintRow): Hint {
   return {

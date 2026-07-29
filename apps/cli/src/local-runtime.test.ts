@@ -5605,6 +5605,58 @@ describe('a stale Ask scope must not wedge the surface', () => {
 });
 
 describe('governed correction lifecycle API', () => {
+  it('materializes Git-owned Hint Graph data when a cloned project opens', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-hint-clone-bootstrap-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'hint_clone_bootstrap' }));
+    const hintDir = join(projectRoot, '.dql', 'hints');
+    mkdirSync(hintDir, { recursive: true });
+    writeFileSync(join(hintDir, 'clone-revenue.hint.yaml'), [
+      'id: clone-revenue',
+      'title: Use governed net revenue',
+      'guidance: Use net amount and exclude refunds.',
+      'status: approved',
+      'scope:',
+      '  metric: revenue',
+      '  domain: commerce',
+      '  dbtModel: fct_orders',
+      'correctedSql: SELECT SUM(o.net_amount) FROM analytics.fct_orders AS o',
+      'createdAt: 2026-01-01T00:00:00.000Z',
+      'updatedAt: 2026-01-01T00:00:00.000Z',
+      '',
+    ].join('\n'));
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const listed = await fetch(`http://127.0.0.1:${port}/api/agent/hints`).then((response) => response.json()) as {
+        hints: Array<{
+          id: string;
+          graphEdges?: Array<{ kind: string; targetId: string }>;
+        }>;
+      };
+
+      expect(listed.hints).toEqual([
+        expect.objectContaining({
+          id: 'clone-revenue',
+          graphEdges: expect.arrayContaining([
+            expect.objectContaining({ kind: 'belongs_to_domain', targetId: 'domain:commerce' }),
+            expect.objectContaining({ kind: 'uses_relation', targetId: 'relation:analytics.fct_orders' }),
+            expect.objectContaining({ kind: 'uses_column', targetId: 'column:analytics.fct_orders.net_amount' }),
+          ]),
+        }),
+      ]);
+    } finally {
+      await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
+    }
+  });
+
   it('never fabricates approval during correction capture', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-hint-capture-'));
     tempDirs.push(projectRoot);
@@ -5675,6 +5727,7 @@ describe('governed correction lifecycle API', () => {
         hints: Array<{
           id: string;
           trace?: { question: string };
+          graphEdges?: Array<{ kind: string; targetId: string }>;
           inspection?: { state: string; checks: unknown[] };
           exclusions?: Array<{ reason: string }>;
         }>;
@@ -5686,6 +5739,11 @@ describe('governed correction lifecycle API', () => {
       expect(listed.hints[0].inspection?.checks.length).toBeGreaterThan(0);
       expect(listed.hints[0].inspection?.state).not.toBe('current');
       expect(listed.hints[0].exclusions?.map((item) => item.reason)).toContain(listed.hints[0].inspection?.state);
+      expect(listed.hints[0].graphEdges).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'refines_metric', targetId: 'metric:revenue' }),
+        expect.objectContaining({ kind: 'uses_relation', targetId: 'relation:orders' }),
+        expect.objectContaining({ kind: 'uses_column', targetId: 'column:orders.net_amount' }),
+      ]));
 
       const editedResponse = await fetch(`${base}/api/agent/hints/${encodeURIComponent(captured.hint.id)}`, {
         method: 'PATCH',

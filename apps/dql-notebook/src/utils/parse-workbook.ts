@@ -11,6 +11,7 @@ import type {
   BlockBinding,
   ChatCellConfig,
   CellDqlArtifact,
+  CellCorrectionProvenance,
   ExecutionTarget,
   DatasetReference,
   CellDependency,
@@ -131,6 +132,7 @@ const KNOWN_CELL_FIELDS = new Set([
   "blockBinding",
   "dqlParameterValues",
   "dqlArtifact",
+  "correctionProvenance",
   "executionTarget",
   "datasetRefs",
   "dependencies",
@@ -164,6 +166,7 @@ export interface DqlNotebookFile {
     blockBinding?: BlockBinding;
     dqlParameterValues?: Record<string, unknown>;
     dqlArtifact?: CellDqlArtifact;
+    correctionProvenance?: CellCorrectionProvenance;
     executionTarget?: ExecutionTarget;
     datasetRefs?: DatasetReference[];
     dependencies?: CellDependency[];
@@ -202,6 +205,7 @@ export function parseDqlNotebook(content: string): ParsedWorkbook {
         ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
         ...(c.dqlParameterValues ? { dqlParameterValues: c.dqlParameterValues } : {}),
         ...(c.dqlArtifact ? { dqlArtifact: c.dqlArtifact } : {}),
+        ...(c.correctionProvenance ? { correctionProvenance: c.correctionProvenance } : {}),
         ...(c.executionTarget ? { executionTarget: c.executionTarget } : {}),
         ...(c.datasetRefs ? { datasetRefs: c.datasetRefs } : {}),
         ...(c.dependencies ? { dependencies: c.dependencies } : {}),
@@ -260,6 +264,7 @@ export function serializeDqlNotebook(title: string, cells: Cell[], existingMetad
       ...(c.blockBinding ? { blockBinding: c.blockBinding } : {}),
       ...(c.dqlParameterValues ? { dqlParameterValues: c.dqlParameterValues } : {}),
       ...(c.dqlArtifact ? { dqlArtifact: c.dqlArtifact } : {}),
+      ...(c.correctionProvenance ? { correctionProvenance: c.correctionProvenance } : {}),
       ...(c.executionTarget ? { executionTarget: c.executionTarget } : {}),
       ...(c.datasetRefs ? { datasetRefs: c.datasetRefs } : {}),
       ...(c.dependencies ? { dependencies: c.dependencies } : {}),

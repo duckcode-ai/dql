@@ -1,9 +1,29 @@
 import { useCallback } from 'react';
 import { api, type DatasetSource } from '../api/client';
 import { makeCell, useNotebook } from '../store/NotebookStore';
-import type { Cell, NotebookFile } from '../store/types';
+import type { Cell, CellCorrectionProvenance, NotebookFile } from '../store/types';
 import type { InsertDqlPayload } from '../components/agent/UnifiedAgentRunPanel';
 import { focusInsertedNotebookCell } from './notebook-cell-focus';
+
+export function correctionProvenanceForDraft(input: {
+  question?: string;
+  generatedSql?: string;
+  generatedDql?: string;
+  sourceRunId?: string;
+}): CellCorrectionProvenance | undefined {
+  const question = input.question?.trim();
+  const generatedSql = input.generatedSql?.trim();
+  const generatedDql = input.generatedDql?.trim();
+  if (!question || (!generatedSql && !generatedDql)) return undefined;
+  return {
+    version: 1,
+    source: 'agent_run',
+    question,
+    ...(generatedSql ? { generatedSql } : {}),
+    ...(generatedDql ? { generatedDql } : {}),
+    ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
+  };
+}
 
 /** Cell names are used as identifiers downstream, so keep them safe and bounded. */
 export function safeCellName(value: string): string {
@@ -67,6 +87,12 @@ export function buildNotebookCellsFromAnswer(
     cell.executionCount = 1;
   }
   if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+  cell.correctionProvenance = correctionProvenanceForDraft({
+    question: payload.question,
+    generatedSql: payload.sql ?? payload.dqlArtifact?.compiledSql,
+    generatedDql: dqlSource,
+    sourceRunId: payload.sourceRunId,
+  });
   if (payload.dqlArtifact) {
     cell.dqlArtifact = {
       source: payload.dqlArtifact.source,

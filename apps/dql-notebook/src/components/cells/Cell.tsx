@@ -1944,6 +1944,41 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
           </details>
         )}
 
+        {(cell.type === 'sql' || cell.type === 'dql') && (
+          cell.correctionProvenance && !(
+            cell.dqlArtifact?.sourcePath
+            || cell.dqlArtifact?.persistence === 'saved'
+            || cell.dqlArtifact?.trustState === 'certified'
+            || cell.dqlArtifact?.reviewState === 'certified'
+          ) ? (
+            teachCorrectionEligibility(cell).reason === 'ready' ? (
+              <TeachCorrectionBar cell={cell} t={t} />
+            ) : (
+              <div
+                data-teach-state={teachCorrectionEligibility(cell).reason}
+                style={{ borderTop: `1px solid ${t.cellBorder}`, padding: '5px 12px', background: `${t.accent}0A`, color: t.textMuted, font: `500 10.5px ${t.font}` }}
+              >
+                <strong style={{ color: t.textSecondary }}>AI draft.</strong>{' '}
+                {teachCorrectionEligibility(cell).reason === 'missing_generated_sql'
+                  ? <>Original SQL evidence is missing. Reopen this draft from Ask or Notebook AI before teaching it.</>
+                  : teachCorrectionEligibility(cell).reason === 'run_required' || teachCorrectionEligibility(cell).reason === 'execution_mismatch'
+                    ? <>Draft changed. Run this exact cell successfully to unlock <strong style={{ color: t.accent }}>Teach DQL</strong>.</>
+                    : <>Edit this cell and run it successfully; then <strong style={{ color: t.accent }}>Teach DQL</strong> appears below the editor. Teaching creates a review candidate and never certifies automatically.</>}
+              </div>
+            )
+          ) : cell.dqlArtifact && (
+            cell.dqlArtifact.sourcePath
+            || cell.dqlArtifact.persistence === 'saved'
+            || cell.dqlArtifact.trustState === 'certified'
+            || cell.dqlArtifact.reviewState === 'certified'
+          ) ? (
+            <div style={{ borderTop: `1px solid ${t.cellBorder}`, padding: '5px 12px', background: `${t.warning}0A`, color: t.textMuted, font: `500 10.5px ${t.font}` }}>
+              <strong style={{ color: t.textSecondary }}>Saved governed DQL.</strong>{' '}
+              Notebook edits are a draft for block review and recertification; they do not create Teach DQL learning or overwrite the source automatically.
+            </div>
+          ) : null
+        )}
+
         <ExecutionTrustPanel cell={cell} t={t} />
 
         {notesOpen && (
@@ -2080,7 +2115,6 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     </button>
                   </>
                 )}
-              <TeachCorrectionBar cell={cell} t={t} />
               {cell.result && (
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }} aria-label="Explore this result">
                   <span style={{ font: `700 9px ${t.font}`, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.05em' }}>
@@ -2706,9 +2740,29 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
 
   if (state === 'saved') {
     return (
-      <span style={{ fontSize: 10.5, color: t.success, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-        <Check size={11} /> Saved for review
-      </span>
+      <div
+        data-teach-state="saved"
+        role="status"
+        style={{
+          borderTop: `1px solid ${t.success}55`,
+          borderBottom: `1px solid ${t.success}33`,
+          background: `${t.success}10`,
+          padding: '11px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 9,
+          color: t.success,
+          fontFamily: t.font,
+        }}
+      >
+        <Check size={17} strokeWidth={2.4} />
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 750 }}>Correction saved for review</div>
+          <div style={{ marginTop: 2, fontSize: 10.5, color: t.textMuted }}>
+            It remains a candidate until it passes evaluation and you explicitly approve it in Agent learning.
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -2736,27 +2790,70 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
   };
 
   return (
-    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-      <span style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
-        {state === 'error' ? (error ?? 'Could not save.') : 'You changed this and it ran. Teach DQL?'}
-      </span>
-      <button
-        type="button"
-        onClick={() => void teach()}
-        disabled={state === 'saving'}
-        title="Record this fix so DQL stops repeating the mistake. Reviewed before it applies."
-        style={{ ...controlStyle(t, { variant: 'accent', size: 'xs', disabled: state === 'saving' }), fontSize: 10 }}
+    <div
+      data-teach-state={state === 'error' ? 'error' : 'ready'}
+      role="region"
+      aria-label="Teach DQL correction"
+      style={{
+        borderTop: `2px solid ${state === 'error' ? t.error : t.accent}`,
+        borderBottom: `1px solid ${state === 'error' ? `${t.error}44` : `${t.accent}44`}`,
+        background: state === 'error'
+          ? `${t.error}0D`
+          : `linear-gradient(90deg, ${t.accent}18 0%, ${t.accent}09 72%, transparent 100%)`,
+        padding: '13px 14px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 11,
+        flexWrap: 'wrap',
+        fontFamily: t.font,
+      }}
+    >
+      <div
+        aria-hidden="true"
+        style={{
+          width: 32,
+          height: 32,
+          flex: '0 0 32px',
+          borderRadius: 8,
+          display: 'grid',
+          placeItems: 'center',
+          color: state === 'error' ? t.error : '#ffffff',
+          background: state === 'error' ? `${t.error}18` : t.accent,
+          border: `1px solid ${state === 'error' ? `${t.error}44` : t.accent}`,
+        }}
       >
-        {state === 'saving' ? 'Saving…' : 'Teach DQL'}
-      </button>
-      <button
-        type="button"
-        onClick={() => setState('dismissed')}
-        title="Dismiss"
-        style={{ ...controlStyle(t, { variant: 'ghost', size: 'xs' }), fontSize: 10 }}
-      >
-        Not now
-      </button>
+        <Sparkles size={17} strokeWidth={2.3} />
+      </div>
+      <div style={{ flex: '1 1 300px', minWidth: 0 }}>
+        <div style={{ color: state === 'error' ? t.error : t.textPrimary, fontSize: 12.5, fontWeight: 750 }}>
+          {state === 'error' ? 'This correction was not saved' : 'Your working correction is ready to teach'}
+        </div>
+        <div style={{ marginTop: 3, color: t.textMuted, fontSize: 10.75, lineHeight: 1.45 }}>
+          {state === 'error'
+            ? (error ?? 'DQL could not create the review candidate. Try again.')
+            : <>Save the AI-generated SQL and your successful edit as a governed review candidate. It will not affect future answers until evaluated and explicitly approved.</>}
+        </div>
+      </div>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, marginLeft: 'auto' }}>
+        <button
+          type="button"
+          onClick={() => void teach()}
+          disabled={state === 'saving'}
+          title="Save the original AI SQL and your working correction for governed review"
+          style={controlStyle(t, { variant: 'primary', size: 'md', disabled: state === 'saving' })}
+        >
+          <Sparkles size={14} aria-hidden="true" />
+          {state === 'saving' ? 'Saving correction…' : state === 'error' ? 'Try again' : 'Teach DQL'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setState('dismissed')}
+          title="Dismiss this suggestion"
+          style={controlStyle(t, { variant: 'ghost', size: 'sm' })}
+        >
+          Not now
+        </button>
+      </div>
     </div>
   );
 }

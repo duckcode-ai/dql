@@ -857,6 +857,8 @@ export {
   evaluateHint,
   reviewHint,
   reindexHints,
+  ensureHintIndexFresh,
+  hintIndexProjectionFingerprint,
   listHintsFromGit,
   getHintFromGit,
   getCorrectionTraceFromGit,
@@ -877,6 +879,9 @@ export {
   supersedeHint,
   HintLifecycleError,
   requiresEvaluatedApproval,
+} from "./hints/git-store.js";
+export type {
+  EnsureHintIndexFreshResult,
 } from "./hints/git-store.js";
 export {
   recordGovernedCorrection,
@@ -936,6 +941,13 @@ export {
   hintAppliesToScope,
   hintsConflict,
 } from "./hints/types.js";
+export {
+  buildHintGraphEdges,
+  questionHintGraphTargetIds,
+  highSignalHintGraphTargetIds,
+  describeHintGraphOverlap,
+  hintGraphOverlapScore,
+} from "./hints/graph.js";
 export type {
   CorrectionTrace,
   Hint,
@@ -944,6 +956,8 @@ export type {
   HintEvaluationStatus,
   HintDependency,
   HintDependencyKind,
+  HintGraphEdge,
+  HintGraphEdgeKind,
   HintLifecycleFailure,
   HintReview,
   HintScope,

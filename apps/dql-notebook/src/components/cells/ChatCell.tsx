@@ -1,7 +1,13 @@
 import { themes } from '../../themes/notebook-theme';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { Cell, ChatCellConfig, ThemeMode } from '../../store/types';
-import { UnifiedAgentRunPanel, type ThreadItem, type InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
+import {
+  UnifiedAgentRunPanel,
+  type ThreadItem,
+  type InsertDqlPayload,
+  type SqlNotebookDraftMeta,
+} from '../agent/UnifiedAgentRunPanel';
+import { correctionProvenanceForDraft } from '../../utils/answer-to-notebook';
 
 interface ChatCellProps {
   cell: Cell;
@@ -56,11 +62,16 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
   const t = themes[themeMode];
   const config: ChatCellConfig = { history: [], ...cell.chatConfig };
 
-  const insertGeneratedSqlCell = (sql: string, title?: string) => {
+  const insertGeneratedSqlCell = (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => {
     const trimmed = sql.trim();
     if (!trimmed) return;
     const sqlCell = makeCell('sql', trimmed);
     sqlCell.name = uniqueSqlCellName(title, cells);
+    sqlCell.correctionProvenance = correctionProvenanceForDraft({
+      question: meta?.question,
+      generatedSql: trimmed,
+      sourceRunId: meta?.sourceRunId,
+    });
     dispatch({ type: 'ADD_CELL', cell: sqlCell, afterId: cell.id });
   };
 
@@ -79,6 +90,12 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
       sqlCell.executionCount = 1;
     }
     if (payload.chartConfig) sqlCell.chartConfig = payload.chartConfig;
+    sqlCell.correctionProvenance = correctionProvenanceForDraft({
+      question: payload.question,
+      generatedSql: payload.sql ?? payload.dqlArtifact?.compiledSql,
+      generatedDql: dqlSource,
+      sourceRunId: payload.sourceRunId,
+    });
     if (payload.dqlArtifact) {
       sqlCell.dqlArtifact = {
         source: payload.dqlArtifact.source,
@@ -93,6 +110,7 @@ export function ChatCell({ cell, cells, index, themeMode, onUpdate }: ChatCellPr
         persistence: payload.dqlArtifact.persistence,
         trustState: payload.dqlArtifact.trustState,
         compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
+        ...(payload.question ? { question: payload.question } : {}),
       };
       sqlCell.dqlParameterValues = payload.dqlArtifact.parameterValues;
     }

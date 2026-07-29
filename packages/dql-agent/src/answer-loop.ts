@@ -5333,7 +5333,7 @@ function renderContextPrompt(
   const hintsSection = appliedHints.length > 0
     ? `\n\n## Applied governed hints (human-approved corrections)\n\nReviewed, scope-matched corrections from your team. Apply them when preparing a SQL preview to avoid known mistakes; they refine the DQL artifact's SQL preview but MUST NOT override a certified artifact that already answers the question.\n${appliedHints
         .slice(0, 6)
-        .map((h) => `- \`${h.title}\`: ${h.guidance}${h.correctedSql ? `\n  corrected SQL pattern: ${h.correctedSql.replace(/\s+/g, ' ').trim().slice(0, 240)}` : ''}`)
+        .map((h) => `- \`${h.title}\`: ${h.guidance}${h.graphReason ? `\n  matched graph context: ${h.graphReason}` : ''}${h.correctedSql ? `\n  corrected SQL pattern: ${h.correctedSql.replace(/\s+/g, ' ').trim().slice(0, 240)}` : ''}`)
         .join('\n')}`
     : '';
   const extraSection = extraContext?.trim()

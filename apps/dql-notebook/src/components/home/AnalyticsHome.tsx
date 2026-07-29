@@ -5,10 +5,14 @@ import type { Cell } from '../../store/types';
 import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { focusInsertedNotebookCell } from '../../utils/notebook-cell-focus';
-import { useOpenAnswerInNotebook } from '../../utils/answer-to-notebook';
+import {
+  correctionProvenanceForDraft,
+  useOpenAnswerInNotebook,
+} from '../../utils/answer-to-notebook';
 import {
   UnifiedAgentRunPanel,
   type InsertDqlPayload,
+  type SqlNotebookDraftMeta,
   type ThreadItem,
 } from '../agent/UnifiedAgentRunPanel';
 
@@ -60,6 +64,12 @@ export function askNotebookCellFromPayload(payload: InsertDqlPayload): Cell | un
     cell.executionCount = 1;
   }
   if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+  cell.correctionProvenance = correctionProvenanceForDraft({
+    question: payload.question,
+    generatedSql: payload.sql ?? payload.dqlArtifact?.compiledSql,
+    generatedDql: dqlSource,
+    sourceRunId: payload.sourceRunId,
+  });
   if (payload.dqlArtifact) {
     cell.dqlArtifact = {
       source: payload.dqlArtifact.source,
@@ -75,6 +85,7 @@ export function askNotebookCellFromPayload(payload: InsertDqlPayload): Cell | un
       trustState: payload.dqlArtifact.trustState,
       compiledSql: payload.dqlArtifact.compiledSql ?? payload.sql,
       reviewState: payload.dqlArtifact.trustState === 'certified' ? 'certified' : 'review_required',
+      ...(payload.question ? { question: payload.question } : {}),
     };
     cell.dqlParameterValues = payload.dqlArtifact.parameterValues;
   }
@@ -329,7 +340,12 @@ export function AnalyticsHome() {
           onRunningChange={setIsRunning}
           onOpenResearch={openResearch}
           onOpenApp={openApp}
-          onInsertSql={(sql, title) => openEditableNotebookCell({ sql, title })}
+          onInsertSql={(sql, title, meta?: SqlNotebookDraftMeta) => openEditableNotebookCell({
+            sql,
+            title,
+            question: meta?.question,
+            sourceRunId: meta?.sourceRunId,
+          })}
           onInsertDql={openEditableNotebookCell}
           insertDqlActionLabel="Open in notebook"
         />

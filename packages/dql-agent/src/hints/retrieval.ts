@@ -21,6 +21,7 @@ export interface AppliedHint {
   title: string;
   guidance: string;
   scopeReason: string;
+  graphReason?: string;
   score: number;
   correctedSql?: string;
   traceId?: string;
@@ -161,6 +162,7 @@ function toAppliedHint(match: ScopedHintMatch): AppliedHint {
     title: match.hint.title,
     guidance: match.hint.guidance,
     scopeReason: match.scopeReason,
+    graphReason: match.graphReason,
     score: match.score,
     correctedSql: match.hint.correctedSql,
     traceId: match.hint.traceId,

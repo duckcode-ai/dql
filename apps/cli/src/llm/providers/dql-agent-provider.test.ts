@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { __test__, resolveEffectiveQuestion } from './dql-agent-provider.js';
 import type { AgentRunRequest } from '../types.js';
-import { dqlToolNamesForSurface, type AgentMessage, type AgentProvider } from '@duckcodeailabs/dql-agent';
+import {
+  buildAnalysisQuestionPlan,
+  dqlToolNamesForSurface,
+  type AgentMessage,
+  type AgentProvider,
+} from '@duckcodeailabs/dql-agent';
 
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
   return { provider: 'ollama', messages, projectRoot: '/tmp/x' } as AgentRunRequest;
@@ -415,6 +420,68 @@ describe('conversation context follow-up routing', () => {
         category: ['Drink'],
       },
       priorMeasures: ['revenue'],
+    });
+  });
+
+  it('does not turn ordinary "the customers" wording into prior-result member filters', () => {
+    const question = 'who are the customers have top region';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        sourceQuestion: 'who are the top revenue customers?',
+        sourceAnswerSummary: 'Melissa Lopez and Joy Lam lead beverage revenue.',
+        resultColumns: ['customer_name', 'beverage_revenue'],
+        resultDimensionValues: {
+          customer_name: ['Melissa Lopez', 'Joy Lam'],
+        },
+        priorMeasures: ['beverage_revenue'],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      dimensions: ['region'],
+      priorResultValues: {
+        customer_name: ['Melissa Lopez', 'Joy Lam'],
+      },
+    });
+    expect(followUp?.filters).toBeUndefined();
+    expect(followUp?.memberBindings).toBeUndefined();
+    expect(followUp?.resolvedReferences).toBeUndefined();
+
+    const plan = buildAnalysisQuestionPlan(question, followUp);
+    expect(plan.requestedShape.filters).toEqual([]);
+    expect(plan.requestedShape.memberBindings).toEqual([]);
+    expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['customer', 'region']));
+  });
+
+  it('still carries prior members when the question explicitly says "these customers"', () => {
+    const question = 'which regions have these customers';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        sourceQuestion: 'who are the top revenue customers?',
+        resultColumns: ['customer_name', 'beverage_revenue'],
+        resultDimensionValues: {
+          customer_name: ['Melissa Lopez', 'Joy Lam'],
+        },
+        priorMeasures: ['beverage_revenue'],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['Melissa Lopez', 'Joy Lam'],
+      memberBindings: [{
+        dimension: 'customer',
+        values: ['Melissa Lopez', 'Joy Lam'],
+        source: 'prior_result',
+        confidence: 'deictic',
+      }],
     });
   });
 

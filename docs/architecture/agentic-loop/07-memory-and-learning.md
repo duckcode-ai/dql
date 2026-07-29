@@ -25,9 +25,11 @@ flowchart LR
     D -.-> CAND
 ```
 
-- **Capture is explicit** — the notebook's Teach action or the equivalent API/MCP tool records the
+- **Capture is explicit** — Ask or Notebook AI opens a transient draft in the Notebook with its
+  original question and generated SQL/DQL provenance. After the analyst changes that draft and runs
+  it successfully, the notebook's Teach action (or the equivalent API/MCP tool) records the
   correction. Editing, running, rating, saving, or certifying elsewhere does not silently create a
-  hint.
+  hint. Saved/certified DQL follows draft review and recertification instead of Teach.
 - **Application is human- and evidence-gated** — a candidate is never retrieved. In a dbt-first v3
   project, approval reruns current SQL/context checks, verifies the original snapshot and
   content-addressed dependencies, and performs bounded execution when the local runtime is
@@ -57,6 +59,43 @@ flowchart TD
 
 Hints are not mirrored into advisory memory. Git is authoritative; the
 `.dql/cache/agent-kg.sqlite` index is rebuildable.
+
+### The Hint Graph projection
+
+Each hint is a governed node in the rebuildable `agent_hints` index. DQL also
+materializes typed `agent_hint_edges` from the hint's reviewed scope, dependency
+fingerprints, lifecycle provenance, and parsed corrected SQL:
+
+```text
+hint
+├─ belongs_to_domain → domain
+├─ refines_metric → metric
+├─ uses_dbt_model → dbt model
+├─ uses_relation → warehouse/dbt relation
+├─ uses_column → qualified relation.column
+├─ derived_from → correction trace
+├─ validated_by → evaluation
+└─ supersedes → older hint
+```
+
+These edges share `.dql/cache/agent-kg.sqlite` with the project KG but remain in
+their own adjacency table. This preserves the trust order: candidate hints are
+reviewable but never enter normal KG search, and approved hints are still folded
+in only after certified routing.
+
+The Git hint set and projection schema are content-addressed. On Notebook
+startup, DQL compares that fingerprint with the local SQLite projection and
+rebuilds it when missing or changed. Therefore an OSS clone receives the shared
+governed history from Git without committing or copying `.dql/cache`; an
+unchanged project keeps its current local index.
+
+For a new question, explicit domain/metric/model/term/block overlap can recall an
+approved hint even when the wording differs. Relation and column overlap then
+ranks and explains the match. Relation or column overlap alone cannot make a
+hint applicable; every declared scope field must still match, and current
+dependency fingerprints must pass. This lets a reviewed rule such as "revenue
+uses net amount and excludes refunds" transfer from revenue-by-customer to
+revenue-by-region without leaking into customer-count or headcount questions.
 
 ## The closed loop
 

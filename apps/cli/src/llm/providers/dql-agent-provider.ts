@@ -1396,17 +1396,22 @@ function resolveDeicticDimensions(question: string, priorValues: Record<string, 
   if (!priorValues) return undefined;
   const lower = question.toLowerCase();
   const dims: string[] = [];
+  // A definite article names the current population ("the customers", "the
+  // regions"); it does not point at rows from the previous answer. Treating
+  // "the" like "these/those" silently turned ordinary new analyses into
+  // required member filters from conversation history. Carry prior members only
+  // for explicit demonstratives or other unambiguous prior-result references.
   const candidates: Array<[RegExp, string]> = [
-    [/\b(?:these|those|the)\s+cat(?:egor|agor|ogor)(?:y|ies)\b/, 'category'],
-    [/\b(?:this|that|these|those|the)\s+products?\b/, 'product'],
-    [/\b(?:this|that|these|those|the)\s+customers?\b/, 'customer'],
+    [/\b(?:these|those|same|previous|prior|above)\s+cat(?:egor|agor|ogor)(?:y|ies)\b/, 'category'],
+    [/\b(?:this|that|these|those|same|previous|prior|above)\s+products?\b/, 'product'],
+    [/\b(?:this|that|these|those|same|previous|prior|above)\s+customers?\b/, 'customer'],
     [/\b(?:above|previous|prior)\s+(?:orders?|results?|rows?)\b/, 'customer'],
-    [/\b(?:this|that|these|those|the)\s+segments?\b/, 'segment'],
-    [/\b(?:this|that|these|those|the)\s+regions?\b/, 'region'],
+    [/\b(?:this|that|these|those|same|previous|prior|above)\s+segments?\b/, 'segment'],
+    [/\b(?:this|that|these|those|same|previous|prior|above)\s+regions?\b/, 'region'],
   ];
   for (const [pattern, dim] of candidates) {
     if (!pattern.test(lower)) continue;
-    if (dim === 'product' && /\bthe\s+product\s+cat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower)) continue;
+    if (dim === 'product' && /\b(?:this|that|these|those|same|previous|prior|above)\s+product\s+cat(?:egor|agor|ogor)(?:y|ies)\b/.test(lower)) continue;
     if (valuesForPriorDimension(priorValues, dim).length) dims.push(dim);
   }
   // Subject/object pronouns usually refer to people/accounts when paired with
@@ -1427,11 +1432,11 @@ function resolveDeicticDimensions(question: string, priorValues: Record<string, 
 function resolveSingularDeicticDimension(question: string, priorValues: Record<string, string[]>): string | undefined {
   const lower = question.toLowerCase();
   const candidates: Array<[RegExp, string]> = [
-    [/\b(?:this|that|the)\s+product\b/, 'product'],
-    [/\b(?:this|that|the)\s+customer\b/, 'customer'],
-    [/\b(?:this|that|the)\s+category\b/, 'category'],
-    [/\b(?:this|that|the)\s+segment\b/, 'segment'],
-    [/\b(?:this|that|the)\s+region\b/, 'region'],
+    [/\b(?:this|that|same|previous|prior|above)\s+product\b/, 'product'],
+    [/\b(?:this|that|same|previous|prior|above)\s+customer\b/, 'customer'],
+    [/\b(?:this|that|same|previous|prior|above)\s+category\b/, 'category'],
+    [/\b(?:this|that|same|previous|prior|above)\s+segment\b/, 'segment'],
+    [/\b(?:this|that|same|previous|prior|above)\s+region\b/, 'region'],
   ];
   for (const [pattern, dim] of candidates) {
     if (pattern.test(lower) && valuesForPriorDimension(priorValues, dim).length) return dim;

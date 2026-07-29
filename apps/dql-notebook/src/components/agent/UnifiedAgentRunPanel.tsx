@@ -101,6 +101,11 @@ const ACTIVE_RUNS_STORAGE_KEY = 'dql.agent.active-runs.v1';
 /** An empty-state suggestion chip: the label is shown, the prompt is submitted. */
 export type ExamplePrompt = { label: string; prompt: string };
 
+export interface SqlNotebookDraftMeta {
+  question?: string;
+  sourceRunId?: string;
+}
+
 interface UnifiedAgentRunPanelProps {
   themeMode: ThemeMode;
   title?: string;
@@ -131,7 +136,7 @@ interface UnifiedAgentRunPanelProps {
   /** 'stakeholder' (consumption-only) hides authoring modes + adds the certify handoff. */
   audience?: AgentRunAudience;
   autoRun?: { text: string; mode?: AgentRunRequestedMode; nonce: number };
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   /**
    * DQL-first insertion: the whole governed artifact (compiled SQL body + DQL
    * provenance + executed result + chart config) so the host can create a
@@ -1387,7 +1392,7 @@ function RunCard({
   themeMode: ThemeMode;
   appContext?: { appId?: string; dashboardId?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
@@ -1506,6 +1511,7 @@ function RunCard({
               onInsertSql={onInsertSql}
               onInsertDql={onInsertDql}
               sourceRunId={run.id}
+              sourceQuestion={run.question}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
               onOpenApp={onOpenApp}
@@ -1819,7 +1825,7 @@ function AskRunCard({
   selectedArtifactId?: string;
   onOpenArtifact?: (artifactId: string, tab: AskInspectorTab) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onReplaceDql?: (payload: InsertDqlPayload) => void;
   insertDqlActionLabel?: string;
@@ -1983,6 +1989,7 @@ function AskRunCard({
               onInsertDql={onInsertDql}
               insertDqlActionLabel={insertDqlActionLabel}
               sourceRunId={run.id}
+              sourceQuestion={run.question}
               onOpenBlock={onOpenBlock}
               onOpenResearch={onOpenResearch}
               onOpenApp={onOpenApp}
@@ -2171,7 +2178,7 @@ function AnalyticalHowAnswered({
   sql?: string;
   lineage: AskLineageEntry[];
   t: Theme;
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onSaveBlock: () => void;
 }) {
@@ -2222,7 +2229,14 @@ function AnalyticalHowAnswered({
     if (!dqlArtifact?.source || !onInsertDql) return;
     try {
       const response = await api.deriveAnalyticalRepair(run.id, { version: 1, action: 'edit_dql', dqlSource: dqlArtifact.source });
-      onInsertDql({ sql, dqlArtifact, result, title: sourceTitle });
+      onInsertDql({
+        sql,
+        dqlArtifact,
+        result,
+        title: sourceTitle,
+        sourceRunId: run.id,
+        question: run.question,
+      });
       setRepairMessage(repairResultMessage('Opened DQL in Notebook', response));
     } catch (error) {
       setRepairMessage(error instanceof Error ? error.message : String(error));
@@ -2232,7 +2246,10 @@ function AnalyticalHowAnswered({
     if (!sql || !onInsertSql) return;
     try {
       const response = await api.deriveAnalyticalRepair(run.id, { version: 1, action: 'open_sql_notebook', sqlText: sql });
-      onInsertSql(sql, `${sourceTitle} repair`);
+      onInsertSql(sql, `${sourceTitle} repair`, {
+        question: run.question,
+        sourceRunId: run.id,
+      });
       setRepairMessage(repairResultMessage('Opened SQL in Notebook', response));
     } catch (error) {
       setRepairMessage(error instanceof Error ? error.message : String(error));
@@ -2564,7 +2581,7 @@ function AskInspector({
   onChangeTab: (tab: AskInspectorTab) => void;
   onClose: () => void;
   onSaveBlock: () => void;
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
 }) {
   const payload = payloadOf(artifact);
@@ -2661,6 +2678,8 @@ function AskInspector({
                         result: resultData,
                         chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
                         title: insertTitle,
+                        sourceRunId: run.id,
+                        question: run.question,
                       })}
                       style={smallButtonStyle(t)}
                     >
@@ -2683,7 +2702,14 @@ function AskInspector({
                 <span style={{ fontSize: 11, color: t.textMuted }}>Attempted compiled SQL — open it in Notebook to inspect or repair.</span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   {onInsertSql ? (
-                    <button type="button" onClick={() => onInsertSql(sql, insertTitle)} style={smallButtonStyle(t)}>
+                    <button
+                      type="button"
+                      onClick={() => onInsertSql(sql, insertTitle, {
+                        question: run.question,
+                        sourceRunId: run.id,
+                      })}
+                      style={smallButtonStyle(t)}
+                    >
                       Open SQL in notebook
                     </button>
                   ) : null}
@@ -3302,6 +3328,7 @@ function ArtifactView({
   onInsertDql,
   insertDqlActionLabel,
   sourceRunId,
+  sourceQuestion,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -3310,10 +3337,11 @@ function ArtifactView({
   artifact: AgentRunArtifact;
   t: Theme;
   themeMode: ThemeMode;
-  onInsertSql?: (sql: string, title?: string) => void;
+  onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   insertDqlActionLabel?: string;
   sourceRunId?: string;
+  sourceQuestion?: string;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
@@ -3398,13 +3426,23 @@ function ArtifactView({
                   chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
                   title: name,
                   sourceRunId,
+                  question: sourceQuestion,
                 })}
                 style={smallButtonStyle(t)}
               >
                 {insertDqlActionLabel ?? 'Insert as DQL cell'}
               </button>
             ) : sql && onInsertSql ? (
-              <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
+              <button
+                type="button"
+                onClick={() => onInsertSql(sql, name, {
+                  question: sourceQuestion,
+                  sourceRunId,
+                })}
+                style={smallButtonStyle(t)}
+              >
+                Insert SQL preview
+              </button>
             ) : null}
             {dqlPath && onOpenBlock ? (
               <button type="button" onClick={() => onOpenBlock(dqlPath, dqlName)} style={smallButtonStyle(t)}>{dqlOpenLabel}</button>
@@ -3527,6 +3565,8 @@ function ArtifactView({
               chartConfig: resultData ? extractChartConfig(payload, resultData) : undefined,
               title: name,
               mixedSourcePlan,
+              sourceRunId,
+              question: sourceQuestion,
             })}
             style={mixedSourcePlan ? {
               ...smallButtonStyle(t),
@@ -3540,7 +3580,16 @@ function ArtifactView({
             {mixedSourcePlan ? 'Add workflow to notebook' : dqlArtifact ? 'Insert as DQL cell' : 'Add SQL to notebook'}
           </button>
         ) : sql && onInsertSql ? (
-          <button type="button" onClick={() => onInsertSql(sql, name)} style={smallButtonStyle(t)}>Insert SQL preview</button>
+          <button
+            type="button"
+            onClick={() => onInsertSql(sql, name, {
+              question: sourceQuestion,
+              sourceRunId,
+            })}
+            style={smallButtonStyle(t)}
+          >
+            Insert SQL preview
+          </button>
         ) : null}
         {dqlPath && onOpenBlock ? (
           <button type="button" onClick={() => onOpenBlock(dqlPath, dqlName)} style={smallButtonStyle(t)}>{dqlOpenLabel}</button>
